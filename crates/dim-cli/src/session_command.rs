@@ -178,22 +178,31 @@ pub async fn cleanup(
             .then_with(|| left.session_id.cmp(&right.session_id))
     });
     let now = now_ms();
-    let selected: Vec<Summary> = match (older_than, keep) {
+    let (selected, nothing_selected): (Vec<Summary>, String) = match (older_than, keep) {
         (Some(age), _) => {
             let cutoff = now.saturating_sub(age.as_millis().try_into().unwrap_or(u64::MAX));
-            sessions
-                .into_iter()
-                .filter(|session| session.updated_at <= cutoff)
-                .collect()
+            (
+                sessions
+                    .into_iter()
+                    .filter(|session| session.updated_at <= cutoff)
+                    .collect(),
+                format!(
+                    "Nothing to delete: no Session is older than {}.",
+                    age_label(age)
+                ),
+            )
         }
-        (None, Some(keep)) => sessions.into_iter().skip(keep).collect(),
+        (None, Some(keep)) => (
+            sessions.into_iter().skip(keep).collect(),
+            format!("Nothing to delete: --keep {keep} keeps every Session."),
+        ),
         (None, None) => return Err("session cleanup needs --older-than or --keep".into()),
     };
     let (active, selected): (Vec<Summary>, Vec<Summary>) = selected
         .into_iter()
         .partition(|session| session.active_reason().is_some());
     if selected.is_empty() && active.is_empty() {
-        println!("No Sessions matched; nothing was deleted.");
+        println!("{nothing_selected}");
         return Ok(0);
     }
     for session in &selected {
@@ -232,12 +241,19 @@ pub async fn cleanup(
     let mut refused = Vec::new();
     for session in &selected {
         match client
-            .rpc(
+            .typed::<Deleted>(
                 "session.delete",
                 json!({"sessionId": session.session_id, "requireInactive": true}),
             )
             .await
         {
+            // An explicit `false` means another caller removed it first:
+            // neither deleted by this run nor a failure. A reply without the
+            // field is from a server before it, and the rows are gone either
+            // way.
+            Ok(Deleted {
+                deleted: Some(false),
+            }) => println!("Already gone: {}", one_line(&session.session_id)),
             Ok(_) => {
                 deleted += 1;
                 println!("Deleted {}", one_line(&session.session_id));
@@ -265,7 +281,7 @@ pub async fn cleanup(
         }
     }
     if !refused.is_empty() {
-        println!("Kept (active):");
+        println!("Kept (in use at the delete):");
         for (session, why) in &refused {
             println!(
                 "{}\t{}\t{}\t{}",
@@ -345,6 +361,18 @@ fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis() as u64)
+}
+
+/// An `--older-than` length as the count and unit that flag takes, measured
+/// in the largest unit that divides it exactly.
+fn age_label(age: Duration) -> String {
+    let seconds = age.as_secs();
+    for (size, unit) in [(86_400, "d"), (3_600, "h")] {
+        if seconds.is_multiple_of(size) {
+            return format!("{}{unit}", seconds / size);
+        }
+    }
+    format!("{}m", seconds / 60)
 }
 
 /// Text a daemon supplies as one printable line.

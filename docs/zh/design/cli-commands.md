@@ -406,8 +406,11 @@ TITLE 视为缺失，也按同样方式拒绝。
 也保留，且不占用 N 中的一个名额。`dimcode session delete ID` 仍可有意删除一个活跃 Session：服务端
 允许，这条规则属于批量命令。这个划分是预览对 `running`（只覆盖 `main`）与 `attachedClients` 的读取；
 每个删除都带 `requireInactive: true`，所以所有者在删除时再查一次，逐条线，并把使用与 hold 都算进去。
-被所有者以 `session_active` 拒绝的 Session 在删除之后以 `Kept (active):` 列出，列相同，其后是所有者的
-原因；拒绝不是失败，不改变退出状态。选中的 Session 全部被保留时，命令打印
+被所有者以 `session_active` 拒绝的 Session 在删除之后以 `Kept (in use at the delete):` 列出，列相同，
+其后是所有者的
+原因；拒绝不是失败，不改变退出状态。回复为 `deleted: false` 的删除表示摘要读出之后另一个调用方已把该
+Session 移除：命令打印 `Already gone: ID`，既不算作删除也不算作失败。回复中没有该字段则算作删除，与
+`dimcode session delete` 的读法一致。选中的 Session 全部被保留时，命令打印
 `Nothing to delete: every matching Session is active.` 并以 0 退出，无论预览把它们全部保留还是
 所有者拒绝了每一次删除。
 
@@ -429,8 +432,10 @@ Deleted 5e6f7a8b-…
 在终端上只有 `y` 或 `yes` 确认。没有终端时任何输入都不算确认，脚本要传 `--yes`，它同时跳过提示；
 否则命令拒绝并点名 `--yes`。确认后的运行即使某个 id 失败也会删除其余每个选中的 id：每个失败都连同
 其 id 和方法错误一起报告，并为每个失败的 id 打印可重试的命令（`dimcode session delete ID`），
-整次运行以 1 退出。完全没有选中任何 Session 时打印 `No Sessions matched; nothing was deleted.`
-并以 0 退出；选中的 Session 全部活跃时打印上面那句。
+整次运行以 1 退出。选择器没有选中任何 Session 时，命令说明它保留了什么：`--keep N` 打印
+`Nothing to delete: --keep N keeps every Session.`，`--older-than DURATION` 打印
+`Nothing to delete: no Session is older than DURATION.`；两种情况都以 0 退出。
+选中的 Session 全部活跃时打印上面那句。
 
 P1 shell 前缀只用于交互输入。其执行、记录、进度、取消和生命周期遵循 [ShellInput](plugins/ShellInput.md)。
 CLI 在发送请求前生成 `runId`，从不重试一次运行。前缀之后的命令原样传递；空命令打印用法。

@@ -748,26 +748,36 @@ fn session_cleanup_names_a_failed_id_and_prints_its_retry() {
     );
 }
 
+/// A selector that keeps every Session says what it kept, and names the
+/// selector, instead of claiming nothing matched.
 #[test]
-fn session_cleanup_with_an_empty_selection_deletes_nothing() {
-    let home = Home::new();
-    let daemon = home.daemon(|wire| {
-        wire.hello(&["session.summaries", "session.delete"]);
-        let listed = wire.read("session.summaries");
-        wire.reply(&listed, three_sessions());
-        wire.hold();
-    });
-    let output = home
-        .command()
-        .args(["session", "cleanup", "--keep", "9", "--yes"])
-        .output()
-        .unwrap();
-    daemon.join().unwrap();
-    assert!(output.status.success());
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap(),
-        "No Sessions matched; nothing was deleted.\n"
-    );
+fn session_cleanup_says_what_the_selector_kept() {
+    for (args, expected) in [
+        (
+            &["session", "cleanup", "--keep", "9", "--yes"][..],
+            "Nothing to delete: --keep 9 keeps every Session.",
+        ),
+        (
+            &["session", "cleanup", "--older-than", "4d", "--yes"][..],
+            "Nothing to delete: no Session is older than 4d.",
+        ),
+    ] {
+        let home = Home::new();
+        let daemon = home.daemon(|wire| {
+            wire.hello(&["session.summaries", "session.delete"]);
+            let listed = wire.read("session.summaries");
+            wire.reply(&listed, three_sessions());
+            wire.hold();
+        });
+        let output = home.command().args(args).output().unwrap();
+        daemon.join().unwrap();
+        assert!(output.status.success(), "{args:?}");
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("{expected}\n"),
+            "{args:?}"
+        );
+    }
 }
 
 #[test]
@@ -1146,6 +1156,59 @@ fn session_cleanup_stops_when_a_delete_refuses_require_inactive() {
     );
 }
 
+/// A `deleted: false` reply means another caller removed the Session
+/// first: it is reported as already gone, counts as neither a delete nor a
+/// failure, and the run still exits 0.
+#[test]
+fn session_cleanup_reports_a_session_already_gone() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["session.summaries", "session.delete"]);
+        let listed = wire.read("session.summaries");
+        wire.reply(
+            &listed,
+            json!([
+                summary("b", Some("Middle"), 24 * HOUR + HOUR),
+                summary("a", None, 3 * 24 * HOUR + HOUR),
+            ]),
+        );
+        let gone = wire.read("session.delete");
+        assert_eq!(gone["params"], require_inactive("b"));
+        wire.reply(&gone, json!({"deleted": false}));
+        let deleted = wire.read("session.delete");
+        assert_eq!(deleted["params"], require_inactive("a"));
+        wire.reply(&deleted, json!({"deleted": true}));
+        wire.hold();
+    });
+    let output = home
+        .command()
+        .args(["session", "cleanup", "--keep", "0", "--yes"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        [
+            "b\tMiddle\t1d ago",
+            "a\t-\t3d ago",
+            "Already gone: b",
+            "Deleted a",
+        ]
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "an absent Session is not a failure"
+    );
+}
+
 /// The owner refuses a Session the preview read as idle: cleanup keeps it
 /// with the owner's reason, deletes the rest and still exits 0.
 #[test]
@@ -1192,7 +1255,7 @@ fn session_cleanup_keeps_a_session_the_owner_refuses() {
             "b\tMiddle\t1d ago",
             "a\t-\t3d ago",
             "Deleted a",
-            "Kept (active):",
+            "Kept (in use at the delete):",
             "b\tMiddle\t1d ago\tSession is in use: a turn is running",
         ],
         "the refusal is kept with the owner's reason, after the deletes"
@@ -1229,7 +1292,7 @@ fn session_cleanup_says_nothing_to_delete_when_the_owner_refuses_every_session()
             .collect::<Vec<_>>(),
         [
             "b\tMiddle\t1d ago",
-            "Kept (active):",
+            "Kept (in use at the delete):",
             "b\tMiddle\t1d ago\tSession is in use: 1 request or subscription is using it",
             "Nothing to delete: every matching Session is active.",
         ]

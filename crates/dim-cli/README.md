@@ -189,10 +189,13 @@ kept, listed after the selection under `Kept (active):` with its reason, and `--
 keeps it without its consuming one of the N; a failed or closing line is not a reason
 to keep one, so such a Session is deleted when nothing else uses it. Every delete
 carries `requireInactive: true`, so the daemon checks the Session again at the delete; a
-`session_active` refusal is listed under `Kept (active):` after the deletes with the
-daemon's reason and is not a failure. When nothing was deleted because every matching
-Session is active, the command prints `Nothing to delete: every matching Session is
-active.` and exits 0. On a terminal only `y` or `yes` confirms and `--yes` skips
+`session_active` refusal is listed under `Kept (in use at the delete):` after the
+deletes with the daemon's reason and is not a failure, and a `deleted: false` reply
+prints `Already gone: ID` and counts as neither. When nothing was deleted because every
+matching Session is active, the command prints `Nothing to delete: every matching
+Session is active.` and exits 0; a selector that names no Session prints what it kept,
+`Nothing to delete: --keep N keeps every Session.` or `Nothing to delete: no Session is
+older than DURATION.`. On a terminal only `y` or `yes` confirms and `--yes` skips
 the prompt; without a terminal nothing confirms, so a script passes `--yes`. A
 confirmed run deletes every selected id: each failure is printed with its id and the
 method's error, `dimcode session delete ID` is printed to retry it, and the run exits

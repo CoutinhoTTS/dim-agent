@@ -498,11 +498,15 @@ deletes an active Session on purpose: the server permits it, and this is the bul
 command's rule. The partition is the preview's reading of `running` (which covers
 `main`) and `attachedClients`; every delete carries `requireInactive: true`, so the owner
 checks again at the delete, on every line and with uses and holds included. A Session
-the owner refuses with `session_active` is listed under `Kept (active):` after the
-deletes, in the same columns followed by the owner's reason, and a refusal is not a
-failure: it does not change the exit status. When every selected Session was kept, the
-command prints `Nothing to delete: every matching Session is active.`, whether the
-preview kept them all or the owner refused each delete, and exits 0.
+the owner refuses with `session_active` is listed under `Kept (in use at the delete):`
+after the deletes, in the same columns followed by the owner's reason, and a refusal is
+not a failure: it does not change the exit status. A delete whose reply is
+`deleted: false` means another caller removed the Session after the summaries were read:
+the command prints `Already gone: ID` and counts it as neither a delete nor a failure. A
+reply without the field counts as a delete, as `dimcode session delete` reads it. When
+every selected Session was kept, the command prints `Nothing to delete: every matching
+Session is active.`, whether the preview kept them all or the owner refused each delete,
+and exits 0.
 
 Exactly one selector is required. The command prints the selection before it reads a
 key — the id, the title (`-` when untitled) and how long ago the Session was last
@@ -525,8 +529,10 @@ script passes `--yes`, which also skips the prompt; otherwise the command refuse
 names `--yes`. A confirmed run deletes every selected id even when one fails: each
 failure is reported with its id and the method's error, the command that retries it
 (`dimcode session delete ID`) is printed for each failed id, and the run exits 1. A
-selection of no Sessions at all prints `No Sessions matched; nothing was deleted.` and
-exits 0; a selection whose Sessions are all active prints the sentence above instead.
+selector that names no Session prints what it kept: `Nothing to delete: --keep N keeps
+every Session.` for `--keep N`, or `Nothing to delete: no Session is older than
+DURATION.` for `--older-than DURATION`; the run exits 0 either way. A selection whose
+Sessions are all active prints the sentence above instead.
 
 ### Migration interaction
 
