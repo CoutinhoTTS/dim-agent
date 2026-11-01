@@ -131,39 +131,11 @@ impl PolicyContext {
     }
 
     pub fn messages_len(&self, history: &[HistoryEntry]) -> usize {
-        let mut len = history.len();
-        if let Some(ContextCompactionData {
-            outcome:
-                ContextCompactionResult::Completed {
-                    replacement,
-                    context_baseline,
-                    ..
-                },
-            ..
-        }) = self.compaction()
-        {
-            len += replacement.len() + context_baseline.len();
-        }
-        len
+        crate::history::projected_messages_len(self.compaction(), history)
     }
 
     pub fn messages(&self, history: &[HistoryEntry]) -> Vec<Arc<Message>> {
-        let mut messages = Vec::with_capacity(self.messages_len(history));
-        if let Some(ContextCompactionData {
-            outcome:
-                ContextCompactionResult::Completed {
-                    replacement,
-                    context_baseline,
-                    ..
-                },
-            ..
-        }) = self.compaction()
-        {
-            messages.extend(replacement.iter().cloned().map(Arc::new));
-            messages.extend(context_baseline.iter().map(|entry| entry.message.clone()));
-        }
-        messages.extend(history.iter().map(|entry| entry.message.clone()));
-        messages
+        crate::history::projected_messages(self.compaction(), history)
     }
 
     pub fn retained_entry(&self, history: &[HistoryEntry], cut: &str) -> Result<usize, String> {

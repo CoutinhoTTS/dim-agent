@@ -7317,6 +7317,8 @@
         "path context_compaction",
         "path context_configuration",
         "path crate::history::StreamedContext",
+        "path crate::history::projected_messages",
+        "path crate::history::projected_messages_len",
         "path digest_message",
         "path projection_checkpoint",
         "path truncate_middle",
