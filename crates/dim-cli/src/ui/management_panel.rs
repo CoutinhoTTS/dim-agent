@@ -959,13 +959,13 @@ mod tests {
             Area::Skills,
             ManagementAction::List,
             ManagementResult::Refused(ManagementRefusal::Refused(
-                "This daemon cannot manage skills.".into(),
+                "This daemon cannot manage Skills.".into(),
             )),
         ));
         assert!(
             shown(&panel, 60, 10)
                 .join(" ")
-                .contains("This daemon cannot manage skills.")
+                .contains("This daemon cannot manage Skills.")
         );
     }
 
@@ -1109,11 +1109,11 @@ mod tests {
             Area::Skills,
             ManagementAction::List,
             ManagementResult::Refused(ManagementRefusal::Refused(
-                "This daemon cannot manage skills.".into(),
+                "This daemon cannot manage Skills.".into(),
             )),
         ));
         let text = shown(&panel, 60, 12).join("\n");
-        assert!(text.contains("This daemon cannot manage skills."), "{text}");
+        assert!(text.contains("This daemon cannot manage Skills."), "{text}");
         assert!(text.contains("Ctrl+R reload"), "{text}");
         match panel.handle_key(ctrl('r')) {
             Effect::Management(request) => assert_eq!(request.action, ManagementAction::Reload),

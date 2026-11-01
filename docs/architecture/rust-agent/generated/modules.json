@@ -3075,7 +3075,6 @@
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/management/mod.rs",
       "unexpandedMacros": [
-        "format",
         "matches",
         "unreachable",
         "vec"
@@ -3122,15 +3121,6 @@
       "unexpandedMacros": [
         "format",
         "json"
-      ]
-    },
-    {
-      "id": "dim_cli::management::skills::tests",
-      "crate": "dim_cli",
-      "parent": "dim_cli::management::skills",
-      "file": "crates/dim-cli/src/management/skills.rs",
-      "unexpandedMacros": [
-        "assert_eq"
       ]
     },
     {
@@ -25454,12 +25444,8 @@
         "path EntryState::Invalid",
         "path EntryState::ReadOnly",
         "path ManagementAction",
-        "path ManagementAction::Add",
-        "path ManagementAction::Inspect",
         "path ManagementAction::List",
         "path ManagementAction::Reload",
-        "path ManagementAction::Remove",
-        "path ManagementAction::Run",
         "path ManagementAction::Save",
         "path ManagementAction::Toggle",
         "path ManagementEntry",
@@ -25562,13 +25548,6 @@
         "path super::area_kinds",
         "path super::entry_kinds",
         "use super::Groups"
-      ]
-    },
-    {
-      "from": "dim_cli::management::skills",
-      "to": "dim_cli::management::skills::tests",
-      "references": [
-        "mod tests"
       ]
     },
     {

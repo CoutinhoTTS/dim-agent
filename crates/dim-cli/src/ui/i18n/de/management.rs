@@ -70,6 +70,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The Scheduler has no area document." => "Der Scheduler hat kein Bereichsdokument.",
         "No scheduled job has that id." => "Kein geplanter Job hat diese ID.",
+        "This daemon cannot manage {area}." => "Kann {area} nicht verwalten.",
         "The document deleted {field}, which the owner cannot clear; nothing was written." => {
             "Das Dokument hat {field} entfernt, was der Eigentümer nicht leeren kann; es wurde nichts geschrieben."
         }

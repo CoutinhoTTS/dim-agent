@@ -168,13 +168,9 @@ pub async fn apply(
             }
             applied = true;
         }
-        // `supported` refuses a kind this area does not have before `apply`.
-        ManagementAction::Add { .. }
-        | ManagementAction::Remove { .. }
-        | ManagementAction::Run { .. }
-        | ManagementAction::Inspect { .. } => {
-            return Err(Failure::Refused("Hooks has no such action.".into()));
-        }
+        // A kind this area has no method for is refused by
+        // `management::supported` before the adapter runs.
+        _ => {}
     }
     catalog(client, &cwd).await.map_err(|error| {
         if applied {

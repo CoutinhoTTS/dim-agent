@@ -1624,7 +1624,7 @@ fn hooks_commands_refuse_a_daemon_that_does_not_advertise_them() {
         daemon.join().unwrap();
         assert_eq!(output.status.code(), Some(1), "{args:?}");
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains("This daemon cannot manage hooks."),
+            String::from_utf8_lossy(&output.stderr).contains("This daemon cannot manage Hooks."),
             "{args:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
@@ -1644,7 +1644,7 @@ fn hooks_commands_refuse_a_daemon_that_does_not_advertise_them() {
     assert!(
         terminal
             .transcript
-            .contains("This daemon cannot manage hooks."),
+            .contains("This daemon cannot manage Hooks."),
         "{}",
         terminal.transcript
     );
@@ -1687,7 +1687,7 @@ fn hooks_commands_refuse_a_daemon_that_does_not_advertise_them() {
     daemon.join().unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("This daemon cannot manage hooks."),
+        String::from_utf8_lossy(&output.stderr).contains("This daemon cannot manage Hooks."),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -1726,7 +1726,7 @@ fn tui_hooks_panel_says_when_the_daemon_cannot_manage_them() {
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/hooks\r");
-    terminal.until("This daemon cannot manage hooks.");
+    terminal.until("This daemon cannot manage Hooks.");
     terminal.raw(b"\x1b");
     thread::sleep(Duration::from_millis(200));
     terminal.write(b"/exit\r");

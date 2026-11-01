@@ -70,6 +70,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The Scheduler has no area document." => "スケジューラーには領域ドキュメントがありません。",
         "No scheduled job has that id." => "その id のスケジュールジョブはありません。",
+        "This daemon cannot manage {area}." => "{area} を管理できません。",
         "The document deleted {field}, which the owner cannot clear; nothing was written." => {
             "ドキュメントから {field} が削除されましたが、所有者は消去できません。何も書き込みませんでした。"
         }

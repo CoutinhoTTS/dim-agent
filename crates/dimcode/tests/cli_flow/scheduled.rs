@@ -828,8 +828,7 @@ fn scheduled_add_is_refused_before_stdin_is_read() {
     daemon.join().unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("This daemon cannot manage the Scheduler."),
+        String::from_utf8_lossy(&output.stderr).contains("This daemon cannot manage Scheduler."),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -861,8 +860,7 @@ fn scheduled_set_is_refused_before_stdin_is_read() {
     daemon.join().unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("This daemon cannot manage the Scheduler."),
+        String::from_utf8_lossy(&output.stderr).contains("This daemon cannot manage Scheduler."),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -888,7 +886,7 @@ fn scheduled_commands_refuse_a_daemon_that_does_not_advertise_them() {
         assert_eq!(output.status.code(), Some(1), "{args:?}");
         assert!(
             String::from_utf8_lossy(&output.stderr)
-                .contains("This daemon cannot manage the Scheduler."),
+                .contains("This daemon cannot manage Scheduler."),
             "{args:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
@@ -1740,7 +1738,7 @@ fn tui_scheduled_panel_says_when_the_daemon_cannot_manage_it() {
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/scheduled\r");
-    terminal.until("This daemon cannot manage the Scheduler.");
+    terminal.until("This daemon cannot manage Scheduler.");
     terminal.raw(b"\x1b");
     thread::sleep(Duration::from_millis(200));
     terminal.write(b"/exit\r");

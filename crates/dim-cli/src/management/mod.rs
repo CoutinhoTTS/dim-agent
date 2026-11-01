@@ -26,11 +26,14 @@ use crate::model::session::{
 };
 use crate::ui::i18n::{t, tf};
 
-/// One area's management methods: the read that reports the area, and the
-/// method behind each kind it has.
+/// One area's management methods: the read that reports the area, the
+/// method behind each kind it has, and the name the area goes by.
 struct Methods {
     catalog: &'static str,
     kinds: &'static [(ActionKind, &'static str)],
+    /// The area's display label, as its panel's title and every sentence
+    /// that names the area use it.
+    label: &'static str,
 }
 
 impl Methods {
@@ -44,6 +47,7 @@ impl Methods {
 
 const SKILLS: Methods = Methods {
     catalog: "skills.catalog",
+    label: "Skills",
     kinds: &[
         (ActionKind::Toggle, "skills.set_enabled"),
         (ActionKind::Reload, "skills.refresh"),
@@ -52,6 +56,7 @@ const SKILLS: Methods = Methods {
 
 const HOOKS: Methods = Methods {
     catalog: "hooks.catalog",
+    label: "Hooks",
     kinds: &[
         (ActionKind::Toggle, "hooks.set_enabled"),
         (ActionKind::Edit, "hooks.save"),
@@ -62,6 +67,7 @@ const HOOKS: Methods = Methods {
 
 const SCHEDULED: Methods = Methods {
     catalog: "schedule.list",
+    label: "Scheduler",
     kinds: &[
         (ActionKind::Toggle, "schedule.set_enabled"),
         (ActionKind::Edit, "schedule.save"),
@@ -164,12 +170,14 @@ pub fn supports_kind(client: &Client, area: Area, kind: ActionKind) -> Result<()
     }
 }
 
+/// The unsupported-daemon sentence: the area's own label, translated where
+/// it is used, so the shared module names no area.
 fn unsupported(area: Area) -> String {
-    match area {
-        // The Scheduler is one owner by name, not a plural noun.
-        Area::Scheduled => "This daemon cannot manage the Scheduler.".to_owned(),
-        Area::Skills | Area::Hooks => format!("This daemon cannot manage {}.", area.name()),
-    }
+    let methods = methods_of(area);
+    tf(
+        "This daemon cannot manage {area}.",
+        &[("area", t(methods.label))],
+    )
 }
 
 /// The line an applied action reports, from its request alone. It names the
