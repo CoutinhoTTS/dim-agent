@@ -249,6 +249,7 @@ SessionTitle is out of scope: its `SYSTEM` (`runtime/plugins/session-title/index
 **Owner:** the evaluation tooling, `xtask`; implemented under [#550](https://github.com/arcships/dim/issues/550).
 
 - **A scenario runner** with the candidate injection and the test of §8.1: the scenarios are the cases, both arms run the shipped assembly, and the result is reported in the pull request. It interleaves the arms run by run and accepts `--jobs` and repeated `--text`/`--candidate` pairs, so a change that spans two texts of one owner is judged as the one change it is (Goal §A.5.2).
+- **A finished evaluation's saved runs are judged again.** `--rejudge DIR` judges them from the views they saved, with no model turn, keeping each run's own outcome and writing to a new `--out`. Such a report names its sources and has no text or candidate-token row.
 - **No absolute pass line and no CI run** (§8.1).
 
 ## 10. Rule check

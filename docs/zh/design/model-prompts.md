@@ -249,6 +249,7 @@ SessionTitle 不在范围内：它的 `SYSTEM`（`runtime/plugins/session-title/
 **所有者：** 评估工具，`xtask`；在 [#550](https://github.com/arcships/dim/issues/550) 下实现。
 
 - **一个场景运行器**，带 §8.1 的候选注入与检验：场景即用例，两臂都跑 shipped 装配，结果写进 PR。它逐次交错两臂，并接受 `--jobs` 与重复的 `--text`/`--candidate` 对，因此一个跨同一所有者两段文本的改动按它本来就是的一次改动来判定（Goal §A.5.2）。
+- **已完成评估的运行可以重判。** `--rejudge DIR` 按这些运行保存的视图重新判定，不产生模型轮次，保留每次运行自身的结局，写入新的 `--out`。这样的报告会列出它的来源，没有 text 行与 candidate-token 行。
 - **不用绝对通过线，不进 CI**（§8.1）。
 
 ## 10. 规则检查
