@@ -27,6 +27,33 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
     run_with(args, None)
 }
 
+/// Closes every descriptor above standard error that this process inherited.
+/// A daemon outlives the process that started it, so it must not keep that
+/// process's descriptors: a launcher's pipe would never reach EOF while the
+/// daemon runs. Descriptors 0-2 are the stdio the launcher chose.
+#[cfg(unix)]
+fn close_inherited_descriptors() {
+    // The listing is collected before anything is closed: it names its own
+    // directory descriptor too, which the read releases and which then
+    // fails to close with EBADF.
+    let descriptors = match std::fs::read_dir("/dev/fd") {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| entry.file_name().to_str()?.parse::<i32>().ok())
+            .filter(|descriptor| *descriptor > 2)
+            .collect::<Vec<_>>(),
+        Err(error) => {
+            eprintln!("Could not list /dev/fd: {error}; inherited descriptors stay open");
+            return;
+        }
+    };
+    for descriptor in descriptors {
+        // SAFETY: close is async-signal-safe and the descriptor belongs to
+        // this process; EBADF means it was already released.
+        unsafe { libc::close(descriptor) };
+    }
+}
+
 /// Reads a development model configuration, `--model-config PATH`, as the
 /// profile's model catalog with the profile hash a client checks it by.
 pub fn model_profile(
@@ -62,10 +89,16 @@ pub fn product_session_defaults(defaults: &mut dim_agent_runtime::SessionConfig)
 
 /// [`run`] with a managed provider plugin, which an account build's own
 /// executable supplies; it is installed when the server has a product home.
+///
+/// This is a process entry point: on Unix it closes every descriptor above 2
+/// that the process inherited, before it does anything else, so a caller must
+/// open nothing it needs beforehand.
 pub fn run_with(
     args: impl IntoIterator<Item = String>,
     managed_provider: Option<crate::managed_provider::ManagedProviderRow>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    close_inherited_descriptors();
     let argv: Vec<String> = args.into_iter().collect();
     if argv.first().map(String::as_str) == Some("--connect-pipe") {
         let mut args = argv.iter().skip(1);

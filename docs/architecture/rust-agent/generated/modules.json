@@ -1703,6 +1703,7 @@
       "parent": "dim_app_server",
       "file": "crates/dim-app-server/src/cli.rs",
       "unexpandedMacros": [
+        "eprintln",
         "format",
         "println",
         "tokio::pin",

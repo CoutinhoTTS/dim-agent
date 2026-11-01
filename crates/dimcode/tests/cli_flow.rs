@@ -834,6 +834,50 @@ fn a_home_drop_leaves_no_daemon_behind() {
 }
 
 #[test]
+fn a_daemon_keeps_no_descriptor_the_cli_inherited() {
+    let home = Home::new();
+    let (reader, writer) = std::io::pipe().unwrap();
+    let mut command = home.command();
+    command.args(["models", "fixture"]);
+    let inherited = writer.as_raw_fd();
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(&mut command, move || {
+            if libc::fcntl(inherited, libc::F_SETFD, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let status = command.status().unwrap();
+    drop(writer);
+    assert!(
+        status.success(),
+        "the CLI did not start the daemon for {}",
+        home.0.display()
+    );
+    let mut descriptor = libc::pollfd {
+        fd: reader.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ready = unsafe { libc::poll(&mut descriptor, 1, PATIENCE.as_millis() as libc::c_int) };
+    assert!(
+        ready > 0,
+        "the daemon kept the pipe's write end for {}",
+        home.0.display()
+    );
+    let mut byte = [0u8; 1];
+    let read = unsafe {
+        libc::read(
+            reader.as_raw_fd(),
+            byte.as_mut_ptr().cast::<libc::c_void>(),
+            byte.len(),
+        )
+    };
+    assert_eq!(read, 0, "the pipe carried data instead of EOF");
+}
+
+#[test]
 fn daemon_stop_never_treats_old_protocol_eof_or_cleanup_failure_as_completion() {
     for case in ["old", "eof", "failed"] {
         let home = Home::new();

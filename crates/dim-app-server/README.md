@@ -375,6 +375,8 @@ dim_app_server::cli::run_with(args, Some(ManagedProviderRow(Arc::new(|builtins, 
 
 `ManagedProviderRow` registers the plugin's process row given the product root's FileStorage index and returns the row name; `ServerConfig.managed_provider` carries it for embedders. It is installed only with a product home, beside `ManagedProviderBinding`, which hands the provider to `ManagedProviders`. The plugin owns its account schema, authentication, token refresh and catalog normalization; the host does not interpret supplier-specific responses. Files it keeps under the product root go through FileStorage; `auth.json` is plain JSON shared with the native subscription providers, each owning its own root fields.
 
+`run_with` is a process entry: on Unix it closes every descriptor above standard error that the process inherited, before it does anything else, so a caller must open nothing it needs beforehand.
+
 The Dim account (`dimcode-api-oauth`) is such a plugin, in [`crates/dim-oauth`](../dim-oauth/README.md); `dimcode` built with the account's client IDs is the account build. See the [development contract](../../docs/architecture/development.md#managed-provider-boundary) and [release packaging](../../docs/release/README.md#local-packaging).
 
 ### Trusted plugin storage

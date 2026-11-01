@@ -260,6 +260,9 @@ argument errors do not start the daemon.
 ### Daemon startup failure
 
 All entries that start a daemon share the client startup in `connect_inner`.
+On Unix, the daemon keeps only the standard descriptors 0-2 that it inherits
+and closes every other inherited descriptor when it starts, so a long-lived
+daemon never holds its launcher's pipes.
 The daemon is detached and its stderr is the append-only `daemon.log`, so a
 per-launch note is the only channel that does not parse history or depend on a
 pipe the client may close. Before spawning, the CLI removes
