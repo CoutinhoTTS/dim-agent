@@ -8463,8 +8463,10 @@
       "from": "dim_agent_capabilities::hooks::runner",
       "to": "dim_agent_capabilities::hooks::sources",
       "references": [
+        "path HookSourceId",
         "path HookSourcesHost",
         "path HookSourcesSnapshot",
+        "use crate::hooks::HookSourceId",
         "use crate::hooks::HookSourcesHost",
         "use crate::hooks::HookSourcesSnapshot"
       ]
@@ -8617,6 +8619,8 @@
       "to": "dim_agent_capabilities::hooks::runner",
       "references": [
         "path FOLLOWED_EVENTS",
+        "path HookResult",
+        "path HookResult::Blocked",
         "path HookResult::Failed",
         "path HookResult::Success",
         "path HookRun",
@@ -8625,13 +8629,15 @@
         "path View::default",
         "path approval_point",
         "path contribution_of",
-        "path failed"
+        "path failed",
+        "path stop_output"
       ]
     },
     {
       "from": "dim_agent_capabilities::hooks::runner::tests",
       "to": "dim_agent_capabilities::hooks::sources",
       "references": [
+        "path HookSourceId::User",
         "path HookSourcesHost",
         "path HookSourcesSnapshot",
         "path ReadHookSources",

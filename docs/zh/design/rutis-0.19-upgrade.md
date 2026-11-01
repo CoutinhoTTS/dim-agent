@@ -423,12 +423,21 @@ daemon 根（LocalId dim-daemon）                   dimcode leaf 根
   其他插件的测试本来就加载默认导出。
 - `load(plugin, { config, services })` 的形状不变。现在测试和插件之间传值遵循进程之间的规则，测试观察到的
   事件会在发出方返回之后才到达。在 `emit` 之后立刻读取结果的测试要改为等待。
-- goal、session-title、scheduler、workflow 四个插件的测试暂时不在 CI 里运行。0.19.3 修掉了当初把它们停下的三个
-  测试工具问题（[rutis#986](https://github.com/arcships/rutis/issues/986)、
-  [#987](https://github.com/arcships/rutis/issues/987)、[#988](https://github.com/arcships/rutis/issues/988)），但它们在
-  0.19.3 上仍然不通过：session-title 的测试不结束，goal 的 50 个测试里有 23 个失败，scheduler 和 workflow 装载夹具时
-  失败（`partRegistry.registerDefinition` 把插件定义发给不接受它的对端）。`tsc` 仍检查这些插件，§6 的 Node 流程测试
-  仍实际加载它们。按当前测试工具修好这些测试不属于本次升级。
+- 测试要调用插件交给它的函数时，经过运行时去调，而不是自己直接调：测试自己发起的这种调用是同步会话调用，
+  插件在其中无法 await 测试的服务（`SyncWaitCycle`）。`runtime/fixtures/plugin-test.ts` 就是那行插件，
+  由它在运行时里异步调用；goal 和 session-title 的测试把它和被测插件一起装载。
+- 这两个测试等的是插件停下来，而不是自己事件循环转一圈：它们数插件对测试服务的调用，这类调用跨进程。
+- goal 和 session-title 两个插件的测试重新在 CI 里运行。0.19.3 修掉了当初把四个测试停下时的那三个测试工具问题
+  （[rutis#986](https://github.com/arcships/rutis/issues/986)、
+  [#987](https://github.com/arcships/rutis/issues/987)、[#988](https://github.com/arcships/rutis/issues/988)），
+  这两个套件随后按上面的跨进程规则改过。session-title 的生成预算测试被跳过：30 秒预算属于插件所在运行时的计时器，
+  测试推进不了它。
+- scheduler 和 workflow 的测试仍然不在 CI 里：0.19.3 的 TypeScript 测试工具收不到插件定义，而这两个插件一上来就
+  注册部件——`partRegistry.registerDefinition` 会失败，报“cannot send a plugin definition: the far end does not
+  accept plugin definitions (it did not declare the capability plugins)”。这个能力属于 Rust 一侧，测试进程没有声明它，
+  所以测试的任何替身都收不到插件注册的东西，尽管 rutis 自己的设计里测试替身可以收到定义并装载它
+  （[plugin values R10](https://github.com/arcships/rutis/blob/main/docs/design-plugin-values-2026-10-25.en.md)）。
+  `tsc` 仍检查这两个插件，§6 的 Node 流程测试仍实际加载它们。
 - zod 的 `z.toJSONSchema` 结果还带着 `~standard`，0.19 的 `definePlugin` 会把它当成 Standard Schema 拒绝，所以 goal、
   scheduler、workflow 插件把它转成纯 JSON 再传。
 
@@ -469,7 +478,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
    `DIM_TEST_NPM_WRAPPER`
 6. 公开的 Node 绑定：
    - `runtime/plugin-sdk.test.mjs`；
-   - 四个插件的测试及其 `tsc` 检查，现在带上 `RUTIS_HOST`（M10）；
+   - goal、session-title 两个插件的测试，scheduler、workflow 的 `tsc` 检查，现在带上 `RUTIS_HOST`（M10）；
    - 由 `runtime/python-requirements.txt` 建立的 Python 环境。
 7. 由 Node 和 Python 驱动的 Rust 流程，带 `DIM_TEST_NODE`、`DIM_TEST_JS_RUNTIME`、`DIM_TEST_RUTIS_SDK` 和
    `DIM_TEST_PYTHON`：
@@ -556,7 +565,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 | 不认识的 npm 名字会一直等待，而不是失败 | `RuntimeManager` 的状态会显示这个等待；M9 调整依赖原有失败行为的测试 |
 | Dim 保留的启动命令和运行时包脱节 | 它们和这些包一起固定版本（`runtime/package.json`、`runtime/python-requirements.txt`），由 Node 和 Python 驱动的流程测试实际启动两个运行时 |
 | Agent 关闭打断 Session 构造时，某个插件的清理失败 | 0.19.3 由取消这个构造的 dispose 或子树 shutdown 返回清理错误，runtime 把它保留在 `Agent::close` 的结果里；取消本身不作为关闭失败报告。`lifecycle_review` 两者都检查 |
-| TypeScript 插件测试暂时不在 CI 里运行 | `tsc` 和 Node 流程测试仍覆盖这些插件；这些测试在 0.19.3 上仍不通过（M10） |
+| scheduler、workflow 两个插件的测试暂不在 CI 里运行 | `tsc` 和 Node 流程测试仍覆盖这两个插件；在 rutis 的测试工具能收到插件定义之前，测试替身收不到它们注册的那份定义（M10） |
 
 回滚：撤销这次升级改动和固定版本即可。没有任何持久化格式变化；Timeline、存储和线上格式的夹具都不动。
 

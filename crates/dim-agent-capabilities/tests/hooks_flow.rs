@@ -894,6 +894,51 @@ async fn a_context_only_stop_writes_no_follow_up_and_starts_no_turn() {
     env.close().await;
 }
 
+/// A.4: a `Stop` block with an empty reason, here exit 2 with no stderr,
+/// writes no follow-up; the point still runs, and the turn ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_block_without_a_reason_writes_no_follow_up() {
+    let env = Env::new().await;
+    let runs = env.path("stop-runs");
+    env.sources.set(document(serde_json::json!({
+        "Stop": [command(serde_json::json!({
+            "type": "command",
+            "command": format!("printf 'run\\n' >> {}; exit 2", runs.display()),
+        }))],
+    })));
+    let session = env.session().await;
+    turn(&session, "first").await;
+    turn(&session, "barrier").await;
+    for _ in 0..500 {
+        let count = std::fs::read_to_string(&runs)
+            .map(|text| text.lines().count())
+            .unwrap_or(0);
+        if count >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        std::fs::read_to_string(&runs)
+            .unwrap_or_default()
+            .lines()
+            .count(),
+        2,
+        "the second Stop point did not run"
+    );
+    assert!(
+        hook_blocks(&session, "follow-up").await.is_empty(),
+        "an empty-reason Stop block wrote a follow-up"
+    );
+    let starts = events(&session)
+        .await
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
+        .count();
+    assert_eq!(starts, 2, "an empty-reason Stop block started a turn");
+    env.close().await;
+}
+
 /// A4: the follow-up carries the block reasons first, then the contexts, in
 /// catalog order.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
