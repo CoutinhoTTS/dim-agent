@@ -94,7 +94,8 @@ It also draws a progress bar where the terminal is known to (OSC 9;4);\n\
 Questions take option numbers (comma separated for several) or 0 to type your\n\
   own; empty input on the first question declines. Noninteractive questions exit 3.\n\
 Account commands sign in to every Provider the daemon describes with a login\n\
-  method.\n\
+  method. A build without the Dim account provider says so and offers API-key\n\
+  Providers instead.\n\
 Exit codes: 0 success, 1 configuration/transport error, 2 model/turn failure,\n\
             3 interactive approval or answer required, 130 interrupted.\n";
 

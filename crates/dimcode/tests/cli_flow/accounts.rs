@@ -315,6 +315,51 @@ fn account_and_logout_follow_the_described_namespace() {
     );
 }
 
+/// #825: a build without the Dim account provider says so and names the
+/// API-key alternative, from every account command.
+#[test]
+fn account_commands_name_the_missing_account_provider() {
+    const MISSING: &str = "This build has no Dim account provider, so the Dim account is unavailable; configure an API-key provider instead.";
+    for command in ["account", "login", "logout"] {
+        let home = Home::new();
+        let daemon = home.daemon(|wire| {
+            hello(wire, &["provider.management"]);
+            let listed = wire.read("provider.management");
+            wire.reply(
+                &listed,
+                management(json!([
+                    described(
+                        "openai-codex",
+                        "OpenAI Codex",
+                        "account.codex",
+                        &["browser"],
+                        false
+                    ),
+                    described(
+                        "grok-build",
+                        "Grok Build",
+                        "account.grok",
+                        &["device"],
+                        false
+                    ),
+                ])),
+            );
+        });
+        let output = home
+            .command()
+            .args([command, "dimcode-api-oauth"])
+            .output()
+            .unwrap();
+        daemon.join().unwrap();
+        assert_eq!(output.status.code(), Some(1), "{command}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(MISSING),
+            "{command}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
 #[test]
 fn account_help_prints_usage_without_contacting_a_daemon() {
     let home = Home::new();
@@ -323,6 +368,10 @@ fn account_help_prints_usage_without_contacting_a_daemon() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("account PROVIDER"), "{stdout}");
+    assert!(
+        stdout.contains("A build without the Dim account provider says so"),
+        "{stdout}"
+    );
     assert!(!home.0.join("rust").exists(), "the help started a daemon");
 }
 

@@ -6,6 +6,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{io::IsTerminal, time::Duration};
 
+/// What an account command reports when the build has no Dim account
+/// provider.
+pub const ACCOUNT_UNAVAILABLE: &str = "This build has no Dim account provider, so the Dim account is unavailable; configure an API-key provider instead.";
+
 /// `provider.management`'s `account` descriptor, reduced to sign-in needs.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -149,7 +153,7 @@ async fn described_account(client: &mut Client, provider_id: &str) -> Result<Des
             .as_ref()
             .is_some_and(|account| account.namespace == ACCOUNT_NAMESPACE)
     }) {
-        return Err("Account provider is unavailable; install its runtime plugin first".into());
+        return Err(ACCOUNT_UNAVAILABLE.into());
     }
     Err(format!("Unknown account provider {provider_id}; run dimcode login to list them").into())
 }
@@ -162,7 +166,7 @@ pub async fn login(
     let Some(provider_id) = provider_id else {
         let providers = described(client).await?;
         if providers.is_empty() {
-            return Err("Account provider is unavailable; install its runtime plugin first".into());
+            return Err(ACCOUNT_UNAVAILABLE.into());
         }
         println!("Sign in to an account provider:");
         for provider in providers {

@@ -130,7 +130,9 @@ form, and opening it starts nothing.
 the URL or the code the daemon returns; without a PROVIDER it lists the
 described accounts. `dimcode logout PROVIDER` signs one out, and
 `dimcode account PROVIDER` prints its non-secret state. `--help` lists these
-forms and never contacts a daemon.
+forms and never contacts a daemon. A build without the Dim account provider
+says so, and names the API-key Provider alternative, from each of these
+commands.
 
 ## Execution settings
 

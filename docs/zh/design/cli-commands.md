@@ -109,6 +109,7 @@ End     scroll to the bottom (fullscreen, empty draft)
 `dimcode login [PROVIDER]` 在行客户端启动同样的流程，并打印守护进程返回的 URL 或验证码；
 不给 PROVIDER 时列出被描述的账号。`dimcode logout PROVIDER` 让其中一个账号退出；
 `dimcode account PROVIDER` 打印它的非机密状态。`--help` 列出这些形式，且从不连接守护进程。
+没有 Dim 账号提供方的构建会从这些命令里说明这一点，并指出 API-key 提供方这一替代方式。
 
 ## 执行设置
 

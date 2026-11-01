@@ -1077,7 +1077,7 @@ dimcode --home /path/to/plugin-home --provider PROVIDER --model MODEL_ID
 
 Device login prints the verification address and device code, then polls the attempt. `Ctrl+C` cancels it. Account output is a non-secret state view; the CLI never requests token/credential lease APIs. An already accepted browser exchange is owned by the plugin: if the waiter leaves during settlement, inspect it with `account PROVIDER` before starting another login.
 
-A Provider the daemon reports without an `account` descriptor does not offer sign-in, and the command says that instead.
+A build without the Dim account provider says so from `account`, `login` and `logout`: the Dim account is unavailable and an API-key Provider can be used instead. A Provider the daemon reports without an `account` descriptor does not offer sign-in, and the command says that instead.
 
 The terminal UI's `/connect` row for a described account opens the same flow: a signed-out account starts its only flow, and a signed-in one shows `Signed in` and a `Sign out` entry. A row whose namespace is `account` opens `/login`'s Dim panel (identity, plan, usage, enterprise email) instead.
 
