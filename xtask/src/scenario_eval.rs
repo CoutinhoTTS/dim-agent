@@ -156,7 +156,11 @@
 //!   `afterSeconds` of wall clock or, for `whenToolCall`, when a
 //!   `step/tool-use` event carries the substring. A steer sets exactly one of
 //!   the two. A question the run asks is declined: the scenario scripts no
-//!   answer to it. The message is queued input, as the product's own first
+//!   answer to it. The runner keeps the decline until the call's
+//!   `step/tool-result` closes the prompt, and answers a
+//!   `question_not_pending` again a quiet period later, as the Questions
+//!   client rule has it
+//!   (Questions §3.2). The message is queued input, as the product's own first
 //!   message is; the steers are the operator's and are submitted in Steer
 //!   mode, so each one ends a wait and reaches a `main` that is waiting.
 //! - `budget.turns` bounds the turns over every line and `budget.seconds` the
@@ -1337,6 +1341,9 @@ async fn drive(
     // An input the runner submitted is outstanding until a turn starts for it
     // or the run consumes it; a line that has done neither is not idle.
     let mut awaiting = true;
+    // The declines whose `ask_user` call the Session had not registered when
+    // they were sent, kept until the call's `step/tool-result` closes it.
+    let mut declines: Vec<Decline> = Vec::new();
     loop {
         match fire_due(client, &session, &mut steers, started).await {
             Ok(submitted) => awaiting |= submitted,
@@ -1345,6 +1352,11 @@ async fn drive(
                 driven.error = Some(error);
                 return driven;
             }
+        }
+        if let Err(error) = retry_declines(client, &session, &mut declines).await {
+            driven.stop = "error";
+            driven.error = Some(error);
+            return driven;
         }
         let pending = steers.iter().any(|(_, fired)| !fired);
         if started.elapsed().as_secs_f64() >= scenario.budget.seconds {
@@ -1408,7 +1420,13 @@ async fn drive(
                                 return driven;
                             }
                         }
-                        decline_question(client, &session, &branch, &event).await;
+                        if let Err(error) =
+                            decline_question(client, &session, &mut declines, &branch, &event).await
+                        {
+                            driven.stop = "error";
+                            driven.error = Some(error);
+                            return driven;
+                        }
                     }
                     Notice::Approval { branch, request } => {
                         let _ = client
@@ -1445,26 +1463,120 @@ async fn drive(
     driven
 }
 
-/// A question the run asks is declined: the scenario scripts no answer to it.
-async fn decline_question(client: &mut Client, session: &str, branch: &str, event: &Value) {
-    if event["type"] != "step" || event["name"] != "tool-call" {
-        return;
-    }
+/// A question the runner declined that the Session has no waiter for yet. The
+/// Questions capability registers a call's waiter inside the tool handler
+/// (Questions §3.1), so a decline that arrives before the handler ran is
+/// `question_not_pending`: the client keeps its prompt until the call's
+/// `step/tool-result` arrives and answers again (§3.2, A12).
+struct Decline {
+    branch: String,
+    request: String,
+    call: String,
+    /// When the decline was last sent: the retry waits a quiet period, so a
+    /// busy line's notices cannot multiply the requests.
+    sent: Instant,
+}
+
+/// Declines the `ask_user` calls of a `step/tool-call`, keeps the declines the
+/// Session does not wait for yet, and drops the calls a `step/tool-result`
+/// settled. A decline for a call the Session did not take stays with the run
+/// until [`retry_declines`] answers it.
+async fn decline_question(
+    client: &mut Client,
+    session: &str,
+    declines: &mut Vec<Decline>,
+    branch: &str,
+    event: &Value,
+) -> std::result::Result<(), String> {
     let request = event["data"]["request_id"].as_str().unwrap_or_default();
-    let Some(calls) = event["data"]["calls"].as_array() else {
-        return;
-    };
-    for call in calls {
-        if call["name"] != "ask_user" {
+    match (event["type"].as_str(), event["name"].as_str()) {
+        (Some("step"), Some("tool-call")) => {
+            let calls = event["data"]["calls"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            for call in calls {
+                if call["name"] != "ask_user" {
+                    continue;
+                }
+                let decline = Decline {
+                    branch: branch.to_owned(),
+                    request: request.to_owned(),
+                    call: call["id"].as_str().unwrap_or_default().to_owned(),
+                    sent: Instant::now(),
+                };
+                if !decline_once(client, session, &decline).await? {
+                    declines.push(decline);
+                }
+            }
+        }
+        (Some("step"), Some("tool-result")) => {
+            let settled: Vec<&str> = event["data"]["results"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|result| result["call_id"].as_str())
+                .collect();
+            declines.retain(|decline| {
+                decline.branch != branch
+                    || decline.request != request
+                    || !settled.contains(&decline.call.as_str())
+            });
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Answers the declines again that the Session did not take, at most once per
+/// quiet period since the last attempt: the quiet period wakes the driver at
+/// least that often, so the registration is never missed, and a line that
+/// keeps delivering other notices does not multiply the requests.
+async fn retry_declines(
+    client: &mut Client,
+    session: &str,
+    declines: &mut Vec<Decline>,
+) -> std::result::Result<(), String> {
+    let mut index = 0;
+    while index < declines.len() {
+        if declines[index].sent.elapsed() < QUIET {
+            index += 1;
             continue;
         }
-        let _ = client
-            .rpc(
-                "session.question.respond",
-                json!({"sessionId": session, "branchId": branch, "requestId": request,
-                       "callId": call["id"], "declined": true}),
-            )
-            .await;
+        declines[index].sent = Instant::now();
+        if decline_once(client, session, &declines[index]).await? {
+            declines.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+    Ok(())
+}
+
+/// One `session.question.respond` decline: `true` when the call took it, and
+/// `false` while the Session has no waiter for the call. Any other error ends
+/// the run.
+async fn decline_once(
+    client: &mut Client,
+    session: &str,
+    decline: &Decline,
+) -> std::result::Result<bool, String> {
+    let reply = client
+        .rpc(
+            "session.question.respond",
+            json!({"sessionId": session, "branchId": decline.branch,
+                   "requestId": decline.request, "callId": decline.call,
+                   "declined": true}),
+        )
+        .await;
+    match reply {
+        Ok(_) => Ok(true),
+        Err(error) if dim_client::app_error(&error) == Some("question_not_pending") => Ok(false),
+        Err(error) => Err(format!(
+            "{}: the decline of {} failed: {error}",
+            decline.branch, decline.call
+        )),
     }
 }
 
@@ -4910,6 +5022,311 @@ mod tests {
                 "{arm}: the model reads the refusal"
             );
         }
+    }
+
+    /// The runner answers a decline again that found no waiter: the Session
+    /// registers the call's waiter only after this client allowed the call's
+    /// approval, so the first decline is `question_not_pending` and the run
+    /// would sit on its budget without the rule (Questions §3.2, A12).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_decline_before_the_question_is_pending_is_sent_again() {
+        /// The judge's verdict, and an `ask_user` call for a run request that
+        /// does not carry the refusal yet.
+        fn asks_a_question(text: &str) -> Option<Value> {
+            judged(text).or_else(|| {
+                (!text.contains("User declined to answer")).then(|| {
+                    tool_call(
+                        "ask_user",
+                        r#"{"questions":[{"question":"Where to deploy?","options":[{"label":"production"},{"label":"staging"}]}]}"#,
+                    )
+                })
+            })
+        }
+        let fixture = Fixture::start(
+            "question-late",
+            asks_a_question,
+            json!({
+                "message": "Ask me where to deploy.",
+                // The call's handler runs only after this client allows its
+                // approval, so the call has no waiter while the runner's
+                // first decline arrives.
+                "calls": [{"method": "session.permission.update",
+                           "params": {"branchId": "main", "expectedVersion": 0,
+                                      "policy": {"preset": "workspace-write",
+                                                 "toolApproval": "ask"}}}],
+                "budget": {"turns": 4, "seconds": 8, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let report = fixture.evaluate(&options).await.unwrap();
+        assert!(
+            report.contains("candidate is inconclusive: no comparison is a regression"),
+            "{report}"
+        );
+        let records = fixture.records(&options.out);
+        assert_eq!(records.len(), 2, "one run per arm");
+        for record in &records {
+            // A run that ends on its budget writes `seconds`, so `idle`
+            // already says the retry ended it.
+            assert_eq!(record["stop"], "idle", "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+        }
+        for arm in ["current", "candidate"] {
+            let directory = options.out.join(arm).join("case").join("run-0");
+            let export = std::fs::read_to_string(directory.join("timeline.jsonl")).unwrap();
+            assert!(
+                export
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                    .any(|line| line["event"]["type"] == "approval"
+                        && line["event"]["name"] == "request"),
+                "{arm}: the call waited for the approval the decline raced"
+            );
+            let requests = fixture.arm(arm);
+            assert_eq!(requests.len(), 2, "{arm}: the question and the answer");
+            assert!(
+                requests[1].contains("User declined to answer. Proceed without these answers."),
+                "{arm}: the model reads the refusal"
+            );
+        }
+    }
+
+    /// What a scripted App Server peer plays for `session.question.respond`.
+    #[cfg(unix)]
+    enum PeerScript {
+        /// One response body per decline, in order, then `{}`.
+        Replies(Vec<Value>),
+        /// The Session registers the call's waiter after the client's first
+        /// decline, and the line stays busy meanwhile: the peer streams a
+        /// burst of unrelated notices, refuses every decline for the next
+        /// half quiet period, takes the one after that, and settles the call
+        /// with its `step/tool-result`.
+        Late,
+    }
+
+    /// A scripted App Server peer for the driver: it answers the Session
+    /// methods the driver calls and plays one `ask_user` `step/tool-call`
+    /// after the submission. It keeps the line busy, answering no
+    /// `session.idle`, until a decline is taken. It returns the socket and
+    /// how many `session.question.respond` calls it read.
+    #[cfg(unix)]
+    async fn scripted_peer(
+        directory: &Path,
+        window: u64,
+        script: PeerScript,
+    ) -> (PathBuf, Arc<AtomicUsize>) {
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        /// The response frame for one request.
+        fn frame(request: &Value, body: Value) -> Vec<u8> {
+            let mut frame = json!({"jsonrpc": "2.0", "id": request["id"]});
+            for (key, value) in body.as_object().into_iter().flatten() {
+                frame[key] = value.clone();
+            }
+            format!("{frame}\n").into_bytes()
+        }
+        /// One `session.event` notice of `event`.
+        fn notice(event: Value) -> Vec<u8> {
+            let notice = json!({"jsonrpc": "2.0", "method": "session.event",
+                                "params": {"sessionId": "peer", "branchId": "main",
+                                           "event": event}});
+            format!("{notice}\n").into_bytes()
+        }
+        /// The refusal a client gets while the call has no waiter.
+        fn not_pending() -> Value {
+            json!({"error": {"code": -32000, "message": "No ask_user call is waiting for this answer",
+                             "data": {"appError": "question_not_pending"}}})
+        }
+
+        let _ = std::fs::remove_dir_all(directory);
+        private_directory(directory).unwrap();
+        let socket = directory.join("peer.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let responds = Arc::new(AtomicUsize::new(0));
+        let counted = responds.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = tokio::io::BufReader::new(read).lines();
+            let replies = match &script {
+                PeerScript::Replies(replies) => replies.clone(),
+                PeerScript::Late => Vec::new(),
+            };
+            let mut declines = 0;
+            let mut first: Option<Instant> = None;
+            // The line is busy until the peer settles the call, the way a
+            // running turn is: `session.idle` stays unanswered and the
+            // driver's own deadline reports the line busy.
+            let mut settled = false;
+            while let Some(line) = lines.next_line().await.unwrap() {
+                let request: Value = serde_json::from_str(&line).unwrap();
+                let method = request["method"].as_str().unwrap_or_default();
+                if method == "session.idle" && !settled {
+                    continue;
+                }
+                if method == "session.question.respond" {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    let taken = match &script {
+                        PeerScript::Replies(_) => {
+                            let body = replies
+                                .get(declines)
+                                .cloned()
+                                .unwrap_or_else(|| json!({"result": {}}));
+                            declines += 1;
+                            settled = body.get("result").is_some();
+                            write.write_all(&frame(&request, body)).await.unwrap();
+                            false
+                        }
+                        PeerScript::Late => {
+                            let at = *first.get_or_insert_with(Instant::now);
+                            let taken = at.elapsed() >= QUIET / 2;
+                            let body = match taken {
+                                true => json!({"result": {}}),
+                                false => not_pending(),
+                            };
+                            write.write_all(&frame(&request, body)).await.unwrap();
+                            if declines == 0 {
+                                for line in 0..20 {
+                                    let event = json!({"type": "step", "name": "text", "id": "b",
+                                                       "data": {"turn_id": "t1", "request_id": "r1",
+                                                                "text": format!("line {line}")}});
+                                    write.write_all(&notice(event)).await.unwrap();
+                                }
+                            }
+                            declines += 1;
+                            taken
+                        }
+                    };
+                    if taken {
+                        let event = json!({"type": "step", "name": "tool-result", "id": "e3",
+                                           "sequence": 3,
+                                           "data": {"turn_id": "t1", "request_id": "r1",
+                                                    "call_event_id": "e1",
+                                                    "results": [{"call_id": "c1", "result": {
+                                                        "content": "User declined to answer. Proceed without these answers."}}]}});
+                        write.write_all(&notice(event)).await.unwrap();
+                        settled = true;
+                    }
+                    continue;
+                }
+                let body = match method {
+                    "session.create" => json!({"result": {"sessionId": "peer"}}),
+                    "session.context.usage" => json!({"result": {"contextWindow": window}}),
+                    _ => json!({"result": {}}),
+                };
+                write.write_all(&frame(&request, body)).await.unwrap();
+                if method == "session.submit" {
+                    write
+                        .write_all(&notice(
+                            json!({"type": "turn", "name": "start", "data": {}}),
+                        ))
+                        .await
+                        .unwrap();
+                    let event = json!({"type": "step", "name": "tool-call", "id": "e1", "sequence": 1,
+                                       "data": {"turn_id": "t1", "request_id": "r1",
+                                                "calls": [{"id": "c1", "name": "ask_user", "input":
+                                                  {"questions": [{"header": "Deploy",
+                                                                  "question": "Where to deploy?",
+                                                                  "options": [{"label": "production"},
+                                                                              {"label": "staging"}]}]}}]}});
+                    write.write_all(&notice(event)).await.unwrap();
+                }
+            }
+        });
+        (socket, responds)
+    }
+
+    /// A client on a scripted peer's socket.
+    #[cfg(unix)]
+    async fn driver_client(socket: PathBuf) -> Client {
+        Client::open(
+            &ConnectionConfig {
+                endpoint: socket,
+                server: WireServer {
+                    program: std::env::current_exe().unwrap(),
+                    embedded: true,
+                },
+                profile: None,
+                client_kind: "other",
+                client_name: "scenario-eval",
+            },
+            false,
+        )
+        .await
+        .unwrap()
+    }
+
+    /// The model the driver names in `session.create` for a scripted peer.
+    #[cfg(unix)]
+    fn peer_model() -> ModelSelection {
+        ModelSelection {
+            provider_id: "gateway".into(),
+            model_id: "mock".into(),
+            capability_snapshot: None,
+            config: None,
+            metadata: None,
+        }
+    }
+
+    /// Any other error from `session.question.respond` ends the run with that
+    /// error, instead of being dropped and leaving the run on its budget.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn another_question_error_ends_the_run() {
+        let directory =
+            std::env::temp_dir().join(format!("dim-scenario-eval-scripted-{}", std::process::id()));
+        let (socket, _) = scripted_peer(
+            &directory,
+            8_000,
+            PeerScript::Replies(vec![
+                json!({"error": {"code": -32000, "message": "the Session is reloading",
+                                  "data": {"appError": "session_reloading"}}}),
+            ]),
+        )
+        .await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.seconds = 10.;
+        let driven = drive(&mut client, &scenario, &std::env::temp_dir(), &peer_model()).await;
+        let _ = std::fs::remove_dir_all(directory);
+        // The budget writes `seconds`, so `error` is the run ending on the
+        // reply, not on its budget.
+        assert_eq!(driven.stop, "error", "{:?}", driven.error);
+        let error = driven.error.unwrap_or_default();
+        assert!(
+            error.contains("the decline of c1 failed") && error.contains("session_reloading"),
+            "{error}"
+        );
+    }
+
+    /// A busy line does not multiply the declines: the peer refuses the first
+    /// decline and streams a burst of unrelated notices at once, and the
+    /// runner answers the decline again only once the quiet period has
+    /// passed. The peer reads exactly two declines, and the run ends idle
+    /// because the retry took the second one.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_busy_line_sends_the_decline_again_once() {
+        let directory =
+            std::env::temp_dir().join(format!("dim-scenario-eval-busy-{}", std::process::id()));
+        let (socket, responds) = scripted_peer(&directory, 8_000, PeerScript::Late).await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.seconds = 10.;
+        let driven = drive(&mut client, &scenario, &std::env::temp_dir(), &peer_model()).await;
+        let _ = std::fs::remove_dir_all(directory);
+        // The budget writes `seconds`, so `idle` is the retry ending the run.
+        assert_eq!(driven.stop, "idle", "{:?}", driven.error);
+        assert_eq!(
+            responds.load(Ordering::SeqCst),
+            2,
+            "one declined early and one the quiet period scheduled"
+        );
     }
 
     /// The `create_at` of the last `turn/end` on `main` and of the close the
