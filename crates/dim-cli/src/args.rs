@@ -35,6 +35,14 @@ Commands:\n\
   mcp enable ID                    Enable an MCP server shown by mcp list\n\
   mcp disable ID                   Disable it; an unlisted ID withdraws only\n\
                                    this workspace's stored enablement\n\
+  mcp add PATH                     Create an entry from PATH, or from stdin for -\n\
+  mcp edit ID                      Edit an entry's patch in the editor\n\
+  mcp set ID PATH                  Write an entry's patch from PATH,\n\
+                                   or from stdin for -\n\
+  mcp remove ID                    Delete an entry\n\
+  mcp test ID                      Probe a stored entry and list its tools\n\
+  mcp inspect ID                   Show an entry's effective configuration\n\
+  mcp disconnect ID                Close an entry's live connections\n\
   skills list                      List Skills, their sources and states\n\
   skills enable|disable ID         Turn one Skill on or off\n\
   skills reload                    Rescan this workspace's Skills\n\

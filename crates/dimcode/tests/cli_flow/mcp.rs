@@ -1090,6 +1090,57 @@ fn mcp_commands_refuse_a_daemon_without_the_namespace() {
         );
     }
 }
+
+/// `--help` names every MCP management verb.
+#[test]
+fn mcp_help_names_every_management_verb() {
+    let home = Home::new();
+    let output = home.command().arg("--help").output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    for verb in [
+        "mcp add PATH",
+        "mcp edit ID",
+        "mcp set ID PATH",
+        "mcp remove ID",
+        "mcp test ID",
+        "mcp inspect ID",
+        "mcp disconnect ID",
+    ] {
+        assert!(help.contains(verb), "{verb} is missing:\n{help}");
+    }
+}
+
+/// `mcp list` prints each source application's error, the plugin source
+/// included.
+#[test]
+fn mcp_list_prints_every_sources_errors() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        let mut listed = catalog(false, Some("project file is not JSON"));
+        listed["pluginApplication"]["error"] = json!("plugin entry refused");
+        wire.reply(&request, listed);
+    });
+    let output = home.command().args(["mcp", "list"]).output().unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("plugin MCP configuration: plugin entry refused"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("project MCP configuration: project file is not JSON"),
+        "{stderr}"
+    );
+}
+
 /// `mcp enable` and `mcp disable` keep printing what they printed before
 /// the panel shared their implementation.
 #[test]

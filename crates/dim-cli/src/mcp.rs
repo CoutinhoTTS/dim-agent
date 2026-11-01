@@ -87,6 +87,7 @@ pub async fn catalog_report(
     };
     for (source, application) in [
         ("user", Some(catalog.user_application)),
+        ("plugin", catalog.plugin_application),
         ("project", catalog.project_application),
     ] {
         if let Some(application) = application {
