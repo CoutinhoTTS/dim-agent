@@ -28,7 +28,7 @@ use crate::model::session::{
     ActionKind, Area, EntryState, ManagementAction, ManagementDetail, ManagementEntry,
     ManagementRefusal, ManagementReply, ManagementRequest, ManagementResult, ManagementView,
 };
-use crate::sanitize::safe;
+use crate::sanitize::{safe, safe_line};
 use crate::ui::i18n::{t, tf};
 use crate::ui::list_panel::{Event, Item, ListPanel};
 use crate::ui::prompts::{Effect, WriteTarget};
@@ -263,8 +263,8 @@ impl ManagementPanel {
         if let Some(id) = &self.confirming {
             let label = self
                 .entry(id)
-                .map(|entry| entry.label.clone())
-                .unwrap_or_else(|| id.clone());
+                .map(|entry| safe_line(&entry.label))
+                .unwrap_or_else(|| safe_line(id));
             self.list.set_hint(tf(
                 "Remove {name}? Enter confirm · Esc cancel",
                 &[("name", &label)],
@@ -587,7 +587,7 @@ fn render_detail(detail: &ShownDetail, width: usize, rows: usize, p: &Palette) -
         width,
         Some(rows),
         &p.border,
-        Some(&title_plain(&safe(&detail.title), inner, p)),
+        Some(&title_plain(&safe_line(&detail.title), inner, p)),
         Some(&key_hints(t("↑↓ scroll · Esc back"), p)),
     )
 }
@@ -660,14 +660,15 @@ fn hint(kinds: &[ActionKind]) -> String {
 fn items(view: &ManagementView) -> Vec<Item> {
     let mut items = Vec::new();
     for group in &view.groups {
-        items.push(Item::heading(safe(&group.heading)));
+        items.push(Item::heading(safe_line(&group.heading)));
         for entry in &group.entries {
-            // The owner's text is drawn, so it is safe before it is stored:
-            // an escape sequence in a name cannot reach the screen.
+            // The owner's text is drawn on one line, so it is made safe and
+            // kept on that line before it is stored: an escape sequence, a
+            // newline or a tab in a name cannot reach or break the screen.
             let mut item = Item::new(
                 entry.id.clone(),
-                safe(&entry.label),
-                safe(&states(entry).join("  ")),
+                safe_line(&entry.label),
+                safe_line(&states(entry).join("  ")),
             );
             item.search = format!("{} {}", entry.id, entry.detail.join(" "));
             items.push(item);

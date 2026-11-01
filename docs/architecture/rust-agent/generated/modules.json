@@ -25711,7 +25711,9 @@
       "to": "dim_cli::sanitize",
       "references": [
         "path safe",
-        "use crate::sanitize::safe"
+        "path safe_line",
+        "use crate::sanitize::safe",
+        "use crate::sanitize::safe_line"
       ]
     },
     {
@@ -29821,7 +29823,9 @@
       "to": "dim_cli::sanitize",
       "references": [
         "path safe",
-        "use crate::sanitize::safe"
+        "path safe_line",
+        "use crate::sanitize::safe",
+        "use crate::sanitize::safe_line"
       ]
     },
     {

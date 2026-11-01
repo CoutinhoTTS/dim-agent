@@ -1293,6 +1293,88 @@ fn tui_scheduled_panel_keeps_a_refused_edit_for_its_own_job() {
     daemon.join().unwrap();
 }
 
+/// A job the owner named with an escape sequence, a newline and a tab stays
+/// on one line wherever the name is drawn: the command line's columns, the
+/// panel's row and the remove confirmation.
+#[test]
+fn scheduled_draws_a_job_name_on_one_line() {
+    const NAME: &str = "evil\u{1b}[2J\nx\ty";
+    // The command line's columns: one line per job, no escape sequence.
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("schedule.list");
+        wire.reply(
+            &request,
+            json!({"jobs": [job("job-1", NAME, 3, true, Value::Null)]}),
+        );
+    });
+    let output = home.command().args(["scheduled", "list"]).output().unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "job-1\tevil x y\tevery 60 minutes\tenabled\t2026-11-02T09:00:00.000Z\t—\n"
+    );
+    // The panel's row and the confirmation it asks in.
+    let home = Home::new();
+    let (shown, wait_shown) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        for _ in 0..2 {
+            let request = wire.read_any();
+            match request["method"].as_str() {
+                Some("account.providers") => wire.reply(&request, json!([])),
+                Some("session.context.usage") => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                    "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+                method => panic!("unexpected request {method:?}"),
+            }
+        }
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        let request = wire.read("schedule.list");
+        wire.reply(
+            &request,
+            json!({"jobs": [job("job-1", NAME, 3, true, Value::Null)]}),
+        );
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/scheduled\r");
+    terminal.until("evil x y");
+    terminal.raw(b"\x18");
+    // The hint's parts are painted separately: assert one contiguous run.
+    terminal.until("evil x y? Enter confirm");
+    assert!(
+        !terminal.transcript.contains("[2J"),
+        "the owner's escape sequence never reaches the screen"
+    );
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
 /// A daemon without the Scheduler's methods leaves the panel open on the
 /// unsupported-daemon sentence rather than an empty list.
 #[test]
