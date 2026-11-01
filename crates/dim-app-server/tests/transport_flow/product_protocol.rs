@@ -412,6 +412,144 @@ async fn project_entry_edits_keep_the_declared_configuration() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_scope_move_preserves_withheld_values_and_enablement() {
+    let home = std::path::PathBuf::from("/tmp").join(format!("dm-move-{}", uuid::Uuid::new_v4()));
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project = std::fs::canonicalize(&project).unwrap();
+    std::fs::write(
+        project.join(".mcp.json"),
+        json!({"mcpServers":{"github":{"command":"echo","args":["--token","secret-arg"],"env":{"TOKEN":"secret-env"},"enabled":true}}})
+            .to_string(),
+    )
+    .unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let mut remote = Client::new_version(&server, true, 3).await;
+    assert!(
+        client
+            .features
+            .as_array()
+            .unwrap()
+            .contains(&json!("mcp.move"))
+    );
+    assert_eq!(
+        remote.rpc("mcp.move", json!({})).await["error"]["data"]["appError"],
+        "local_transport_required"
+    );
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    assert_eq!(catalog["result"]["servers"][0]["enabled"], false);
+    assert_ok(&client.rpc("mcp.set_enabled", json!({"source":"project","id":"github","cwd":project,"expectedVersion":catalog["result"]["projectRevision"],"enabled":true})).await);
+
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&client.rpc("mcp.move", json!({"id":"github","from":"project","to":"user","cwd":project,"expectedFromVersion":catalog["result"]["projectRevision"],"expectedToVersion":catalog["result"]["userRevision"]})).await);
+    let user = client
+        .rpc("mcp.configuration", json!({"source":"user","id":"github"}))
+        .await;
+    assert_ok(&user);
+    assert_eq!(user["result"]["secretsInUserScope"], false);
+    assert_eq!(user["result"]["enabled"], true);
+    assert_eq!(user["result"]["configuration"]["argsCount"], 2);
+    assert_eq!(
+        user["result"]["configuration"]["envNames"],
+        json!(["TOKEN"])
+    );
+    assert!(!user.to_string().contains("secret-arg"));
+    let stored: Value =
+        serde_json::from_slice(&std::fs::read(project.join(".mcp.json")).unwrap()).unwrap();
+    assert!(
+        stored["mcpServers"].get("github").is_none(),
+        "the project source is removed"
+    );
+
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&client.rpc("mcp.move", json!({"id":"github","from":"user","to":"project","cwd":project,"expectedFromVersion":catalog["result"]["userRevision"],"expectedToVersion":catalog["result"]["projectRevision"]})).await);
+    let project_view = client
+        .rpc(
+            "mcp.configuration",
+            json!({"source":"project","id":"github","cwd":project}),
+        )
+        .await;
+    assert_ok(&project_view);
+    assert_eq!(project_view["result"]["secretsInUserScope"], true);
+    assert_eq!(
+        project_view["result"]["enabled"], false,
+        "a project destination starts disabled"
+    );
+    assert_eq!(project_view["result"]["configuration"]["argsCount"], 2);
+    assert_eq!(
+        project_view["result"]["configuration"]["envNames"],
+        json!(["TOKEN"])
+    );
+    let stored: Value =
+        serde_json::from_slice(&std::fs::read(project.join(".mcp.json")).unwrap()).unwrap();
+    let github = &stored["mcpServers"]["github"];
+    assert_eq!(github["command"], "echo");
+    assert!(github.get("args").is_none());
+    assert!(github.get("env").is_none());
+    assert!(!stored.to_string().contains("secret-arg"));
+    assert!(!stored.to_string().contains("secret-env"));
+
+    let revision = project_view["result"]["revision"].clone();
+    assert_eq!(
+        client.rpc("mcp.save", json!({"source":"project","id":"github","cwd":project,"expectedVersion":revision,"configuration":{"command":"echo","args":["new"],"env":{"TOKEN":"new"}}})).await["error"]["data"]["appError"],
+        "mcp_credentials_are_user_scoped"
+    );
+    assert_eq!(
+        client.rpc("mcp.update", json!({"source":"project","id":"github","cwd":project,"expectedVersion":revision,"patch":{"args":["new"]}})).await["error"]["data"]["appError"],
+        "mcp_credentials_are_user_scoped"
+    );
+    assert_ok(&client.rpc("mcp.update", json!({"source":"project","id":"github","cwd":project,"expectedVersion":revision,"patch":{"command":"echo-2"}})).await);
+    let stored: Value =
+        serde_json::from_slice(&std::fs::read(project.join(".mcp.json")).unwrap()).unwrap();
+    assert_eq!(stored["mcpServers"]["github"]["command"], "echo-2");
+    assert!(stored["mcpServers"]["github"].get("args").is_none());
+    let view = client
+        .rpc(
+            "mcp.configuration",
+            json!({"source":"project","id":"github","cwd":project}),
+        )
+        .await;
+    assert_ok(&view);
+    assert_eq!(view["result"]["configuration"]["argsCount"], 2);
+
+    assert_ok(&client.rpc("mcp.remove", json!({"source":"project","id":"github","cwd":project,"expectedVersion":view["result"]["revision"]})).await);
+    assert_eq!(
+        client
+            .rpc(
+                "mcp.configuration",
+                json!({"source":"project","id":"github","cwd":project})
+            )
+            .await["error"]["data"]["appError"],
+        "mcp_unknown_server"
+    );
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    assert_ok(&client.rpc("mcp.save", json!({"source":"project","id":"github","cwd":project,"expectedVersion":catalog["result"]["projectRevision"],"configuration":{"command":"echo","enabled":false}})).await);
+    let clean = client
+        .rpc(
+            "mcp.configuration",
+            json!({"source":"project","id":"github","cwd":project}),
+        )
+        .await;
+    assert_ok(&clean);
+    assert_eq!(clean["result"]["secretsInUserScope"], false);
+    assert_eq!(clean["result"]["configuration"]["argsCount"], 0);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_connection_tests_are_disposable_preserve_drafts_and_respect_project_authority() {
     let home = std::path::PathBuf::from("/tmp").join(format!("dm-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(home.join("project")).unwrap();

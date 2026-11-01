@@ -168,9 +168,10 @@ states.
 Into project, the destination starts disabled. The move clears the user's `mcp-projects` record
 for the workspace and id before writing the project entry, so a stale enablement cannot grant
 execution, and the source's `enabled` value is not carried into `.mcp.json`. Into user, the
-destination user entry's `enabled` field gets the project entry's current effective enablement,
-and the project record is cleared. The move never enables a project entry; only the user's
-`mcp.set_enabled` can.
+destination user entry is the source's effective configuration: a project entry's resolved
+workspace `cwd` becomes the user entry's declared `cwd`, and its current effective enablement
+becomes the user `enabled` field; the project record is cleared. The move never enables a project
+entry; only the user's `mcp.set_enabled` can.
 
 ### D11. Secrets stay in user scope
 
@@ -179,18 +180,20 @@ entry: `.mcp.json` gets the public skeleton (type, command, declared `cwd`, URL 
 non-secret OAuth fields), and the user-local `mcp-secrets` source gets the withheld part (args,
 environment and header values, the bearer token, the full URL when it carries userinfo, path,
 query or fragment, hidden OAuth fields and unknown extension fields), keyed by canonical
-workspace and id. The declared configuration merges the overlay before the effective resolution;
-the overlay is never returned to a client and is a user-scope document under Settings' own
-storage and access rules. A moved project entry is a Dim-managed skeleton, not a complete
-standalone configuration for another tool; the user keeps the entry in user scope if that
-portability is needed.
+workspace and id. Into project the source's declared `cwd` is preserved in the skeleton; the
+project resolution applies at run time. Into user the source's effective configuration is
+written, so a resolved workspace `cwd` survives the move. The declared configuration merges the
+overlay before the effective resolution; the overlay is never returned to a client and is a
+user-scope document under Settings' own storage and access rules. A moved project entry is a
+Dim-managed skeleton, not a complete standalone configuration for another tool; the user keeps
+the entry in user scope if that portability is needed.
 
 ### D12. Secret fields of a moved project entry are edited in user scope
 
 While an entry has an overlay, `mcp.configuration` reports `secretsInUserScope: true`.
-`mcp.update` refuses a patch that sets `args`, `env`, `headers`, `bearer`, `url` when the overlay
-holds it, or the hidden OAuth fields with `mcp_credentials_are_user_scoped`; `mcp.save` on the
-entry is refused entirely. `mcp.save` is a complete single-document replacement: splitting it
+`mcp.update` refuses a patch that sets `args`, `env`, `headers`, `bearer`, `url`, or the hidden
+OAuth fields with `mcp_credentials_are_user_scoped`; `mcp.save` on the entry is refused entirely.
+`mcp.save` is a complete single-document replacement: splitting it
 across `.mcp.json` and `mcp-secrets` would make a partial save possible, and the client does not
 hold the hidden values it would have to submit. `mcp.update` remains the complete path for every
 non-secret field, and a non-secret patch is applied to the merged entry but written back as the
@@ -321,9 +324,9 @@ a whole document before it is stored, so an edit cannot persist a configuration 
 would refuse, including one that sets `oauth` beside static credentials.
 
 A project entry with `secretsInUserScope: true` (D11, D12) refuses a patch that sets `args`,
-`env`, `headers`, `bearer`, `url` when the overlay holds it, or the hidden OAuth fields
-(`authServerMetadataUrl`, unknown `oauth` extension fields) with
-`mcp_credentials_are_user_scoped`; `mcp.save` on that entry is refused entirely. The message
+`env`, `headers`, `bearer`, `url`, or the hidden OAuth fields (`authServerMetadataUrl`, unknown
+`oauth` extension fields) with `mcp_credentials_are_user_scoped`; `mcp.save` on that entry is
+refused entirely. The message
 names the one-step recovery: `mcp.move {id, from: "project", to: "user", cwd,
 expectedFromVersion: <project revision>, expectedToVersion: <user revision>}`. After the move
 the entry is fully editable; moving it back re-applies the overlay split. `command`, `cwd`,
@@ -381,8 +384,9 @@ Into project:
 
 Into user:
 
-1. write the complete entry, including the overlay, to `mcp.json` with `enabled` set to the
-   project entry's current effective enablement (CAS on `expectedToVersion`);
+1. write the source's effective entry, including the overlay, to `mcp.json` with `enabled` set to
+   the project entry's current effective enablement and a project entry's resolved workspace
+   `cwd` as the declared `cwd` (CAS on `expectedToVersion`);
 2. clear `mcp-projects` for the workspace and id (CAS);
 3. delete the overlay (CAS);
 4. remove the entry from `.mcp.json` (CAS on `expectedFromVersion`).

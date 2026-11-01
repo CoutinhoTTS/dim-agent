@@ -4,7 +4,7 @@ use dim_agent_runtime::wait_active;
 use dim_app_server::{
     mcp::{
         McpChange, McpError, McpPlugin, McpService, McpSource,
-        config::{McpServerSettings, McpSettings},
+        config::{McpProjectEnablement, McpSecrets, McpServerSettings, McpSettings},
     },
     settings::{
         SettingsChanged, SettingsError, SettingsPlugin, SettingsScope, SettingsService,
@@ -979,5 +979,144 @@ async fn admitted_writes_survive_dropped_waiters_and_stop_with_the_plugin() {
         Err(SettingsError::UnknownSource)
     ));
     assert_eq!(fs::read(fixture.home.join("mcp.json")).unwrap(), bytes);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn scope_move_partial_is_recoverable_and_remove_cleans_the_overlay() {
+    let fixture = Fixture::new().await;
+    let cancel = CancellationToken::new();
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    let secrets_path = fixture.home.join("mcp-secrets.json");
+    fs::create_dir(&secrets_path).unwrap();
+    let result = fixture
+        .mcp
+        .move_entry(
+            McpSource::User,
+            McpSource::Project(1),
+            "user-only".into(),
+            catalog.user_revision.clone(),
+            catalog.project_revision.clone().unwrap(),
+            &cancel,
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(McpError::MovePartial { into_project: true })
+    ));
+    let project = fixture
+        .settings
+        .read::<McpSettings>(SettingsScope::Project(1), &cancel)
+        .await
+        .unwrap()
+        .document;
+    assert!(project.mcp_servers.contains_key("user-only"));
+    let user = fixture
+        .settings
+        .read::<McpSettings>(SettingsScope::User, &cancel)
+        .await
+        .unwrap()
+        .document;
+    assert!(user.mcp_servers.contains_key("user-only"));
+    let enablement = fixture
+        .settings
+        .read::<McpProjectEnablement>(SettingsScope::User, &cancel)
+        .await
+        .unwrap()
+        .document;
+    assert!(
+        !enablement
+            .enabled
+            .values()
+            .any(|ids| ids.contains("user-only"))
+    );
+
+    fs::remove_dir(&secrets_path).unwrap();
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    assert_eq!(catalog.servers["user-only"].source, McpSource::Project(1));
+    fixture
+        .mcp
+        .update(
+            SettingsScope::Project(1),
+            catalog.project_revision.clone().unwrap(),
+            "user-only".into(),
+            McpChange::Remove,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    assert_eq!(catalog.servers["user-only"].source, McpSource::User);
+
+    fixture
+        .mcp
+        .move_entry(
+            McpSource::User,
+            McpSource::Project(1),
+            "user-only".into(),
+            catalog.user_revision.clone(),
+            catalog.project_revision.clone().unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let project = fixture
+        .settings
+        .read::<McpSettings>(SettingsScope::Project(1), &cancel)
+        .await
+        .unwrap()
+        .document;
+    let skeleton = serde_json::to_value(&project.mcp_servers["user-only"]).unwrap();
+    assert!(
+        skeleton["url"]
+            .as_str()
+            .is_some_and(|url| url.starts_with("https://example.test") && !url.contains("/mcp"))
+    );
+    assert!(skeleton.get("headers").is_none());
+    assert!(skeleton.get("auth").is_none());
+    assert!(skeleton.get("future").is_none());
+
+    let secrets = fixture
+        .settings
+        .read::<McpSecrets>(SettingsScope::User, &cancel)
+        .await
+        .unwrap()
+        .document;
+    let overlay = secrets
+        .entries
+        .values()
+        .find_map(|servers| servers.get("user-only"))
+        .expect("the move writes the withheld part");
+    assert!(overlay.auth.is_some());
+    assert_eq!(overlay.url.as_deref(), Some("https://example.test/mcp"));
+    assert!(overlay.extra.contains_key("future"));
+    assert!(!skeleton.to_string().contains("private"));
+
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    assert!(!catalog.servers["user-only"].enabled());
+    fixture
+        .mcp
+        .update(
+            SettingsScope::Project(1),
+            catalog.project_revision.clone().unwrap(),
+            "user-only".into(),
+            McpChange::Remove,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let secrets = fixture
+        .settings
+        .read::<McpSecrets>(SettingsScope::User, &cancel)
+        .await
+        .unwrap()
+        .document;
+    assert!(
+        !secrets
+            .entries
+            .values()
+            .any(|servers| servers.contains_key("user-only")),
+        "removing the project entry deletes its overlay"
+    );
     fixture.close().await;
 }

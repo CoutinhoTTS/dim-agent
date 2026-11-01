@@ -15,7 +15,8 @@ pub use session::{McpSession, McpSessionPlugin, McpSessionState, McpSourceState,
 
 use crate::settings::{BusinessDocument, SettingsError, SettingsScope, SettingsService};
 use config::{
-    McpPluginDocument, McpPluginServers, McpProjectEnablement, McpServerSettings, McpSettings,
+    McpPluginDocument, McpPluginServers, McpProjectEnablement, McpSecretEntry, McpSecrets,
+    McpServerSettings, McpSettings,
 };
 use dim_agent_capabilities::file_storage::FileStorage;
 use dim_agent_runtime::Names;
@@ -40,6 +41,12 @@ pub enum McpError {
     InvalidId,
     #[error("MCP server is not configured in this source")]
     UnknownServer,
+    #[error("MCP destination source already has this entry")]
+    MoveConflict,
+    #[error("MCP move is partial")]
+    MovePartial { into_project: bool },
+    #[error("MCP secret fields are stored in user scope")]
+    CredentialsAreUserScoped,
     #[error("MCP server is disabled")]
     Disabled,
     #[error("MCP server Plugin could not be loaded")]
@@ -106,6 +113,11 @@ pub struct McpEditableEntry {
     pub configuration: McpServerSettings,
     pub revision: Option<String>,
     pub enabled: bool,
+    /// The entry has a user-scope secret overlay; the withheld members are
+    /// read-only in project scope.
+    pub secrets_in_user_scope: bool,
+    /// The overlay record, kept server-side for stripping a non-secret patch.
+    pub secret: Option<McpSecretEntry>,
 }
 
 /// Source CAS tokens are distinct from connection and tool-source versions.
@@ -371,6 +383,15 @@ impl McpService {
                     .unwrap_or_default(),
                 None => McpProjectEnablement::default(),
             };
+            let secrets = match project {
+                Some(_) => {
+                    settings
+                        .read::<McpSecrets>(SettingsScope::User, &cancel)
+                        .await?
+                        .document
+                }
+                None => McpSecrets::default(),
+            };
             for source in [McpSource::User, McpSource::Plugins]
                 .into_iter()
                 .chain(project.map(McpSource::Project))
@@ -390,6 +411,10 @@ impl McpService {
                     }
                     continue;
                 };
+                let workspace = match scope {
+                    SettingsScope::Project(_) => Some(config::workspace(&settings, scope)?),
+                    SettingsScope::User => None,
+                };
                 let snapshot = settings.read::<McpSettings>(scope, &cancel).await?;
                 match scope {
                     SettingsScope::User => catalog.user_revision = snapshot.revision,
@@ -398,7 +423,12 @@ impl McpService {
                     }
                 }
                 let document = snapshot.document;
-                for (id, configuration) in document.mcp_servers {
+                for (id, mut configuration) in document.mcp_servers {
+                    if let Some(workspace) = &workspace
+                        && let Some(secret) = secrets.get(workspace, &id)
+                    {
+                        config::merge_secret(&mut configuration, secret)?;
+                    }
                     let configuration =
                         config::effective(&settings, scope, &id, configuration, &enablement)?;
                     catalog.servers.insert(
@@ -446,6 +476,7 @@ impl McpService {
                 .mcp_servers
                 .remove(&id)
                 .ok_or(McpError::UnknownServer)?;
+            let configuration = declared(&settings, source, &id, configuration, &cancel).await?;
             let enablement = enablement(&settings, source, &cancel).await;
             Ok(McpServerEntry {
                 source: source.into(),
@@ -483,14 +514,20 @@ impl McpService {
                     enabled: configuration.enabled(),
                     configuration,
                     revision: None,
+                    secrets_in_user_scope: false,
+                    secret: None,
                 });
             };
             let mut snapshot = settings.read::<McpSettings>(scope, &cancel).await?;
-            let configuration = snapshot
+            let mut configuration = snapshot
                 .document
                 .mcp_servers
                 .remove(&id)
                 .ok_or(McpError::UnknownServer)?;
+            let secret = secret(&settings, scope, &id, &cancel).await?;
+            if let Some(secret) = &secret {
+                config::merge_secret(&mut configuration, secret)?;
+            }
             let enabled = match scope {
                 SettingsScope::User => configuration.enabled(),
                 SettingsScope::Project(_) => {
@@ -503,6 +540,8 @@ impl McpService {
                 configuration,
                 revision: Some(snapshot.revision),
                 enabled,
+                secrets_in_user_scope: secret.is_some(),
+                secret,
             })
         })
         .await
@@ -518,6 +557,7 @@ impl McpService {
         cancel: &CancellationToken,
     ) -> Result<McpServerSettings> {
         self.run(cancel, move |settings, cancel| async move {
+            let configuration = declared(&settings, scope, &id, configuration, &cancel).await?;
             let enablement = enablement(&settings, scope, &cancel).await;
             Ok(config::effective(
                 &settings,
@@ -601,6 +641,120 @@ impl McpService {
         Ok(revision)
     }
 
+    /// Move one entry between the user and project sources. The destination is
+    /// written first and the source removed last; a failure after the first
+    /// destination write is reported as `MovePartial`, not success.
+    pub async fn move_entry(
+        &self,
+        from: McpSource,
+        to: McpSource,
+        id: String,
+        expected_from: String,
+        expected_to: String,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        if id.trim().is_empty() {
+            return Err(McpError::InvalidId);
+        }
+        let from_scope = from.scope().ok_or_else(|| {
+            McpError::Settings(SettingsError::Invalid("plugin entries are not movable"))
+        })?;
+        let to_scope = to.scope().ok_or_else(|| {
+            McpError::Settings(SettingsError::Invalid("plugin entries are not movable"))
+        })?;
+        if from_scope == to_scope {
+            return Err(McpError::Settings(SettingsError::Invalid(
+                "source and destination must differ",
+            )));
+        }
+        let into_project = matches!(to_scope, SettingsScope::Project(_));
+        self.run(cancel, move |settings, cancel| async move {
+            let from_snapshot = settings.read::<McpSettings>(from_scope, &cancel).await?;
+            let to_snapshot = settings.read::<McpSettings>(to_scope, &cancel).await?;
+            if from_snapshot.revision != expected_from || to_snapshot.revision != expected_to {
+                return Err(SettingsError::Conflict.into());
+            }
+            if to_snapshot.document.mcp_servers.contains_key(&id) {
+                return Err(McpError::MoveConflict);
+            }
+            let mut entry = from_snapshot
+                .document
+                .mcp_servers
+                .get(&id)
+                .cloned()
+                .ok_or(McpError::UnknownServer)?;
+            let from_secret = secret(&settings, from_scope, &id, &cancel).await?;
+            if let Some(secret) = &from_secret {
+                config::merge_secret(&mut entry, secret)?;
+            }
+            let enablement = enablement(&settings, from_scope, &cancel).await;
+            let mut entry = config::effective(&settings, from_scope, &id, entry, &enablement)?;
+            let mut document = McpSettings::default();
+            document.mcp_servers.insert(id.clone(), entry.clone());
+            document.validate()?;
+
+            match to_scope {
+                SettingsScope::Project(_) => {
+                    let workspace = config::workspace(&settings, to_scope)?;
+                    let (skeleton, to_secret) = config::split_entry(&entry);
+                    set_project_enabled(&settings, to_scope, &id, false, &cancel).await?;
+                    let mut destination = to_snapshot.document;
+                    destination.mcp_servers.insert(id.clone(), skeleton);
+                    settings
+                        .update(to_scope, &to_snapshot.revision, destination, &cancel)
+                        .await?;
+                    if let Some(secret) = to_secret {
+                        if let Err(error) =
+                            write_secret(&settings, &workspace, &id, secret, &cancel).await
+                        {
+                            return Err(partial(error, into_project));
+                        }
+                    } else if let Err(error) =
+                        remove_secret(&settings, &workspace, &id, &cancel).await
+                    {
+                        return Err(partial(error, into_project));
+                    }
+                    let mut source = from_snapshot.document;
+                    source.mcp_servers.remove(&id);
+                    settings
+                        .update(from_scope, &from_snapshot.revision, source, &cancel)
+                        .await
+                        .map_err(|error| partial(error.into(), into_project))?;
+                }
+                SettingsScope::User => {
+                    let workspace = config::workspace(&settings, from_scope)?;
+                    let enabled = enablement.contains(&workspace, &id);
+                    let (McpServerSettings::Stdio { enabled: field, .. }
+                    | McpServerSettings::Remote { enabled: field, .. }) = &mut entry;
+                    *field = Some(enabled);
+                    let mut destination = to_snapshot.document;
+                    destination.mcp_servers.insert(id.clone(), entry);
+                    settings
+                        .update(to_scope, &to_snapshot.revision, destination, &cancel)
+                        .await?;
+                    if let Err(error) =
+                        set_project_enabled(&settings, from_scope, &id, false, &cancel).await
+                    {
+                        return Err(partial(error, into_project));
+                    }
+                    if from_secret.is_some()
+                        && let Err(error) = remove_secret(&settings, &workspace, &id, &cancel).await
+                    {
+                        return Err(partial(error, into_project));
+                    }
+                    let mut source = from_snapshot.document;
+                    source.mcp_servers.remove(&id);
+                    settings
+                        .update(from_scope, &from_snapshot.revision, source, &cancel)
+                        .await
+                        .map_err(|error| partial(error.into(), into_project))?;
+                }
+            }
+            Ok(())
+        })
+        .await
+    }
+
     async fn run<T, F, Fut>(&self, cancel: &CancellationToken, operation: F) -> Result<T>
     where
         T: Send + 'static,
@@ -651,6 +805,38 @@ async fn enablement(
     }
 }
 
+/// One project entry's user-scope secret overlay, if it has one.
+async fn secret(
+    settings: &SettingsService,
+    scope: SettingsScope,
+    id: &str,
+    cancel: &CancellationToken,
+) -> Result<Option<McpSecretEntry>> {
+    let SettingsScope::Project(_) = scope else {
+        return Ok(None);
+    };
+    let workspace = config::workspace(settings, scope)?;
+    let snapshot = settings
+        .read::<McpSecrets>(SettingsScope::User, cancel)
+        .await?;
+    Ok(snapshot.document.get(&workspace, id).cloned())
+}
+
+/// The declared project entry with its overlay merged.
+async fn declared(
+    settings: &SettingsService,
+    scope: SettingsScope,
+    id: &str,
+    configuration: McpServerSettings,
+    cancel: &CancellationToken,
+) -> Result<McpServerSettings> {
+    let mut configuration = configuration;
+    if let Some(secret) = secret(settings, scope, id, cancel).await? {
+        config::merge_secret(&mut configuration, &secret)?;
+    }
+    Ok(configuration)
+}
+
 /// Writes one change to its source and returns the source's revision.
 async fn write(
     settings: &Arc<SettingsService>,
@@ -673,6 +859,10 @@ async fn write(
     let snapshot = settings.read::<McpSettings>(source, cancel).await?;
     if snapshot.revision != expected {
         return Err(SettingsError::Conflict.into());
+    }
+    if project && matches!(change, McpChange::Remove) {
+        let workspace = config::workspace(settings, source)?;
+        remove_secret(settings, &workspace, &id, cancel).await?;
     }
     let mut document = snapshot.document;
     if project && matches!(change, McpChange::SetEnabled(true)) {
@@ -708,9 +898,49 @@ async fn write(
         .revision)
 }
 
-/// Records the user's enablement of one project entry. Toggles of different
-/// entries commute, so a lost race on the shared record is retried rather
+/// Records the user's enablement of one project entry. Toggles of different/// entries commute, so a lost race on the shared record is retried rather
 /// than reported as a conflict the caller cannot observe.
+fn partial(_error: McpError, into_project: bool) -> McpError {
+    McpError::MovePartial { into_project }
+}
+
+async fn write_secret(
+    settings: &Arc<SettingsService>,
+    workspace: &str,
+    id: &str,
+    secret: McpSecretEntry,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let snapshot = settings
+        .read::<McpSecrets>(SettingsScope::User, cancel)
+        .await?;
+    let mut document = snapshot.document;
+    document.set(workspace, id, secret);
+    settings
+        .update(SettingsScope::User, &snapshot.revision, document, cancel)
+        .await?;
+    Ok(())
+}
+
+async fn remove_secret(
+    settings: &Arc<SettingsService>,
+    workspace: &str,
+    id: &str,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let snapshot = settings
+        .read::<McpSecrets>(SettingsScope::User, cancel)
+        .await?;
+    let mut document = snapshot.document;
+    if !document.remove(workspace, id) {
+        return Ok(());
+    }
+    settings
+        .update(SettingsScope::User, &snapshot.revision, document, cancel)
+        .await?;
+    Ok(())
+}
+
 async fn set_project_enabled(
     settings: &Arc<SettingsService>,
     source: SettingsScope,
@@ -784,6 +1014,7 @@ impl DynPlugin for McpPlugin {
             settings.register::<McpSettings>(ctx)?;
             settings.register::<McpProjectEnablement>(ctx)?;
             settings.register::<McpPluginServers>(ctx)?;
+            settings.register::<McpSecrets>(ctx)?;
             let auth = McpAuth::new(files, self.home_root).map_err(ErrorKind::PluginFailed)?;
             let service = Arc::new(McpService {
                 settings,
