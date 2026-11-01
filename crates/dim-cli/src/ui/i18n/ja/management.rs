@@ -33,6 +33,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
             "ユーザードキュメントは読み取り後に変更されています。今回は何も書き込んでいません。次回の編集では現在のドキュメントを開きます。"
         }
+        "This workspace's hook settings changed since they were read; nothing was written." => {
+            "このワークスペースのフック設定は読み取り後に変更されています。今回は何も書き込んでいません。"
+        }
         _ => return None,
     })
 }

@@ -88,6 +88,19 @@ fn refusal(error: &crate::Error) -> Failure {
     Failure::Refused(error.to_string())
 }
 
+/// What a write the owner refused over a newer document leaves: nothing was
+/// written, and the area is read again so the next write starts from what is
+/// stored now.
+async fn conflict(client: &mut Client, cwd: &str, message: &'static str) -> Failure {
+    match catalog(client, cwd).await {
+        Ok(catalog) => Failure::Conflict {
+            message: t(message).to_owned(),
+            catalog: Box::new(catalog),
+        },
+        Err(error) => Failure::Refused(error),
+    }
+}
+
 /// Performs `action`, then reads the area back as its owner reports it.
 pub async fn apply(
     client: &mut Client,
@@ -105,7 +118,7 @@ pub async fn apply(
                 )));
             }
             let current = catalog(client, &cwd).await.map_err(Failure::Refused)?;
-            client
+            let toggled = client
                 .rpc(
                     "hooks.set_enabled",
                     json!({
@@ -114,8 +127,22 @@ pub async fn apply(
                         "expectedRevision": current.projects_revision,
                     }),
                 )
-                .await
-                .map_err(|error| refusal(&error))?;
+                .await;
+            if let Err(error) = toggled {
+                // A conflict is its own case, as for a save: nothing was
+                // written, and the area is read again.
+                if crate::client::app_error(&error) != Some("hooks_conflict") {
+                    return Err(refusal(&error));
+                }
+                return Err(
+                    conflict(
+                        client,
+                        &cwd,
+                        "This workspace's hook settings changed since they were read; nothing was written.",
+                    )
+                    .await,
+                );
+            }
             applied = true;
         }
         ManagementAction::Save {
@@ -135,14 +162,14 @@ pub async fn apply(
                 if crate::client::app_error(&error) != Some("hooks_conflict") {
                     return Err(refusal(&error));
                 }
-                let catalog = catalog(client, &cwd).await.map_err(Failure::Refused)?;
-                return Err(Failure::Conflict {
-                    message: t(
+                return Err(
+                    conflict(
+                        client,
+                        &cwd,
                         "The user document changed since it was read; nothing was written. Your next edit opens the current document.",
                     )
-                    .to_owned(),
-                    catalog: Box::new(catalog),
-                });
+                    .await,
+                );
             }
             applied = true;
         }

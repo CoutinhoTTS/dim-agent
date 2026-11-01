@@ -31,6 +31,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
             "사용자 문서가 읽은 뒤에 변경되었습니다. 아무것도 쓰지 않았습니다. 다음 편집은 현재 문서를 엽니다."
         }
+        "This workspace's hook settings changed since they were read; nothing was written." => {
+            "이 작업 공간의 훅 설정이 읽은 뒤에 변경되었습니다. 아무것도 쓰지 않았습니다."
+        }
         _ => return None,
     })
 }

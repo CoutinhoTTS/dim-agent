@@ -164,6 +164,111 @@ fn hooks_enable_and_disable_send_the_workspace_and_the_revision() {
     }
 }
 
+/// A toggle the owner refuses over a newer document writes nothing and reads
+/// the area again, as a save's conflict does: the subcommand exits 1 with the
+/// conflict, and the panel shows it over the view it reads again.
+#[test]
+fn hooks_toggle_conflict_reads_the_area_again() {
+    let home = Home::new();
+    let project = home.0.join("work");
+    fs::create_dir(&project).unwrap();
+    let workspace = fs::canonicalize(&project)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("hooks.catalog");
+        wire.reply(&request, document_catalog("user:1", json!({"hooks": {}})));
+        let request = wire.read("hooks.set_enabled");
+        assert_eq!(request["params"]["cwd"], workspace);
+        assert_eq!(request["params"]["enabled"], true);
+        assert_eq!(request["params"]["expectedRevision"], "projects:1");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"settings changed; read the current version before updating",
+            "data":{"appError":"hooks_conflict"}}}));
+        // Nothing was written, so the adapter reads the area again.
+        let request = wire.read("hooks.catalog");
+        wire.reply(&request, document_catalog("user:1", json!({"hooks": {}})));
+        drains(wire);
+    });
+    let output = home
+        .command()
+        .arg("--cwd")
+        .arg(&project)
+        .args(["hooks", "enable"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "This workspace's hook settings changed since they were read; nothing was written."
+        ),
+        "{stderr}"
+    );
+    daemon.join().unwrap();
+    fs::remove_file(home.0.join("rust/daemon.sock")).unwrap();
+    // The panel reads the area again and shows the same conflict, keeping
+    // the project off because the owner wrote nothing.
+    let (shown, wait_shown) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        for _ in 0..2 {
+            let request = wire.read_any();
+            match request["method"].as_str() {
+                Some("account.providers") => wire.reply(&request, json!([])),
+                Some("session.context.usage") => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                    "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+                method => panic!("unexpected request {method:?}"),
+            }
+        }
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        let request = wire.read("hooks.catalog");
+        wire.reply(&request, document_catalog("user:1", json!({"hooks": {}})));
+        let request = wire.read("hooks.catalog");
+        wire.reply(&request, document_catalog("user:1", json!({"hooks": {}})));
+        let request = wire.read("hooks.set_enabled");
+        assert_eq!(request["params"]["expectedRevision"], "projects:1");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"settings changed; read the current version before updating",
+            "data":{"appError":"hooks_conflict"}}}));
+        let request = wire.read("hooks.catalog");
+        wire.reply(&request, document_catalog("user:1", json!({"hooks": {}})));
+        drains(wire);
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/hooks\r");
+    terminal.until("The user's own document; always in effect.");
+    terminal.raw(b"\x1b[B");
+    terminal.until("/work/.dimcode/hooks.json");
+    terminal.raw(b"\r");
+    terminal.until("This workspace's hook settings");
+    assert!(
+        !terminal.transcript.contains("Enabled project."),
+        "the refused toggle writes nothing: {}",
+        terminal.transcript
+    );
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
 #[test]
 #[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
 fn project_hooks_start_disabled_and_the_user_enables_them() {

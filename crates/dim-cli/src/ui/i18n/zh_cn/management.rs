@@ -29,6 +29,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
             "用户文档在读取后已被修改；本次没有写入。下次编辑会打开当前文档。"
         }
+        "This workspace's hook settings changed since they were read; nothing was written." => {
+            "此工作区的钩子设置已在读取后发生变化；本次没有写入。"
+        }
         _ => return None,
     })
 }

@@ -64,6 +64,7 @@ pub const STRINGS: &[&str] = &[
     "Owned by plugin {plugin}.",
     "The user document turns every hook off (disableAllHooks).",
     "The user document changed since it was read; nothing was written. Your next edit opens the current document.",
+    "This workspace's hook settings changed since they were read; nothing was written.",
 ];
 
 pub struct ManagementPanel {

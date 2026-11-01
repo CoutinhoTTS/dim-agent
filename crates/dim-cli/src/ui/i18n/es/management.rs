@@ -33,6 +33,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
             "El documento del usuario cambió desde que se leyó; no se escribió nada. Tu próxima edición abre el documento actual."
         }
+        "This workspace's hook settings changed since they were read; nothing was written." => {
+            "La configuración de hooks de este espacio de trabajo cambió desde que se leyó; no se escribió nada."
+        }
         _ => return None,
     })
 }
