@@ -292,6 +292,36 @@ fn models_area_refuses_a_toggle_the_set_does_not_govern() {
     );
 }
 
+/// A Provider record the owner could not read shows the owner's message,
+/// not the not-found fallback.
+#[test]
+fn models_area_shows_the_owner_error_for_an_unreadable_provider() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("provider.management");
+        wire.reply(
+            &request,
+            json!({"providers": [], "errors": [{"providerId": "fixture",
+                "message": "The Provider record could not be read: checksum mismatch"}]}),
+        );
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let output = home
+        .command()
+        .args(["models", "fixture", "inspect", "flash"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("checksum mismatch"), "{stderr}");
+    assert!(!stderr.contains("No provider has that id."), "{stderr}");
+}
+
 #[test]
 fn models_area_set_writes_the_revision_it_read_and_only_the_changed_fields() {
     let home = Home::new();

@@ -30,10 +30,21 @@ const EDITABLE: &[&str] = &[
     "endpoint",
 ];
 
-/// `provider.management`'s reply for one Provider.
+/// `provider.management`'s reply: the Providers it could read, and the ones
+/// it could not, each with the owner's message.
 #[derive(Debug, Deserialize)]
 pub struct Reply {
     pub providers: Vec<Provider>,
+    #[serde(default)]
+    pub errors: Vec<RecordError>,
+}
+
+/// A Provider record the owner could not read.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordError {
+    pub provider_id: String,
+    pub message: String,
 }
 
 /// One Provider as `provider.management` reports it.
@@ -197,11 +208,23 @@ pub async fn read(client: &mut Client, provider_id: &str) -> Result<Provider, Fa
         .typed("provider.management", json!({"providerId": provider_id}))
         .await
         .map_err(|error| Failure::Refused(error.to_string()))?;
-    reply
+    if let Some(provider) = reply
         .providers
         .into_iter()
         .find(|provider| provider.provider_id == provider_id)
-        .ok_or_else(|| Failure::Refused(t("No provider has that id.").to_owned()))
+    {
+        return Ok(provider);
+    }
+    // The owner named a record it could not read: its own message says why,
+    // and stands before the not-found fallback.
+    match reply
+        .errors
+        .into_iter()
+        .find(|error| error.provider_id == provider_id)
+    {
+        Some(error) => Err(Failure::Refused(error.message)),
+        None => Err(Failure::Refused(t("No provider has that id.").to_owned())),
+    }
 }
 
 /// Performs `action`, then reads the area back as its owner reports it.
