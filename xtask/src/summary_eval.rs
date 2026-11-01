@@ -29,7 +29,7 @@ use dim_agent_capabilities::{
     history::{HistoryEntry, summary_message},
     host::{
         CompactionCheckpoint, CompactionCut, CompactionInput, CompactionStrategy, ContextModel,
-        HostError, ModelChunk, ModelHost, ModelStream, ProviderConnectionResolver,
+        HostError, ModelChunk, ModelHost, ModelStopReason, ModelStream, ProviderConnectionResolver,
         ResolveContextModel, StrategyOutcome,
     },
     model_provider::invoke_with_recovery,
@@ -1264,14 +1264,40 @@ async fn judge_probes(
         .collect())
 }
 
-pub(crate) async fn complete(
+async fn complete(
     host: &Arc<ModelHost>,
     resolver: &Arc<ProviderConnectionResolver>,
     request: &Arc<ModelRequest>,
     cancel: &CancellationToken,
 ) -> Result<String> {
+    Ok(complete_detailed(host, resolver, request, cancel)
+        .await?
+        .text)
+}
+
+/// One completion's reply with what the stream reported about it: its text,
+/// its stop reason, the completion tokens it counted, and the size of its
+/// reasoning deltas.
+pub(crate) struct Completion {
+    /// The reply's text blocks.
+    pub text: String,
+    /// The stop reason the stream reported; `None` when it ended without one,
+    /// which is an error.
+    pub stop: Option<ModelStopReason>,
+    /// The completion tokens the stream reported, when it reported usage.
+    pub completion_tokens: Option<f64>,
+    /// The bytes of reasoning deltas the stream carried.
+    pub thinking_bytes: usize,
+}
+
+pub(crate) async fn complete_detailed(
+    host: &Arc<ModelHost>,
+    resolver: &Arc<ProviderConnectionResolver>,
+    request: &Arc<ModelRequest>,
+    cancel: &CancellationToken,
+) -> Result<Completion> {
     let resolved = resolver.0.resolve(request.clone(), cancel.clone()).await?;
-    let (text, _) = invoke_with_recovery(
+    let reply = invoke_with_recovery(
         host,
         request,
         resolved,
@@ -1280,23 +1306,29 @@ pub(crate) async fn complete(
         |stream: ModelStream, _, _, _| Box::pin(collected(stream)),
     )
     .await?;
-    Ok(text)
+    Ok(reply)
 }
 
-async fn collected(mut stream: ModelStream) -> std::result::Result<(String, bool), HostError> {
-    let mut text = String::new();
-    let mut stopped = false;
+async fn collected(mut stream: ModelStream) -> std::result::Result<Completion, HostError> {
+    let mut reply = Completion {
+        text: String::new(),
+        stop: None,
+        completion_tokens: None,
+        thinking_bytes: 0,
+    };
     while let Some(chunk) = stream.next().await {
         match chunk? {
-            ModelChunk::Text(delta) => text.push_str(&delta),
-            ModelChunk::MessageStop { .. } => stopped = true,
+            ModelChunk::Text(delta) => reply.text.push_str(&delta),
+            ModelChunk::Thinking(delta) => reply.thinking_bytes += delta.len(),
+            ModelChunk::MessageStop { reason, .. } => reply.stop = Some(reason),
+            ModelChunk::Usage(usage) => reply.completion_tokens = Some(usage.completion_tokens),
             _ => {}
         }
     }
-    if !stopped {
+    if reply.stop.is_none() {
         return Err(HostError::failed("the judge stream ended without a stop"));
     }
-    Ok((text, true))
+    Ok(reply)
 }
 
 /// The verdicts of a judge reply: the first JSON array that parses as a

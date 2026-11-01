@@ -41,7 +41,8 @@
 //! A failed run is one that ended on an error or its wall-clock budget, or
 //! one whose judging did not happen: there was nothing the judge could be
 //! asked, or a judge call failed — the first call, its retry without a
-//! temperature, or a re-ask. The judge is asked for `present` or `absent`;
+//! temperature, or a re-ask; a reply that stopped at its output cap fails the
+//! call and is not asked again. The judge is asked for `present` or `absent`;
 //! the verdict parser it shares with the summary evaluation also accepts
 //! `contradicted`, which a `must_not_show` probe treats as not shown. The
 //! judge's verdicts are read from a JSON array or from one object per line; a
@@ -183,10 +184,15 @@
 //! state a second run reads.
 use crate::app_server::{self, Overrides, RunSettings};
 use crate::rule::{self, Comparison, Counts, Worse};
-use crate::summary_eval::{Configuration, Judgement, Verdict, complete, parse_judgements};
+use crate::summary_eval::{
+    Completion, Configuration, Judgement, Verdict, complete_detailed, parse_judgements,
+};
 use dim_agent_capabilities::{
     context_model::window_facts,
-    host::{ModelHost, ModelSelectionHost, ProviderConnectionResolver, ResolveContextModel},
+    host::{
+        ModelHost, ModelSelectionHost, ModelStopReason, ProviderConnectionResolver,
+        ResolveContextModel,
+    },
 };
 use dim_agent_runtime::AgentBuilder;
 use dim_agent_types::{
@@ -802,6 +808,9 @@ struct RunRecord {
     /// How many times the judge was asked again for an answer it could not
     /// use.
     judge_reasks: u32,
+    /// One entry per judge call the run made, in order: what its stream
+    /// reported.
+    judge_calls: Vec<JudgeCall>,
     #[serde(skip)]
     temperature_dropped: bool,
     probes: Vec<ProbeRecord>,
@@ -845,13 +854,14 @@ enum ProbeVerdict {
 /// How one run's judging ended (model-prompts §8.1). The outcome is a typed
 /// field, so nothing tells a run the judge could not be asked from one it
 /// answered unreadably by reading the error's text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum JudgeOutcome {
     /// The judge answered every call, and its verdicts are usable.
     Judged,
     /// A judge call failed: a window overflow, a transport or an HTTP error,
-    /// on the first call, on its retry, or on a re-ask.
+    /// or a reply cut off at its output cap, on the first call, on its retry,
+    /// or on a re-ask.
     CallFailed,
     /// The judge was never asked: the run left no export, the profile has no
     /// model host for the judge, or the run failed before the judge ran.
@@ -862,6 +872,60 @@ enum JudgeOutcome {
     /// The judge answered every call and gave no usable verdicts after the
     /// re-asks.
     Unreadable,
+}
+
+/// One judge call, as the stream reported it: the stop reason, how long it
+/// took, the reply's text, and the reasoning it carried. The OpenAI-chat
+/// stream gives no separate reasoning-token count, so the reasoning is the
+/// bytes of thinking deltas, and the stream's usage adds the call's whole
+/// completion count beside it.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JudgeCall {
+    /// The stop reason the stream reported: `end_turn`, `tool_use`,
+    /// `stop_sequence` or `max_tokens`; `none` when the call failed or the
+    /// stream ended without one.
+    stop: String,
+    duration_ms: f64,
+    /// The reply text's length in bytes.
+    text_bytes: usize,
+    /// The completion tokens the stream reported, when it reported usage.
+    completion_tokens: Option<f64>,
+    /// The bytes of reasoning deltas the stream carried.
+    thinking_bytes: usize,
+}
+impl JudgeCall {
+    /// The call a reply answers, timed from the call's start.
+    fn answered(reply: &Completion, duration: Duration) -> Self {
+        Self {
+            stop: reply.stop.map_or_else(
+                || "none".to_owned(),
+                |reason| {
+                    match reason {
+                        ModelStopReason::EndTurn => "end_turn",
+                        ModelStopReason::ToolUse => "tool_use",
+                        ModelStopReason::StopSequence => "stop_sequence",
+                        ModelStopReason::MaxTokens => "max_tokens",
+                    }
+                    .to_owned()
+                },
+            ),
+            duration_ms: duration.as_secs_f64() * 1000.,
+            text_bytes: reply.text.len(),
+            completion_tokens: reply.completion_tokens,
+            thinking_bytes: reply.thinking_bytes,
+        }
+    }
+    /// The call that failed: no stop, no text, and no reply facts.
+    fn failed(duration: Duration) -> Self {
+        Self {
+            stop: "none".to_owned(),
+            duration_ms: duration.as_secs_f64() * 1000.,
+            text_bytes: 0,
+            completion_tokens: None,
+            thinking_bytes: 0,
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -953,6 +1017,7 @@ async fn run_once(
         error,
         judge_error: finished.judging.error,
         judge_reasks: finished.judging.reasks,
+        judge_calls: finished.judging.calls,
         temperature_dropped: finished.judging.temperature_dropped,
         probes: finished.judging.probes,
     })
@@ -995,6 +1060,8 @@ struct Judging {
     /// How many times the judge was asked again for an answer it could not
     /// use.
     reasks: u32,
+    /// One entry per judge call, in order.
+    calls: Vec<JudgeCall>,
     /// Whether the judge had to drop its temperature.
     temperature_dropped: bool,
 }
@@ -1008,6 +1075,7 @@ impl Judging {
             probes: unparsed(scenario),
             error,
             reasks: 0,
+            calls: Vec::new(),
             temperature_dropped: false,
         }
     }
@@ -1750,6 +1818,7 @@ async fn judge_export(
     config.temperature = Some(0.);
     let mut dropped = false;
     let mut reasks = 0;
+    let mut calls: Vec<JudgeCall> = Vec::new();
     let whole = judge_request(judge, &messages, &config);
     let facts = window_facts(limits.window, limits.max_output, &whole);
     let estimate = facts.count_tokens(&whole);
@@ -1762,16 +1831,22 @@ async fn judge_export(
                 "the judge view needs about {estimate:.0} tokens; the judge's budget is {budget:.0}"
             )),
             reasks: 0,
+            calls: Vec::new(),
             temperature_dropped: false,
         };
     }
     let (outcome, probes, error) = loop {
         let request = Arc::new(judge_request(judge, &messages, &config));
-        let reply = match complete(host, resolver, &request, cancel).await {
-            Ok(reply) => reply,
+        let started = Instant::now();
+        let reply: Completion = match complete_detailed(host, resolver, &request, cancel).await {
+            Ok(reply) => {
+                calls.push(JudgeCall::answered(&reply, started.elapsed()));
+                reply
+            }
             // A call that fails during a re-ask ends the asking, and the
             // error names the call that failed.
             Err(error) if reasks > 0 => {
+                calls.push(JudgeCall::failed(started.elapsed()));
                 break (
                     JudgeOutcome::CallFailed,
                     unparsed(scenario),
@@ -1779,13 +1854,19 @@ async fn judge_export(
                 );
             }
             Err(error) => {
+                calls.push(JudgeCall::failed(started.elapsed()));
                 // The first call is retried once without a temperature.
                 config.temperature = None;
                 dropped = true;
                 let retry = Arc::new(judge_request(judge, &messages, &config));
-                match complete(host, resolver, &retry, cancel).await {
-                    Ok(reply) => reply,
+                let started = Instant::now();
+                match complete_detailed(host, resolver, &retry, cancel).await {
+                    Ok(reply) => {
+                        calls.push(JudgeCall::answered(&reply, started.elapsed()));
+                        reply
+                    }
                     Err(retry) => {
+                        calls.push(JudgeCall::failed(started.elapsed()));
                         break (
                             JudgeOutcome::CallFailed,
                             unparsed(scenario),
@@ -1795,21 +1876,34 @@ async fn judge_export(
                 }
             }
         };
-        let what = match verdicts(scenario, &reply) {
+        // A call cut off at its cap is a failed call, not an unreadable
+        // answer: a re-ask exists for an answer that does not read, not for a
+        // call that was cut off.
+        if reply.stop == Some(ModelStopReason::MaxTokens) {
+            let cap = match reply.completion_tokens {
+                Some(tokens) => {
+                    format!("the judge stopped at its output cap ({tokens:.0} completion tokens)")
+                }
+                None => "the judge stopped at its output cap".to_owned(),
+            };
+            break (JudgeOutcome::CallFailed, unparsed(scenario), Some(cap));
+        }
+        let what = match verdicts(scenario, &reply.text) {
             Ok(probes) => break (JudgeOutcome::Judged, probes, None),
             Err(what) if reasks == REASKS => {
                 break (
                     JudgeOutcome::Unreadable,
                     unparsed(scenario),
                     Some(format!(
-                        "the judge answered with no usable verdicts: {what}\n{reply}"
+                        "the judge answered with no usable verdicts: {what}\n{}",
+                        reply.text
                     )),
                 );
             }
             Err(what) => what,
         };
         reasks += 1;
-        messages.push(Message::text(Role::Assistant, reply));
+        messages.push(Message::text(Role::Assistant, reply.text));
         messages.push(Message::text(
             Role::User,
             JUDGE_REASK.replace("{what}", &what),
@@ -1820,6 +1914,7 @@ async fn judge_export(
         probes,
         error,
         reasks,
+        calls,
         temperature_dropped: dropped,
     }
 }
@@ -2369,6 +2464,7 @@ mod tests {
             error: None,
             judge_error: None,
             judge_reasks: 0,
+            judge_calls: Vec::new(),
             temperature_dropped: false,
             probes: verdicts
                 .iter()
@@ -3463,6 +3559,117 @@ mod tests {
         );
     }
 
+    /// Answers with a thinking block, no text, and a `max_tokens` stop at a
+    /// 384,000-token output cap.
+    #[derive(Default)]
+    struct Capped(AtomicUsize);
+    impl ModelDriver for Capped {
+        fn invoke(
+            &self,
+            _: Arc<ModelRequest>,
+            _: ModelConnection,
+            _: CancellationToken,
+        ) -> HostFuture<'_, dim_agent_capabilities::host::ModelStream> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async move {
+                Ok(Box::pin(futures_util::stream::iter(vec![
+                    Ok(dim_agent_capabilities::host::ModelChunk::MessageStart {
+                        message_id: "reply".into(),
+                    }),
+                    Ok(dim_agent_capabilities::host::ModelChunk::Thinking(
+                        "weighing the timeline".into(),
+                    )),
+                    Ok(dim_agent_capabilities::host::ModelChunk::Usage(
+                        dim_agent_types::Usage {
+                            prompt_tokens: 1_000.,
+                            completion_tokens: 384_000.,
+                            total_tokens: 385_000.,
+                            cache_read_tokens: None,
+                            cache_write_tokens: None,
+                            cost: None,
+                            currency: None,
+                        },
+                    )),
+                    Ok(dim_agent_capabilities::host::ModelChunk::MessageStop {
+                        message_id: "reply".into(),
+                        reason: ModelStopReason::MaxTokens,
+                    }),
+                ]))
+                    as dim_agent_capabilities::host::ModelStream)
+            })
+        }
+    }
+
+    /// A judge reply cut off at its output cap is a failed call, not an
+    /// unreadable answer: the run is a failed run, the error names the cap,
+    /// and there is no re-ask.
+    #[tokio::test]
+    async fn a_judge_cut_off_at_its_output_cap_is_a_failed_call() {
+        let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
+        let judge = ModelSelection {
+            provider_id: "fake".into(),
+            model_id: "fake".into(),
+            capability_snapshot: None,
+            config: None,
+            metadata: None,
+        };
+        let driver = Arc::new(Capped::default());
+        let judging = judge_export(
+            &Arc::new(ModelHost(driver.clone())),
+            &Arc::new(ProviderConnectionResolver(Arc::new(Local))),
+            &judge,
+            &scenario,
+            "{\"kind\":\"header\"}",
+            JudgeWindow {
+                window: 1_048_576,
+                max_output: 384_000,
+            },
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(
+            driver.0.load(Ordering::Relaxed),
+            1,
+            "a cap stop is not asked again"
+        );
+        assert_eq!(judging.outcome, JudgeOutcome::CallFailed);
+        assert_eq!(judging.reasks, 0);
+        let error = judging.error.expect("a cap stop is the judge's error");
+        assert!(
+            error.starts_with("the judge stopped at its output cap"),
+            "{error}"
+        );
+        assert!(error.contains("384000"), "{error}");
+        assert!(
+            judging
+                .probes
+                .iter()
+                .all(|probe| probe.verdict == ProbeVerdict::Unparsed)
+        );
+        assert_eq!(judging.calls.len(), 1, "one call is recorded");
+        let call = &judging.calls[0];
+        assert_eq!(call.stop, "max_tokens");
+        assert_eq!(call.text_bytes, 0);
+        assert!(call.thinking_bytes > 0, "the thinking deltas are counted");
+        assert_eq!(call.completion_tokens, Some(384_000.));
+        let record = RunRecord {
+            failed: failed("idle", None, judging.outcome),
+            judge_outcome: judging.outcome,
+            judge_error: Some(error),
+            judge_reasks: judging.reasks,
+            judge_calls: judging.calls,
+            probes: judging.probes,
+            ..record("current", &scenario, &[], JudgeOutcome::Judged)
+        };
+        assert!(record.failed, "a failed judge call is a failed run");
+        let serialized = serde_json::to_value(&record).unwrap();
+        assert_eq!(serialized["judgeOutcome"], "call_failed", "{serialized}");
+        assert_eq!(
+            serialized["judgeCalls"][0]["stop"], "max_tokens",
+            "{serialized}"
+        );
+    }
+
     /// The judge's window is its selection's capability snapshot, or else the
     /// model configuration's own declaration; with neither, the evaluation
     /// fails before the first call and names the judge (issue #635).
@@ -3550,6 +3757,19 @@ mod tests {
             assert_eq!(record["judgeOutcome"], "judged", "{record}");
             assert_eq!(record["probes"][0]["verdict"], "present", "{record}");
             assert_eq!(record["probes"][1]["verdict"], "absent", "{record}");
+            let calls = record["judgeCalls"]
+                .as_array()
+                .expect("every record lists its judge calls");
+            assert_eq!(calls.len(), 1, "one answered call: {record}");
+            assert_eq!(calls[0]["stop"], "end_turn", "{record}");
+            assert!(
+                calls[0]["textBytes"].as_u64().unwrap() > 0,
+                "the reply's text is measured: {record}"
+            );
+            assert!(
+                calls[0]["thinkingBytes"].as_u64().is_some(),
+                "the reasoning deltas are measured: {record}"
+            );
         }
     }
 
@@ -3642,6 +3862,13 @@ mod tests {
             assert_eq!(record["judgeReasks"], 1, "{record}");
             assert_eq!(record["judgeOutcome"], "judged", "{record}");
             assert_eq!(record["probes"][0]["verdict"], "present", "{record}");
+            let calls = record["judgeCalls"]
+                .as_array()
+                .expect("every record lists its judge calls");
+            assert_eq!(calls.len(), 2, "the call and its re-ask: {record}");
+            for call in calls {
+                assert_eq!(call["stop"], "end_turn", "{record}");
+            }
         }
         let judge = fixture.judge();
         assert_eq!(judge.len(), 4, "one call and one re-ask per arm");
