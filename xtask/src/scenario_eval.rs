@@ -158,11 +158,14 @@
 //!   the two. A question the run asks is declined: the scenario scripts no
 //!   answer to it. The runner keeps the decline until the call's
 //!   `step/tool-result` closes the prompt, and answers a
-//!   `question_not_pending` again a quiet period later, as the Questions
-//!   client rule has it
-//!   (Questions §3.2). The message is queued input, as the product's own first
-//!   message is; the steers are the operator's and are submitted in Steer
-//!   mode, so each one ends a wait and reaches a `main` that is waiting.
+//!   `question_not_pending` again once a quiet period has passed. That
+//!   cadence is the runner's own policy: the client rule has the prompt stay
+//!   open until the batch's `step/tool-result` and the user send the answer
+//!   again ([Questions §3.2], [Questions §4.3]), and a run has no user, so it
+//!   sends again by itself. The message is queued input, as the product's
+//!   own first message is; the steers are the operator's and are submitted in
+//!   Steer mode, so each one ends a wait and reaches a `main` that is
+//!   waiting.
 //! - `budget.turns` bounds the turns over every line and `budget.seconds` the
 //!   wall clock from the first submission; both stop the run. `budget.window`
 //!   is the context window the scenario is written for and is checked, not
@@ -185,6 +188,9 @@
 //! calls and endpoint are its own, so `--jobs` needs nothing of them: every
 //! run serves its own App Server on its own endpoint, and the runner holds no
 //! state a second run reads.
+//!
+//! [Questions §3.2]: ../../docs/design/plugins/Questions.md#32-clients-attach-and-several-clients
+//! [Questions §4.3]: ../../docs/design/plugins/Questions.md#43-fork-and-branches
 use crate::app_server::{self, Overrides, RunSettings};
 use crate::rule::{self, Comparison, Counts, Worse};
 use crate::summary_eval::{Configuration, Judgement, Verdict, complete, parse_judgements};
@@ -1467,7 +1473,7 @@ async fn drive(
 /// Questions capability registers a call's waiter inside the tool handler
 /// (Questions §3.1), so a decline that arrives before the handler ran is
 /// `question_not_pending`: the client keeps its prompt until the call's
-/// `step/tool-result` arrives and answers again (§3.2, A12).
+/// `step/tool-result` arrives and lets the user answer again (§3.2, A12).
 struct Decline {
     branch: String,
     request: String,
@@ -1555,14 +1561,14 @@ async fn retry_declines(
 }
 
 /// One `session.question.respond` decline: `true` when the call took it, and
-/// `false` while the Session has no waiter for the call. Any other error ends
+/// `false` while the Session has no waiter for the call. Any other reply ends
 /// the run.
 async fn decline_once(
     client: &mut Client,
     session: &str,
     decline: &Decline,
 ) -> std::result::Result<bool, String> {
-    let reply = client
+    let result = client
         .rpc(
             "session.question.respond",
             json!({"sessionId": session, "branchId": decline.branch,
@@ -1570,10 +1576,28 @@ async fn decline_once(
                    "declined": true}),
         )
         .await;
+    // The product's Questions client classifies this reply the same way
+    // (`dim_client::question::reply`); a transport error that is no RPC reply
+    // can only be a failure.
+    let reply = match result {
+        Ok(value) => dim_client::question::reply(&Ok(value)),
+        Err(error) => match error.downcast::<dim_client::RpcError>() {
+            Ok(error) => dim_client::question::reply(&Err(*error)),
+            Err(error) => dim_client::question::Reply::Failed(error.to_string()),
+        },
+    };
     match reply {
-        Ok(_) => Ok(true),
-        Err(error) if dim_client::app_error(&error) == Some("question_not_pending") => Ok(false),
-        Err(error) => Err(format!(
+        dim_client::question::Reply::Accepted => Ok(true),
+        dim_client::question::Reply::NotPending => Ok(false),
+        // The line keeps a reply it could not take, and lets the user send
+        // the answer again; a run has no user to resend, and the call would
+        // wait out the budget, so the run ends on the error where the CLI
+        // keeps the prompt.
+        dim_client::question::Reply::Rejected(reason) => Err(format!(
+            "{}: the decline of {} failed: {reason}",
+            decline.branch, decline.call
+        )),
+        dim_client::question::Reply::Failed(error) => Err(format!(
             "{}: the decline of {} failed: {error}",
             decline.branch, decline.call
         )),
