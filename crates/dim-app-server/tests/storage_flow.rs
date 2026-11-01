@@ -1850,6 +1850,104 @@ async fn reads_rebuild_lists_from_where_they_start_in_bounded_holds() {
     db.close().await.unwrap();
 }
 
+/// A paging read uses none of the requests its records hold, so it rebuilds
+/// none: `context/prepare` and `model/call` carry an empty request, no
+/// content row is loaded, and a page still returns when one of those nodes
+/// is damaged. A read that uses the requests fails on the same row (#598).
+#[tokio::test]
+async fn paging_reads_do_not_rebuild_request_bodies() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("paging", &SessionConfig::default())
+        .await
+        .unwrap();
+    let main = key("paging", "main");
+    let messages: Vec<Message> = (1..=6)
+        .map(|index| Message::text(Role::User, format!("message-{index}")))
+        .collect();
+    append(
+        &store,
+        main.clone(),
+        vec![
+            record(
+                1,
+                EventKind::InputMessage(InputMessageData::text("go", Some(InputMode::Queue))),
+            ),
+            model_call(2, messages.clone()),
+            text(3, "done"),
+        ],
+    )
+    .await
+    .unwrap();
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    dim_agent_capabilities::defaults::mock_hosts(&mut builder);
+    dim_agent_capabilities::defaults::install(&mut builder);
+    builder.timeline_store(store.clone());
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = agent.restore_session("paging".into()).await.unwrap();
+    session.idle("main").await.unwrap();
+    store.take_node_loads();
+
+    let page = session.local_page("main", 0, 8, 3).await.unwrap();
+    assert_eq!(page.len(), 3);
+    assert_eq!(
+        store.take_node_loads(),
+        NodeLoads::default(),
+        "a paging read loaded request content"
+    );
+    assert!(
+        matches!(&page[1].kind, EventKind::ModelCall(data) if data.request.messages.is_empty()),
+        "a paging read left a stored request as its record holds it"
+    );
+
+    let rebuilt = store.read_page(&main, 0, 8, 3).await.unwrap();
+    assert_eq!(rebuilt[1].event, model_call(2, messages).event);
+    assert_eq!(store.take_node_loads().loads, 6);
+
+    let connection = Connection::open(&database.0).unwrap();
+    let damaged = connection
+        .execute(
+            "UPDATE timeline_content SET body = replace(body, 'message-1', 'message-X') \
+             WHERE session_id = 'paging' AND kind = 'node'",
+            [],
+        )
+        .unwrap();
+    assert!(damaged > 0, "the request's nodes are stored");
+    assert!(
+        matches!(
+            store.read_page(&main, 0, 8, 3).await,
+            Err(AgentError::Storage(message)) if message.contains("request content hash mismatch")
+        ),
+        "a read that uses the requests checks their content"
+    );
+    let page = session.local_page("main", 0, 8, 3).await.unwrap();
+    assert_eq!(
+        page.iter().map(|event| event.sequence).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(store.take_node_loads(), NodeLoads::default());
+    let sessions =
+        dim_app_server::storage::SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
+    let page = sessions
+        .read_page_before("paging", "main", 4, 8, 3, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.iter()
+            .map(|record| record.event.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3],
+        "the reverse history page does not rebuild the damaged request"
+    );
+    drop(sessions);
+    drop(connection);
+    agent.close().await.unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
 /// §18 item 3b: one long request, append-only or with its last four
 /// messages rewritten each turn. A cold read of it loads each of its nodes
 /// once, in holds of at most 256 node loads. After a restart the first

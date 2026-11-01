@@ -23163,6 +23163,10 @@
         "path Previous",
         "path Reader",
         "path Reader::new",
+        "path Reader::without_request_bodies",
+        "path RequestBodies",
+        "path RequestBodies::Rebuild",
+        "path RequestBodies::Unused",
         "path Values::Written",
         "path WireEvent",
         "path codec::NodeLoads",
@@ -23177,6 +23181,7 @@
         "use super::codec::ListReferences",
         "use super::codec::Previous",
         "use super::codec::Reader",
+        "use super::codec::RequestBodies",
         "use super::codec::Values",
         "use super::codec::WireEvent"
       ]

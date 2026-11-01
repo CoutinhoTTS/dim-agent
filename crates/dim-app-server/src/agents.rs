@@ -633,7 +633,12 @@ impl AgentIndex {
             if through > head {
                 return Err(AgentError::InvalidInput("future Timeline sequence".into()));
             }
-            return Ok((through, store.read_page(id, after, limit, through).await?));
+            return Ok((
+                through,
+                store
+                    .read_page_without_request_bodies(id, after, limit, through)
+                    .await?,
+            ));
         }
         let (_, session) = self
             .session(id)
@@ -1019,7 +1024,7 @@ impl AgentIndex {
                 .as_ref()
                 .ok_or_else(|| AgentError::Closed(id.into()))?;
             let events = store
-                .read_page(id, 0, Self::SUMMARY_SCAN_LIMIT, through)
+                .read_page_without_request_bodies(id, 0, Self::SUMMARY_SCAN_LIMIT, through)
                 .await?;
             let last = store
                 .timeline_store()
