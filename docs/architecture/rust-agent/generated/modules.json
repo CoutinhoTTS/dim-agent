@@ -21181,8 +21181,8 @@
         "path managed_authority",
         "path parse_static",
         "path selection_scope",
-        "path static_catalog",
         "path storage",
+        "path stored_selection",
         "path validate_static_record"
       ]
     },
