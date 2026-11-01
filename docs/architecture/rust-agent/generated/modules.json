@@ -2828,6 +2828,15 @@
       ]
     },
     {
+      "id": "dim_cli::client::same_file_tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::client",
+      "file": "crates/dim-cli/src/client.rs",
+      "unexpandedMacros": [
+        "assert"
+      ]
+    },
+    {
       "id": "dim_cli::client::web_assets_tests",
       "crate": "dim_cli",
       "parent": "dim_cli::client",
@@ -4711,6 +4720,7 @@
         "matches",
         "print",
         "println",
+        "unreachable",
         "vec"
       ]
     },
@@ -24238,7 +24248,15 @@
       "to": "dim_cli::args",
       "references": [
         "path Options",
-        "use crate::args::Options"
+        "use crate::args::Options",
+        "use crate::args::SERVER_REQUIREMENT"
+      ]
+    },
+    {
+      "from": "dim_cli::client",
+      "to": "dim_cli::client::same_file_tests",
+      "references": [
+        "mod same_file_tests"
       ]
     },
     {
@@ -24274,6 +24292,13 @@
         "use dim_client::RpcError",
         "use dim_client::Server",
         "use dim_client::app_error"
+      ]
+    },
+    {
+      "from": "dim_cli::client::same_file_tests",
+      "to": "dim_cli::client",
+      "references": [
+        "use super::same_file"
       ]
     },
     {
@@ -24656,7 +24681,8 @@
       "to": "dim_cli::args",
       "references": [
         "path Options",
-        "use crate::args::Options"
+        "use crate::args::Options",
+        "use crate::args::SERVER_REQUIREMENT"
       ]
     },
     {
@@ -33009,6 +33035,16 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path i18n::LOCALES",
+        "path i18n::active",
+        "path i18n::set",
+        "path t"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::oauth_view",
       "references": [
         "path OauthView::dim"
@@ -33144,6 +33180,8 @@
         "path LOAD_MORE",
         "path Prompt::Ask",
         "path Prompt::Login",
+        "path QUEUE_HINT",
+        "path QUEUE_HINT_MORE",
         "path ThemeContext",
         "path WebOpened",
         "path banner",

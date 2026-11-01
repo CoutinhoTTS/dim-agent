@@ -43,6 +43,20 @@ Home    scroll to the top (fullscreen, empty draft)
 End     scroll to the bottom (fullscreen, empty draft)
 ```
 
+### Queue strip
+
+With a message queued, the strip above the composer draws the queue in a titled border: messages oldest first, the next to run at the top, then a hint naming the keys that act on them. With an empty draft, `↑` withdraws the newest queued message into the composer to edit; `Ctrl+S` steers with the next one. The hint names a command only when the command table has one for the queue, so a typed `/name` it shows runs locally instead of being sent to the model. No command views the queue, so the hint names keys only.
+
+```text
+╭─ Queue (2) ─────────────────────────────────────╮
+│ › fix the failing test in session_host          │
+│ › then update the design note                   │
+│ ↑ edit · ctrl+s steer now                       │
+╰─────────────────────────────────────────────────╯
+```
+
+A queued message the strip does not show adds its count to the hint: `+3 more · ↑ edit · ctrl+s steer now`. The strip shows at most five messages and keeps the height it reached while the queue drains.
+
 ## Usage report
 
 In both TUI modes, `/usage` prints the main branch's context usage. When the
@@ -203,12 +217,18 @@ there. `dimcode hooks enable|disable` records the workspace in the user-local `h
 project file cannot enable itself ([Hooks](plugins/Hooks.md#a7-management-methods)).
 
 Global home, workspace, server and model-profile options retain their current
-meanings and work before or after the command. Existing login/account/logout,
-models, MCP and daemon commands remain available. Existing `--prompt`, piped
-stdin and `--resume` calls retain their behavior; `exec resume` also accepts the
-same existing global options. Supplying the Session twice or the prompt twice
-is an argument error. `--json` serves `exec` and `migration`, and `tui` requires a terminal.
-Help/version and argument errors do not start the daemon.
+meanings and work before or after the command. `--server PATH` names a
+standalone `dim-app-server` binary, which the CLI runs by its own name; the
+default instead runs this executable's `app-server` subcommand, so naming this
+executable is an error. A path that does not exist, a program that exits
+before serving, or one that does not start serving in time is reported with the
+same requirement, unless it left a [startup note](#daemon-startup-failure).
+Existing login/account/logout, models, MCP and daemon commands remain
+available. Existing `--prompt`, piped stdin and `--resume` calls retain their
+behavior; `exec resume` also accepts the same existing global options.
+Supplying the Session twice or the prompt twice is an argument error. `--json`
+serves `exec` and `migration`, and `tui` requires a terminal. Help/version and
+argument errors do not start the daemon.
 
 ### Daemon startup failure
 
@@ -230,10 +250,12 @@ storage gate writes the note on a diagnosed incompatibility and names the
 store, its marker, the daemon's supported format, whether the store is newer,
 mismatched, unrecognized or too old, and the recovery paths ([native storage format §
 startup incompatibility](appserver/native-storage-format.md#启动不兼容诊断)).
-Without a matching note the existing `App Server exited (<status>); see ...`
-remains. The failed launch removes the note after reading; a successful
-connection removes any note. The CLI never prints `daemon.log`, never deletes,
-recreates, downgrades or rewrites the store, and exits 1.
+Without a matching note the embedded server reports the existing
+`App Server exited (<status>); see ...`, and a `--server` binary reports that
+the flag must name a standalone `dim-app-server` binary. The failed launch
+removes the note after reading; a successful connection removes any note. The
+CLI never prints `daemon.log`, never deletes, recreates, downgrades or rewrites
+the store, and exits 1.
 Development documentation continues to use `./dev` and its isolated home; the
 terminal note itself names a compatible build or `--home PATH`.
 

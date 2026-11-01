@@ -155,10 +155,10 @@ fn an_incompatible_store_reports_the_startup_note() {
     assert!(!home.0.join("rust/dimcode.sqlite.startup").exists());
 }
 
-/// A daemon that exits without a storage note keeps the generic cause and log
-/// location.
+/// A `--server` program that exits without a storage note keeps the
+/// requirement and the log location.
 #[test]
-fn a_daemon_that_exits_without_a_note_keeps_the_generic_error() {
+fn a_server_that_exits_without_a_note_keeps_the_requirement() {
     let home = Home::new();
     let server = home.0.join("failing-server");
     fs::write(&server, "#!/bin/sh\nexit 1\n").unwrap();
@@ -170,7 +170,12 @@ fn a_daemon_that_exits_without_a_note_keeps_the_generic_error() {
         .unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("App Server exited"), "{stderr}");
+    assert!(
+        stderr.contains("--server must name a standalone dim-app-server binary"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("it exited before serving"), "{stderr}");
+    assert!(stderr.contains("daemon.log"), "{stderr}");
     assert!(!stderr.contains("Cannot open native store"), "{stderr}");
 }
 
@@ -210,7 +215,10 @@ fn a_startup_note_for_another_pid_is_not_printed() {
     let output = server.output().unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("App Server exited"), "{stderr}");
+    assert!(
+        stderr.contains("--server must name a standalone dim-app-server binary"),
+        "{stderr}"
+    );
     assert!(!stderr.contains("Cannot open native store"), "{stderr}");
     assert!(!note.exists(), "the client removes the note it rejects");
 }
@@ -228,7 +236,10 @@ fn a_startup_note_other_users_can_read_is_not_printed() {
     let output = server.output().unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("App Server exited"), "{stderr}");
+    assert!(
+        stderr.contains("--server must name a standalone dim-app-server binary"),
+        "{stderr}"
+    );
     assert!(!stderr.contains("Cannot open native store"), "{stderr}");
     assert!(!note.exists(), "the client removes the note it rejects");
 }
