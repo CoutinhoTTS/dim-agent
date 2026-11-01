@@ -1686,6 +1686,7 @@
         "assert_eq",
         "format",
         "json",
+        "matches",
         "panic",
         "vec"
       ]
@@ -16282,6 +16283,13 @@
     },
     {
       "from": "dim_app_server::agents::tests::slots",
+      "to": "dim_agent_runtime::agent",
+      "references": [
+        "path dim_agent_runtime::Agent"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests::slots",
       "to": "dim_agent_runtime::assembly",
       "references": [
         "path AgentBuilder",
@@ -16314,6 +16322,21 @@
     },
     {
       "from": "dim_app_server::agents::tests::slots",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path dim_agent_types::ToolContent::Text"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests::slots",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path EventKind::ToolResult",
+        "use dim_agent_types::EventKind"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests::slots",
       "to": "dim_app_server",
       "references": [
         "path RunningServer",
@@ -16341,6 +16364,13 @@
         "path config",
         "use super::builder",
         "use super::config"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests::slots",
+      "to": "dim_app_server::collaboration",
+      "references": [
+        "path crate::collaboration::install"
       ]
     },
     {

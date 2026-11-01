@@ -1248,16 +1248,14 @@ impl AgentIndex {
         Self::check_session_id(id)?;
         let slot = self.slot(id);
         let gate = slot.gate.lock().await;
-        match self.in_use_reason(id).await? {
-            Some(reason) => Ok(DeleteOutcome::InUse(reason)),
-            None => {
-                let deleted = self.remove_locked(id, &slot).await?;
-                drop(gate);
-                drop(slot);
-                self.directory.inner.lock().expect("agent index").sweep();
-                Ok(DeleteOutcome::Removed(deleted))
-            }
-        }
+        let outcome = match self.in_use_reason(id).await? {
+            Some(reason) => DeleteOutcome::InUse(reason),
+            None => DeleteOutcome::Removed(self.remove_locked(id, &slot).await?),
+        };
+        drop(gate);
+        drop(slot);
+        self.directory.inner.lock().expect("agent index").sweep();
+        Ok(outcome)
     }
 
     /// The id names `command-output/<id>`, so only a single path component
