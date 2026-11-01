@@ -345,7 +345,7 @@ Attachments（[A.2](../plugins/Attachments.md#a2-attachmentput)）在 `Deps` 中
 
 ### 11.1 读取 Session 文件
 
-**决定：模型读取 Session 文件与读取任何文件相同。Session 自有文件是固定事实之一，所以在任何预设下该读取都不询问、不记录授权；事实之外的读取需要询问，非交互运行则拒绝。** [ADR 014](../../../adr/014-file-access-facts.md) 根据工作区、系统目录、Session 自有文件和授权决定文件读写；[ADR 013](../../../adr/013-command-output-ownership.md) 在 [#784](https://github.com/arcships/dim/pull/784) 中把命令输出并入所有权事实；在它落地前，命令输出不是自有事实，`read-only` 和 `workspace-write` 下其读取需要询问。
+**决定：模型读取 Session 文件与读取任何文件相同。Session 自有文件是固定事实之一，所以在任何预设下该读取都不询问、不记录授权；事实之外的读取需要询问，非交互运行则拒绝。** [ADR 014](../../../adr/014-file-access-facts.md) 根据工作区、系统目录、Session 自有文件和授权决定文件读写；[ADR 013](../../../adr/013-command-output-ownership.md) 增加第二张所有权表，所以 `owns` 也回答命令输出，`read-only` 和 `workspace-write` 下读取它不需要审批。
 
 ```
  model: read {path: "<database directory>/<db>.session-files/<fileId>/paste.txt"}

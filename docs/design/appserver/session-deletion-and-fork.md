@@ -113,7 +113,10 @@ are Rust methods over the native store, not services: only Agents calls them.
    (ADR 013 D4): its own `<database directory>/command-output/<S>/`, and the directory of every
    path it has a row for, so inherited `command-output/<parent>/` and
    `.dim/exec/<parent>/<branch>/` directories a fork copied are covered. A directory is removed
-   only if no row of another Session in this database names a path under it. `command-output`
+   only if no row of another Session in this database names a path under it. SessionStore
+   serializes this removal with step 4's row deletion across Sessions with its delete lock: two
+   concurrent deletes could otherwise both see the other's rows, both keep the shared directory,
+   and leave it with no owner after both commits. `command-output`
    directories go through the FileStorage of S's resource node, looked up per call as in S5a;
    HostPlatform removes the `.dim/exec` directories it owns. HostPlatform does not read ownership
    rows. An absent directory counts as removed. Each removal must be durable before step 4 (§4).
