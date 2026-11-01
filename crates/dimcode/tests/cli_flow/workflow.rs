@@ -1737,7 +1737,7 @@ fn workflow_commands_write_and_enable_against_the_real_owner() {
     );
     assert_eq!(
         String::from_utf8(set.stdout).unwrap(),
-        "Saved the definition.\n"
+        "Saved review-and-fix.\n"
     );
     let listed = list();
     assert!(
