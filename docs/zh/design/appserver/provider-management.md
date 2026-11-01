@@ -413,14 +413,15 @@ owner 实现是 `ProviderService::selectable_models`，`ProductResolver` 转调�
 | 部分 | 值 |
 | --- | --- |
 | 输入 | `providerId`；`parse_static` 或 `convert_legacy_provider` 返回的已准入 `StaticProviderRecord`；显式 `modelId`；调用方已加载的捆绑目录 |
-| 回复 | `{target: {providerId, modelId}, protocol: ModelProtocol, snapshot: ModelCapabilitySnapshot}` |
+| 回复 | `{protocol: ModelProtocol, snapshot: ModelCapabilitySnapshot}` |
 | 错误 | 记录的凭据 authority 不是 `static` 时为 `account_owned`；有效目录没有该模型时为 `not_found`；模型存在但被既有 `ProviderCatalog::selectable` 拒绝时为 `unavailable {reason: string \| null, disabled: boolean, missingLimits: string[]}` |
 
-回复就是执行时采用的有效描述：`snapshot` 是既有 `ModelCapabilitySnapshot`，`protocol`
-是有效路由。只需要“能/不能”的消费方忽略这些字段。本合同不应用已保存的 `ModelPreferences`、
-不选择默认模型、也不创建路由标记；这些属于采用，仍由 `configuration` 解析。记录的前置条件由
-已准入类型保证：它的路由由 Provider 解析器按当前 driver 和 New API 规则派生，因此本函数不重新
-解析记录、不重新校验字段、也不重新派生路由，不增加第二条准入路径。
+回复就是执行时采用的有效描述：`snapshot` 是既有 `ModelCapabilitySnapshot`，其 `target`
+携带 provider/model 标识，`protocol` 是有效路由。只需要“能/不能”的消费方忽略这些字段。本合同
+不应用已保存的 `ModelPreferences`、不选择默认模型、也不创建路由标记；这些属于采用，仍由
+`configuration` 解析。记录的前置条件由已准入类型保证：它的路由由 Provider 解析器按当前 driver
+和 New API 规则派生，因此本函数不重新解析记录、不重新校验字段、也不重新派生路由，不增加第二条
+准入路径。
 
 **应用的规则。** 它构建与 `provider.catalog`、`catalog_for` 相同的单 provider 目录
 （`static_catalog`），并且只通过既有 `ProviderCatalog::selectable` 接受模型。有效描述——捆绑
@@ -460,7 +461,6 @@ owner API、回调或 RPC。
 
 ```rust
 pub struct StoredSelection {
-    pub target: ModelId,
     pub protocol: ModelProtocol,
     pub snapshot: ModelCapabilitySnapshot,
 }

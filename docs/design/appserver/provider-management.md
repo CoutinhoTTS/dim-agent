@@ -557,14 +557,15 @@ it reads no store, account status or network.
 | Part | Value |
 | --- | --- |
 | Input | `providerId`; the admitted `StaticProviderRecord` returned by `parse_static` or `convert_legacy_provider`; the explicit `modelId`; and the bundled catalog the caller loaded |
-| Reply | `{target: {providerId, modelId}, protocol: ModelProtocol, snapshot: ModelCapabilitySnapshot}` |
+| Reply | `{protocol: ModelProtocol, snapshot: ModelCapabilitySnapshot}` |
 | Errors | `account_owned` when the record's credential authority is not `static`; `not_found` when the effective catalog has no such model; `unavailable {reason: string \| null, disabled: boolean, missingLimits: string[]}` when the existing `ProviderCatalog::selectable` refuses a present model |
 
 The reply is the effective descriptor execution adopts: `snapshot` is the existing
-`ModelCapabilitySnapshot` and `protocol` the effective route. A consumer that needs only a
-yes/no answer ignores the fields. The contract does not apply saved `ModelPreferences`,
-choose a default model or create the route stamp; those belong to adoption, which still
-resolves through `configuration`. The record's precondition is the admitted type's: its
+`ModelCapabilitySnapshot`, whose `target` carries the provider and model identity, and
+`protocol` the effective route. A consumer that needs only a yes/no answer ignores the
+fields. The contract does not apply saved `ModelPreferences`, choose a default model or
+create the route stamp; those belong to adoption, which still resolves through
+`configuration`. The record's precondition is the admitted type's: its
 routes were derived by Provider's parser under the current driver and New API rules, so
 this function does not re-parse the record, re-validate its fields or re-derive its routes.
 It adds no second admission path.
@@ -623,7 +624,6 @@ service.
 
 ```rust
 pub struct StoredSelection {
-    pub target: ModelId,
     pub protocol: ModelProtocol,
     pub snapshot: ModelCapabilitySnapshot,
 }
