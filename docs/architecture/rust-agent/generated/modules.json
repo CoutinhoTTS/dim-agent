@@ -3102,6 +3102,19 @@
       ]
     },
     {
+      "id": "dim_cli::management::models",
+      "crate": "dim_cli",
+      "parent": "dim_cli::management",
+      "file": "crates/dim-cli/src/management/models.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches",
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_cli::management::scheduler",
       "crate": "dim_cli",
       "parent": "dim_cli::management",
@@ -25339,6 +25352,20 @@
     },
     {
       "from": "dim_cli::management",
+      "to": "dim_cli::management::models",
+      "references": [
+        "mod models",
+        "path models::Answer::Detail",
+        "path models::Answer::Provider",
+        "path models::Failure::Conflict",
+        "path models::Failure::ReadFailed",
+        "path models::Failure::Refused",
+        "path models::apply",
+        "path models::view"
+      ]
+    },
+    {
+      "from": "dim_cli::management",
       "to": "dim_cli::management::scheduler",
       "references": [
         "mod scheduler",
@@ -25377,6 +25404,7 @@
         "path ActionKind::Toggle",
         "path Area",
         "path Area::Hooks",
+        "path Area::Models",
         "path Area::Scheduled",
         "path Area::Skills",
         "path ManagementAction",
@@ -25479,6 +25507,96 @@
         "path Client",
         "path crate::client::app_error",
         "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::management::models",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path dim_agent_types::CatalogCapabilities",
+        "path dim_agent_types::ModelReasoning"
+      ]
+    },
+    {
+      "from": "dim_cli::management::models",
+      "to": "dim_cli",
+      "references": [
+        "path crate::Error"
+      ]
+    },
+    {
+      "from": "dim_cli::management::models",
+      "to": "dim_cli::management",
+      "references": [
+        "path Groups::default",
+        "path super::area_kinds",
+        "use super::Groups"
+      ]
+    },
+    {
+      "from": "dim_cli::management::models",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path ActionKind",
+        "path ActionKind::Add",
+        "path ActionKind::Edit",
+        "path ActionKind::Inspect",
+        "path ActionKind::Remove",
+        "path ActionKind::Toggle",
+        "path EntryDocument",
+        "path EntryState::Unavailable",
+        "path ManagementAction",
+        "path ManagementAction::Add",
+        "path ManagementAction::Inspect",
+        "path ManagementAction::List",
+        "path ManagementAction::Reload",
+        "path ManagementAction::Remove",
+        "path ManagementAction::Run",
+        "path ManagementAction::Save",
+        "path ManagementAction::Toggle",
+        "path ManagementDetail",
+        "path ManagementEntry",
+        "path ManagementView",
+        "path RemoveVerb",
+        "path RemoveVerb::Remove",
+        "path RemoveVerb::Reset",
+        "path RemoveVerb::default",
+        "use crate::model::session::ActionKind",
+        "use crate::model::session::EntryDocument",
+        "use crate::model::session::EntryState",
+        "use crate::model::session::ManagementAction",
+        "use crate::model::session::ManagementDetail",
+        "use crate::model::session::ManagementEntry",
+        "use crate::model::session::ManagementView",
+        "use crate::model::session::RemoveVerb"
+      ]
+    },
+    {
+      "from": "dim_cli::management::models",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path t",
+        "path tf",
+        "use crate::ui::i18n::t",
+        "use crate::ui::i18n::tf"
+      ]
+    },
+    {
+      "from": "dim_cli::management::models",
+      "to": "dim_cli::ui::oauth_view",
+      "references": [
+        "path count",
+        "use crate::ui::oauth_view::count"
+      ]
+    },
+    {
+      "from": "dim_cli::management::models",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "path app_error",
+        "use crate::client::Client",
+        "use crate::client::app_error"
       ]
     },
     {
@@ -25654,6 +25772,19 @@
     },
     {
       "from": "dim_cli::management_command",
+      "to": "dim_cli::management::models",
+      "references": [
+        "path models::Answer::Detail",
+        "path models::Answer::Provider",
+        "path models::Failure::ReadFailed",
+        "path models::apply",
+        "path models::edit_template",
+        "path models::read",
+        "use crate::management::models"
+      ]
+    },
+    {
+      "from": "dim_cli::management_command",
       "to": "dim_cli::management::scheduler",
       "references": [
         "path scheduler::Answer::Detail",
@@ -25693,8 +25824,10 @@
         "path ActionKind::Edit",
         "path Area",
         "path Area::Hooks",
+        "path Area::Models",
         "path Area::Scheduled",
         "path Area::Skills",
+        "path ManagementAction",
         "path ManagementAction::Add",
         "path ManagementAction::List",
         "path ManagementAction::Remove",
@@ -25705,11 +25838,13 @@
         "path ManagementResult::Detail",
         "path ManagementResult::Refused",
         "path ManagementResult::View",
+        "path RemoveVerb",
         "use crate::model::session::ActionKind",
         "use crate::model::session::Area",
         "use crate::model::session::ManagementAction",
         "use crate::model::session::ManagementRequest",
-        "use crate::model::session::ManagementResult"
+        "use crate::model::session::ManagementResult",
+        "use crate::model::session::RemoveVerb"
       ]
     },
     {
@@ -29784,6 +29919,7 @@
         "path ActionKind::Toggle",
         "path Area",
         "path Area::Hooks",
+        "path Area::Models",
         "path Area::Scheduled",
         "path Area::Skills",
         "path EntryState::Invalid",
@@ -36532,6 +36668,10 @@
     {
       "module": "dim_cli::args",
       "path": "Area::Hooks"
+    },
+    {
+      "module": "dim_cli::args",
+      "path": "Area::Models"
     },
     {
       "module": "dim_cli::args",

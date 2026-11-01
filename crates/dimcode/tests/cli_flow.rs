@@ -23,6 +23,8 @@ mod hooks;
 
 #[path = "cli_flow/migration.rs"]
 mod migration;
+#[path = "cli_flow/models.rs"]
+mod models;
 #[path = "cli_flow/permission.rs"]
 mod permission;
 #[path = "cli_flow/question.rs"]

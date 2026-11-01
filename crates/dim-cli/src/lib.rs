@@ -822,13 +822,13 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             management_command::run(&mut client, &options, request).await
         }
         Action::ManagementEdit { area, id } => {
-            management_command::edit(&mut client, &options, *area, id.clone()).await
+            management_command::edit(&mut client, &options, area.clone(), id.clone()).await
         }
         Action::ManagementSet { area, id, path } => {
-            management_command::set(&mut client, &options, *area, id.clone(), path).await
+            management_command::set(&mut client, &options, area.clone(), id.clone(), path).await
         }
         Action::ManagementAdd { area, path } => {
-            management_command::add(&mut client, &options, *area, path).await
+            management_command::add(&mut client, &options, area.clone(), path).await
         }
         Action::Recording { enabled } => recording::run(&mut client, &options, *enabled).await,
         Action::Chat | Action::Tui | Action::Exec => {

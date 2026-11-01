@@ -77,6 +77,85 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "As definições de hooks deste espaço de trabalho mudaram desde que foram lidas; nada foi escrito."
         }
+        "Models" => "Modelos",
+        "catalog" => "catálogo",
+        "overrides" => "substituições",
+        "added" => "adicionados",
+        "Models · {name}" => "Modelos · {name}",
+        "undeclared" => "não declarado",
+        "Context window {window} · max output {output}" => {
+            "Janela de contexto {window} · saída máx. {output}"
+        }
+        "Endpoint {endpoint}" => "Endpoint {endpoint}",
+        "Endpoint {endpoint} · override {value}" => "Endpoint {endpoint} · substituição {value}",
+        "The provider reports it unavailable." => "O fornecedor indica-o como indisponível.",
+        "Limits undeclared; edit the model to declare them." => {
+            "Limites não declarados; edite o modelo para os declarar."
+        }
+        "Sign in to the account to use its models." => {
+            "Inicie sessão na conta para usar os modelos dela."
+        }
+        "The signed-in account changed; reload to list its models." => {
+            "A conta iniciada mudou; recarregue para listar os modelos dela."
+        }
+        "The provider has no catalog yet." => "Este fornecedor ainda não tem catálogo.",
+        "The provider listed no models." => "O fornecedor não listou nenhum modelo.",
+        "Listed {count} models." => "{count} modelos listados.",
+        "Refreshed the models." => "Modelos atualizados.",
+        "Could not list models: {error}. Showing the stored list." => {
+            "Não foi possível listar os modelos: {error}. A mostrar a lista guardada."
+        }
+        "The signed-in account changed; the refresh cleared preferences, overrides and disables." => {
+            "A conta iniciada mudou; a recarga limpou preferências, substituições e desativações."
+        }
+        "The models changed since they were read; nothing was written. Your next edit opens the current list." => {
+            "Os modelos mudaram desde a leitura; nada foi escrito. A próxima edição abrirá a lista atual."
+        }
+        "The models changed since they were read; nothing was written. Your next add opens your text again." => {
+            "Os modelos mudaram desde a leitura; nada foi escrito. A próxima adição abrirá novamente o seu texto."
+        }
+        "The models changed since they were read; nothing was removed." => {
+            "Os modelos mudaram desde a leitura; nada foi removido."
+        }
+        "The models changed since they were read; nothing was written." => {
+            "Os modelos mudaram desde a leitura; nada foi escrito."
+        }
+        "No provider has that id." => "Nenhum fornecedor tem esse id.",
+        "No model has that id." => "Nenhum modelo tem esse id.",
+        "This model cannot be removed." => "Este modelo não pode ser removido.",
+        "A Provider's models have no area document." => {
+            "Os modelos de um fornecedor não têm documento de área."
+        }
+        "Models have no run operation." => "Os modelos não têm operação de execução.",
+        "The document is not an object; nothing was written." => {
+            "O documento não é um objeto; nada foi escrito."
+        }
+        "The document changes no editable field; nothing was written." => {
+            "O documento não altera nenhum campo editável; nada foi escrito."
+        }
+        "The model document names no model." => "O documento do modelo não indica nenhum modelo.",
+        "The provider has no model catalog to write." => {
+            "Este fornecedor não tem catálogo de modelos para escrever."
+        }
+        "ID {id}" => "ID {id}",
+        "Source {source}" => "Origem {source}",
+        "Status {status}" => "Estado {status}",
+        "Tools {value}" => "Ferramentas {value}",
+        "Vision {value}" => "Visão {value}",
+        "Reasoning {value}" => "Raciocínio {value}",
+        "Modalities {list}" => "Modalidades {list}",
+        "Description {text}" => "Descrição {text}",
+        "Release date {date}" => "Data de lançamento {date}",
+        "Pricing {value}" => "Preço {value}",
+        "Rate limit {value}" => "Limite de taxa {value}",
+        "Matched provider {id}" => "Fornecedor correspondente {id}",
+        "Matched model {id}" => "Modelo correspondente {id}",
+        "Match strategy {strategy}" => "Estratégia de correspondência {strategy}",
+        "Capability overrides {fields}" => "Substituições de capacidades {fields}",
+        "yes" => "sim",
+        "no" => "não",
+        "off" => "desligado",
+        "supported" => "suportado",
         _ => return None,
     })
 }

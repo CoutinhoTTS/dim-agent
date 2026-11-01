@@ -28,6 +28,16 @@ Commands:\n\
   models PROVIDER [--refresh | --clear-preferences MODEL\n\
                   | --set-limits MODEL --context-window N --max-output-tokens N\n\
                   | --set-missing-limits --context-window N --max-output-tokens N]\n\
+                                   List a Provider's models; --refresh reloads
+\
+                                   the area's list
+\
+  models PROVIDER enable|disable|remove|inspect MODEL\n\
+  models PROVIDER edit MODEL       Edit the model's fields in the editor\n\
+  models PROVIDER set MODEL PATH   Write the model's fields from PATH,\n\
+                                   or from stdin for -\n\
+  models PROVIDER add PATH         Create a model from PATH, or from stdin\n\
+                                   for -\n\
   mcp list                         List MCP servers and their enablement\n\
   mcp login ID [--no-browser] [--client-secret]\n\
                                    Sign in; secrets use hidden terminal input\n\
@@ -709,11 +719,73 @@ impl Options {
                         options.action = Action::Login(provider);
                     } else {
                         let provider = provider.ok_or_else(|| format!("{arg} requires a value"))?;
-                        options.action = match arg.as_str() {
-                            "account" => Action::Account(provider),
-                            "logout" => Action::Logout(provider),
-                            _ => Action::Models(provider),
-                        };
+                        if arg == "account" {
+                            options.action = Action::Account(provider);
+                        } else if arg == "logout" {
+                            options.action = Action::Logout(provider);
+                        } else {
+                            use crate::model::session::{
+                                Area, ManagementAction, ManagementRequest,
+                            };
+                            match args.peek().cloned().as_deref() {
+                                Some("enable" | "disable") => {
+                                    let enabled = value(&mut args)? == "enable";
+                                    options.action = Action::Management(ManagementRequest {
+                                        area: Area::Models {
+                                            provider_id: provider.clone(),
+                                        },
+                                        action: ManagementAction::Toggle {
+                                            id: value(&mut args)?,
+                                            enabled,
+                                        },
+                                    });
+                                }
+                                Some("edit") => {
+                                    args.next();
+                                    options.action = Action::ManagementEdit {
+                                        area: Area::Models {
+                                            provider_id: provider.clone(),
+                                        },
+                                        id: Some(value(&mut args)?),
+                                    };
+                                }
+                                Some("set") => {
+                                    args.next();
+                                    options.action = Action::ManagementSet {
+                                        area: Area::Models {
+                                            provider_id: provider.clone(),
+                                        },
+                                        id: Some(value(&mut args)?),
+                                        path: value(&mut args)?.into(),
+                                    };
+                                }
+                                Some("add") => {
+                                    args.next();
+                                    options.action = Action::ManagementAdd {
+                                        area: Area::Models {
+                                            provider_id: provider.clone(),
+                                        },
+                                        path: value(&mut args)?.into(),
+                                    };
+                                }
+                                Some(verb @ ("remove" | "inspect")) => {
+                                    args.next();
+                                    let id = value(&mut args)?;
+                                    let action = if verb == "remove" {
+                                        ManagementAction::Remove { id }
+                                    } else {
+                                        ManagementAction::Inspect { id }
+                                    };
+                                    options.action = Action::Management(ManagementRequest {
+                                        area: Area::Models {
+                                            provider_id: provider.clone(),
+                                        },
+                                        action,
+                                    });
+                                }
+                                _ => options.action = Action::Models(provider),
+                            }
+                        }
                     }
                 }
                 _ if options.client_secret => {

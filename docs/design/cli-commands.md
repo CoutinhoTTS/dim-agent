@@ -324,8 +324,8 @@ A management area is one owner's management methods. The App Server serves each 
 owner and gives clients no generic path across them ([settings
 service](appserver/settings-service.md#11-what-this-does-not-do)): Skills are `skills.*`, Hooks are
 `hooks.*`, MCP is `mcp.*`, the Scheduler is `schedule.*`, Workflow definitions are `workflow.*`,
-command rules are `permission.rules` and `permission.set_rules`, and plugins are PluginManager's
-methods. Their entry shapes differ and stay as they are; this section makes one structure out of
+command rules are `permission.rules` and `permission.set_rules`, plugins are PluginManager's
+methods, and one Provider's models are `provider.*`. Their entry shapes differ and stay as they are; this section makes one structure out of
 the client side, so an area is added once instead of once per surface.
 
 Each area has two surfaces in the native client:
@@ -571,6 +571,69 @@ the run was skipped — and Tab shows the job's history in place of the list:
 `dimcode scheduled add PATH` (`-` for stdin) is the create without an editor, `dimcode scheduled
 history ID` prints the lines the detail shows, and `dimcode scheduled remove ID` deletes without
 the panel's confirmation.
+
+### The Models area
+
+The models area (#818): `Edit models` in `/models` opens one Provider's panel, and `dimcode
+models PROVIDER enable|disable|remove|inspect MODEL`, `edit MODEL`, `set MODEL PATH` and `add
+PATH` are the same area at the command line, over `provider.management` and the
+`provider.models.*` writes ([provider management](appserver/provider-management.md)). The Provider
+is part of the area, so a reply for another Provider never lands in the panel, and the panel's
+title names the Provider (`Models · <name>`). `dimcode models PROVIDER` keeps its listing and its
+four flags; `--refresh` is the area's reload at the command line.
+
+A model is an entry. Its label is the display name, and its detail is the id, both limits (or
+`undeclared`), the endpoint and its override, and the owner's reason when the model cannot be
+used. Entries are grouped by the source the owner reports: `catalog` for defaults, `overrides`
+for descriptor overrides and `added` for user models, in that order. A model the owner reports
+unavailable keeps the `unavailable` state word, and its detail says why. An account entry the
+owner holds no catalog for has no entries; the read's issue says it has no catalog yet.
+
+| Class | toggle | edit | remove | inspect |
+| --- | --- | --- | --- | --- |
+| catalog model | yes | yes | no | yes |
+| overridden catalog model | yes | yes | yes, `Reset` | yes |
+| user-added model | yes | yes | yes, `Delete` | yes |
+| unavailable model | as its class | as its class | as its class | yes |
+
+The Provider record's `version` is the revision every write takes (`expectedVersion`). A write
+replies with the Provider catalog, so the client reads the area again after one. Edit opens the
+entry's `ModelEdit` — `displayName`, `contextWindow`, `maxOutputTokens`, `toolCalling`, `vision`,
+`reasoning` and `modalityCapabilities`, plus `endpoint` on a static New API model — and sends only
+the fields the draft changed, diffed against a template built from the fresh read, so an inherited
+limit written back does not become a user declaration. Toggle, add and remove read the area
+immediately before the write: toggle sends the complete enabled set with the model flipped, with
+an unavailable model's state left as it is; remove deletes a user model or resets an override, as
+the entry's own verb says; add sends the `ModelEntry` of the create template, whose limits both
+start undeclared. A `provider_conflict` is classified by the version a fresh read reports: a moved
+version means the models changed and nothing was written, and an unchanged one is the owner's own
+refusal, such as a duplicate model id, which keeps the draft's revision.
+
+Ctrl+R reads the area, and sends `provider.refresh` first when the Provider's actions include
+`refresh`; a refused listing writes nothing, so the stored list stays with the owner's reason as
+the note. Tab projects the whole descriptor in place of the list: id, source, status, both limits,
+endpoint and override, tools, vision, reasoning and its efforts, modalities, description, release
+date, pricing, rate limit, the bundled match and the capability overrides.
+
+```text
+╭─ Models · Relay ─────────────────────────────────────────────────────────────────────────────╮
+│ >                                                                                           │
+│   catalog                                                                                   │
+│ › flash           enabled                                                                   │
+│   reasoner        enabled   unavailable                                                     │
+│   overrides                                                                                 │
+│   tuned           enabled                                                                   │
+│   added                                                                                     │
+│   house-model     disabled                                                                  │
+│                                                                                             │
+│   tuned                                                                                     │
+│   Context window 128,000 · max output 16,384                                                │
+│   Endpoint openai-compatible · override openai                                              │
+╰──── Enter toggle · Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Tab inspect ─╯
+```
+
+`dimcode models PROVIDER remove MODEL` removes without the panel's confirmation, and `dimcode
+models PROVIDER inspect MODEL` prints the lines the detail shows.
 
 ## Commands
 

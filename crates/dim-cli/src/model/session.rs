@@ -285,20 +285,25 @@ pub enum Command {
 
 /// One management area: an owner's management methods, drawn by the native
 /// client through the area's adapter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Area {
     Skills,
     Hooks,
     Scheduled,
+    /// One Provider's models: the Provider is the area's scope.
+    Models {
+        provider_id: String,
+    },
 }
 
 impl Area {
     /// The slash command and the subcommand stem of the area.
-    pub fn name(self) -> &'static str {
+    pub fn name(&self) -> &'static str {
         match self {
             Self::Skills => "skills",
             Self::Hooks => "hooks",
             Self::Scheduled => "scheduled",
+            Self::Models { .. } => "models",
         }
     }
 }

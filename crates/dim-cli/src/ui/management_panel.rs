@@ -103,6 +103,57 @@ pub const STRINGS: &[&str] = &[
     "The Scheduler has no area document.",
     "No scheduled job has that id.",
     "This workspace's hook settings changed since they were read; nothing was written.",
+    "Models",
+    "catalog",
+    "overrides",
+    "added",
+    "Models · {name}",
+    "undeclared",
+    "Context window {window} · max output {output}",
+    "Endpoint {endpoint}",
+    "Endpoint {endpoint} · override {value}",
+    "The provider reports it unavailable.",
+    "Limits undeclared; edit the model to declare them.",
+    "Sign in to the account to use its models.",
+    "The signed-in account changed; reload to list its models.",
+    "The provider has no catalog yet.",
+    "The provider listed no models.",
+    "Listed {count} models.",
+    "Refreshed the models.",
+    "Could not list models: {error}. Showing the stored list.",
+    "The signed-in account changed; the refresh cleared preferences, overrides and disables.",
+    "The models changed since they were read; nothing was written. Your next edit opens the current list.",
+    "The models changed since they were read; nothing was written. Your next add opens your text again.",
+    "The models changed since they were read; nothing was removed.",
+    "The models changed since they were read; nothing was written.",
+    "No provider has that id.",
+    "No model has that id.",
+    "This model cannot be removed.",
+    "A Provider's models have no area document.",
+    "Models have no run operation.",
+    "The document is not an object; nothing was written.",
+    "The document changes no editable field; nothing was written.",
+    "The model document names no model.",
+    "The provider has no model catalog to write.",
+    "ID {id}",
+    "Source {source}",
+    "Status {status}",
+    "Tools {value}",
+    "Vision {value}",
+    "Reasoning {value}",
+    "Modalities {list}",
+    "Description {text}",
+    "Release date {date}",
+    "Pricing {value}",
+    "Rate limit {value}",
+    "Matched provider {id}",
+    "Matched model {id}",
+    "Match strategy {strategy}",
+    "Capability overrides {fields}",
+    "yes",
+    "no",
+    "off",
+    "supported",
 ];
 
 pub struct ManagementPanel {
@@ -145,10 +196,11 @@ impl ShownDetail {
 
 impl ManagementPanel {
     pub fn new(area: Area) -> Self {
+        let title = title(&area);
         Self {
             area,
             list: ListPanel::new(
-                title(area),
+                title,
                 hint(&[]),
                 "Loading...",
                 "No entries.",
@@ -350,7 +402,7 @@ impl ManagementPanel {
             }
             self.busy = true;
             return Effect::Management(ManagementRequest {
-                area: self.area,
+                area: self.area.clone(),
                 action: ManagementAction::Remove { id },
             });
         }
@@ -373,7 +425,7 @@ impl ManagementPanel {
             }
             self.busy = true;
             return Effect::Management(ManagementRequest {
-                area: self.area,
+                area: self.area.clone(),
                 action: ManagementAction::Reload,
             });
         }
@@ -416,7 +468,7 @@ impl ManagementPanel {
             return Effect::None;
         }
         let request = ManagementRequest {
-            area: self.area,
+            area: self.area.clone(),
             action: ManagementAction::Toggle {
                 id: entry.id.clone(),
                 enabled: !entry.enabled,
@@ -463,7 +515,7 @@ impl ManagementPanel {
             return Effect::None;
         }
         let request = ManagementRequest {
-            area: self.area,
+            area: self.area.clone(),
             action: action(entry.id.clone()),
         };
         self.busy = true;
@@ -532,7 +584,7 @@ impl ManagementPanel {
         };
         self.busy = true;
         Effect::EditManagement {
-            area: self.area,
+            area: self.area.clone(),
             target,
             text: format!("{json}\n"),
         }
@@ -602,7 +654,7 @@ fn render_detail(detail: &ShownDetail, width: usize, rows: usize, p: &Palette) -
 
 /// What a reload with no panel reports: the area's size, then what its owner
 /// could not use.
-pub fn reloaded(area: Area, view: &ManagementView) -> String {
+pub fn reloaded(area: &Area, view: &ManagementView) -> String {
     let entries: Vec<&ManagementEntry> = view
         .groups
         .iter()
@@ -623,11 +675,12 @@ pub fn reloaded(area: Area, view: &ManagementView) -> String {
 
 /// The panel title of `area`, in English: the list translates it as it
 /// draws.
-fn title(area: Area) -> &'static str {
+fn title(area: &Area) -> &'static str {
     match area {
         Area::Skills => "Skills",
         Area::Hooks => "Hooks",
         Area::Scheduled => "Scheduler",
+        Area::Models { .. } => "Models",
     }
 }
 
@@ -1103,7 +1156,7 @@ mod tests {
         let mut panel = ManagementPanel::new(Area::Hooks);
         panel.set_result(&view_reply(Area::Hooks, ManagementAction::List, view));
         assert!(matches!(panel.handle_key(ctrl('e')), Effect::None));
-        let text = reloaded(Area::Hooks, &hooks_view());
+        let text = reloaded(&Area::Hooks, &hooks_view());
         assert!(
             text.starts_with("Reloaded Hooks: 2 entries, 0 disabled."),
             "{text}"

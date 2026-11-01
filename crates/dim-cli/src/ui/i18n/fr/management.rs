@@ -77,6 +77,87 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "Les réglages des hooks de cet espace de travail ont changé depuis leur lecture ; rien n'a été écrit."
         }
+        "Models" => "Modèles",
+        "catalog" => "catalogue",
+        "overrides" => "surcharges",
+        "added" => "ajoutés",
+        "Models · {name}" => "Modèles · {name}",
+        "undeclared" => "non déclaré",
+        "Context window {window} · max output {output}" => {
+            "Fenêtre de contexte {window} · sortie max {output}"
+        }
+        "Endpoint {endpoint}" => "Point de terminaison {endpoint}",
+        "Endpoint {endpoint} · override {value}" => {
+            "Point de terminaison {endpoint} · surcharge {value}"
+        }
+        "The provider reports it unavailable." => "Le fournisseur le signale indisponible.",
+        "Limits undeclared; edit the model to declare them." => {
+            "Limites non déclarées ; modifiez le modèle pour les déclarer."
+        }
+        "Sign in to the account to use its models." => {
+            "Connectez-vous au compte pour utiliser ses modèles."
+        }
+        "The signed-in account changed; reload to list its models." => {
+            "Le compte connecté a changé ; rechargez pour lister ses modèles."
+        }
+        "The provider has no catalog yet." => "Ce fournisseur n'a pas encore de catalogue.",
+        "The provider listed no models." => "Le fournisseur n'a listé aucun modèle.",
+        "Listed {count} models." => "{count} modèles listés.",
+        "Refreshed the models." => "Modèles actualisés.",
+        "Could not list models: {error}. Showing the stored list." => {
+            "Impossible de lister les modèles : {error}. La liste enregistrée est affichée."
+        }
+        "The signed-in account changed; the refresh cleared preferences, overrides and disables." => {
+            "Le compte connecté a changé ; le rechargement a effacé les préférences, surcharges et désactivations."
+        }
+        "The models changed since they were read; nothing was written. Your next edit opens the current list." => {
+            "Les modèles ont changé depuis leur lecture ; rien n'a été écrit. La prochaine modification ouvrira la liste actuelle."
+        }
+        "The models changed since they were read; nothing was written. Your next add opens your text again." => {
+            "Les modèles ont changé depuis leur lecture ; rien n'a été écrit. Le prochain ajout rouvrira votre texte."
+        }
+        "The models changed since they were read; nothing was removed." => {
+            "Les modèles ont changé depuis leur lecture ; rien n'a été supprimé."
+        }
+        "The models changed since they were read; nothing was written." => {
+            "Les modèles ont changé depuis leur lecture ; rien n'a été écrit."
+        }
+        "No provider has that id." => "Aucun fournisseur n'a cet id.",
+        "No model has that id." => "Aucun modèle n'a cet id.",
+        "This model cannot be removed." => "Ce modèle ne peut pas être supprimé.",
+        "A Provider's models have no area document." => {
+            "Les modèles d'un fournisseur n'ont pas de document de zone."
+        }
+        "Models have no run operation." => "Les modèles n'ont pas d'opération d'exécution.",
+        "The document is not an object; nothing was written." => {
+            "Le document n'est pas un objet ; rien n'a été écrit."
+        }
+        "The document changes no editable field; nothing was written." => {
+            "Le document ne modifie aucun champ modifiable ; rien n'a été écrit."
+        }
+        "The model document names no model." => "Le document de modèle ne nomme aucun modèle.",
+        "The provider has no model catalog to write." => {
+            "Ce fournisseur n'a pas de catalogue de modèles à écrire."
+        }
+        "ID {id}" => "ID {id}",
+        "Source {source}" => "Source {source}",
+        "Status {status}" => "Statut {status}",
+        "Tools {value}" => "Outils {value}",
+        "Vision {value}" => "Vision {value}",
+        "Reasoning {value}" => "Raisonnement {value}",
+        "Modalities {list}" => "Modalités {list}",
+        "Description {text}" => "Description {text}",
+        "Release date {date}" => "Date de sortie {date}",
+        "Pricing {value}" => "Tarif {value}",
+        "Rate limit {value}" => "Limite de débit {value}",
+        "Matched provider {id}" => "Fournisseur correspondant {id}",
+        "Matched model {id}" => "Modèle correspondant {id}",
+        "Match strategy {strategy}" => "Stratégie de correspondance {strategy}",
+        "Capability overrides {fields}" => "Surcharges de capacités {fields}",
+        "yes" => "oui",
+        "no" => "non",
+        "off" => "désactivé",
+        "supported" => "pris en charge",
         _ => return None,
     })
 }

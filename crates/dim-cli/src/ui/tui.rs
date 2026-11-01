@@ -631,10 +631,10 @@ fn run_terminal(
                     // A draft a refused edit kept continues in its own file;
                     // anything else starts from the document the panel read.
                     let creating = matches!(target, WriteTarget::Create);
-                    let (target, draft, reopened) = match app.kept_draft(area, creating) {
+                    let (target, draft, reopened) = match app.kept_draft(&area, creating) {
                         Some((target, draft)) => (target, draft, true),
                         None => {
-                            let draft = match editor::Draft::open(&app.home, area, &text) {
+                            let draft = match editor::Draft::open(&app.home, area.clone(), &text) {
                                 Ok(draft) => draft,
                                 Err(error) => {
                                     if let Some(Prompt::Management(panel)) = &mut app.prompt {
@@ -1008,7 +1008,7 @@ enum Prompt {
     Models(ModelsPanel),
     Providers(Box<ProvidersPanel>),
     Plugins(PluginsPanel),
-    Management(ManagementPanel),
+    Management(Box<ManagementPanel>),
     Login(Box<OauthView>),
     Approvals(ApprovalsPanel),
     Theme(ThemePanel),
@@ -1813,7 +1813,7 @@ impl App {
                     match &reply.result {
                         ManagementResult::View { view, .. } => {
                             let text = crate::ui::management_panel::reloaded(
-                                reply.request.area,
+                                &reply.request.area,
                                 view.as_ref(),
                             );
                             self.reports.push(Block::Status {
@@ -3125,9 +3125,9 @@ impl App {
     /// The draft a refused edit kept for `area`, if its text is still
     /// there: the editor reopens it as it is, so an edit that continues
     /// keeps working in its own file, at the revision that text came from.
-    fn kept_draft(&mut self, area: Area, creating: bool) -> Option<(WriteTarget, editor::Draft)> {
+    fn kept_draft(&mut self, area: &Area, creating: bool) -> Option<(WriteTarget, editor::Draft)> {
         let kept = self.management_edit.as_ref()?;
-        if kept.area != area || matches!(kept.target, WriteTarget::Create) != creating {
+        if kept.area != *area || matches!(kept.target, WriteTarget::Create) != creating {
             return None;
         }
         let kept = self.management_edit.take()?;
@@ -3269,7 +3269,7 @@ impl App {
                     },
                 };
                 self.management_edit = Some(ManagementDraft {
-                    area,
+                    area: area.clone(),
                     target,
                     draft,
                 });
@@ -3281,7 +3281,9 @@ impl App {
 
     /// `/<area>` opens the management panel of `area`, which reads it.
     fn open_management(&mut self, area: Area) {
-        self.open_prompt(Prompt::Management(ManagementPanel::new(area)));
+        self.open_prompt(Prompt::Management(Box::new(ManagementPanel::new(
+            area.clone(),
+        ))));
         self.host.send(Command::Management(ManagementRequest {
             area,
             action: ManagementAction::List,
@@ -8907,7 +8909,9 @@ mod tests {
         }
         // The panel is open: the file and the link stay for the next Ctrl+N.
         for result in [refused(), conflict()] {
-            app.prompt = Some(Prompt::Management(ManagementPanel::new(Area::Scheduled)));
+            app.prompt = Some(Prompt::Management(Box::new(ManagementPanel::new(
+                Area::Scheduled,
+            ))));
             let path = draft(&mut app);
             app.apply(create_reply(result));
             assert!(path.exists(), "a create keeps its file: {path:?}");

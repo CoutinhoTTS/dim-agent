@@ -14,6 +14,7 @@
 
 pub mod editor;
 pub mod hooks;
+pub mod models;
 pub mod scheduler;
 pub mod skills;
 
@@ -73,11 +74,26 @@ const SCHEDULED: Methods = Methods {
     ],
 };
 
-fn methods_of(area: Area) -> &'static Methods {
+/// One Provider's models. The reload names the read, not the rescan: the
+/// adapter asks for a rescan itself when the Provider offers one.
+const MODELS: Methods = Methods {
+    catalog: "provider.management",
+    kinds: &[
+        (ActionKind::Toggle, "provider.models.set_enabled"),
+        (ActionKind::Edit, "provider.models.edit"),
+        (ActionKind::Reload, "provider.management"),
+        (ActionKind::Add, "provider.models.create"),
+        (ActionKind::Remove, "provider.models.delete"),
+        (ActionKind::Inspect, "provider.management"),
+    ],
+};
+
+fn methods_of(area: &Area) -> &'static Methods {
     match area {
         Area::Skills => &SKILLS,
         Area::Hooks => &HOOKS,
         Area::Scheduled => &SCHEDULED,
+        Area::Models { .. } => &MODELS,
     }
 }
 
@@ -120,7 +136,7 @@ pub(super) fn entry_kinds(available: &[ActionKind]) -> Vec<ActionKind> {
 
 /// The action kinds the daemon can serve for `area`, in the order a panel
 /// offers them. An area the daemon cannot read offers none.
-pub fn actions(client: &Client, area: Area) -> Vec<ActionKind> {
+pub fn actions(client: &Client, area: &Area) -> Vec<ActionKind> {
     let methods = methods_of(area);
     if !client.supports(&[methods.catalog]) {
         return Vec::new();
@@ -138,13 +154,13 @@ pub fn actions(client: &Client, area: Area) -> Vec<ActionKind> {
 /// another method or the host's own environment.
 pub fn supported(client: &Client, request: &ManagementRequest) -> Result<(), String> {
     match kind(&request.action) {
-        Some(kind) => supports_kind(client, request.area, kind),
+        Some(kind) => supports_kind(client, &request.area, kind),
         None => {
-            let methods = methods_of(request.area);
+            let methods = methods_of(&request.area);
             if client.supports(&[methods.catalog]) {
                 Ok(())
             } else {
-                Err(unsupported(request.area))
+                Err(unsupported(&request.area))
             }
         }
     }
@@ -152,7 +168,7 @@ pub fn supported(client: &Client, request: &ManagementRequest) -> Result<(), Str
 
 /// Refuses a kind the daemon cannot serve for `area`, with the area's
 /// sentence, for a surface that checks before it gathers anything.
-pub fn supports_kind(client: &Client, area: Area, kind: ActionKind) -> Result<(), String> {
+pub fn supports_kind(client: &Client, area: &Area, kind: ActionKind) -> Result<(), String> {
     let methods = methods_of(area);
     if !client.supports(&[methods.catalog]) {
         return Err(unsupported(area));
@@ -163,10 +179,11 @@ pub fn supports_kind(client: &Client, area: Area, kind: ActionKind) -> Result<()
     }
 }
 
-fn unsupported(area: Area) -> String {
+fn unsupported(area: &Area) -> String {
     match area {
         // The Scheduler is one owner by name, not a plural noun.
         Area::Scheduled => "This daemon cannot manage the Scheduler.".to_owned(),
+        Area::Models { .. } => "This daemon cannot manage models.".to_owned(),
         Area::Skills | Area::Hooks => format!("This daemon cannot manage {}.", area.name()),
     }
 }
@@ -180,8 +197,8 @@ pub async fn apply(
     if let Err(error) = supported(client, request) {
         return ManagementResult::Refused(ManagementRefusal::Refused(error));
     }
-    let actions = actions(client, request.area);
-    match request.area {
+    let actions = actions(client, &request.area);
+    match &request.area {
         Area::Skills => match skills::apply(client, &request.action, cwd).await {
             skills::Outcome::Catalog(catalog) => ManagementResult::View {
                 view: Box::new(skills::view(&catalog, &actions)),
@@ -234,6 +251,28 @@ pub async fn apply(
                 })
             }
         },
+        Area::Models { provider_id } => {
+            match models::apply(client, provider_id, &request.action).await {
+                Ok(models::Answer::Provider { provider, note, .. }) => ManagementResult::View {
+                    view: Box::new(models::view(&provider, &actions)),
+                    note,
+                },
+                Ok(models::Answer::Detail(detail)) => ManagementResult::Detail(detail),
+                Err(models::Failure::ReadFailed { note, error, .. }) => ManagementResult::Applied {
+                    note,
+                    read_error: error,
+                },
+                Err(models::Failure::Refused(message)) => {
+                    ManagementResult::Refused(ManagementRefusal::Refused(message))
+                }
+                Err(models::Failure::Conflict { message, provider }) => {
+                    ManagementResult::Refused(ManagementRefusal::Conflict {
+                        message,
+                        view: Box::new(models::view(&provider, &actions)),
+                    })
+                }
+            }
+        }
     }
 }
 

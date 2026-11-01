@@ -69,6 +69,75 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "此工作区的钩子设置已在读取后发生变化；本次没有写入。"
         }
+        "Models" => "模型",
+        "catalog" => "目录",
+        "overrides" => "覆盖",
+        "added" => "新增",
+        "Models · {name}" => "模型 · {name}",
+        "undeclared" => "未声明",
+        "Context window {window} · max output {output}" => {
+            "上下文窗口 {window} · 最大输出 {output}"
+        }
+        "Endpoint {endpoint}" => "端点 {endpoint}",
+        "Endpoint {endpoint} · override {value}" => "端点 {endpoint} · 覆盖为 {value}",
+        "The provider reports it unavailable." => "提供方报告它不可用。",
+        "Limits undeclared; edit the model to declare them." => "上限未声明；编辑该模型以声明。",
+        "Sign in to the account to use its models." => "登录账号后即可使用其模型。",
+        "The signed-in account changed; reload to list its models." => {
+            "登录的账号已变更；重新加载以列出其模型。"
+        }
+        "The provider has no catalog yet." => "此提供方还没有目录。",
+        "The provider listed no models." => "提供方没有列出任何模型。",
+        "Listed {count} models." => "已列出 {count} 个模型。",
+        "Refreshed the models." => "模型已刷新。",
+        "Could not list models: {error}. Showing the stored list." => {
+            "无法列出模型：{error}。显示已存储的列表。"
+        }
+        "The signed-in account changed; the refresh cleared preferences, overrides and disables." => {
+            "登录的账号已变更；刷新已清除偏好、覆盖和禁用项。"
+        }
+        "The models changed since they were read; nothing was written. Your next edit opens the current list." => {
+            "模型在读取后已变更；本次没有写入。下次编辑会打开当前列表。"
+        }
+        "The models changed since they were read; nothing was written. Your next add opens your text again." => {
+            "模型在读取后已变更；本次没有写入。下次新建会重新打开你的文本。"
+        }
+        "The models changed since they were read; nothing was removed." => {
+            "模型在读取后已变更；本次没有移除任何东西。"
+        }
+        "The models changed since they were read; nothing was written." => {
+            "模型在读取后已变更；本次没有写入。"
+        }
+        "No provider has that id." => "没有该 id 的提供方。",
+        "No model has that id." => "没有该 id 的模型。",
+        "This model cannot be removed." => "此模型无法移除。",
+        "A Provider's models have no area document." => "提供方的模型没有领域文档。",
+        "Models have no run operation." => "模型没有运行操作。",
+        "The document is not an object; nothing was written." => "文档不是对象；本次没有写入。",
+        "The document changes no editable field; nothing was written." => {
+            "文档没有修改任何可编辑字段；本次没有写入。"
+        }
+        "The model document names no model." => "模型文档没有指明模型。",
+        "The provider has no model catalog to write." => "此提供方没有可写入的模型目录。",
+        "ID {id}" => "ID {id}",
+        "Source {source}" => "来源 {source}",
+        "Status {status}" => "状态 {status}",
+        "Tools {value}" => "工具 {value}",
+        "Vision {value}" => "视觉 {value}",
+        "Reasoning {value}" => "推理 {value}",
+        "Modalities {list}" => "模态 {list}",
+        "Description {text}" => "描述 {text}",
+        "Release date {date}" => "发布日期 {date}",
+        "Pricing {value}" => "价格 {value}",
+        "Rate limit {value}" => "速率限制 {value}",
+        "Matched provider {id}" => "匹配提供方 {id}",
+        "Matched model {id}" => "匹配模型 {id}",
+        "Match strategy {strategy}" => "匹配策略 {strategy}",
+        "Capability overrides {fields}" => "能力覆盖字段 {fields}",
+        "yes" => "是",
+        "no" => "否",
+        "off" => "关闭",
+        "supported" => "支持",
         _ => return None,
     })
 }

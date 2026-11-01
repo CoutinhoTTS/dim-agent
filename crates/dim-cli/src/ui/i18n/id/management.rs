@@ -73,6 +73,81 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "Pengaturan hook ruang kerja ini berubah sejak dibaca; tidak ada yang ditulis."
         }
+        "Models" => "Model",
+        "catalog" => "katalog",
+        "overrides" => "penimpaan",
+        "added" => "ditambahkan",
+        "Models · {name}" => "Model · {name}",
+        "undeclared" => "belum dideklarasikan",
+        "Context window {window} · max output {output}" => {
+            "Jendela konteks {window} · output maks {output}"
+        }
+        "Endpoint {endpoint}" => "Endpoint {endpoint}",
+        "Endpoint {endpoint} · override {value}" => "Endpoint {endpoint} · penimpaan {value}",
+        "The provider reports it unavailable." => "Penyedia melaporkannya tidak tersedia.",
+        "Limits undeclared; edit the model to declare them." => {
+            "Batas belum dideklarasikan; edit modelnya untuk mendeklarasikan."
+        }
+        "Sign in to the account to use its models." => "Masuk ke akun untuk memakai modelnya.",
+        "The signed-in account changed; reload to list its models." => {
+            "Akun yang masuk berubah; muat ulang untuk menampilkan modelnya."
+        }
+        "The provider has no catalog yet." => "Penyedia ini belum punya katalog.",
+        "The provider listed no models." => "Penyedia tidak menampilkan model apa pun.",
+        "Listed {count} models." => "Menampilkan {count} model.",
+        "Refreshed the models." => "Model diperbarui.",
+        "Could not list models: {error}. Showing the stored list." => {
+            "Tidak dapat menampilkan model: {error}. Menampilkan daftar tersimpan."
+        }
+        "The signed-in account changed; the refresh cleared preferences, overrides and disables." => {
+            "Akun yang masuk berubah; muat ulang menghapus preferensi, penimpaan, dan penonaktifan."
+        }
+        "The models changed since they were read; nothing was written. Your next edit opens the current list." => {
+            "Model berubah sejak dibaca; tidak ada yang ditulis. Edit berikutnya membuka daftar saat ini."
+        }
+        "The models changed since they were read; nothing was written. Your next add opens your text again." => {
+            "Model berubah sejak dibaca; tidak ada yang ditulis. Tambah berikutnya membuka teks Anda lagi."
+        }
+        "The models changed since they were read; nothing was removed." => {
+            "Model berubah sejak dibaca; tidak ada yang dihapus."
+        }
+        "The models changed since they were read; nothing was written." => {
+            "Model berubah sejak dibaca; tidak ada yang ditulis."
+        }
+        "No provider has that id." => "Tidak ada penyedia dengan id itu.",
+        "No model has that id." => "Tidak ada model dengan id itu.",
+        "This model cannot be removed." => "Model ini tidak dapat dihapus.",
+        "A Provider's models have no area document." => "Model penyedia tidak punya dokumen area.",
+        "Models have no run operation." => "Model tidak punya operasi jalankan.",
+        "The document is not an object; nothing was written." => {
+            "Dokumen bukan objek; tidak ada yang ditulis."
+        }
+        "The document changes no editable field; nothing was written." => {
+            "Dokumen tidak mengubah bidang yang dapat diedit; tidak ada yang ditulis."
+        }
+        "The model document names no model." => "Dokumen model tidak menamai model.",
+        "The provider has no model catalog to write." => {
+            "Penyedia ini tidak punya katalog model untuk ditulis."
+        }
+        "ID {id}" => "ID {id}",
+        "Source {source}" => "Sumber {source}",
+        "Status {status}" => "Status {status}",
+        "Tools {value}" => "Alat {value}",
+        "Vision {value}" => "Visi {value}",
+        "Reasoning {value}" => "Penalaran {value}",
+        "Modalities {list}" => "Modalitas {list}",
+        "Description {text}" => "Deskripsi {text}",
+        "Release date {date}" => "Tanggal rilis {date}",
+        "Pricing {value}" => "Harga {value}",
+        "Rate limit {value}" => "Batas laju {value}",
+        "Matched provider {id}" => "Penyedia cocok {id}",
+        "Matched model {id}" => "Model cocok {id}",
+        "Match strategy {strategy}" => "Strategi cocok {strategy}",
+        "Capability overrides {fields}" => "Penimpaan kemampuan {fields}",
+        "yes" => "ya",
+        "no" => "tidak",
+        "off" => "mati",
+        "supported" => "didukung",
         _ => return None,
     })
 }
