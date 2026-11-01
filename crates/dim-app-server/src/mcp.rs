@@ -647,14 +647,14 @@ impl McpService {
             let outcome = tokio::time::timeout(PROBE_DEADLINE, operation).await;
             let latency = started.elapsed();
             let probe = match outcome {
-                Ok(Ok(tools)) => McpProbe::connected(tools, latency),
-                Ok(Err(McpError::Server(error))) => McpProbe::ended(error, latency),
-                Ok(Err(error)) => return Err(error),
-                Err(_deadline) => McpProbe::failed(
+                Ok(Ok(tools)) => Ok(McpProbe::connected(tools, latency)),
+                Ok(Err(McpError::Server(error))) => Ok(McpProbe::ended(error, latency)),
+                Ok(Err(error)) => Err(error),
+                Err(_deadline) => Ok(McpProbe::failed(
                     ProbeReason::Timeout,
                     server::McpServerError::Timeout,
                     latency,
-                ),
+                )),
             };
             if view.shutdown().await.is_err() || view.state().error.is_some() {
                 return Ok(McpProbe::failed(
@@ -663,7 +663,7 @@ impl McpService {
                     latency,
                 ));
             }
-            Ok(probe)
+            probe
         })
         .await
     }
