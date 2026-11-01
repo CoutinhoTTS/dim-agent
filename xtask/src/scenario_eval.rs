@@ -5105,19 +5105,39 @@ mod tests {
         /// half quiet period, takes the one after that, and settles the call
         /// with its `step/tool-result`.
         Late,
+        /// The Session never takes a decline: the peer refuses every one and
+        /// settles the call with its `step/tool-result` after the second, so
+        /// a decline after that result can only be one the runner kept past
+        /// it.
+        Refused,
+        /// A later request reuses the settled call id: the peer refuses the
+        /// first decline, asks `ask_user` again as `c1` under `r2`, refuses
+        /// that one too, settles only `r1`, and then takes the decline the
+        /// runner sends for `r2` and settles that batch.
+        ReusedCallId,
+    }
+
+    /// What a scripted peer read: the `requestId` of every decline, in order,
+    /// and how many it had read when it first wrote a call's
+    /// `step/tool-result`.
+    #[cfg(unix)]
+    #[derive(Default)]
+    struct PeerReads {
+        declines: Mutex<Vec<String>>,
+        settled_at: AtomicUsize,
     }
 
     /// A scripted App Server peer for the driver: it answers the Session
-    /// methods the driver calls and plays one `ask_user` `step/tool-call`
-    /// after the submission. It keeps the line busy, answering no
-    /// `session.idle`, until a decline is taken. It returns the socket and
-    /// how many `session.question.respond` calls it read.
+    /// methods the driver calls and plays the `ask_user` `step/tool-call`
+    /// the script asks for after the submission. It keeps the line busy,
+    /// answering no `session.idle`, until it writes a result that closes the
+    /// call. It returns the socket and what it read.
     #[cfg(unix)]
     async fn scripted_peer(
         directory: &Path,
         window: u64,
         script: PeerScript,
-    ) -> (PathBuf, Arc<AtomicUsize>) {
+    ) -> (PathBuf, Arc<PeerReads>) {
         use std::os::unix::fs::PermissionsExt;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
@@ -5141,26 +5161,48 @@ mod tests {
             json!({"error": {"code": -32000, "message": "No ask_user call is waiting for this answer",
                              "data": {"appError": "question_not_pending"}}})
         }
+        /// One `ask_user` `step/tool-call` asking `call` under `request`.
+        fn question_call(request: &str, call: &str) -> Vec<u8> {
+            notice(
+                json!({"type": "step", "name": "tool-call", "id": "e1", "sequence": 1,
+                          "data": {"turn_id": "t1", "request_id": request,
+                                   "calls": [{"id": call, "name": "ask_user", "input":
+                                     {"questions": [{"header": "Deploy",
+                                                     "question": "Where to deploy?",
+                                                     "options": [{"label": "production"},
+                                                                 {"label": "staging"}]}]}}]}}),
+            )
+        }
+        /// The `step/tool-result` that closes `call` of `request` with the
+        /// declined answer.
+        fn declined_result(request: &str, call: &str) -> Vec<u8> {
+            notice(json!({"type": "step", "name": "tool-result", "id": "e3",
+                          "sequence": 3,
+                          "data": {"turn_id": "t1", "request_id": request,
+                                   "call_event_id": "e1",
+                                   "results": [{"call_id": call, "result": {
+                                       "content": "User declined to answer. Proceed without these answers."}}]}}))
+        }
 
         let _ = std::fs::remove_dir_all(directory);
         private_directory(directory).unwrap();
         let socket = directory.join("peer.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let responds = Arc::new(AtomicUsize::new(0));
-        let counted = responds.clone();
+        let reads = Arc::new(PeerReads::default());
+        let recorded = reads.clone();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let (read, mut write) = stream.into_split();
             let mut lines = tokio::io::BufReader::new(read).lines();
             let replies = match &script {
                 PeerScript::Replies(replies) => replies.clone(),
-                PeerScript::Late => Vec::new(),
+                _ => Vec::new(),
             };
             let mut declines = 0;
             let mut first: Option<Instant> = None;
-            // The line is busy until the peer settles the call, the way a
-            // running turn is: `session.idle` stays unanswered and the
+            // The line is busy until the peer writes the call's result, the
+            // way a running turn is: `session.idle` stays unanswered and the
             // driver's own deadline reports the line busy.
             let mut settled = false;
             while let Some(line) = lines.next_line().await.unwrap() {
@@ -5170,17 +5212,26 @@ mod tests {
                     continue;
                 }
                 if method == "session.question.respond" {
-                    counted.fetch_add(1, Ordering::SeqCst);
-                    let taken = match &script {
+                    recorded.declines.lock().unwrap().push(
+                        request["params"]["requestId"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
+                    );
+                    declines += 1;
+                    // The batch whose `step/tool-result` the peer writes after
+                    // answering this decline: a taken decline settles its own
+                    // call, and a refused one only where the script has the
+                    // Session close the call by other means.
+                    let closed = match &script {
                         PeerScript::Replies(_) => {
                             let body = replies
-                                .get(declines)
+                                .get(declines - 1)
                                 .cloned()
                                 .unwrap_or_else(|| json!({"result": {}}));
-                            declines += 1;
-                            settled = body.get("result").is_some();
+                            let taken = body.get("result").is_some();
                             write.write_all(&frame(&request, body)).await.unwrap();
-                            false
+                            taken.then_some("r1")
                         }
                         PeerScript::Late => {
                             let at = *first.get_or_insert_with(Instant::now);
@@ -5190,7 +5241,7 @@ mod tests {
                                 false => not_pending(),
                             };
                             write.write_all(&frame(&request, body)).await.unwrap();
-                            if declines == 0 {
+                            if declines == 1 {
                                 for line in 0..20 {
                                     let event = json!({"type": "step", "name": "text", "id": "b",
                                                        "data": {"turn_id": "t1", "request_id": "r1",
@@ -5198,19 +5249,49 @@ mod tests {
                                     write.write_all(&notice(event)).await.unwrap();
                                 }
                             }
-                            declines += 1;
-                            taken
+                            taken.then_some("r1")
                         }
+                        PeerScript::Refused => {
+                            write
+                                .write_all(&frame(&request, not_pending()))
+                                .await
+                                .unwrap();
+                            (declines == 2).then_some("r1")
+                        }
+                        PeerScript::ReusedCallId => match declines {
+                            1 => {
+                                write
+                                    .write_all(&frame(&request, not_pending()))
+                                    .await
+                                    .unwrap();
+                                write.write_all(&question_call("r2", "c1")).await.unwrap();
+                                None
+                            }
+                            2 => {
+                                write
+                                    .write_all(&frame(&request, not_pending()))
+                                    .await
+                                    .unwrap();
+                                Some("r1")
+                            }
+                            _ => {
+                                write
+                                    .write_all(&frame(&request, json!({"result": {}})))
+                                    .await
+                                    .unwrap();
+                                Some("r2")
+                            }
+                        },
                     };
-                    if taken {
-                        let event = json!({"type": "step", "name": "tool-result", "id": "e3",
-                                           "sequence": 3,
-                                           "data": {"turn_id": "t1", "request_id": "r1",
-                                                    "call_event_id": "e1",
-                                                    "results": [{"call_id": "c1", "result": {
-                                                        "content": "User declined to answer. Proceed without these answers."}}]}});
-                        write.write_all(&notice(event)).await.unwrap();
+                    if let Some(request) = closed {
+                        if recorded.settled_at.load(Ordering::SeqCst) == 0 {
+                            recorded.settled_at.store(declines, Ordering::SeqCst);
+                        }
                         settled = true;
+                        write
+                            .write_all(&declined_result(request, "c1"))
+                            .await
+                            .unwrap();
                     }
                     continue;
                 }
@@ -5227,18 +5308,11 @@ mod tests {
                         ))
                         .await
                         .unwrap();
-                    let event = json!({"type": "step", "name": "tool-call", "id": "e1", "sequence": 1,
-                                       "data": {"turn_id": "t1", "request_id": "r1",
-                                                "calls": [{"id": "c1", "name": "ask_user", "input":
-                                                  {"questions": [{"header": "Deploy",
-                                                                  "question": "Where to deploy?",
-                                                                  "options": [{"label": "production"},
-                                                                              {"label": "staging"}]}]}}]}});
-                    write.write_all(&notice(event)).await.unwrap();
+                    write.write_all(&question_call("r1", "c1")).await.unwrap();
                 }
             }
         });
-        (socket, responds)
+        (socket, reads)
     }
 
     /// A client on a scripted peer's socket.
@@ -5314,7 +5388,7 @@ mod tests {
     async fn a_busy_line_sends_the_decline_again_once() {
         let directory =
             std::env::temp_dir().join(format!("dim-scenario-eval-busy-{}", std::process::id()));
-        let (socket, responds) = scripted_peer(&directory, 8_000, PeerScript::Late).await;
+        let (socket, reads) = scripted_peer(&directory, 8_000, PeerScript::Late).await;
         let mut client = driver_client(socket).await;
         let mut scenario = scenario(Vec::new());
         scenario.budget.seconds = 10.;
@@ -5323,9 +5397,73 @@ mod tests {
         // The budget writes `seconds`, so `idle` is the retry ending the run.
         assert_eq!(driven.stop, "idle", "{:?}", driven.error);
         assert_eq!(
-            responds.load(Ordering::SeqCst),
+            reads.declines.lock().unwrap().len(),
             2,
             "one declined early and one the quiet period scheduled"
+        );
+    }
+
+    /// A kept decline ends at its call's result, not at the Session's answer:
+    /// the peer refuses every decline and settles `c1` with its
+    /// `step/tool-result`, and the runner reads the first decline and one
+    /// retry and sends nothing after the result.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_kept_decline_is_dropped_at_its_calls_result() {
+        let directory =
+            std::env::temp_dir().join(format!("dim-scenario-eval-kept-{}", std::process::id()));
+        let (socket, reads) = scripted_peer(&directory, 8_000, PeerScript::Refused).await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.seconds = 10.;
+        let driven = drive(&mut client, &scenario, &std::env::temp_dir(), &peer_model()).await;
+        // The peer reads a request only after the driver sent it, so the
+        // counts are final once it has read the last one.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let _ = std::fs::remove_dir_all(directory);
+        let declines = reads.declines.lock().unwrap().len();
+        let settled_at = reads.settled_at.load(Ordering::SeqCst);
+        // The budget writes `seconds`, so `idle` is the result closing the
+        // call and the line.
+        assert_eq!(driven.stop, "idle", "{:?}", driven.error);
+        assert!(
+            settled_at >= 2,
+            "the peer reads the first decline and a retry: {declines} declines"
+        );
+        assert_eq!(
+            declines, settled_at,
+            "no decline arrives after the call's result: {declines} declines, {settled_at} before the result"
+        );
+    }
+
+    /// A later request reusing the settled call id is not closed by the stale
+    /// entry's result: the key holds the `requestId` as well as the call id,
+    /// and the later call's own decline is sent (Questions §4.3).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_later_request_reusing_the_call_id_keeps_its_own_decline() {
+        let directory =
+            std::env::temp_dir().join(format!("dim-scenario-eval-reused-{}", std::process::id()));
+        let (socket, reads) = scripted_peer(&directory, 8_000, PeerScript::ReusedCallId).await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.seconds = 10.;
+        let driven = drive(&mut client, &scenario, &std::env::temp_dir(), &peer_model()).await;
+        // The peer reads a request only after the driver sent it, so the
+        // counts are final once it has read the last one.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let _ = std::fs::remove_dir_all(directory);
+        let declines = reads.declines.lock().unwrap().clone();
+        let settled_at = reads.settled_at.load(Ordering::SeqCst);
+        assert_eq!(driven.stop, "idle", "{:?}", driven.error);
+        assert_eq!(
+            settled_at, 2,
+            "the stale batch's result went out after two declines: {declines:?}"
+        );
+        assert_eq!(
+            declines,
+            ["r1", "r2", "r2"],
+            "the later call's decline is sent after the stale batch settled"
         );
     }
 
