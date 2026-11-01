@@ -108,15 +108,13 @@ values. Edits target `source: "user" | "project"`, an `id`, and that source's `e
 Project edits require an authorized workspace `cwd`; `mcp.save` and `mcp.remove` write `.mcp.json`,
 not the user source.
 
-- `mcp.save` additionally takes `configuration`: a complete stdio, HTTP or SSE server definition
-  in the existing `mcpServers` format. It creates or replaces that source's entry, not a merged one.
-- `mcp.configuration({source,id,cwd?})` returns an editable projection. Stdio entries include
-  command, arguments, working directory and environment names, never environment values. Remote
-  entries include `endpoint` (the URL origin), header names, bearer/OAuth presence flags and
-  OAuth client ID, callback port, scopes and metadata-URL presence. Endpoint userinfo, path,
-  query and fragment, the metadata URL, unknown extension fields and all credentials stay private.
+- `mcp.configuration`, `mcp.save` and `mcp.update` read, create or replace and patch one entry;
+  the [MCP configuration management](../../docs/design/appserver/mcp-management.md) contract
+  defines the entry read with its source revision, the declared configuration they read and
+  write, the patch semantics and the values they redact.
 - `mcp.inspect({source,id,cwd?})` returns `{enabled,configuration,connections}`. Configuration
-  uses that same safe projection. Each connection contains `state: {status,expired?}` and
+  is the effective entry a Session runs, with a project or plugin entry's stdio `cwd` resolved.
+  Each connection contains `state: {status,expired?}` and
   `tools: [{name,description,inputSchema}] | null`: its last complete successful discovery,
   or null before discovery. Status is `disconnected`, `connecting`, `connected`, `failed`,
   `closed` or `auth_required` (with `expired`). These are existing connection generations,
@@ -132,21 +130,6 @@ not the user source.
   The Web client confirms this action. Tests never save configuration, alter source revisions,
   publish tools to Sessions or replace their connections. OAuth uses the existing credential
   authority, including its normal refresh behavior.
-- `mcp.update` takes the source revision and a typed `patch`: command, arguments, working
-  directory and environment for stdio, or URL, headers and bearer for remote entries. Stored
-  arguments are projected only as `argsCount`; omission preserves them, while an explicit
-  `args` array replaces them (including an empty array to clear them). An omitted URL
-  preserves the complete stored endpoint, including hidden credentials; an entered URL replaces
-  it. Environment/header maps change only named keys: a string sets a value and null removes it.
-  An omitted bearer preserves it; `bearer: {action:"set",token}` replaces it and
-  `bearer: {action:"remove"}` clears it. OAuth and static credentials remain mutually exclusive.
-  An omitted OAuth patch preserves it; `oauth: {action:"remove"}` removes explicit configuration
-  (automatic OAuth discovery remains). `oauth: {action:"set",clientId?,callbackPort?,scopes?,
-  authServerMetadataUrl?}` updates only mentioned fields, with null clearing an optional field.
-  Unmentioned keys, extra fields and enablement are preserved. The Web editor leaves metadata
-  replacement blank and omits it unless the user explicitly replaces or removes it.
-  An empty working directory clears it. Fields of the wrong transport and plugin-owned writes
-  are refused. The Web form leaves the replacement URL blank until the user enters one.
 - `mcp.remove` removes the entry from the selected source; it can reveal a lower-precedence entry.
 - `mcp.set_enabled` additionally takes `enabled`. A user entry's `enabled` field changes and the
   rest of the entry is preserved. For a project entry, enabling checks `expectedVersion` against
@@ -302,6 +285,19 @@ selects automatic detection; null is invalid. The HostPlatform owner validates t
 selection and atomically updates its configured `exec-shell.json` through FileStorage.
 Stale writes return `exec_shell_conflict`; other host/storage failures are
 `exec_shell_failed`. New commands reread the preference; running shells are unchanged.
+
+### Sandbox backend availability
+
+`host.execution.backend({})` returns `{available: true}` or `{available: false, reason}` for the
+host that would start the next process. macOS uses the seatbelt backend and answers
+`{available: true}`; Linux answers `{available: true}` when preparation would find bubblewrap on
+the captured `PATH`, and `{available: false, reason}` otherwise; Windows always answers
+`{available: false, reason}`. The App Server's `ExecutionBackend` part reads `HostPlatform`, which
+resolves the same bubblewrap executable preparation uses. The reason is the text the next process
+start would use. The Execution row in `/settings` and the Web Permissions page read this method and
+display the reason; neither infers the platform from its own environment. The switches stay on
+`settings.read`/`settings.update`, and a sandboxed process on a host without a backend still fails
+as `isolation_unavailable`.
 
 ### Permission command rules
 

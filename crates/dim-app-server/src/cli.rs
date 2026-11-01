@@ -325,6 +325,7 @@ pub fn run_with(
             hooks_settings::install(&mut builder, config.product_home.clone());
             dim_agent_capabilities::hooks::install(&mut builder);
             crate::session_grants::install(&mut builder);
+            dim_agent_capabilities::file_access::install(&mut builder);
             builder
                 .session_value(Arc::new(HistoryRenderer::default()))
                 .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))));

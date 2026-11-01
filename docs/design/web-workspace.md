@@ -327,7 +327,7 @@ optional account feature must not prevent identity or usage from loading.
 | MCP | List, add/edit transports, enable/disable, test, authentication/sign-out and confirmed removal, preserving secret fields omitted from edits |
 | Plugins | List, enable/disable, installation/update/removal and the owner's typed settings surfaces |
 | Skills | List, enable/disable, source installation, update and confirmed removal |
-| Permissions | Default execution/network settings and command-rule management, with confirmation for privilege increases |
+| Permissions | Default execution/network settings and command-rule management, with confirmation for privilege increases. The Execution card reads `host.execution.backend` and shows the owner's sandbox-backend reason when the host has none; the browser never infers the platform |
 | Archived sessions | Search, restore/open and confirmed permanent deletion |
 | Diagnostics | Safe version, protocol, connection and logging information with refresh and supported logging controls |
 

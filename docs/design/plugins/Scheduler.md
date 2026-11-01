@@ -828,7 +828,7 @@ No complete Scheduler behavior is claimed before Appendix D passes.
 
 | Surface | Status |
 | --- | --- |
-| Gated-row failure reporting | Pinned rutis 0.19.2 supplies failed-owner diagnostics and `service_unavailable`. Appendix D items 8, 12 and 13 check incomplete-v1 rejection, known-failed owners and invalid inner versions, with dependencies and assertions unchanged. |
+| Gated-row failure reporting | Pinned rutis 0.19.3 supplies failed-owner diagnostics and `service_unavailable`. Appendix D items 8, 12 and 13 check incomplete-v1 rejection, known-failed owners and invalid inner versions, with dependencies and assertions unchanged. |
 | Public run store | Process-typescript §5.2 supplies the existing pluginFiles provider and actual public Node storage acceptance. The package must persist required transitions before starting run effects; no private managed-plugin slot or direct Node filesystem access. |
 | Liveness wording | Feature list says the interactive terminal must be alive; this design keeps "daemon alive" (E5); recorded, not open |
 | Package binding | The concrete process row and its Session definition, named dependencies, management admission and caller authority are implemented in #317 under §1.3. |

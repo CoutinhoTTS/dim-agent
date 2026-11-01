@@ -149,6 +149,11 @@ export function readMcpConfiguration(value: unknown): McpConfiguration {
   const oauth = source.oauth === null ? undefined : object(source.oauth)
   return { type, endpoint: string(source.endpoint), headerNames: array(source.headerNames, string), authConfigured: boolean(source.authConfigured), oauthConfigured: boolean(source.oauthConfigured), oauth: oauth === undefined ? undefined : { clientId: optionalString(oauth.clientId), callbackPort: oauth.callbackPort === null ? undefined : number(oauth.callbackPort), scopes: optionalString(oauth.scopes), metadataConfigured: boolean(oauth.metadataConfigured) } }
 }
+export type McpEditableEntry = { revision: string | undefined; enabled: boolean; configuration: McpConfiguration }
+export function readMcpEditableEntry(value: unknown): McpEditableEntry {
+  const source = object(value)
+  return { revision: optionalString(source.revision), enabled: boolean(source.enabled), configuration: readMcpConfiguration(source.configuration) }
+}
 export type McpTool = { name: string; description: string | undefined }
 function readMcpTool(value: unknown): McpTool {
   const source = object(value)
@@ -196,6 +201,12 @@ export function readExecutionSettings(value: unknown): ExecutionSettings {
   const source = object(value)
   const document = object(source.document)
   return { revision: string(source.revision), sandbox: boolean(document.sandbox), network: boolean(document.network) }
+}
+
+export type SandboxBackend = { available: true } | { available: false; reason: string }
+export function readSandboxBackend(value: unknown): SandboxBackend {
+  const source = object(value)
+  return boolean(source.available) ? { available: true } : { available: false, reason: string(source.reason) }
 }
 
 export type ModalityModel = { id: string; name: string; vision: boolean; toolCalling: boolean; modalities: string[] }
