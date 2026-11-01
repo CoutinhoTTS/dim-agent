@@ -21,7 +21,7 @@ use rutis_loader::Loader;
 use rutis_loader::edit::InstanceResult;
 use rutis_loader::resolve::Build;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::{Component, Path},
     sync::{
         Arc, Mutex, OnceLock,
@@ -597,7 +597,7 @@ impl AgentIndex {
             .contains_key(agent_id)
     }
     /// See [`Inner::closed`].
-    fn closed(&self, id: &str) -> bool {
+    pub(crate) fn closed(&self, id: &str) -> bool {
         self.directory.inner.lock().expect("agent index").closed(id)
     }
     pub(crate) fn session_available(&self, id: &str) -> bool {
@@ -909,6 +909,7 @@ impl AgentIndex {
         request: crate::protocol::Catalog,
         agent: Option<String>,
         version: u32,
+        include_closed: bool,
         cancel: CancellationToken,
     ) -> dim_agent_runtime::Result<crate::protocol::CatalogResult> {
         let store = self
@@ -920,7 +921,7 @@ impl AgentIndex {
             .into_iter()
             .map(|host| host.agent_id.clone())
             .collect();
-        let closed = self
+        let closed: HashSet<String> = self
             .directory
             .inner
             .lock()
@@ -930,10 +931,16 @@ impl AgentIndex {
             .filter(|(_, slot)| slot.closed.load(Ordering::Acquire))
             .map(|(id, _)| id.clone())
             .collect();
+        let excluded: Vec<String> = if include_closed {
+            Vec::new()
+        } else {
+            closed.iter().cloned().collect()
+        };
         let mut page = store
-            .catalog(request, agent, version, hosts, closed, cancel)
+            .catalog(request, agent, version, hosts, excluded, cancel)
             .await?;
         for summary in &mut page.sessions {
+            summary.closed = closed.contains(&summary.session.session_id);
             if let Some((_, session)) = self.session(&summary.session.session_id) {
                 match session
                     .state("main")

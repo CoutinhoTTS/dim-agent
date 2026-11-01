@@ -99,7 +99,7 @@ pub enum Call {
     Shutdown(Shutdown),
     Create(Create),
     List(SessionList),
-    Summaries(SessionList),
+    Summaries(Summaries),
     Catalog(Catalog),
     CatalogCancel(CatalogCancel),
     Attach(Attach),
@@ -520,6 +520,16 @@ pub struct AgentClose {
 pub struct SessionList {
     #[serde(default, deserialize_with = "optional_non_null")]
     pub agent_id: Option<String>,
+}
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Summaries {
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub agent_id: Option<String>,
+    /// Whether the catalog also lists Sessions this daemon closed, which
+    /// keep their stored rows.
+    #[serde(default)]
+    pub include_closed: bool,
 }
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1078,6 +1088,9 @@ pub struct SessionSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
     pub updated_at: u64,
+    /// Whether this daemon closed the Session; its rows stay stored, and
+    /// only a read that asked for closed Sessions lists it.
+    pub closed: bool,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
