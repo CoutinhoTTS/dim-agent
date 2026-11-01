@@ -30714,6 +30714,7 @@
         "path crate::model::session::AccountTarget",
         "path crate::model::session::Area",
         "path crate::model::session::GrantRequest",
+        "path crate::model::session::ManagementAction",
         "path crate::model::session::ManagementRequest",
         "path crate::model::session::OauthStart",
         "path crate::model::session::PluginAction",
@@ -36742,6 +36743,14 @@
     {
       "module": "dim_cli::ui::progress",
       "path": "char::is_ascii_digit"
+    },
+    {
+      "module": "dim_cli::ui::prompts",
+      "path": "ManagementAction::Add"
+    },
+    {
+      "module": "dim_cli::ui::prompts",
+      "path": "ManagementAction::Save"
     },
     {
       "module": "dim_cli::ui::providers_panel",

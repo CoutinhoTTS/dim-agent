@@ -422,6 +422,11 @@ adapter and the methods its kinds call, and names here the kinds it adds.
 An entry of an area whose documents are per entry offers edit for its own document: the Save
 action then carries the entry's id, and the adapter keeps the revision it read with the draft.
 
+A kept draft belongs to the write target it was taken for: the area's document, one entry's
+document, or a create. The edit key of a target reopens only that target's kept draft, at the
+revision its text came from; another target's edit opens its own document and leaves the kept
+draft where it is, and only the reply to a draft's own write settles that draft.
+
 ### Writes
 
 Writes follow [Execution settings](#execution-settings):

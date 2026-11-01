@@ -1178,6 +1178,121 @@ fn tui_scheduled_panel_keeps_the_users_text_when_a_create_is_refused() {
     }
 }
 
+/// A refused edit keeps its text for its own job: editing another job after
+/// the refusal opens that job's document, and coming back reopens the kept
+/// text at the revision it was read at.
+#[test]
+fn tui_scheduled_panel_keeps_a_refused_edit_for_its_own_job() {
+    let home = Home::new();
+    let seen = home.0.join("seen.log");
+    let script = editor(
+        &home,
+        "editor.sh",
+        &format!(
+            "cat \"$1\" >> \"{0}\"\n\
+             printf '\\n---\\n' >> \"{0}\"\n\
+             case \"$(cat \"$1\")\" in\n\
+             *'\"name\": \"release\"'*)\n\
+               printf '%s' '{{\"cwd\":\"/workspace\",\"enabled\":false,\"max_run_minutes\":60,\"mode\":\"create\",\"name\":\"release\",\"prompt\":\"Release edited.\",\"schedule\":{{\"every_minutes\":60}}}}' > \"$1\" ;;\n\
+             *'\"prompt\":\"Broken\"'*)\n\
+               printf '%s' '{{\"cwd\":\"/workspace\",\"enabled\":true,\"max_run_minutes\":60,\"mode\":\"create\",\"name\":\"nightly\",\"prompt\":\"Fixed.\",\"schedule\":{{\"every_minutes\":60}}}}' > \"$1\" ;;\n\
+             *)\n\
+               printf '%s' '{{\"cwd\":\"/workspace\",\"enabled\":true,\"max_run_minutes\":60,\"mode\":\"create\",\"name\":\"nightly\",\"prompt\":\"Broken\",\"schedule\":{{\"cron\":\"not a cron\"}}}}' > \"$1\" ;;\n\
+             esac\n",
+            seen.display()
+        ),
+    );
+    let (shown, wait_shown) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        for _ in 0..2 {
+            let request = wire.read_any();
+            match request["method"].as_str() {
+                Some("account.providers") => wire.reply(&request, json!([])),
+                Some("session.context.usage") => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                    "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+                method => panic!("unexpected request {method:?}"),
+            }
+        }
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
+        // Ctrl+E on the first job: the owner refuses the invalid cron.
+        let request = wire.read("schedule.save");
+        assert_eq!(request["params"]["revision"], 3);
+        assert_eq!(request["params"]["job"]["id"], "job-1");
+        assert_eq!(
+            request["params"]["job"]["schedule"],
+            json!({"cron": "not a cron"})
+        );
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"Invalid cron expression or time zone",
+            "data":{"appError":"schedule_invalid"}}}));
+        // Ctrl+E on the second job: a fresh document for that job, written
+        // with its own id and revision.
+        let request = wire.read("schedule.save");
+        assert_eq!(request["params"]["job"]["id"], "job-2");
+        assert_eq!(request["params"]["revision"], 7);
+        assert_eq!(request["params"]["job"]["prompt"], "Release edited.");
+        wire.reply(&request, json!({"job": job("job-2", "release", 8, false, Value::Null)}));
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
+        // Back on the first job: its kept text reopens at its own revision.
+        let request = wire.read("schedule.save");
+        assert_eq!(request["params"]["job"]["id"], "job-1");
+        assert_eq!(request["params"]["revision"], 3);
+        assert_eq!(request["params"]["job"]["prompt"], "Fixed.");
+        wire.reply(&request, json!({"job": job("job-1", "nightly", 4, true, Value::Null)}));
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(edit_command(&home, &script, false));
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/scheduled\r");
+    terminal.until("every 60 minutes");
+    terminal.raw(b"\x05");
+    terminal.until("Invalid cron expression or time zone");
+    terminal.until("kept in");
+    // The second job's edit is its own document, not the kept text.
+    terminal.raw(b"\x1b[B");
+    terminal.raw(b"\x05");
+    terminal.until("Saved.");
+    // The first job's edit opens the text the owner refused.
+    terminal.raw(b"\x1b[A");
+    terminal.raw(b"\x05");
+    terminal.until("Saved.");
+    let log = fs::read_to_string(&seen).unwrap();
+    let runs: Vec<&str> = log.split("---\n").collect();
+    assert!(
+        runs[1].contains("\"name\": \"release\""),
+        "the second edit opened the second job's document: {log}"
+    );
+    assert!(
+        runs[2].contains("\"prompt\":\"Broken\""),
+        "the third edit reopened the refused text: {log}"
+    );
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
 /// A daemon without the Scheduler's methods leaves the panel open on the
 /// unsupported-daemon sentence rather than an empty list.
 #[test]
