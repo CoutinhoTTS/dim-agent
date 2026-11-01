@@ -17,6 +17,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Hooks" => "鉤子",
         "invalid" => "無效",
         "Saved." => "已儲存。",
+        "Saved {name}." => "已儲存 {name}。",
         "No change." => "沒有變更。",
         "Your text is kept in {path}." => "你的內容保留在 {path}。",
         "The user's own document; always in effect." => "使用者自己的文件；始終生效。",
@@ -37,10 +38,19 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Added." => "已新增。",
         "Removed {name}." => "已刪除 {name}。",
         "Ran {name}." => "已執行 {name}。",
-        "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
-            "使用者文件在讀取後已被修改；這次沒有寫入。下次編輯會開啟目前文件。"
+        "The user document changed since it was read; nothing was written." => {
+            "使用者文件在讀取後已被修改；這次沒有寫入。"
         }
+        "The job changed since it was read; nothing was written." => {
+            "工作在讀取後已被修改；這次沒有寫入。"
+        }
+        "The jobs changed since they were read; nothing was written." => {
+            "工作在讀取後已被修改；這次沒有寫入。"
+        }
+        "Your next edit opens the current document." => "下次編輯會開啟目前文件。",
+        "Your next add reopens your text." => "下次新增會重新開啟你的文字。",
         "Scheduler" => "排程器",
+        "jobs" => "工作",
         "Added {name}." => "已新增 {name}。",
         "Run {name}: {outcome}." => "已執行 {name}：{outcome}。",
         "Recent runs of {name}" => "{name} 的最近執行",
@@ -52,33 +62,27 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "at {instant}" => "於 {instant}",
         "cron {expression}" => "cron {expression}",
         "cron {expression} in {zone}" => "cron {expression}（{zone}）",
-        "The job changed since it was read; nothing was written. Your next edit opens the current job." => {
-            "工作在讀取後已被修改；這次沒有寫入。下次編輯會開啟目前工作。"
-        }
-        "The jobs changed since they were read; nothing was written. Your next add opens your text again." => {
-            "工作在讀取後已被修改；這次沒有寫入。下次新增會重新開啟你的文字。"
-        }
         "The job changed since it was read; nothing was removed." => {
             "工作在讀取後已被修改；這次沒有刪除。"
         }
         "The Scheduler has no area document." => "排程器沒有領域文件。",
         "No scheduled job has that id." => "沒有該 id 的排程工作。",
+        "This daemon cannot manage {area}." => "無法管理{area}。",
+        "The document deleted {field}, which the owner cannot clear; nothing was written." => {
+            "文件刪除了 {field}，擁有者無法清除它；本次沒有寫入。"
+        }
+        "The document changes no field; nothing was written." => {
+            "文件沒有變更任何欄位；本次沒有寫入。"
+        }
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "此工作區的鉤子設定已在讀取後變更；這次沒有寫入。"
         }
         "Workflow" => "工作流程",
-        "Saved {name}." => "已儲存 {name}。",
         "Saved {name}. It stays disabled until you enable it." => {
             "已儲存 {name}。在你啟用它之前，它保持停用。"
         }
         "The definitions changed since they were read; nothing was written." => {
             "定義在讀取後已被修改；本次沒有寫入。"
-        }
-        "The definition changed since it was read; nothing was written. Your next edit opens the current definition." => {
-            "定義在讀取後已被修改；本次沒有寫入。下次編輯會開啟目前定義。"
-        }
-        "The definitions changed since they were read; nothing was written. Your next add opens your text again." => {
-            "定義在讀取後已被修改；本次沒有寫入。下次新增會重新開啟你的文字。"
         }
         "A definition's name is its key; add it to save it under another name." => {
             "定義的名稱就是它的鍵；要用另一個名稱儲存，請新增它。"

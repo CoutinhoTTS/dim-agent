@@ -17,6 +17,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Hooks" => "Hooks",
         "invalid" => "ungültig",
         "Saved." => "Gespeichert.",
+        "Saved {name}." => "{name} gespeichert.",
         "No change." => "Keine Änderung.",
         "Your text is kept in {path}." => "Dein Text bleibt in {path} erhalten.",
         "The user's own document; always in effect." => {
@@ -43,10 +44,21 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Added." => "Hinzugefügt.",
         "Removed {name}." => "{name} entfernt.",
         "Ran {name}." => "{name} ausgeführt.",
-        "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
-            "Das Benutzerdokument wurde seit dem Lesen geändert; es wurde nichts geschrieben. Deine nächste Bearbeitung öffnet das aktuelle Dokument."
+        "The user document changed since it was read; nothing was written." => {
+            "Das Benutzerdokument wurde seit dem Lesen geändert; es wurde nichts geschrieben."
         }
+        "The job changed since it was read; nothing was written." => {
+            "Der Job wurde seit dem Lesen geändert; es wurde nichts geschrieben."
+        }
+        "The jobs changed since they were read; nothing was written." => {
+            "Die Jobs wurden seit dem Lesen geändert; es wurde nichts geschrieben."
+        }
+        "Your next edit opens the current document." => {
+            "Deine nächste Bearbeitung öffnet das aktuelle Dokument."
+        }
+        "Your next add reopens your text." => "Dein nächstes Hinzufügen öffnet deinen Text erneut.",
         "Scheduler" => "Scheduler",
+        "jobs" => "Jobs",
         "Added {name}." => "{name} hinzugefügt.",
         "Run {name}: {outcome}." => "{name} ausgeführt: {outcome}.",
         "Recent runs of {name}" => "Letzte Läufe von {name}",
@@ -58,33 +70,27 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "at {instant}" => "um {instant}",
         "cron {expression}" => "cron {expression}",
         "cron {expression} in {zone}" => "cron {expression} in {zone}",
-        "The job changed since it was read; nothing was written. Your next edit opens the current job." => {
-            "Der Job wurde seit dem Lesen geändert; es wurde nichts geschrieben. Deine nächste Bearbeitung öffnet den aktuellen Job."
-        }
-        "The jobs changed since they were read; nothing was written. Your next add opens your text again." => {
-            "Die Jobs wurden seit dem Lesen geändert; es wurde nichts geschrieben. Dein nächstes Hinzufügen öffnet deinen Text erneut."
-        }
         "The job changed since it was read; nothing was removed." => {
             "Der Job wurde seit dem Lesen geändert; es wurde nichts entfernt."
         }
         "The Scheduler has no area document." => "Der Scheduler hat kein Bereichsdokument.",
         "No scheduled job has that id." => "Kein geplanter Job hat diese ID.",
+        "This daemon cannot manage {area}." => "Kann {area} nicht verwalten.",
+        "The document deleted {field}, which the owner cannot clear; nothing was written." => {
+            "Das Dokument hat {field} entfernt, was der Eigentümer nicht leeren kann; es wurde nichts geschrieben."
+        }
+        "The document changes no field; nothing was written." => {
+            "Das Dokument ändert kein Feld; es wurde nichts geschrieben."
+        }
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "Die Hook-Einstellungen dieses Arbeitsbereichs wurden seit dem Lesen geändert; es wurde nichts geschrieben."
         }
         "Workflow" => "Workflow",
-        "Saved {name}." => "{name} gespeichert.",
         "Saved {name}. It stays disabled until you enable it." => {
             "{name} gespeichert. Es bleibt deaktiviert, bis du es aktivierst."
         }
         "The definitions changed since they were read; nothing was written." => {
             "Die Definitionen wurden seit dem Lesen geändert; es wurde nichts geschrieben."
-        }
-        "The definition changed since it was read; nothing was written. Your next edit opens the current definition." => {
-            "Die Definition wurde seit dem Lesen geändert; es wurde nichts geschrieben. Deine nächste Bearbeitung öffnet die aktuelle Definition."
-        }
-        "The definitions changed since they were read; nothing was written. Your next add opens your text again." => {
-            "Die Definitionen wurden seit dem Lesen geändert; es wurde nichts geschrieben. Dein nächstes Hinzufügen öffnet deinen Text erneut."
         }
         "A definition's name is its key; add it to save it under another name." => {
             "Der Name einer Definition ist ihr Schlüssel; füge sie hinzu, um sie unter einem anderen Namen zu speichern."

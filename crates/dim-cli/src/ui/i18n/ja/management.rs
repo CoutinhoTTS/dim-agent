@@ -17,6 +17,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Hooks" => "フック",
         "invalid" => "無効",
         "Saved." => "保存しました。",
+        "Saved {name}." => "{name} を保存しました。",
         "No change." => "変更はありません。",
         "Your text is kept in {path}." => "入力した内容は {path} に残しています。",
         "The user's own document; always in effect." => {
@@ -43,10 +44,21 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Added." => "作成しました。",
         "Removed {name}." => "{name} を削除しました。",
         "Ran {name}." => "{name} を実行しました。",
-        "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
-            "ユーザードキュメントは読み取り後に変更されています。今回は何も書き込んでいません。次回の編集では現在のドキュメントを開きます。"
+        "The user document changed since it was read; nothing was written." => {
+            "ユーザードキュメントは読み取り後に変更されています。今回は何も書き込んでいません。"
         }
+        "The job changed since it was read; nothing was written." => {
+            "ジョブは読み取り後に変更されています。今回は何も書き込んでいません。"
+        }
+        "The jobs changed since they were read; nothing was written." => {
+            "ジョブは読み取り後に変更されています。今回は何も書き込んでいません。"
+        }
+        "Your next edit opens the current document." => {
+            "次回の編集では現在のドキュメントを開きます。"
+        }
+        "Your next add reopens your text." => "次回の作成では入力した内容を開きます。",
         "Scheduler" => "スケジューラー",
+        "jobs" => "ジョブ",
         "Added {name}." => "{name} を作成しました。",
         "Run {name}: {outcome}." => "{name} を実行しました：{outcome}。",
         "Recent runs of {name}" => "{name} の最近の実行",
@@ -58,33 +70,27 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "at {instant}" => "{instant} に",
         "cron {expression}" => "cron {expression}",
         "cron {expression} in {zone}" => "cron {expression}（{zone}）",
-        "The job changed since it was read; nothing was written. Your next edit opens the current job." => {
-            "ジョブは読み取り後に変更されています。今回は何も書き込んでいません。次回の編集では現在のジョブを開きます。"
-        }
-        "The jobs changed since they were read; nothing was written. Your next add opens your text again." => {
-            "ジョブは読み取り後に変更されています。今回は何も書き込んでいません。次回の作成では入力した内容を開きます。"
-        }
         "The job changed since it was read; nothing was removed." => {
             "ジョブは読み取り後に変更されています。今回は何も削除していません。"
         }
         "The Scheduler has no area document." => "スケジューラーには領域ドキュメントがありません。",
         "No scheduled job has that id." => "その id のスケジュールジョブはありません。",
+        "This daemon cannot manage {area}." => "{area} を管理できません。",
+        "The document deleted {field}, which the owner cannot clear; nothing was written." => {
+            "ドキュメントから {field} が削除されましたが、所有者は消去できません。何も書き込みませんでした。"
+        }
+        "The document changes no field; nothing was written." => {
+            "ドキュメントはどのフィールドも変更していません。何も書き込みませんでした。"
+        }
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "このワークスペースのフック設定は読み取り後に変更されています。今回は何も書き込んでいません。"
         }
         "Workflow" => "ワークフロー",
-        "Saved {name}." => "{name} を保存しました。",
         "Saved {name}. It stays disabled until you enable it." => {
             "{name} を保存しました。有効にするまで無効のままです。"
         }
         "The definitions changed since they were read; nothing was written." => {
             "定義は読み取り後に変更されました。何も書き込まれていません。"
-        }
-        "The definition changed since it was read; nothing was written. Your next edit opens the current definition." => {
-            "定義は読み取り後に変更されました。何も書き込まれていません。次回の編集では現在の定義が開きます。"
-        }
-        "The definitions changed since they were read; nothing was written. Your next add opens your text again." => {
-            "定義は読み取り後に変更されました。何も書き込まれていません。次回の追加ではあなたのテキストが再び開きます。"
         }
         "A definition's name is its key; add it to save it under another name." => {
             "定義の名前はそのキーです。別の名前で保存するには追加してください。"

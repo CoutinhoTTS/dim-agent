@@ -25,14 +25,18 @@ use crate::model::session::{
     ActionKind, Area, ManagementAction, ManagementEntry, ManagementGroup, ManagementRefusal,
     ManagementRequest, ManagementResult,
 };
+use crate::ui::i18n::{t, tf};
 
-/// One area's management methods: the read that reports the area, and the
-/// methods behind each kind it has.
+/// One area's management methods: the read that reports the area, every
+/// method behind each kind it has, and the name the area goes by.
 struct Methods {
     catalog: &'static str,
     /// Each kind and every method it calls. A kind is offered only when all
     /// of them are advertised.
     kinds: &'static [(ActionKind, &'static [&'static str])],
+    /// The area's display label, as its panel's title and every sentence
+    /// that names the area use it.
+    label: &'static str,
 }
 
 impl Methods {
@@ -46,6 +50,7 @@ impl Methods {
 
 const SKILLS: Methods = Methods {
     catalog: "skills.catalog",
+    label: "Skills",
     kinds: &[
         (ActionKind::Toggle, &["skills.set_enabled"]),
         (ActionKind::Reload, &["skills.refresh"]),
@@ -54,6 +59,7 @@ const SKILLS: Methods = Methods {
 
 const HOOKS: Methods = Methods {
     catalog: "hooks.catalog",
+    label: "Hooks",
     kinds: &[
         (ActionKind::Toggle, &["hooks.set_enabled"]),
         (ActionKind::Edit, &["hooks.save"]),
@@ -64,6 +70,7 @@ const HOOKS: Methods = Methods {
 
 const WORKFLOW: Methods = Methods {
     catalog: "workflow.list",
+    label: "Workflow",
     kinds: &[
         (ActionKind::Toggle, &["settings.read", "settings.update"]),
         (ActionKind::Edit, &["settings.read", "workflow.save"]),
@@ -76,6 +83,7 @@ const WORKFLOW: Methods = Methods {
 
 const SCHEDULED: Methods = Methods {
     catalog: "schedule.list",
+    label: "Scheduler",
     kinds: &[
         (ActionKind::Toggle, &["schedule.set_enabled"]),
         (ActionKind::Edit, &["schedule.save"]),
@@ -179,12 +187,40 @@ pub fn supports_kind(client: &Client, area: Area, kind: ActionKind) -> Result<()
     }
 }
 
+/// The unsupported-daemon sentence: the area's own label, translated where
+/// it is used, so the shared module names no area.
 pub(crate) fn unsupported(area: Area) -> String {
-    match area {
-        // The Scheduler is one owner by name, not a plural noun.
-        Area::Scheduled => "This daemon cannot manage the Scheduler.".to_owned(),
-        Area::Workflow => "This daemon cannot manage workflow definitions.".to_owned(),
-        Area::Skills | Area::Hooks => format!("This daemon cannot manage {}.", area.name()),
+    let methods = methods_of(area);
+    tf(
+        "This daemon cannot manage {area}.",
+        &[("area", t(methods.label))],
+    )
+}
+
+/// The line an applied action reports, from its request alone. It names the
+/// id, which is what a surface without the area's view has; an adapter with
+/// a better line — a create's name, a run's answer — gives its own.
+pub fn applied_line(request: &ManagementRequest) -> String {
+    match &request.action {
+        ManagementAction::Toggle { id, enabled } => tf(
+            if *enabled {
+                "Enabled {name}."
+            } else {
+                "Disabled {name}."
+            },
+            &[("name", id)],
+        ),
+        ManagementAction::Save { id: Some(id), .. } => tf("Saved {name}.", &[("name", id)]),
+        ManagementAction::Save { id: None, .. } => t("Saved.").to_owned(),
+        ManagementAction::Remove { id } => tf("Removed {name}.", &[("name", id)]),
+        ManagementAction::Reload => t("Reloaded.").to_owned(),
+        ManagementAction::Add { .. } => t("Added.").to_owned(),
+        ManagementAction::Run { id, .. } => tf("Ran {name}.", &[("name", id)]),
+        // A read applies nothing: the adapters answer with one only after an
+        // action of the kinds above.
+        ManagementAction::List | ManagementAction::Inspect { .. } => {
+            unreachable!("a read does not report an applied action")
+        }
     }
 }
 
@@ -214,7 +250,7 @@ pub async fn apply(
                 note: None,
             },
             skills::Outcome::ReadFailed(error) => ManagementResult::Applied {
-                note: None,
+                note: applied_line(request),
                 read_error: error,
             },
             skills::Outcome::Refused(message) => {
@@ -227,7 +263,7 @@ pub async fn apply(
                 note: None,
             },
             Err(hooks::Failure::ReadFailed(error)) => ManagementResult::Applied {
-                note: None,
+                note: applied_line(request),
                 read_error: error,
             },
             Err(hooks::Failure::Refused(message)) => {
@@ -247,7 +283,7 @@ pub async fn apply(
             },
             Ok(workflow::Answer::Detail(detail)) => ManagementResult::Detail(detail),
             Err(workflow::Failure::ReadFailed { note, error }) => ManagementResult::Applied {
-                note,
+                note: note.unwrap_or_else(|| applied_line(request)),
                 read_error: error,
             },
             Err(workflow::Failure::Refused(message)) => {
@@ -267,7 +303,7 @@ pub async fn apply(
             },
             Ok(scheduler::Answer::Detail(detail)) => ManagementResult::Detail(detail),
             Err(scheduler::Failure::ReadFailed { note, error }) => ManagementResult::Applied {
-                note,
+                note: note.unwrap_or_else(|| applied_line(request)),
                 read_error: error,
             },
             Err(scheduler::Failure::Refused(message)) => {

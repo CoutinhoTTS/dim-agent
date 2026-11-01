@@ -5,7 +5,7 @@ use std::cell::Cell;
 
 use crate::ui::i18n::t;
 use crate::ui::line_input::LineInput;
-use crate::ui::render::panel::{bordered, follow_window, key_hints, wrap_words};
+use crate::ui::render::panel::{bordered, follow_window, key_hints, visible_width, wrap_words};
 use crate::ui::rows::{Columns, Kind, Row, panel_row, title_plain};
 use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
 use crate::ui::text::truncate_cells;
@@ -318,6 +318,17 @@ impl ListPanel {
         let inner = width.saturating_sub(4).max(1);
         let shown = self.shown();
         let query_rows = if self.filterable { 3 } else { 0 };
+        // A hint the bottom border cannot hold is drawn as rows above a plain
+        // bottom border, so no key is ever lost to the width. The rows take
+        // the list's space like the footer's, but the list keeps one row of
+        // its own: a panel too short for both shows no hint rather than no
+        // list.
+        let hint = hint_rows(&self.hint, width)
+            .filter(|hint| hint.len() <= rows.saturating_sub(2 + query_rows + footer.len() + 1));
+        let (bottom_hint, hint_rows): (Option<String>, Vec<String>) = match &hint {
+            Some(hint) => (None, hint.iter().map(|row| key_hints(row, p)).collect()),
+            None => (Some(key_hints(&self.hint, p)), Vec::new()),
+        };
         let mut notes = Vec::new();
         for note in &self.notes {
             for line in wrap_words(note, inner.saturating_sub(6).max(1)) {
@@ -328,10 +339,10 @@ impl ListPanel {
                 ));
             }
         }
-        notes.truncate(rows.saturating_sub(3 + query_rows + shown.len().min(3)));
+        notes.truncate(rows.saturating_sub(3 + query_rows + shown.len().min(3) + hint_rows.len()));
         let note_rows = notes.len() + usize::from(!notes.is_empty());
         let page = rows
-            .saturating_sub(2 + query_rows + note_rows + footer.len())
+            .saturating_sub(2 + query_rows + note_rows + footer.len() + hint_rows.len())
             .max(1);
         self.page.set(page);
         let list: Vec<Row> = shown
@@ -411,15 +422,40 @@ impl ListPanel {
             content.extend(notes);
         }
         content.extend_from_slice(footer);
+        content.extend(hint_rows);
         bordered(
             &content,
             width,
             None,
             &p.border,
             Some(&title_plain(t(self.title), inner, p)),
-            Some(&key_hints(&self.hint, p)),
+            bottom_hint.as_deref(),
         )
     }
+}
+
+/// The hint as rows above the bottom border, when the border cannot hold it:
+/// its ` · ` parts joined into rows of the panel's content width, so a part
+/// never splits. A part wider than a row is cut with `…`.
+fn hint_rows(hint: &str, width: usize) -> Option<Vec<String>> {
+    // `bordered` puts a hint on the bottom border only while a dash still
+    // fits on either side of it.
+    if visible_width(hint) + 6 <= width {
+        return None;
+    }
+    let room = width.saturating_sub(4).max(1);
+    let mut rows: Vec<String> = Vec::new();
+    for part in hint.split(" · ") {
+        let part = truncate_cells(part, room);
+        match rows.last_mut() {
+            Some(row) if visible_width(row) + 3 + visible_width(&part) <= room => {
+                row.push_str(" · ");
+                row.push_str(&part);
+            }
+            _ => rows.push(part),
+        }
+    }
+    Some(rows)
 }
 
 #[cfg(test)]

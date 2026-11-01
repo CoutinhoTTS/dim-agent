@@ -55,6 +55,14 @@ fn jobs(enabled: bool) -> Value {
     ]})
 }
 
+/// The jobs after another writer saved job-1: its revision moved on.
+fn newer_jobs() -> Value {
+    json!({"jobs": [
+        job("job-1", "nightly", 4, true, run("completed", "", "2026-11-01T09:00:12.000Z")),
+        job("job-2", "release", 7, false, Value::Null),
+    ]})
+}
+
 #[test]
 fn scheduled_list_prints_the_jobs_and_their_runs() {
     let home = Home::new();
@@ -135,10 +143,7 @@ fn scheduled_enable_and_disable_send_the_job() {
         );
         assert_eq!(
             String::from_utf8(output.stdout).unwrap(),
-            format!(
-                "{} nightly.\n",
-                if enabled { "Enabled" } else { "Disabled" }
-            )
+            format!("{} job-1.\n", if enabled { "Enabled" } else { "Disabled" })
         );
         fs::remove_file(home.0.join("rust/daemon.sock")).unwrap();
     }
@@ -200,6 +205,33 @@ fn scheduled_remove_reports_a_conflict() {
         stderr.contains("The job changed since it was read; nothing was removed."),
         "{stderr}"
     );
+}
+
+/// An interactive edit needs a terminal; the error names the twin, which for
+/// a job takes the id and a path.
+#[test]
+fn scheduled_edit_refuses_stdin_that_is_not_a_terminal() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let output = home
+        .command()
+        .args(["scheduled", "edit", "job-1"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("scheduled edit needs a terminal"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("scheduled set ID PATH"), "{stderr}");
 }
 
 #[test]
@@ -313,7 +345,7 @@ fn scheduled_add_keeps_the_owners_answer_when_the_read_back_fails() {
 }
 
 /// A remove the daemon accepted exits 0 when the read that follows fails,
-/// with the read error on stderr and nothing on stdout.
+/// with the action's line on stdout and the read error on stderr.
 #[test]
 fn scheduled_remove_exits_zero_when_the_read_back_fails() {
     let home = Home::new();
@@ -331,11 +363,54 @@ fn scheduled_remove_exits_zero_when_the_read_back_fails() {
         .unwrap();
     daemon.join().unwrap();
     assert_eq!(output.status.code(), Some(0));
-    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Removed job-1.\n"
+    );
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
         "the scheduler is unavailable (RPC -32000)\n"
     );
+}
+
+/// An enable or a disable the daemon accepted reports its line even when the
+/// read that follows fails: the line names the id, the read error goes to
+/// stderr, and the exit stays 0.
+#[test]
+fn scheduled_enable_and_disable_report_the_line_when_the_read_back_fails() {
+    for enabled in [true, false] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
+            hello(wire);
+            let request = wire.read("schedule.set_enabled");
+            assert_eq!(
+                request["params"],
+                json!({"job_id": "job-1", "enabled": enabled})
+            );
+            wire.reply(&request, json!({"job": {}}));
+            let request = wire.read("schedule.list");
+            read_failed(wire, &request);
+        });
+        let output = home
+            .command()
+            .args([
+                "scheduled",
+                if enabled { "enable" } else { "disable" },
+                "job-1",
+            ])
+            .output()
+            .unwrap();
+        daemon.join().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("{} job-1.\n", if enabled { "Enabled" } else { "Disabled" })
+        );
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            "the scheduler is unavailable (RPC -32000)\n"
+        );
+    }
 }
 
 #[test]
@@ -497,10 +572,6 @@ fn scheduled_prints_owner_text_without_escape_sequences() {
 
 /// The document `set` writes for a job: the fields `schedule.save` takes, as
 /// the job reported them.
-fn edited(document: Value) -> Value {
-    json!({"job": document, "revision": 3})
-}
-
 fn edited_document() -> Value {
     json!({
         "cwd": "/workspace",
@@ -518,11 +589,17 @@ fn scheduled_set_writes_a_job_with_the_revision_read_before_it() {
     let home = Home::new();
     let path = home.0.join("job.json");
     fs::write(&path, serde_json::to_string(&edited_document()).unwrap()).unwrap();
-    let mut document = edited_document();
-    document["id"] = json!("job-1");
-    let expected = edited(document);
+    // Only the member the draft changed travels, with the id and the
+    // revision.
+    let expected = json!({
+        "job": {"id": "job-1", "prompt": "Summarize the day in one line."},
+        "revision": 3,
+    });
     let daemon = home.daemon(move |wire| {
         hello(wire);
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
+        // The adapter reads the job again before it diffs the draft.
         let request = wire.read("schedule.list");
         wire.reply(&request, jobs(true));
         let request = wire.read("schedule.save");
@@ -546,10 +623,147 @@ fn scheduled_set_writes_a_job_with_the_revision_read_before_it() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap(),
-        "Saved the job.\n"
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "Saved job-1.\n");
+}
+
+/// A job's editable members as `schedule.list` reports them: the base of a
+/// draft that changes one of them.
+fn job_document() -> Value {
+    json!({
+        "cwd": "/workspace",
+        "enabled": true,
+        "max_run_minutes": 60,
+        "mode": "create",
+        "name": "nightly",
+        "prompt": "Summarize the day.",
+        "schedule": {"every_minutes": 60},
+    })
+}
+
+/// A member the draft deleted cannot be cleared through the owner's patch:
+/// the write is refused before it is sent, and the refusal names the member.
+#[test]
+fn scheduled_set_refuses_a_deleted_member_the_owner_cannot_clear() {
+    let home = Home::new();
+    let path = home.0.join("job.json");
+    // The stored job has a policy; the draft leaves it out.
+    let listed = || {
+        let mut job = job("job-1", "nightly", 3, true, Value::Null);
+        job["policy"] = json!("read-only");
+        json!({"jobs": [job]})
+    };
+    fs::write(&path, serde_json::to_string(&job_document()).unwrap()).unwrap();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("schedule.list");
+        wire.reply(&request, listed());
+        // The adapter reads the job again and refuses: no save is sent.
+        let request = wire.read("schedule.list");
+        wire.reply(&request, listed());
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let output = home
+        .command()
+        .args(["scheduled", "set", "job-1"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("The document deleted policy"), "{stderr}");
+    assert!(stderr.contains("Your text is kept in"), "{stderr}");
+}
+
+/// Setting a reuse job's mode to create clears its Session: the draft
+/// deleted it, the owner clears it itself, and the patch carries no
+/// session_id.
+#[test]
+fn scheduled_set_sends_no_session_id_when_the_mode_becomes_create() {
+    let home = Home::new();
+    let path = home.0.join("job.json");
+    let listed = || {
+        let mut job = job("job-1", "nightly", 3, true, Value::Null);
+        job["mode"] = json!("reuse");
+        job["session_id"] = json!("session-1");
+        json!({"jobs": [job]})
+    };
+    fs::write(&path, serde_json::to_string(&job_document()).unwrap()).unwrap();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("schedule.list");
+        wire.reply(&request, listed());
+        let request = wire.read("schedule.list");
+        wire.reply(&request, listed());
+        let request = wire.read("schedule.save");
+        assert_eq!(
+            request["params"],
+            json!({"job": {"id": "job-1", "mode": "create"}, "revision": 3})
+        );
+        wire.reply(
+            &request,
+            json!({"job": job("job-1", "nightly", 4, true, Value::Null)}),
+        );
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
+    });
+    let output = home
+        .command()
+        .args(["scheduled", "set", "job-1"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "Saved job-1.\n");
+}
+
+/// A stale revision on `set` states the owner's fact and where the text is,
+/// and nothing a surface adds: the panel's next-edit sentence belongs to
+/// the panel, not to the command line.
+#[test]
+fn scheduled_set_reports_a_conflict_without_the_panels_sentences() {
+    let home = Home::new();
+    let path = home.0.join("job.json");
+    fs::write(&path, serde_json::to_string(&edited_document()).unwrap()).unwrap();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
+        let request = wire.read("schedule.save");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"The job changed; read it before updating",
+            "data":{"appError":"schedule_conflict"}}}));
+        // The conflict wrote nothing, so the jobs are read again.
+        let request = wire.read("schedule.list");
+        wire.reply(&request, newer_jobs());
+    });
+    let output = home
+        .command()
+        .args(["scheduled", "set", "job-1"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("The job changed since it was read; nothing was written."),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Your text is kept in"), "{stderr}");
+    assert!(!stderr.contains("Your next edit"), "{stderr}");
+    assert!(!stderr.contains("Your next add"), "{stderr}");
 }
 
 /// `scheduled edit ID` opens the job's own document in the editor and
@@ -564,6 +778,9 @@ fn scheduled_edit_writes_what_the_editor_leaves() {
     );
     let daemon = home.daemon(|wire| {
         hello(wire);
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
+        // The adapter reads the job again before it diffs the draft.
         let request = wire.read("schedule.list");
         wire.reply(&request, jobs(true));
         let request = wire.read("schedule.save");
@@ -587,7 +804,7 @@ fn scheduled_edit_writes_what_the_editor_leaves() {
     daemon.join().unwrap();
     assert!(status.success(), "{}", terminal.transcript);
     assert!(
-        terminal.transcript.contains("Saved the job."),
+        terminal.transcript.contains("Saved job-1."),
         "{}",
         terminal.transcript
     );
@@ -679,8 +896,7 @@ fn scheduled_add_is_refused_before_stdin_is_read() {
     daemon.join().unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("This daemon cannot manage the Scheduler."),
+        String::from_utf8_lossy(&output.stderr).contains("This daemon cannot manage Scheduler."),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -712,8 +928,7 @@ fn scheduled_set_is_refused_before_stdin_is_read() {
     daemon.join().unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("This daemon cannot manage the Scheduler."),
+        String::from_utf8_lossy(&output.stderr).contains("This daemon cannot manage Scheduler."),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -739,7 +954,7 @@ fn scheduled_commands_refuse_a_daemon_that_does_not_advertise_them() {
         assert_eq!(output.status.code(), Some(1), "{args:?}");
         assert!(
             String::from_utf8_lossy(&output.stderr)
-                .contains("This daemon cannot manage the Scheduler."),
+                .contains("This daemon cannot manage Scheduler."),
             "{args:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
@@ -900,7 +1115,10 @@ fn tui_scheduled_panel_edits_and_creates_jobs() {
             wait_shown.recv_timeout(PATIENCE).unwrap();
             let request = wire.read("schedule.list");
             wire.reply(&request, jobs(true));
-            // Ctrl+E writes the job's own document at its revision.
+            // Ctrl+E writes the job's own document at its revision; the
+            // adapter reads the job again before it diffs the draft.
+            let request = wire.read("schedule.list");
+            wire.reply(&request, jobs(true));
             let request = wire.read("schedule.save");
             assert_eq!(request["params"]["revision"], 3);
             assert_eq!(request["params"]["job"]["id"], "job-1");
@@ -994,6 +1212,9 @@ fn tui_scheduled_panel_keeps_the_users_text_when_the_revision_is_stale() {
             wait_shown.recv_timeout(PATIENCE).unwrap();
             let request = wire.read("schedule.list");
             wire.reply(&request, jobs(true));
+            // The adapter reads the job again before it diffs the draft.
+            let request = wire.read("schedule.list");
+            wire.reply(&request, jobs(true));
             let request = wire.read("schedule.save");
             assert_eq!(request["params"]["revision"], 3);
             wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
@@ -1003,12 +1224,11 @@ fn tui_scheduled_panel_keeps_the_users_text_when_the_revision_is_stale() {
             // The conflict writes nothing, so the adapter reads the area
             // again, and the panel moves to the newer revision.
             let request = wire.read("schedule.list");
-            wire.reply(&request, json!({"jobs": [
-                job("job-1", "nightly", 4, true, run("completed", "", "2026-11-01T09:00:12.000Z")),
-                job("job-2", "release", 7, false, Value::Null),
-            ]}));
+            wire.reply(&request, newer_jobs());
             // The next edit opens the stored job at that revision, not the
-            // rejected text.
+            // rejected text, and the adapter reads the job again to diff it.
+            let request = wire.read("schedule.list");
+            wire.reply(&request, newer_jobs());
             let request = wire.read("schedule.save");
             assert_eq!(request["params"]["revision"], 4);
             assert_eq!(request["params"]["job"]["prompt"], "Edited.");
@@ -1108,6 +1328,84 @@ fn tui_scheduled_panel_reports_a_conflict_on_remove() {
     daemon.join().unwrap();
 }
 
+/// At 80 columns the Scheduler's keys wrap above the bottom border, so every
+/// key stays visible, and the remove confirmation for a long name is drawn
+/// whole, in both terminal modes.
+#[test]
+fn tui_scheduled_panel_shows_every_key_and_confirmation_at_80_columns() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (shown, wait_shown) = mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            hello(wire);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history");
+            wire.reply(
+                &history,
+                json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+            );
+            for _ in 0..2 {
+                let request = wire.read_any();
+                match request["method"].as_str() {
+                    Some("account.providers") => wire.reply(&request, json!([])),
+                    Some("session.context.usage") => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                        "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+                    method => panic!("unexpected request {method:?}"),
+                }
+            }
+            wait_shown.recv_timeout(PATIENCE).unwrap();
+            let request = wire.read("schedule.list");
+            wire.reply(
+                &request,
+                json!({"jobs": [
+                    job("job-1", "a job whose name is rather long", 3, true, Value::Null),
+                ]}),
+            );
+            let mut line = String::new();
+            while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+                line.clear();
+            }
+        });
+        let mut command = home.command();
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        sized(&mut command, 80, 24);
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("test / model");
+        shown.send(()).unwrap();
+        terminal.write(b"/scheduled\r");
+        terminal.until("every 60 minutes");
+        // Every key is drawn, wrapped above the border at this width. A key
+        // and its action are painted as separate spans, so each is asserted
+        // on its own; a frame redraws the same hint, so each search starts
+        // anywhere in the transcript.
+        for key in [
+            "Enter", "Ctrl+E", "Ctrl+R", "Ctrl+N", "Ctrl+X", "Ctrl+T", "Tab", "Esc",
+        ] {
+            terminal.until_anywhere(key);
+        }
+        for action in [
+            " toggle", " edit", " reload", " add", " remove", " run", " inspect", " close",
+        ] {
+            terminal.until_anywhere(action);
+        }
+        terminal.raw(b"\x18");
+        terminal.until("a job whose name is rather long? Enter confirm");
+        // Esc cancels the confirmation, a second closes the panel.
+        terminal.raw(b"\x1b");
+        thread::sleep(Duration::from_millis(200));
+        terminal.raw(b"\x1b");
+        thread::sleep(Duration::from_millis(200));
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+    }
+}
+
 /// A create the owner refuses keeps the user's text, and the next Ctrl+N
 /// writes that same text again with no revision, in both terminal modes.
 #[test]
@@ -1178,6 +1476,301 @@ fn tui_scheduled_panel_keeps_the_users_text_when_a_create_is_refused() {
     }
 }
 
+/// A refused edit keeps its text for its own job: editing another job after
+/// the refusal opens that job's document, and coming back reopens the kept
+/// text at the revision it was read at.
+#[test]
+fn tui_scheduled_panel_keeps_a_refused_edit_for_its_own_job() {
+    let home = Home::new();
+    let seen = home.0.join("seen.log");
+    let script = editor(
+        &home,
+        "editor.sh",
+        &format!(
+            "cat \"$1\" >> \"{0}\"\n\
+             printf '\\n---\\n' >> \"{0}\"\n\
+             case \"$(cat \"$1\")\" in\n\
+             *'\"name\": \"release\"'*)\n\
+               printf '%s' '{{\"cwd\":\"/workspace\",\"enabled\":false,\"max_run_minutes\":60,\"mode\":\"create\",\"name\":\"release\",\"prompt\":\"Release edited.\",\"schedule\":{{\"every_minutes\":60}}}}' > \"$1\" ;;\n\
+             *'\"prompt\":\"Broken\"'*)\n\
+               printf '%s' '{{\"cwd\":\"/workspace\",\"enabled\":true,\"max_run_minutes\":60,\"mode\":\"create\",\"name\":\"nightly\",\"prompt\":\"Fixed.\",\"schedule\":{{\"every_minutes\":60}}}}' > \"$1\" ;;\n\
+             *)\n\
+               printf '%s' '{{\"cwd\":\"/workspace\",\"enabled\":true,\"max_run_minutes\":60,\"mode\":\"create\",\"name\":\"nightly\",\"prompt\":\"Broken\",\"schedule\":{{\"cron\":\"not a cron\"}}}}' > \"$1\" ;;\n\
+             esac\n",
+            seen.display()
+        ),
+    );
+    let (shown, wait_shown) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        for _ in 0..2 {
+            let request = wire.read_any();
+            match request["method"].as_str() {
+                Some("account.providers") => wire.reply(&request, json!([])),
+                Some("session.context.usage") => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                    "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+                method => panic!("unexpected request {method:?}"),
+            }
+        }
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
+        // Ctrl+E on the first job: the owner refuses the invalid cron. The
+        // adapter reads the job again before it diffs the draft.
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
+        let request = wire.read("schedule.save");
+        assert_eq!(request["params"]["revision"], 3);
+        assert_eq!(request["params"]["job"]["id"], "job-1");
+        assert_eq!(
+            request["params"]["job"]["schedule"],
+            json!({"cron": "not a cron"})
+        );
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"Invalid cron expression or time zone",
+            "data":{"appError":"schedule_invalid"}}}));
+        // Ctrl+E on the second job: a fresh document for that job, written
+        // with its own id and revision.
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
+        let request = wire.read("schedule.save");
+        assert_eq!(request["params"]["job"]["id"], "job-2");
+        assert_eq!(request["params"]["revision"], 7);
+        assert_eq!(request["params"]["job"]["prompt"], "Release edited.");
+        wire.reply(&request, json!({"job": job("job-2", "release", 8, false, Value::Null)}));
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
+        // Back on the first job: its kept text reopens at its own revision.
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
+        let request = wire.read("schedule.save");
+        assert_eq!(request["params"]["job"]["id"], "job-1");
+        assert_eq!(request["params"]["revision"], 3);
+        assert_eq!(request["params"]["job"]["prompt"], "Fixed.");
+        wire.reply(&request, json!({"job": job("job-1", "nightly", 4, true, Value::Null)}));
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(edit_command(&home, &script, false));
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/scheduled\r");
+    terminal.until("every 60 minutes");
+    terminal.raw(b"\x05");
+    terminal.until("Invalid cron expression or time zone");
+    terminal.until("kept in");
+    // The second job's edit is its own document, not the kept text.
+    terminal.raw(b"\x1b[B");
+    terminal.raw(b"\x05");
+    terminal.until("Saved.");
+    // The first job's edit opens the text the owner refused.
+    terminal.raw(b"\x1b[A");
+    terminal.raw(b"\x05");
+    terminal.until("Saved.");
+    let log = fs::read_to_string(&seen).unwrap();
+    let runs: Vec<&str> = log.split("---\n").collect();
+    assert!(
+        runs[1].contains("\"name\": \"release\""),
+        "the second edit opened the second job's document: {log}"
+    );
+    assert!(
+        runs[2].contains("\"prompt\":\"Broken\""),
+        "the third edit reopened the refused text: {log}"
+    );
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+/// A job the owner named with an escape sequence, a newline and a tab stays
+/// on one line wherever the name is drawn: the command line's columns, the
+/// panel's row and the remove confirmation.
+#[test]
+fn scheduled_draws_a_job_name_on_one_line() {
+    const NAME: &str = "evil\u{1b}[2J\nx\ty";
+    // The command line's columns: one line per job, no escape sequence.
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("schedule.list");
+        wire.reply(
+            &request,
+            json!({"jobs": [job("job-1", NAME, 3, true, Value::Null)]}),
+        );
+    });
+    let output = home.command().args(["scheduled", "list"]).output().unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "job-1\tevil x y\tevery 60 minutes\tenabled\t2026-11-02T09:00:00.000Z\t—\n"
+    );
+    // The panel's row and the confirmation it asks in.
+    let home = Home::new();
+    let (shown, wait_shown) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        for _ in 0..2 {
+            let request = wire.read_any();
+            match request["method"].as_str() {
+                Some("account.providers") => wire.reply(&request, json!([])),
+                Some("session.context.usage") => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                    "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+                method => panic!("unexpected request {method:?}"),
+            }
+        }
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        let request = wire.read("schedule.list");
+        wire.reply(
+            &request,
+            json!({"jobs": [job("job-1", NAME, 3, true, Value::Null)]}),
+        );
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/scheduled\r");
+    terminal.until("evil x y");
+    terminal.raw(b"\x18");
+    // The hint's parts are painted separately: assert one contiguous run.
+    terminal.until("evil x y? Enter confirm");
+    assert!(
+        !terminal.transcript.contains("[2J"),
+        "the owner's escape sequence never reaches the screen"
+    );
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+/// A create the owner accepted whose answer does not parse is applied work,
+/// not a refusal: the draft's file goes, and the next Ctrl+N opens a fresh
+/// document instead of the text the user wrote.
+#[test]
+fn tui_scheduled_panel_reports_an_unreadable_create_reply_as_applied() {
+    let home = Home::new();
+    let seen = home.0.join("seen.log");
+    let script = editor(
+        &home,
+        "editor.sh",
+        &format!(
+            "cat \"$1\" >> \"{0}\"\n\
+             printf '\\n---\\n' >> \"{0}\"\n\
+             printf '%s' '{{\"cwd\":\"/workspace\",\"name\":\"attempt\",\"prompt\":\"Attempt.\",\"schedule\":{{\"every_minutes\":60}}}}' > \"$1\"\n",
+            seen.display()
+        ),
+    );
+    let (shown, wait_shown) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        for _ in 0..2 {
+            let request = wire.read_any();
+            match request["method"].as_str() {
+                Some("account.providers") => wire.reply(&request, json!([])),
+                Some("session.context.usage") => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                    "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+                method => panic!("unexpected request {method:?}"),
+            }
+        }
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
+        // Ctrl+N: the owner wrote the job, and its answer has no job object.
+        let request = wire.read("schedule.save");
+        assert_eq!(request["params"].get("revision"), None);
+        wire.reply(&request, json!({}));
+        // The read that reports the jobs still works.
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
+        // The next Ctrl+N writes a fresh document, not the one just saved.
+        let request = wire.read("schedule.save");
+        assert_eq!(request["params"].get("revision"), None);
+        wire.reply(&request, json!({"job": job("job-3", "attempt", 1, true, Value::Null)}));
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(edit_command(&home, &script, false));
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/scheduled\r");
+    terminal.until("every 60 minutes");
+    terminal.raw(b"\x0e");
+    // The parse error is the read error, and the line still says what was
+    // done.
+    terminal.until("Added.");
+    terminal.until("schedule.save:");
+    // The panel keeps no view, so Ctrl+R reads the jobs again.
+    terminal.raw(b"\x12");
+    terminal.until("every 60 minutes");
+    terminal.raw(b"\x0e");
+    terminal.until("Added attempt.");
+    let log = fs::read_to_string(&seen).unwrap();
+    let runs: Vec<&str> = log.split("---\n").collect();
+    assert!(
+        runs[1].contains("\"name\": \"example\""),
+        "the second create opened a fresh document: {log}"
+    );
+    assert!(
+        !runs[1].contains("attempt"),
+        "the written text is no longer linked: {log}"
+    );
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
 /// A daemon without the Scheduler's methods leaves the panel open on the
 /// unsupported-daemon sentence rather than an empty list.
 #[test]
@@ -1213,7 +1806,7 @@ fn tui_scheduled_panel_says_when_the_daemon_cannot_manage_it() {
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/scheduled\r");
-    terminal.until("This daemon cannot manage the Scheduler.");
+    terminal.until("This daemon cannot manage Scheduler.");
     terminal.raw(b"\x1b");
     thread::sleep(Duration::from_millis(200));
     terminal.write(b"/exit\r");

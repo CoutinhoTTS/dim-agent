@@ -342,14 +342,12 @@ async fn save(
             if crate::client::app_error(&error) != Some("conflict") {
                 return Err(Failure::Refused(error.to_string()));
             }
-            return Err(
-                conflict(
-                    client,
-                    cwd,
-                    t("The definition changed since it was read; nothing was written. Your next edit opens the current definition."),
-                )
-                .await,
-            );
+            return Err(conflict(
+                client,
+                cwd,
+                t("The definition changed since it was read; nothing was written."),
+            )
+            .await);
         }
     };
     let saved: Saved = serde_json::from_value(saved)
@@ -386,14 +384,12 @@ async fn add(client: &mut Client, input: &Value, cwd: &str) -> Result<(String, S
             if crate::client::app_error(&error) != Some("conflict") {
                 return Err(Failure::Refused(error.to_string()));
             }
-            return Err(
-                conflict(
-                    client,
-                    cwd,
-                    t("The definitions changed since they were read; nothing was written. Your next add opens your text again."),
-                )
-                .await,
-            );
+            return Err(conflict(
+                client,
+                cwd,
+                t("The definitions changed since they were read; nothing was written."),
+            )
+            .await);
         }
     };
     let saved: Saved = serde_json::from_value(saved)

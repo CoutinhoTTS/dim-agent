@@ -156,9 +156,9 @@ pub enum Failure {
         message: String,
         catalog: Box<Catalog>,
     },
-    /// The action was applied and the read that reports the jobs failed: the
-    /// change was made, the owner's answer is kept, and this is why the jobs
-    /// are not shown.
+    /// The action was applied and what follows it could not be read: the
+    /// change was made, the owner's answer is kept when it was read, and this
+    /// is why the jobs are not shown.
     ReadFailed { note: Option<String>, error: String },
     /// The daemon or the owner refused it: nothing was written.
     Refused(String),
@@ -215,8 +215,14 @@ pub async fn apply(client: &mut Client, action: &ManagementAction) -> Result<Ans
                 Ok(saved) => saved,
                 Err(error) => return Err(conflict(client, &error, ConflictKind::Create).await),
             };
-            let saved: Saved = serde_json::from_value(saved)
-                .map_err(|error| Failure::Refused(format!("schedule.save: {error}")))?;
+            // The method returned, so the job was written. What failed is the
+            // answer: reporting a refusal here would keep the draft and invite
+            // a duplicate.
+            let saved: Saved =
+                serde_json::from_value(saved).map_err(|error| Failure::ReadFailed {
+                    note: None,
+                    error: format!("schedule.save: {error}"),
+                })?;
             Answered::Created(saved.job.name)
         }
         ManagementAction::Save {
@@ -229,23 +235,7 @@ pub async fn apply(client: &mut Client, action: &ManagementAction) -> Result<Ans
                     t("The Scheduler has no area document.").to_owned(),
                 ));
             };
-            let revision = expected_revision.parse::<i64>().map_err(|_| {
-                Failure::Refused(format!("schedule.save: bad revision {expected_revision:?}"))
-            })?;
-            let mut job = document.clone();
-            let Some(fields) = job.as_object_mut() else {
-                return Err(Failure::Refused(
-                    "schedule.save: the document is not an object.".to_owned(),
-                ));
-            };
-            fields.insert("id".to_owned(), json!(id));
-            let written = client
-                .rpc("schedule.save", json!({"job": job, "revision": revision}))
-                .await;
-            if let Err(error) = written {
-                return Err(conflict(client, &error, ConflictKind::Job).await);
-            }
-            Answered::Nothing
+            save(client, id, expected_revision, document).await?
         }
         ManagementAction::Remove { id } => {
             let deleted = client.rpc("schedule.delete", json!({"job_id": id})).await;
@@ -264,8 +254,12 @@ pub async fn apply(client: &mut Client, action: &ManagementAction) -> Result<Ans
                 .rpc("schedule.run_now", json!({"job_id": id}))
                 .await
                 .map_err(|error| Failure::Refused(error.to_string()))?;
-            let run: Run = serde_json::from_value(run)
-                .map_err(|error| Failure::Refused(format!("schedule.run_now: {error}")))?;
+            // The method returned, so the run was accepted. What failed is
+            // the answer, not the work.
+            let run: Run = serde_json::from_value(run).map_err(|error| Failure::ReadFailed {
+                note: None,
+                error: format!("schedule.run_now: {error}"),
+            })?;
             Answered::Run {
                 id: id.clone(),
                 run,
@@ -300,6 +294,80 @@ pub async fn apply(client: &mut Client, action: &ManagementAction) -> Result<Ans
     Ok(Answer::Jobs { catalog, note })
 }
 
+/// Writes one job's edit as the members the draft changed. `schedule.save`
+/// merges a patch over the stored job, so the adapter reads the job again,
+/// refuses a draft that is no longer at its revision, and sends only the
+/// members that differ: a member left out would silently keep its stored
+/// value, and one the draft deleted cannot be cleared at all.
+async fn save(
+    client: &mut Client,
+    id: &str,
+    expected_revision: &str,
+    document: &Value,
+) -> Result<Answered, Failure> {
+    let catalog = catalog(client).await.map_err(Failure::Refused)?;
+    let Some(job) = catalog.jobs.iter().find(|job| job.id == id) else {
+        return Err(Failure::Refused(
+            t("No scheduled job has that id.").to_owned(),
+        ));
+    };
+    if job.revision.to_string() != expected_revision {
+        return Err(Failure::Conflict {
+            message: t(conflict_message(ConflictKind::Job)).to_owned(),
+            catalog: Box::new(catalog),
+        });
+    }
+    let Some(draft) = document.as_object() else {
+        return Err(Failure::Refused(
+            "schedule.save: the document is not an object.".to_owned(),
+        ));
+    };
+    let stored = job.document();
+    let stored = stored.as_object().expect("a job document is an object");
+    let mut patch = Map::new();
+    for key in EDITABLE {
+        match draft.get(*key) {
+            Some(value) => {
+                if stored.get(*key) != Some(value) {
+                    patch.insert((*key).to_owned(), value.clone());
+                }
+            }
+            // The patch schema has no null: a member the draft deleted would
+            // keep its stored value, so it is refused by name. The exception
+            // is the Session of a job that becomes a create, which the owner
+            // clears itself when the patch leaves it out.
+            None if stored.contains_key(*key) => {
+                if *key == "session_id"
+                    && draft.get("mode").and_then(Value::as_str) == Some("create")
+                {
+                    continue;
+                }
+                return Err(Failure::Refused(tf(
+                    "The document deleted {field}, which the owner cannot clear; nothing was written.",
+                    &[("field", key)],
+                )));
+            }
+            None => {}
+        }
+    }
+    if patch.is_empty() {
+        return Err(Failure::Refused(
+            t("The document changes no field; nothing was written.").to_owned(),
+        ));
+    }
+    patch.insert("id".to_owned(), json!(id));
+    let written = client
+        .rpc(
+            "schedule.save",
+            json!({"job": patch, "revision": job.revision}),
+        )
+        .await;
+    if let Err(error) = written {
+        return Err(conflict(client, &error, ConflictKind::Job).await);
+    }
+    Ok(Answered::Nothing)
+}
+
 /// Whether a conflict concerns one job's revision or the jobs as a whole.
 #[derive(Clone, Copy)]
 enum ConflictKind {
@@ -311,21 +379,23 @@ enum ConflictKind {
     Remove,
 }
 
+/// The owner's sentence for a conflict of `kind`: what changed, and that
+/// nothing was written. Where the text still is belongs to the surface.
+fn conflict_message(kind: ConflictKind) -> &'static str {
+    match kind {
+        ConflictKind::Job => "The job changed since it was read; nothing was written.",
+        ConflictKind::Create => "The jobs changed since they were read; nothing was written.",
+        ConflictKind::Remove => "The job changed since it was read; nothing was removed.",
+    }
+}
+
 /// The area after a refusal, when the owner refused because the jobs
 /// changed; any other refusal leaves the draft where it is.
 async fn conflict(client: &mut Client, error: &crate::Error, kind: ConflictKind) -> Failure {
     if crate::client::app_error(error) != Some("schedule_conflict") {
         return Failure::Refused(error.to_string());
     }
-    let message = match kind {
-        ConflictKind::Job => t(
-            "The job changed since it was read; nothing was written. Your next edit opens the current job.",
-        ),
-        ConflictKind::Create => t(
-            "The jobs changed since they were read; nothing was written. Your next add opens your text again.",
-        ),
-        ConflictKind::Remove => t("The job changed since it was read; nothing was removed."),
-    };
+    let message = t(conflict_message(kind));
     match catalog(client).await {
         Ok(catalog) => Failure::Conflict {
             message: message.to_owned(),
@@ -381,7 +451,7 @@ pub(super) fn view(catalog: &Catalog, available: &[ActionKind], cwd: &Path) -> M
             states.push(EntryState::Invalid);
         }
         groups.push(
-            "jobs",
+            t("jobs"),
             ManagementEntry {
                 id: job.id.clone(),
                 label: job.name.clone(),

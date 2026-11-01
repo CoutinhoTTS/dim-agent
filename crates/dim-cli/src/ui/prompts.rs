@@ -35,11 +35,33 @@ pub enum WriteTarget {
 }
 
 impl WriteTarget {
-    /// Whether `self` and `other` are the same kind of draft: a kept draft
-    /// reopens only for its own kind, so a run's parameters never reopen as
-    /// an entry's edit.
-    pub(crate) fn same_kind(&self, other: &Self) -> bool {
-        std::mem::discriminant(self) == std::mem::discriminant(other)
+    /// Whether this target and `other` are the same write target. The
+    /// revision a draft was read at is not part of what it is for: a kept
+    /// draft reopens at its own revision, whatever the area reports now.
+    pub fn same_target(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Create, Self::Create) | (Self::Area { .. }, Self::Area { .. }) => true,
+            (Self::Entry { id, .. }, Self::Entry { id: other, .. }) => id == other,
+            (Self::Run { id }, Self::Run { id: other }) => id == other,
+            _ => false,
+        }
+    }
+
+    /// Whether `action`, sent for this target, reports its reply.
+    pub fn is_written_by(&self, action: &crate::model::session::ManagementAction) -> bool {
+        use crate::model::session::ManagementAction;
+        match (self, action) {
+            (Self::Create, ManagementAction::Add { .. }) => true,
+            (Self::Area { .. }, ManagementAction::Save { id: None, .. }) => true,
+            (
+                Self::Entry { id, .. },
+                ManagementAction::Save {
+                    id: Some(written), ..
+                },
+            ) => id == written,
+            (Self::Run { id }, ManagementAction::Run { id: written, .. }) => id == written,
+            _ => false,
+        }
     }
 }
 

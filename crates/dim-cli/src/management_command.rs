@@ -20,7 +20,7 @@ use crate::mcp_command::print_report;
 use crate::model::session::{
     ActionKind, Area, ManagementAction, ManagementRequest, ManagementResult,
 };
-use crate::sanitize::safe;
+use crate::sanitize::{safe, safe_line};
 
 /// Runs `request` and prints its area's report.
 pub async fn run(
@@ -45,9 +45,13 @@ pub async fn edit(
     id: Option<String>,
 ) -> Result<i32> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        let set = if area.per_entry() {
+            format!("{} set ID PATH", area.name())
+        } else {
+            format!("{} set PATH", area.name())
+        };
         return Err(format!(
-            "{} edit needs a terminal; {} set PATH writes a file, or - its input",
-            area.name(),
+            "{} edit needs a terminal; {set} writes a file, or - its input",
             area.name()
         )
         .into());
@@ -319,12 +323,12 @@ async fn write(client: &mut Client, options: &Options, draft: &Draft) -> Result<
         // The document was replaced; only the report after it failed, so the
         // command did what it was asked and says why it cannot show the area.
         ManagementResult::Applied { read_error, .. } => {
-            print_report(vec![saved(draft.area)], vec![read_error]);
+            print_report(vec![management::applied_line(&request)], vec![read_error]);
             Ok(0)
         }
         // A save reports the area after it; a detail belongs to an inspect.
         ManagementResult::View { .. } | ManagementResult::Detail(_) => {
-            print_report(vec![saved(draft.area)], Vec::new());
+            print_report(vec![management::applied_line(&request)], Vec::new());
             Ok(0)
         }
     }
@@ -348,15 +352,14 @@ async fn create(
         ManagementResult::View { note, .. } => {
             // The note names the entry the owner saved: made safe, as every
             // line the Scheduler prints is.
-            let note = note.iter().map(|note| safe(note)).collect();
+            let note = note.iter().map(|note| safe_line(note)).collect();
             print_report(note, Vec::new());
             Ok(0)
         }
-        // The entry was created; only the read after it failed. The owner's
-        // answer still names it, made safe, and the exit stays 0.
+        // The entry was created; only the read after it failed. The action's
+        // own line still stands, made safe, and the exit stays 0.
         ManagementResult::Applied { note, read_error } => {
-            let note = note.iter().map(|note| safe(note)).collect();
-            print_report(note, vec![read_error]);
+            print_report(vec![safe_line(&note)], vec![read_error]);
             Ok(0)
         }
         // An add reports the entry it created; a detail belongs to an inspect.
@@ -371,15 +374,6 @@ async fn create(
     }
 }
 
-/// The notice a successful write leaves.
-fn saved(area: Area) -> String {
-    match area {
-        Area::Scheduled => "Saved the job.".to_owned(),
-        Area::Workflow => "Saved the definition.".to_owned(),
-        Area::Skills | Area::Hooks => format!("Saved the {} document.", area.name()),
-    }
-}
-
 async fn run_skills(
     client: &mut Client,
     options: &Options,
@@ -389,39 +383,17 @@ async fn run_skills(
     let catalog = match skills::apply(client, &request.action, &options.cwd).await {
         skills::Outcome::Catalog(catalog) => catalog,
         // A toggle or a rescan was applied, so the command did what it was
-        // asked; only the report after it failed. The toggle's line names the
-        // id the user gave, since the read is what supplies the name; every
-        // other write here is the rescan.
+        // asked; only the report after it failed, and the action's own line
+        // still stands.
         skills::Outcome::ReadFailed(error) => {
-            let line = match &request.action {
-                ManagementAction::Toggle { id, enabled } => format!(
-                    "{} {}.",
-                    if *enabled { "Enabled" } else { "Disabled" },
-                    safe(id)
-                ),
-                _ => "Reloaded.".to_owned(),
-            };
-            print_report(vec![line], vec![error]);
+            print_report(vec![management::applied_line(request)], vec![error]);
             return Ok(0);
         }
         skills::Outcome::Refused(error) => return Err(error.into()),
     };
     match &request.action {
-        ManagementAction::Toggle { id, enabled } => {
-            let name = catalog
-                .entries
-                .iter()
-                .find(|entry| &entry.id == id)
-                .map(|entry| entry.name.clone())
-                .unwrap_or_else(|| id.clone());
-            print_report(
-                vec![format!(
-                    "{} {}.",
-                    if *enabled { "Enabled" } else { "Disabled" },
-                    safe(&name)
-                )],
-                Vec::new(),
-            );
+        ManagementAction::Toggle { .. } => {
+            print_report(vec![management::applied_line(request)], Vec::new());
         }
         _ => print_report(rows(&catalog), notes(&catalog)),
     }
@@ -447,7 +419,7 @@ async fn run_hooks(
                 vec![format!(
                     "{} project hooks for {}.",
                     if *enabled { "Enabled" } else { "Disabled" },
-                    safe(&cwd)
+                    safe_line(&cwd)
                 )],
                 vec![toggle_note(*enabled).to_owned(), error],
             );
@@ -462,7 +434,7 @@ async fn run_hooks(
                 vec![format!(
                     "{} project hooks for {}.",
                     if *enabled { "Enabled" } else { "Disabled" },
-                    safe(&cwd)
+                    safe_line(&cwd)
                 )],
                 vec![toggle_note(*enabled).to_owned()],
             );
@@ -484,34 +456,24 @@ async fn run_scheduled(client: &mut Client, request: &ManagementRequest) -> Resu
             print_report(lines, Vec::new())
         }
         Ok(scheduler::Answer::Jobs { catalog, note }) => match (&request.action, note) {
-            (_, Some(note)) => print_report(vec![safe(&note)], Vec::new()),
-            (ManagementAction::Toggle { id, enabled }, None) => {
-                let name = catalog
-                    .jobs
-                    .iter()
-                    .find(|job| &job.id == id)
-                    .map(|job| job.name.clone())
-                    .unwrap_or_else(|| id.clone());
-                print_report(
-                    vec![format!(
-                        "{} {}.",
-                        if *enabled { "Enabled" } else { "Disabled" },
-                        safe(&name)
-                    )],
-                    Vec::new(),
-                );
+            // The owner's own answer: the entry a create made, or a run's
+            // state.
+            (_, Some(note)) => print_report(vec![safe_line(&note)], Vec::new()),
+            // A read reports what it read; an action reports its line.
+            (ManagementAction::List | ManagementAction::Reload, None) => {
+                print_report(job_rows(&catalog), job_notes(&catalog))
             }
-            (ManagementAction::Remove { id }, None) => {
-                print_report(vec![format!("Removed {}.", safe(id))], Vec::new());
-            }
-            _ => print_report(job_rows(&catalog), job_notes(&catalog)),
+            (_, None) => print_report(
+                vec![safe_line(&management::applied_line(request))],
+                Vec::new(),
+            ),
         },
-        // The action was applied; only the report after it failed. The
-        // owner's answer, when there is one, is the outcome, made safe, and
-        // the read error goes to stderr with the exit still 0.
+        // The action was applied; the report after it failed. The action's own
+        // line stands, made safe, and the read error goes to stderr with the
+        // exit still 0.
         Err(scheduler::Failure::ReadFailed { note, error }) => {
-            let lines = note.iter().map(|note| safe(note)).collect();
-            print_report(lines, vec![error])
+            let line = note.unwrap_or_else(|| management::applied_line(request));
+            print_report(vec![safe_line(&line)], vec![error])
         }
         Err(error) => return Err(error.to_string().into()),
     }
@@ -610,12 +572,12 @@ fn job_rows(catalog: &scheduler::Catalog) -> Vec<String> {
             );
             format!(
                 "{}\t{}\t{}\t{}\t{}\t{}",
-                safe(&job.id),
-                safe(&job.name),
-                safe(&scheduler::schedule_text(&job.schedule)),
+                safe_line(&job.id),
+                safe_line(&job.name),
+                safe_line(&scheduler::schedule_text(&job.schedule)),
                 if job.enabled { "enabled" } else { "disabled" },
-                safe(next),
-                safe(&last),
+                safe_line(next),
+                safe_line(&last),
             )
         })
         .collect()
@@ -629,7 +591,7 @@ fn job_notes(catalog: &scheduler::Catalog) -> Vec<String> {
     };
     for job in &catalog.jobs {
         if let Some(error) = &job.schedule_error {
-            notes.push(format!("{}: {}", safe(&job.name), safe(error)));
+            notes.push(format!("{}: {}", safe_line(&job.name), safe_line(error)));
         }
     }
     notes
@@ -652,15 +614,15 @@ fn rows(catalog: &skills::Catalog) -> Vec<String> {
         .map(|entry| {
             let mut state = if entry.enabled { "enabled" } else { "disabled" }.to_owned();
             if let Some(by) = &entry.shadowed_by {
-                state.push_str(&format!(", shadowed by {}", safe(by)));
+                state.push_str(&format!(", shadowed by {}", safe_line(by)));
             }
             format!(
                 "{}\t{}\t{}\t{}\t{}",
-                safe(&entry.name),
-                safe(entry.source.as_deref().unwrap_or("-")),
+                safe_line(&entry.name),
+                safe_line(entry.source.as_deref().unwrap_or("-")),
                 state,
-                safe(&entry.file_path),
-                safe(&entry.description),
+                safe_line(&entry.file_path),
+                safe_line(&entry.description),
             )
         })
         .collect()
@@ -676,7 +638,7 @@ fn notes(catalog: &skills::Catalog) -> Vec<String> {
         catalog
             .issues
             .iter()
-            .map(|issue| format!("{}: {}", safe(&issue.path), safe(&issue.message))),
+            .map(|issue| format!("{}: {}", safe_line(&issue.path), safe_line(&issue.message))),
     );
     notes
 }
@@ -694,15 +656,15 @@ fn hook_rows(catalog: &hooks::Catalog) -> Vec<String> {
                 .is_some_and(|source| source.enabled);
             format!(
                 "{}\t{}\t{}\t{}\t{}\t{}s\t{}\t{}\t{}",
-                safe(&hook.event),
-                safe(hook.matcher.as_deref().unwrap_or("*")),
-                safe(&hook.source),
+                safe_line(&hook.event),
+                safe_line(hook.matcher.as_deref().unwrap_or("*")),
+                safe_line(&hook.source),
                 if enabled { "enabled" } else { "disabled" },
-                safe(&hook.state),
+                safe_line(&hook.state),
                 hook.timeout,
-                safe(&hook.on_failure),
+                safe_line(&hook.on_failure),
                 if hook.r#async { "async" } else { "sync" },
-                safe(hook.command.as_deref().unwrap_or("—")),
+                safe_line(hook.command.as_deref().unwrap_or("—")),
             )
         })
         .collect()
@@ -719,17 +681,17 @@ fn hook_notes(catalog: &hooks::Catalog) -> Vec<String> {
     };
     for source in &catalog.sources {
         let name = match source.path.as_deref() {
-            Some(path) => format!("{} hooks ({})", safe(&source.source), safe(path)),
-            None => format!("{} hooks", safe(&source.source)),
+            Some(path) => format!("{} hooks ({})", safe_line(&source.source), safe_line(path)),
+            None => format!("{} hooks", safe_line(&source.source)),
         };
         if source.state != "ok" {
             notes.push(format!(
                 "{name}: {}{}",
-                safe(&source.state),
+                safe_line(&source.state),
                 source
                     .message
                     .as_deref()
-                    .map(|message| format!(": {}", safe(message)))
+                    .map(|message| format!(": {}", safe_line(message)))
                     .unwrap_or_default()
             ));
         } else if !source.enabled {
