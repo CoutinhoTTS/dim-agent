@@ -1086,7 +1086,7 @@ fn roster(open: &[(&str, &str)], ended: Option<&str>) -> EventKind {
                 "dim-branch-lines",
                 &[("branch", "main")],
                 &format!(
-                    "Lines you opened that are still open. Each is you, working in parallel from the point you opened it; it does not see your work after that point unless you message it.\n{listed}\nThey message you when they find something, need you, or end. Use the branch tool to message or read them, and wait to wait for them."
+                    "Lines you opened that are still open. Each is you, working in parallel from the point you opened it; it does not see your work after that point unless you message it.\n{listed}\nThey message you when they find something, need you, or end. Use the branch tool to message or read them, and the `wait` tool to wait for them; end the wait when your lines have nothing left to tell you."
                 ),
             ),
             key,

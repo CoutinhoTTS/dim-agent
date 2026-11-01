@@ -216,7 +216,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Nothing is running" => "沒有執行中項目",
         "No queued message" => "佇列中沒有訊息",
         "Only in fullscreen (/tui)" => "僅限全螢幕模式（/tui）",
-        "/{name} is not yet available" => "/{name} 尚未提供",
         "new session" => "新工作階段",
         "resumed {id} · {count} messages" => "已繼續 {id} · {count} 則訊息",
         " · earlier history: /timeline" => " · 較早歷程：/timeline",
@@ -229,9 +228,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "answer required" => "需要回答",
         "permission required" => "需要授權",
         "esc interrupt" => "esc 中斷",
-        "↑ edit · ctrl+s steer now · /queue" => "↑ 編輯 · ctrl+s 立即 steer · /queue",
-        "+{count} more · ↑ edit · ctrl+s steer now · /queue" => {
-            "還有 {count} 則 · ↑ 編輯 · ctrl+s 立即 steer · /queue"
+        "↑ edit · ctrl+s steer now" => "↑ 編輯 · ctrl+s 立即 steer",
+        "+{count} more · ↑ edit · ctrl+s steer now" => {
+            "還有 {count} 則 · ↑ 編輯 · ctrl+s 立即 steer"
         }
         "Queue ({count})" => "佇列（{count}）",
         "Thinking…" => "思考中…",

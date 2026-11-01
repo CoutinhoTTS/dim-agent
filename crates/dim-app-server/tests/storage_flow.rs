@@ -8,7 +8,9 @@ use dim_agent_types::{
     grant::{GrantKind, GrantMode, SessionGrant},
     *,
 };
-use dim_app_server::storage::{NodeLoads, SqliteStorage, SqliteTimelineStore};
+use dim_app_server::storage::{
+    NodeLoads, STORE_FORMAT, SqliteStorage, SqliteTimelineStore, vacuum_store,
+};
 use rusqlite::{Connection, params};
 use rutis::host::CtxHost;
 use std::{
@@ -153,6 +155,15 @@ fn queue(
             .expect("the writer did not publish the write")
             .unwrap()
     }
+}
+/// How long a flow waits for the Session fact it asserts on, such as a close,
+/// before it fails instead of hanging.
+const SETTLED: Duration = Duration::from_secs(10);
+/// Waits for `fact` and fails the flow with `what` when it never holds.
+async fn settled<T>(what: &str, fact: impl Future<Output = T>) -> T {
+    tokio::time::timeout(SETTLED, fact)
+        .await
+        .unwrap_or_else(|_| panic!("the flow never observed that {what}"))
 }
 /// Appends `records` and holds the writer thread in their publish callback,
 /// after their round committed, until the returned sender drops, which a
@@ -387,7 +398,7 @@ fn v15_store(path: &std::path::Path) -> Connection {
 /// The schema statements of a store, sorted.
 fn schema(connection: &Connection) -> Vec<String> {
     let mut statements: Vec<String> = connection
-        .prepare("SELECT sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")
+        .prepare("SELECT sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name != 'timeline_history_anchors'")
         .unwrap()
         .query_map([], |row| row.get(0))
         .unwrap()
@@ -843,6 +854,119 @@ async fn committed_history_round_trips_requests_outputs_traces_and_branch_direct
     assert_eq!(store.head(&key("session", "main")).await.unwrap(), 11);
     store.close().await.unwrap();
     db.close().await.unwrap();
+}
+
+/// A held read snapshot keeps the WAL from checkpointing; once it ends, the
+/// writer's checkpoint copies the frames and the size limit truncates the
+/// file, so the WAL stays bounded instead of at its high-water mark (#600).
+#[tokio::test]
+async fn the_wal_file_is_bounded_when_a_read_snapshot_ends() {
+    const WAL_LIMIT: u64 = 64 * 1024 * 1024;
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let mut wal = database.0.as_os_str().to_os_string();
+    wal.push("-wal");
+    let wal_bytes = || std::fs::metadata(&wal).map_or(0, |meta| meta.len());
+    let reader = Connection::open(&database.0).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    let _: i64 = reader
+        .query_row("SELECT count(*) FROM timeline_events", [], |row| row.get(0))
+        .unwrap();
+    let payload = "x".repeat(8_000_000);
+    let mut sequence = 0;
+    while wal_bytes() <= WAL_LIMIT && sequence < 20 {
+        sequence += 1;
+        append(
+            &store,
+            key("session", "main"),
+            vec![record(
+                sequence,
+                EventKind::InputMessage(InputMessageData::text(payload.clone(), None)),
+            )],
+        )
+        .await
+        .unwrap();
+    }
+    assert!(
+        wal_bytes() > WAL_LIMIT,
+        "a held read snapshot keeps the WAL growing: {} bytes",
+        wal_bytes()
+    );
+    reader.execute_batch("COMMIT").unwrap();
+    drop(reader);
+    for _ in 0..2 {
+        sequence += 1;
+        append(
+            &store,
+            key("session", "main"),
+            vec![record(
+                sequence,
+                EventKind::InputMessage(InputMessageData::text(payload.clone(), None)),
+            )],
+        )
+        .await
+        .unwrap();
+    }
+    assert!(
+        wal_bytes() <= WAL_LIMIT,
+        "the WAL is truncated to its limit after the snapshot ends: {} bytes",
+        wal_bytes()
+    );
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// Deleting a Session leaves free pages; `dimcode daemon vacuum` rewrites the
+/// offline store to reclaim them and refuses a store another process owns.
+#[tokio::test]
+async fn vacuum_reclaims_a_deleted_session_and_refuses_a_running_store() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    for sequence in 1..=50u64 {
+        append(
+            &store,
+            key("session", "main"),
+            vec![record(
+                sequence,
+                EventKind::InputMessage(InputMessageData::text("x".repeat(40_000), None)),
+            )],
+        )
+        .await
+        .unwrap();
+    }
+    assert!(
+        vacuum_store(database.0.clone()).is_err(),
+        "a running store owns the database"
+    );
+    store.rollback_session("session").await.unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+    let before = std::fs::metadata(&database.0).unwrap().len();
+    let vacuumed = vacuum_store(database.0.clone()).unwrap();
+    assert!(
+        vacuumed.after < before,
+        "vacuum reclaims free pages: {} >= {}",
+        vacuumed.after,
+        before
+    );
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    db.close().await.unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    let events: i64 = connection
+        .query_row("SELECT count(*) FROM timeline_events", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(events, 0, "vacuum keeps the deleted rows deleted");
+    drop(connection);
 }
 
 /// A text block's identity is the first delta's event id, so the output-row
@@ -1841,6 +1965,104 @@ async fn reads_rebuild_lists_from_where_they_start_in_bounded_holds() {
     db.close().await.unwrap();
 }
 
+/// A paging read uses none of the requests its records hold, so it rebuilds
+/// none: `context/prepare` and `model/call` carry an empty request, no
+/// content row is loaded, and a page still returns when one of those nodes
+/// is damaged. A read that uses the requests fails on the same row (#598).
+#[tokio::test]
+async fn paging_reads_do_not_rebuild_request_bodies() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("paging", &SessionConfig::default())
+        .await
+        .unwrap();
+    let main = key("paging", "main");
+    let messages: Vec<Message> = (1..=6)
+        .map(|index| Message::text(Role::User, format!("message-{index}")))
+        .collect();
+    append(
+        &store,
+        main.clone(),
+        vec![
+            record(
+                1,
+                EventKind::InputMessage(InputMessageData::text("go", Some(InputMode::Queue))),
+            ),
+            model_call(2, messages.clone()),
+            text(3, "done"),
+        ],
+    )
+    .await
+    .unwrap();
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    dim_agent_capabilities::defaults::mock_hosts(&mut builder);
+    dim_agent_capabilities::defaults::install(&mut builder);
+    builder.timeline_store(store.clone());
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = agent.restore_session("paging".into()).await.unwrap();
+    session.idle("main").await.unwrap();
+    store.take_node_loads();
+
+    let page = session.local_page("main", 0, 8, 3).await.unwrap();
+    assert_eq!(page.len(), 3);
+    assert_eq!(
+        store.take_node_loads(),
+        NodeLoads::default(),
+        "a paging read loaded request content"
+    );
+    assert!(
+        matches!(&page[1].kind, EventKind::ModelCall(data) if data.request.messages.is_empty()),
+        "a paging read left a stored request as its record holds it"
+    );
+
+    let rebuilt = store.read_page(&main, 0, 8, 3).await.unwrap();
+    assert_eq!(rebuilt[1].event, model_call(2, messages).event);
+    assert_eq!(store.take_node_loads().loads, 6);
+
+    let connection = Connection::open(&database.0).unwrap();
+    let damaged = connection
+        .execute(
+            "UPDATE timeline_content SET body = replace(body, 'message-1', 'message-X') \
+             WHERE session_id = 'paging' AND kind = 'node'",
+            [],
+        )
+        .unwrap();
+    assert!(damaged > 0, "the request's nodes are stored");
+    assert!(
+        matches!(
+            store.read_page(&main, 0, 8, 3).await,
+            Err(AgentError::Storage(message)) if message.contains("request content hash mismatch")
+        ),
+        "a read that uses the requests checks their content"
+    );
+    let page = session.local_page("main", 0, 8, 3).await.unwrap();
+    assert_eq!(
+        page.iter().map(|event| event.sequence).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(store.take_node_loads(), NodeLoads::default());
+    let sessions =
+        dim_app_server::storage::SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
+    let page = sessions
+        .read_page_before("paging", "main", 4, 8, 3, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.iter()
+            .map(|record| record.event.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3],
+        "the reverse history page does not rebuild the damaged request"
+    );
+    drop(sessions);
+    drop(connection);
+    agent.close().await.unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
 /// §18 item 3b: one long request, append-only or with its last four
 /// messages rewritten each turn. A cold read of it loads each of its nodes
 /// once, in holds of at most 256 node loads. After a restart the first
@@ -2015,8 +2237,7 @@ async fn failed_session_rolls_back_directory_and_does_not_block_other_sessions()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_orphan() {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        for reopen in [false, true] {
+    for reopen in [false, true] {
         let database = Database::new();
         let mut db = SqliteStorage::open(database.0.clone()).unwrap();
         let mut store = SqliteTimelineStore::new(db.clone());
@@ -2025,39 +2246,81 @@ async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_o
         dim_agent_capabilities::defaults::install(&mut builder);
         builder.timeline_store(store.clone());
         let mut agent = MinimalHost::start(&builder).await.unwrap();
-        let bad = agent.create_session(SessionConfig::default()).await.unwrap();
-        let mut good = agent.create_session(SessionConfig::default()).await.unwrap();
+        let bad = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
+        let mut good = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
         let bad_id = bad.id().to_owned();
         let connection = Connection::open(&database.0).unwrap();
         connection.execute_batch("CREATE TRIGGER fail_output BEFORE INSERT ON timeline_events WHEN NEW.kind = 'step/text' AND NEW.session_id = (SELECT session_id FROM injected_session) BEGIN SELECT RAISE(ABORT, 'injected output commit failure'); END; CREATE TABLE injected_session(session_id TEXT)").unwrap();
-        connection.execute("INSERT INTO injected_session VALUES (?1)", [&bad_id]).unwrap();
+        connection
+            .execute("INSERT INTO injected_session VALUES (?1)", [&bad_id])
+            .unwrap();
         let (admitted_bad, admitted_good) = tokio::join!(
             bad.submit("failed output".into(), InputMode::Queue, "main"),
             good.submit("healthy output".into(), InputMode::Queue, "main"),
         );
         admitted_bad.unwrap();
         admitted_good.unwrap();
-        let error = bad.closed().await.unwrap_err();
+        let error = settled("the failed Session closes", bad.closed())
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("injected output commit failure"));
-        good.idle("main").await.unwrap();
+        settled("the healthy branch idles", good.idle("main"))
+            .await
+            .unwrap();
         assert_eq!(store.writer_memo_requests(good.id()), 1);
         assert_eq!(store.writer_memo_requests(&bad_id), 0);
         assert!(agent.get_session(&bad_id).is_none());
         assert!(agent.get_session(good.id()).is_some());
         let bad_history = bad.history("main", None).await.unwrap();
-        assert!(bad_history.iter().any(|event| matches!(event.kind, EventKind::ModelCall(_))));
-        assert!(!bad_history.iter().any(|event| matches!(event.kind, EventKind::Text(_) | EventKind::ModelOutputEnd(_) | EventKind::TurnEnd(_))));
-        assert!(bad.submit("late".into(), InputMode::Queue, "main").await.unwrap_err().to_string().contains("injected output commit failure"));
+        assert!(
+            bad_history
+                .iter()
+                .any(|event| matches!(event.kind, EventKind::ModelCall(_)))
+        );
+        assert!(!bad_history.iter().any(|event| matches!(
+            event.kind,
+            EventKind::Text(_) | EventKind::ModelOutputEnd(_) | EventKind::TurnEnd(_)
+        )));
+        assert!(
+            bad.submit("late".into(), InputMode::Queue, "main")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("injected output commit failure")
+        );
         assert!(good.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("healthy output"))));
-        connection.execute_batch("DROP TRIGGER fail_output; DROP TABLE injected_session").unwrap();
+        connection
+            .execute_batch("DROP TRIGGER fail_output; DROP TABLE injected_session")
+            .unwrap();
         connection.execute_batch("CREATE TRIGGER fail_restore BEFORE INSERT ON timeline_events WHEN NEW.session_id = (SELECT session_id FROM restore_failure) BEGIN SELECT RAISE(ABORT, 'injected restore settlement failure'); END; CREATE TABLE restore_failure(session_id TEXT)").unwrap();
-        connection.execute("INSERT INTO restore_failure VALUES (?1)", [&bad_id]).unwrap();
+        connection
+            .execute("INSERT INTO restore_failure VALUES (?1)", [&bad_id])
+            .unwrap();
         let head = store.head(&key(&bad_id, "main")).await.unwrap();
-        let failed_restore = agent.restore_session(bad_id.clone()).await.err().expect("a failed settlement must reject restore");
-        assert!(failed_restore.to_string().contains("injected restore settlement failure"), "{failed_restore}");
+        let failed_restore = settled(
+            "a failed settlement rejects restore",
+            agent.restore_session(bad_id.clone()),
+        )
+        .await
+        .err()
+        .expect("a failed settlement must reject restore");
+        assert!(
+            failed_restore
+                .to_string()
+                .contains("injected restore settlement failure"),
+            "{failed_restore}"
+        );
         assert!(agent.get_session(&bad_id).is_none());
         assert_eq!(store.head(&key(&bad_id, "main")).await.unwrap(), head);
-        connection.execute_batch("DROP TRIGGER fail_restore; DROP TABLE restore_failure").unwrap();
+        connection
+            .execute_batch("DROP TRIGGER fail_restore; DROP TABLE restore_failure")
+            .unwrap();
         drop(connection);
         if reopen {
             let good_id = good.id().to_owned();
@@ -2073,29 +2336,50 @@ async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_o
             agent = MinimalHost::start(&builder).await.unwrap();
             good = agent.restore_session(good_id).await.unwrap();
         }
-        let session = agent.restore_session(bad_id).await.unwrap();
-        assert!(bad.submit("old generation".into(), InputMode::Queue, "main").await.is_err());
-        good.submit("still healthy".into(), InputMode::Queue, "main").await.unwrap();
-        good.idle("main").await.unwrap();
+        let session = settled("the orphan restores", agent.restore_session(bad_id))
+            .await
+            .unwrap();
+        assert!(
+            bad.submit("old generation".into(), InputMode::Queue, "main")
+                .await
+                .is_err()
+        );
+        good.submit("still healthy".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        settled("the healthy branch idles after recovery", good.idle("main"))
+            .await
+            .unwrap();
         assert!(good.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("still healthy"))));
-        session.idle("main").await.unwrap();
+        settled(
+            "the restored branch settles the orphaned turn",
+            session.idle("main"),
+        )
+        .await
+        .unwrap();
         let history = session.history("main", None).await.unwrap();
         assert!(history.iter().any(|event| matches!(&event.kind, EventKind::ModelOutputEnd(data) if matches!(data.outcome, ModelOutputOutcome::Failed { .. }))));
         assert!(history.iter().any(|event| matches!(&event.kind, EventKind::TurnEnd(data) if matches!(data.outcome, TurnOutcome::Failed { .. }))));
-        session.submit("after recovery".into(), InputMode::Queue, "main").await.unwrap();
-        session.idle("main").await.unwrap();
+        session
+            .submit("after recovery".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        settled("the restored branch ends its turn", session.idle("main"))
+            .await
+            .unwrap();
         assert!(session.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("after recovery"))));
         assert_eq!(store.writer_memo_requests(session.id()), 1);
         assert!(session.unload_if_idle().await.unwrap());
-        session.closed().await.unwrap();
+        settled("the unloaded Session closes", session.closed())
+            .await
+            .unwrap();
         let id = session.id().to_owned();
         drop(session);
         assert_eq!(store.writer_memo_requests(&id), 0);
         agent.close().await.unwrap();
         store.close().await.unwrap();
         db.close().await.unwrap();
-        }
-    }).await.expect("Session failure and recovery completed");
+    }
 }
 
 #[tokio::test]
@@ -2751,6 +3035,242 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             assert_eq!(std::fs::read(&database.0).unwrap(), original);
         }
     }
+}
+
+fn startup_note(database: &std::path::Path) -> PathBuf {
+    let mut note = database.as_os_str().to_os_string();
+    note.push(".startup");
+    note.into()
+}
+
+fn read_startup_note(database: &std::path::Path) -> String {
+    let note = std::fs::read_to_string(startup_note(database)).unwrap();
+    let (header, body) = note.split_once('\n').unwrap();
+    assert_eq!(
+        header,
+        format!("dimcode-startup-failure v1 pid={}", std::process::id())
+    );
+    assert!(!body.is_empty(), "{note}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(startup_note(database))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0, "{note}");
+    }
+    body.to_owned()
+}
+
+#[test]
+fn a_newer_store_leaves_an_actionable_startup_note() {
+    let database = Database::new();
+    Connection::open(&database.0)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 30));
+             INSERT INTO agent_store_format VALUES (30);",
+        )
+        .unwrap();
+    let original = std::fs::read(&database.0).unwrap();
+    let Err(AgentError::Storage(message)) = SqliteStorage::open(database.0.clone()) else {
+        panic!("a newer store must be rejected");
+    };
+    assert!(message.contains("unsupported SQLite schema"), "{message}");
+    assert_eq!(std::fs::read(&database.0).unwrap(), original);
+    let note = read_startup_note(&database.0);
+    assert!(note.contains("Store format: v30"), "{note}");
+    assert!(note.contains("Daemon format: v29"), "{note}");
+    assert!(note.contains("Existing data was preserved"), "{note}");
+    assert!(note.contains("Run a build supporting v30"), "{note}");
+    assert!(note.contains("--home PATH"), "{note}");
+}
+
+#[test]
+fn a_mismatched_store_note_does_not_claim_a_downgrade() {
+    let database = Database::new();
+    drop(SqliteStorage::open(database.0.clone()).unwrap());
+    Connection::open(&database.0)
+        .unwrap()
+        .execute_batch(
+            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=28",
+        )
+        .unwrap();
+    let original = std::fs::read(&database.0).unwrap();
+    assert!(SqliteStorage::open(database.0.clone()).is_err());
+    assert_eq!(std::fs::read(&database.0).unwrap(), original);
+    let note = read_startup_note(&database.0);
+    assert!(note.contains("Store format: v28 (schema is v29)"), "{note}");
+    assert!(note.contains("marker and schema disagree"), "{note}");
+    assert!(
+        note.contains("Use the build that wrote this store"),
+        "{note}"
+    );
+    assert!(!note.contains("Run a build supporting"), "{note}");
+}
+
+#[test]
+fn an_older_known_schema_with_a_newer_marker_is_a_mismatch() {
+    let database = Database::new();
+    let connection = v13_store(&database.0);
+    connection
+        .execute_batch(
+            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=30",
+        )
+        .unwrap();
+    drop(connection);
+    let original = std::fs::read(&database.0).unwrap();
+    assert!(SqliteStorage::open(database.0.clone()).is_err());
+    assert_eq!(std::fs::read(&database.0).unwrap(), original);
+    let note = read_startup_note(&database.0);
+    assert!(note.contains("Store format: v30 (schema is v13)"), "{note}");
+    assert!(
+        note.contains("Use the build that wrote this store"),
+        "{note}"
+    );
+    assert!(!note.contains("Run a build supporting"), "{note}");
+}
+
+#[test]
+fn an_empty_marker_table_is_reported_as_missing_or_ambiguous() {
+    let database = Database::new();
+    drop(SqliteStorage::open(database.0.clone()).unwrap());
+    Connection::open(&database.0)
+        .unwrap()
+        .execute_batch("DELETE FROM agent_store_format")
+        .unwrap();
+    let original = std::fs::read(&database.0).unwrap();
+    assert!(SqliteStorage::open(database.0.clone()).is_err());
+    assert_eq!(std::fs::read(&database.0).unwrap(), original);
+    let note = read_startup_note(&database.0);
+    assert!(
+        note.contains("Store format: v29 (format marker is missing or ambiguous)"),
+        "{note}"
+    );
+    assert!(!note.contains("Run a build supporting"), "{note}");
+}
+
+#[test]
+fn an_unrecognized_store_with_a_readable_marker_names_it() {
+    let database = Database::new();
+    Connection::open(&database.0)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY);
+             INSERT INTO agent_store_format VALUES (20);
+             CREATE TABLE unrelated (value INTEGER);",
+        )
+        .unwrap();
+    assert!(SqliteStorage::open(database.0.clone()).is_err());
+    let note = read_startup_note(&database.0);
+    assert!(
+        note.contains("Store format: v20 (unrecognized schema)"),
+        "{note}"
+    );
+    assert!(
+        note.contains("The store is not a format this daemon recognizes"),
+        "{note}"
+    );
+    assert!(!note.contains("Run a build supporting"), "{note}");
+}
+
+#[test]
+fn an_unrecognized_store_note_names_no_guessed_format() {
+    let database = Database::new();
+    Connection::open(&database.0)
+        .unwrap()
+        .execute_batch("CREATE TABLE unrelated (value INTEGER)")
+        .unwrap();
+    assert!(SqliteStorage::open(database.0.clone()).is_err());
+    let note = read_startup_note(&database.0);
+    assert!(note.contains("Store format: unrecognized"), "{note}");
+    assert!(
+        note.contains("The store is not a format this daemon recognizes"),
+        "{note}"
+    );
+    assert!(!note.contains("Run a build supporting"), "{note}");
+}
+
+#[test]
+fn an_old_store_note_says_it_is_no_longer_read() {
+    let database = Database::new();
+    Connection::open(&database.0)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY);
+             INSERT INTO agent_store_format VALUES (12);
+             CREATE TABLE unrelated (value INTEGER);",
+        )
+        .unwrap();
+    assert!(SqliteStorage::open(database.0.clone()).is_err());
+    let note = read_startup_note(&database.0);
+    assert!(
+        note.contains("Store format: v12 (no longer read by this daemon)"),
+        "{note}"
+    );
+    assert!(note.contains("Use a build that reads v12"), "{note}");
+}
+
+#[test]
+fn a_removed_v14_store_note_says_it_is_no_longer_read() {
+    let database = Database::new();
+    Connection::open(&database.0)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY);
+             INSERT INTO agent_store_format VALUES (14);
+             CREATE TABLE unrelated (value INTEGER);",
+        )
+        .unwrap();
+    assert!(SqliteStorage::open(database.0.clone()).is_err());
+    let note = read_startup_note(&database.0);
+    assert!(
+        note.contains("Store format: v14 (no longer read by this daemon)"),
+        "{note}"
+    );
+    assert!(note.contains("Use a build that reads v14"), "{note}");
+}
+
+#[test]
+fn a_failed_open_replaces_the_previous_startup_note() {
+    let database = Database::new();
+    Connection::open(&database.0)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 30));
+             INSERT INTO agent_store_format VALUES (30);",
+        )
+        .unwrap();
+    std::fs::write(
+        startup_note(&database.0),
+        "dimcode-startup-failure v1 pid=1\nCannot open native store /previous.\n  Store format: v31\n",
+    )
+    .unwrap();
+    assert!(SqliteStorage::open(database.0.clone()).is_err());
+    let note = read_startup_note(&database.0);
+    assert!(note.contains("Store format: v30"), "{note}");
+    assert!(!note.contains("/previous"), "{note}");
+    assert!(!note.contains("v31"), "{note}");
+}
+
+#[test]
+fn a_successful_open_removes_a_stale_startup_note() {
+    let database = Database::new();
+    drop(SqliteStorage::open(database.0.clone()).unwrap());
+    std::fs::write(startup_note(&database.0), "stale").unwrap();
+    drop(SqliteStorage::open(database.0.clone()).unwrap());
+    assert!(!startup_note(&database.0).exists());
+}
+
+#[test]
+fn a_successful_upgrade_removes_a_stale_startup_note() {
+    let database = Database::new();
+    drop(v13_store(&database.0));
+    std::fs::write(startup_note(&database.0), "stale").unwrap();
+    drop(SqliteStorage::open(database.0.clone()).unwrap());
+    assert!(!startup_note(&database.0).exists());
+    assert_eq!(marker(&Connection::open(&database.0).unwrap()), vec![29]);
 }
 
 fn marker(connection: &Connection) -> Vec<i64> {
@@ -6162,4 +6682,98 @@ async fn output_ownership_survives_a_fork_and_a_source_delete() {
     store.close().await.unwrap();
     db.close().await.unwrap();
     root.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_history_window_index_is_created_at_open_without_a_format_step() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    assert_eq!(db.upgraded_from(), None);
+    db.close().await.unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    let indexed: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='timeline_history_anchors')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(indexed);
+    assert_eq!(marker(&connection), [i64::from(STORE_FORMAT)]);
+    connection
+        .execute_batch("DROP INDEX timeline_history_anchors")
+        .unwrap();
+    drop(connection);
+
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    assert_eq!(db.upgraded_from(), None, "the index is not a format step");
+    db.close().await.unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    let indexed: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='timeline_history_anchors')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(indexed, "a later open recreates the index");
+    assert_eq!(marker(&connection), [i64::from(STORE_FORMAT)]);
+    drop(connection);
+
+    let (read, format) = SqliteStorage::open_read_only(database.0.clone()).unwrap();
+    assert_eq!(format, STORE_FORMAT);
+    read.close().await.unwrap();
+}
+
+/// A window's fixed watermark must end a batch: two events committed as one
+/// batch make `through` 1 a storage error, not an empty page.
+#[tokio::test]
+async fn a_history_window_read_rejects_a_through_inside_a_batch() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let sessions =
+        dim_app_server::storage::SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
+    let store = sessions.timeline_store();
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let mut first = text(1, "one");
+    first.batch_end = 2;
+    let (published, receiver) = tokio::sync::oneshot::channel();
+    store
+        .append(
+            key("session", "main"),
+            vec![first, text(2, "two")],
+            Box::new(move |result| {
+                let _ = published.send(result);
+            }),
+        )
+        .unwrap();
+    tokio::time::timeout(PUBLISHED, receiver)
+        .await
+        .expect("the writer did not publish the write")
+        .unwrap()
+        .unwrap();
+
+    assert!(matches!(
+        store.read(&key("session", "main"), 1..=1).await,
+        Err(AgentError::InvalidInput(message)) if message.contains("inside an atomic batch")
+    ));
+    assert!(matches!(
+        sessions.read_page_before("session", "main", 2, 10, 1, 1).await,
+        Err(AgentError::InvalidInput(message)) if message.contains("inside an atomic batch")
+    ));
+    assert_eq!(
+        sessions
+            .read_page_before("session", "main", 3, 10, 2, 1)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+
+    drop(store);
+    drop(sessions);
+    db.close().await.unwrap();
 }

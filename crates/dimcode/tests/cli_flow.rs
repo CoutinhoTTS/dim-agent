@@ -24,6 +24,8 @@ mod migration;
 mod permission;
 #[path = "cli_flow/question.rs"]
 mod question;
+#[path = "cli_flow/server.rs"]
+mod server;
 #[path = "cli_flow/session_management.rs"]
 mod session_management;
 #[path = "cli_flow/tasks.rs"]
@@ -209,7 +211,9 @@ impl Wire {
 }
 
 /// The record `session.attach` replies for the Session it names: that
-/// Session's `SessionInfo`, as `session.list` gives it.
+/// Session's `SessionInfo`, whose model follows its latest adopted
+/// configuration rather than the creation model `session.list` reports until
+/// #795 lands.
 fn attach_record(request: &Value) -> Value {
     json!({
         "sessionId": request["params"]["sessionId"],
@@ -2291,6 +2295,13 @@ impl Terminal {
             );
             thread::sleep(Duration::from_millis(10));
         }
+    }
+    /// Waits until the terminal has shown `expected` anywhere, for a frame
+    /// whose place among the frames already consumed the flow does not fix.
+    fn until_anywhere(&mut self, expected: &str) {
+        let consumed = std::mem::take(&mut self.consumed);
+        self.until(expected);
+        self.consumed = consumed;
     }
     fn until(&mut self, expected: &str) {
         let deadline = Instant::now() + PATIENCE;
@@ -9320,4 +9331,48 @@ fn tui_default_theme_respects_background_and_saved_choice() {
             serde_json::from_slice(&fs::read(home.0.join("config.json")).unwrap()).unwrap();
         assert_eq!(config.get("themeId").and_then(Value::as_str), saved);
     }
+}
+
+/// `dimcode daemon vacuum` rewrites an offline store through the sibling App
+/// Server and reports its size before and after (#600).
+#[test]
+fn daemon_vacuum_reclaims_an_offline_store() {
+    use dim_app_server::storage::SqliteStorage;
+    let home = Home::new();
+    let database = home.0.join("rust/dimcode.sqlite");
+    drop(SqliteStorage::open(database.clone()).unwrap());
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO agent_sessions(session_id, config, created_at_ms) VALUES ('s', '{}', 0);
+             INSERT INTO timeline_branches VALUES ('s', 'main', '{}', 0);",
+        )
+        .unwrap();
+    connection.execute_batch("BEGIN").unwrap();
+    for sequence in 1..=2000 {
+        connection
+            .execute(
+                "INSERT INTO timeline_events VALUES ('s', 'main', ?1, ?1, 'turn/start', ?2, NULL)",
+                rusqlite::params![sequence, "x".repeat(4000)],
+            )
+            .unwrap();
+    }
+    connection
+        .execute_batch("COMMIT; DELETE FROM timeline_events; PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    drop(connection);
+    let before = fs::metadata(&database).unwrap().len();
+    let output = home.command().args(["daemon", "vacuum"]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.starts_with("Vacuumed "), "{stdout}");
+    let after = fs::metadata(&database).unwrap().len();
+    assert!(
+        after < before,
+        "vacuum reclaims free pages: {after} >= {before}"
+    );
 }

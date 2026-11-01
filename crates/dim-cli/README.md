@@ -194,6 +194,15 @@ tool wrote into the Timeline is exported with it. Files follow the rules above, 
 failed export removes the file it created. See the
 [Timeline export design](../../docs/design/appserver/timeline-export.md).
 
+Use `dimcode daemon vacuum [--database PATH]` after `dimcode daemon stop` to
+reclaim the space deleted Sessions leave in the native store. It runs the App
+Server binary (the sibling or `--server PATH`) with `--vacuum`, takes the store's
+maintenance lock, checks the current format, rewrites the database with SQLite
+`VACUUM` and prints its size before and after. It refuses while a daemon owns
+the database, never creates a database or upgrades one, and needs free disk space
+about the store's size. The database path follows `dimcode export`. See the
+[storage format](../../docs/design/appserver/native-storage-format.md#sqlite-运行参数与空间回收).
+
 At the idle interactive prompt:
 
 ```text
@@ -245,7 +254,7 @@ cargo build --locked -p dimcode
 target/debug/dimcode --help
 ```
 
-Help and version commands do not start a daemon or read credentials. This crate is a library; the `dimcode` crate builds the single executable, which runs the CLI and, as `dimcode app-server`, the App Server. The CLI starts its daemon by running its own executable with `app-server`, through a `dimcode-server` link to it in `<home>/rust` so that process lists (`ps`, `pgrep dimcode-server`, Activity Monitor) tell the daemon from the clients that share the executable; `--server PATH` selects an explicit App Server binary instead and runs it by its own name.
+Help and version commands do not start a daemon or read credentials. This crate is a library; the `dimcode` crate builds the single executable, which runs the CLI and, as `dimcode app-server`, the App Server. The CLI starts its daemon by running its own executable with `app-server`, through a `dimcode-server` link to it in `<home>/rust` so that process lists (`ps`, `pgrep dimcode-server`, Activity Monitor) tell the daemon from the clients that share the executable; `--server PATH` names a standalone `dim-app-server` binary, which the CLI runs by its own name, while the default instead runs this executable's `app-server` subcommand. Naming this executable is an error: it serves the App Server only behind that subcommand; a path that does not exist, a program that exits before serving, or one that does not start serving in time is reported with the same requirement.
 
 ## API-key configuration
 

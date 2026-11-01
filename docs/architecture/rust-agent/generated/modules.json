@@ -1807,6 +1807,7 @@
       "parent": "dim_app_server::connection",
       "file": "crates/dim-app-server/src/connection/tree.rs",
       "unexpandedMacros": [
+        "format",
         "tokio::select",
         "tracing::warn",
         "vec"
@@ -2329,6 +2330,15 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_app_server::provider::preferences::tests",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::provider::preferences",
+      "file": "crates/dim-app-server/src/provider/preferences.rs",
+      "unexpandedMacros": [
+        "assert_eq"
+      ]
+    },
+    {
       "id": "dim_app_server::provider::remote",
       "crate": "dim_app_server",
       "parent": "dim_app_server::provider",
@@ -2593,7 +2603,9 @@
       "unexpandedMacros": [
         "eprintln",
         "format",
-        "tokio::pin"
+        "rusqlite::params",
+        "tokio::pin",
+        "tracing::error"
       ]
     },
     {
@@ -2817,6 +2829,15 @@
       ]
     },
     {
+      "id": "dim_cli::client::same_file_tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::client",
+      "file": "crates/dim-cli/src/client.rs",
+      "unexpandedMacros": [
+        "assert"
+      ]
+    },
+    {
       "id": "dim_cli::client::web_assets_tests",
       "crate": "dim_cli",
       "parent": "dim_cli::client",
@@ -3014,6 +3035,15 @@
         "println",
         "tokio::pin",
         "tokio::select"
+      ]
+    },
+    {
+      "id": "dim_cli::maintenance",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/maintenance.rs",
+      "unexpandedMacros": [
+        "format"
       ]
     },
     {
@@ -4714,6 +4744,7 @@
         "matches",
         "print",
         "println",
+        "unreachable",
         "vec"
       ]
     },
@@ -15634,6 +15665,7 @@
       "to": "dim_agent_runtime::timeline_store",
       "references": [
         "path TimelineKey",
+        "path dim_agent_runtime::StoredEvent",
         "path dim_agent_runtime::TimelineKey",
         "use dim_agent_runtime::TimelineKey"
       ]
@@ -15771,6 +15803,7 @@
       "to": "dim_app_server::storage::timeline",
       "references": [
         "path SessionStore",
+        "path crate::storage::TurnWindow",
         "use crate::storage::SessionStore"
       ]
     },
@@ -16587,6 +16620,13 @@
       "to": "dim_app_server::storage::export",
       "references": [
         "path crate::storage::export_timeline"
+      ]
+    },
+    {
+      "from": "dim_app_server::cli",
+      "to": "dim_app_server::storage::sqlite",
+      "references": [
+        "path crate::storage::vacuum_store"
       ]
     },
     {
@@ -17431,8 +17471,7 @@
       "from": "dim_app_server::connection",
       "to": "dim_agent_types::model",
       "references": [
-        "path crate::provider::ModelPreferences",
-        "path crate::provider::ModelPreferences::default"
+        "path crate::provider::ModelPreferences"
       ]
     },
     {
@@ -17770,6 +17809,14 @@
     },
     {
       "from": "dim_app_server::connection::subscription",
+      "to": "dim_agent_capabilities::prompt_state",
+      "references": [
+        "path PromptSnapshot",
+        "use dim_agent_capabilities::prompt_state::PromptSnapshot"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection::subscription",
       "to": "dim_agent_capabilities::session_broadcast",
       "references": [
         "path SessionBroadcast",
@@ -17825,6 +17872,13 @@
         "path dim_agent_types::ApprovalRequestData",
         "use dim_agent_types::AgentEvent",
         "use dim_agent_types::EventKind"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection::subscription",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path dim_agent_types::ModelId"
       ]
     },
     {
@@ -17954,6 +18008,7 @@
         "path RpcError::from",
         "path RpcError::invalid",
         "path RpcError::reloading",
+        "path RpcError::wire",
         "path params"
       ]
     },
@@ -17976,8 +18031,16 @@
       "from": "dim_app_server::connection::tree",
       "to": "dim_agent_runtime::error",
       "references": [
+        "path AgentError",
         "path AgentError::BranchEnded",
         "path AgentError::InvalidInput"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection::tree",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path dim_agent_runtime::StoredEvent"
       ]
     },
     {
@@ -18003,6 +18066,13 @@
     },
     {
       "from": "dim_app_server::connection::tree",
+      "to": "dim_app_server::outbound",
+      "references": [
+        "path crate::outbound::MAX_FRAME_BYTES"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection::tree",
       "to": "dim_app_server::protocol",
       "references": [
         "path BranchCreate",
@@ -18019,6 +18089,13 @@
         "path Reply::empty",
         "path Submit",
         "path SubmitResult"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection::tree",
+      "to": "dim_app_server::storage::timeline",
+      "references": [
+        "path crate::storage::TurnWindow"
       ]
     },
     {
@@ -18763,8 +18840,12 @@
         "mod server",
         "path McpServer",
         "path McpServerError",
-        "path McpServerError::Cleanup",
-        "path McpServerError::Timeout",
+        "path server::McpServerError",
+        "path server::McpServerError::AuthRequired",
+        "path server::McpServerError::Cleanup",
+        "path server::McpServerError::InsufficientScope",
+        "path server::McpServerError::InvalidResponse",
+        "path server::McpServerError::Timeout",
         "path server::McpServerPlugin::new",
         "path server::McpServerState",
         "path server::McpTool",
@@ -20564,6 +20645,8 @@
         "path ResolveModelConnection",
         "path ResolveModelSelection",
         "path ResolvedModelConnection",
+        "path SelectableModels",
+        "path SelectableModelsHost",
         "path dim_agent_capabilities::host::adopted_preferences"
       ]
     },
@@ -20599,6 +20682,7 @@
         "path CatalogCapabilities",
         "path ModelCapabilitySnapshot",
         "path ModelConfig",
+        "path ModelConfig::default",
         "path ModelPreferences",
         "path ModelPreferences::default",
         "path ModelRequest",
@@ -20721,6 +20805,13 @@
     },
     {
       "from": "dim_app_server::provider",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path crate::protocol::ModelPreferenceUpdate"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider",
       "to": "dim_app_server::provider::auxiliary",
       "references": [
         "mod auxiliary",
@@ -20799,7 +20890,9 @@
       "references": [
         "mod preferences",
         "path preferences",
-        "path preferences::configure"
+        "path preferences::configure",
+        "path preferences::restore_reasoning",
+        "path preferences::restore_service_tier"
       ]
     },
     {
@@ -21320,10 +21413,14 @@
       "to": "dim_agent_capabilities::host",
       "references": [
         "path ModelProtocol",
+        "path ModelProtocol::Anthropic",
         "path ModelProtocol::Bedrock",
+        "path ModelProtocol::Gemini",
         "path ModelProtocol::OpenaiChat",
         "path ModelProtocol::OpenaiCompatible",
         "path ModelProtocol::OpenaiResponses",
+        "path ModelProtocol::Xai",
+        "path ModelProtocol::XaiResponses",
         "path reasoning_config",
         "use dim_agent_capabilities::host::ModelProtocol",
         "use dim_agent_capabilities::host::reasoning_config"
@@ -21336,7 +21433,51 @@
         "path ModelCapabilitySnapshot",
         "path ModelConfig",
         "path ModelPreferences",
-        "path ModelPreferences::default"
+        "path ModelPreferences::default",
+        "path ProviderOptions",
+        "path ProviderReasoningConfig::default"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::preferences",
+      "to": "dim_app_server::provider::preferences::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::preferences::tests",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path ModelProtocol::Anthropic",
+        "path ModelProtocol::OpenaiChat",
+        "path ModelProtocol::OpenaiCompatible",
+        "path ModelProtocol::OpenaiResponses",
+        "path ModelProtocol::Xai",
+        "path ModelProtocol::XaiResponses"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::preferences::tests",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path AnthropicProviderOptions",
+        "path CompatibleThinking",
+        "path ModelConfig",
+        "path ModelConfig::default",
+        "path OpenAiCompatibleProviderOptions",
+        "path ProviderOptions",
+        "path ProviderReasoningConfig",
+        "path SummaryStyle::Auto",
+        "path ThinkingType::Disabled"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::preferences::tests",
+      "to": "dim_app_server::provider::preferences",
+      "references": [
+        "path restore_reasoning",
+        "path restore_service_tier"
       ]
     },
     {
@@ -22359,7 +22500,9 @@
         "mod sqlite",
         "use sqlite::FORMAT",
         "use sqlite::SqliteStorage",
-        "use sqlite::SqliteStoragePlugin"
+        "use sqlite::SqliteStoragePlugin",
+        "use sqlite::Vacuumed",
+        "use sqlite::vacuum_store"
       ]
     },
     {
@@ -22369,7 +22512,8 @@
         "mod timeline",
         "use timeline::SessionStore",
         "use timeline::SessionStorePlugin",
-        "use timeline::SqliteTimelineStore"
+        "use timeline::SqliteTimelineStore",
+        "use timeline::TurnWindow"
       ]
     },
     {
@@ -23062,6 +23206,10 @@
         "path Previous",
         "path Reader",
         "path Reader::new",
+        "path Reader::without_request_bodies",
+        "path RequestBodies",
+        "path RequestBodies::Rebuild",
+        "path RequestBodies::Unused",
         "path Values::Written",
         "path WireEvent",
         "path codec::NodeLoads",
@@ -23076,6 +23224,7 @@
         "use super::codec::ListReferences",
         "use super::codec::Previous",
         "use super::codec::Reader",
+        "use super::codec::RequestBodies",
         "use super::codec::Values",
         "use super::codec::WireEvent"
       ]
@@ -23679,6 +23828,7 @@
         "path Action::Acp",
         "path Action::Chat",
         "path Action::DaemonStop",
+        "path Action::DaemonVacuum",
         "path Action::DefaultTerminalMode",
         "path Action::Exec",
         "path Action::Export",
@@ -23823,6 +23973,14 @@
         "path login::account_directory",
         "path login::login",
         "path login::logout"
+      ]
+    },
+    {
+      "from": "dim_cli",
+      "to": "dim_cli::maintenance",
+      "references": [
+        "mod maintenance",
+        "path maintenance::vacuum"
       ]
     },
     {
@@ -24150,7 +24308,15 @@
       "to": "dim_cli::args",
       "references": [
         "path Options",
-        "use crate::args::Options"
+        "use crate::args::Options",
+        "use crate::args::SERVER_REQUIREMENT"
+      ]
+    },
+    {
+      "from": "dim_cli::client",
+      "to": "dim_cli::client::same_file_tests",
+      "references": [
+        "mod same_file_tests"
       ]
     },
     {
@@ -24186,6 +24352,13 @@
         "use dim_client::RpcError",
         "use dim_client::Server",
         "use dim_client::app_error"
+      ]
+    },
+    {
+      "from": "dim_cli::client::same_file_tests",
+      "to": "dim_cli::client",
+      "references": [
+        "use super::same_file"
       ]
     },
     {
@@ -24568,7 +24741,8 @@
       "to": "dim_cli::args",
       "references": [
         "path Options",
-        "use crate::args::Options"
+        "use crate::args::Options",
+        "use crate::args::SERVER_REQUIREMENT"
       ]
     },
     {
@@ -24809,6 +24983,30 @@
       "references": [
         "path Client",
         "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::maintenance",
+      "to": "dim_cli",
+      "references": [
+        "path Result",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::maintenance",
+      "to": "dim_cli::args",
+      "references": [
+        "path Options",
+        "use crate::args::Options"
+      ]
+    },
+    {
+      "from": "dim_cli::maintenance",
+      "to": "dim_cli::client",
+      "references": [
+        "path client::server",
+        "use crate::client"
       ]
     },
     {
@@ -32991,6 +33189,16 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path i18n::LOCALES",
+        "path i18n::active",
+        "path i18n::set",
+        "path t"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::oauth_view",
       "references": [
         "path OauthView::dim"
@@ -33126,6 +33334,8 @@
         "path LOAD_MORE",
         "path Prompt::Ask",
         "path Prompt::Login",
+        "path QUEUE_HINT",
+        "path QUEUE_HINT_MORE",
         "path ThemeContext",
         "path WebOpened",
         "path banner",

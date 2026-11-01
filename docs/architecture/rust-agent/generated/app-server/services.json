@@ -2337,6 +2337,12 @@
         "removing": false
       },
       {
+        "service": "dim_agent_capabilities::host::SelectableModelsHost",
+        "provider": 14,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dim_agent_capabilities::host::SessionFilesHost",
         "provider": 7,
         "generation": 1,
