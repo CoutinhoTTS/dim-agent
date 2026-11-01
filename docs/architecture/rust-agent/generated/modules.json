@@ -24674,6 +24674,14 @@
     },
     {
       "from": "dim_cli::login",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path ACCOUNT_NAMESPACE",
+        "use crate::model::session::ACCOUNT_NAMESPACE"
+      ]
+    },
+    {
+      "from": "dim_cli::login",
       "to": "dim_cli::sanitize",
       "references": [
         "use crate::sanitize::safe"
@@ -26024,6 +26032,16 @@
     },
     {
       "from": "dim_cli::session_host",
+      "to": "dim_cli::login",
+      "references": [
+        "path crate::login::attempt",
+        "path crate::login::browser_begin",
+        "path crate::login::device_begin",
+        "path crate::login::target"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
       "to": "dim_cli::mcp",
       "references": [
         "path mcp::Started",
@@ -26054,7 +26072,9 @@
       "from": "dim_cli::session_host",
       "to": "dim_cli::model::session",
       "references": [
+        "path ACCOUNT_NAMESPACE",
         "path Account",
+        "path AccountDescriptor",
         "path Command",
         "path Command::Approval",
         "path Command::AskAnswers",
@@ -26191,7 +26211,9 @@
         "path Update::UsageReport",
         "path Update::Web",
         "path Usage",
+        "use crate::model::session::ACCOUNT_NAMESPACE",
         "use crate::model::session::Account",
+        "use crate::model::session::AccountDescriptor",
         "use crate::model::session::Command",
         "use crate::model::session::CompactReply",
         "use crate::model::session::ContextReading",
@@ -28733,8 +28755,10 @@
       "from": "dim_cli::ui::oauth_view",
       "to": "dim_cli::model::session",
       "references": [
+        "path ACCOUNT_NAMESPACE",
+        "path AccountDescriptor",
         "path AccountInfo",
-        "path DIM_OAUTH_ID",
+        "path AccountTarget",
         "path OauthEvent",
         "path OauthEvent::Device",
         "path OauthEvent::Done",
@@ -28743,8 +28767,10 @@
         "path OauthEvent::Url",
         "path OauthStart",
         "path Usage",
+        "use crate::model::session::ACCOUNT_NAMESPACE",
         "use crate::model::session::Account",
-        "use crate::model::session::DIM_OAUTH_ID",
+        "use crate::model::session::AccountDescriptor",
+        "use crate::model::session::AccountTarget",
         "use crate::model::session::OauthEvent",
         "use crate::model::session::OauthStart",
         "use crate::model::session::Usage"
@@ -28888,13 +28914,15 @@
       "from": "dim_cli::ui::oauth_view::tests",
       "to": "dim_cli::model::session",
       "references": [
+        "path AccountDescriptor",
         "path AccountInfo",
         "path DIM_OAUTH_ID",
         "path OauthEvent::Done",
         "path OauthEvent::Exchanging",
         "path OauthEvent::Url",
         "path OauthStart",
-        "path Usage"
+        "path Usage",
+        "use crate::model::session::DIM_OAUTH_ID"
       ]
     },
     {
@@ -28911,7 +28939,8 @@
         "path Focus::Input",
         "path Focus::Submit",
         "path OauthView",
-        "path OauthView::new"
+        "path OauthView::described",
+        "path OauthView::dim"
       ]
     },
     {
@@ -29233,6 +29262,7 @@
       "from": "dim_cli::ui::prompts",
       "to": "dim_cli::model::session",
       "references": [
+        "path crate::model::session::AccountTarget",
         "path crate::model::session::GrantRequest",
         "path crate::model::session::OauthStart",
         "path crate::model::session::PluginAction",
@@ -29448,16 +29478,20 @@
       "from": "dim_cli::ui::providers_panel",
       "to": "dim_cli::model::session",
       "references": [
-        "path DIM_OAUTH_ID",
+        "path ACCOUNT_NAMESPACE",
+        "path Account",
         "path OauthEvent",
         "path ProviderAction::Configure",
         "path ProviderAction::Create",
         "path ProviderAction::Disconnect",
         "path ProviderEntry",
-        "use crate::model::session::DIM_OAUTH_ID",
+        "path Usage",
+        "use crate::model::session::ACCOUNT_NAMESPACE",
+        "use crate::model::session::Account",
         "use crate::model::session::OauthEvent",
         "use crate::model::session::ProviderAction",
-        "use crate::model::session::ProviderEntry"
+        "use crate::model::session::ProviderEntry",
+        "use crate::model::session::Usage"
       ]
     },
     {
@@ -29504,8 +29538,10 @@
       "to": "dim_cli::ui::oauth_view",
       "references": [
         "path OauthView",
+        "path OauthView::described",
+        "path OauthView::dim",
         "path OauthView::native_selection",
-        "path OauthView::new",
+        "path OauthView::provider_id",
         "use crate::ui::oauth_view::OauthView"
       ]
     },
@@ -29515,6 +29551,8 @@
       "references": [
         "path Effect",
         "path Effect::Close",
+        "path Effect::LoginStatus",
+        "path Effect::Logout",
         "path Effect::None",
         "path Effect::OauthBack",
         "path Effect::OauthCancel",
@@ -29605,9 +29643,9 @@
       "from": "dim_cli::ui::providers_panel::tests",
       "to": "dim_cli::model::session",
       "references": [
-        "path DIM_OAUTH_ID",
         "path ProviderAction::Create",
-        "path ProviderEntry"
+        "path ProviderEntry",
+        "path crate::model::session::AccountDescriptor"
       ]
     },
     {
@@ -29638,6 +29676,7 @@
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path KeyCode::Char",
+        "path KeyCode::Down",
         "path KeyCode::Enter",
         "path KeyCode::Up",
         "path KeyEvent::new",
@@ -32161,7 +32200,7 @@
       "to": "dim_cli::ui::oauth_view",
       "references": [
         "path OauthView",
-        "path OauthView::new",
+        "path OauthView::dim",
         "use crate::ui::oauth_view::OauthView"
       ]
     },
@@ -32203,6 +32242,7 @@
         "path Effect::LanguageApply",
         "path Effect::LanguagePreview",
         "path Effect::LanguageRestore",
+        "path Effect::LoginStatus",
         "path Effect::LoginUsage",
         "path Effect::Logout",
         "path Effect::None",
@@ -32745,7 +32785,7 @@
       "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::oauth_view",
       "references": [
-        "path OauthView::new"
+        "path OauthView::dim"
       ]
     },
     {

@@ -133,8 +133,10 @@ pub enum Effect {
     Connected(String),
     /// Open the `/models` picker in place of this panel.
     OpenModels,
-    /// Sign this account provider out; the host reports the account again.
-    Logout(String),
+    /// Sign this described account out; the host reports its state again.
+    Logout(crate::model::session::AccountTarget),
+    /// Read this account's state; the host reports it back.
+    LoginStatus(String),
     /// Report this account provider's usage again.
     LoginUsage(String),
     /// Open this page in the browser.

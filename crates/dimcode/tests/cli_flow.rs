@@ -1,5 +1,8 @@
 #![cfg(unix)]
 
+#[path = "cli_flow/accounts.rs"]
+mod accounts;
+
 #[path = "cli_flow/acp.rs"]
 mod acp;
 
@@ -4488,7 +4491,7 @@ fn fullscreen_login_releases_mouse_for_the_link_and_restores_the_preference_on_c
         )
         .unwrap();
         let daemon = home.daemon(|wire| {
-            wire.hello(&[]);
+            wire.hello(&["account.login.browser.begin", "account.login.cancel"]);
             wire.created();
             let attach = wire.read("session.attach");
             wire.reply(&attach, attach_record(&attach));

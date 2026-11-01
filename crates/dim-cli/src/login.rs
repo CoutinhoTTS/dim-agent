@@ -1,6 +1,9 @@
-use crate::{Result, args::Options, client::Client, input::Input, sanitize::safe};
+use crate::{
+    Result, args::Options, client::Client, input::Input, model::session::ACCOUNT_NAMESPACE,
+    sanitize::safe,
+};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::{io::IsTerminal, time::Duration};
 
 #[derive(Deserialize)]
@@ -173,4 +176,31 @@ async fn cancel(client: &mut Client, provider_id: &str, attempt_id: &str) -> Res
         )
         .await?;
     Ok(())
+}
+
+/// The params a namespace's account calls take. The managed account
+/// namespace targets one provider; a native OAuth namespace has one account.
+pub(crate) fn target(namespace: &str, provider_id: &str) -> Value {
+    if namespace == ACCOUNT_NAMESPACE {
+        json!({"providerId": provider_id})
+    } else {
+        json!({})
+    }
+}
+
+/// The params a sign-in with `attempt_id` takes in `namespace`.
+pub(crate) fn attempt(namespace: &str, provider_id: &str, attempt_id: &str) -> Value {
+    let mut params = target(namespace, provider_id);
+    params["attemptId"] = json!(attempt_id);
+    params
+}
+
+/// The namespace's browser sign-in begin method.
+pub(crate) fn browser_begin(namespace: &str) -> String {
+    format!("{namespace}.login.browser.begin")
+}
+
+/// The namespace's device sign-in begin method.
+pub(crate) fn device_begin(namespace: &str) -> String {
+    format!("{namespace}.login.begin")
 }
