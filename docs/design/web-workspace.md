@@ -395,11 +395,13 @@ effect from this page.
 | `--log LEVEL` forwarded to the spawned daemon | Duplicates `RUST_LOG`, which the spawned daemon already inherits from the CLI's environment, and needs its own grammar and precedence |
 | Restore the trace archive or show a trace location | ADR 005 removed the channel and the archive; a direction change is a new ADR, and the Timeline export already reads complete runs |
 
-**What a user loses.** No switch in any client, no `auto` rule, and no archive
-to point at. Raising process logging takes `dimcode daemon stop` and a new start
-from a terminal with the filter set (`RUST_LOG=debug dimcode`); `daemon.log`
-appends across starts, so a diagnosis keeps the earlier evidence in one file.
-The complete record of what a run committed is `dimcode export SESSION_ID`
+**What a user loses.** No process-log switch in any client, no `auto` rule (the
+legacy rule is not in this repository, so it is dropped rather than
+reconstructed), and no archive to point at. Raising process logging takes
+`dimcode daemon stop` and a new start from a terminal with the filter set
+(`RUST_LOG=debug dimcode`); `daemon.log` appends across starts, so a diagnosis
+keeps the earlier evidence in one file. The complete record of what a run
+committed is `dimcode export SESSION_ID`
 ([Timeline export](../appserver/timeline-export.md)), and the model-request
 recording switch on the same page is the record of model wire exchanges
 ([ADR 016](../../adr/016-model-request-log.md)); that switch stays user scope,
