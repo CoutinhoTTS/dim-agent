@@ -472,6 +472,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Permission needed: {tool}" => "Perlu izin: {tool}",
         "Question waiting for your answer" => "Pertanyaan menunggu jawaban",
         "Notify when agent needs you" => "Beri tahu saat agen butuh Anda",
+        "Show ACP sessions" => "Tampilkan sesi ACP",
         // keys.rs
         "show the key bindings" => "lihat pintasan tombol",
         "Application keys" => "Tombol aplikasi",

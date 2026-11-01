@@ -407,6 +407,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Permission needed: {tool}" => "需要授权：{tool}",
         "Question waiting for your answer" => "有问题等你回答",
         "Notify when agent needs you" => "需要你时通知",
+        "Show ACP sessions" => "显示 ACP 会话",
         "show the key bindings" => "显示快捷键",
         "Application keys" => "应用快捷键",
         "Enter submit · Shift+Enter or Ctrl+J newline · ↑↓ history" => {

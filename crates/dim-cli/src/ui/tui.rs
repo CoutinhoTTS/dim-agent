@@ -2771,6 +2771,7 @@ impl App {
             tools_expanded: self.tool_detail == Detail::Expanded,
             mouse: self.mouse,
             notify: self.notify,
+            acp_sessions: crate::ui::config::saved_show_acp(&self.home),
             file_access: file_label(self.permission_policy.file_access()).to_owned(),
             approvals: tool_policy_label(&self.permission_policy).to_owned(),
         };
@@ -2816,6 +2817,14 @@ impl App {
                 self.notify = !self.notify;
                 let key = crate::ui::notify::NOTIFY_KEY;
                 if let Some(error) = crate::ui::config::write(&self.home, key, self.notify.into()) {
+                    self.set_notice(error);
+                }
+                self.settings_return = None;
+                self.open_settings(setting);
+            }
+            Setting::AcpSessions => {
+                let show = !crate::ui::config::saved_show_acp(&self.home);
+                if let Some(error) = crate::ui::config::save_show_acp(&self.home, show) {
                     self.set_notice(error);
                 }
                 self.settings_return = None;
@@ -2953,7 +2962,9 @@ impl App {
             }
             "web" => Outcome::Web,
             "resume" => {
-                self.open_prompt(Prompt::Sessions(SessionsPanel::new()));
+                self.open_prompt(Prompt::Sessions(SessionsPanel::new(
+                    crate::ui::config::saved_show_acp(&self.home),
+                )));
                 self.sync_sessions();
                 Outcome::Continue
             }
@@ -5657,7 +5668,7 @@ mod tests {
         );
         let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
         app.run_command("settings", "");
-        for _ in 0..8 {
+        for _ in 0..9 {
             app.handle_input(key(KeyCode::Down));
         }
         app.handle_input(key(KeyCode::Enter));

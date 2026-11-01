@@ -79,6 +79,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Agents sessions service](design/appserver/sessions-service.md)（[中文](zh/design/appserver/sessions-service.md)）
 - [Session deletion, cleanup and fork](design/appserver/session-deletion-and-fork.md)（[中文](zh/design/appserver/session-deletion-and-fork.md)）
 - [Client Session catalog](design/appserver/session-catalog.md) (#556)（[中文](zh/design/appserver/session-catalog.md)）
+- [Session classification: creation origin and catalog visibility](design/appserver/session-classification.md) (#557)
 - [Session broadcast notices](design/appserver/session-notices.md)（[中文](zh/design/appserver/session-notices.md)）
 - [Bounded latest-turn history window](design/appserver/session-history-window.md) (#712)
 - [SessionStore title metadata](design/appserver/session-title-metadata.md)（[中文](zh/design/appserver/session-title-metadata.md)）
