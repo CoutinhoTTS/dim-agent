@@ -21318,6 +21318,16 @@
     },
     {
       "from": "dim_app_server::storage::catalog::tests",
+      "to": "dim_app_server::connection",
+      "references": [
+        "path ConnectionHub",
+        "path Entry::Bare",
+        "use crate::connection::ConnectionHub",
+        "use crate::connection::Entry"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::catalog::tests",
       "to": "dim_app_server::storage::catalog",
       "references": [
         "path create"
