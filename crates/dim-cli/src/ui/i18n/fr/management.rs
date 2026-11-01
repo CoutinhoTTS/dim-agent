@@ -17,6 +17,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Hooks" => "Hooks",
         "invalid" => "non valide",
         "Saved." => "Enregistré.",
+        "Saved {name}." => "{name} enregistré.",
         "No change." => "Aucun changement.",
         "Your text is kept in {path}." => "Votre texte est conservé dans {path}.",
         "The user's own document; always in effect." => {
@@ -48,10 +49,21 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Reset {name} to its catalog entry." => "{name} réinitialisé sur son entrée de catalogue.",
         "Ran {name}." => "{name} exécuté.",
-        "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
-            "Le document utilisateur a changé depuis sa lecture ; rien n'a été écrit. Votre prochaine modification ouvrira le document actuel."
+        "The user document changed since it was read; nothing was written." => {
+            "Le document utilisateur a changé depuis sa lecture ; rien n'a été écrit."
         }
+        "The job changed since it was read; nothing was written." => {
+            "La tâche a changé depuis sa lecture ; rien n'a été écrit."
+        }
+        "The jobs changed since they were read; nothing was written." => {
+            "Les tâches ont changé depuis leur lecture ; rien n'a été écrit."
+        }
+        "Your next edit opens the current document." => {
+            "Votre prochaine modification ouvrira le document actuel."
+        }
+        "Your next add reopens your text." => "Votre prochain ajout rouvrira votre texte.",
         "Scheduler" => "Planificateur",
+        "jobs" => "tâches",
         "Added {name}." => "{name} ajouté.",
         "Run {name}: {outcome}." => "{name} exécuté : {outcome}.",
         "Recent runs of {name}" => "Exécutions récentes de {name}",
@@ -63,17 +75,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "at {instant}" => "à {instant}",
         "cron {expression}" => "cron {expression}",
         "cron {expression} in {zone}" => "cron {expression} en {zone}",
-        "The job changed since it was read; nothing was written. Your next edit opens the current job." => {
-            "La tâche a changé depuis sa lecture ; rien n'a été écrit. Votre prochaine modification ouvrira la tâche actuelle."
-        }
-        "The jobs changed since they were read; nothing was written. Your next add opens your text again." => {
-            "Les tâches ont changé depuis leur lecture ; rien n'a été écrit. Votre prochain ajout rouvrira votre texte."
-        }
         "The job changed since it was read; nothing was removed." => {
             "La tâche a changé depuis sa lecture ; rien n'a été supprimé."
         }
         "The Scheduler has no area document." => "Le planificateur n'a pas de document de domaine.",
         "No scheduled job has that id." => "Aucune tâche planifiée n'a cet id.",
+        "This daemon cannot manage {area}." => "Impossible de gérer {area}.",
+        "The document deleted {field}, which the owner cannot clear; nothing was written." => {
+            "Le document supprime {field}, que le propriétaire ne peut pas effacer ; rien n'a été écrit."
+        }
+        "The document changes no field; nothing was written." => {
+            "Le document ne modifie aucun champ ; rien n'a été écrit."
+        }
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "Les réglages des hooks de cet espace de travail ont changé depuis leur lecture ; rien n'a été écrit."
         }
@@ -109,12 +122,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The signed-in account changed; the refresh cleared preferences, overrides and disables." => {
             "Le compte connecté a changé ; le rechargement a effacé les préférences, surcharges et désactivations."
-        }
-        "The models changed since they were read; nothing was written. Your next edit opens the current list." => {
-            "Les modèles ont changé depuis leur lecture ; rien n'a été écrit. La prochaine modification ouvrira la liste actuelle."
-        }
-        "The models changed since they were read; nothing was written. Your next add opens your text again." => {
-            "Les modèles ont changé depuis leur lecture ; rien n'a été écrit. Le prochain ajout rouvrira votre texte."
         }
         "The models changed since they were read; nothing was removed." => {
             "Les modèles ont changé depuis leur lecture ; rien n'a été supprimé."

@@ -298,7 +298,7 @@ fn models_area_set_writes_the_revision_it_read_and_only_the_changed_fields() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(String::from_utf8(output.stdout).unwrap(), "Saved.\n");
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "Saved flash.\n");
 
     // A conflict writes nothing, and the user's text keeps its file.
     let home = Home::new();
@@ -341,7 +341,7 @@ fn models_area_set_writes_the_revision_it_read_and_only_the_changed_fields() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stderr.contains("The models changed since they were read; nothing was written. Your next edit opens the current list."),
+        stderr.contains("The models changed since they were read; nothing was written."),
         "{stderr}"
     );
     assert!(stderr.contains(&kept), "{stderr}");
@@ -617,7 +617,11 @@ fn tui_models_area_opens_and_toggles_a_model() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    // The three groups and the wrapped hint need more than 80 columns and
+    // 24 rows; the panel is the same at any size.
+    let mut command = home.command();
+    sized(&mut command, 100, 32);
+    let mut terminal = Terminal::launch_tui(command);
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/models\r");

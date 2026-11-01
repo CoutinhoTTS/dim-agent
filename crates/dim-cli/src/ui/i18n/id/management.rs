@@ -17,6 +17,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Hooks" => "Hooks",
         "invalid" => "tidak valid",
         "Saved." => "Disimpan.",
+        "Saved {name}." => "{name} disimpan.",
         "No change." => "Tidak ada perubahan.",
         "Your text is kept in {path}." => "Teks Anda tersimpan di {path}.",
         "The user's own document; always in effect." => "Dokumen milik pengguna; selalu berlaku.",
@@ -44,10 +45,19 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Reset {name}? Enter confirm · Esc cancel" => "Reset {name}? Enter konfirmasi · Esc batal",
         "Reset {name} to its catalog entry." => "{name} direset ke entri katalog.",
         "Ran {name}." => "{name} dijalankan.",
-        "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
-            "Dokumen pengguna berubah sejak dibaca; tidak ada yang ditulis. Edit berikutnya membuka dokumen saat ini."
+        "The user document changed since it was read; nothing was written." => {
+            "Dokumen pengguna berubah sejak dibaca; tidak ada yang ditulis."
         }
+        "The job changed since it was read; nothing was written." => {
+            "Tugas berubah sejak dibaca; tidak ada yang ditulis."
+        }
+        "The jobs changed since they were read; nothing was written." => {
+            "Tugas berubah sejak dibaca; tidak ada yang ditulis."
+        }
+        "Your next edit opens the current document." => "Edit berikutnya membuka dokumen saat ini.",
+        "Your next add reopens your text." => "Tambah berikutnya membuka kembali teks Anda.",
         "Scheduler" => "Penjadwal",
+        "jobs" => "tugas",
         "Added {name}." => "{name} ditambahkan.",
         "Run {name}: {outcome}." => "{name} dijalankan: {outcome}.",
         "Recent runs of {name}" => "Eksekusi terbaru {name}",
@@ -59,17 +69,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "at {instant}" => "pada {instant}",
         "cron {expression}" => "cron {expression}",
         "cron {expression} in {zone}" => "cron {expression} di {zone}",
-        "The job changed since it was read; nothing was written. Your next edit opens the current job." => {
-            "Tugas berubah sejak dibaca; tidak ada yang ditulis. Edit berikutnya membuka tugas saat ini."
-        }
-        "The jobs changed since they were read; nothing was written. Your next add opens your text again." => {
-            "Tugas berubah sejak dibaca; tidak ada yang ditulis. Tambah berikutnya membuka kembali teks Anda."
-        }
         "The job changed since it was read; nothing was removed." => {
             "Tugas berubah sejak dibaca; tidak ada yang dihapus."
         }
         "The Scheduler has no area document." => "Penjadwal tidak memiliki dokumen area.",
         "No scheduled job has that id." => "Tidak ada tugas terjadwal dengan id itu.",
+        "This daemon cannot manage {area}." => "Tidak dapat mengelola {area}.",
+        "The document deleted {field}, which the owner cannot clear; nothing was written." => {
+            "Dokumen menghapus {field}, yang tidak dapat dibersihkan pemilik; tidak ada yang ditulis."
+        }
+        "The document changes no field; nothing was written." => {
+            "Dokumen tidak mengubah bidang apa pun; tidak ada yang ditulis."
+        }
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "Pengaturan hook ruang kerja ini berubah sejak dibaca; tidak ada yang ditulis."
         }
@@ -101,12 +112,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The signed-in account changed; the refresh cleared preferences, overrides and disables." => {
             "Akun yang masuk berubah; muat ulang menghapus preferensi, penimpaan, dan penonaktifan."
-        }
-        "The models changed since they were read; nothing was written. Your next edit opens the current list." => {
-            "Model berubah sejak dibaca; tidak ada yang ditulis. Edit berikutnya membuka daftar saat ini."
-        }
-        "The models changed since they were read; nothing was written. Your next add opens your text again." => {
-            "Model berubah sejak dibaca; tidak ada yang ditulis. Tambah berikutnya membuka teks Anda lagi."
         }
         "The models changed since they were read; nothing was removed." => {
             "Model berubah sejak dibaca; tidak ada yang dihapus."

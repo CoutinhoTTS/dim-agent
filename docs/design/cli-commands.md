@@ -401,6 +401,11 @@ failed read. The first two areas use toggle, reload and edit. The Scheduler area
 add, remove, run and inspect, and the client's kinds are what it writes; a later area adds its
 adapter and the methods its kinds call, and names here the kinds it adds.
 
+A hint the bottom border cannot hold is drawn as rows above a plain bottom border, wrapped at
+the ` · ` separators so a part never splits, and a part wider than a row is cut with `…`. The
+rows take their space from the list like the footer's, so every key stays visible at any width,
+the remove confirmation included.
+
 - add opens the external editor on a new-entry document that the adapter supplies — the owner's
   create shape, filled with example values — and writes it with the area's create method. An
   unchanged document writes nothing, and a refusal keeps the draft, which the next Ctrl+N
@@ -424,6 +429,11 @@ adapter and the methods its kinds call, and names here the kinds it adds.
 An entry of an area whose documents are per entry offers edit for its own document: the Save
 action then carries the entry's id, and the adapter keeps the revision it read with the draft.
 
+A kept draft belongs to the write target it was taken for: the area's document, one entry's
+document, or a create. The edit key of a target reopens only that target's kept draft, at the
+revision its text came from; another target's edit opens its own document and leaves the kept
+draft where it is, and only the reply to a draft's own write settles that draft.
+
 ### Writes
 
 Writes follow [Execution settings](#execution-settings):
@@ -434,8 +444,10 @@ Writes follow [Execution settings](#execution-settings):
   stale revision is dropped, and the next edit opens the stored document. It never retries
   automatically and never overwrites a newer document;
 - reload discards the draft and reads again;
-- an edit the conflict prevented is not lost silently: the message names the file that holds the
-  user's text;
+- a conflict message states the owner's fact — what changed, and that nothing was written — and
+  leaves where the text is to the surface that holds it: the panel says what the next edit or add
+  does with the kept text and names its file, and the command line names the file that holds the
+  text, a stdin input included, and exits 1;
 - a refusal that does not involve a newer document — text that does not parse, or one the owner
   refuses — keeps the draft's revision, so the edit key reopens the user's text and writes it
   again;
@@ -536,7 +548,13 @@ owner reports no grouping, so the jobs share one heading, `jobs`.
 A job's document is the record the owner wrote; the client changes only the fields `schedule.save`
 takes — `name`, `schedule`, `prompt`, `cwd`, `model`, `mode`, `policy`, `max_run_minutes`,
 `enabled`, `session_id` and `agent_id` — and carries the id on the Save action and the job's
-revision as the revision the draft was read at. A stale revision is `schedule_conflict`, the
+revision as the revision the draft was read at. `schedule.save` is a patch merged over the stored
+job, so an edit writes only the members the draft changed: the adapter reads the job again,
+refuses a draft whose revision is no longer the job's, and sends the changed members with the id
+and the revision. A draft that changes no editable member writes nothing, and a member the draft
+deletes cannot be cleared because the patch has no null: the write is refused before it is sent
+and names the member. The exception is a `session_id` whose `mode` becomes `create`, which the
+owner clears itself. A stale revision is `schedule_conflict`, the
 typed conflict: nothing is written, the jobs are read again, and the next edit opens the current
 record. `created_by`, `policy_cap` and `enabled_at` are the owner's to derive and are never sent.
 A new entry starts from the owner's create shape — a name, an example `every` schedule, a prompt
@@ -686,7 +704,7 @@ models PROVIDER inspect MODEL` prints the lines the detail shows.
 | `dimcode scheduled remove ID` | Delete one job over `schedule.delete` without a prompt: the id on the command line is the intent. |
 | `dimcode scheduled run ID` | Run one job now over `schedule.run_now` and report what the owner returned, or why it skipped the run. |
 | `dimcode scheduled history ID` | Print one job's recent runs over `schedule.history`, newest first, with each run's state and time. |
-| `/scheduled`, `/schedule` | Open the Scheduler panel of the Session's workspace ([management surfaces](#management-surfaces)): a job per entry with its schedule, next window and last outcome, and the toggle, edit, add, remove, run and history kinds. |
+| `/scheduled`, `/schedule` | Open the Scheduler panel ([management surfaces](#management-surfaces)): a job per entry with its schedule, next window and last outcome, and the toggle, edit, add, remove, run and inspect kinds; the Scheduler's verb for inspect is history. Jobs are the host's, not the Session's or workspace's; only a new job's default `cwd` comes from the Session. |
 | `dimcode login [PROVIDER] [--directory URL] [--device] [--redirect-uri URI]` | Start the described account's browser or device sign-in ([Provider accounts](#provider-accounts)); without PROVIDER, list the described accounts. |
 | `dimcode account PROVIDER` | Print the described account's non-secret state. |
 | `dimcode logout PROVIDER` | Sign the described account out. |

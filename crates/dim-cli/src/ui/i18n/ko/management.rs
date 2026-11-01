@@ -17,6 +17,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Hooks" => "훅",
         "invalid" => "유효하지 않음",
         "Saved." => "저장했습니다.",
+        "Saved {name}." => "{name}을(를) 저장했습니다.",
         "No change." => "변경 사항이 없습니다.",
         "Your text is kept in {path}." => "작성한 내용은 {path}에 보관됩니다.",
         "The user's own document; always in effect." => "사용자 자신의 문서이며 항상 적용됩니다.",
@@ -46,10 +47,19 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Reset {name} to its catalog entry." => "{name}을(를) 카탈로그 항목으로 초기화했습니다.",
         "Ran {name}." => "{name}을(를) 실행했습니다.",
-        "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
-            "사용자 문서가 읽은 뒤에 변경되었습니다. 아무것도 쓰지 않았습니다. 다음 편집은 현재 문서를 엽니다."
+        "The user document changed since it was read; nothing was written." => {
+            "사용자 문서가 읽은 뒤에 변경되었습니다. 아무것도 쓰지 않았습니다."
         }
+        "The job changed since it was read; nothing was written." => {
+            "작업이 읽은 뒤에 변경되었습니다. 아무것도 쓰지 않았습니다."
+        }
+        "The jobs changed since they were read; nothing was written." => {
+            "작업이 읽은 뒤에 변경되었습니다. 아무것도 쓰지 않았습니다."
+        }
+        "Your next edit opens the current document." => "다음 편집은 현재 문서를 엽니다.",
+        "Your next add reopens your text." => "다음 추가는 작성한 내용을 다시 엽니다.",
         "Scheduler" => "스케줄러",
+        "jobs" => "작업",
         "Added {name}." => "{name}을(를) 추가했습니다.",
         "Run {name}: {outcome}." => "{name}을(를) 실행했습니다: {outcome}.",
         "Recent runs of {name}" => "{name}의 최근 실행",
@@ -61,17 +71,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "at {instant}" => "{instant}에",
         "cron {expression}" => "cron {expression}",
         "cron {expression} in {zone}" => "cron {expression} ({zone})",
-        "The job changed since it was read; nothing was written. Your next edit opens the current job." => {
-            "작업이 읽은 뒤에 변경되었습니다. 아무것도 쓰지 않았습니다. 다음 편집은 현재 작업을 엽니다."
-        }
-        "The jobs changed since they were read; nothing was written. Your next add opens your text again." => {
-            "작업이 읽은 뒤에 변경되었습니다. 아무것도 쓰지 않았습니다. 다음 추가는 작성한 내용을 다시 엽니다."
-        }
         "The job changed since it was read; nothing was removed." => {
             "작업이 읽은 뒤에 변경되었습니다. 아무것도 삭제하지 않았습니다."
         }
         "The Scheduler has no area document." => "스케줄러에는 영역 문서가 없습니다.",
         "No scheduled job has that id." => "해당 id의 예약 작업이 없습니다.",
+        "This daemon cannot manage {area}." => "{area}을(를) 관리할 수 없습니다.",
+        "The document deleted {field}, which the owner cannot clear; nothing was written." => {
+            "{field}이(가) 문서에서 삭제되었지만 소유자가 지울 수 없습니다. 아무것도 쓰지 않았습니다."
+        }
+        "The document changes no field; nothing was written." => {
+            "문서가 어떤 필드도 바꾸지 않았습니다. 아무것도 쓰지 않았습니다."
+        }
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "이 작업 공간의 훅 설정이 읽은 뒤에 변경되었습니다. 아무것도 쓰지 않았습니다."
         }
@@ -105,12 +116,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The signed-in account changed; the refresh cleared preferences, overrides and disables." => {
             "로그인한 계정이 바뀌었습니다. 새로 고침이 기본 설정, 재정의, 비활성화를 지웠습니다."
-        }
-        "The models changed since they were read; nothing was written. Your next edit opens the current list." => {
-            "모델이 읽은 뒤 변경되었습니다. 이번에는 아무것도 쓰지 않았습니다. 다음 편집은 현재 목록을 엽니다."
-        }
-        "The models changed since they were read; nothing was written. Your next add opens your text again." => {
-            "모델이 읽은 뒤 변경되었습니다. 이번에는 아무것도 쓰지 않았습니다. 다음 추가는 텍스트를 다시 엽니다."
         }
         "The models changed since they were read; nothing was removed." => {
             "모델이 읽은 뒤 변경되었습니다. 이번에는 아무것도 제거하지 않았습니다."

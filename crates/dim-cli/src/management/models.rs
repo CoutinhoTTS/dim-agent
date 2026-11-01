@@ -13,7 +13,7 @@ use super::Groups;
 use crate::client::{Client, app_error};
 use crate::model::session::{
     ActionKind, EntryDocument, EntryState, ManagementAction, ManagementDetail, ManagementEntry,
-    ManagementView, RemoveVerb,
+    ManagementRequest, ManagementView, RemoveVerb,
 };
 use crate::ui::i18n::{t, tf};
 use crate::ui::oauth_view::count;
@@ -459,6 +459,19 @@ async fn detail(client: &mut Client, provider_id: &str, id: &str) -> Result<Answ
     Ok(Answer::Detail(descriptor(model)))
 }
 
+/// The line an applied models action reports, from its request and the verb
+/// the owner's entry gave. It is the shared line, except that a reset says
+/// what it did to the entry: it puts the catalog entry back rather than
+/// removing anything.
+pub fn applied_line(request: &ManagementRequest, removed: Option<RemoveVerb>) -> String {
+    match (&request.action, removed) {
+        (ManagementAction::Remove { id }, Some(RemoveVerb::Reset)) => {
+            tf("Reset {name} to its catalog entry.", &[("name", id)])
+        }
+        _ => super::applied_line(request),
+    }
+}
+
 /// Reads the area after an action the owner accepted: a failed read reports
 /// the action as applied with the action's note, not as a refusal.
 async fn read_after(
@@ -536,14 +549,10 @@ async fn conflict(
 
 fn conflict_message(kind: ConflictKind) -> String {
     t(match kind {
-        ConflictKind::Edit => {
-            "The models changed since they were read; nothing was written. Your next edit opens the current list."
-        }
-        ConflictKind::Add => {
-            "The models changed since they were read; nothing was written. Your next add opens your text again."
+        ConflictKind::Edit | ConflictKind::Add | ConflictKind::Toggle => {
+            "The models changed since they were read; nothing was written."
         }
         ConflictKind::Remove => "The models changed since they were read; nothing was removed.",
-        ConflictKind::Toggle => "The models changed since they were read; nothing was written.",
     })
     .to_owned()
 }

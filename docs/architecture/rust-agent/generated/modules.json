@@ -3075,8 +3075,8 @@
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/management/mod.rs",
       "unexpandedMacros": [
-        "format",
         "matches",
+        "unreachable",
         "vec"
       ]
     },
@@ -3134,15 +3134,6 @@
       "unexpandedMacros": [
         "format",
         "json"
-      ]
-    },
-    {
-      "id": "dim_cli::management::skills::tests",
-      "crate": "dim_cli",
-      "parent": "dim_cli::management::skills",
-      "file": "crates/dim-cli/src/management/skills.rs",
-      "unexpandedMacros": [
-        "assert_eq"
       ]
     },
     {
@@ -3217,7 +3208,9 @@
       "crate": "dim_cli",
       "parent": "dim_cli::model",
       "file": "crates/dim-cli/src/model/session.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "matches"
+      ]
     },
     {
       "id": "dim_cli::model::shell",
@@ -25361,6 +25354,7 @@
         "path models::Failure::Conflict",
         "path models::Failure::ReadFailed",
         "path models::Failure::Refused",
+        "path models::applied_line",
         "path models::apply",
         "path models::view"
       ]
@@ -25439,6 +25433,16 @@
     },
     {
       "from": "dim_cli::management",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path t",
+        "path tf",
+        "use crate::ui::i18n::t",
+        "use crate::ui::i18n::tf"
+      ]
+    },
+    {
+      "from": "dim_cli::management",
       "to": "dim_client",
       "references": [
         "path Client",
@@ -25472,12 +25476,8 @@
         "path EntryState::Invalid",
         "path EntryState::ReadOnly",
         "path ManagementAction",
-        "path ManagementAction::Add",
-        "path ManagementAction::Inspect",
         "path ManagementAction::List",
         "path ManagementAction::Reload",
-        "path ManagementAction::Remove",
-        "path ManagementAction::Run",
         "path ManagementAction::Save",
         "path ManagementAction::Toggle",
         "path ManagementEntry",
@@ -25530,6 +25530,7 @@
       "to": "dim_cli::management",
       "references": [
         "path Groups::default",
+        "path super::applied_line",
         "path super::area_kinds",
         "use super::Groups"
       ]
@@ -25557,6 +25558,7 @@
         "path ManagementAction::Toggle",
         "path ManagementDetail",
         "path ManagementEntry",
+        "path ManagementRequest",
         "path ManagementView",
         "path RemoveVerb",
         "path RemoveVerb::Remove",
@@ -25568,6 +25570,7 @@
         "use crate::model::session::ManagementAction",
         "use crate::model::session::ManagementDetail",
         "use crate::model::session::ManagementEntry",
+        "use crate::model::session::ManagementRequest",
         "use crate::model::session::ManagementView",
         "use crate::model::session::RemoveVerb"
       ]
@@ -25678,13 +25681,6 @@
     },
     {
       "from": "dim_cli::management::skills",
-      "to": "dim_cli::management::skills::tests",
-      "references": [
-        "mod tests"
-      ]
-    },
-    {
-      "from": "dim_cli::management::skills",
       "to": "dim_cli::model::session",
       "references": [
         "path ActionKind",
@@ -25745,6 +25741,7 @@
       "from": "dim_cli::management_command",
       "to": "dim_cli::management",
       "references": [
+        "path management::applied_line",
         "path management::apply",
         "path management::supported",
         "path management::supports_kind",
@@ -25778,6 +25775,7 @@
         "path models::Answer::Detail",
         "path models::Answer::Provider",
         "path models::Failure::ReadFailed",
+        "path models::applied_line",
         "path models::apply",
         "path models::edit_template",
         "path models::read",
@@ -25828,10 +25826,9 @@
         "path Area::Models",
         "path Area::Scheduled",
         "path Area::Skills",
-        "path ManagementAction",
         "path ManagementAction::Add",
         "path ManagementAction::List",
-        "path ManagementAction::Remove",
+        "path ManagementAction::Reload",
         "path ManagementAction::Save",
         "path ManagementAction::Toggle",
         "path ManagementRequest",
@@ -25839,13 +25836,11 @@
         "path ManagementResult::Detail",
         "path ManagementResult::Refused",
         "path ManagementResult::View",
-        "path RemoveVerb",
         "use crate::model::session::ActionKind",
         "use crate::model::session::Area",
         "use crate::model::session::ManagementAction",
         "use crate::model::session::ManagementRequest",
-        "use crate::model::session::ManagementResult",
-        "use crate::model::session::RemoveVerb"
+        "use crate::model::session::ManagementResult"
       ]
     },
     {
@@ -25853,7 +25848,9 @@
       "to": "dim_cli::sanitize",
       "references": [
         "path safe",
-        "use crate::sanitize::safe"
+        "path safe_line",
+        "use crate::sanitize::safe",
+        "use crate::sanitize::safe_line"
       ]
     },
     {
@@ -29817,10 +29814,12 @@
         "path bordered",
         "path follow_window",
         "path key_hints",
+        "path visible_width",
         "path wrap_words",
         "use crate::ui::render::panel::bordered",
         "use crate::ui::render::panel::follow_window",
         "use crate::ui::render::panel::key_hints",
+        "use crate::ui::render::panel::visible_width",
         "use crate::ui::render::panel::wrap_words"
       ]
     },
@@ -29969,7 +29968,9 @@
       "to": "dim_cli::sanitize",
       "references": [
         "path safe",
-        "use crate::sanitize::safe"
+        "path safe_line",
+        "use crate::sanitize::safe",
+        "use crate::sanitize::safe_line"
       ]
     },
     {
@@ -30877,6 +30878,7 @@
         "path crate::model::session::AccountTarget",
         "path crate::model::session::Area",
         "path crate::model::session::GrantRequest",
+        "path crate::model::session::ManagementAction",
         "path crate::model::session::ManagementRequest",
         "path crate::model::session::OauthStart",
         "path crate::model::session::PluginAction",
@@ -33522,6 +33524,14 @@
     },
     {
       "from": "dim_cli::ui::tui",
+      "to": "dim_cli::management",
+      "references": [
+        "path management::applied_line",
+        "use crate::management"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
       "to": "dim_cli::management::editor",
       "references": [
         "path editor::Draft",
@@ -33603,6 +33613,7 @@
         "path ManagementAction::Save",
         "path ManagementRefusal::Conflict",
         "path ManagementRequest",
+        "path ManagementResult",
         "path ManagementResult::Applied",
         "path ManagementResult::Detail",
         "path ManagementResult::Refused",
@@ -34455,6 +34466,7 @@
         "path Command::Submit",
         "path DIM_OAUTH_ID",
         "path ManagementAction::Add",
+        "path ManagementAction::Run",
         "path ManagementAction::Save",
         "path ManagementRefusal::Conflict",
         "path ManagementRefusal::Refused",
@@ -36910,6 +36922,14 @@
     {
       "module": "dim_cli::ui::progress",
       "path": "char::is_ascii_digit"
+    },
+    {
+      "module": "dim_cli::ui::prompts",
+      "path": "ManagementAction::Add"
+    },
+    {
+      "module": "dim_cli::ui::prompts",
+      "path": "ManagementAction::Save"
     },
     {
       "module": "dim_cli::ui::providers_panel",

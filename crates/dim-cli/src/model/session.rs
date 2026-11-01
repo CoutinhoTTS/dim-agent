@@ -306,6 +306,12 @@ impl Area {
             Self::Models { .. } => "models",
         }
     }
+
+    /// Whether the area's documents are per entry, so `edit` and `set` name
+    /// one, rather than one document for the area.
+    pub fn per_entry(&self) -> bool {
+        matches!(self, Self::Scheduled | Self::Models { .. })
+    }
 }
 
 /// What a management request asks of its area's owner.
@@ -360,7 +366,9 @@ pub struct ManagementView {
     pub create: Option<serde_json::Value>,
     /// The kinds that act on the area itself rather than on one entry, in the
     /// order a panel offers them: reload and add, neither of which needs a
-    /// selection, so they work on an empty area and after a failed read.
+    /// selection, so both work on an empty area. Add still needs this view's
+    /// create document; without a view there is none, and the hint offers
+    /// only reload.
     pub actions: Vec<ActionKind>,
     /// Entries under the source headings their owner reports.
     pub groups: Vec<ManagementGroup>,
@@ -457,12 +465,10 @@ pub enum ManagementResult {
         note: Option<String>,
     },
     /// The action was applied and the read that reports the area failed:
-    /// the change was made, the owner's answer is kept, and `read_error`
-    /// says why the area is not shown.
-    Applied {
-        note: Option<String>,
-        read_error: String,
-    },
+    /// the change was made, and `read_error` says why the area is not shown.
+    /// `note` is the action's own line, always: the owner's answer when that
+    /// is more than the view, else the line its kind reports.
+    Applied { note: String, read_error: String },
     /// What an inspect found, in place of the list.
     Detail(ManagementDetail),
     /// Nothing was applied, and this is why.

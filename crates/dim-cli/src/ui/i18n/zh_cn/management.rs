@@ -17,6 +17,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Hooks" => "钩子",
         "invalid" => "无效",
         "Saved." => "已保存。",
+        "Saved {name}." => "已保存 {name}。",
         "No change." => "没有变化。",
         "Your text is kept in {path}." => "你的内容保留在 {path}。",
         "The user's own document; always in effect." => "用户自己的文档；始终生效。",
@@ -40,10 +41,19 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Reset {name}? Enter confirm · Esc cancel" => "重置 {name}？Enter 确认 · Esc 取消",
         "Reset {name} to its catalog entry." => "已将 {name} 重置为目录条目。",
         "Ran {name}." => "已运行 {name}。",
-        "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
-            "用户文档在读取后已被修改；本次没有写入。下次编辑会打开当前文档。"
+        "The user document changed since it was read; nothing was written." => {
+            "用户文档在读取后已被修改；本次没有写入。"
         }
+        "The job changed since it was read; nothing was written." => {
+            "任务在读取后已被修改；本次没有写入。"
+        }
+        "The jobs changed since they were read; nothing was written." => {
+            "任务在读取后已被修改；本次没有写入。"
+        }
+        "Your next edit opens the current document." => "下次编辑会打开当前文档。",
+        "Your next add reopens your text." => "下次新建会重新打开你的文本。",
         "Scheduler" => "调度器",
+        "jobs" => "任务",
         "Added {name}." => "已新建 {name}。",
         "Run {name}: {outcome}." => "已运行 {name}：{outcome}。",
         "Recent runs of {name}" => "{name} 的最近运行",
@@ -55,17 +65,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "at {instant}" => "于 {instant}",
         "cron {expression}" => "cron {expression}",
         "cron {expression} in {zone}" => "cron {expression}（{zone}）",
-        "The job changed since it was read; nothing was written. Your next edit opens the current job." => {
-            "任务在读取后已被修改；本次没有写入。下次编辑会打开当前任务。"
-        }
-        "The jobs changed since they were read; nothing was written. Your next add opens your text again." => {
-            "任务在读取后已被修改；本次没有写入。下次新建会重新打开你的文本。"
-        }
         "The job changed since it was read; nothing was removed." => {
             "任务在读取后已被修改；本次没有删除。"
         }
         "The Scheduler has no area document." => "调度器没有领域文档。",
         "No scheduled job has that id." => "没有该 id 的定时任务。",
+        "This daemon cannot manage {area}." => "无法管理{area}。",
+        "The document deleted {field}, which the owner cannot clear; nothing was written." => {
+            "文档删除了 {field}，所有者无法清除它；本次没有写入。"
+        }
+        "The document changes no field; nothing was written." => {
+            "文档没有改动任何字段；本次没有写入。"
+        }
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "此工作区的钩子设置已在读取后发生变化；本次没有写入。"
         }
@@ -95,12 +106,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The signed-in account changed; the refresh cleared preferences, overrides and disables." => {
             "登录的账号已变更；刷新已清除偏好、覆盖和禁用项。"
-        }
-        "The models changed since they were read; nothing was written. Your next edit opens the current list." => {
-            "模型在读取后已变更；本次没有写入。下次编辑会打开当前列表。"
-        }
-        "The models changed since they were read; nothing was written. Your next add opens your text again." => {
-            "模型在读取后已变更；本次没有写入。下次新建会重新打开你的文本。"
         }
         "The models changed since they were read; nothing was removed." => {
             "模型在读取后已变更；本次没有移除任何东西。"
