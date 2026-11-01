@@ -31,6 +31,10 @@ tool discovery and tool publication belong to the Session that adopted the entry
 answer a view by opening its own connection without duplicating daemon-owned configuration,
 credentials and OAuth state.
 
+Two words are used precisely below. An entry's **discovered** tools are the ones its server declares in
+`tools/list`; they are what a view's call is looked up in. The **published** tools are the subset the
+Session offers the model, under the namespaced name `mcp_<label>_<hash>` a `tool/call` fact carries.
+
 It does not own:
 
 | Surface | Owner |
@@ -79,8 +83,8 @@ certainly not to a view.
 
 ### D2. A view's operations are Session methods
 
-Each operation acts on one Session's live connection and on the tools that entry published. That is
-Session state, so the operations are Session methods dispatched through `sessionId`, beside
+Each operation acts on one Session's live connection and on the tools that connection discovered. That
+is Session state, so the operations are Session methods dispatched through `sessionId`, beside
 `session.mcp` and `session.mcp.refresh`
 ([Management methods § Dispatch and lifecycle](management-methods.md#dispatch-and-lifecycle)). A
 management method would have to reach into a Session's connection from the process, which is the
@@ -91,15 +95,19 @@ it (D5).
 
 ### D3. A view is identified by its Session, its entry and its tool; there is no handle
 
-There is no view session, no lease, no token and no daemon-side registry. Every request names the
+There is no view session, no lease, no token and no daemon-side registry. A view's **call** names the
 Session it belongs to, the entry the Session adopted, and the tool; the daemon resolves them against
-what the Session holds at that moment. Two consequences follow.
+what the Session holds at that moment. The **mount read** names only the Session and the published tool
+name, because a client reading a `tool/call` fact has nothing else: resolving that name to its entry is
+what the mount read does (D4). Two consequences follow.
 
 - Retiring a connection generation needs no invalidation: the next request uses the generation that is
   current then, and an entry that stayed the same keeps the same answer.
-- The client's cache key is `session.mcp`'s per-entry `version`, which already changes exactly when
-  the entry's discovered tools change. A view re-reads its document when that version changes or when
-  the entry is no longer `ready`.
+- The client's cache key is `session.mcp`'s per-entry `version`, which changes when the entry's
+  discovered tools change **or when its connection is re-established** — a reconnect, a restore or a
+  replaced generation starts a new discovery. A view re-reads its document when that version changes or
+  when the entry is no longer `ready`, so a rebuilt connection cannot serve a document cached under the
+  old one.
 
 A runtime handle would add state to create, expire and clean up, and runtime handles are not durable
 identities ([design rules §4 rule 8](../../architecture/rust-agent/principles.md)).
@@ -144,7 +152,10 @@ to further user approval"), and only the client knows what the user is looking a
 to ask before forwarding a call does so before it sends the request.
 
 The call does not go through the branch's tool executor: it has no turn, it writes no `tool/*` fact,
-and its result must not enter the model context (D6).
+and its result must not enter the model context (D6). The daemon adds no deadline either: a view's call
+ends when the server answers, when the client's request is interrupted, or when the Session or the
+entry ends. A model tool call on the same connection has no deadline, and a per-surface one would be a
+second contract for the same connection.
 
 ### D6. The result belongs to the view
 
@@ -225,23 +236,54 @@ tool result has no new limit: it is the same connection and the same MCP path a 
 uses, so a limit that applied to one path only would be a second, unexplained contract for the same
 connection.
 
-### D12. A refusal is an error; a tool's own failure is data
+### D12. Refusal, unknown outcome and the tool's own failure are three different answers
 
-The daemon answers the host's request with an RPC error only when it refuses to perform it: the entry is
-gone or unusable, the tool is absent or not app-callable, the document is unsupported. A call that ran
-answers the tool's result, including one with `isError: true`, and a transport failure during the call
-is `mcp_unavailable` — the view is told the call did not happen rather than receiving an empty result.
+A host decides what to do next from what the daemon can guarantee, so the three outcomes are separate:
+
+- **Refused before the request was handed to the connection.** Nothing reached the server, so nothing
+  ran, and the view may retry once the cause is gone. A determinate refusal with a name of its own uses
+  that name (`mcp_unknown_server` for a call, `mcp_app_absent`, `mcp_app_not_callable`,
+  `mcp_app_unsupported`, `mcp_unavailable`); one without such a name — the request was interrupted while
+  the connection was still being opened — is `mcp_app_refused`.
+- **Handed over and no outcome received.** The request reached the connection and the daemon did not
+  get the answer: the client's request was interrupted after the hand-off, or the Session, the entry or
+  the generation ended while the call ran. That is `mcp_app_unknown`, and the view must treat the call
+  as possibly executed. It must not retry blindly: only the server can say whether the tool ran, so the
+  view shows the uncertainty and the user decides.
+- **Ran.** The reply is the tool's result, including one with `isError: true`, which is the server's
+  answer and not a failure of the call.
+
+`mcp_app_refused` and `mcp_app_unknown` replace `operation_interrupted` for these methods, because the
+client's next step depends on which side of the hand-off the request was on; a single code that warns
+"may already have committed" would make every retry an unbounded risk. The hand-off is the moment the
+daemon asks the connection to send `tools/call`; everything before it — resolving the entry, finding
+the tool, checking visibility, opening the connection — is a refusal, and everything after it is
+unknown if the answer does not arrive.
 
 ## 4. Contract
 
-Session methods, namespace `session.mcp.app`, admitted exactly as `session.mcp` is: they are
-execution-session methods, so the bare WebSocket answers `local_transport_required`, and the owner-only
-local transport and the authenticated loopback web entry are served
-([Session boundary A.3](../contracts/session-boundary.md#a3-entries-and-export)). Their names are
-advertised in `hello.features` with the methods that require local execution, under the same
-conditions. A remote paired device will need its own decision when RemoteGateway exists: a view's
-document and its calls are untrusted content the daemon relays. `sessionId` is required everywhere;
-`server` is the entry id `session.mcp` reports.
+Session methods named `session.mcp.app.widget` and `session.mcp.app.call`. Both are **exact built-in
+Session methods**, registered as `session.mcp` is: Rpc decodes them itself, and a Session namespace that
+equals, contains or lies inside either name is refused when it registers
+([Session boundary A.1](../contracts/session-boundary.md#a1-method-contributions), Reserved names). Their
+names are advertised in `hello.features` with the methods that require local execution.
+
+Admission is `session.mcp`'s — execution-session methods, so the bare WebSocket answers
+`local_transport_required` and the owner-only local transport and the authenticated loopback web entry
+are served ([Session boundary A.3](../contracts/session-boundary.md#a3-entries-and-export)) — with one
+narrower rule:
+
+**A connection carrying a `deviceId` is refused.** A paired device gets `local_transport_required` for
+both names, which is narrower than the execution Session methods
+[Session boundary A.4](../contracts/session-boundary.md#a4-migration-and-compatibility) E3 makes available
+to paired devices. Rendering a third-party document on another device and forwarding its calls through
+one of the user's enabled entries has no basis yet: the document's sandbox and CSP would be that
+device's, the daemon cannot see which device shows the view, and the call would run on the user's
+entries from a device the user may not be holding. Serving them there is a decision with its own
+boundary, taken when RemoteGateway lands, not an extension of this one.
+
+`sessionId` is required everywhere; `server` is the entry id `session.mcp` reports, and only
+`session.mcp.app.call` takes it.
 
 | Method | Request | Reply |
 | --- | --- | --- |
@@ -252,6 +294,9 @@ Neither method carries a branch, and neither changes process or Session state be
 entry's connection as any request on it would.
 
 ### 4.1 Mount read (`session.mcp.app.widget`)
+
+The request carries no entry: the published tool name is all a client has when it reads a `tool/call`
+fact, and resolving that name to its entry is this method's job (D3, D4).
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -309,27 +354,46 @@ client (host)                Session                       MCP entry
   | log (session, entry, tool, outcome, duration)              |
 ```
 
-The call is tracked by the connection's reply, so an interrupted request answers
-`operation_interrupted`; a Session that closes, an entry that is disabled or a generation that is
-replaced ends the call with `mcp_unavailable`. There is no per-call deadline: a model tool call on the
-same connection has none either (D11).
+The call is tracked by the connection's reply. An interruption before the request is handed to the
+connection answers `mcp_app_refused` and nothing ran; after the hand-off, an interruption, a Session
+close, a disable or a replaced generation answers `mcp_app_unknown`, because the server may have run it
+(D12). There is no per-call deadline (D5).
 
 ### 4.3 Errors
 
+The two methods answer different sets: the mount read has no entry in its request, so
+`mcp_unknown_server` belongs to the call only. Both share the connection, Session and admission codes.
+
+**`session.mcp.app.widget`**
+
 | `appError` | When |
 | --- | --- |
-| `mcp_unknown_server` | `server` is not an entry of this Session's MCP selection |
-| `mcp_unavailable` | The entry has no usable connection: disabled, connecting, failed, authorization required, or replaced while the call ran. The reason is `session.mcp`'s to report |
-| `mcp_app_absent` | The tool is not declared by the entry's current discovery, or declares no widget resource |
-| `mcp_app_not_callable` | The tool's `visibility` excludes `"app"` |
+| `mcp_app_absent` | The published tool name is not one the Session holds, or resolves to a tool that declares no widget resource |
 | `mcp_app_unsupported` | The declared resource is not a `ui://` `text/html;profile=mcp-app` document, carries neither text nor blob, or is larger than the limit (D11) |
+| `mcp_unavailable` | The tool's entry has no usable connection: disabled, connecting, failed, authorization required |
+| `mcp_app_refused` | Nothing was read: the request was interrupted before the read was handed to the connection. No effect; retryable |
+| `mcp_app_unknown` | The read was handed to the connection and its answer did not arrive. A read has no side effect, so retrying is safe here |
 | `invalid_params` (`-32602`) | A missing or empty field, or a field of the wrong type |
-| `local_transport_required` | The connection is the bare WebSocket |
+| `local_transport_required` | The connection is the bare WebSocket, or carries a `deviceId` |
 | `session_closed` / `service_reloading` / `service_unavailable` | From the Session and the row that serves it ([management methods](management-methods.md#dispatch-and-lifecycle)) |
-| `operation_interrupted` | The request was interrupted; the call may have run, so the view must not retry blindly |
+
+**`session.mcp.app.call`**
+
+| `appError` | When |
+| --- | --- |
+| `mcp_unknown_server` | `server` is not an entry of this Session's MCP selection. Nothing was sent |
+| `mcp_app_absent` | The tool is not declared by that entry's current discovery. Nothing was sent |
+| `mcp_app_not_callable` | The tool's `visibility` excludes `"app"`. Nothing was sent |
+| `mcp_unavailable` | The entry has no usable connection: disabled, connecting, failed, authorization required. Nothing was sent |
+| `mcp_app_refused` | The request was interrupted before the daemon handed it to the connection, for a reason no code above names. Nothing ran; retryable |
+| `mcp_app_unknown` | The request was handed to the connection and the outcome was not received: the request was interrupted, or the Session, the entry or the generation ended while the call ran. It may have run; the view must not retry blindly (D12) |
+| `invalid_params` (`-32602`) | A missing or empty field, or a field of the wrong type |
+| `local_transport_required` | The connection is the bare WebSocket, or carries a `deviceId` |
+| `session_closed` / `service_reloading` / `service_unavailable` | From the Session and the row that serves it ([management methods](management-methods.md#dispatch-and-lifecycle)) |
 
 No code is borrowed from admission: the daemon never refuses a view's call because of a permission mode
-or an approval, so it has nothing to report about one.
+or an approval, so it has nothing to report about one. `mcp_app_refused` and `mcp_app_unknown` replace
+`operation_interrupted` for these methods (D12).
 
 ## 5. Security boundary
 
@@ -341,9 +405,16 @@ through this contract is fixed by one binding, and nothing else is reachable.
   and no cross-entry and no cross-server call exists in this contract. The daemon cannot see which view
   a host forwards for, so same-entry forwarding is a host obligation (D7); what the daemon can see, it
   enforces.
-- **Fail closed.** An entry that is not enabled, not `ready`, or whose connection was replaced answers
-  `mcp_unavailable`. Nothing falls back to another entry, another tool or another generation, and
-  nothing is retried against a server the view did not come from.
+- **No relay to another device.** A connection carrying a `deviceId` is refused at admission (§4), so
+  neither a view's document nor a view's call crosses to a paired device. Rendering a third-party
+  document elsewhere and forwarding its calls through the user's enabled entries would run on this
+  daemon's connections from a device the daemon cannot identify, so it is refused by default until
+  RemoteGateway decides otherwise.
+- **Fail closed.** An entry that is not enabled, not `ready`, or whose connection is gone answers
+  `mcp_unavailable` and nothing was sent. Nothing falls back to another entry, another tool or another
+  generation, and nothing is retried against a server the view did not come from. A connection that is
+  replaced while a call is in flight is the other case: the call answers `mcp_app_unknown` and the view
+  treats it as possibly executed (D12).
 - **Credentials stay in the connection.** The daemon is the MCP client: headers, bearer tokens, OAuth
   tokens and endpoints live in the connection and are never returned by this surface — not to a host
   and not to a view. A view's HTTP calls to the outside are governed by the document's declared CSP,
@@ -366,17 +437,22 @@ through this contract is fixed by one binding, and nothing else is reachable.
 
 - A host mounts a view from a `tool/call` fact: it reads `session.mcp.app.widget` with the tool name it
   has, and caches the reply under the entry's `version` from `session.mcp`. It re-reads when that
-  version changes or the entry stops being `ready`.
+  version changes — the discovered tools changed **or the connection was re-established** (D3) — or when
+  the entry stops being `ready`.
 - It renders the document under the `app` metadata it received, sandboxed as the specification
   requires. Building the CSP, the `allow` list and the host context is the client's work and is not
   part of this contract.
 - `tools/call` from the view becomes `session.mcp.app.call`, addressed to the entry of the document it
   mounted and never to another entry. Whether the host asks the user first is the host's own policy;
   showing that the app issued the action is its obligation (§5).
+- A host treats `mcp_app_refused` as "nothing ran" and `mcp_app_unknown` as "it may have run": the first
+  may be retried once the cause is gone, the second is shown to the user as an unknown outcome (D12).
 - `resources/read` from the view is answered from the mounted document; any other URI is a refusal the
   client produces itself (D10). `ui/update-model-context` is refused by the client (D9).
 - `ui/message` becomes `session.submit` and is validated as any user input is. Whether the user is
   asked to confirm is the client's decision.
+- A connection with a `deviceId` cannot mount a document or call one (§4, §5): a remote client renders
+  no views until RemoteGateway decides its own boundary.
 - The Desktop client (`arcships/dim-electron#20`) replaces its local MCP Apps host's document read and
   tool call with §4 and keeps its sandbox, bridge and rendering.
 - The native CLI and the Web workspace render no views. Their MCP tool results keep their text content,
@@ -386,7 +462,11 @@ through this contract is fixed by one binding, and nothing else is reachable.
 ## 7. What does not change
 
 - `session.mcp`, `session.mcp.refresh`, `mcp.*`, `mcp.auth.*` and the probe keep their requests and
-  replies. A view's state is read from `session.mcp`; this design adds no per-entry field there.
+  replies. A view's state is read from `session.mcp`; this design adds no per-entry field there. The one
+  meaning that narrows is the per-entry `version`: it also changes when the connection is
+  re-established (D3), which a client already treats as a new snapshot.
+- The two names are added to the built-in method list, so `hello.features` gains them under the same
+  conditions as `session.mcp` and a Session namespace cannot shadow them (§4); no existing name moves.
 - The agent's tool loop is untouched: the same `tool/*` facts, the same admission, the same model
   context. A view's call cannot be confused with one, because it is a different method.
 - No method is added to a management namespace, so no client needs a new capability check beyond the
@@ -432,8 +512,8 @@ Flow level, in `crates/dim-app-server/tests`, reusing the Node MCP fixtures unde
 
 | File | What it protects |
 | --- | --- |
-| `mcp_session_flow.rs` | A widget tool's document is mounted from its published tool name and names its entry and the server's tool; a tool that declares no resource is `mcp_app_absent`; a document that is not a `ui://` `text/html;profile=mcp-app` or is larger than the limit is `mcp_app_unsupported`; a tool whose visibility is `["app"]` is absent from the Session's tool list but answers `session.mcp.app.call`, and one whose visibility is `["model"]` answers `mcp_app_not_callable`; a call naming an entry the Session does not hold answers `mcp_unknown_server`; a call on a disabled or unauthorized entry answers `mcp_unavailable`; neither reply carries a header value, a bearer token, an OAuth token or an endpoint URL |
-| `transport_flow/product_protocol.rs` | The wire contract: both methods are advertised in `hello.features`, refused with `local_transport_required` on a bare entry, and answer the error codes of §4.3; a view's call leaves no `tool/call`, `tool/start` or `tool/result` fact and does not enter the next turn's context; a `read-only` Session's view call is not refused by the daemon |
+| `mcp_session_flow.rs` | A widget tool's document is mounted from its published tool name and names its entry and the server's tool; a tool that declares no resource is `mcp_app_absent`; a document that is not a `ui://` `text/html;profile=mcp-app` or is larger than the limit is `mcp_app_unsupported`; a tool whose visibility is `["app"]` is absent from the Session's tool list but answers `session.mcp.app.call`, and one whose visibility is `["model"]` answers `mcp_app_not_callable`; a call naming an entry the Session does not hold answers `mcp_unknown_server`; a call on a disabled or unauthorized entry answers `mcp_unavailable`; a call interrupted after the fixture recorded the invocation answers `mcp_app_unknown` while one interrupted before the connection was handed the request answers `mcp_app_refused` with no invocation recorded; neither reply carries a header value, a bearer token, an OAuth token or an endpoint URL; a new connection generation changes the entry's `version`, so the mounted document is re-read |
+| `transport_flow/product_protocol.rs` | The wire contract: both methods are advertised in `hello.features`, refused with `local_transport_required` on a bare entry and on a connection carrying a `deviceId`, and answer the error codes of §4.3; a Session namespace equal to `session.mcp.app.widget`, `session.mcp.app.call`, or containing or lying inside either, is refused at registration because both are exact built-ins; a view's call leaves no `tool/call`, `tool/start` or `tool/result` fact and does not enter the next turn's context; a `read-only` Session's view call is not refused by the daemon |
 
 ## 12. Rule check
 
