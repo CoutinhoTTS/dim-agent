@@ -324,6 +324,15 @@ async fn launch_policy_cap_matches_the_shared_scheduler_contract() {
             .map(|value| value.as_str().unwrap().to_owned())
             .collect::<std::collections::BTreeSet<_>>()
     };
+    let dimensions = |value: &Value| {
+        let value = policy(value.clone());
+        (
+            value.file_access(),
+            value.tool_approval(),
+            value.preset == dim_agent_types::PermissionPreset::ReadOnly
+                && value.tool_approval.is_none(),
+        )
+    };
     for case in fixtures["cap"].as_array().unwrap() {
         let starter = client_session(&mut client, &agent, case["bound"].clone()).await;
         let launched = sessions.ok("launch", json!({
@@ -338,6 +347,15 @@ async fn launch_policy_cap_matches_the_shared_scheduler_contract() {
         );
         let mut within = actual["preset"] == case["requested"]["preset"];
         assert_eq!(json!(within), case["presetWithin"], "{}", case["name"]);
+        for field in ["fileAccess", "toolApproval"] {
+            assert_eq!(
+                actual.get(field),
+                case["capped"].get(field),
+                "{} {field}",
+                case["name"]
+            );
+        }
+        within &= dimensions(actual) == dimensions(&case["requested"]);
         for field in ["allowedTools", "disallowedTools"] {
             assert_eq!(
                 names(actual, field),
@@ -360,54 +378,13 @@ async fn launch_policy_cap_matches_the_shared_scheduler_contract() {
                 .await,
         );
     }
-    for (bound, requested, access, approval) in [
-        (
-            json!({"preset":"full-access","fileAccess":"read-only","toolApproval":"bypass"}),
-            json!({"preset":"full-access","fileAccess":"unrestricted","toolApproval":"bypass"}),
-            json!("read-only"),
-            json!("bypass"),
-        ),
-        (
-            json!({"preset":"full-access","fileAccess":"unrestricted","toolApproval":"ask"}),
-            json!({"preset":"full-access","fileAccess":"workspace-read-write","toolApproval":"bypass"}),
-            json!("workspace-read-write"),
-            json!("ask"),
-        ),
-        (
-            json!({"preset":"workspace-write"}),
-            json!({"preset":"full-access","fileAccess":"unrestricted","toolApproval":"bypass"}),
-            json!("workspace-read-write"),
-            json!("ask"),
-        ),
-        (
-            json!({"preset":"read-only"}),
-            json!({"preset":"full-access","fileAccess":"unrestricted","toolApproval":"bypass"}),
-            json!("read-only"),
-            Value::Null,
-        ),
-    ] {
-        let starter = client_session(&mut client, &agent, bound).await;
-        let launched = sessions.ok("launch", json!({
-            "cwd":std::env::temp_dir(),"starter":{"sessionId":starter.id(),"branchId":"main"},
-            "policy":requested
-        })).await;
-        assert_eq!(launched["policy"]["fileAccess"], access);
-        assert_eq!(launched["policy"]["toolApproval"], approval);
-        assert_launched(&mut client, &agent, &launched, launched["policy"].clone()).await;
-        for id in [launched["sessionId"].as_str().unwrap(), starter.id()] {
-            assert_ok(&client.rpc("session.close", json!({"sessionId":id})).await);
-        }
-    }
-    for (bound, requested) in [
-        (json!({"preset":"read-only"}), json!({"toolApproval":"ask"})),
-        (json!({"toolApproval":"ask"}), json!({"preset":"read-only"})),
-    ] {
-        let starter = client_session(&mut client, &agent, bound).await;
+    for case in fixtures["reject"].as_array().unwrap() {
+        let starter = client_session(&mut client, &agent, case["bound"].clone()).await;
         let before = agent.sessions().len();
         assert_eq!(sessions.error("launch", json!({
             "cwd":std::env::temp_dir(),"starter":{"sessionId":starter.id(),"branchId":"main"},
-            "policy":requested
-        })).await, "rejected");
+            "policy":case["requested"]
+        })).await, "rejected", "{}", case["name"]);
         assert_eq!(agent.sessions().len(), before);
         assert_ok(
             &client
@@ -427,6 +404,7 @@ async fn launch_policy_cap_matches_the_shared_scheduler_contract() {
             })).await;
             let actual = &launched["policy"];
             let within = actual["preset"] == case["x"]["preset"]
+                && dimensions(actual) == dimensions(&case["x"])
                 && ["allowedTools", "disallowedTools"]
                     .iter()
                     .all(|field| names(actual, field) == names(&case["x"], field));
