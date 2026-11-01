@@ -1290,9 +1290,10 @@ version. A failed save neither changes remembered choices nor falls back to a le
 Process isolation opens the execution settings. The Command rules row opens the management panel
 of [The command rules area](#the-command-rules-area), where the rules are listed, added and
 removed; Esc there returns to this panel, and the three controls above the row keep their pages.
-Arguments after `/permissions` in the terminal UI open the panel and say where they work — the
-line prompt and `dimcode permissions` — instead of being ignored; the compact grammar belongs to
-the line prompt.
+Arguments after `/permissions` in the terminal UI open that panel instead of being ignored, and
+it opens holding one line that says where arguments work — the line prompt and `dimcode
+permissions` — which stands above the panel's answers until the user's first key there, however
+long the opening read takes; the compact grammar belongs to the line prompt.
 
 ```text
 Permissions (main branch)

@@ -187,7 +187,12 @@ impl ApprovalsPanel {
                         "file" => self.page = Page::File,
                         "tool" => self.page = Page::Tool,
                         "isolation" => return Effect::Setting(Setting::Isolation),
-                        "rules" => return Effect::OpenArea(Area::Permissions),
+                        "rules" => {
+                            return Effect::OpenArea {
+                                area: Area::Permissions,
+                                note: None,
+                            };
+                        }
                         _ => return Effect::None,
                     }
                     self.refresh();

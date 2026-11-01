@@ -33529,6 +33529,7 @@
       "references": [
         "path Area",
         "path Area::Hooks",
+        "path Area::Permissions",
         "path Area::Scheduled",
         "path Area::Skills",
         "path Command::Approval",

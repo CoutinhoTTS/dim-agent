@@ -114,6 +114,7 @@ pub const STRINGS: &[&str] = &[
     "That command rule is no longer listed; nothing was removed.",
     "Command rules changed since they were read; nothing was removed.",
     "A command rule is DECISION MATCH COMMAND, such as deny prefix git push.",
+    "Use the line prompt or dimcode permissions.",
 ];
 
 pub struct ManagementPanel {
@@ -128,6 +129,9 @@ pub struct ManagementPanel {
     busy: bool,
     /// What the last request came to.
     message: Option<Result<String, String>>,
+    /// The line the panel was opened with: it stands until the user's first
+    /// key here, whatever the opening read answers.
+    opening: Option<String>,
     /// Why the read that follows an applied action failed: the action was
     /// done, and the area is not reported.
     read_error: Option<String>,
@@ -155,7 +159,11 @@ impl ShownDetail {
 }
 
 impl ManagementPanel {
-    pub fn new(area: Area) -> Self {
+    /// The panel of `area`, opened holding `opening`.
+    ///
+    /// The line stands where the answers stand, but the opening read does
+    /// not replace it: only the user's first key here does.
+    pub fn new(area: Area, opening: Option<String>) -> Self {
         Self {
             area,
             list: ListPanel::new(
@@ -171,6 +179,7 @@ impl ManagementPanel {
             detail: None,
             busy: true,
             message: None,
+            opening,
             read_error: None,
         }
     }
@@ -363,6 +372,9 @@ impl ManagementPanel {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
+        // The line the panel was opened with belongs to the panel, not to
+        // the user: any key here takes it away.
+        self.opening = None;
         if self.detail.is_some() {
             return self.detail_key(key);
         }
@@ -578,6 +590,11 @@ impl ManagementPanel {
                 for row in wrap_words(&safe(line), inner.saturating_sub(2).max(1)) {
                     footer.push(format!("  {}", fg(&row, &p.muted)));
                 }
+            }
+        }
+        if let Some(opening) = &self.opening {
+            for row in wrap_words(&safe(opening), inner) {
+                footer.push(fg(&row, &p.muted));
             }
         }
         if let Some(message) = &self.message {
@@ -873,7 +890,7 @@ mod tests {
     }
 
     fn opened() -> ManagementPanel {
-        let mut panel = ManagementPanel::new(Area::Skills);
+        let mut panel = ManagementPanel::new(Area::Skills, None);
         panel.set_result(&view_reply(Area::Skills, ManagementAction::List, view()));
         panel
     }
@@ -1008,7 +1025,7 @@ mod tests {
                 vec![ActionKind::Toggle, ActionKind::Remove],
             )],
         });
-        let mut panel = ManagementPanel::new(Area::Skills);
+        let mut panel = ManagementPanel::new(Area::Skills, None);
         panel.set_result(&view_reply(Area::Skills, ManagementAction::List, view));
         // The rule is the only entry of the last group.
         panel.handle_key(key(KeyCode::End));
@@ -1027,11 +1044,38 @@ mod tests {
         ));
     }
 
+    /// A line the panel was opened with stands through the opening read,
+    /// however it turns out, and the user's first key takes it away.
+    #[test]
+    fn the_line_a_panel_was_opened_with_stands_until_the_first_key() {
+        let opening = "Use the line prompt or dimcode permissions.";
+        let mut panel = ManagementPanel::new(Area::Permissions, Some(opening.into()));
+        assert!(
+            shown(&panel, 80, 20).join(" ").contains(opening),
+            "the line is drawn while the read is out"
+        );
+        panel.set_result(&view_reply(
+            Area::Permissions,
+            ManagementAction::List,
+            ManagementView {
+                actions: vec![ActionKind::Reload],
+                ..ManagementView::default()
+            },
+        ));
+        assert!(
+            shown(&panel, 80, 20).join(" ").contains(opening),
+            "the opening read leaves the line"
+        );
+        panel.handle_key(key(KeyCode::Down));
+        let text = shown(&panel, 80, 20).join(" ");
+        assert!(!text.contains(opening), "{text}");
+    }
+
     /// The Command rules area is titled for what it lists, and its hint
     /// names the kinds it has.
     #[test]
     fn the_command_rules_area_names_its_title_and_kinds() {
-        let mut panel = ManagementPanel::new(Area::Permissions);
+        let mut panel = ManagementPanel::new(Area::Permissions, None);
         panel.set_result(&view_reply(
             Area::Permissions,
             ManagementAction::List,
@@ -1077,7 +1121,7 @@ mod tests {
     /// error rather than an empty list.
     #[test]
     fn an_empty_area_and_a_failed_read_say_so() {
-        let mut panel = ManagementPanel::new(Area::Skills);
+        let mut panel = ManagementPanel::new(Area::Skills, None);
         assert!(shown(&panel, 40, 10).join("\n").contains("Loading..."));
         panel.set_result(&view_reply(
             Area::Skills,
@@ -1085,7 +1129,7 @@ mod tests {
             ManagementView::default(),
         ));
         assert!(shown(&panel, 40, 10).join("\n").contains("No entries."));
-        let mut panel = ManagementPanel::new(Area::Skills);
+        let mut panel = ManagementPanel::new(Area::Skills, None);
         panel.set_result(&reply(
             Area::Skills,
             ManagementAction::List,
@@ -1136,7 +1180,7 @@ mod tests {
     }
 
     fn opened_hooks() -> ManagementPanel {
-        let mut panel = ManagementPanel::new(Area::Hooks);
+        let mut panel = ManagementPanel::new(Area::Hooks, None);
         panel.set_result(&view_reply(
             Area::Hooks,
             ManagementAction::List,
@@ -1201,7 +1245,7 @@ mod tests {
         let mut view = hooks_view();
         view.document = None;
         view.groups[0].entries[0].actions = vec![ActionKind::Reload];
-        let mut panel = ManagementPanel::new(Area::Hooks);
+        let mut panel = ManagementPanel::new(Area::Hooks, None);
         panel.set_result(&view_reply(Area::Hooks, ManagementAction::List, view));
         assert!(matches!(panel.handle_key(ctrl('e')), Effect::None));
         let text = reloaded(Area::Hooks, &hooks_view());
@@ -1215,7 +1259,7 @@ mod tests {
     /// failed read, where no entry is selected to offer it.
     #[test]
     fn reload_works_on_an_empty_area_and_after_a_failed_read() {
-        let mut panel = ManagementPanel::new(Area::Skills);
+        let mut panel = ManagementPanel::new(Area::Skills, None);
         panel.set_result(&view_reply(
             Area::Skills,
             ManagementAction::List,
@@ -1235,7 +1279,7 @@ mod tests {
             _ => panic!("expected a reload"),
         }
         // A read that failed leaves nothing to select; Ctrl+R reads again.
-        let mut panel = ManagementPanel::new(Area::Skills);
+        let mut panel = ManagementPanel::new(Area::Skills, None);
         panel.set_result(&reply(
             Area::Skills,
             ManagementAction::List,
@@ -1382,7 +1426,7 @@ mod tests {
     }
 
     fn opened_catalogue() -> ManagementPanel {
-        let mut panel = ManagementPanel::new(Area::Skills);
+        let mut panel = ManagementPanel::new(Area::Skills, None);
         panel.set_result(&view_reply(
             Area::Skills,
             ManagementAction::List,
@@ -1529,7 +1573,7 @@ mod tests {
     /// empty area and opens the document the adapter supplied.
     #[test]
     fn add_needs_no_selection_and_opens_the_adapters_document() {
-        let mut panel = ManagementPanel::new(Area::Skills);
+        let mut panel = ManagementPanel::new(Area::Skills, None);
         panel.set_result(&view_reply(
             Area::Skills,
             ManagementAction::List,
@@ -1557,7 +1601,7 @@ mod tests {
             _ => panic!("expected an editor draft"),
         }
         // An area with no create document offers no add.
-        let mut panel = ManagementPanel::new(Area::Skills);
+        let mut panel = ManagementPanel::new(Area::Skills, None);
         panel.set_result(&view_reply(
             Area::Skills,
             ManagementAction::List,
@@ -1695,7 +1739,7 @@ mod tests {
         view.groups[0].entries[0].label = "nightly\u{1b}[2J".into();
         view.groups[0].entries[0].detail = vec!["every 60 minutes\u{1b}[2J".into()];
         view.issues = vec!["an issue\u{1b}[2J".into()];
-        let mut panel = ManagementPanel::new(Area::Skills);
+        let mut panel = ManagementPanel::new(Area::Skills, None);
         panel.set_result(&reply(
             Area::Skills,
             ManagementAction::Run { id: "job-1".into() },

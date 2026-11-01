@@ -1755,35 +1755,45 @@ fn tui_permissions_panel_shows_a_rule_written_elsewhere_on_the_next_read() {
     daemon.join().unwrap();
 }
 
-/// `/permissions` with arguments opens the panel and says where arguments
-/// work; it sends no rule write.
+/// `/permissions` with arguments opens the rule panel, which holds the line
+/// that says where arguments work until the user's first key there. A read
+/// slower than any notice keeps the line: the panel owns it, and it is drawn
+/// again with the list.
 #[test]
 fn tui_permissions_arguments_open_the_panel_and_are_not_ignored() {
-    let home = Home::new();
-    let (shown, wait_shown) = std::sync::mpsc::channel();
-    let daemon = home.daemon(move |wire| {
-        rules_start(wire);
-        wait_shown.recv_timeout(PATIENCE).unwrap();
-        let mut line = String::new();
-        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
-            assert!(
-                !line.contains("\"permission.rules\"")
-                    && !line.contains("\"permission.set_rules\""),
-                "unexpected rule request: {line}"
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (shown, wait_shown) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            rules_start(wire);
+            wait_shown.recv_timeout(PATIENCE).unwrap();
+            let request = wire.read("permission.rules");
+            // Well past the notice the terminal UI used to expire.
+            thread::sleep(Duration::from_secs(3));
+            wire.reply(
+                &request,
+                rules_reply("r1", json!([command_rule("deny", "prefix", "git push")])),
             );
-            line.clear();
+            rules_drain(wire);
+        });
+        let mut command = home.command();
+        if fullscreen {
+            command.arg("--fullscreen");
         }
-    });
-    let mut terminal = Terminal::launch_tui(home.command());
-    terminal.until("test / model");
-    shown.send(()).unwrap();
-    terminal.write(b"/permissions allow prefix npm test\r");
-    terminal.until("File access");
-    terminal.until("Use the line prompt or dimcode permissions.");
-    terminal.raw(b"\x1b");
-    thread::sleep(Duration::from_millis(200));
-    terminal.write(b"/exit\r");
-    terminal.until("Bye!");
-    assert!(terminal.wait().success());
-    daemon.join().unwrap();
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("test / model");
+        shown.send(()).unwrap();
+        terminal.write(b"/permissions allow prefix npm test\r");
+        terminal.until("Use the line prompt or dimcode permissions.");
+        terminal.until("deny prefix git push");
+        // The line is drawn after the list it arrived with, so this proves
+        // it survived the slow read rather than lingering from before it.
+        terminal.until("Use the line prompt or dimcode permissions.");
+        terminal.raw(b"\x1b");
+        thread::sleep(Duration::from_millis(200));
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+    }
 }
