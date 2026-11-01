@@ -812,6 +812,8 @@ struct RunRecord {
     /// How many times the judge was asked again for an answer it could not
     /// use.
     judge_reasks: u32,
+    /// How many declines the runner sent again after `question_not_pending`.
+    decline_retries: u32,
     #[serde(skip)]
     temperature_dropped: bool,
     probes: Vec<ProbeRecord>,
@@ -963,6 +965,7 @@ async fn run_once(
         error,
         judge_error: finished.judging.error,
         judge_reasks: finished.judging.reasks,
+        decline_retries: driven.decline_retries,
         temperature_dropped: finished.judging.temperature_dropped,
         probes: finished.judging.probes,
     })
@@ -984,6 +987,7 @@ impl Finished {
                 stop: "error",
                 turns: 0,
                 window: None,
+                decline_retries: 0,
                 error: Some(error),
             },
             export: None,
@@ -1238,6 +1242,8 @@ struct Driven {
     stop: &'static str,
     turns: u32,
     window: Option<f64>,
+    /// How many declines the runner sent again after `question_not_pending`.
+    decline_retries: u32,
     error: Option<String>,
 }
 
@@ -1267,6 +1273,7 @@ async fn drive(
                 stop: "error",
                 turns: 0,
                 window: None,
+                decline_retries: 0,
                 error: Some(format!("session.create failed: {error}")),
             };
         }
@@ -1276,6 +1283,7 @@ async fn drive(
         stop: "idle",
         turns: 0,
         window: None,
+        decline_retries: 0,
         error: None,
     };
     if let Err(error) = client
@@ -1359,10 +1367,13 @@ async fn drive(
                 return driven;
             }
         }
-        if let Err(error) = retry_declines(client, &session, &mut declines).await {
-            driven.stop = "error";
-            driven.error = Some(error);
-            return driven;
+        match retry_declines(client, &session, &mut declines).await {
+            Ok(retried) => driven.decline_retries += retried,
+            Err(error) => {
+                driven.stop = "error";
+                driven.error = Some(error);
+                return driven;
+            }
         }
         let pending = steers.iter().any(|(_, fired)| !fired);
         if started.elapsed().as_secs_f64() >= scenario.budget.seconds {
@@ -1494,9 +1505,12 @@ async fn decline_question(
     branch: &str,
     event: &Value,
 ) -> std::result::Result<(), String> {
-    let request = event["data"]["request_id"].as_str().unwrap_or_default();
     match (event["type"].as_str(), event["name"].as_str()) {
         (Some("step"), Some("tool-call")) => {
+            // `ToolCallData.request_id` is required, so a question's
+            // `step/tool-call` always carries the batch it answers: a call
+            // without one cannot be keyed to any reply.
+            let request = event["data"]["request_id"].as_str().unwrap_or_default();
             let calls = event["data"]["calls"]
                 .as_array()
                 .map(Vec::as_slice)
@@ -1505,10 +1519,16 @@ async fn decline_question(
                 if call["name"] != "ask_user" {
                     continue;
                 }
+                let call_id = call["id"].as_str().unwrap_or_default();
+                if request.is_empty() {
+                    return Err(format!(
+                        "{branch}: the ask_user call {call_id} carries no request_id"
+                    ));
+                }
                 let decline = Decline {
                     branch: branch.to_owned(),
                     request: request.to_owned(),
-                    call: call["id"].as_str().unwrap_or_default().to_owned(),
+                    call: call_id.to_owned(),
                     sent: Instant::now(),
                 };
                 if !decline_once(client, session, &decline).await? {
@@ -1517,6 +1537,7 @@ async fn decline_question(
             }
         }
         (Some("step"), Some("tool-result")) => {
+            let request = event["data"]["request_id"].as_str().unwrap_or_default();
             let settled: Vec<&str> = event["data"]["results"]
                 .as_array()
                 .map(Vec::as_slice)
@@ -1538,12 +1559,14 @@ async fn decline_question(
 /// Answers the declines again that the Session did not take, at most once per
 /// quiet period since the last attempt: the quiet period wakes the driver at
 /// least that often, so the registration is never missed, and a line that
-/// keeps delivering other notices does not multiply the requests.
+/// keeps delivering other notices does not multiply the requests. Returns how
+/// many it sent.
 async fn retry_declines(
     client: &mut Client,
     session: &str,
     declines: &mut Vec<Decline>,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<u32, String> {
+    let mut sent = 0;
     let mut index = 0;
     while index < declines.len() {
         if declines[index].sent.elapsed() < QUIET {
@@ -1556,8 +1579,9 @@ async fn retry_declines(
         } else {
             index += 1;
         }
+        sent += 1;
     }
-    Ok(())
+    Ok(sent)
 }
 
 /// One `session.question.respond` decline: `true` when the call took it, and
@@ -2297,6 +2321,10 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
         alpha = rule::ALPHA,
         floor = rule::FLOOR,
     );
+    let decline_retries: u32 = records.iter().map(|record| record.decline_retries).sum();
+    if decline_retries > 0 {
+        text += &format!("| decline retries | {decline_retries} across all runs |\n");
+    }
     if same_family(&instrument.model, &instrument.judge) {
         text += "| judge limitation | the judge is the model's own family; the measurement is limited by that |\n";
     }
@@ -2505,6 +2533,7 @@ mod tests {
             error: None,
             judge_error: None,
             judge_reasks: 0,
+            decline_retries: 0,
             temperature_dropped: false,
             probes: verdicts
                 .iter()
@@ -5037,7 +5066,10 @@ mod tests {
         for record in &records {
             assert_eq!(record["stop"], "idle", "{record}");
             assert_eq!(record["judgeOutcome"], "judged", "{record}");
+            assert_eq!(record["declineRetries"], 0, "{record}");
         }
+        // The row is shown only when a run sent a decline again.
+        assert!(!report.contains("| decline retries |"), "{report}");
         for arm in ["current", "candidate"] {
             let requests = fixture.arm(arm);
             assert_eq!(requests.len(), 2, "{arm}: the question and the answer");
@@ -5092,12 +5124,21 @@ mod tests {
         );
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
+        let mut retries = 0;
         for record in &records {
             // A run that ends on its budget writes `seconds`, so `idle`
             // already says the retry ended it.
             assert_eq!(record["stop"], "idle", "{record}");
             assert_eq!(record["judgeOutcome"], "judged", "{record}");
+            retries += record["declineRetries"]
+                .as_u64()
+                .expect("a run records its decline retries");
         }
+        assert!(retries >= 2, "each arm sent the decline again: {retries}");
+        assert!(
+            report.contains(&format!("| decline retries | {retries} across all runs |")),
+            "{report}"
+        );
         for arm in ["current", "candidate"] {
             let directory = options.out.join(arm).join("case").join("run-0");
             let export = std::fs::read_to_string(directory.join("timeline.jsonl")).unwrap();
@@ -5139,6 +5180,9 @@ mod tests {
         /// that one too, settles only `r1`, and then takes the decline the
         /// runner sends for `r2` and settles that batch.
         ReusedCallId,
+        /// The `step/tool-call` carries no `request_id`, which the event
+        /// contract never does, so its call cannot be keyed.
+        Unkeyed,
     }
 
     /// What a scripted peer read: the `requestId` of every decline, in order,
@@ -5185,16 +5229,21 @@ mod tests {
             json!({"error": {"code": -32000, "message": "No ask_user call is waiting for this answer",
                              "data": {"appError": "question_not_pending"}}})
         }
-        /// One `ask_user` `step/tool-call` asking `call` under `request`.
-        fn question_call(request: &str, call: &str) -> Vec<u8> {
+        /// One `ask_user` `step/tool-call` asking `call` under `request`;
+        /// `None` leaves the `request_id` out.
+        fn question_call(request: Option<&str>, call: &str) -> Vec<u8> {
+            let mut data = json!({"turn_id": "t1",
+                                  "calls": [{"id": call, "name": "ask_user", "input":
+                                    {"questions": [{"header": "Deploy",
+                                                    "question": "Where to deploy?",
+                                                    "options": [{"label": "production"},
+                                                                {"label": "staging"}]}]}}]});
+            if let Some(request) = request {
+                data["request_id"] = json!(request);
+            }
             notice(
                 json!({"type": "step", "name": "tool-call", "id": "e1", "sequence": 1,
-                          "data": {"turn_id": "t1", "request_id": request,
-                                   "calls": [{"id": call, "name": "ask_user", "input":
-                                     {"questions": [{"header": "Deploy",
-                                                     "question": "Where to deploy?",
-                                                     "options": [{"label": "production"},
-                                                                 {"label": "staging"}]}]}}]}}),
+                          "data": data}),
             )
         }
         /// The `step/tool-result` that closes `call` of `request` with the
@@ -5288,7 +5337,10 @@ mod tests {
                                     .write_all(&frame(&request, not_pending()))
                                     .await
                                     .unwrap();
-                                write.write_all(&question_call("r2", "c1")).await.unwrap();
+                                write
+                                    .write_all(&question_call(Some("r2"), "c1"))
+                                    .await
+                                    .unwrap();
                                 None
                             }
                             2 => {
@@ -5306,6 +5358,13 @@ mod tests {
                                 Some("r2")
                             }
                         },
+                        PeerScript::Unkeyed => {
+                            write
+                                .write_all(&frame(&request, not_pending()))
+                                .await
+                                .unwrap();
+                            None
+                        }
                     };
                     if let Some(request) = closed {
                         if recorded.settled_at.load(Ordering::SeqCst) == 0 {
@@ -5332,7 +5391,14 @@ mod tests {
                         ))
                         .await
                         .unwrap();
-                    write.write_all(&question_call("r1", "c1")).await.unwrap();
+                    let request = match &script {
+                        PeerScript::Unkeyed => None,
+                        _ => Some("r1"),
+                    };
+                    write
+                        .write_all(&question_call(request, "c1"))
+                        .await
+                        .unwrap();
                 }
             }
         });
@@ -5488,6 +5554,38 @@ mod tests {
             declines,
             ["r1", "r2", "r2"],
             "the later call's decline is sent after the stale batch settled"
+        );
+    }
+
+    /// A question's `step/tool-call` always carries its batch's `request_id`
+    /// (`ToolCallData`), so an `ask_user` call without one cannot be keyed to
+    /// any reply: the run ends with an error naming the call rather than
+    /// keeping a decline that would be sent again for the rest of the run.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_call_with_no_request_id_ends_the_run() {
+        let directory =
+            std::env::temp_dir().join(format!("dim-scenario-eval-unkeyed-{}", std::process::id()));
+        let (socket, reads) = scripted_peer(&directory, 8_000, PeerScript::Unkeyed).await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.seconds = 10.;
+        let driven = drive(&mut client, &scenario, &std::env::temp_dir(), &peer_model()).await;
+        // The peer reads a request only after the driver sent it, so the
+        // count is final once it has read the last one.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let _ = std::fs::remove_dir_all(directory);
+        // The budget writes `seconds`, so `error` is the run ending on the
+        // call, not on its budget.
+        assert_eq!(driven.stop, "error", "{:?}", driven.error);
+        let error = driven.error.unwrap_or_default();
+        assert!(
+            error.contains("the ask_user call c1 carries no request_id"),
+            "{error}"
+        );
+        assert!(
+            reads.declines.lock().unwrap().is_empty(),
+            "the run sends no decline for the call"
         );
     }
 
