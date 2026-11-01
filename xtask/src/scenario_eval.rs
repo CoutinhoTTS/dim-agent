@@ -194,11 +194,13 @@
 //!
 //! A re-judged run keeps its own stop, turns and error and takes the judge's
 //! part afresh; a run that failed before judging is kept as it is. The source
-//! is never written to, and an `--out` inside it is refused. Repeated `--run`
-//! selects runs; without one, every saved run is judged again.
+//! is never written to, and an `--out` inside it is refused before anything
+//! is created. Repeated `--run` selects runs, each at most once; without one,
+//! every saved run is judged again.
 //!
 //! Several finished evaluations are reported together under the same rule and
-//! format, with no model turn and no judge call:
+//! format, with no model turn and no judge call, one `--pool` per source — a
+//! single one included:
 //!
 //! ```text
 //! cargo run --locked -p xtask -- scenario-eval --pool DIR --pool DIR
@@ -412,14 +414,6 @@ async fn rejudge(
 ) -> Result<String> {
     let source = std::fs::canonicalize(source)
         .map_err(|error| format!("--rejudge {}: {error}", source.display()))?;
-    if options.out == source || options.out.starts_with(&source) {
-        return Err(format!(
-            "--out {} is inside --rejudge {}: a re-judge writes a new directory",
-            options.out.display(),
-            source.display()
-        )
-        .into());
-    }
     let saved = read_saved_runs(&source)?;
     let selected = select_saved(&saved, &options.select)?;
     let scenarios = read_scenarios(&options.scenarios)?;
@@ -462,14 +456,6 @@ async fn pooled(options: &Options, observe: impl Fn(&mut AgentBuilder)) -> Resul
     for source in &options.pool {
         let source = std::fs::canonicalize(source)
             .map_err(|error| format!("--pool {}: {error}", source.display()))?;
-        if options.out == source || options.out.starts_with(&source) {
-            return Err(format!(
-                "--out {} is inside --pool {}: a pool writes a new directory",
-                options.out.display(),
-                source.display()
-            )
-            .into());
-        }
         let read = read_pooled_runs(&source, &scenarios)?;
         directories.push((source, read.len()));
         records.extend(read);
@@ -919,8 +905,8 @@ impl Options {
                      --scenarios, --judge, --model, --model-config, --out and \
                      [--jobs N], selecting runs with repeated --run \
                      arm/scenario/run; --pool DIR adds a finished evaluation's \
-                     saved runs to the report, given twice or more, and writes \
-                     the same rule over their union";
+                     saved runs to the report and may be repeated, writing the \
+                     same rule over their union";
         // Both arms serve the product's default plugins; `--defaults`
         // names another default configuration file.
         let mut args = args.into_iter();
@@ -936,7 +922,16 @@ impl Options {
             match flag.as_str() {
                 "--scenarios" => scenarios = Some(PathBuf::from(value)),
                 "--rejudge" => rejudge = Some(PathBuf::from(value)),
-                "--run" => select.push(value),
+                "--run" => {
+                    let run = parse_selection(&value)?;
+                    if select
+                        .iter()
+                        .any(|given| parse_selection(given).is_ok_and(|given| given == run))
+                    {
+                        return Err(format!("--run {value} names a run already selected").into());
+                    }
+                    select.push(value);
+                }
                 "--pool" => pool.push(PathBuf::from(value)),
                 "--text" => {
                     if let Some(pending) = &text {
@@ -986,6 +981,9 @@ impl Options {
                 "--run selects a --rejudge source's runs; --pool reports every saved run".into(),
             );
         }
+        if !select.is_empty() && rejudge.is_none() {
+            return Err("--run selects a --rejudge source's runs: give --rejudge DIR".into());
+        }
         let finished = rejudge.is_some() || !pool.is_empty();
         if finished && model_config.is_none() {
             return Err(
@@ -1015,6 +1013,8 @@ impl Options {
         } else {
             home.ok_or(usage)?
         };
+        let out = out.ok_or(usage)?;
+        refuse_output_inside_sources(&out, rejudge.as_deref(), &pool)?;
         Ok(Self {
             scenarios: scenarios.ok_or(usage)?,
             texts,
@@ -1022,7 +1022,7 @@ impl Options {
             judge: judge.ok_or(usage)?,
             runs,
             jobs: jobs.unwrap_or(1).max(1),
-            out: output_directory(&out.ok_or(usage)?)?,
+            out: output_directory(&out)?,
             home,
             model_config,
             defaults,
@@ -1049,6 +1049,56 @@ fn output_directory(path: &Path) -> Result<PathBuf> {
     let error = |error: std::io::Error| format!("--out {}: {error}", path.display());
     std::fs::create_dir_all(path).map_err(error)?;
     Ok(std::fs::canonicalize(path).map_err(error)?)
+}
+
+/// A finished read never writes to its sources: refuses an `--out` inside
+/// one. The source exists; `--out` may not, so its nearest existing ancestor
+/// is resolved instead. The check runs before `--out` is created, so a
+/// refusal leaves the source as it was.
+fn refuse_output_inside_sources(
+    out: &Path,
+    rejudge: Option<&Path>,
+    pool: &[PathBuf],
+) -> Result<()> {
+    if rejudge.is_none() && pool.is_empty() {
+        return Ok(());
+    }
+    let mut existing = if out.is_absolute() {
+        out.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| format!("--out {}: {error}", out.display()))?
+            .join(out)
+    };
+    let resolved = loop {
+        match std::fs::canonicalize(&existing) {
+            Ok(resolved) => break resolved,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                existing = existing
+                    .parent()
+                    .ok_or_else(|| format!("--out {}: {error}", out.display()))?
+                    .to_path_buf();
+            }
+            Err(error) => return Err(format!("--out {}: {error}", out.display()).into()),
+        }
+    };
+    for (flag, source) in rejudge
+        .into_iter()
+        .map(|source| ("--rejudge", source))
+        .chain(pool.iter().map(|source| ("--pool", source.as_path())))
+    {
+        let source = std::fs::canonicalize(source)
+            .map_err(|error| format!("{flag} {}: {error}", source.display()))?;
+        if resolved.starts_with(&source) {
+            return Err(format!(
+                "--out {} is inside {flag} {}: the source is never written to",
+                out.display(),
+                source.display()
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 fn candidate_prompt(path: &Path) -> Result<Arc<str>> {
@@ -3301,6 +3351,167 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// `--run` selects a run of a `--rejudge` source once: the same run
+    /// selected twice — as `run-N` or as its index — is refused rather than
+    /// reported twice.
+    #[test]
+    fn a_run_selected_twice_is_refused() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-run-twice-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let out = directory.join("out");
+        for repeated in [
+            ["current/case/run-0", "current/case/run-0"],
+            ["current/case/run-0", "current/case/0"],
+        ] {
+            let args = [
+                "--scenarios",
+                "scenarios",
+                "--model",
+                "gateway/model",
+                "--judge",
+                "gateway/model",
+                "--model-config",
+                "models.json",
+                "--out",
+                out.to_str().unwrap(),
+                "--rejudge",
+                "source",
+                "--run",
+                repeated[0],
+                "--run",
+                repeated[1],
+            ];
+            let error = match Options::parse_from(args.map(str::to_owned)) {
+                Err(error) => error.to_string(),
+                Ok(_) => panic!("{repeated:?} is refused"),
+            };
+            assert!(
+                error.contains(&format!(
+                    "--run {} names a run already selected",
+                    repeated[1]
+                )),
+                "{repeated:?}: {error}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// `--run` selects a `--rejudge` source's runs: a new evaluation refuses
+    /// it rather than running with the selection dropped.
+    #[test]
+    fn a_run_without_a_rejudge_source_is_refused() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-run-parse-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let candidate = directory.join("candidate.md");
+        std::fs::write(&candidate, "candidate").unwrap();
+        let out = directory.join("out");
+        let args = [
+            "--scenarios",
+            "scenarios",
+            "--text",
+            "context-compaction/summary",
+            "--candidate",
+            candidate.to_str().unwrap(),
+            "--model",
+            "gateway/model",
+            "--judge",
+            "gateway/model",
+            "--runs",
+            "1",
+            "--home",
+            "home",
+            "--out",
+            out.to_str().unwrap(),
+            "--run",
+            "current/case/run-0",
+        ];
+        let error = match Options::parse_from(args.map(str::to_owned)) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("--run without --rejudge is refused"),
+        };
+        assert!(
+            error.contains("--run selects a --rejudge source's runs: give --rejudge DIR"),
+            "{error}"
+        );
+        assert!(
+            !out.exists(),
+            "nothing is created before the flags are read"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// Everything under a directory: its directories and their files, by
+    /// relative path, with each file's bytes.
+    fn tree(directory: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+        fn walk(root: &Path, directory: &Path, entries: &mut BTreeMap<PathBuf, Option<Vec<u8>>>) {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                let relative = path.strip_prefix(root).unwrap().to_owned();
+                if path.is_dir() {
+                    entries.insert(relative, None);
+                    walk(root, &path, entries);
+                } else {
+                    entries.insert(relative, Some(std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+        let mut entries = BTreeMap::new();
+        walk(directory, directory, &mut entries);
+        entries
+    }
+
+    /// A finished read never writes to its source: an `--out` inside it is
+    /// refused before `--out` is created, so the source is left byte for
+    /// byte as it was, with no new directory or file.
+    #[test]
+    fn a_finished_read_refuses_an_out_inside_its_source() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-inside-source-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        let source = directory.join("source");
+        std::fs::create_dir_all(source.join("current").join("case").join("run-0")).unwrap();
+        std::fs::write(source.join("runs.jsonl"), "{\"arm\": \"current\"}\n").unwrap();
+        std::fs::write(source.join("scenario.md"), "the source's report").unwrap();
+        let before = tree(&source);
+        for read in ["--rejudge", "--pool"] {
+            let out = source.join("inside");
+            let args = [
+                "--scenarios",
+                "scenarios",
+                "--model",
+                "gateway/model",
+                "--judge",
+                "gateway/model",
+                "--model-config",
+                "models.json",
+                "--out",
+                out.to_str().unwrap(),
+                read,
+                source.to_str().unwrap(),
+            ];
+            let error = match Options::parse_from(args.map(str::to_owned)) {
+                Err(error) => error.to_string(),
+                Ok(_) => panic!("{read}: an --out inside the source is refused"),
+            };
+            assert!(
+                error.contains(&format!("--out {} is inside {read}", out.display())),
+                "{read}: {error}"
+            );
+            assert_eq!(tree(&source), before, "{read}: the source is unchanged");
+        }
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     /// `--text` repeats once per pair, and a text named twice is refused
     /// before any run (model-prompts §8.1).
     #[test]
@@ -4687,13 +4898,6 @@ mod tests {
                 .all(|request| !request.contains("SAVED VIEW unselected")),
             "a run --run did not select is not judged: {asked:?}"
         );
-        let mut inside = fixture.options(source.canonicalize().unwrap().join("inside"));
-        inside.rejudge = Some(source.clone());
-        let error = fixture.rejudge(&inside).await.unwrap_err().to_string();
-        assert!(
-            error.contains("a re-judge writes a new directory"),
-            "{error}"
-        );
     }
 
     /// A pool reports several finished evaluations under one rule: both
@@ -4793,10 +4997,6 @@ mod tests {
             "every run of both sources is kept: {records:?}"
         );
         assert!(out.join("scenario.md").exists());
-        let mut refused = fixture.options(first.canonicalize().unwrap().join("inside"));
-        refused.pool = vec![first.clone()];
-        let error = fixture.pooled(&refused).await.unwrap_err().to_string();
-        assert!(error.contains("a pool writes a new directory"), "{error}");
     }
 
     /// The judge's first answer leaves a probe without a verdict, and every
