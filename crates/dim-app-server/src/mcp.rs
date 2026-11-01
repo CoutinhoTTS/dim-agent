@@ -547,6 +547,24 @@ impl McpService {
         .await
     }
 
+    /// Deletes a project entry's withheld record, including a record whose
+    /// project entry no longer exists.
+    pub async fn clear_secret(
+        &self,
+        source: SettingsScope,
+        id: String,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        if id.trim().is_empty() {
+            return Err(McpError::InvalidId);
+        }
+        self.run(cancel, move |settings, cancel| async move {
+            let workspace = config::workspace(&settings, source)?;
+            remove_secret(&settings, &workspace, &id, &cancel).await
+        })
+        .await
+    }
+
     /// The configuration a Session runs, from the declared one a client reads
     /// and patches.
     pub async fn effective(
@@ -860,10 +878,6 @@ async fn write(
     if snapshot.revision != expected {
         return Err(SettingsError::Conflict.into());
     }
-    if project && matches!(change, McpChange::Remove) {
-        let workspace = config::workspace(settings, source)?;
-        remove_secret(settings, &workspace, &id, cancel).await?;
-    }
     let mut document = snapshot.document;
     if project && matches!(change, McpChange::SetEnabled(true)) {
         if !document.mcp_servers.contains_key(&id) {
@@ -872,16 +886,12 @@ async fn write(
         set_project_enabled(settings, source, &id, true, cancel).await?;
         return Ok(snapshot.revision);
     }
-    match change {
+    let removed = match change {
         McpChange::Put(configuration) => {
-            document.mcp_servers.insert(id, configuration);
+            document.mcp_servers.insert(id.clone(), configuration);
+            None
         }
-        McpChange::Remove => {
-            document
-                .mcp_servers
-                .remove(&id)
-                .ok_or(McpError::UnknownServer)?;
-        }
+        McpChange::Remove => Some(document.mcp_servers.remove(&id).is_some()),
         McpChange::SetEnabled(value) => {
             let configuration = document
                 .mcp_servers
@@ -890,16 +900,37 @@ async fn write(
             let (McpServerSettings::Stdio { enabled, .. }
             | McpServerSettings::Remote { enabled, .. }) = configuration;
             *enabled = Some(value);
+            None
         }
+    };
+    let Some(present) = removed else {
+        return Ok(settings
+            .update(source, &expected, document, cancel)
+            .await?
+            .revision);
+    };
+    // The document removal commits before the overlay is deleted, so a remove
+    // that loses a race to a concurrent write leaves an inert overlay instead
+    // of a live entry without its withheld values. An overlay whose entry is
+    // already gone is still deleted, so a leftover record can be cleaned.
+    let revision = if present {
+        settings
+            .update(source, &expected, document, cancel)
+            .await?
+            .revision
+    } else {
+        expected
+    };
+    if project {
+        let workspace = config::workspace(settings, source)?;
+        remove_secret(settings, &workspace, &id, cancel).await?;
     }
-    Ok(settings
-        .update(source, &expected, document, cancel)
-        .await?
-        .revision)
+    if !present {
+        return Err(McpError::UnknownServer);
+    }
+    Ok(revision)
 }
 
-/// Records the user's enablement of one project entry. Toggles of different/// entries commute, so a lost race on the shared record is retried rather
-/// than reported as a conflict the caller cannot observe.
 fn partial(_error: McpError, into_project: bool) -> McpError {
     McpError::MovePartial { into_project }
 }
@@ -941,6 +972,9 @@ async fn remove_secret(
     Ok(())
 }
 
+/// Records the user's enablement of one project entry. Toggles of different
+/// entries commute, so a lost race on the shared record is retried rather
+/// than reported as a conflict the caller cannot observe.
 async fn set_project_enabled(
     settings: &Arc<SettingsService>,
     source: SettingsScope,

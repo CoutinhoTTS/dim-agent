@@ -158,11 +158,18 @@ where
 }
 
 fn patch_sets_secret(patch: &ConfigurationPatch, secret: &McpSecretEntry) -> bool {
+    let static_credential = secret.auth.is_some()
+        || secret.headers.as_ref().is_some_and(|headers| {
+            headers
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case("authorization"))
+        });
     patch.args.is_some()
         || patch.env.is_some()
         || patch.headers.is_some()
         || patch.bearer.is_some()
         || patch.url.is_some()
+        || (patch.oauth.is_some() && static_credential)
         || matches!(&patch.oauth, Some(OAuthPatch::Remove) if secret.oauth.is_some())
         || matches!(
             &patch.oauth,
@@ -657,13 +664,28 @@ pub(super) fn provide(
                             project(&settings, p.cwd, &stopping).await?,
                         )?;
                         let source = writable(mcp_source)?;
-                        if matches!(mcp_source, McpSource::Project(_))
-                            && let Ok(entry) = directory
+                        if matches!(mcp_source, McpSource::Project(_)) {
+                            // A save replaces the whole entry, so an overlay is
+                            // refused while its entry exists and a record whose
+                            // entry an external edit deleted is deleted, not
+                            // merged into the new entry. An unreadable overlay
+                            // fails the save instead of passing the guard.
+                            match directory
                                 .editable(mcp_source, p.id.clone(), &stopping)
                                 .await
-                            && entry.secrets_in_user_scope
-                        {
-                            return Err(error(McpError::CredentialsAreUserScoped));
+                            {
+                                Ok(entry) if entry.secrets_in_user_scope => {
+                                    return Err(error(McpError::CredentialsAreUserScoped));
+                                }
+                                Ok(_) => {}
+                                Err(McpError::UnknownServer) => {
+                                    directory
+                                        .clear_secret(source, p.id.clone(), &stopping)
+                                        .await
+                                        .map_err(error)?;
+                                }
+                                Err(failure) => return Err(error(failure)),
+                            }
                         }
                         directory
                             .update(
