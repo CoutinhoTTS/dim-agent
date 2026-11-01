@@ -410,9 +410,11 @@ bearer and URL secrets and reads the entry back.
 
 The probe is asserted through the management method, in the transport flow, because its outcome
 is the reply rather than a service result the fixture can call; its auth outcomes need the OAuth
-fixture. The 30-second deadline is not exercised by a flow test, as today: reaching it costs 30
-seconds of real time for one outcome. The probe's `cleanup` outcome is covered by the refusal
-paths that already assert the spawned child has closed.
+fixture. The 30-second deadline and the `cleanup` outcome are not exercised by a flow test:
+reaching the deadline costs 30 seconds of real time for one outcome, and no fixture makes the
+disposable view fail to close. The refusal paths that assert the spawned child has closed show
+that a probe returns only after its cleanup ran; they reply `failed`/`unavailable` and
+`failed`/`response`, not `failed`/`cleanup`.
 
 ## 11. Rule check
 
