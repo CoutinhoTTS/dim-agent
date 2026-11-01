@@ -187,7 +187,7 @@ Reset 要求确认后把两个布尔值都写为 false。Off 可保留无效的�
 全局的 home、工作区、server 和模型配置选项保持现有含义，放在命令前后都可以。`--server PATH`
 指向独立的 `dim-app-server` 二进制，CLI 按它自己的名字直接运行；默认则运行本可执行文件的
 `app-server` 子命令，因此指向本可执行文件是参数错误。指向不存在的路径、程序在开始服务前
-退出，或未及时开始服务时，也按同一要求报错。现有的
+退出，或未及时开始服务时，也按同一要求报错，除非它留下了[启动说明](#守护进程启动失败)。现有的
 login/account/logout、models、MCP 和 daemon 命令仍然可用。现有的 `--prompt`、管道 stdin 和
 `--resume` 调用行为不变；`exec resume` 也接受同样的全局选项。重复给出 Session 或提示词是参数错误。
 `--json` 是 `exec` 的选项，`tui` 需要终端。help/version 与参数错误不会启动守护进程。
@@ -206,7 +206,8 @@ stderr 追加到 `daemon.log`，所以每次启动的一份说明是唯一既不
 诊断出不兼容时写这份说明，写明库、标记、守护进程支持的格式、库是更新、标记与结构
 不符、无法识别还是过旧，以及恢复办法（[原生存储格式 §
 启动不兼容诊断](../../design/appserver/native-storage-format.md#启动不兼容诊断)）。
-没有匹配的说明时保留现有的 `App Server exited (<status>); see ...`。失败的启动读完后
+没有匹配的说明时，内嵌守护进程保留现有的 `App Server exited (<status>); see ...`，
+`--server` 指定的程序则报出该选项必须指向独立的 `dim-app-server` 二进制。失败的启动读完后
 删除说明；连接成功也删除任何说明。CLI 从不打印 `daemon.log`，从不删除、重建、降级或
 改写库，并以 1 退出。开发说明继续使用 `./dev` 和它的隔离 home；终端说明本身只给兼容
 构建或 `--home PATH` 两条路。

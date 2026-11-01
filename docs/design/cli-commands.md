@@ -222,13 +222,13 @@ standalone `dim-app-server` binary, which the CLI runs by its own name; the
 default instead runs this executable's `app-server` subcommand, so naming this
 executable is an error. A path that does not exist, a program that exits
 before serving, or one that does not start serving in time is reported with the
-same requirement. Existing
-login/account/logout, models, MCP and daemon commands remain available. Existing
-`--prompt`, piped stdin and `--resume` calls retain their behavior; `exec resume`
-also accepts the same existing global options. Supplying the Session twice or
-the prompt twice is an argument error. `--json` serves `exec` and `migration`,
-and `tui` requires a terminal. Help/version and argument errors do not start
-the daemon.
+same requirement, unless it left a [startup note](#daemon-startup-failure).
+Existing login/account/logout, models, MCP and daemon commands remain
+available. Existing `--prompt`, piped stdin and `--resume` calls retain their
+behavior; `exec resume` also accepts the same existing global options.
+Supplying the Session twice or the prompt twice is an argument error. `--json`
+serves `exec` and `migration`, and `tui` requires a terminal. Help/version and
+argument errors do not start the daemon.
 
 ### Daemon startup failure
 
@@ -250,10 +250,12 @@ storage gate writes the note on a diagnosed incompatibility and names the
 store, its marker, the daemon's supported format, whether the store is newer,
 mismatched, unrecognized or too old, and the recovery paths ([native storage format §
 startup incompatibility](appserver/native-storage-format.md#启动不兼容诊断)).
-Without a matching note the existing `App Server exited (<status>); see ...`
-remains. The failed launch removes the note after reading; a successful
-connection removes any note. The CLI never prints `daemon.log`, never deletes,
-recreates, downgrades or rewrites the store, and exits 1.
+Without a matching note the embedded server reports the existing
+`App Server exited (<status>); see ...`, and a `--server` binary reports that
+the flag must name a standalone `dim-app-server` binary. The failed launch
+removes the note after reading; a successful connection removes any note. The
+CLI never prints `daemon.log`, never deletes, recreates, downgrades or rewrites
+the store, and exits 1.
 Development documentation continues to use `./dev` and its isolated home; the
 terminal note itself names a compatible build or `--home PATH`.
 
