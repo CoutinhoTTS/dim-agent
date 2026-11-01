@@ -553,9 +553,10 @@ fn read_pooled_runs(source: &Path, scenarios: &[Scenario]) -> Result<Vec<RunReco
         .collect()
 }
 
-/// One pooled run as the report reads it: the kind of each probe comes from
-/// the scenario, so a record naming a scenario or a probe the set does not
-/// have is refused.
+/// One pooled run as the report reads it: each probe keeps the kind its
+/// source recorded, checked against the scenario's, so a probe that changed
+/// kind since is refused rather than reinterpreted, and a record naming a
+/// scenario or a probe the set does not have is refused too.
 fn pooled_record(source: &Path, run: SavedRun, scenarios: &[Scenario]) -> Result<RunRecord> {
     let path = source.join("runs.jsonl");
     let scenario = scenarios
@@ -572,11 +573,18 @@ fn pooled_record(source: &Path, run: SavedRun, scenarios: &[Scenario]) -> Result
         .probes
         .into_iter()
         .map(|probe| {
-            let kind = scenario
+            let recorded = probe.kind.ok_or_else(|| {
+                format!(
+                    "{}: scenario {} probe {} recorded no kind; re-run the evaluation",
+                    path.display(),
+                    scenario.id,
+                    probe.id
+                )
+            })?;
+            let declared = scenario
                 .probes
                 .iter()
                 .find(|declared| declared.id == probe.id)
-                .map(|declared| declared.kind.name())
                 .ok_or_else(|| {
                     format!(
                         "{}: no probe {} in scenario {}",
@@ -585,6 +593,17 @@ fn pooled_record(source: &Path, run: SavedRun, scenarios: &[Scenario]) -> Result
                         scenario.id
                     )
                 })?;
+            let kind = declared.kind.name();
+            if recorded != kind {
+                return Err(format!(
+                    "{}: scenario {} probe {} is {kind} now but its run recorded {recorded}; \
+                     re-run the evaluation",
+                    path.display(),
+                    scenario.id,
+                    probe.id
+                )
+                .into());
+            }
             Ok(ProbeRecord {
                 id: probe.id,
                 kind,
@@ -740,12 +759,16 @@ struct SavedRun {
     probes: Vec<SavedProbe>,
 }
 
-/// One probe's record in a saved run: the report reads ids and verdicts, and
-/// the scenario declares the kind.
+/// One probe's record in a saved run: the kind the run was judged against,
+/// its verdict and the judge's quote.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SavedProbe {
     id: String,
+    /// The kind the run was judged against; every record this tool writes
+    /// carries it, so one without it is refused rather than guessed at.
+    #[serde(default)]
+    kind: Option<String>,
     verdict: ProbeVerdict,
     #[serde(default)]
     quote: Option<String>,
@@ -4997,6 +5020,54 @@ mod tests {
             "every run of both sources is kept: {records:?}"
         );
         assert!(out.join("scenario.md").exists());
+    }
+
+    /// A pooled run's probes keep the kind their source recorded: a probe
+    /// that changed kind between the source run and the pool, or a saved
+    /// record without one, is refused rather than reinterpreted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_pool_refuses_a_probe_whose_kind_changed() {
+        let fixture = Fixture::start(
+            "pool-kind",
+            judged,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let source = |name: &str, probe: Value| {
+            let directory = fixture.directory.join(name);
+            std::fs::create_dir_all(&directory).unwrap();
+            let run = json!({"arm": "current", "scenario": "case", "run": 0, "session": null,
+                             "stop": "idle", "turns": 2, "window": 24000.0, "durationMs": 1.0,
+                             "failed": false, "judgeOutcome": "judged", "error": null,
+                             "judgeError": null, "judgeReasks": 0, "probes": [probe]});
+            std::fs::write(directory.join("runs.jsonl"), format!("{run}\n")).unwrap();
+            directory
+        };
+        let changed = source(
+            "changed",
+            json!({"id": "ran", "kind": "must_not_show", "verdict": "present", "quote": null}),
+        );
+        let mut options = fixture.options(fixture.directory.join("pooled"));
+        options.pool = vec![changed];
+        let error = fixture.pooled(&options).await.unwrap_err().to_string();
+        assert!(error.contains("scenario case probe ran"), "{error}");
+        assert!(error.contains("must_show"), "{error}");
+        assert!(error.contains("must_not_show"), "{error}");
+        assert!(error.contains("re-run the evaluation"), "{error}");
+        let unrecorded = source(
+            "unrecorded",
+            json!({"id": "ran", "verdict": "present", "quote": null}),
+        );
+        let mut options = fixture.options(fixture.directory.join("pooled-again"));
+        options.pool = vec![unrecorded];
+        let error = fixture.pooled(&options).await.unwrap_err().to_string();
+        assert!(error.contains("probe ran recorded no kind"), "{error}");
+        assert!(error.contains("re-run the evaluation"), "{error}");
     }
 
     /// The judge's first answer leaves a probe without a verdict, and every
