@@ -1161,8 +1161,10 @@ impl SessionStore {
     }
 
     /// The newest events below `before` inside `window_start..=through`, whole
-    /// batches at both ends (session-history-window §4.2). Every event carries
-    /// its batch end, so the caller can trim by bytes without splitting one.
+    /// batches at both ends (session-history-window §4.2). A `before` inside a
+    /// batch clamps down to the batch end; a `through` inside one fails like
+    /// the forward read. Every event carries its batch end, so the caller can
+    /// trim by bytes without splitting one.
     pub async fn read_page_before(
         &self,
         id: &str,
@@ -1176,6 +1178,9 @@ impl SessionStore {
             session_id: id.into(),
             branch_id: branch.into(),
         };
+        if through > 0 {
+            self.timeline.read(&key, through..=through).await?;
+        }
         let top = before.saturating_sub(1).min(through);
         if top == 0 || top < window_start || limit == 0 {
             return Ok(vec![]);

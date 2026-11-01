@@ -58,7 +58,44 @@ impl dim_agent_capabilities::host::ModelDriver for StreamingModel {
     }
 }
 
-async fn serve_streaming(directory: &std::path::Path, model: Arc<StreamingModel>) -> RunningServer {
+/// Captures the main branch's Timeline so a flow can commit several events as
+/// one atomic batch, which a fixed `through` must not point inside.
+#[derive(Default)]
+struct BatchProbe(std::sync::Mutex<Option<Arc<dim_agent_runtime::Timeline>>>);
+
+struct BatchProbePlugin(
+    Arc<BatchProbe>,
+    rutis::host::Key<dim_agent_runtime::Timeline>,
+);
+
+impl BatchProbePlugin {
+    fn new(names: &dim_agent_runtime::Names<'_>, probe: Arc<BatchProbe>) -> rutis::Result<Self> {
+        Ok(Self(probe, names.key()?))
+    }
+}
+
+impl rutis::host::DynPlugin for BatchProbePlugin {
+    fn name(&self) -> &str {
+        "history-window-batch-probe"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.1.erase()]
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
+        Box::pin(async move {
+            *self.0.0.lock().unwrap() = Some(ctx.require_at(&self.1)?.clone());
+            Ok(rutis::host::Effect::Done)
+        })
+    }
+}
+
+async fn serve_streaming(
+    directory: &std::path::Path,
+    model: Arc<StreamingModel>,
+) -> (RunningServer, Arc<BatchProbe>) {
     use dim_agent_capabilities::{
         adapters::DefaultPrepareModelPlugin,
         history::HistoryRenderer,
@@ -87,7 +124,15 @@ async fn serve_streaming(directory: &std::path::Path, model: Arc<StreamingModel>
             }),
         );
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
-    serve(
+    let batch = Arc::new(BatchProbe::default());
+    let probe = batch.clone();
+    builder.require_feature(
+        Feature::new("history-window-batch-probe")
+            .branch("history-window-batch-probe", move |names| {
+                Ok(Box::new(BatchProbePlugin::new(names, probe.clone())?))
+            }),
+    );
+    let server = serve(
         builder,
         ServerConfig {
             unix_path: Some(directory.join("server.sock")),
@@ -96,7 +141,8 @@ async fn serve_streaming(directory: &std::path::Path, model: Arc<StreamingModel>
         },
     )
     .await
-    .unwrap()
+    .unwrap();
+    (server, batch)
 }
 
 /// A short path under `/tmp`: a socket path must stay below `SUN_LEN`, which a
@@ -182,7 +228,7 @@ async fn read_window(client: &mut Client, id: &str) -> (Vec<Value>, usize, usize
 async fn the_latest_turn_window_carries_the_prompt_and_folds_like_forward_paging() {
     let directory = new_directory("small");
     let model = Arc::new(StreamingModel::default());
-    let server = serve_streaming(&directory, model.clone()).await;
+    let (server, _) = serve_streaming(&directory, model.clone()).await;
     let mut client = Client::new_version(&server, false, 3).await;
     assert!(
         client
@@ -243,7 +289,7 @@ async fn the_latest_turn_window_carries_the_prompt_and_folds_like_forward_paging
 async fn the_latest_turn_window_bounds_a_large_turn_and_continues_with_before() {
     let directory = new_directory("large");
     let model = Arc::new(StreamingModel::default());
-    let server = serve_streaming(&directory, model.clone()).await;
+    let (server, _) = serve_streaming(&directory, model.clone()).await;
     let mut client = Client::new_version(&server, false, 3).await;
     let created = client.rpc("session.create", create(json!([]))).await;
     assert_ok(&created);
@@ -314,7 +360,7 @@ async fn the_latest_turn_window_bounds_a_large_turn_and_continues_with_before() 
 async fn the_latest_turn_window_returns_a_batch_above_the_target_and_rejects_a_frame_breaker() {
     let directory = new_directory("bytes");
     let model = Arc::new(StreamingModel::default());
-    let server = serve_streaming(&directory, model.clone()).await;
+    let (server, _) = serve_streaming(&directory, model.clone()).await;
     let mut client = Client::new_version(&server, false, 3).await;
     let created = client.rpc("session.create", create(json!([]))).await;
     assert_ok(&created);
@@ -377,7 +423,7 @@ async fn the_latest_turn_window_returns_a_batch_above_the_target_and_rejects_a_f
 async fn the_latest_turn_window_measures_the_three_issue_sizes() {
     let directory = new_directory("measure");
     let model = Arc::new(StreamingModel::default());
-    let server = serve_streaming(&directory, model.clone()).await;
+    let (server, _) = serve_streaming(&directory, model.clone()).await;
     let mut client = Client::new_version(&server, false, 3).await;
     let mut table = Vec::new();
     for chunks in [1_946, 3_112, 6_852] {
@@ -418,7 +464,7 @@ async fn the_latest_turn_window_measures_the_three_issue_sizes() {
 async fn a_branch_without_a_turn_returns_its_newest_events() {
     let directory = new_directory("noturn");
     let model = Arc::new(StreamingModel::default());
-    let server = serve_streaming(&directory, model.clone()).await;
+    let (server, _) = serve_streaming(&directory, model.clone()).await;
     let mut client = Client::new_version(&server, false, 3).await;
     let created = client.rpc("session.create", create(json!([]))).await;
     assert_ok(&created);
@@ -447,6 +493,72 @@ async fn a_branch_without_a_turn_returns_its_newest_events() {
             .iter()
             .any(|event| event["type"] == "input" && text_of(event) == Some("appended note")),
         "{page}"
+    );
+
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// A pinned `through` must end a batch: the window read answers the storage
+/// error the forward read gives, not a page that stops below the pin.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_latest_turn_window_rejects_a_through_inside_a_batch() {
+    let directory = new_directory("batch");
+    let model = Arc::new(StreamingModel::default());
+    let (server, batch) = serve_streaming(&directory, model.clone()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", create(json!([]))).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let timeline = batch.0.lock().unwrap().clone().unwrap();
+    let inside = timeline
+        .append_batch_registered(
+            ["first in batch", "second in batch"]
+                .into_iter()
+                .map(|text| {
+                    EventKind::InputMessage(dim_agent_types::InputMessageData::text(
+                        text,
+                        Some(dim_agent_types::InputMode::Append),
+                    ))
+                    .into()
+                })
+                .collect(),
+            |_| Ok(()),
+        )
+        .unwrap()[0]
+        .sequence;
+    assert_ok(
+        &client
+            .rpc("session.idle", json!({"sessionId":id,"branchId":"main"}))
+            .await,
+    );
+
+    let forward = client
+        .rpc(
+            "session.history",
+            json!({"sessionId":id,"branchId":"main","through":inside}),
+        )
+        .await;
+    assert_eq!(forward["error"]["code"], -32602, "{forward}");
+    assert!(
+        forward["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("inside an atomic batch")),
+        "{forward}"
+    );
+    let window = client
+        .rpc(
+            "session.history",
+            json!({"sessionId":id,"branchId":"main","latestTurn":true,"through":inside}),
+        )
+        .await;
+    assert_eq!(window["error"]["code"], -32602, "{window}");
+    assert!(
+        window["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("inside an atomic batch")),
+        "{window}"
     );
 
     server.shutdown();

@@ -6204,3 +6204,56 @@ async fn the_history_window_index_is_created_at_open_without_a_format_step() {
     assert_eq!(format, 28);
     read.close().await.unwrap();
 }
+
+/// A window's fixed watermark must end a batch: two events committed as one
+/// batch make `through` 1 a storage error, not an empty page.
+#[tokio::test]
+async fn a_history_window_read_rejects_a_through_inside_a_batch() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let sessions =
+        dim_app_server::storage::SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
+    let store = sessions.timeline_store();
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let mut first = text(1, "one");
+    first.batch_end = 2;
+    let (published, receiver) = tokio::sync::oneshot::channel();
+    store
+        .append(
+            key("session", "main"),
+            vec![first, text(2, "two")],
+            Box::new(move |result| {
+                let _ = published.send(result);
+            }),
+        )
+        .unwrap();
+    tokio::time::timeout(PUBLISHED, receiver)
+        .await
+        .expect("the writer did not publish the write")
+        .unwrap()
+        .unwrap();
+
+    assert!(matches!(
+        store.read(&key("session", "main"), 1..=1).await,
+        Err(AgentError::InvalidInput(message)) if message.contains("inside an atomic batch")
+    ));
+    assert!(matches!(
+        sessions.read_page_before("session", "main", 2, 10, 1, 1).await,
+        Err(AgentError::InvalidInput(message)) if message.contains("inside an atomic batch")
+    ));
+    assert_eq!(
+        sessions
+            .read_page_before("session", "main", 3, 10, 2, 1)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+
+    drop(store);
+    drop(sessions);
+    db.close().await.unwrap();
+}
