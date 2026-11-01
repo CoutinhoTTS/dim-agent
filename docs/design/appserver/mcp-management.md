@@ -3,14 +3,15 @@
 Status: Draft.
 
 Scope: process.
-Issue: [#453](https://github.com/arcships/dim/issues/453).
+Issue: [#453](https://github.com/arcships/dim/issues/453), [#452](https://github.com/arcships/dim/issues/452).
 Rules: [design rules](../../architecture/rust-agent/principles.md), [ADR 002](../../adr/002-plugin-scope.md).
 
 ## 1. Scope
 
 This document owns the configuration surface of the `mcp` management namespace: how a client
-reads one entry in order to edit it and writes the result. It owns those methods' requests and
-replies, the values they redact, and how a source revision orders an edit.
+reads one entry in order to edit it, writes the result, and exercises a configuration before
+saving one. It owns those methods' requests and replies, the values they redact, and how a source
+revision orders an edit.
 
 It does not own:
 
@@ -21,6 +22,11 @@ It does not own:
 | Entry admission, dispatch, withdrawn-namespace answers, interruption settlement | [Management methods](management-methods.md) |
 | Revisions, compare-and-set, project authorization | [Settings service](settings-service.md#33-persistence-and-revisions) |
 | Which plugin registers which entry, and how | [PluginManager](../plugins/PluginManager.md#37-content-registration) |
+
+An MCP Apps host contract — resources, tool invocation from a widget, widget metadata and
+model-context messages — is not part of this surface. The probe lists tools for a diagnostic and
+exposes no resource, invocation or widget; [#451](https://github.com/arcships/dim/issues/451)
+owns that boundary.
 
 Two terms are used below:
 
@@ -38,7 +44,8 @@ optional `auth`, plus both source revisions and each source's application record
 creates or replaces one source's entry, `mcp.update` applies a typed patch, `mcp.remove` removes
 the entry and `mcp.set_enabled` writes enablement. `mcp.configuration` returns a redacted
 projection of one entry, `mcp.inspect` returns that projection with the entry's connection
-generations, and `mcp.test` probes a draft configuration.
+generations, and `mcp.test` probes a saved entry or a draft configuration, answering its tools or
+an RPC error.
 
 Two properties of that surface prevent a client from editing an entry:
 
@@ -52,6 +59,10 @@ Two properties of that surface prevent a client from editing an entry:
    leaves `cwd` alone persists that absolute path into `.mcp.json`. For a project entry the patch
    also persists the user record's enablement as the file's `enabled` field, which the same
    design ignores when it runs the entry.
+
+The probe hides its own outcome. A client that asks whether a server works gets its tools or an
+RPC error, so a timeout, a failed request and a refused schema arrive as error codes with no
+latency, and a server that needs sign-in answers `mcp_unavailable` like any other failure.
 
 ## 3. Decisions
 
@@ -134,6 +145,35 @@ so a copy either shares that credential or needs its own, and neither is decided
 entry starts without the environment, header and bearer values of its original, and the user
 enters them again.
 
+### D8. A probe reports its outcome; a failed probe is data
+
+`mcp.test` is a diagnostic of one configuration, not an operation: it opens one disposable
+connection, initializes it, lists every tool page, closes it, and replies with what happened.
+A timeout, a failed request, a refused credential or an answer the MCP owner cannot use is the
+probe's result, so it is reported in the reply rather than as an error of the call.
+
+Only a request the owner refuses before anything is contacted stays an error: an empty or unknown
+`id`, an entry its source cannot probe, a plugin `patch`, a draft that is not user-supplied, a
+field of the other transport, and a configuration the MCP owner cannot construct. Cancellation
+and interruption keep the call's existing meaning: an interrupted probe is not an outcome.
+
+A client shows the result of a test the user asked for. Answering through RPC errors would force
+every client to rebuild the outcome from error codes, and would lose the latency of the attempt
+that failed.
+
+### D9. The probe and the run view answer different questions
+
+- `mcp.inspect` is the run view: it reports the connection generations the Sessions hold now,
+  their state and their last complete discovery, and it contacts nothing.
+- `mcp.test` is a one-shot diagnostic: it contacts the server for a saved entry or a draft and
+  reports one terminal outcome. It attaches no Session, publishes no tool, registers no
+  connection and writes no configuration, so it says nothing about what runs.
+- A server no Session uses has no inspect connection; a probe leaves the inspect reply unchanged.
+- What Dim holds stays the credential authority's: the catalog's `auth` field and `mcp.auth.*`
+  report it. The probe reports what its attempt met, and shares the authority's behavior for one
+  thing: an OAuth entry may refresh its credential, and a `403` records its challenge and scopes,
+  as it does for any connection.
+
 ## 4. Contract
 
 Namespace `mcp`, process scope, served on local connections
@@ -141,24 +181,23 @@ Namespace `mcp`, process scope, served on local connections
 `source` is `"user"`, `"project"` or `"plugin"`; `cwd` is required for a project source and is
 the workspace whose `.mcp.json` is read, authorized as today.
 
-These are the methods that read or write one entry's configuration:
+These are the methods that read or write one entry's configuration, or exercise it:
 
-| Method | Request | Reply | Mutating |
+| Method | Request | Reply | Writes |
 | --- | --- | --- | --- |
 | `mcp.configuration` | `{cwd?, id, source}` | `{revision?, enabled, configuration: Configuration}` | no |
-| `mcp.save` | `{cwd?, id, source, expectedVersion, configuration}` | `{}` | yes |
-| `mcp.update` | `{cwd?, id, source, expectedVersion, patch}` | `{}` | yes |
+| `mcp.save` | `{cwd?, id, source, expectedVersion, configuration}` | `{}` | the source |
+| `mcp.update` | `{cwd?, id, source, expectedVersion, patch}` | `{}` | the source |
+| `mcp.test` | `{cwd?, id, source, configuration?, patch?}` | `Probe` (§4.5) | no configuration; the credential authority's, as for any connection |
 
 `mcp.save` takes a complete stdio, HTTP or SSE definition in the existing `mcpServers` format and
 creates or replaces that source's entry, not a merged one. The namespace's other methods are
-listed in §6 and keep their references: `mcp.catalog`, `mcp.inspect`, `mcp.test`, `mcp.remove`,
+listed in §6 and keep their references: `mcp.catalog`, `mcp.inspect`, `mcp.remove`,
 `mcp.set_enabled` and `mcp.disconnect` in the App Server's
 [MCP configuration reference](../../../crates/dim-app-server/README.md#mcp-configuration-management),
 `mcp.auth.*` in [MCP OAuth §9.1](mcp-oauth.md#91-management-methods-namespace-mcp-local-transports-only),
 and `mcp.temporary.capabilities` in [TemporaryMcp](../plugins/TemporaryMcp.md). §3 D5 states the
-revision every write takes. `mcp.test` probes a draft configuration; [#452](https://github.com/arcships/dim/issues/452)
-extends its reply, so this document does not state that reply and is the document that will state
-it.
+revision every write takes.
 
 ### 4.1 Entry read (`mcp.configuration`)
 
@@ -247,6 +286,46 @@ would refuse, including one that sets `oauth` beside static credentials.
 
 A read serves a disabled entry: enablement is a field, not a condition for reading.
 
+### 4.5 Probe (`mcp.test`)
+
+`mcp.test` exercises one configuration: it opens one disposable connection, initializes it, lists
+every tool page, closes it, and reports what happened. It attaches no Session, publishes no tool,
+registers no connection and writes no configuration (D9).
+
+The request is unchanged, and a complete `configuration` is a user-supplied draft without
+`patch`. Otherwise the probe uses that source's declared entry with an optional unsaved `patch`,
+so stored secrets are preserved by the patch rules in §4.3 (D4). A user entry is probed even when
+it is disabled, as an explicit local action; a project or plugin entry must be enabled. The
+30-second deadline and the cleanup after every outcome are unchanged.
+
+The reply is a `Probe`:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `status` | `"connected"` \| `"authRequired"` \| `"failed"` | The terminal outcome: the connection initialized and every tool page was listed; the server refused the attempt for lack of a usable credential; anything else (D8) |
+| `latencyMs` | integer ≥ 0 | Daemon-measured time from opening the disposable connection to the terminal outcome, excluding cleanup |
+| `tools` | `Tool[]` or `null` | Every discovered tool with `name`, `description` and `inputSchema`; `null` unless `connected`. The count is this list's length |
+| `expired` | boolean, with `authRequired` | Dim held a credential and the authorization server rejected it, rather than Dim holding none |
+| `missingScopes` | string[], with `authRequired` | The scopes a `403 insufficient_scope` named while discovering |
+| `reason` | `"timeout"` \| `"unavailable"` \| `"response"` \| `"cleanup"`, with `failed` | The deadline passed; the connection, a request or the server failed; the server's answer was refused; the disposable connection did not close cleanly |
+| `message` | string, with `failed` | The detail the same failure carried as an error before; it never carries a configuration value, a credential or a callback URL |
+
+`connected` is the only outcome that lists tools; `expired` and `missingScopes` are present only
+with `authRequired`, and `reason` and `message` only with `failed`.
+
+An OAuth entry's probe uses the stored credential as any connection does, which can refresh it
+and record a `403` challenge with its scopes; the catalog's `auth` report can therefore gain
+`missingScopes` after a probe (D9). No other state changes: no source revision, no tool published
+to a Session, no connection generation created or replaced.
+
+Only a request refused before anything is contacted stays an RPC error: `invalid_params` for an
+empty `id`, a plugin `patch`, a complete `configuration` for a non-user source or a field of the
+other transport (§4.4); `mcp_unknown_server` for an unknown `id`; `mcp_unavailable` for a project
+or plugin entry that is not enabled; and, unchanged, the error a configuration answers when the
+MCP owner cannot construct it (D8). An interrupted probe answers `operation_interrupted`, and a
+probe while Mcp is not serving answers `service_reloading`
+([management methods](management-methods.md#dispatch-and-lifecycle)).
+
 ## 5. What changes for a client
 
 - The reply of `mcp.configuration` stops being the bare projection and becomes
@@ -256,6 +335,11 @@ A read serves a disabled entry: enablement is a field, not a condition for readi
   is unaffected; every other client sees the projection replaced by the wrapper.
 - An empty `id` on the entry read answers `mcp_invalid_config`, the code `mcp.save` already
   returns, instead of `invalid_params`.
+- The reply of `mcp.test` stops being `{tools}` and becomes the probe report in §4.5, and a probe
+  that fails is a reply rather than an RPC error. That is also a breaking change on protocol v3:
+  a client that read `{tools}` must read `tools` under the report and take the outcome from
+  `status`. The Web settings page changes in the same implementation; the native CLI does not call
+  the method; every other client sees the wrapper replace the old reply.
 - The edit flow is `mcp.configuration` then `mcp.update` with the returned `revision`; creating an
   entry takes the token from `mcp.catalog`'s source revision (D1).
 - A client renders `command`, `cwd` and `endpoint`, the name lists and the counts, and offers
@@ -263,17 +347,23 @@ A read serves a disabled entry: enablement is a field, not a condition for readi
   the metadata URL. It shows `argsCount`, `envNames` and `headerNames` as the fields that a
   replacement would replace.
 - A client must not write back `mcp.inspect` values (D1).
+- A client shows a probe's `status`, `latencyMs` and tools, offers sign-in on `authRequired` (with
+  `expired` and `missingScopes` when present), and shows `reason` and `message` on `failed`. It
+  takes "no live connection" from `mcp.inspect`, not from a probe (D9).
 - The Desktop client (arcships/dim-electron#20) replaces its `mcp.get` and `mcp.update`
-  `capability_unavailable` answers with `mcp.configuration` and `mcp.update`.
+  `capability_unavailable` answers with `mcp.configuration` and `mcp.update`, and its `mcp.test`
+  answer with the probe report.
 
 ## 6. What does not change
 
-- `mcp.catalog`, `mcp.inspect`, `mcp.test`, `mcp.save`, `mcp.remove`, `mcp.set_enabled` and
-  `mcp.disconnect` keep their requests and replies, including `mcp.inspect`'s effective
-  configuration and its connection generations.
+- `mcp.catalog`, `mcp.inspect`, `mcp.save`, `mcp.remove`, `mcp.set_enabled` and `mcp.disconnect`
+  keep their requests and replies, including `mcp.inspect`'s effective configuration and its
+  connection generations.
+- `mcp.test`'s request, its 30-second deadline, its cleanup and its credential behavior are
+  unchanged; only its reply changes (§4.5).
 - The namespace's method set is unchanged, so `hello.features` advertises the same names and no
   client needs a capability check for a new method.
-- No error code is added, removed or renamed.
+- No error code is added, removed or renamed; a probe's outcome is a reply, not a code.
 - The `mcp` business documents, their file names, source precedence, project enablement record,
   plugin registration and the credential store keep their formats. No persisted data moves, so no
   format version changes.
@@ -309,14 +399,18 @@ Flow level, reusing the existing MCP flows:
 
 | File | What it protects |
 | --- | --- |
-| `crates/dim-app-server/tests/transport_flow/product_protocol.rs` | The wire contract on local v3: the read returns the revision the catalog reports for the same source; creating an entry with the catalog's source revision succeeds and a stale revision is `mcp_settings_conflict`; a plugin entry's read has no revision and a write to it is `invalid_params`; a project entry patched on one unrelated field leaves `.mcp.json` without a resolved `cwd` and without an `enabled` key; and no withheld value appears in the read, including after an edit |
-| `crates/dim-app-server/tests/mcp_flow.rs` | The service level: a source's read returns its declared entry with the source revision, and a project entry's enablement comes from the user's record, while the effective entry a Session runs resolves the workspace `cwd`; a user entry's read carries its declared configuration and revision |
-| `crates/dim-app-server/tests/mcp_oauth_flow.rs` | Existing evidence, unchanged: `mcp.inspect` and `mcp.update` keep their replies for an OAuth entry |
+| `crates/dim-app-server/tests/transport_flow/product_protocol.rs` | The wire contract on local v3: the read returns the revision the catalog reports for the same source; creating an entry with the catalog's source revision succeeds and a stale revision is `mcp_settings_conflict`; a plugin entry's read has no revision and a write to it is `invalid_params`; a project entry patched on one unrelated field leaves `.mcp.json` without a resolved `cwd` and without an `enabled` key; no withheld value appears in the read, including after an edit; and a probe reports `connected` with a latency and every tool, or `failed` with `reason`/`message` and no tools, without changing the source revision or creating a Session connection |
+| `crates/dim-app-server/tests/mcp_flow.rs` | The service level: a source's read returns its declared entry with the source revision, and a project entry's enablement comes from the user's record, while the effective entry a Session runs resolves the workspace `cwd`; a user entry's read carries its declared configuration and revision; a probe returns its report rather than an error when the server refuses |
+| `crates/dim-app-server/tests/mcp_oauth_flow.rs` | A probe of an unauthorized entry reports `authRequired`, with `expired` where Dim's stored credential was rejected and `missingScopes` where the server answered `403 insufficient_scope`; existing evidence that `mcp.inspect` and `mcp.update` keep their replies for an OAuth entry |
 
 The redaction assertions of
 `mcp_editor_preserves_redacts_and_removes_credentials_with_source_cas` extend to the new reply
 shape rather than moving to a new test: the same fixture writes argument, environment, header,
 bearer and URL secrets and reads the entry back.
+
+The 30-second deadline is not exercised by a flow test, as today: reaching it costs 30 seconds of
+real time for one outcome. The probe's `cleanup` outcome is covered by the refusal paths that
+already assert the spawned child has closed.
 
 ## 11. Rule check
 
@@ -327,8 +421,8 @@ bearer and URL secrets and reads the entry back.
 | §4 rule 3 (`before` callbacks) | None |
 | §4 rule 4 (core without business meaning) | No core change; Rpc dispatches the namespace as it does today |
 | §4 rule 5 (batch) | Not applicable: no events are written |
-| §4 rule 6 (model context) | Not applicable: nothing enters the model context; MCP tool declarations are unchanged |
-| §4 rule 7 (public events and services only) | The MCP row uses Settings' public service and reads the entries PluginManager registered; it reads no other part's internal state |
+| §4 rule 6 (model context) | Not applicable: nothing enters the model context. A probe's discovered tools are a reply to the client that asked, not tools published to a Session or a model |
+| §4 rule 7 (public events and services only) | The MCP row uses Settings' public service, reads the entries PluginManager registered, and reaches the credential authority through its own part; it reads no other part's internal state |
 | §4 rule 8 (infrastructure unchanged) | No change to the Timeline, Dispatcher, event envelope, assembly, Session or branch facades; no requirement is raised |
 | §4 rule 9 (only facts later decisions use) | Configuration stays out of the Timeline; a Session broadcast notice is not added |
 | §1 (Capability and the App Server boundary) | No new part and no new Capability. The MCP process row and its Session part keep their state; the change is in the process row's management methods |
@@ -350,3 +444,8 @@ bearer and URL secrets and reads the entry back.
 | Return the new revision from the writes (`provider.update` precedent) | A client reads the entry back after a write anyway, because the server normalizes what it stores; the four writes keep one reply shape, and `mcp.remove` has no entry to return |
 | Keep the read and the patch on the effective configuration | Then a client cannot echo a value it read: a project entry's resolved `cwd` and the user record's `enabled` would be persisted into `.mcp.json` by an edit of another field |
 | A server-side `mcp.duplicate` | It would carry secrets between entries without deciding whether the credential record is shared or copied; the copy's enablement and source would need their own decision |
+| Keep a failed probe an RPC error | Every client would rebuild the outcome from error codes and lose the latency of the attempt that failed. A request the owner refuses before contacting anything stays an error, so nothing is hidden |
+| Report only an outcome code, without the tool list | The probe already lists every tool page and a client asks for both in one action; the count is that list's length, so no field repeats it |
+| Attach a Session to measure what runs | A diagnostic must not create, publish to or replace a Session, and `mcp.inspect` already reports the connections Sessions hold (D9) |
+| Record nothing from the probe's connection | It would need a flag on the credential path, and the catalog would ignore a challenge the server just sent. A probe already refreshes a credential as any connection does, so recording the challenge with it is the same rule |
+| One `mcp.probe` method beside `mcp.test` | Two methods that open a disposable connection and list tools; the Desktop client's name maps onto the existing method |
