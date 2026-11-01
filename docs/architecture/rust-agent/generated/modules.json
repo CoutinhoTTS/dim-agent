@@ -2101,6 +2101,17 @@
       ]
     },
     {
+      "id": "dim_app_server::modality",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/modality.rs",
+      "unexpandedMacros": [
+        "format",
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_app_server::model_catalog",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -15360,6 +15371,15 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::modality",
+      "references": [
+        "mod modality",
+        "path modality::ModalityAdapterService",
+        "path modality::ModalityPlugin::new"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::model_catalog",
       "references": [
         "mod model_catalog"
@@ -19991,6 +20011,105 @@
         "path ManagementMethodsPlugin",
         "path ManagementMethodsPlugin::new",
         "path dispatch"
+      ]
+    },
+    {
+      "from": "dim_app_server::modality",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostError",
+        "path HostError::Cancelled",
+        "path HostError::Failed",
+        "path HostErrorKind::OwnerClosed",
+        "path ModelSelectionHost",
+        "path SelectableModelsHost",
+        "use dim_agent_capabilities::host::HostError",
+        "use dim_agent_capabilities::host::HostErrorKind",
+        "use dim_agent_capabilities::host::ModelSelectionHost",
+        "use dim_agent_capabilities::host::SelectableModelsHost"
+      ]
+    },
+    {
+      "from": "dim_app_server::modality",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path RpcError",
+        "path RpcError::app",
+        "path RpcError::interrupted",
+        "path RpcError::invalid",
+        "path RpcError::reloading",
+        "path params",
+        "path reply",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::params",
+        "use dim_agent_capabilities::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_app_server::modality",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path SettingsScope::User",
+        "use crate::settings::SettingsScope"
+      ]
+    },
+    {
+      "from": "dim_app_server::modality",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::modality",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path ModelCapabilitySnapshot",
+        "use dim_agent_types::ModelCapabilitySnapshot"
+      ]
+    },
+    {
+      "from": "dim_app_server::modality",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path ModelId",
+        "use dim_agent_types::ModelId"
+      ]
+    },
+    {
+      "from": "dim_app_server::modality",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path ManagementMethods",
+        "use crate::methods::ManagementMethods"
+      ]
+    },
+    {
+      "from": "dim_app_server::modality",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path Empty",
+        "use crate::protocol::Empty"
+      ]
+    },
+    {
+      "from": "dim_app_server::modality",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path BusinessDocument",
+        "path SettingsError",
+        "path SettingsError::Cancelled",
+        "path SettingsError::Closed",
+        "path SettingsError::Conflict",
+        "path SettingsError::Invalid",
+        "path SettingsService",
+        "path crate::settings::Result",
+        "use crate::settings::BusinessDocument",
+        "use crate::settings::SettingsError",
+        "use crate::settings::SettingsService"
       ]
     },
     {
@@ -35246,6 +35365,10 @@
     {
       "module": "dim_app_server::mcp::server",
       "path": "T::Error"
+    },
+    {
+      "module": "dim_app_server::modality",
+      "path": "D::Error"
     },
     {
       "module": "dim_app_server::model_catalog",
