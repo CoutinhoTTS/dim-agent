@@ -1,7 +1,9 @@
 use dim_agent_capabilities::{
     adapters::{DefaultPrepareModelPlugin, EchoModel, MockTools},
     defaults,
-    history::{HistoryEntry, HistoryRenderer, project_context_history, project_history},
+    history::{
+        HistoryEntry, HistoryRenderer, project_context_history, project_history, summary_message,
+    },
     host::*,
 };
 use dim_agent_runtime::testing::MinimalHost;
@@ -244,7 +246,26 @@ enum PrefixEdit {
     Drop,
     Append,
 }
-struct RewritePrefix(PrefixEdit);
+struct RewritePrefix {
+    edit: PrefixEdit,
+    /// Edit only a request that already starts with the replacement a
+    /// completed compaction stores.
+    compacted: bool,
+}
+impl RewritePrefix {
+    fn new(edit: PrefixEdit) -> Self {
+        Self {
+            edit,
+            compacted: false,
+        }
+    }
+    fn compacted(edit: PrefixEdit) -> Self {
+        Self {
+            edit,
+            compacted: true,
+        }
+    }
+}
 impl PrepareContext for RewritePrefix {
     fn prepare(
         &self,
@@ -252,14 +273,25 @@ impl PrepareContext for RewritePrefix {
         _: ContextSource,
         _: CancellationToken,
     ) -> HostFuture<'_, Arc<ModelRequest>> {
-        let edit = self.0;
+        let (edit, compacted) = (self.edit, self.compacted);
         Box::pin(async move {
             let mut request = (*request).clone();
+            if compacted && !starts_with_replacement(&request) {
+                return Ok(Arc::new(request));
+            }
             match edit {
                 PrefixEdit::Change => {
+                    assert!(
+                        !request.messages.is_empty(),
+                        "the prepared request has no prefix to change"
+                    );
                     request.messages[0] = Arc::new(Message::text(Role::User, "changed"))
                 }
                 PrefixEdit::Drop => {
+                    assert!(
+                        !request.messages.is_empty(),
+                        "the prepared request has no prefix to drop"
+                    );
                     request.messages.remove(0);
                 }
                 PrefixEdit::Append => request
@@ -269,6 +301,13 @@ impl PrepareContext for RewritePrefix {
             Ok(Arc::new(request))
         })
     }
+}
+/// Whether the request starts with a completed compaction's replacement.
+fn starts_with_replacement(request: &ModelRequest) -> bool {
+    matches!(
+        request.messages.first().map(|message| &message.content),
+        Some(MessageContent::Text(text)) if text.starts_with("<dim-summary>")
+    )
 }
 
 fn external_history(events: &ContextHistory) -> std::result::Result<Vec<HistoryEntry>, String> {
@@ -1527,7 +1566,7 @@ async fn a_changed_prefix_message_fails_the_preparation() {
         Arc::new(EchoModel),
         HistoryRenderer::default(),
         Context::default(),
-        Arc::new(RewritePrefix(PrefixEdit::Change)),
+        Arc::new(RewritePrefix::new(PrefixEdit::Change)),
     ))
     .await
     .unwrap();
@@ -1569,7 +1608,7 @@ async fn a_short_request_fails_the_preparation() {
         Arc::new(EchoModel),
         HistoryRenderer::default(),
         Context::default(),
-        Arc::new(RewritePrefix(PrefixEdit::Drop)),
+        Arc::new(RewritePrefix::new(PrefixEdit::Drop)),
     ))
     .await
     .unwrap();
@@ -1605,7 +1644,7 @@ async fn a_message_appended_after_the_prefix_reaches_the_model() {
         Arc::new(EchoModel),
         HistoryRenderer::default(),
         Context::default(),
-        Arc::new(RewritePrefix(PrefixEdit::Append)),
+        Arc::new(RewritePrefix::new(PrefixEdit::Append)),
     ))
     .await
     .unwrap();
@@ -1635,6 +1674,120 @@ async fn a_message_appended_after_the_prefix_reaches_the_model() {
     );
     assert!(events.iter().any(
         |event| matches!(&event.kind, EventKind::Text(data) if data.delta == "Echo: appended")
+    ));
+    agent.close().await.unwrap();
+}
+
+/// A completed compaction's replacement is part of the prefix the check
+/// compares: a tail appended after it reaches the model, and a changed
+/// replacement is refused before the model.
+#[tokio::test]
+async fn a_completed_compaction_keeps_its_replacement_in_the_prefix_check() {
+    let compacting = || Context {
+        threshold: Some(450.),
+        ..Context::default()
+    };
+    let long = "x".repeat(1_200);
+    let summary = summary_message("short");
+
+    let agent = MinimalHost::start(&builder_with_prepare(
+        Arc::new(EchoModel),
+        HistoryRenderer::default(),
+        compacting(),
+        Arc::new(RewritePrefix::compacted(PrefixEdit::Append)),
+    ))
+    .await
+    .unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    session
+        .submit(long.clone(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    session
+        .submit("after".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = session.history("main", None).await.unwrap();
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::ContextCompaction(ContextCompactionData {
+                outcome: ContextCompactionResult::Completed { replacement, .. },
+                ..
+            }) if replacement.first() == Some(&summary)
+        )),
+        "the first turn completes a compaction whose replacement starts with the summary"
+    );
+    let calls: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => Some(data.request.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls.len(), 2, "both turns reach the model");
+    let sent = calls.last().unwrap();
+    assert_eq!(
+        *sent.messages[0], summary,
+        "the checked prefix starts with the replacement"
+    );
+    assert_eq!(
+        sent.messages.last().unwrap().as_ref(),
+        &Message::text(Role::User, "appended")
+    );
+    assert!(events.iter().any(
+        |event| matches!(&event.kind, EventKind::Text(data) if data.delta == "Echo: appended")
+    ));
+    agent.close().await.unwrap();
+
+    let agent = MinimalHost::start(&builder_with_prepare(
+        Arc::new(EchoModel),
+        HistoryRenderer::default(),
+        compacting(),
+        Arc::new(RewritePrefix::compacted(PrefixEdit::Change)),
+    ))
+    .await
+    .unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    session
+        .submit(long, InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    session
+        .submit("after".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = session.history("main", None).await.unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::ModelCall(_)))
+            .count(),
+        1,
+        "the changed replacement never reaches the model"
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        EventKind::ModelOutputEnd(data)
+            if matches!(&data.outcome, ModelOutputOutcome::Failed { error, .. }
+                if error.contains("must preserve the timeline history prefix"))
+    )));
+    assert!(matches!(
+        events.last().unwrap().kind,
+        EventKind::TurnEnd(TurnEndData {
+            outcome: TurnOutcome::Failed { .. },
+            ..
+        })
     ));
     agent.close().await.unwrap();
 }
