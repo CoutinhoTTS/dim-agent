@@ -4,7 +4,7 @@ use std::path::Path;
 use std::{ffi::OsString, path::PathBuf};
 
 #[cfg(not(target_os = "macos"))]
-pub(super) const BWRAP_UNAVAILABLE: &str = "bubblewrap (bwrap) is not installed on the captured host PATH. Install bubblewrap, or turn the sandbox off in /settings > Execution";
+pub(super) const BWRAP_UNAVAILABLE: &str = "bubblewrap (bwrap) is not installed on the captured host PATH. Install bubblewrap, or select Off in /permissions > Process isolation";
 
 /// The bubblewrap executable preparation would run, from the captured host
 /// `PATH`. The availability report and preparation share this resolution.
@@ -166,7 +166,7 @@ impl HostPlatform {
                 .map_err(|error| ProcessSpecError {
                     code: "isolation_unavailable",
                     reason: format!(
-                        "Isolated temporary directory: {error}; turn Sandbox off in /settings > Execution"
+                        "Isolated temporary directory: {error}; select Off in /permissions > Process isolation"
                     ),
                 })?;
             writable.push((temporary.0.clone(), temporary.0.clone()));

@@ -122,17 +122,9 @@ not the user source.
   or null before discovery. Status is `disconnected`, `connecting`, `connected`, `failed`,
   `closed` or `auth_required` (with `expired`). These are existing connection generations,
   not a host-global connection state. Inspection does not connect or contact the server.
-- `mcp.test({source,id,cwd?,configuration?,patch?})` opens a disposable connection, initializes
-  it and lists every tool page. It returns `{tools:[{name,description,inputSchema}]}` only after
-  cleanup; failed initialization, discovery, cancellation, timeout or cleanup is an RPC error.
-  There is a 30-second connection/discovery deadline followed by normal resource cleanup.
-  A complete `configuration` is accepted only for a user-supplied draft, without `patch`.
-  Otherwise the test uses the selected source's entry and an optional unsaved `patch`, with
-  stored secrets preserved. Project and plugin entries must already be enabled; plugin patches
-  are refused. User tests are explicit local execution, including for a disabled user entry.
-  The Web client confirms this action. Tests never save configuration, alter source revisions,
-  publish tools to Sessions or replace their connections. OAuth uses the existing credential
-  authority, including its normal refresh behavior.
+- `mcp.test` probes one configuration without attaching a Session; the
+  [MCP configuration management](../../docs/design/appserver/mcp-management.md#45-probe-mcptest)
+  contract defines its outcome, latency, tools and auth report.
 - `mcp.remove` removes the entry from the selected source; it can reveal a lower-precedence entry.
 - `mcp.set_enabled` additionally takes `enabled`. A user entry's `enabled` field changes and the
   rest of the entry is preserved. For a project entry, enabling checks `expectedVersion` against

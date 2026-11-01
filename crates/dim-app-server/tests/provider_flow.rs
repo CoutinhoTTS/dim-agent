@@ -9,14 +9,15 @@ use dim_agent_capabilities::{
     file_storage::FileStoragePlugin,
     host::{
         AuxiliaryErrorCode, AuxiliaryModelHost, AuxiliaryRequest, AwsCredentials, BedrockAuth,
-        ModelChunk, ModelConnection, ModelHost, ModelStopReason, ProviderConnectionResolver,
+        HostError, HostErrorKind, ModelChunk, ModelConnection, ModelHost, ModelStopReason,
+        ProviderConnectionResolver, SelectableModelsHost,
     },
 };
 use dim_agent_runtime::{Names, names::ServiceCatalog};
 use dim_agent_types::{Message, ModelId, ModelRequest, Role};
 use dim_app_server::{
     managed_provider::ManagedProvidersPlugin,
-    model_catalog::{BundledCatalog, ModelEntry},
+    model_catalog::{BundledCatalog, ModelEntry, ModelStatus},
     provider::{
         ConnectionInput, CreateProvider, CredentialUpdate, LegacyRow, ModelPreferences,
         ProviderError, ProviderPlugin, ProviderService, StaticAuth, convert_legacy_provider,
@@ -1105,6 +1106,230 @@ async fn an_undeclared_model_limit_is_refused_until_a_source_declares_it() {
     );
     assert_eq!(redeclared.models[0].missing_limits, Vec::<String>::new());
     root.shutdown().await.unwrap();
+    server.abort();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test]
+async fn selectable_models_match_execution_and_hide_unavailable_models() {
+    use axum::http::{StatusCode, Uri};
+    use tokio::sync::{mpsc, oneshot};
+    type Exchange = (Uri, oneshot::Sender<(StatusCode, Json<Value>)>);
+    let (send, mut requests) = mpsc::channel::<Exchange>(4);
+    let app = Router::new().fallback(move |uri: Uri| {
+        let send = send.clone();
+        async move {
+            let (reply, _response) = oneshot::channel();
+            send.send((uri, reply)).await.unwrap();
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({})))
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let home = std::env::temp_dir().join(format!("provider-selectable-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.canonicalize().unwrap();
+    let root = Ctx::root().unwrap();
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
+    root.plugin(FileStoragePlugin::new(vec![home.clone()]));
+    root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
+    root.plugin(ManagedProvidersPlugin);
+    root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_agent_aimux::AimuxPlugin);
+    let view = root.plugin(provider_part(ProviderPlugin::new));
+    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+        .await
+        .unwrap();
+    let provider = root.get::<ProviderService>().unwrap();
+    let selectable = root.get::<SelectableModelsHost>().unwrap();
+    let cancel = CancellationToken::new();
+    const MINE: &str = "00000000-0000-4000-8000-000000000030";
+    const OFF: &str = "00000000-0000-4000-8000-000000000031";
+    const ROUTELESS: &str = "00000000-0000-4000-8000-000000000032";
+    let mut unavailable = model("unavailable", 1000);
+    unavailable.status = ModelStatus::Unavailable;
+    let mut image = model("image", 1000);
+    image.capabilities.modalities = vec!["image".into()];
+    let mut nonchat = model("nonchat", 1000);
+    nonchat.metadata =
+        Some(serde_json::from_value(json!({"raw":{"type":"image-generation"}})).unwrap());
+    let narrow: ModelEntry = serde_json::from_value(json!({
+        "modelId":"narrow", "displayName":"narrow", "status":"active",
+        "capabilities":{"modalities":["text"],"toolCalling":true,"streaming":true,
+            "structuredOutput":true,"vision":false,"audio":false,"reasoning":false}
+    }))
+    .unwrap();
+    let mut mine = input(
+        MINE,
+        &format!("{base}/v1"),
+        StaticAuth::Bearer,
+        Some("selectable-key"),
+        "selectable",
+        1000,
+    );
+    mine.models = vec![
+        model("text", 1000),
+        model("served", 1000),
+        unavailable,
+        image,
+        nonchat,
+        narrow,
+    ];
+    let created = provider.create(mine, &cancel).await.unwrap();
+    let updated = provider
+        .set_enabled_models(
+            MINE.into(),
+            created.version.unwrap(),
+            vec![
+                "served".into(),
+                "unavailable".into(),
+                "image".into(),
+                "nonchat".into(),
+                "narrow".into(),
+            ],
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let mut off = input(
+        OFF,
+        &format!("{base}/v1"),
+        StaticAuth::Bearer,
+        Some("selectable-key"),
+        "off",
+        1000,
+    );
+    off.enabled = false;
+    provider.create(off, &cancel).await.unwrap();
+    let mut route = input(ROUTELESS, &base, StaticAuth::Anonymous, None, "route", 1000);
+    route.connection.driver_kind = "new-api-router".into();
+    let mut no_route = model("image-only", 1000);
+    no_route.metadata =
+        Some(serde_json::from_value(json!({"raw":{"endpointType":"image-generation"}})).unwrap());
+    route.models = vec![no_route];
+    provider.create(route, &cancel).await.unwrap();
+
+    let first = selectable.0.selectable(cancel.clone()).await.unwrap();
+    let mine: Vec<_> = first
+        .iter()
+        .filter(|model| model.target.provider_id == MINE)
+        .collect();
+    let ids: Vec<&str> = mine
+        .iter()
+        .map(|model| model.target.model_id.as_str())
+        .collect();
+    assert_eq!(ids, ["served"], "{ids:?}");
+    assert!(
+        !first
+            .iter()
+            .any(|model| model.target.provider_id == OFF || model.target.provider_id == ROUTELESS),
+        "{first:?}"
+    );
+    let catalog = provider
+        .catalog_for(MINE.into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(catalog.disabled_model_ids, ["text"]);
+    for (id, reason) in [
+        ("unavailable", "provider_unavailable"),
+        ("image", "provider_unavailable"),
+        ("nonchat", "provider_unavailable"),
+        ("narrow", "limits_undeclared"),
+    ] {
+        let model = catalog.models.iter().find(|model| model.id == id).unwrap();
+        assert_eq!(model.unavailable_reason.as_deref(), Some(reason), "{id}");
+    }
+    let declared = catalog
+        .models
+        .iter()
+        .find(|model| model.id == "served")
+        .unwrap();
+    assert!(declared.unavailable_reason.is_none());
+    assert!(declared.missing_limits.is_empty());
+    assert_eq!(
+        mine[0].capabilities.modalities,
+        declared.capabilities.modalities
+    );
+    assert_eq!(
+        Some(mine[0].capabilities.context_window),
+        declared.capabilities.context_window
+    );
+    for model in &first {
+        provider
+            .configuration(
+                Some(model.target.clone()),
+                None,
+                ModelPreferences::default(),
+                &cancel,
+            )
+            .await
+            .unwrap();
+    }
+    for excluded in ["text", "unavailable", "image", "nonchat", "narrow"] {
+        let error = provider
+            .configuration(
+                Some(ModelId {
+                    provider_id: MINE.into(),
+                    model_id: excluded.into(),
+                }),
+                None,
+                ModelPreferences::default(),
+                &cancel,
+            )
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.to_string(),
+            "Explicit model is unavailable",
+            "{excluded}"
+        );
+    }
+    assert!(
+        requests.try_recv().is_err(),
+        "the read made a provider request"
+    );
+    provider
+        .set_enabled_models(MINE.into(), updated.version, vec!["text".into()], &cancel)
+        .await
+        .unwrap();
+    let second = selectable.0.selectable(cancel.clone()).await.unwrap();
+    let second_ids: Vec<&str> = second
+        .iter()
+        .filter(|model| model.target.provider_id == MINE)
+        .map(|model| model.target.model_id.as_str())
+        .collect();
+    assert_eq!(second_ids, ["text"]);
+    assert_eq!(ids, ["served"], "the earlier reply must not change");
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert!(matches!(
+        selectable.0.selectable(cancelled).await,
+        Err(HostError::Cancelled(_))
+    ));
+    root.shutdown().await.unwrap();
+    let error = selectable
+        .0
+        .selectable(CancellationToken::new())
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(
+            error,
+            HostError::Failed {
+                kind: HostErrorKind::OwnerClosed,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
     server.abort();
     std::fs::remove_dir_all(home).unwrap();
 }

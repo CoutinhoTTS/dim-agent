@@ -3189,7 +3189,7 @@ async fn the_daemon_names_an_ignored_host_isolation_file() {
         .unwrap();
     let path = home.canonicalize().unwrap().join("host-isolation.json");
     let line = format!(
-        "Ignoring {}: command isolation is a user setting in /settings > Execution; delete the file.",
+        "Ignoring {}: command isolation is a user setting in /permissions > Process isolation; delete the file.",
         path.display()
     );
     assert!(stderr.lines().any(|report| report == line), "{stderr}");

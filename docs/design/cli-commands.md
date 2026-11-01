@@ -20,8 +20,8 @@ Search relevance takes priority; equally ranked matches use the same category/na
 Exit and suspend require their exact name or alias before dispatch: choosing an
 incomplete match fills the command name and keeps the composer open. Exact typed
 commands, including hidden commands, retain their own dispatch behavior.
-The command menu lists `/approvals` as the permission entry. `/approval`
-remains available when typed directly. Interrupt and steer are reached through
+The command menu lists `/permissions` as the permission entry. `/approvals` and `/approval`
+remain compatibility aliases when typed directly. Interrupt and steer are reached through
 `Esc` and `Ctrl+S` and are omitted from the menu. The menu only lists slash
 commands: the view actions for picking an earlier message and scrolling to the
 top or bottom are also omitted; `Tab`, `Home` and `End` retain their bindings.
@@ -30,11 +30,11 @@ top or bottom are also omitted; `Tab`, `Home` and `End` retain their bindings.
 Commands
   app     /exit        exit
   app     /keys        show the key bindings
-  model   /approvals   set the session's permission preset
+  model   /permissions   file access, tool approval and process isolation
 
 / + Enter          -> /exit (completion only)
 /exit + Enter      -> exit
-/approval + Enter  -> Ask / Full access menu
+/permissions + Enter -> permission controls
 
 Esc     interrupt the run
 Ctrl+S  steer with the next queued message
@@ -148,60 +148,41 @@ forms and never contacts a daemon. A build without the Dim account provider
 says so, and names the API-key Provider alternative, from each of these
 commands.
 
-## Execution settings
+## Process isolation settings
 
-The existing `/settings` panel has one `Execution` row, next to `Tool approvals`. It is the only
-user configuration entry for the process boundary: there is no native `dimcode isolation` command,
-no `/isolation` slash command and no policy file. The switches are the user-scope `execution`
-settings source, read through
-[`settings.read`/`settings.update`](appserver/settings-service.md); what each switch grants is the
-[process isolation design](host-platform-isolation.md)'s contract. `/approvals` output says the
-sandbox is in `/settings > Execution`; the sandbox is not another Permission preset.
+`/settings` and `/permissions` expose the same `Process isolation` control. It replaces the old
+`Execution` panel and separate Sandbox entry; there is no duplicate toggle, native `dimcode
+isolation` command, `/isolation` command or policy file. Choices and their stored boolean mapping
+belong to the [process isolation design](host-platform-isolation.md#process-isolation), not to
+Permission. File access and Tool approval never change this control.
 
 ```text
-Settings > Execution
-  Applies to new processes and persistent shells.
-  Sandbox is unavailable on this host: <reason>   shown only when the host has no backend
-  Sandbox             off  >                    toggle off | on
-  Network             off  >                    ignored while Sandbox is off, and shown as
-                                                "off (ignored while Sandbox is off)"
-  Save                                          write both switches with the read revision
-  Reset to defaults                             confirm, then write both off
-  Reload              Discard edits and read the current settings
+Settings                         Process isolation
+  File access          >       > Off
+  Tool approval        >         Sandboxed · No network
+  Process isolation    >         Sandboxed · Network allowed
+                                 Applies to new processes and persistent shells.
 ```
 
-Opening the panel reads `{source: "execution", scope: "user"}` and keeps the returned revision with
-the draft, not as a user-entered field. When the daemon advertises `host.execution.backend`, the
-panel also reads `{}` from it: `{available: true}` or `{available: false, reason}`. The reason is
-the text the next process start would use; the panel shows it and leaves both switches editable.
-The Web Permissions page reads the same method and shows the same reason. Neither client infers the
-platform or the backend from its own environment.
-↑↓ move, Enter or Space toggles the selected row, Esc
-closes the panel and asks before discarding edits. Save submits both switches with the inspected
-revision; Reset to defaults asks for confirmation, then writes both switches off with that
-revision. Neither action retries a stale revision automatically: a conflict keeps the draft and
-shows the error, and Reload explicitly discards the draft and reads again. The panel keeps the
-stored Network value visible while Sandbox is off, marked as ignored, so what will apply when
-Sandbox is turned on can be read. Loading disables mutation, and a daemon without the settings
-methods displays an unsupported-daemon error instead of falling back to the host.
+Opening the control reads `{source: "execution", scope: "user"}` through
+[`settings.read`](appserver/settings-service.md) and retains its CAS revision. If advertised,
+`host.execution.backend {}` supplies `{available: true}` or `{available: false, reason}`; show the
+daemon's reason without inferring availability from the client platform. The choices remain
+editable. ↑↓/Tab moves, Enter selects, Esc returns. Saving uses `settings.update` with the read
+revision; a conflict is shown without retrying the user's choice against unseen data. Reload
+discards the draft and reads again. Loading disables mutation; unsupported methods report an
+unsupported-daemon error, never a local fallback. Reset requires confirmation and writes both
+booleans false. Off may retain the old inert Network value; either sandboxed choice writes its
+own network value explicitly.
 
-The row reports the stored switches, not the boundary of a running command: a running process,
-including a persistent shell, keeps the boundary it started with. On a platform with no sandbox
-backend — Windows, or Linux without `bwrap` — the row names the reason, and the next process start
-still fails as `isolation_unavailable`; showing the state does not weaken that refusal.
+This is user-scope host configuration, not branch policy or the boundary of a running command.
+A running process, including a persistent shell, keeps its startup boundary. An unavailable
+backend still refuses the next sandboxed start as `isolation_unavailable`; displaying the reason
+does not weaken enforcement. The existing backend and execution source are reused.
 
-The switches are stored configuration. A model that can write the source — under `full-access`, or
-through an approved outside write under `workspace-write` — changes the value for the next process.
-That write has the same authority as changing the row, creates no grant and does not change a
-running process; a user who wants a boundary does not approve such a write
-([ADR 011 D2](../adr/011-execution-settings.md)).
-
-Verification covers what the row shows and what the daemon does with it: the read, the toggle that
-keeps the stored Network value visible while Sandbox is off, the CAS conflict, the backend reason,
-and a save followed by `exec` under the new boundary, with Network off and with Network on, where a
-write outside the workspace fails while the sandbox is on and succeeds once it is off. Reset,
-reload after an external edit, the unsupported-daemon branch and a persistent shell started before
-the change have no flow coverage yet.
+A model permitted to write the settings source can change the next process's boundary, just as
+a user can through this control; that write creates no grant and changes no running process
+([ADR 011 D2](../adr/011-execution-settings.md)). File access is not OS isolation for shell code.
 
 ## Commands
 
@@ -226,8 +207,8 @@ the change have no flow coverage yet.
 | `/exit` | Detach and exit from the idle interactive prompt. |
 | `!command` / `!!command` | Call the Session's existing `shell.run` in record/private mode, including during a model turn. |
 | `--permission read-only\|workspace-write\|full-access` | Select the preset of a new or resumed Session for `dimcode`, `tui`, `exec` and `exec resume` ([permission controls](#permission-controls)). |
-| `/approval` | In the terminal UI, choose Ask (`workspace-write`) or full access for this session and later ones ([permission controls](#permission-controls)). |
-| `/approvals` (alias `/permissions`) | Show, switch and manage the preset and command rules while the interactive client is idle. |
+| `/permissions` | Open independent File access, Tool approval and Process isolation controls; manage command rules while idle ([permission controls](#permission-controls)). |
+| `/approvals`, `/approval` | Compatibility aliases for `/permissions`; legacy preset arguments remain supported. |
 
 `dimcode hooks` never writes a hook document. The user's document is the Settings source `hooks`
 of the home the daemon serves (`user/hooks` in native storage, `hooks.json` in a standalone home),
@@ -447,7 +428,7 @@ settlement, and exits with code 3. A [question](#questions) gets no answer
 the same way: the question's branch and the turn are stopped, and the exit code is 3.
 It does not change
 `SessionConfig.interactive`. Sessions created as noninteractive retain Approval's existing owner-side policy (#98 D10).
-`--permission` changes only which calls need approval; a call that still asks is denied
+`--permission` selects a legacy policy, including its file scope and risk decisions; a call that still asks is denied
 the same way ([headless execution](#headless-execution)).
 Other exit codes retain the native CLI contract, including 2 for turn failure
 and 130 for interruption. A transport failure does not retry a submission.
@@ -522,14 +503,28 @@ interrupts do not become an exit or draft-clear action at the next prompt.
 
 ## Permission controls
 
-The App Server already owns everything needed to decide tool calls: a branch preset fixed
-at `session.create {permissionPolicy}` and changed with `session.permission.get/update`
-(versioned per branch), and the user's command rules read and replaced with
-`permission.rules`/`permission.set_rules` ([F2](appserver/permission-command-rules.md)).
-Session file grants are stored by the App Server's `session.grants.add/remove` methods under
-[ADR 012](../../adr/012-session-grants.md). The CLI only answered each approval once with `y`.
-This section adds CLI entry points over those contracts and the
-[F2 §5.4](appserver/permission-command-rules.md#54-always-allow-client-flow) client flow.
+Permission owns the branch policy seeded by `session.create {permissionPolicy}` and changed with
+versioned `session.permission.get/update`. The independent optional fields and legacy semantics
+are the [Permission contract](../architecture/rust-agent/plugins/Permission.md#policy-contract),
+extended by [ADR 017](../adr/017-independent-permission-controls.md). Command rules remain
+`permission.rules`/`permission.set_rules` ([F2](appserver/permission-command-rules.md)); file grants
+remain `session.grants.add/remove` ([ADR 012](../adr/012-session-grants.md)).
+
+| TUI control | Choices | Policy field or owner |
+| --- | --- | --- |
+| File access | Read only / Workspace read/write / Unrestricted | `fileAccess` |
+| Tool approval | Ask / Bypass | `toolApproval` |
+| Process isolation | Off / Sandboxed · No network / Sandboxed · Network allowed | Existing `execution` settings, not Permission |
+
+Ask means every tool call needs consent unless explicitly allowed by a tool or command rule;
+Bypass skips tool questions only. Neither answers a file-scope question, lifts an explicit deny
+or changes the sandbox. File access is a separate gate using the existing fixed facts: Read only
+denies writes even for an allowed tool; read grants never permit writes. A call requiring both
+scope and tool consent uses one approval. The new TUI never labels a choice Full access or Auto;
+Auto is reserved for a future actual automatic decision system.
+
+For compatibility, policies without explicit overrides retain the following legacy behavior,
+after tool lists and command rules, with the existing file checks taking precedence:
 
 | Preset | What runs (Permission's existing decision, after `disallowedTools` and deny rules) |
 | --- | --- |
@@ -547,19 +542,21 @@ Sessions with `workspace-write`; that default is unchanged.
 `exec resume`, before or after the command. Another value, a repeated flag or the flag on any
 other command is an argument error before the daemon starts.
 
-The terminal UI remembers the preset chosen in `/approval` or its `/approvals` panel as
-`permissionPreset` in the product home's `config.json`: without the flag, the sessions it creates
-get it in `session.create`, and a resumed one has `main` switched to it before attach. The flag
-wins for one run; choosing another preset in either menu replaces the remembered one.
-On the home screen without an active Session, either menu saves the preset without requiring
-account sign-in or creating a Session. The first message creates the Session with that selection,
-including within the same client process. With an active Session, the selection is remembered
-only after its permission update succeeds. Full access still requires confirmation in either case.
+The terminal UI remembers independent `fileAccess` and `toolApproval` choices in the product
+home's `config.json`, alongside legacy `permissionPreset`. Missing new fields remain missing;
+loading old config does not convert a preset into explicit Ask or widen its legacy denials.
+This is a CLI preference for later Sessions, not a daemon-wide default for all clients.
+On the home screen without an active Session, `/permissions` saves the selected field without
+sign-in or Session creation. The first message creates the Session with the remembered choices,
+including within the same client process. With an active Session, remember the choice only after
+its versioned `main` policy update succeeds. Changing one field preserves the other field,
+the legacy seed and tool lists. Process isolation uses its existing host settings source instead.
 
 ```text
-Home > /approvals > select preset
-  -> confirm if full access -> remember preset (no Session or login required)
-  -> first message -> session.create {permissionPolicy: selected preset}
+Home > /permissions > File access > Read only
+  -> remember fileAccess (no Session or login required)
+  -> first message -> session.create {permissionPolicy: {preset: <legacy seed>,
+                                                       fileAccess: "read-only", ...}}
 ```
 
 ```text
@@ -577,32 +574,41 @@ $ dimcode exec resume <session-id> --permission read-only -p 'Summarize'
   attach -> history -> submit -> idle -> detach
 ```
 
-A new Session receives the whole policy `{preset}` in `session.create`: no tool lists, which is
-the product profile's form. New members inherit the requesting branch's current policy
-(see branch semantics). On resume the flag replaces only the preset; the stored
-`allowedTools`/`disallowedTools` are kept.
+A new Session created with the legacy flag receives `{preset}` without explicit overrides.
+The flag wins over remembered CLI choices for that run. New members inherit the requesting
+branch's current policy (see branch semantics). A preset-only update on resume changes only
+the legacy seed and retains all other policy fields, including explicit overrides and tool lists;
+explicit overrides still take precedence over that seed. The notice must show their effective
+values rather than suggest that changing a preset replaced explicit controls.
 The update happens before attach, so no turn submitted by this invocation runs under the old
-preset. Without the flag, `session.create` omits the policy and a resumed Session keeps its own.
+preset. Without the flag or remembered choices, `session.create` omits the policy and a resumed
+Session keeps its own. Remembered choices are supplied explicitly when applied; they never
+reinterpret stored history.
 A resume flag against a daemon that does not advertise `session.permission.update` fails before
 attach. A conflict retry is correct here because the requested preset does not depend on what
 the read returned; the read only supplies the version and the tool lists to keep.
 
-The preset is shown where the Session is identified. Interactive start reads it with
+The effective controls are shown where the Session is identified. Interactive start reads the policy with
 `session.permission.get` when the daemon advertises that method; `exec` prints it to stderr only
 when `--permission` was given, so its existing diagnostics are otherwise unchanged. A
 `permission/changed` event that arrives live on `main`, from this or another client such as a
-paired device, prints one record. The approval reason already names the preset in force.
+paired device, prints one record with the independent values and any legacy tool exceptions.
+
+The overview and Settings use `Ask (legacy tool exceptions)`. The compact TUI scrollback status
+uses `Ask (legacy)` so saved-setting notices still fit 80 columns; this is the same legacy policy,
+not explicit Ask or another option.
 
 ```text
 $ dimcode --permission read-only
 dimcode · model: provider/model
 local files: /workspace/project
 session: <session-id>
-permission: read-only
+File access: Read only
+Tool approval: Ask (legacy tool exceptions)
 
 > Fix the build
 Assistant: ...
-[permission] main branch preset: workspace-write     <- changed by another client
+[permission] main: File access = Workspace read/write  <- changed by another client
 ```
 
 There is no status line: the scrollback client has no persistent area, and the editor's hint
@@ -611,10 +617,11 @@ line is fixed help text truncated to the terminal width.
 ### Headless execution
 
 `exec` keeps its contract: an approval request is answered with the ordinary denial, the turn is
-stopped and settled, and the exit code is 3. `--permission` only changes which calls ask. With
-`full-access` nothing asks; with `read-only` writes and commands return Permission's denial to
-the model without a question; with `workspace-write` a command still asks and exits 3. There is
-no automatic approval. The flag is the explicit choice, so `exec` asks for no confirmation.
+stopped and settled, and the exit code is 3. For legacy policies without explicit overrides,
+`full-access` asks nothing except that explicit denies still refuse calls; `read-only` denies
+writes and commands; `workspace-write` asks for commands and exits 3. Explicit Ask also asks for
+otherwise in-scope reads; Bypass still leaves file-scope approvals intact. There is no automatic
+approval answerer. The flag is an explicit legacy choice, so `exec` asks for no confirmation.
 
 ### Branch semantics
 
@@ -722,60 +729,61 @@ may emit the raw notifications, but adds no stdin approval protocol. Non-interac
 are settled by Collaboration without prompting. A terminal that loses its connection neither
 approves nor cancels work by that fact alone.
 
-### `/approval`
+### `/permissions`
 
-`/approval` in the terminal UI opens a menu of two choices for the `main` preset. It writes the
-same `session.permission.update` as `/approvals` and remembers the preset the same way. It does
-not list or edit command rules. At the line prompt the command is refused: that client keeps
-`/approvals`.
+`/permissions` is the visible menu entry in both TUI modes; `/approvals` and `/approval` open the
+same controls as compatibility aliases, not a second preset chooser. The control applies to
+`main`; each field selection writes only its dimension using the current whole policy and
+version. A failed save neither changes remembered choices nor falls back to a legacy preset.
 
 ```text
-Approval
-> Ask            current
-  Full access
+Permissions (main branch)
+> File access          Workspace read/write >
+  Tool approval        Ask                  >
+  Process isolation    Off                  >
+
+File access                         Tool approval
+  Read only                       > Ask
+> Workspace read/write              Bypass
+  Unrestricted
+
+Hint: Read only: no writes.          Hint: Ask before tool calls.
+      Tool approval still applies.        File restrictions still apply.
+
 ↑↓/Tab move · Enter apply · Esc back
 ```
 
-| Choice | Preset | What runs |
-| --- | --- | --- |
-| Ask | `workspace-write` | Reads of the workspace, system roots, Session-owned files and granted paths run, and other reads ask; workspace writes run; writes to system roots or Session-owned files are denied; commands, network, other outside writes and unclassified tools ask |
-| Full access | `full-access` | Every tool call runs without asking |
+In both fullscreen and scrollback, File access, Tool approval and Process isolation show short
+explanations below all choices and actions, separated by a blank line. The block starts with
+`Hint:`; each paragraph starts on a new line, wraps at word boundaries to the available width,
+and aligns continuation lines after the prefix. Explanations are not selectable rows. Errors
+remain distinct from these hints.
 
-Ask is the product default. Enter on the choice already in force closes the menu. Full access
-still asks for the same confirmation as `/approvals`. A session on `read-only` shows neither
-choice as current; Ask switches it to `workspace-write`. `read-only` stays available from
-`/approvals` and `--permission`. The notice names Ask for `workspace-write`.
+An old policy with no explicit tool override shows `Ask (legacy tool exceptions)` where
+appropriate, with its existing automatic allows and risk denials explained rather than
+pretending explicit Ask is active. Merely opening the panel writes nothing. Selecting Ask
+explicitly replaces the legacy tool-risk behavior; selecting File access alone does not.
+Increasing file access or choosing Bypass explains that explicit denies remain and process
+isolation is unchanged; it does not claim every call will run. No combined permissive shortcut
+appears in an approval prompt.
 
-### `/approvals`
-
-`/approvals` and its alias `/permissions` run at the idle prompt like the other commands and need
-plain single-line input. Without arguments they read the preset of `main` and, when the daemon
-advertises `permission.rules`, the command rules, numbered. The printed rules and their revision
-are kept for `remove`.
+At the line prompt the no-argument command prints effective independent controls and numbered
+command rules when supported. Preset arguments remain compatibility operations, not TUI labels.
+The printed rules and revision are kept for `remove`.
 
 ```text
-> /approvals
-Preset (main branch): workspace-write
-  read-only        reads run; writes, commands, network and unclassified tools are denied
-* workspace-write  reads and workspace file writes run; outside writes, commands, network and unclassified tools ask
-  full-access      every tool call runs without asking
+> /permissions
+File access (main branch): Workspace read/write
+Tool approval (main branch): Ask (legacy tool exceptions)
+Process isolation: Off
 Command rules (user scope, every Session):
   1  allow  exact   cargo test -p dim-cli
   2  deny   prefix  git push
-Usage: /approvals [PRESET | allow|deny exact|prefix COMMAND | remove N]
 
-> /approvals full-access
-Full access runs every tool call, including commands, without asking.
-Switch the main branch to full-access? [y/N]
-Preset unchanged: workspace-write
-
-> /approvals read-only
-Preset (main branch): read-only. Child branches and members created later from main inherit it; existing branches and members keep their policies.
-
-> /approvals deny prefix git push
+> /permissions deny prefix git push
 Rule already present: deny prefix `git push`
 
-> /approvals remove 1
+> /permissions remove 1
 Rule removed: allow exact `cargo test -p dim-cli`
 Command rules (user scope, every Session):
   1  deny   prefix  git push
@@ -783,17 +791,18 @@ Command rules (user scope, every Session):
 
 | Form | Calls | Conflict |
 | --- | --- | --- |
-| `/approvals` | `session.permission.get` on `main`; `permission.rules` | none |
-| `/approvals PRESET` | `get`; for `full-access` a `[y/N]` confirmation where Enter, any other answer, EOF and Ctrl+C mean No; then `update` with the read version and tool lists | `permission_conflict`: read again, print the current preset, write nothing; the user decides again |
-| `/approvals allow\|deny exact\|prefix COMMAND` | `permission.rules`; unless the same rule exists, `set_rules(revision, rules + rule)`, then print the new list | read again and retry, at most 3 attempts: adding does not depend on the other rules |
-| `/approvals remove N` | `set_rules(listing revision, listing without rule N)`, then print the new list | `permission_rules_conflict`: read again, print the current list, remove nothing |
+| `/permissions` | `session.permission.get` on `main`; `permission.rules`; existing execution settings read | none |
+| File access / Tool approval selection | `get`, then `update` preserving untouched policy fields | Re-read before any retry; never replace the other dimension or tool lists |
+| `/permissions PRESET` (legacy) | `get`; for `full-access` a `[y/N]` confirmation where Enter, any other answer, EOF and Ctrl+C mean No; then `update` with the read version and otherwise unchanged policy | `permission_conflict`: read again, print the current policy, write nothing; the user decides again |
+| `/permissions allow\|deny exact\|prefix COMMAND` | `permission.rules`; unless the same rule exists, `set_rules(revision, rules + rule)`, then print the new list | read again and retry, at most 3 attempts: adding does not depend on the other rules |
+| `/permissions remove N` | `set_rules(listing revision, listing without rule N)`, then print the new list | `permission_rules_conflict`: read again, print the current list, remove nothing |
 
 `remove N` refers to the numbered list printed last. The listing, an added rule, a removal and a
 removal conflict each print the resulting list, and only a printed list is kept for `remove`, so
 a number never refers to a position the user has not seen. A form that prints no list (a rule
 already present, a preset switch, an "always" answer during a turn) keeps the last printed one; if
 the rules changed since, its revision makes the next `remove` fail, and the conflict prints the
-current list. Without a printed list in this process, `remove` asks for `/approvals` first.
+current list. Without a printed list in this process, `remove` asks for `/permissions` first.
 COMMAND is the rest of the line; the CLI rejects an empty command or one containing a separator
 character (`dim_agent_types::COMMAND_SEPARATORS`, the set F2 validates) before any call. A
 preset that is already in force writes nothing. Without the advertised methods, the command
@@ -847,10 +856,10 @@ filter.
 
 ### "Allow for this session"
 
-For `read`, `write` and `edit` calls with a `path`, the prompt also offers `Allow for this
-session` (ADR 012). Under `read-only` and `workspace-write`, `read` asks for a path outside the
-workspace, system roots, Session-owned files and granted paths, so the action appears for it
-([ADR 014](../../adr/014-file-access-facts.md#d2-read-and-write)). The CLI sends the tool's path
+For `read`, `write` and `edit` calls with a `path`, a file-scope question also offers `Allow for
+this session` (ADR 012). With Read only or Workspace read/write file access, an outside read
+needs scope consent. An in-scope call asking only because of explicit Tool approval Ask does
+not need a file grant. The CLI sends the tool's path
 unchanged to `session.grants.add {sessionId, path, kind: "file", mode}`: the mode is `read` for
 `read` and `write` otherwise. The daemon resolves `~`, a relative path, `..` and symlinks against
 the Session workspace and stores the canonical path; a new file is resolved by its parent and
@@ -859,7 +868,7 @@ final name. The CLI decides no path or kind locally.
 ```text
 [approval] read: Reading outside the session workspace requires approval: /home/user/.ssh/config
   path: /home/user/.ssh/config
-› Allow once   Allow for this session   Reject   Full access
+› Allow once   Allow for this session   Reject
 ```
 
 `Allow for this session` writes the grant first, then answers `approval.respond allow`; the
@@ -867,17 +876,16 @@ recheck sees the grant. If the write fails, the CLI shows `Grant not saved: <err
 allows the call once, as the user asked, so no failed store write blocks the turn. A read
 outside the facts in a non-interactive run (`exec`) is denied with the ordinary refusal and exit
 code 3; no new error path is added. This prompt does not list or remove grants; revocation has
-no client surface yet. A grant is consulted only at the `Ask` step, a write grant also admits a
-read, a `read` grant never authorizes a write, and a fork starts without the source's grants.
+no client surface yet. A grant answers file scope, not explicit Tool approval Ask; the current
+answer still consents to this call once. A write grant also admits a read, a `read` grant never
+authorizes a write, and a fork starts without the source's grants.
 
 ### Decisions
 
-1. **No default preset in the CLI.** A default for new Sessions is user host configuration
-   that every client creating Sessions must honor: Web, ACP, paired devices and automation as
-   well as `dimcode`. A CLI file or environment variable would make the default depend on the
-   client and become a second source to migrate. The durable place is the daemon's user
-   Settings, read by `session.create`, which is a server change: requirement R1. Until then
-   `--permission` (or a shell alias) selects the preset per invocation.
+1. **Remembered CLI choices are not a host default.** Independent choices are saved alongside
+   old config and sent explicitly by the CLI. A default honored by Web, ACP, paired devices and
+   automation belongs to the daemon's user Settings: requirement R1. Do not reinterpret old
+   config or existing policies to simulate such a default.
 2. **No `--allowed-tools`/`--disallowed-tools`.** Tool names belong to the daemon profile and the
    protocol offers no catalog to validate them, so a misspelled name would be accepted and do
    nothing. `allowedTools` also bypasses the preset for every call of a tool, which presets and
@@ -885,15 +893,17 @@ read, a `read` grant never authorizes a write, and a fork starts without the sou
 3. **The CLI writes `main` only** (branch semantics above).
 4. **No Shift+Tab cycle.** The key decoder belongs to the idle draft editor, which returns only
    send or exit; a running turn reads plain lines. A cycle needs an editor action result and a
-   full-access confirmation inside the editor. `/approvals` covers switching.
-5. **`/approvals` also adds rules.** F2 §8 lists adding as part of the panel, and with product
+   separate interaction design. `/permissions` covers switching.
+5. **`/permissions` also adds rules.** F2 §8 lists adding as part of the panel, and with product
    storage the rules live in a database row that the user cannot edit as a file; without `add`
    a deny rule could not be created from the CLI.
-6. **Retry only when the outcome does not depend on the read.** The startup flag and adding a
-   rule retry conflicts; switching from the panel and removing by number report them, because
-   the user chose from what was shown.
-7. **Confirmation only for an interactive switch to full-access.** The startup flag is itself
-   the explicit choice and works headless.
+6. **Retry only when the outcome does not depend on the read.** A startup preset, an independent
+   field assignment and adding a rule can retry after re-reading and preserving untouched fields.
+   Legacy panel preset switching and removal by number report conflicts because the user chose
+   from what was shown. Execution Settings retains its inspected-revision save contract.
+7. **Legacy permissive preset confirmation remains.** An interactive legacy `full-access`
+   argument still requires confirmation; the startup flag is itself explicit and works headless.
+   New controls describe their independent effects rather than offering that combined TUI choice.
 
 ### Out of scope
 
@@ -902,7 +912,12 @@ read, a `read` grant never authorizes a write, and a fork starts without the sou
 | A reviewer model that answers approvals for the user | An approval answerer that responds through Approval's public respond operation, with its own model call and design, like the Collaboration leader route; not a CLI change |
 | Shift+Tab cycle | CLI only: an editor action result and a confirmation path (decision 4) |
 | `--allowed-tools`/`--disallowed-tools` | A tool catalog read to validate names at the argument boundary (decision 2) |
-| `/approvals` during a running turn | CLI only: the running turn reads plain lines and answers approvals; panel calls would join its multiplexed loop |
+| `/permissions` during a running turn | CLI only: the running turn reads plain lines and answers approvals; panel calls would join its multiplexed loop |
+
+ACP, Hooks and Web remain legacy/preset-only clients for permission selection in this change.
+Their existing preset controls do not select explicit File access or Tool approval, and their
+omitted overrides retain legacy risk decisions. Extending those UIs is separate work, not a
+second implementation of the TUI controls; Web's existing execution settings remain host settings.
 
 ### Rule check
 
@@ -913,13 +928,13 @@ read, a `read` grant never authorizes a write, and a fork starts without the sou
 | §4 rule 1 (command events) | Policy changes go through Permission's existing `session.permission.update`, which writes `permission/changed`; rules and grants go through their owners' typed writes |
 | §4 rule 2 (handover) | Unchanged |
 | §4 rule 3 (before callback) | Not used |
-| §4 rule 4 (core has no business meaning) | Timeline, Dispatcher and Permission are unchanged; tool names appear only in the CLI's prompt eligibility |
+| §4 rule 4 (core has no business meaning) | Timeline and Dispatcher are unchanged; independent policy semantics belong to Permission, not the CLI |
 | §4 rule 5 (batches) | The rule write and the approval answer are separate owners' writes, ordered by the client as F2 §5.4 specifies |
 | §4 rule 6 (context) | The model sees only the existing results and denials |
 | §4 rule 7 (public interfaces only) | Only public methods and notifications; the CLI reads `permission/changed` from the public event stream |
 | §4 rule 8 (infrastructure unchanged) | No change; two requirements are raised below for App Server owners, not infrastructure |
 | §4 rule 9 (only needed facts in Timeline) | No new event; rules and grants stay out of the Timeline |
-| ADR 002 D1 to D5 | No new part, wiring, dependency, configuration or contract |
+| ADR 002 D1 to D5 | No new part, wiring or dependency; additive policy fields follow ADR 017, CLI preferences are local business configuration |
 | ADR 003 | Presets and rules govern only agent tool calls; `!command` is unaffected; rules are user scope only, so no project file can widen them; replay, restore and fork confer nothing new |
 
 ### Requirements raised to mechanism owners
@@ -1078,17 +1093,18 @@ Changes stay in `crates/dim-cli`: `args.rs`/`main.rs` select commands,
 `session.rs` reuses Session execution and its shared paged-history reader,
 `display.rs` keeps human rendering separate from JSON output, and `export.rs`
 formats conversations and writes new files. `permission.rs` holds the permission operations any
-CLI client can call, without terminal input or output: reading and switching the `main` preset
+CLI client can call, without terminal input or output: reading and updating the `main` policy
 with version checks, listing, adding and removing command rules with revision checks, and the
 "always allow" steps (the eligible command, the proposed rule, the rule write as request and reply
 steps for a turn loop that multiplexes its connection, and the allow answer).
-`permission_command.rs` is the line-mode `/approvals` command, and the approval prompt stays in
+`permission_command.rs` is the line-mode `/permissions` command, and the approval prompt stays in
 `session.rs`; both only show results. `question/mod.rs` holds what any client needs for questions,
 without terminal input or output: the `ask_user` input rules, the waiting calls derived from
 events, the `session.question.respond` params and what a reply means. `question/line.rs` is the
 line-mode prompt that `session.rs` feeds with notices and replies. Conversation formatting belongs
-to the CLI. Besides the Questions Capability the CLI answers, no App Server, Capability, core
-lifecycle, protocol, storage migration, dependency or runtime registration changes are required.
+to the CLI. Independent controls use Permission's additive policy contract (ADR 017) and the
+existing execution Settings contract; no core lifecycle, storage migration or runtime registration
+change is required.
 
 Reuse `cli_flow.rs` and its actual daemon profile fixture to cover `exec` and
 resume, stdout/stderr separation, public JSON notification preservation,
@@ -1100,17 +1116,29 @@ Unix file privacy.
 Use isolated homes only. Implementation requires the focused CLI flows and
 affected Clippy.
 
-Permission controls are covered at both boundaries. Scripted daemon flows check the
+Verify permission controls at both boundaries. Reuse scripted daemon flows for the
 `session.create` policy, the resume read/update with a conflict retry, argument errors, the
-`/approvals` listing, switch confirmation, conflict reports, adding and removing rules with the
+`/permissions` listing, legacy aliases and confirmation, conflict reports, adding and removing rules with the
 new numbered list printed after each, two removals in a row where the second number refers to the
 list the first printed, the "always" prompt with a prefix rule, a conflict retry, a failed write
 that falls back to answering once, an existing rule that is not written again, Ctrl+C during the
 write that abandons the rule, and a command with a separator that is not offered "always". Flows against the built App
-Server (run by CI with `DIM_TEST_APP_SERVER`) check that `exec --permission full-access` runs a
+Server (run by CI with `DIM_TEST_APP_SERVER`) should check that `exec --permission full-access` runs a
 process tool without a question, that default `exec` still exits 3, that `exec resume
 --permission` changes the resumed branch, and that "always" writes an exact rule after which the
-identical call runs without asking, until `/approvals remove` deletes it.
+identical call runs without asking, until `/permissions remove` deletes it.
+
+The independent-control acceptance cases are: an in-scope read asks with explicit Ask; a tool
+allow answers only the tool question; Bypass still asks outside file scope; Read only denies a
+write even with a tool allow; one call needing scope and tool consent prompts once; a read grant
+cannot authorize a write; an explicit deny wins with Bypass; old policies/config retain exact
+legacy behavior without silent writes. Verify each choice changes only its own field, remembers
+it only after a successful policy update, works before Session creation, and reports conflicts or
+unsupported servers without widening. Check both TUI modes show only `/permissions` in the menu,
+both aliases work, and Process isolation has no duplicate Execution/Sandbox entry. Reuse process
+flows for the boolean mapping, CAS failure, unavailable-backend reason, and a process started
+before an isolation change retaining its old boundary. These are requirements, not a claim of
+implementation or verification completion.
 
 Questions are covered by scripted daemon flows (`cli_flow/question.rs`): single and multiple
 choices, custom text, a decline, invalid lines, inputs the handler rejects and other tools that

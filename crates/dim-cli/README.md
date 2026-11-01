@@ -346,10 +346,23 @@ See the [MCP OAuth contract](../../docs/design/appserver/mcp-oauth.md#13-require
 
 ## Permission presets and approvals
 
-The App Server decides each tool call by the branch's preset and the user's command rules; the
-CLI selects them through existing methods and never decides a call itself. A preset or approval
-decides whether a command runs; the user's [sandbox switch](#execution-boundary) limits what it can
-reach once it runs, and neither one widens the other.
+The App Server decides each tool call; the CLI selects settings and never decides a call itself.
+`/permissions` opens three independent controls, also available under `/settings`:
+
+```text
+Permissions
+  File access         Read only / Workspace read/write / Unrestricted
+  Tool approval       Ask / Bypass
+  Process isolation   Off / Sandboxed · No network / Sandboxed · Network allowed
+```
+
+Choosing File access writes only `fileAccess`; choosing Tool approval writes only `toolApproval`.
+The UI preserves the branch's legacy preset and tool lists, and saves the chosen field alone in
+`config.json` for new sessions, keeping other configuration keys. Ask asks about all tools except
+explicitly allowed tools and commands; Bypass skips only tool questions, not file restrictions,
+deny rules or process isolation. The picker identifies legacy risk-based behavior until an
+explicit tool-approval choice is made. Existing `permissionPreset` configuration and `--permission`
+remain compatibility seeds, with this behavior when the independent fields are omitted:
 
 | Preset | Reads | File writes | Commands, network, unclassified tools |
 | --- | --- | --- | --- |
@@ -368,8 +381,10 @@ retrying a version conflict. Without the flag a resumed Session keeps its preset
 shows the preset; `exec` prints it to stderr only when the flag is given. A live change on
 `main`, from any client, prints `[permission] main branch preset: ...`.
 
-At the idle prompt, `/approvals` (alias `/permissions`) shows the `main` preset and the user's
-command rules. `/approvals PRESET` switches `main`; `full-access` asks `[y/N]` and only `y`/`yes`
+At the line-mode idle prompt, `/permissions` (aliases `/approvals` and `/approval`) shows the
+independent controls, the legacy preset seed and the user's command rules. It accepts
+`file-access read-only|workspace-read-write|unrestricted` and `tool-approval ask|bypass` for the
+active main branch. `/approvals PRESET` still switches the legacy seed; `full-access` asks `[y/N]` and only `y`/`yes`
 confirms. `/approvals allow|deny exact|prefix COMMAND` adds a rule and `/approvals remove N`
 removes rule N of the list printed last; both print the new numbered list. A preset or rule list
 that changed since it was shown is reported and nothing is written. Child branches and native members created later from the changed branch inherit its current policy;
@@ -400,8 +415,11 @@ conflict, and then answers allow. If the write fails it prints `[rule not saved]
 
 ## Execution boundary
 
-The sandbox is a setting, and it is off by default. `/settings > Execution` has two switches,
-`Sandbox` and `Network`; both start off, and Network applies only while Sandbox is on. The switch
+The sandbox is a setting, and it is off by default. `/permissions > Process isolation` and
+`/settings > Process isolation` open the same picker: Off, Sandboxed · No network, or
+Sandboxed · Network allowed. Save, Reset and Reload reuse the existing user-scope execution settings
+and their revision conflict checks. The stored `sandbox` and `network` switches both start off;
+Network applies only while Sandbox is on. The setting
 is read whenever a command starts, so it applies to the next command or new persistent shell
 without restarting the daemon, and a running process keeps the boundary it started with. Approving
 a command and choosing `full-access` do not change the boundary; the model cannot change it at all.
@@ -433,7 +451,7 @@ A denied operation fails inside the command as an ordinary error: `Operation not
 macOS; on Linux, `No such file or directory` for an ungranted path and `Read-only file system`
 for a read-only one. When a sandboxed command fails with a typical denial, its result tells the
 model that the sandbox may be the cause and that you change the switches in
-`/settings > Execution`.
+`/settings > Process isolation`.
 
 There is no policy file, and the `host-isolation.json` that earlier releases read is ignored: a
 daemon that finds one names it on stderr at startup and asks you to delete it. The switches are
@@ -724,7 +742,7 @@ Pickers (`/resume`, `/models`, `/connect`, `/login`, `/approvals`, `/theme`, `/l
 
 Both scrollback and fullscreen palettes list slash commands, grouped by category and sorted alphabetically by canonical English category and command name. Each row shows its category, `/command`, description and any command shortcut. Commands requiring a session are faint and marked `(unavailable)` until one exists. Keyboard-only actions are omitted from both menus; `/keys` lists `Esc` interrupt, `Ctrl+S` steer, and the fullscreen `Home` / `End` scroll and `Tab` message picker bindings.
 
-`/approvals` is the visible permission entry; the hidden `/approval` still opens its own menu when typed exactly. Selecting an incomplete `exit` or `suspend` match only fills the command name; its exact name or alias is required before dispatch. Thus `/` + Enter completes `/exit` without quitting, and another Enter executes the completed command.
+`/permissions` is the single visible permission entry; `/approvals` and `/approval` are compatibility aliases for the same unified flow. Selecting an incomplete `exit` or `suspend` match only fills the command name; its exact name or alias is required before dispatch. Thus `/` + Enter completes `/exit` without quitting, and another Enter executes the completed command.
 
 Typing ranks the matches: the exact name, a name prefix, an alias prefix, a prefix of a name part (`reload-skills` for `sk`), a name containing the query, a description word starting with it, then three or more letters in order through the name (`stg` for `settings`); a match inside a description word does not count. Equally ranked matches use the category/name order. See the [command menu design](../../docs/design/cli-commands.md#command-menu).
 
