@@ -196,6 +196,19 @@
 //! part afresh; a run that failed before judging is kept as it is. The source
 //! is never written to, and an `--out` inside it is refused. Repeated `--run`
 //! selects runs; without one, every saved run is judged again.
+//!
+//! Several finished evaluations are reported together under the same rule and
+//! format, with no model turn and no judge call:
+//!
+//! ```text
+//! cargo run --locked -p xtask -- scenario-eval --pool DIR --pool DIR
+//!     --scenarios DIR --model PROVIDER/MODEL --judge PROVIDER/MODEL
+//!     --model-config FILE --out DIR
+//! ```
+//!
+//! Each source's `runs.jsonl` is read as it stands, in the order given: the
+//! runs are added together and no source is written to. A pooled set keeps
+//! the sources' run numbers, which may repeat between them.
 use crate::app_server::{self, Overrides, RunSettings};
 use crate::rule::{self, Comparison, Counts, Worse};
 use crate::summary_eval::{
@@ -297,9 +310,10 @@ const TEXTS: &[(&str, TextMember)] = &[
 
 pub async fn run() -> Result<()> {
     let options = Options::parse()?;
-    let report = match &options.rejudge {
-        Some(source) => rejudge(&options, source, |_| {}).await?,
-        None => evaluate(&options, |_| {}).await?,
+    let report = match (&options.rejudge, options.pool.is_empty()) {
+        (Some(source), _) => rejudge(&options, source, |_| {}).await?,
+        (None, false) => pooled(&options, |_| {}).await?,
+        (None, true) => evaluate(&options, |_| {}).await?,
     };
     println!("{report}");
     println!("wrote {}", options.out.join("scenario.md").display());
@@ -424,11 +438,68 @@ async fn rejudge(
         plan.push((run, index));
     }
     let cancel = CancellationToken::new();
-    // The judging profile: the model configuration under a fresh home beside
-    // the output. No Session is created and no model turn runs.
+    let server = served(options, observe).await?;
+    let outcome = rejudge_with(options, &source, &server, &scenarios, &plan, &cancel).await;
+    server.shutdown();
+    server.join().await?;
+    let (records, model, judge, limits) = outcome?;
+    let sources = Sources {
+        directories: vec![(source.clone(), records.len())],
+        given: false,
+    };
+    write_report(options, &scenarios, &records, model, judge, limits, sources)
+}
+
+/// `--pool`: reports over several finished evaluations' saved runs under the
+/// same rule and report format, without a model turn or a judge call. Each
+/// source's `runs.jsonl` is read as it stands, in the order given; the
+/// sources are never written to, and nothing is re-judged. A pooled set
+/// keeps the sources' run numbers, which may repeat between them.
+async fn pooled(options: &Options, observe: impl Fn(&mut AgentBuilder)) -> Result<String> {
+    let scenarios = read_scenarios(&options.scenarios)?;
+    let mut records = Vec::new();
+    let mut directories = Vec::new();
+    for source in &options.pool {
+        let source = std::fs::canonicalize(source)
+            .map_err(|error| format!("--pool {}: {error}", source.display()))?;
+        if options.out == source || options.out.starts_with(&source) {
+            return Err(format!(
+                "--out {} is inside --pool {}: a pool writes a new directory",
+                options.out.display(),
+                source.display()
+            )
+            .into());
+        }
+        let read = read_pooled_runs(&source, &scenarios)?;
+        directories.push((source, read.len()));
+        records.extend(read);
+    }
+    let cancel = CancellationToken::new();
+    let server = served(options, observe).await?;
+    let resolved = async {
+        let model = selection(&server, &options.model, &options.out, &cancel).await?;
+        let judge = selection(&server, &options.judge, &options.out, &cancel).await?;
+        let limits = judge_window(&judge, options.model_config.as_deref(), &cancel).await?;
+        Ok::<_, Box<dyn std::error::Error>>((model, judge, limits))
+    }
+    .await;
+    server.shutdown();
+    server.join().await?;
+    let (model, judge, limits) = resolved?;
+    let sources = Sources {
+        directories,
+        given: true,
+    };
+    write_report(options, &scenarios, &records, model, judge, limits, sources)
+}
+
+/// The profile a re-judge or a pool resolves the judge in: the model
+/// configuration under a fresh home beside the output. No Session is created
+/// and no model turn runs.
+async fn served(options: &Options, observe: impl Fn(&mut AgentBuilder)) -> Result<RunningServer> {
     let home = options.out.join("home");
     private_directory(&home)?;
-    let server = app_server::serve_home(
+    app_server::serve_home(
         &home,
         &options.out,
         options.out.join("command-output"),
@@ -438,16 +509,23 @@ async fn rejudge(
         },
         observe,
     )
-    .await?;
-    let outcome = rejudge_with(options, &source, &server, &scenarios, &plan, &cancel).await;
-    server.shutdown();
-    server.join().await?;
-    let (records, model, judge, limits) = outcome?;
-    let sources = Sources {
-        directories: vec![(source.clone(), records.len())],
-    };
+    .await
+}
+
+/// Writes a set of runs as `--out`'s `runs.jsonl` and the report over them as
+/// `scenario.md`, under the rule of model-prompts §8.1, and returns the
+/// report. `sources` names the finished evaluations the runs were read from.
+fn write_report(
+    options: &Options,
+    scenarios: &[Scenario],
+    records: &[RunRecord],
+    model: ModelSelection,
+    judge: ModelSelection,
+    limits: JudgeWindow,
+    sources: Sources,
+) -> Result<String> {
     let mut jsonl = String::new();
-    for record in &records {
+    for record in records {
         jsonl += &serde_json::to_string(record)?;
         jsonl.push('\n');
     }
@@ -456,7 +534,7 @@ async fn rejudge(
         texts: options.texts.iter().map(|(text, _)| text.clone()).collect(),
         model: options.model.clone(),
         judge: options.judge.clone(),
-        runs: runs_per_arm_and_scenario(&records),
+        runs: runs_per_arm_and_scenario(records),
         tokens: options
             .texts
             .iter()
@@ -467,16 +545,86 @@ async fn rejudge(
         judge_window: Some(limits),
         sources: Some(sources),
         judge_temperature_dropped: 0,
+        judge_temperature_unrecorded: 0,
         judge_asked_runs: 0,
         judge_reasks: 0,
     };
     let measured = instrument.clone();
-    for record in &records {
+    for record in records {
         instrument.merge(record, measured.clone());
     }
-    let report = report(&instrument, &scenarios, &records);
+    let report = report(&instrument, scenarios, records);
     std::fs::write(options.out.join("scenario.md"), &report)?;
     Ok(report)
+}
+
+/// One `--pool` source's saved runs, matched to the scenarios the report
+/// names.
+fn read_pooled_runs(source: &Path, scenarios: &[Scenario]) -> Result<Vec<RunRecord>> {
+    read_saved_runs(source)?
+        .into_iter()
+        .map(|run| pooled_record(source, run, scenarios))
+        .collect()
+}
+
+/// One pooled run as the report reads it: the kind of each probe comes from
+/// the scenario, so a record naming a scenario or a probe the set does not
+/// have is refused.
+fn pooled_record(source: &Path, run: SavedRun, scenarios: &[Scenario]) -> Result<RunRecord> {
+    let path = source.join("runs.jsonl");
+    let scenario = scenarios
+        .iter()
+        .find(|scenario| scenario.id == run.scenario)
+        .ok_or_else(|| {
+            format!(
+                "{}: no scenario {} under the scenarios directory",
+                path.display(),
+                run.scenario
+            )
+        })?;
+    let probes = run
+        .probes
+        .into_iter()
+        .map(|probe| {
+            let kind = scenario
+                .probes
+                .iter()
+                .find(|declared| declared.id == probe.id)
+                .map(|declared| declared.kind.name())
+                .ok_or_else(|| {
+                    format!(
+                        "{}: no probe {} in scenario {}",
+                        path.display(),
+                        probe.id,
+                        scenario.id
+                    )
+                })?;
+            Ok(ProbeRecord {
+                id: probe.id,
+                kind,
+                verdict: probe.verdict,
+                quote: probe.quote,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(RunRecord {
+        arm: arm_name(&run.arm)?,
+        scenario: run.scenario,
+        run: run.run,
+        session: run.session,
+        stop: stop_name(&run.stop)?,
+        turns: run.turns,
+        window: run.window,
+        duration_ms: run.duration_ms,
+        failed: run.failed,
+        judge_outcome: run.judge_outcome,
+        error: run.error,
+        judge_error: run.judge_error,
+        judge_reasks: run.judge_reasks,
+        judge_calls: run.judge_calls,
+        temperature_dropped: run.temperature_dropped,
+        probes,
+    })
 }
 
 /// The judge part of a re-judge: resolves the judge and the run model from the
@@ -565,14 +713,14 @@ async fn rejudge_one(
         judge_error: judging.error,
         judge_reasks: judging.reasks,
         judge_calls: judging.calls,
-        temperature_dropped: judging.temperature_dropped,
+        temperature_dropped: Some(judging.temperature_dropped),
         probes: judging.probes,
     })
 }
 
-/// One run of a finished evaluation's `runs.jsonl`: the fields a re-judge
-/// keeps. The judge's part is judged afresh except where the run failed
-/// before judging.
+/// One run of a finished evaluation's `runs.jsonl`, read back where a
+/// re-judge or a pool takes it in: a re-judge keeps the run's own outcome and
+/// judges it afresh; a pool reports the record as it stands.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SavedRun {
@@ -588,11 +736,33 @@ struct SavedRun {
     window: Option<f64>,
     #[serde(default)]
     duration_ms: f64,
+    #[serde(default)]
+    failed: bool,
     judge_outcome: JudgeOutcome,
     #[serde(default)]
     error: Option<String>,
     #[serde(default)]
     judge_error: Option<String>,
+    #[serde(default)]
+    judge_reasks: u32,
+    #[serde(default)]
+    judge_calls: Vec<JudgeCall>,
+    /// `None` in a record written before the runner wrote this fact.
+    #[serde(default)]
+    temperature_dropped: Option<bool>,
+    #[serde(default)]
+    probes: Vec<SavedProbe>,
+}
+
+/// One probe's record in a saved run: the report reads ids and verdicts, and
+/// the scenario declares the kind.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedProbe {
+    id: String,
+    verdict: ProbeVerdict,
+    #[serde(default)]
+    quote: Option<String>,
 }
 
 /// The runs a finished evaluation wrote, in their recorded order.
@@ -723,6 +893,9 @@ struct Options {
     /// The runs `--rejudge` reads, as `arm/scenario/run`; empty means every
     /// run the source holds.
     select: Vec<String>,
+    /// The finished evaluations `--pool` reports over, in the order given:
+    /// their saved runs are added as they stand, and no model turn runs.
+    pool: Vec<PathBuf>,
 }
 impl Options {
     fn parse() -> Result<Self> {
@@ -745,7 +918,9 @@ impl Options {
                      evaluation's saved views again without a model turn, with \
                      --scenarios, --judge, --model, --model-config, --out and \
                      [--jobs N], selecting runs with repeated --run \
-                     arm/scenario/run";
+                     arm/scenario/run; --pool DIR adds a finished evaluation's \
+                     saved runs to the report, given twice or more, and writes \
+                     the same rule over their union";
         // Both arms serve the product's default plugins; `--defaults`
         // names another default configuration file.
         let mut args = args.into_iter();
@@ -754,6 +929,7 @@ impl Options {
         let (mut runs, mut jobs, mut model_config, mut defaults) = (None, None, None, None);
         let mut rejudge = None;
         let mut select: Vec<String> = Vec::new();
+        let mut pool: Vec<PathBuf> = Vec::new();
         let mut texts: Vec<(String, Arc<str>)> = Vec::new();
         while let Some(flag) = args.next() {
             let value = args.next().ok_or(format!("{flag} requires a value"))?;
@@ -761,6 +937,7 @@ impl Options {
                 "--scenarios" => scenarios = Some(PathBuf::from(value)),
                 "--rejudge" => rejudge = Some(PathBuf::from(value)),
                 "--run" => select.push(value),
+                "--pool" => pool.push(PathBuf::from(value)),
                 "--text" => {
                     if let Some(pending) = &text {
                         return Err(format!("--text {pending} has no --candidate").into());
@@ -798,27 +975,36 @@ impl Options {
         if candidate.is_some() {
             return Err("--candidate has no --text".into());
         }
-        if texts.is_empty() && rejudge.is_none() {
+        if texts.is_empty() && rejudge.is_none() && pool.is_empty() {
             return Err(usage.into());
         }
-        if rejudge.is_some() && model_config.is_none() {
+        if rejudge.is_some() && !pool.is_empty() {
+            return Err("--rejudge and --pool are different reads: give one".into());
+        }
+        if !pool.is_empty() && !select.is_empty() {
             return Err(
-                "--rejudge needs --model-config: the judge's window is read from it".into(),
+                "--run selects a --rejudge source's runs; --pool reports every saved run".into(),
             );
         }
-        let finished = rejudge.is_some();
+        let finished = rejudge.is_some() || !pool.is_empty();
+        if finished && model_config.is_none() {
+            return Err(
+                "--rejudge and --pool need --model-config: the judge's window is read from it"
+                    .into(),
+            );
+        }
         if finished && (!texts.is_empty() || runs.is_some() || home.is_some() || defaults.is_some())
         {
             return Err(
-                "--rejudge reads a finished evaluation's saved runs: --text, --candidate, \
-                 --runs, --home and --defaults belong to a new evaluation"
+                "--rejudge and --pool read finished evaluations' saved runs: --text, \
+                 --candidate, --runs, --home and --defaults belong to a new evaluation"
                     .into(),
             );
         }
         let defaults = Some(defaults.unwrap_or_else(|| {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../runtime/default-plugins.json")
         }));
-        // A finished evaluation's runs come from its source, not from --runs.
+        // A finished evaluation's runs come from its sources, not from --runs.
         let runs = if finished {
             0
         } else {
@@ -844,6 +1030,7 @@ impl Options {
             js_runtime: env_path("DIM_TEST_JS_RUNTIME"),
             rejudge,
             select,
+            pool,
         })
     }
 }
@@ -1166,8 +1353,10 @@ struct RunRecord {
     /// One entry per judge call the run made, in order: what its stream
     /// reported.
     judge_calls: Vec<JudgeCall>,
-    #[serde(skip)]
-    temperature_dropped: bool,
+    /// Whether the judge had to drop its temperature; the runner records it
+    /// for every run it makes, and `None` when a report reads a record from
+    /// before this fact was written.
+    temperature_dropped: Option<bool>,
     probes: Vec<ProbeRecord>,
 }
 impl RunRecord {
@@ -1198,7 +1387,7 @@ struct ProbeRecord {
     verdict: ProbeVerdict,
     quote: Option<String>,
 }
-#[derive(Clone, Copy, serde::Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum ProbeVerdict {
     Present,
@@ -1373,7 +1562,7 @@ async fn run_once(
         judge_error: finished.judging.error,
         judge_reasks: finished.judging.reasks,
         judge_calls: finished.judging.calls,
-        temperature_dropped: finished.judging.temperature_dropped,
+        temperature_dropped: Some(finished.judging.temperature_dropped),
         probes: finished.judging.probes,
     })
 }
@@ -2478,15 +2667,26 @@ fn comparisons(current: &Metrics, candidate: &Metrics, scenarios: &[Scenario]) -
 #[derive(Clone)]
 struct Sources {
     directories: Vec<(PathBuf, usize)>,
+    /// Whether the model and judge rows are the flags rather than the judge
+    /// that made these records: a pool judges nothing.
+    given: bool,
 }
 impl Sources {
     /// The row that names the sources and the runs each supplied.
     fn row(&self) -> String {
-        self.directories
+        let mut row = self
+            .directories
             .iter()
             .map(|(directory, runs)| format!("`{}` ({runs} runs)", directory.display()))
             .collect::<Vec<_>>()
-            .join(", ")
+            .join(", ");
+        if self.given {
+            row += concat!(
+                "; the model and judge rows are those given to --pool; each source's ",
+                "scenario.md states the instrument its runs were judged with",
+            );
+        }
+        row
     }
 }
 
@@ -2510,6 +2710,9 @@ struct Instrument {
     /// The finished evaluations the report was built from instead of runs.
     sources: Option<Sources>,
     judge_temperature_dropped: usize,
+    /// Runs the judge was asked about whose record does not say whether it
+    /// dropped the temperature: a record from before the runner wrote it.
+    judge_temperature_unrecorded: usize,
     /// Runs the judge was asked about: every outcome but `not_asked` and a
     /// view that does not fit its budget.
     judge_asked_runs: usize,
@@ -2536,6 +2739,7 @@ impl Instrument {
             judge_window: None,
             sources: None,
             judge_temperature_dropped: 0,
+            judge_temperature_unrecorded: 0,
             judge_asked_runs: 0,
             judge_reasks: 0,
         }
@@ -2552,11 +2756,16 @@ impl Instrument {
             .take()
             .or(measured.judge_configuration);
         self.judge_window = self.judge_window.take().or(measured.judge_window);
-        self.judge_temperature_dropped += usize::from(record.temperature_dropped);
-        self.judge_asked_runs += usize::from(!matches!(
+        let asked = !matches!(
             record.judge_outcome,
             JudgeOutcome::NotAsked | JudgeOutcome::Unfit
-        ));
+        );
+        match record.temperature_dropped {
+            Some(dropped) => self.judge_temperature_dropped += usize::from(dropped),
+            None if asked => self.judge_temperature_unrecorded += 1,
+            None => {}
+        }
+        self.judge_asked_runs += usize::from(asked);
         self.judge_reasks += record.judge_reasks as usize;
     }
 }
@@ -2648,11 +2857,18 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
     if same_family(&instrument.model, &instrument.judge) {
         text += "| judge limitation | the judge is the model's own family; the measurement is limited by that |\n";
     }
-    if instrument.judge_temperature_dropped > 0 {
-        text += &format!(
-            "| judge temperature | dropped in {} of {} runs the judge was asked |\n",
+    if instrument.judge_temperature_dropped > 0 || instrument.judge_temperature_unrecorded > 0 {
+        let mut row = format!(
+            "| judge temperature | dropped in {} of {} runs the judge was asked",
             instrument.judge_temperature_dropped, instrument.judge_asked_runs
         );
+        if instrument.judge_temperature_unrecorded > 0 {
+            row += &format!(
+                "; not recorded for {} runs",
+                instrument.judge_temperature_unrecorded
+            );
+        }
+        text += &format!("{row} |\n");
     }
     if instrument.judge_reasks > 0 {
         text += &format!(
@@ -2854,7 +3070,7 @@ mod tests {
             judge_error: None,
             judge_reasks: 0,
             judge_calls: Vec::new(),
-            temperature_dropped: false,
+            temperature_dropped: Some(false),
             probes: verdicts
                 .iter()
                 .map(|(id, verdict)| ProbeRecord {
@@ -2896,6 +3112,7 @@ mod tests {
             judge_window: None,
             sources: None,
             judge_temperature_dropped: 0,
+            judge_temperature_unrecorded: 0,
             judge_asked_runs: 0,
             judge_reasks: 0,
         }
@@ -3037,39 +3254,50 @@ mod tests {
         walk(directory, &directory.join("workspace"))
     }
 
-    /// A re-judge reads a finished evaluation's saved runs, so the flags that
-    /// name a new evaluation are refused rather than ignored.
+    /// A re-judge or a pool reads a finished evaluation's saved runs, so a
+    /// flag that names a new evaluation, or a selection that read does not
+    /// take, is refused rather than ignored.
     #[test]
-    fn a_rejudge_refuses_the_flags_of_a_new_evaluation() {
+    fn a_saved_run_read_refuses_the_flags_it_does_not_read() {
         let directory = std::env::temp_dir().join(format!(
-            "dim-scenario-eval-rejudge-parse-{}",
+            "dim-scenario-eval-saved-parse-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&directory).unwrap();
-        let parsed = Options::parse_from(
-            [
-                "--rejudge",
-                "source",
-                "--scenarios",
-                "scenarios",
-                "--model",
-                "gateway/model",
-                "--judge",
-                "gateway/model",
-                "--model-config",
-                "models.json",
-                "--runs",
-                "1",
-                "--out",
-                directory.join("out").to_str().unwrap(),
-            ]
-            .map(str::to_owned),
-        );
-        let error = match parsed {
-            Err(error) => error.to_string(),
-            Ok(_) => panic!("--runs is refused with --rejudge"),
+        let out = directory.join("out");
+        let shared = [
+            "--scenarios",
+            "scenarios",
+            "--model",
+            "gateway/model",
+            "--judge",
+            "gateway/model",
+            "--model-config",
+            "models.json",
+            "--out",
+            out.to_str().unwrap(),
+        ];
+        let refused = |flags: &[&str]| {
+            let args = shared.iter().chain(flags).map(|value| (*value).to_owned());
+            match Options::parse_from(args) {
+                Err(error) => error.to_string(),
+                Ok(_) => panic!("{flags:?} is refused"),
+            }
         };
+        let error = refused(&["--rejudge", "source", "--runs", "1"]);
         assert!(error.contains("belong to a new evaluation"), "{error}");
+        let error = refused(&[
+            "--pool",
+            "one",
+            "--pool",
+            "two",
+            "--run",
+            "current/case/run-0",
+        ]);
+        assert!(
+            error.contains("--run selects a --rejudge source's runs"),
+            "{error}"
+        );
         let _ = std::fs::remove_dir_all(&directory);
     }
 
@@ -4175,6 +4403,10 @@ mod tests {
             report.contains("candidate is inconclusive: no comparison is a regression"),
             "{report}"
         );
+        assert!(
+            report.contains("| text | `context-compaction/summary` |"),
+            "a run's report names the texts under test: {report}"
+        );
         assert_eq!(fixture.judge().len(), 2, "one judge request per arm");
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
@@ -4195,6 +4427,11 @@ mod tests {
             assert!(
                 calls[0]["thinkingBytes"].as_u64().is_some(),
                 "the reasoning deltas are measured: {record}"
+            );
+            assert_eq!(
+                record["temperatureDropped"],
+                json!(false),
+                "the record says whether the judge dropped its temperature: {record}"
             );
         }
     }
@@ -4457,6 +4694,109 @@ mod tests {
             error.contains("a re-judge writes a new directory"),
             "{error}"
         );
+    }
+
+    /// A pool reports several finished evaluations under one rule: both
+    /// sources' runs are added, their probes counted together, and no source
+    /// is written to.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_pool_reports_several_finished_evaluations_under_one_rule() {
+        let fixture = Fixture::start(
+            "pool",
+            judged,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let source = |name: &str, current: Value, candidate: Value, dropped: Option<[bool; 2]>| {
+            let directory = fixture.directory.join(name);
+            std::fs::create_dir_all(&directory).unwrap();
+            let mut runs = [
+                json!({"arm": "current", "scenario": "case", "run": 0, "session": null,
+                       "stop": "idle", "turns": 2, "window": 24000.0, "durationMs": 1.0,
+                       "failed": false, "judgeOutcome": "judged", "error": null,
+                       "judgeError": null, "judgeReasks": 0,
+                       "probes": [{"id": "ran", "kind": "must_show",
+                                   "verdict": current, "quote": null}]}),
+                json!({"arm": "candidate", "scenario": "case", "run": 0, "session": null,
+                       "stop": "idle", "turns": 2, "window": 24000.0, "durationMs": 1.0,
+                       "failed": false, "judgeOutcome": "judged", "error": null,
+                       "judgeError": null, "judgeReasks": 0,
+                       "probes": [{"id": "ran", "kind": "must_show",
+                                   "verdict": candidate, "quote": null}]}),
+            ];
+            if let Some([current, candidate]) = dropped {
+                runs[0]["temperatureDropped"] = json!(current);
+                runs[1]["temperatureDropped"] = json!(candidate);
+            }
+            let jsonl: String = runs.iter().map(|record| format!("{record}\n")).collect();
+            std::fs::write(directory.join("runs.jsonl"), &jsonl).unwrap();
+            (directory, jsonl)
+        };
+        let (first, first_jsonl) = source(
+            "first",
+            json!("present"),
+            json!("absent"),
+            Some([true, false]),
+        );
+        let (second, second_jsonl) = source("second", json!("present"), json!("present"), None);
+        let out = fixture.directory.join("pooled");
+        let mut options = fixture.options(out.clone());
+        options.pool = vec![first.clone(), second.clone()];
+        let report = fixture.pooled(&options).await.unwrap();
+        assert!(
+            report.contains("| runs | 2 per arm and scenario |"),
+            "{report}"
+        );
+        assert!(
+            report.contains("| case/ran (must_show) | 2/2 (1.000) | 1/2 (0.500) |"),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "| judge temperature | dropped in 1 of 4 runs the judge was asked; not recorded for 2 runs |"
+            ),
+            "the row counts what is recorded and says what is not: {report}"
+        );
+        assert!(
+            report.contains(&format!(
+                "| sources | `{}` (2 runs), `{}` (2 runs); the model and judge rows are those \
+                 given to --pool; each source's scenario.md states the instrument its runs were \
+                 judged with |",
+                first.canonicalize().unwrap().display(),
+                second.canonicalize().unwrap().display()
+            )),
+            "the report names both sources and the limits of its instrument: {report}"
+        );
+        assert!(
+            !report.contains("| text |"),
+            "no saved run records the texts under test: {report}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(first.join("runs.jsonl")).unwrap(),
+            first_jsonl,
+            "the first source is never written to"
+        );
+        assert_eq!(
+            std::fs::read_to_string(second.join("runs.jsonl")).unwrap(),
+            second_jsonl,
+            "the second source is never written to"
+        );
+        let records = fixture.records(&out);
+        assert_eq!(
+            records.len(),
+            4,
+            "every run of both sources is kept: {records:?}"
+        );
+        assert!(out.join("scenario.md").exists());
+        let mut refused = fixture.options(first.canonicalize().unwrap().join("inside"));
+        refused.pool = vec![first.clone()];
+        let error = fixture.pooled(&refused).await.unwrap_err().to_string();
+        assert!(error.contains("a pool writes a new directory"), "{error}");
     }
 
     /// The judge's first answer leaves a probe without a verdict, and every
@@ -4900,6 +5240,14 @@ mod tests {
             )
             .await
         }
+        /// [`pooled`] over this fixture's provider, with the same process
+        /// facts as [`evaluate`](Self::evaluate).
+        async fn pooled(&self, options: &Options) -> Result<String> {
+            pooled(options, |builder| {
+                builder.process_value(Arc::new(self.platform.clone()));
+            })
+            .await
+        }
         /// The options of one run per arm over this fixture, with `out`.
         fn options(&self, out: PathBuf) -> Options {
             Options {
@@ -4917,6 +5265,7 @@ mod tests {
                 js_runtime: None,
                 rejudge: None,
                 select: Vec::new(),
+                pool: Vec::new(),
             }
         }
         /// [`options`](Self::options) with the judge under the provider entry
