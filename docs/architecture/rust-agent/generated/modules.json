@@ -26574,6 +26574,7 @@
       "to": "dim_client",
       "references": [
         "path Client",
+        "path crate::client::app_error",
         "use crate::client::Client"
       ]
     },

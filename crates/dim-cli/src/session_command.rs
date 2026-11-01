@@ -29,6 +29,14 @@ struct Declared {
     name: String,
 }
 
+/// The `session.delete` reply. An App Server before the field answers `{}`,
+/// which reads as `None` and as a delete that removed the rows.
+#[derive(Deserialize)]
+struct Deleted {
+    #[serde(default)]
+    deleted: Option<bool>,
+}
+
 /// One stored Session as `session.summaries` reports it.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,6 +47,31 @@ struct Summary {
     updated_at: u64,
     #[serde(default)]
     title: Option<String>,
+    /// Whether this daemon closed the Session; its rows stay stored.
+    #[serde(default)]
+    closed: bool,
+    /// Whether a turn is running on the Session's `main` line.
+    #[serde(default)]
+    running: bool,
+    /// How many clients are attached to the Session.
+    #[serde(default)]
+    attached_clients: usize,
+}
+
+impl Summary {
+    /// Why cleanup keeps an active Session, or `None` when it is idle.
+    fn active_reason(&self) -> Option<String> {
+        let mut reasons = Vec::new();
+        if self.running {
+            reasons.push("running".to_owned());
+        }
+        match self.attached_clients {
+            0 => {}
+            1 => reasons.push("1 client attached".to_owned()),
+            clients => reasons.push(format!("{clients} clients attached")),
+        }
+        (!reasons.is_empty()).then(|| reasons.join(", "))
+    }
 }
 
 /// `dimcode session rename`: sets the manual title, or clears it when `title`
@@ -105,33 +138,31 @@ async fn serves_rename(client: &mut Client, session_id: &str) -> Result<bool> {
 
 /// `dimcode session delete`: permanently deletes the named Session.
 ///
-/// `session.delete` answers `{}` for an id its store holds no rows of, so the
-/// summaries are read first: an id this daemon does not hold is reported as
-/// an error here instead of reading as a delete.
+/// The reply says whether this call removed it. An id this daemon holds no
+/// rows of is still a success, but nothing was deleted, and the command
+/// reports that instead of a delete.
 pub async fn delete(client: &mut Client, session_id: &str) -> Result<()> {
-    if !client.supports(&["session.delete", "session.summaries"]) {
+    if !client.supports(&["session.delete"]) {
         return Err(DELETE_UNSUPPORTED.into());
     }
-    if !summaries(client)
-        .await?
-        .iter()
-        .any(|session| session.session_id == session_id)
-    {
+    let reply: Deleted = client
+        .typed("session.delete", json!({"sessionId": session_id}))
+        .await?;
+    if reply.deleted == Some(false) {
         return Err(format!(
-            "No Session {} is stored here; nothing was deleted",
+            "Nothing was deleted: no Session {} is stored in this daemon's database.",
             one_line(session_id)
         )
         .into());
     }
-    client
-        .rpc("session.delete", json!({"sessionId": session_id}))
-        .await?;
     println!("Deleted {}", one_line(session_id));
     Ok(())
 }
 
 /// `dimcode session cleanup`: shows the Sessions one selector names, asks for
-/// confirmation, then deletes every one of them.
+/// confirmation, then deletes every one of them. A Session with a running
+/// turn or an attached client is shown as kept and never deleted, and
+/// `--keep N` counts it as kept without its consuming one of the N.
 pub async fn cleanup(
     client: &mut Client,
     older_than: Option<Duration>,
@@ -160,21 +191,39 @@ pub async fn cleanup(
         (None, Some(keep)) => sessions.into_iter().skip(keep).collect(),
         (None, None) => return Err("session cleanup needs --older-than or --keep".into()),
     };
-    if selected.is_empty() {
+    let (active, selected): (Vec<Summary>, Vec<Summary>) = selected
+        .into_iter()
+        .partition(|session| session.active_reason().is_some());
+    if selected.is_empty() && active.is_empty() {
         println!("No Sessions matched; nothing was deleted.");
         return Ok(0);
     }
     for session in &selected {
         println!(
-            "{}\t{}\t{}",
+            "{}\t{}\t{}{}",
             one_line(&session.session_id),
-            session
-                .title
-                .as_deref()
-                .map(one_line)
-                .unwrap_or_else(|| "-".into()),
-            crate::ui::sessions_panel::relative_time(session.updated_at, now)
+            session_title(session),
+            crate::ui::sessions_panel::relative_time(session.updated_at, now),
+            if session.closed { "\tclosed" } else { "" }
         );
+    }
+    if !active.is_empty() {
+        println!("Kept (active):");
+        for session in &active {
+            println!(
+                "{}\t{}\t{}\t{}",
+                one_line(&session.session_id),
+                session_title(session),
+                crate::ui::sessions_panel::relative_time(session.updated_at, now),
+                session
+                    .active_reason()
+                    .expect("an active Session has a reason")
+            );
+        }
+    }
+    if selected.is_empty() {
+        println!("No Sessions matched; nothing was deleted.");
+        return Ok(0);
     }
     if !yes && !confirmed(selected.len())? {
         println!("Nothing was deleted.");
@@ -226,9 +275,32 @@ fn confirmed(count: usize) -> Result<bool> {
     ))
 }
 
-/// Every Session of this daemon that `session.summaries` reports.
+/// The title column of the preview, or `-` when the Session has none.
+fn session_title(session: &Summary) -> String {
+    session
+        .title
+        .as_deref()
+        .map(one_line)
+        .unwrap_or_else(|| "-".into())
+}
+
+/// Every stored Session `session.summaries` reports, the ones this daemon
+/// closed included; an App Server before `includeClosed` answers
+/// `invalid_params`, and the read is repeated without the field.
 async fn summaries(client: &mut Client) -> Result<Vec<Summary>> {
-    client.typed("session.summaries", json!({})).await
+    match client
+        .typed("session.summaries", json!({"includeClosed": true}))
+        .await
+    {
+        Ok(sessions) => Ok(sessions),
+        Err(error) if crate::client::app_error(&error) == Some("invalid_params") => {
+            eprintln!(
+                "This App Server does not list Sessions closed since it started; they are not included."
+            );
+            client.typed("session.summaries", json!({})).await
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn now_ms() -> u64 {

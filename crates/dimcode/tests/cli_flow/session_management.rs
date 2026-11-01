@@ -503,7 +503,16 @@ fn summary(id: &str, title: Option<&str>, ago: u64) -> Value {
         "attachedClients": 0,
         "updatedAt": now_ms().saturating_sub(ago),
         "title": title,
+        "closed": false,
     })
+}
+
+/// `summary` with the closed and activity fields the cleanup preview reads.
+fn state(mut session: Value, closed: bool, running: bool, clients: usize) -> Value {
+    session["closed"] = json!(closed);
+    session["running"] = json!(running);
+    session["attachedClients"] = json!(clients);
+    session
 }
 
 fn now_ms() -> u64 {
@@ -526,14 +535,67 @@ fn three_sessions() -> Value {
 }
 
 #[test]
-fn session_delete_reports_a_live_session() {
+fn session_delete_reports_a_deleted_session() {
+    // The Session the daemon deletes is not in its summaries, as a Session
+    // it closed is not: the command must delete without reading them.
     let home = Home::new();
     let daemon = home.daemon(|wire| {
-        wire.hello(&["session.summaries", "session.delete"]);
-        let listed = wire.read("session.summaries");
-        wire.reply(&listed, json!([summary("session", Some("Kept"), HOUR)]));
+        wire.hello(&["session.delete", "session.summaries"]);
         let delete = wire.read("session.delete");
         assert_eq!(delete["params"], json!({"sessionId":"session"}));
+        wire.reply(&delete, json!({"deleted": true}));
+        wire.hold();
+    });
+    let output = home
+        .command()
+        .args(["session", "delete", "session"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Deleted session\n"
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn session_delete_reports_a_delete_that_removed_nothing() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["session.delete"]);
+        let delete = wire.read("session.delete");
+        assert_eq!(delete["params"], json!({"sessionId":"gone"}));
+        wire.reply(&delete, json!({"deleted": false}));
+        wire.hold();
+    });
+    let output = home
+        .command()
+        .args(["session", "delete", "gone"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr
+            .contains("Nothing was deleted: no Session gone is stored in this daemon's database."),
+        "{stderr}"
+    );
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn session_delete_reads_a_reply_without_the_field_as_a_delete() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["session.delete"]);
+        let delete = wire.read("session.delete");
         wire.reply(&delete, json!({}));
         wire.hold();
     });
@@ -552,32 +614,6 @@ fn session_delete_reports_a_live_session() {
         String::from_utf8(output.stdout).unwrap(),
         "Deleted session\n"
     );
-}
-
-#[test]
-fn session_delete_reports_an_id_the_store_no_longer_holds() {
-    let home = Home::new();
-    let daemon = home.daemon(|wire| {
-        wire.hello(&["session.summaries", "session.delete"]);
-        let listed = wire.read("session.summaries");
-        wire.reply(&listed, json!([summary("kept", None, HOUR)]));
-        // `session.delete` answers `{}` for an id it has no rows of, so a
-        // delete of a gone id must not reach it.
-        wire.hold();
-    });
-    let output = home
-        .command()
-        .args(["session", "delete", "gone"])
-        .output()
-        .unwrap();
-    daemon.join().unwrap();
-    assert_eq!(output.status.code(), Some(1));
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("No Session gone is stored here; nothing was deleted"),
-        "{stderr}"
-    );
-    assert!(output.stdout.is_empty());
 }
 
 #[test]
@@ -834,5 +870,240 @@ fn session_cleanup_rejects_a_duration_the_units_do_not_cover() {
     assert!(
         !home.0.join("rust/daemon.sock").exists(),
         "a usage error connects to no daemon"
+    );
+}
+
+#[test]
+fn session_cleanup_lists_and_deletes_a_closed_session() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["session.summaries", "session.delete"]);
+        let listed = wire.read("session.summaries");
+        assert_eq!(listed["params"], json!({"includeClosed": true}));
+        wire.reply(
+            &listed,
+            json!([
+                summary("kept", Some("Newest"), HOUR),
+                state(summary("closed", None, 3 * HOUR), true, false, 0),
+            ]),
+        );
+        let delete = wire.read("session.delete");
+        assert_eq!(delete["params"], json!({"sessionId":"closed"}));
+        wire.reply(&delete, json!({"deleted": true}));
+        wire.hold();
+    });
+    let output = home
+        .command()
+        .args(["session", "cleanup", "--keep", "1", "--yes"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["closed\t-\t3h ago\tclosed", "Deleted closed"],
+        "a closed Session is shown as closed and deleted"
+    );
+}
+
+#[test]
+fn session_cleanup_keeps_active_sessions() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["session.summaries", "session.delete"]);
+        let listed = wire.read("session.summaries");
+        wire.reply(
+            &listed,
+            json!([
+                state(
+                    summary("running", Some("Running"), 3 * 24 * HOUR),
+                    false,
+                    true,
+                    0
+                ),
+                state(
+                    summary("attached", Some("Attached"), 4 * 24 * HOUR),
+                    false,
+                    false,
+                    2
+                ),
+                summary("idle", Some("Idle"), 5 * 24 * HOUR),
+            ]),
+        );
+        let delete = wire.read("session.delete");
+        assert_eq!(
+            delete["params"],
+            json!({"sessionId":"idle"}),
+            "an active Session is never deleted"
+        );
+        wire.reply(&delete, json!({"deleted": true}));
+        wire.hold();
+    });
+    let output = home
+        .command()
+        .args(["session", "cleanup", "--older-than", "2d", "--yes"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        [
+            "idle\tIdle\t5d ago",
+            "Kept (active):",
+            "running\tRunning\t3d ago\trunning",
+            "attached\tAttached\t4d ago\t2 clients attached",
+            "Deleted idle",
+        ]
+    );
+}
+
+#[test]
+fn session_cleanup_with_keep_zero_selects_every_inactive_session() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["session.summaries", "session.delete"]);
+        let listed = wire.read("session.summaries");
+        wire.reply(
+            &listed,
+            json!([
+                state(summary("c", Some("Newest"), HOUR), false, true, 1),
+                summary("b", Some("Middle"), 24 * HOUR + HOUR),
+                summary("a", None, 3 * 24 * HOUR + HOUR),
+            ]),
+        );
+        for expected in ["b", "a"] {
+            let delete = wire.read("session.delete");
+            assert_eq!(delete["params"], json!({"sessionId": expected}));
+            wire.reply(&delete, json!({"deleted": true}));
+        }
+        wire.hold();
+    });
+    let output = home
+        .command()
+        .args(["session", "cleanup", "--keep", "0", "--yes"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        [
+            "b\tMiddle\t1d ago",
+            "a\t-\t3d ago",
+            "Kept (active):",
+            "c\tNewest\t1h ago\trunning, 1 client attached",
+            "Deleted b",
+            "Deleted a",
+        ]
+    );
+}
+
+#[test]
+fn session_cleanup_reports_every_failed_delete() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["session.summaries", "session.delete"]);
+        let listed = wire.read("session.summaries");
+        wire.reply(
+            &listed,
+            json!([
+                state(summary("c", Some("Newest"), HOUR), false, true, 1),
+                summary("b", Some("Middle"), 24 * HOUR + HOUR),
+                summary("a", None, 3 * 24 * HOUR + HOUR),
+            ]),
+        );
+        for expected in ["b", "a"] {
+            let delete = wire.read("session.delete");
+            assert_eq!(delete["params"], json!({"sessionId": expected}));
+            wire.send(json!({"jsonrpc":"2.0","id":delete["id"],"error":{
+                "code":-32000,"message":"fixture storage_failed",
+                "data":{"appError":"storage_failed"}}}));
+        }
+        wire.hold();
+    });
+    let output = home
+        .command()
+        .args(["session", "cleanup", "--keep", "0", "--yes"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for id in ["b", "a"] {
+        assert!(
+            stderr.contains(&format!("Cannot delete {id}: fixture storage_failed")),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("dimcode session delete {id}")),
+            "the failed id has a retry command: {stderr}"
+        );
+    }
+    assert!(
+        !String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("Deleted"),
+        "no delete succeeded"
+    );
+}
+
+#[test]
+fn session_cleanup_falls_back_once_without_include_closed() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["session.summaries", "session.delete"]);
+        let listed = wire.read("session.summaries");
+        assert_eq!(listed["params"], json!({"includeClosed": true}));
+        wire.send(json!({"jsonrpc":"2.0","id":listed["id"],"error":{
+            "code":-32602,"message":"Invalid request parameters",
+            "data":{"appError":"invalid_params"}}}));
+        let retried = wire.read("session.summaries");
+        assert_eq!(retried["params"], json!({}), "the field is dropped once");
+        wire.reply(&retried, json!([]));
+        wire.hold();
+    });
+    let output = home
+        .command()
+        .args(["session", "cleanup", "--keep", "1", "--yes"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(
+            "This App Server does not list Sessions closed since it started; they are not included."
+        ),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "No Sessions matched; nothing was deleted.\n"
     );
 }

@@ -452,13 +452,22 @@ idle line client reads the same two forms and prints
 
 `dimcode session delete SESSION` removes the Session and everything its store keeps
 ([session deletion](appserver/session-deletion-and-fork.md)). There is no prompt: the
-id on the command line is the intent. `session.delete` answers `{}` for an id its store
-holds no rows of, so the command reads `session.summaries` first and reports an id the
-daemon does not hold as an error with a non-zero exit, instead of reading as a delete.
-That is not a usage error; a malformed command line is.
+id on the command line is the intent. The reply says whether this call removed it
+([`deleted`](appserver/session-deletion-and-fork.md#31-method)): `Deleted ID` on `true`,
+and on `false` the command prints `Nothing was deleted: no Session ID is stored in this
+daemon's database.` on stderr and exits 1. An id the daemon holds no rows of is a
+successful delete that removed nothing; that is not a usage error, a malformed command
+line is. A reply without the field, from an App Server before it, reads as a delete: the
+rows are gone either way, which is the state asked for.
 
 `dimcode session cleanup` composes deletion from the same two methods, as
 [§5.1](appserver/session-deletion-and-fork.md#51-cleanup-by-age-or-count) requires. It
+reads `session.summaries` with `includeClosed: true`, so a Session this daemon closed is
+listed too and marked `closed` in the preview: its rows are still stored, and no other
+listing shows it ([session catalog](appserver/session-catalog.md#33-sessionsummaries)).
+An App Server before that parameter refuses it `invalid_params`; the command then reads
+the summaries again without it and prints one stderr note that Sessions closed since
+that daemon started are not included. It
 selects with one of two selectors and reads both from the `updatedAt` of
 `session.summaries`, the Session's last activity:
 
@@ -467,15 +476,26 @@ selects with one of two selectors and reads both from the `updatedAt` of
 | `--older-than DURATION` | Every Session whose `updatedAt` is at least `DURATION` ago. `DURATION` is a count and a unit `d`, `h` or `m`, such as `30d`. |
 | `--keep N` | The N most recently active Sessions stay; every other Session is selected. |
 
+A Session with a running turn or an attached client is kept: the preview lists the
+skipped Sessions after the selection under `Kept (active):`, in the same columns
+followed by the reason (`running`, `N clients attached`), and no such Session is
+deleted, `--yes` included. `--keep N`
+still keeps the N most recently active Sessions, and an active Session older than those
+is kept as well without its consuming one of the N. `dimcode session delete ID` still
+deletes an active Session on purpose: the server permits it, and this is the bulk
+command's rule.
+
 Exactly one selector is required. The command prints the selection before it reads a
 key — the id, the title (`-` when untitled) and how long ago the Session was last
-active, as one tab-separated line each, drawn here with spaces — and deletes only
-after confirmation:
+active, as one tab-separated line each, with `closed` after a Session this daemon
+closed, drawn here with spaces — and deletes only after confirmation:
 
 ```text
-$ dimcode session cleanup --keep 3
+$ dimcode session cleanup --keep 1
 a1b2c3d4-…  Notes on the build  3d ago
-5e6f7a8b-…  -                   12d ago
+5e6f7a8b-…  -                   12d ago  closed
+Kept (active):
+c3d4e5f6-…  Fix the parser      1d ago   running
 Delete 2 Sessions? [y/N] y
 Deleted a1b2c3d4-…
 Deleted 5e6f7a8b-…
@@ -485,8 +505,8 @@ On a terminal, only `y` or `yes` confirms. Without a terminal nothing confirms, 
 script passes `--yes`, which also skips the prompt; otherwise the command refuses and
 names `--yes`. A confirmed run deletes every selected id even when one fails: each
 failure is reported with its id and the method's error, the command that retries it
-(`dimcode session delete ID`) is printed for each failed id, and the run exits
-non-zero. An empty selection prints that nothing matched and exits 0.
+(`dimcode session delete ID`) is printed for each failed id, and the run exits 1. An
+empty selection prints that nothing matched and exits 0.
 
 ### Migration interaction
 

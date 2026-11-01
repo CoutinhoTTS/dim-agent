@@ -368,11 +368,19 @@ TITLE 与 `--clear` 必须恰好给出一个，所以漏写参数是用法错误
 
 `dimcode session delete SESSION` 删除该 Session 及其存储为它保留的一切
 （[Session 删除](appserver/session-deletion-and-fork.md)）。不弹出确认：命令行上给出的 id 就是意图。
-`session.delete` 对其存储中没有行的 id 答复 `{}`，所以该命令先读 `session.summaries`，把守护进程
-不持有的 id 报为错误并以非零状态退出，而不是读作一次删除。这不是用法错误；命令行本身写错才是。
+回复说明本次调用是否移除了它（[`deleted`](appserver/session-deletion-and-fork.md#31-method)）：为
+`true` 时打印 `Deleted ID`，为 `false` 时在 stderr 打印
+`Nothing was deleted: no Session ID is stored in this daemon's database.` 并以 1 退出。守护进程
+在这个 id 下没有行，是一次什么都没移除的成功删除；这不是用法错误，命令行本身写错才是。回复不带该字段
+（来自更旧的 App Server）时按一次删除处理：两种情况下行都已不在，也就是所要求的状态。
 
 `dimcode session cleanup` 用同样的两个方法组合删除，符合
-[§5.1](appserver/session-deletion-and-fork.md#51-cleanup-by-age-or-count) 的要求。它用两个选择器之一，
+[§5.1](appserver/session-deletion-and-fork.md#51-cleanup-by-age-or-count) 的要求。它用
+`includeClosed: true` 读 `session.summaries`，因此本守护进程关闭的 Session 也会列出，并在预览里
+标为 `closed`：它的行仍在存储中，而别的列目录都不显示它
+（[Session 目录](appserver/session-catalog.md#33-sessionsummaries)）。旧版 App Server 没有这个参数，
+会以 `invalid_params` 拒绝；命令随后去掉它重读摘要，并在 stderr 打印一条说明：该守护进程启动以来
+关闭的 Session 没有包含在内。它用两个选择器之一，
 两者都读 `session.summaries` 的 `updatedAt`，即 Session 的最后活跃时间：
 
 | 选择器 | 选择范围 |
@@ -380,13 +388,22 @@ TITLE 与 `--clear` 必须恰好给出一个，所以漏写参数是用法错误
 | `--older-than DURATION` | `updatedAt` 距今至少 `DURATION` 的每个 Session。`DURATION` 是数字加单位 `d`、`h` 或 `m`，例如 `30d`。 |
 | `--keep N` | 保留最近活跃的 N 个 Session；其余全部选中。 |
 
+轮次正在运行或仍有客户端附着的 Session 会被保留：预览在选择结果之后以 `Kept (active):` 列出这些
+被跳过的 Session，列与选择结果相同，其后是原因（`running`、`N clients attached`），这样的 Session
+一律不删除，`--yes` 也一样。`--keep N` 仍然保留最近活跃的 N 个 Session；比这 N 个更旧的活跃 Session
+也保留，且不占用 N 中的一个名额。`dimcode session delete ID` 仍可有意删除一个活跃 Session：服务端
+允许，这条规则属于批量命令。
+
 必须恰好给出一个选择器。命令在读取按键之前先打印选择结果——id、标题（无标题时 `-`）以及该 Session
-最后活跃距今多久，每个一行——确认之后才删除：
+最后活跃距今多久，每个一行，本守护进程关闭的 Session 在其后加 `closed`，此处以空格示意——确认之后
+才删除：
 
 ```text
-$ dimcode session cleanup --keep 3
+$ dimcode session cleanup --keep 1
 a1b2c3d4-…  Notes on the build  3d ago
-5e6f7a8b-…  -                   12d ago
+5e6f7a8b-…  -                   12d ago  closed
+Kept (active):
+c3d4e5f6-…  Fix the parser      1d ago   running
 Delete 2 Sessions? [y/N] y
 Deleted a1b2c3d4-…
 Deleted 5e6f7a8b-…
@@ -395,7 +412,7 @@ Deleted 5e6f7a8b-…
 在终端上只有 `y` 或 `yes` 确认。没有终端时任何输入都不算确认，脚本要传 `--yes`，它同时跳过提示；
 否则命令拒绝并点名 `--yes`。确认后的运行即使某个 id 失败也会删除其余每个选中的 id：每个失败都连同
 其 id 和方法错误一起报告，并为每个失败的 id 打印可重试的命令（`dimcode session delete ID`），
-整次运行以非零状态退出。选择为空时打印没有命中并以 0 退出。
+整次运行以 1 退出。选择为空时打印没有命中并以 0 退出。
 
 P1 shell 前缀只用于交互输入。其执行、记录、进度、取消和生命周期遵循 [ShellInput](plugins/ShellInput.md)。
 CLI 在发送请求前生成 `runId`，从不重试一次运行。前缀之后的命令原样传递；空命令打印用法。

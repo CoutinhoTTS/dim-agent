@@ -110,8 +110,10 @@ Questions take option numbers (comma separated for several) or 0 to type your\n\
 Account commands sign in to every Provider the daemon describes with a login\n\
   method. A build without the Dim account provider says so and offers API-key\n\
   Providers instead.\n\
-Exit codes: 0 success, 1 configuration/transport error, 2 model/turn failure,\n\
-            3 interactive approval or answer required, 130 interrupted.\n";
+Exit codes: 0 success, 1 configuration/transport error, a delete that removed\n\
+            nothing or a cleanup in which a delete failed, 2 model/turn\n\
+            failure, 3 interactive approval or answer required, 130\n\
+            interrupted.\n";
 
 /// What `dimcode session` names besides `export`.
 const USAGE_SESSION: &str =

@@ -169,17 +169,22 @@ a Session that does not list it is reported as an unsupported daemon.
 
 `dimcode session delete SESSION` permanently deletes the Session through
 `session.delete`, and `dimcode session cleanup (--older-than DURATION | --keep N)
-[--yes]` deletes the Sessions a selector matches. Cleanup reads
-`session.summaries`, orders and filters by `updatedAt` (the last activity), and
-prints its selection before anything is deleted: the id, the title and how long
-ago the Session was active, one tab-separated line each. On a terminal only `y`
-or `yes` confirms and `--yes` skips the prompt; without a terminal nothing
-confirms, so a script passes `--yes`. A confirmed run deletes every selected id:
-each failure is printed with its id and the method's error, `dimcode session
-delete ID` is printed to retry it, and the run exits non-zero. `DURATION` is a
-count with a unit `d`, `h` or `m`. Because `session.delete` answers `{}` for an id
-its store holds no rows of, both verbs read the summaries first and report an id
-the daemon does not hold as an error with a non-zero exit.
+[--yes]` deletes the Sessions a selector matches. The delete reply says whether the
+call removed the Session: `true` prints `Deleted ID`; `false` prints `Nothing was
+deleted: no Session ID is stored in this daemon's database.` on stderr and exits 1,
+and a reply without the field, from an older App Server, prints `Deleted ID`. Cleanup
+reads `session.summaries` with `includeClosed: true`, so a Session this daemon closed
+is listed and marked `closed` (an older App Server refuses the field `invalid_params`;
+the read is repeated without it with one stderr note), orders and filters by
+`updatedAt` (the last activity), and prints its selection before anything is deleted:
+the id, the title and how long ago the Session was active, one tab-separated line
+each. A Session with a running turn or an attached client is kept, listed after the
+selection under `Kept (active):` with its reason, and `--keep N` keeps it without its
+consuming one of the N. On a terminal only `y` or `yes` confirms and `--yes` skips
+the prompt; without a terminal nothing confirms, so a script passes `--yes`. A
+confirmed run deletes every selected id: each failure is printed with its id and the
+method's error, `dimcode session delete ID` is printed to retry it, and the run exits
+1. `DURATION` is a count with a unit `d`, `h` or `m`.
 
 Use `dimcode export SESSION_ID [--output PATH] [--database PATH]` for a Session's
 whole Timeline ([ADR 005](../../docs/adr/005-observability.md) D3): every event of
