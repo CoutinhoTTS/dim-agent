@@ -11,7 +11,7 @@ use std::{
 };
 
 /// The native store format this daemon creates and opens.
-pub const FORMAT: u32 = 28;
+pub const FORMAT: u32 = 29;
 const LEGACY_BY_END: (&str, &str) = (
     "timeline_events_by_end",
     "CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence)",
@@ -19,7 +19,7 @@ const LEGACY_BY_END: (&str, &str) = (
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 28))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 29))",
     ),
     (
         "settings_documents",
@@ -106,6 +106,14 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
         "CREATE TABLE session_grants (session_id TEXT NOT NULL REFERENCES agent_sessions(session_id), path TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('file', 'dir')), mode TEXT NOT NULL CHECK (mode IN ('read', 'write')), PRIMARY KEY (session_id, path))",
     ),
     (
+        "session_output_owners",
+        "CREATE TABLE session_output_owners (session_id TEXT NOT NULL REFERENCES agent_sessions(session_id), path TEXT NOT NULL, PRIMARY KEY (session_id, path))",
+    ),
+    (
+        "session_output_owners_by_path",
+        "CREATE INDEX session_output_owners_by_path ON session_output_owners(path)",
+    ),
+    (
         "session_metadata",
         "CREATE TABLE session_metadata (session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), revision INTEGER NOT NULL CHECK (revision > 0), title TEXT, title_source TEXT CHECK (title_source IN ('auto', 'manual')), CHECK ((title IS NULL) = (title_source IS NULL)))",
     ),
@@ -133,7 +141,7 @@ ALTER TABLE agents ADD COLUMN owner_session_id TEXT REFERENCES agent_sessions(se
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 14] = [
+const UPGRADES: [(u32, &[&str]); 15] = [
     (
         13,
         &[
@@ -177,6 +185,12 @@ const UPGRADES: [(u32, &[&str]); 14] = [
     // #593: a delegation's owner and a member Session's leader.
     (26, &["agents_by_owner", "agent_sessions_by_leader"]),
     (27, &["session_grants"]),
+    // ADR 013: output ownership, copied by a fork and read by the
+    // `session-owned` fact.
+    (
+        28,
+        &["session_output_owners", "session_output_owners_by_path"],
+    ),
 ];
 
 fn format_table(version: u32) -> String {

@@ -2545,6 +2545,7 @@
       "parent": "dim_app_server::storage",
       "file": "crates/dim-app-server/src/storage/files.rs",
       "unexpandedMacros": [
+        "format",
         "matches",
         "params",
         "tokio::select",
@@ -2561,6 +2562,8 @@
         "assert_eq",
         "env",
         "format",
+        "rusqlite::params",
+        "tokio::join",
         "vec"
       ]
     },
@@ -10730,7 +10733,9 @@
         "path HostError",
         "path HostError::Cancelled",
         "path HostError::failed",
-        "use crate::host::HostError"
+        "path SessionFilesHost",
+        "use crate::host::HostError",
+        "use crate::host::SessionFilesHost"
       ]
     },
     {
@@ -12175,11 +12180,13 @@
         "path HostError::Cancelled",
         "path HostError::failed",
         "path HostFuture",
+        "path SessionFilesHost",
         "path ToolDriver",
         "path ToolExecutionContext",
         "path ToolHost",
         "use crate::host::HostError",
         "use crate::host::HostFuture",
+        "use crate::host::SessionFilesHost",
         "use crate::host::ToolDriver",
         "use crate::host::ToolExecutionContext",
         "use crate::host::ToolHost"
@@ -22630,6 +22637,14 @@
     },
     {
       "from": "dim_app_server::storage::files",
+      "to": "dim_agent_capabilities::host_platform",
+      "references": [
+        "path HostPlatform",
+        "use dim_agent_capabilities::host_platform::HostPlatform"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::files",
       "to": "dim_agent_runtime::error",
       "references": [
         "path dim_agent_runtime::Result"
@@ -22679,6 +22694,17 @@
     },
     {
       "from": "dim_app_server::storage::files::tests",
+      "to": "dim_agent_capabilities::host_platform",
+      "references": [
+        "path HostPlatform",
+        "path HostPlatform::current",
+        "path ShellStatus::Unavailable",
+        "use dim_agent_capabilities::host_platform::HostPlatform",
+        "use dim_agent_capabilities::host_platform::ShellStatus"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::files::tests",
       "to": "dim_agent_runtime::config",
       "references": [
         "path SessionConfig::default",
@@ -22705,6 +22731,8 @@
       "references": [
         "path SessionFiles",
         "path SessionFiles::new",
+        "path like_prefix",
+        "path release",
         "path share"
       ]
     },
@@ -22993,6 +23021,7 @@
         "path files",
         "path files::release",
         "path files::share",
+        "path files::share_output",
         "use super::files",
         "use super::files::SessionFiles"
       ]
