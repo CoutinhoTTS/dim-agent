@@ -6,7 +6,7 @@ use std::{
     fs::File,
     io::Write,
     panic::{AssertUnwindSafe, catch_unwind},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -16,6 +16,16 @@ pub const FORMAT: u32 = 29;
 /// The oldest schema the startup transaction upgrades: the first step of
 /// `UPGRADES`, which is ordered oldest first.
 const MIN_FORMAT: u32 = UPGRADES[0].0;
+/// WAL bytes after which the writer checkpoints, outside its commit. This is
+/// SQLite's own automatic threshold (1000 pages of 4 KiB) moved off the
+/// commit path.
+const CHECKPOINT_BYTES: u64 = 4 * 1024 * 1024;
+/// The WAL file is truncated to this size when a checkpoint restarts it.
+const WAL_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
+/// The process connection's page cache in KiB. A measurement over a 650 MB
+/// store with 2,300 Sessions put their hot tail pages (about 20 MB) in cache
+/// from 32 MiB on; larger caches read no fewer bytes.
+const PAGE_CACHE_KIB: i64 = 32 * 1024;
 const LEGACY_BY_END: (&str, &str) = (
     "timeline_events_by_end",
     "CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence)",
@@ -529,6 +539,15 @@ impl SqliteStorage {
             .pragma_update(None, "synchronous", "FULL")
             .map_err(storage)?;
         connection
+            .pragma_update(None, "wal_autocheckpoint", 0)
+            .map_err(storage)?;
+        connection
+            .pragma_update(None, "journal_size_limit", WAL_LIMIT_BYTES)
+            .map_err(storage)?;
+        connection
+            .pragma_update(None, "cache_size", -PAGE_CACHE_KIB)
+            .map_err(storage)?;
+        connection
             .pragma_update(None, "foreign_keys", true)
             .map_err(storage)?;
         #[cfg(target_os = "macos")]
@@ -667,6 +686,32 @@ impl SqliteStorage {
         .await
     }
 
+    /// Checkpoints the WAL once it passes `CHECKPOINT_BYTES`. The writer
+    /// calls this after a round committed and published, so the copy runs
+    /// outside the commit path (#600). A passive checkpoint leaves readers
+    /// alone: a read snapshot, such as an export's, keeps the WAL growing
+    /// until it ends, and the next call then copies and restarts it.
+    pub(super) fn checkpoint(&self) {
+        if self.wal_bytes() < CHECKPOINT_BYTES {
+            return;
+        }
+        let mut guard = self
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(connection) = guard.as_mut() else {
+            return;
+        };
+        if let Err(error) = connection.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(())) {
+            tracing::error!(db_path = %self.path.display(), phase = "checkpoint", pid = std::process::id(), %error, "storage.transaction");
+        }
+    }
+    fn wal_bytes(&self) -> u64 {
+        let mut path = self.path.as_os_str().to_os_string();
+        path.push("-wal");
+        std::fs::metadata(path).map_or(0, |meta| meta.len())
+    }
+
     pub async fn close(self: &Arc<Self>) -> Result<()> {
         self.admission.lock().unwrap().closed = true;
         let db = self.clone();
@@ -685,11 +730,17 @@ impl SqliteStorage {
                     .connection
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(connection) = guard.take()
-                    && let Err((connection, failure)) = connection.close()
-                {
-                    *guard = Some(connection);
-                    return Err(storage(failure));
+                if let Some(connection) = guard.take() {
+                    if let Ok(false) = connection.is_readonly("main")
+                        && let Err(error) =
+                            connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+                    {
+                        tracing::error!(db_path = %db.path.display(), phase = "close", pid = std::process::id(), %error, "storage.transaction");
+                    }
+                    if let Err((connection, failure)) = connection.close() {
+                        *guard = Some(connection);
+                        return Err(storage(failure));
+                    }
                 }
                 let mut admission = db.admission.lock().unwrap();
                 if let Some(lease) = &admission.lease {
@@ -704,6 +755,84 @@ impl SqliteStorage {
         .await
         .map_err(storage)?
     }
+}
+
+/// What `vacuum_store` reclaimed, as bytes on disk before and after.
+pub struct Vacuumed {
+    pub before: u64,
+    pub after: u64,
+}
+
+/// Reclaims free pages in an existing store by rewriting it with `VACUUM`
+/// (#600). It takes the same lease as `open`, so a running daemon makes it
+/// fail, and it requires the current format's exact schema: it never creates
+/// a store, upgrades one or touches an unsupported format. `VACUUM` rewrites
+/// the whole database, so it needs free space about the store's size.
+pub fn vacuum_store(path: PathBuf) -> Result<Vacuumed> {
+    if !path.is_file() {
+        return Err(storage(format!(
+            "No dimcode database at {}",
+            path.display()
+        )));
+    }
+    let path = path.canonicalize().map_err(storage)?;
+    let mut lock_path = path.as_os_str().to_os_string();
+    lock_path.push(".lock");
+    let admission = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(storage)?;
+    admission.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => storage(format!(
+            "another process owns the SQLite database: {}",
+            path.display()
+        )),
+        std::fs::TryLockError::Error(error) => storage(error),
+    })?;
+    let _lease = DatabaseLease(admission);
+    let connection = Connection::open(&path).map_err(storage)?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(storage)?;
+    let unsupported = || {
+        storage(format!(
+            "unsupported Timeline storage format at {}; the database was not changed",
+            path.display()
+        ))
+    };
+    if known_format(&schema(&connection)?) != Some(FORMAT)
+        || markers(&connection)? != [i64::from(FORMAT)]
+    {
+        return Err(unsupported());
+    }
+    let before = store_bytes(&path);
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .map_err(storage)?;
+    connection.execute_batch("VACUUM").map_err(storage)?;
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .map_err(storage)?;
+    connection
+        .close()
+        .map_err(|(_, failure)| storage(failure))?;
+    Ok(Vacuumed {
+        before,
+        after: store_bytes(&path),
+    })
+}
+
+fn store_bytes(path: &Path) -> u64 {
+    let mut wal = path.as_os_str().to_os_string();
+    wal.push("-wal");
+    [path, Path::new(&wal)]
+        .into_iter()
+        .filter_map(|path| std::fs::metadata(path).ok())
+        .map(|meta| meta.len())
+        .sum()
 }
 
 pub struct SqliteStoragePlugin {

@@ -2604,7 +2604,8 @@
         "eprintln",
         "format",
         "rusqlite::params",
-        "tokio::pin"
+        "tokio::pin",
+        "tracing::error"
       ]
     },
     {
@@ -3034,6 +3035,15 @@
         "println",
         "tokio::pin",
         "tokio::select"
+      ]
+    },
+    {
+      "id": "dim_cli::maintenance",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/maintenance.rs",
+      "unexpandedMacros": [
+        "format"
       ]
     },
     {
@@ -16599,6 +16609,13 @@
       ]
     },
     {
+      "from": "dim_app_server::cli",
+      "to": "dim_app_server::storage::sqlite",
+      "references": [
+        "path crate::storage::vacuum_store"
+      ]
+    },
+    {
       "from": "dim_app_server::codex_oauth",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
@@ -22469,7 +22486,9 @@
         "mod sqlite",
         "use sqlite::FORMAT",
         "use sqlite::SqliteStorage",
-        "use sqlite::SqliteStoragePlugin"
+        "use sqlite::SqliteStoragePlugin",
+        "use sqlite::Vacuumed",
+        "use sqlite::vacuum_store"
       ]
     },
     {
@@ -23795,6 +23814,7 @@
         "path Action::Acp",
         "path Action::Chat",
         "path Action::DaemonStop",
+        "path Action::DaemonVacuum",
         "path Action::DefaultTerminalMode",
         "path Action::Exec",
         "path Action::Export",
@@ -23936,6 +23956,14 @@
         "path login::account_directory",
         "path login::login",
         "path login::logout"
+      ]
+    },
+    {
+      "from": "dim_cli",
+      "to": "dim_cli::maintenance",
+      "references": [
+        "mod maintenance",
+        "path maintenance::vacuum"
       ]
     },
     {
@@ -24928,6 +24956,30 @@
       "references": [
         "path Client",
         "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::maintenance",
+      "to": "dim_cli",
+      "references": [
+        "path Result",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::maintenance",
+      "to": "dim_cli::args",
+      "references": [
+        "path Options",
+        "use crate::args::Options"
+      ]
+    },
+    {
+      "from": "dim_cli::maintenance",
+      "to": "dim_cli::client",
+      "references": [
+        "path client::server",
+        "use crate::client"
       ]
     },
     {
