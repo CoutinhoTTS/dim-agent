@@ -1772,7 +1772,17 @@ impl App {
                 } else {
                     None
                 };
-                if let Some(Prompt::Management(panel)) = &mut self.prompt {
+                // A reply belongs to a panel only when that panel manages the
+                // reply's area: another area's panel is as absent as a closed
+                // one, and the notice still reports what the action came to.
+                let same_area = matches!(
+                    &self.prompt,
+                    Some(Prompt::Management(panel)) if panel.area() == reply.request.area
+                );
+                if same_area {
+                    let Some(Prompt::Management(panel)) = &mut self.prompt else {
+                        unreachable!("the matched prompt is a management panel")
+                    };
                     panel.set_result(&reply);
                     // The write took it: the file is no longer the user's
                     // text. That holds when only the read that reports the
@@ -1787,15 +1797,25 @@ impl App {
                             ManagementResult::Refused(ManagementRefusal::Conflict { .. })
                                 if creating =>
                             {
-                                panel.conflicted(true, &settled.draft.path().display().to_string());
+                                panel.conflicted(
+                                    reply.request.area,
+                                    true,
+                                    &settled.draft.path().display().to_string(),
+                                );
                                 self.hold_draft(settled);
                             }
                             ManagementResult::Refused(ManagementRefusal::Conflict { .. }) => {
-                                panel
-                                    .conflicted(false, &settled.draft.path().display().to_string());
+                                panel.conflicted(
+                                    reply.request.area,
+                                    false,
+                                    &settled.draft.path().display().to_string(),
+                                );
                             }
                             ManagementResult::Refused(_) => {
-                                panel.kept(&settled.draft.path().display().to_string());
+                                panel.kept(
+                                    reply.request.area,
+                                    &settled.draft.path().display().to_string(),
+                                );
                                 self.hold_draft(settled);
                             }
                             _ => settled.draft.remove(),
@@ -3350,7 +3370,7 @@ impl App {
             }) {
                 Err(error) => {
                     panel.failed(error);
-                    panel.kept(&path);
+                    panel.kept(area, &path);
                     Next::Keep
                 }
                 Ok(document) if panel.document(&target) == Some(&document) => {
@@ -9107,6 +9127,59 @@ mod tests {
             !text.contains('\u{1b}') && !text.contains('\n') && !text.contains('\r'),
             "{text:?}"
         );
+    }
+
+    /// A reply for one area does not write its message into another area's
+    /// panel that opened while the write was in flight: the notice reports
+    /// it, and the open panel keeps its own state.
+    #[test]
+    fn another_areas_panel_keeps_its_own_message() {
+        use crate::model::session::ManagementReply;
+        let root = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            root.path().join("home"),
+            "/w".into(),
+        );
+        // The Scheduler's panel sent a create, then Esc closed it; the
+        // Skills panel opened before the reply landed.
+        app.hold_draft(ManagementDraft {
+            area: Area::Scheduled,
+            target: WriteTarget::Create,
+            draft: editor::Draft::open(root.path(), Area::Scheduled, "{}").unwrap(),
+        });
+        let path = app
+            .management_edits
+            .last()
+            .unwrap()
+            .draft
+            .path()
+            .display()
+            .to_string();
+        app.prompt = Some(Prompt::Management(ManagementPanel::new(Area::Skills)));
+        app.apply(Update::Management(ManagementReply {
+            request: ManagementRequest {
+                area: Area::Scheduled,
+                action: ManagementAction::Add {
+                    document: serde_json::Value::Null,
+                },
+            },
+            result: ManagementResult::Refused(ManagementRefusal::Refused("nope".into())),
+        }));
+        let shown = match &app.prompt {
+            Some(Prompt::Management(panel)) => panel.render(80, 20, &theme.palette).join(" "),
+            _ => panic!("the Skills panel stays open"),
+        };
+        assert!(!shown.contains("nope"), "{shown}");
+        assert!(!shown.contains(&path), "{shown}");
+        assert!(!shown.contains("Your text is kept in"), "{shown}");
+        let (text, _) = app.notice.clone().unwrap();
+        assert!(text.contains("nope"), "{text}");
+        assert!(text.contains(&path), "{text}");
+        assert!(app.management_edits.first().unwrap().draft.path().exists());
     }
 
     /// A create the owner refuses, or a conflict on one, keeps the draft

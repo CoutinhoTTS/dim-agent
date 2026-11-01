@@ -248,6 +248,12 @@ impl ManagementPanel {
         entry_name(self.view.as_ref(), None, action)
     }
 
+    /// The area the panel manages: a reply for another area belongs to the
+    /// surface, not here.
+    pub fn area(&self) -> Area {
+        self.area
+    }
+
     fn selected(&self) -> Option<&ManagementEntry> {
         self.entry(&self.list.selected_id()?)
     }
@@ -330,13 +336,19 @@ impl ManagementPanel {
 
     /// A draft was written but the owner kept the stored document: the
     /// message names where the user's text still is.
-    pub fn kept(&mut self, path: &str) {
+    pub fn kept(&mut self, area: Area, path: &str) {
+        if area != self.area {
+            return;
+        }
         self.keep_text(path, &[]);
     }
 
     /// A conflict kept the user's text: the message names what the next
     /// attempt does with it and where the text is.
-    pub fn conflicted(&mut self, creating: bool, path: &str) {
+    pub fn conflicted(&mut self, area: Area, creating: bool, path: &str) {
+        if area != self.area {
+            return;
+        }
         let next = if creating {
             t("Your next add reopens your text.")
         } else {
@@ -1060,7 +1072,7 @@ mod tests {
         ));
         panel.saving();
         assert!(shown(&panel, 72, 20).join("\n").contains("Working..."));
-        panel.kept("/home/u/edit/hooks.json");
+        panel.kept(Area::Hooks, "/home/u/edit/hooks.json");
         let text = shown(&panel, 72, 20).join(" ");
         assert!(
             text.contains("Your text is kept in /home/u/edit/hooks.json."),
@@ -1163,7 +1175,7 @@ mod tests {
             text.contains("The user document changed since it was read."),
             "{text}"
         );
-        panel.kept("/home/u/edit/hooks-1.json");
+        panel.kept(Area::Hooks, "/home/u/edit/hooks-1.json");
         let text = shown(&panel, 72, 20).join(" ");
         assert!(text.contains("Your text is kept in"), "{text}");
         assert!(text.contains("hooks-1.json"), "{text}");
@@ -1197,7 +1209,7 @@ mod tests {
                     view: Box::new(hooks_view()),
                 }),
             ));
-            panel.conflicted(creating, "/home/u/edit/hooks-1.json");
+            panel.conflicted(Area::Hooks, creating, "/home/u/edit/hooks-1.json");
             let text = shown(&panel, 72, 20).join(" ");
             assert!(text.contains(sentence), "{text}");
             assert!(text.contains("Your text is kept in"), "{text}");
