@@ -120,6 +120,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Model berubah sejak dibaca; tidak ada yang ditulis."
         }
         "No provider has that id." => "Tidak ada penyedia dengan id itu.",
+        "{name} is unavailable ({reason}); its enablement is kept as it is." => {
+            "{name} tidak tersedia ({reason}); status aktifnya dipertahankan."
+        }
         "No model has that id." => "Tidak ada model dengan id itu.",
         "This model cannot be removed." => "Model ini tidak dapat dihapus.",
         "A Provider's models have no area document." => "Model penyedia tidak punya dokumen area.",

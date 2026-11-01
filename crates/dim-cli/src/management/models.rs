@@ -72,6 +72,7 @@ struct Connection {
 
 /// One model of the Provider's catalog.
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Model {
     #[serde(rename = "model")]
     pub entry: Entry,
@@ -313,8 +314,17 @@ async fn toggle(
     let provider = read(client, provider_id).await?;
     let version = version(&provider)?;
     let models = provider.models.as_deref().unwrap_or_default();
-    if !models.iter().any(|model| model.entry.model_id == id) {
+    let Some(model) = models.iter().find(|model| model.entry.model_id == id) else {
         return Err(Failure::Refused(t("No model has that id.").to_owned()));
+    };
+    // The set governs the entries the account can use: the owner keeps an
+    // unavailable entry's enablement whatever the set says, so the write is
+    // refused before it is sent rather than reported as done.
+    if let Some(reason) = &model.unavailable_reason {
+        return Err(Failure::Refused(tf(
+            "{name} is unavailable ({reason}); its enablement is kept as it is.",
+            &[("name", id), ("reason", reason)],
+        )));
     }
     let ids: Vec<&str> = models
         .iter()

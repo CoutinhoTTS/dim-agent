@@ -490,6 +490,19 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
         listed["result"]["providers"][0]["models"][1]["unavailableReason"],
         "limits_undeclared"
     );
+    // The set keeps an unavailable entry's enablement, so the view offers no
+    // toggle for it; the available entry beside it still offers one.
+    let actions = listed["result"]["providers"][0]["models"][1]["actions"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(!actions.contains(&json!("set_enabled")), "{actions:?}");
+    assert!(actions.contains(&json!("edit")), "{actions:?}");
+    let actions = listed["result"]["providers"][0]["models"][0]["actions"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(actions.contains(&json!("set_enabled")), "{actions:?}");
     assert_ok(
         &client
             .rpc(

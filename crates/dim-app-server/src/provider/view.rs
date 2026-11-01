@@ -280,20 +280,28 @@ impl ProviderService {
                             .model_config_overrides
                             .iter()
                             .find(|entry| entry.model_id == source.entry.model_id);
-                        let mut actions = if unavailable.is_none() {
-                            vec!["set_enabled", "edit"]
-                        } else {
-                            Vec::new()
-                        };
-                        if replacement.is_some() && unavailable.is_none() {
-                            actions.push("reset");
-                        }
                         let mut model = match replacement {
                             Some(replacement) => inherit_limits(replacement.clone(), &source.entry),
                             None => source.entry.clone(),
                         };
                         fill_bundled_limits(bundled, &mut model);
                         let missing_limits = model.capabilities.missing_limits();
+                        let unavailable_reason = unavailable.map(str::to_owned).or_else(|| {
+                            limits_reason(source.unavailable_reason.clone(), &missing_limits)
+                        });
+                        // The set governs the entries the account can use: an
+                        // unavailable entry keeps the enablement it has, so the
+                        // owner offers no toggle for it.
+                        let mut actions = if unavailable.is_some() {
+                            Vec::new()
+                        } else if unavailable_reason.is_none() {
+                            vec!["set_enabled", "edit"]
+                        } else {
+                            vec!["edit"]
+                        };
+                        if replacement.is_some() && unavailable.is_none() {
+                            actions.push("reset");
+                        }
                         ManagementModel {
                             enabled: !record.disabled_model_ids.contains(&model.model_id),
                             model,
@@ -304,9 +312,7 @@ impl ProviderService {
                             },
                             endpoint: Some(source.protocol),
                             missing_limits: missing_limits.clone(),
-                            unavailable_reason: unavailable.map(str::to_owned).or_else(|| {
-                                limits_reason(source.unavailable_reason.clone(), &missing_limits)
-                            }),
+                            unavailable_reason,
                             actions,
                             endpoint_override: None,
                         }

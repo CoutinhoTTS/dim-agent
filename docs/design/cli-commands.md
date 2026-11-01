@@ -612,7 +612,7 @@ owner holds no catalog for has no entries; the read's issue says it has no catal
 | catalog model | yes | yes | no | yes |
 | overridden catalog model | yes | yes | yes, `Reset` | yes |
 | user-added model | yes | yes | yes, `Delete` | yes |
-| unavailable model | as its class | as its class | as its class | yes |
+| unavailable model | no | as its class | as its class | yes |
 
 The Provider record's `version` is the revision every write takes (`expectedVersion`). A write
 replies with the Provider catalog, so the client reads the area again after one. Edit opens the
@@ -620,8 +620,10 @@ entry's `ModelEdit` — `displayName`, `contextWindow`, `maxOutputTokens`, `tool
 `reasoning` and `modalityCapabilities`, plus `endpoint` on a static New API model — and sends only
 the fields the draft changed, diffed against a template built from the fresh read, so an inherited
 limit written back does not become a user declaration. Toggle, add and remove read the area
-immediately before the write: toggle sends the complete enabled set with the model flipped, with
-an unavailable model's state left as it is; remove deletes a user model or resets an override, as
+immediately before the write: toggle sends the complete enabled set with the model flipped, and
+an unavailable model has no toggle, so `enable` and `disable` on one are refused before any
+write, naming the owner's reason and saying its enablement is kept as it is; remove deletes a
+user model or resets an override, as
 the entry's own verb says; add sends the `ModelEntry` of the create template, whose limits both
 start undeclared. A `provider_conflict` is classified by the version a fresh read reports: a moved
 version means the models changed and nothing was written, and an unchanged one is the owner's own

@@ -250,6 +250,48 @@ fn models_area_verbs_write_through_the_management_methods() {
     );
 }
 
+/// The models a read reports, with one the owner marked unavailable: the set
+/// keeps its enablement, so the owner offers no toggle for it.
+fn unavailable_models() -> Value {
+    let mut models = models(true);
+    models[0]["unavailableReason"] = json!("limits_undeclared");
+    models[0]["actions"] = json!(["edit"]);
+    models
+}
+
+/// A toggle on a model the set does not govern is refused before the write,
+/// naming the owner's reason: no `provider.models.set_enabled` is sent.
+#[test]
+fn models_area_refuses_a_toggle_the_set_does_not_govern() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("provider.management");
+        wire.reply(&request, provider(unavailable_models(), 3));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let output = home
+        .command()
+        .args(["models", "fixture", "enable", "flash"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8(output.stdout).unwrap().is_empty(),
+        "a refused toggle reports no applied line"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr
+            .contains("flash is unavailable (limits_undeclared); its enablement is kept as it is."),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn models_area_set_writes_the_revision_it_read_and_only_the_changed_fields() {
     let home = Home::new();
@@ -554,6 +596,30 @@ fn area_models(flash_enabled: bool) -> Value {
     ])
 }
 
+/// [`area_models`] with one catalog model the owner reports unusable: the
+/// set keeps its enablement, so the entry offers no toggle.
+fn area_models_unavailable() -> Value {
+    let mut models = area_models(true);
+    let mut limited = model("limited", "Limited", "default", true, &["edit"]);
+    limited["unavailableReason"] = json!("limits_undeclared");
+    models.as_array_mut().unwrap().insert(1, limited);
+    models
+}
+
+/// [`area_models_unavailable`] after the toggle wrote the override model
+/// disabled.
+fn area_models_unavailable_after_toggle() -> Value {
+    let mut models = area_models_unavailable();
+    let tuned = models
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|model| model["model"]["modelId"] == json!("tuned"))
+        .unwrap();
+    tuned["enabled"] = json!(false);
+    models
+}
+
 /// `/models` → `Edit models` opens one Provider's area: the title names the
 /// Provider, rows are grouped by source, Enter toggles with the complete
 /// enabled set at the read's version, Tab shows the descriptor, and Esc
@@ -640,6 +706,99 @@ fn tui_models_area_opens_and_toggles_a_model() {
     terminal.raw(b"\t");
     terminal.until("ID flash");
     terminal.raw(b"\x1b");
+    terminal.raw(b"\x1b");
+    terminal.until("Ask anything...");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+/// The area offers no toggle for a model the set does not govern: Enter on
+/// it sends nothing, while the model below it still toggles with the
+/// complete enabled set.
+#[test]
+fn tui_models_area_offers_no_toggle_for_an_unavailable_model() {
+    let home = Home::new();
+    let (shown, wait_shown) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        for _ in 0..2 {
+            let request = wire.read_any();
+            match request["method"].as_str() {
+                Some("account.providers") => wire.reply(&request, json!([])),
+                Some("session.context.usage") => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                    "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+                method => panic!("unexpected request {method:?}"),
+            }
+        }
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        let request = wire.read("provider.list");
+        wire.reply(
+            &request,
+            json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
+        );
+        let request = wire.read("account.providers");
+        wire.reply(&request, json!([]));
+        let request = wire.read("provider.catalog");
+        wire.reply(&request, picker_catalog());
+        let request = wire.read("provider.management");
+        wire.reply(&request, test_provider(area_models_unavailable(), 3));
+        // Edit models opens the Provider's area.
+        let request = wire.read("provider.management");
+        wire.reply(&request, test_provider(area_models_unavailable(), 3));
+        // Tab on the unavailable model: an inspect reads the area. Had Enter
+        // toggled it, the toggle's own read would stand here instead.
+        let request = wire.read("provider.management");
+        wire.reply(&request, test_provider(area_models_unavailable(), 3));
+        // Enter on an available model still toggles.
+        let request = wire.read("provider.management");
+        wire.reply(&request, test_provider(area_models_unavailable(), 3));
+        let request = wire.read("provider.models.set_enabled");
+        assert_eq!(
+            request["params"],
+            json!({"providerId": "test", "expectedVersion": 3,
+                "modelIds": ["flash", "limited", "custom"]})
+        );
+        wire.reply(&request, json!({}));
+        let request = wire.read("provider.management");
+        wire.reply(
+            &request,
+            test_provider(area_models_unavailable_after_toggle(), 4),
+        );
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/models\r");
+    terminal.until("Test / flash");
+    terminal.until("Edit models");
+    terminal.raw(b"\x1b[B");
+    terminal.until("Edit models");
+    terminal.raw(b"\r");
+    terminal.until("Models · Test");
+    terminal.until("unavailable");
+    // The unavailable model is the row below the catalog's first one: Enter
+    // on it changes nothing.
+    terminal.raw(b"\x1b[B\r");
+    // Tab still opens its descriptor, so the selection was on it.
+    terminal.raw(b"\t");
+    terminal.until("ID limited");
+    terminal.raw(b"\x1b");
+    // The available override model below it toggles.
+    terminal.raw(b"\x1b[B\r");
+    terminal.until("Disabled Tuned.");
     terminal.raw(b"\x1b");
     terminal.until("Ask anything...");
     terminal.signal(libc::SIGKILL);

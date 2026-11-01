@@ -124,6 +124,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "모델이 읽은 뒤 변경되었습니다. 이번에는 아무것도 쓰지 않았습니다."
         }
         "No provider has that id." => "해당 id의 공급자가 없습니다.",
+        "{name} is unavailable ({reason}); its enablement is kept as it is." => {
+            "{name}은(는) 사용할 수 없습니다({reason}). 활성화 상태는 그대로 유지됩니다."
+        }
         "No model has that id." => "해당 id의 모델이 없습니다.",
         "This model cannot be removed." => "이 모델은 제거할 수 없습니다.",
         "A Provider's models have no area document." => "공급자의 모델에는 영역 문서가 없습니다.",

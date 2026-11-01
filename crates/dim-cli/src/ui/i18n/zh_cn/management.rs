@@ -114,6 +114,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "模型在读取后已变更；本次没有写入。"
         }
         "No provider has that id." => "没有该 id 的提供方。",
+        "{name} is unavailable ({reason}); its enablement is kept as it is." => {
+            "{name} 不可用（{reason}）；其启用状态保持不变。"
+        }
         "No model has that id." => "没有该 id 的模型。",
         "This model cannot be removed." => "此模型无法移除。",
         "A Provider's models have no area document." => "提供方的模型没有领域文档。",

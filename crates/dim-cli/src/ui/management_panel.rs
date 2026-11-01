@@ -127,6 +127,7 @@ pub const STRINGS: &[&str] = &[
     "The models changed since they were read; nothing was removed.",
     "The models changed since they were read; nothing was written.",
     "No provider has that id.",
+    "{name} is unavailable ({reason}); its enablement is kept as it is.",
     "No model has that id.",
     "This model cannot be removed.",
     "A Provider's models have no area document.",

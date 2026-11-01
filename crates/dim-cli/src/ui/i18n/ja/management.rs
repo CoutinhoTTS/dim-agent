@@ -130,6 +130,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "モデルは読み取り後に変更されています。今回は何も書き込んでいません。"
         }
         "No provider has that id." => "その id のプロバイダーはありません。",
+        "{name} is unavailable ({reason}); its enablement is kept as it is." => {
+            "{name} は利用できません（{reason}）。有効状態はそのまま維持されます。"
+        }
         "No model has that id." => "その id のモデルはありません。",
         "This model cannot be removed." => "このモデルは削除できません。",
         "A Provider's models have no area document." => {

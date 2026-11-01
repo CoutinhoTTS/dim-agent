@@ -427,9 +427,9 @@ Models 领域（#818）：`/models` 里的 `Edit models` 打开单个提供方�
 | 目录模型 | 是 | 是 | 否 | 是 |
 | 被覆盖的目录模型 | 是 | 是 | 是，`Reset` | 是 |
 | 用户新增模型 | 是 | 是 | 是，`Delete` | 是 |
-| 不可用模型 | 同其类别 | 同其类别 | 同其类别 | 是 |
+| 不可用模型 | 否 | 同其类别 | 同其类别 | 是 |
 
-Provider 记录的 `version` 是每次写入所取的 revision（`expectedVersion`）。写入以 Provider 目录回复，所以客户端在写入后再次读取该领域。edit 打开条目的 `ModelEdit`——`displayName`、`contextWindow`、`maxOutputTokens`、`toolCalling`、`vision`、`reasoning` 与 `modalityCapabilities`，静态 New API 模型再加 `endpoint`——并且只发送草稿改动的字段，与从新读取构建的模板对比，因此把继承的上限原样写回不会变成用户声明。toggle、add 与 remove 在写入前紧邻读取该领域：toggle 发送翻转该模型后的完整启用集合，不可用模型的状态保持不变；remove 按条目自己的动词删除用户模型或重置覆盖；add 发送创建模板的 `ModelEntry`，两个上限都未声明。`provider_conflict` 按新读取报告的 version 分类：version 变了说明模型已变更、什么都没写；version 没变则是所有者自己的拒绝，例如重复的模型 id，草稿保留原 revision。
+Provider 记录的 `version` 是每次写入所取的 revision（`expectedVersion`）。写入以 Provider 目录回复，所以客户端在写入后再次读取该领域。edit 打开条目的 `ModelEdit`——`displayName`、`contextWindow`、`maxOutputTokens`、`toolCalling`、`vision`、`reasoning` 与 `modalityCapabilities`，静态 New API 模型再加 `endpoint`——并且只发送草稿改动的字段，与从新读取构建的模板对比，因此把继承的上限原样写回不会变成用户声明。toggle、add 与 remove 在写入前紧邻读取该领域：toggle 发送翻转该模型后的完整启用集合，不可用模型没有 toggle，对它的 `enable` 与 `disable` 在写入前即被拒绝，拒绝信息写明所有者的原因并说明其启用状态保持不变；remove 按条目自己的动词删除用户模型或重置覆盖；add 发送创建模板的 `ModelEntry`，两个上限都未声明。`provider_conflict` 按新读取报告的 version 分类：version 变了说明模型已变更、什么都没写；version 没变则是所有者自己的拒绝，例如重复的模型 id，草稿保留原 revision。
 
 Ctrl+R 读取该领域，并在提供方的 actions 含 `refresh` 时先发送 `provider.refresh`；被拒绝的列目录不写入任何东西，所以已存储的列表保留，所有者的原因作为 note。Tab 用完整描述替代列表显示：id、来源、状态、两个上限、端点与覆盖、工具、视觉、推理及其档位、模态、描述、发布日期、价格、速率限制、内建匹配与能力覆盖字段。
 

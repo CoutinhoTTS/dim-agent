@@ -132,6 +132,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Los modelos cambiaron desde su lectura; no se escribió nada."
         }
         "No provider has that id." => "Ningún proveedor tiene ese id.",
+        "{name} is unavailable ({reason}); its enablement is kept as it is." => {
+            "{name} no está disponible ({reason}); su activación se mantiene como está."
+        }
         "No model has that id." => "Ningún modelo tiene ese id.",
         "This model cannot be removed." => "Este modelo no se puede eliminar.",
         "A Provider's models have no area document." => {
