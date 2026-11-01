@@ -129,6 +129,155 @@ write outside the workspace fails while the sandbox is on and succeeds once it i
 reload after an external edit, the unsupported-daemon branch and a persistent shell started before
 the change have no flow coverage yet.
 
+## Management surfaces
+
+A management area is one owner's management methods. The App Server serves each area through its
+owner and gives clients no generic path across them ([settings
+service](appserver/settings-service.md#11-what-this-does-not-do)): Skills are `skills.*`, Hooks are
+`hooks.*`, MCP is `mcp.*`, the Scheduler is `schedule.*`, Workflow definitions are `workflow.*`,
+command rules are `permission.rules` and `permission.set_rules`, and plugins are PluginManager's
+methods. Their entry shapes differ and stay as they are; this section makes one structure out of
+the client side, so an area is added once instead of once per surface.
+
+Each area has two surfaces in the native client:
+
+- a terminal UI panel, `/<area>`, in both TUI modes, following the [command menu
+  contract](#command-menu);
+- a subcommand, `dimcode <area> <verb>`.
+
+Both surfaces use the same area adapter. `dimcode hooks list|enable|disable` keeps its output and
+exit codes, and the hooks adapter serves it.
+
+### The adapter
+
+An adapter talks to the daemon through the client connection, so a subcommand needs no Session.
+It turns its owner's reply into one client view at that boundary, it performs the area's actions,
+and it refuses an action whose methods the daemon does not advertise, with an unsupported-daemon
+error. It never falls back to a file, to another method or to the host's own environment.
+
+The client infers nothing the methods do not report. A view that needs a fact the reply does not
+carry gets that fact from the producer: `skills.catalog` reports each entry's `source`, and
+`hooks.catalog` reports the user document with its revision.
+
+### The view
+
+Entries are grouped under source headings — user, project, `plugin:<id>`, built-in — as the
+owner reports them. Each entry has a label, a detail, its states (enabled, disabled, invalid,
+shadowed, read-only) and the actions it offers. An entry its owner does not let the client write
+(plugin-owned, locked) offers no write action, and its detail says why. What the owner could not
+use is listed after the entries as its issues.
+
+```text
+╭─ Skills ──────────────────────────────────────╮
+│ >                                             │
+│                                               │
+│   user                                        │
+│ › commit      enabled                         │
+│   review      disabled  shadowed by commit    │
+│   project                                     │
+│   deploy      enabled                         │
+│   Issues                                      │
+│     /w/.agents/skills/old/SKILL.md: no name   │
+│   Writes commit messages from the staged diff.│
+│   /home/u/.agents/skills/commit/SKILL.md      │
+╰──── Enter toggle · Ctrl+R reload · Esc close ─╯
+```
+
+### Actions
+
+The client has a closed set of action kinds. Each kind has one key in every panel, and the hint
+lists the area's kinds plus the selected entry's kinds, in the table's order.
+
+| Kind | Key | What it does |
+| --- | --- | --- |
+| toggle | Enter or Space | Enable or disable the entry, as in [Execution settings](#execution-settings). |
+| edit | Ctrl+E | Open the area's document in the external editor, then write it. |
+| reload | Ctrl+R | Re-read the area, or ask the owner to rescan it, as `skills.refresh` does. |
+| add | Ctrl+N | Create an entry. |
+| remove | Ctrl+X | Remove the entry, after a confirmation, as `/models` clears a saved record. |
+| run | Ctrl+T | An area's named operation, such as test, run now or start. |
+| inspect | Tab | A read-only detail view. |
+
+Esc closes the panel. An action key is a Ctrl chord, or a key the filter never takes, because
+the filter takes every plain letter. A kind that acts on the area itself belongs to the area's
+view rather than to one entry — today only reload — so it needs no selection: the hint lists it
+whether or not an entry is selected, and Ctrl+R reads the area again after a failed read. The
+areas these surfaces first carry use toggle, reload and edit; a later area adds the code of the
+kinds it needs, and the design of the area that introduces one names it here.
+
+### Writes
+
+Writes follow [Execution settings](#execution-settings):
+
+- the adapter keeps the revision it read with the draft, and the revision is not a field the user
+  types;
+- a conflict writes nothing and shows the error; it never retries automatically and never
+  overwrites a newer document;
+- reload discards the draft and reads again;
+- an edit the conflict prevented is not lost silently: the message names the file that holds the
+  user's text;
+- loading and writing disable mutation.
+
+### The external editor
+
+- The editor is `$VISUAL`, then `$EDITOR`, then the platform default: `vi`, or `notepad` on
+  Windows.
+- The document is written to a file only the user can read (mode 0600 on Unix), in a temporary
+  directory under the product home (`<home>/edit/`), which is not the native store, the Web
+  workspace or anything exported. A successful write removes the file; a refused one keeps it
+  and the message names it, so the user can reopen it.
+- The terminal UI suspends while the editor runs — raw mode and the alternate screen are left and
+  restored — and works in both TUI modes.
+- If the file is unchanged, nothing is written.
+- If the text does not parse, or the owner refuses it, the error is shown and the edit key opens
+  the editor again with the user's text.
+- An interactive edit needs a terminal. Every edit has a non-interactive twin,
+  `dimcode <area> set PATH` (`-` for stdin), which writes with the revision it reads immediately
+  before the write.
+- A document can hold commands, environment and headers. The temporary file has the same exposure
+  as the user's own settings file, and nothing more.
+
+### The session port and the one panel
+
+- Management goes through one generic request and one generic reply on the session port, each
+  carrying the area and a typed action or view: `Command::Management(ManagementRequest)` and
+  `Update::Management(ManagementReply)`.
+- One panel type draws every area. It is built on the shared list panel
+  ([`ListPanel`](../../crates/dim-cli/src/ui/list_panel.rs)), and its confirmation, busy and
+  message state live in one place.
+- Adding an area means an adapter, its command menu rows, its subcommand verbs and its design
+  rows. It adds no new `Prompt`, `Command` or `Update` variant.
+- Existing panels — `/plugins`, `/approvals` — move onto this structure when they are next
+  changed. This section does not migrate them, and they keep their own keys until then.
+
+```text
+/skills ──► Command::Management { area, List } ──► adapter
+                                                    │ methods advertised?  no ──► unsupported-daemon error
+                                                    │ skills.catalog
+                          Update::Management ◄───────┴ group, entries, states, actions, issues
+Panel  ◄───────────────────{ area, view }◄──────────┘
+   │
+   └─ Enter ──► Command { area, Toggle { id, enabled } } ──► skills.set_enabled ──► skills.catalog
+                                                                                    (the view again)
+
+dimcode skills enable ID ──────────────────────────────► the same adapter, over its own connection
+```
+
+### The first two areas
+
+Skills (#814): the `/skills` panel and `dimcode skills list|enable|disable|reload` over
+`skills.catalog`, `skills.set_enabled` and `skills.refresh`; `/reload-skills` runs the reload
+action with no panel and reports what it found. An entry is enabled or disabled by its id, so a
+toggle needs no revision of its own. Installing and removing a Skill package stays with plugin
+installation ([overview](overview.md#appendix-d-cli-layer)), which owns it.
+
+Hooks (#809): the `/hooks` panel and `dimcode hooks list|enable|disable|edit|set PATH`. The panel
+lists the sources with their state; a toggle enables or disables the project source through
+`hooks.set_enabled` (a project source starts disabled, and only the user can enable it); and edit
+opens the user document in the editor and writes it with `hooks.save`, which is the CAS write of
+the Settings source `hooks`. The user source, a plugin source and a project file the client may
+not write offer no write action of their own, and their detail says why.
+
 ## Commands
 
 | Entry | Behavior |
@@ -143,6 +292,11 @@ the change have no flow coverage yet.
 | `dimcode migration [run\|inspect] [--source OLD_HOME]` | Import by default, or inspect, a stopped legacy data home through the shared [Migration plugin](../../crates/dim-migration/README.md). |
 | `dimcode migration list\|show TASK\|cancel TASK` | Query durable results or request cancellation without a daemon. |
 | `dimcode migration retry TASK [--source OLD_HOME]` | Reconcile a previous task's source again; return a new task linked to the old report. |
+| `dimcode skills list` | List the Skills of the workspace over `skills.catalog`: each entry's name, source, state, file and description, then the catalog's issues. |
+| `dimcode skills enable\|disable ID` | Enable or disable one Skill over `skills.set_enabled`, then report the catalog again. |
+| `dimcode skills reload` | Rescan the user and project roots over `skills.refresh` and report what it found, through the [Skills management surface](#management-surfaces). |
+| `/skills` | Open the Skills panel of the Session's workspace ([management surfaces](#management-surfaces)). |
+| `/reload-skills` | Run the reload action for the Session's workspace with no panel and report the entries and issues it found. |
 | `dimcode hooks list [--cwd DIR]` | List the effective hook catalog over `hooks.catalog` ([Hooks](plugins/Hooks.md#a7-management-methods)): each source with its path, enablement and state, and each handler with its event, matcher, command and state. |
 | `dimcode hooks enable\|disable [--cwd DIR]` | Enable or disable the project hooks of the workspace at `DIR` (the current directory by default) over `hooks.set_enabled`, recorded against the project root Settings authorizes for it. |
 | `/exit` | Detach and exit from the idle interactive prompt. |

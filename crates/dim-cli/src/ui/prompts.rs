@@ -119,6 +119,8 @@ pub enum Effect {
     Setting(crate::ui::settings_panel::Setting),
     /// Change a plugin (`/plugins`).
     Plugin(crate::model::session::PluginAction),
+    /// One request to a management area (`/skills`, `/hooks`).
+    Management(crate::model::session::ManagementRequest),
     /// Change a provider (`/connect`).
     Provider(crate::model::session::ProviderAction),
     /// Begin a sign-in on the worker.

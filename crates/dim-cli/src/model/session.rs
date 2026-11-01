@@ -234,6 +234,8 @@ pub enum Command {
     Recording(String),
     /// List the plugins of the `/plugins` panel (`plugin.list`).
     ListPlugins,
+    /// One request to a management area's owner, through its adapter.
+    Management(ManagementRequest),
     /// Change one plugin; the worker lists the plugins again after it.
     Plugin(PluginAction),
     /// A configuration command line (`/effort high`, `/agent`, ...).
@@ -254,6 +256,103 @@ pub enum Command {
     },
     /// Install the offered version (the update dialog's "Update now").
     UpgradeInstall(crate::update::Install),
+}
+
+/// One management area: an owner's management methods, drawn by the native
+/// client through the area's adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Area {
+    Skills,
+}
+
+impl Area {
+    /// The slash command and the subcommand stem of the area.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Skills => "skills",
+        }
+    }
+}
+
+/// What a management request asks of its area's owner.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ManagementAction {
+    /// Read the area.
+    List,
+    /// Enable or disable one entry, and report the area again.
+    Toggle { id: String, enabled: bool },
+    /// Re-read the area, or ask its owner to rescan it.
+    Reload,
+}
+
+/// One request to a management area, carrying the area and what it asks.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManagementRequest {
+    pub area: Area,
+    pub action: ManagementAction,
+}
+
+/// An area as its owner reports it, at the adapter's boundary.
+///
+/// The client infers nothing here: every fact comes from the owner's reply.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ManagementView {
+    /// The revision the next write takes.
+    pub revision: Option<String>,
+    /// The area's document, when its owner reports one the client can edit.
+    pub document: Option<serde_json::Value>,
+    /// The kinds that act on the area itself rather than on one entry, in the
+    /// order a panel offers them. Today only reload: it needs no selection,
+    /// so it works on an empty area and after a failed read.
+    pub actions: Vec<ActionKind>,
+    /// Entries under the source headings their owner reports.
+    pub groups: Vec<ManagementGroup>,
+    /// What the owner could not use, after the entries.
+    pub issues: Vec<String>,
+}
+
+/// The entries one source holds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManagementGroup {
+    pub heading: String,
+    pub entries: Vec<ManagementEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManagementEntry {
+    /// The id the owner's actions take.
+    pub id: String,
+    pub label: String,
+    /// What the entry says about itself, a line each, shown for the entry the
+    /// panel has selected.
+    pub detail: Vec<String>,
+    /// Whether the entry is on; a toggle asks for the other state.
+    pub enabled: bool,
+    /// What the row names besides on and off.
+    pub states: Vec<EntryState>,
+    pub actions: Vec<ActionKind>,
+}
+
+/// A property of an entry that its row names besides on and off.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryState {
+    /// Another entry of the same name takes precedence.
+    Shadowed { by: String },
+}
+
+/// An action kind the client offers. Every kind has one key in every panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionKind {
+    Toggle,
+    Reload,
+}
+
+/// What a management request came to: the area's view after it, or why the
+/// area could not be read or the action refused.
+#[derive(Debug, Clone)]
+pub struct ManagementReply {
+    pub request: ManagementRequest,
+    pub result: Result<ManagementView, String>,
 }
 
 /// One change the `/plugins` panel asks PluginManager for.
@@ -651,6 +750,8 @@ pub enum Update {
         providers: Result<Vec<ProviderEntry>, String>,
     },
     Plugins(Result<Vec<PluginItem>, String>),
+    /// What a management request came to.
+    Management(ManagementReply),
     /// What a plugin change came to, and the plugins listed after it.
     PluginResult {
         action: PluginAction,

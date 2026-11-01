@@ -8,7 +8,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::model::session::{
-    Command, CompactReply, ContextReading, DIM_OAUTH_ID, DraftPart, SessionPort, SwitchKind, Update,
+    Area, Command, CompactReply, ContextReading, DIM_OAUTH_ID, DraftPart, ManagementAction,
+    ManagementRequest, SessionPort, SwitchKind, Update,
 };
 #[cfg(test)]
 use crate::model::shell::Outcome as ShellOutcome;
@@ -23,6 +24,7 @@ use crate::ui::composer::{Composer, Outcome as ComposerOutcome, Shell, history};
 use crate::ui::i18n::{self, t, tf};
 use crate::ui::language_panel::LanguagePanel;
 use crate::ui::lines_panel::{LinesPanel, short_id};
+use crate::ui::management_panel::ManagementPanel;
 use crate::ui::models_panel::ModelsPanel;
 use crate::ui::oauth_view::OauthView;
 use crate::ui::plugins_panel::PluginsPanel;
@@ -943,6 +945,7 @@ enum Prompt {
     Models(ModelsPanel),
     Providers(Box<ProvidersPanel>),
     Plugins(PluginsPanel),
+    Management(ManagementPanel),
     Login(Box<OauthView>),
     Approvals(ApprovalsPanel),
     Theme(ThemePanel),
@@ -1245,6 +1248,7 @@ impl App {
             | Some(Prompt::Models(_))
             | Some(Prompt::Providers(_))
             | Some(Prompt::Plugins(_))
+            | Some(Prompt::Management(_))
             | Some(Prompt::Login(_))
             | Some(Prompt::Approvals(_))
             | Some(Prompt::Theme(_))
@@ -1587,6 +1591,21 @@ impl App {
                     panel.set_result(&action, result, plugins);
                 }
             }
+            Update::Management(reply) => {
+                if let Some(Prompt::Management(panel)) = &mut self.prompt {
+                    panel.set_result(&reply);
+                } else if reply.request.action == ManagementAction::Reload {
+                    if let Ok(view) = &reply.result {
+                        let text = crate::ui::management_panel::reloaded(reply.request.area, view);
+                        self.reports.push(Block::Status {
+                            text,
+                            tone: Tone::Muted,
+                        });
+                    } else if let Err(error) = &reply.result {
+                        self.set_notice(error.clone());
+                    }
+                }
+            }
             Update::Login(account) => {
                 let signed_in = matches!(account, Ok(Some(_)));
                 self.signed_in = signed_in;
@@ -1760,6 +1779,7 @@ impl App {
                     Some(Prompt::Language(panel)) => panel.paste(&text),
                     Some(Prompt::Settings(panel)) => panel.paste(&text),
                     Some(Prompt::Isolation(panel)) => panel.paste(&text),
+                    Some(Prompt::Management(panel)) => panel.paste(&text),
                     Some(Prompt::Ask(prompt)) => prompt.paste(&text),
                     Some(_) => {}
                 }
@@ -1840,6 +1860,7 @@ impl App {
                 Prompt::Models(p) => p.handle_key(key),
                 Prompt::Providers(p) => p.handle_key(key),
                 Prompt::Plugins(p) => p.handle_key(key),
+                Prompt::Management(p) => p.handle_key(key),
                 Prompt::Login(p) => match p.handle_key(key) {
                     Effect::OauthBack => Effect::Close,
                     Effect::OauthCancel => {
@@ -2563,6 +2584,7 @@ impl App {
             }
             Effect::Provider(action) => self.host.send(Command::Provider(action)),
             Effect::Plugin(action) => self.host.send(Command::Plugin(action)),
+            Effect::Management(request) => self.host.send(Command::Management(request)),
             Effect::OauthStart(start) => self.host.send(Command::OauthStart(start)),
             Effect::OauthCancel => self.host.send(Command::OauthCancel),
             Effect::OauthBack => {}
@@ -2853,6 +2875,15 @@ impl App {
         }
     }
 
+    /// `/<area>` opens the management panel of `area`, which reads it.
+    fn open_management(&mut self, area: Area) {
+        self.open_prompt(Prompt::Management(ManagementPanel::new(area)));
+        self.host.send(Command::Management(ManagementRequest {
+            area,
+            action: ManagementAction::List,
+        }));
+    }
+
     /// `/plugins` opens the list; `/plugins install PATH` installs the
     /// directory at PATH (relative to the workspace) and opens the list on
     /// the outcome.
@@ -3010,6 +3041,17 @@ impl App {
             }
             "plugins" => {
                 self.plugins(args);
+                Outcome::Continue
+            }
+            "skills" => {
+                self.open_management(Area::Skills);
+                Outcome::Continue
+            }
+            "reload-skills" => {
+                self.host.send(Command::Management(ManagementRequest {
+                    area: Area::Skills,
+                    action: ManagementAction::Reload,
+                }));
                 Outcome::Continue
             }
             "connect" => {
@@ -3552,6 +3594,7 @@ impl App {
                 Some(Prompt::Models(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Providers(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Plugins(prompt)) => list(prompt.render(list_width, budget, p)),
+                Some(Prompt::Management(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Login(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Approvals(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Theme(prompt)) => list(prompt.render(list_width, budget, p)),
@@ -3575,6 +3618,7 @@ impl App {
             Some(Prompt::Models(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Providers(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Plugins(prompt)) => Some(prompt.render(outer, panel_rows, p)),
+            Some(Prompt::Management(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Login(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Approvals(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Theme(prompt)) => Some(prompt.render(outer, panel_rows, p)),

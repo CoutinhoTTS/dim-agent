@@ -62,7 +62,7 @@ pub struct ListPanel {
     /// The fixed texts are English, translated as they are drawn so a
     /// language preview shows at once.
     title: &'static str,
-    hint: &'static str,
+    hint: String,
     loading_text: &'static str,
     empty_text: &'static str,
     no_match_text: &'static str,
@@ -89,7 +89,7 @@ pub struct ListPanel {
 impl ListPanel {
     pub fn new(
         title: &'static str,
-        hint: &'static str,
+        hint: impl Into<String>,
         loading_text: &'static str,
         empty_text: &'static str,
         no_match_text: &'static str,
@@ -97,7 +97,7 @@ impl ListPanel {
     ) -> Self {
         Self {
             title,
-            hint,
+            hint: hint.into(),
             loading_text,
             empty_text,
             no_match_text,
@@ -128,6 +128,12 @@ impl ListPanel {
     pub fn without_filter(mut self) -> Self {
         self.filterable = false;
         self
+    }
+
+    /// The hint names the keys the selection offers; a panel that redraws it
+    /// when the selection moves sets it here.
+    pub fn set_hint(&mut self, hint: String) {
+        self.hint = hint;
     }
 
     pub fn filter_is_empty(&self) -> bool {
@@ -288,10 +294,23 @@ impl ListPanel {
 
     /// `width` columns including borders; `rows` is the panel's row budget.
     pub fn render(&self, width: usize, rows: usize, p: &Palette) -> Vec<String> {
+        self.render_with_footer(width, rows, p, &[])
+    }
+
+    /// As [`ListPanel::render`], with `footer` lines above the bottom border:
+    /// the caller fits and colours them, and they take their rows from the
+    /// list.
+    pub fn render_with_footer(
+        &self,
+        width: usize,
+        rows: usize,
+        p: &Palette,
+        footer: &[String],
+    ) -> Vec<String> {
         let inner = width.saturating_sub(4).max(1);
         let shown = self.shown();
         let query_rows = if self.filterable { 3 } else { 0 };
-        let page = rows.saturating_sub(2 + query_rows).max(1);
+        let page = rows.saturating_sub(2 + query_rows + footer.len()).max(1);
         self.page.set(page);
         let list: Vec<Row> = shown
             .iter()
@@ -365,13 +384,14 @@ impl ListPanel {
                 }
             }
         }
+        content.extend_from_slice(footer);
         bordered(
             &content,
             width,
             None,
             &p.border,
             Some(&title_plain(t(self.title), inner, p)),
-            Some(&key_hints(t(self.hint), p)),
+            Some(&key_hints(&self.hint, p)),
         )
     }
 }

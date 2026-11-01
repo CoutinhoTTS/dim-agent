@@ -12,6 +12,8 @@ mod images;
 mod input;
 mod leaf;
 mod login;
+mod management;
+mod management_command;
 mod mcp;
 mod mcp_command;
 mod member_approval;
@@ -833,6 +835,9 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
                 mcp_command::set_enabled(&mut client, &options, id, *enabled).await?;
             mcp_command::print_report(rows, notes);
             Ok(0)
+        }
+        Action::Management(request) => {
+            management_command::run(&mut client, &options, request).await
         }
         Action::HooksList => {
             hooks_command::list(&mut client, &options).await?;

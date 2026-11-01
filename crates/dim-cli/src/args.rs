@@ -29,6 +29,9 @@ Commands:\n\
   mcp enable ID                    Enable an MCP server shown by mcp list\n\
   mcp disable ID                   Disable it; an unlisted ID withdraws only\n\
                                    this workspace's stored enablement\n\
+  skills list                      List Skills, their sources and states\n\
+  skills enable|disable ID         Turn one Skill on or off\n\
+  skills reload                    Rescan this workspace's Skills\n\
   hooks list                       List hook handlers, their sources and states\n\
   hooks enable                     Run this workspace's .dimcode/hooks.json\n\
   hooks disable                    Stop running this workspace's hooks\n\
@@ -130,6 +133,8 @@ pub enum Action {
     HooksEnable {
         enabled: bool,
     },
+    /// `skills ...`: one request to a management area's owner.
+    Management(crate::model::session::ManagementRequest),
     /// `recording [on|off]`: the daemon's model request record.
     Recording {
         enabled: Option<bool>,
@@ -472,6 +477,28 @@ impl Options {
                             return Err("Use mcp list, mcp login ID, mcp logout ID, mcp enable ID or mcp disable ID".into());
                         }
                     };
+                }
+                "skills" if matches!(options.action, Action::Chat) => {
+                    use crate::model::session::{Area, ManagementAction, ManagementRequest};
+                    let verb = value(&mut args)?;
+                    let action = match verb.as_str() {
+                        "list" => ManagementAction::List,
+                        "reload" => ManagementAction::Reload,
+                        command @ ("enable" | "disable") => ManagementAction::Toggle {
+                            id: value(&mut args)?,
+                            enabled: command == "enable",
+                        },
+                        _ => {
+                            return Err(
+                                "Use skills list, skills enable ID, skills disable ID or skills reload"
+                                    .into(),
+                            );
+                        }
+                    };
+                    options.action = Action::Management(ManagementRequest {
+                        area: Area::Skills,
+                        action,
+                    });
                 }
                 "hooks" if matches!(options.action, Action::Chat) => {
                     options.action = match value(&mut args)?.as_str() {
