@@ -296,7 +296,7 @@ Writes follow [Execution settings](#execution-settings):
   message state live in one place.
 - Adding an area means an adapter, its command menu rows, its subcommand verbs and its design
   rows. It adds no new `Prompt`, `Command` or `Update` variant.
-- Existing panels — `/plugins`, `/approvals` — move onto this structure when they are next
+- Existing panels — `/plugins`, `/permissions` — move onto this structure when they are next
   changed. This section does not migrate them, and they keep their own keys until then.
 
 ```text

@@ -221,7 +221,7 @@ Esc 关闭面板。动作键要么是 Ctrl 组合键，要么是筛选从不接�
 - 管理经会话端口上的一个通用请求和一个通用回复，各自携带领域与类型化的动作或视图：`Command::Management(ManagementRequest)` 与 `Update::Management(ManagementReply)`。
 - 一个面板类型绘制所有领域。它建立在共享列表面板（[`ListPanel`](../../../crates/dim-cli/src/ui/list_panel.rs)）之上，确认、忙碌和消息状态只有一处。
 - 新增一个领域意味着：一个适配器、它的命令菜单行、它的子命令动词和它的设计表格行。它不新增 `Prompt`、`Command` 或 `Update` 变体。
-- 现有面板——`/plugins`、`/approvals`——在下次改动时迁移到这个结构。本节不迁移它们，在迁移前它们保留自己的按键。
+- 现有面板——`/plugins`、`/permissions`——在下次改动时迁移到这个结构。本节不迁移它们，在迁移前它们保留自己的按键。
 
 ```text
 /skills ──► Command::Management { area, List } ──► 适配器
