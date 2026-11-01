@@ -919,8 +919,15 @@ fn real_daemon_exec_presets_decide_process_tools_without_automatic_approval() {
         "{stdout}"
     );
     assert!(stderr.contains("permission: full-access"), "{stderr}");
+    assert!(
+        stderr.contains("File access: Unrestricted; Tool approval: Bypass"),
+        "{stderr}"
+    );
     assert!(stderr.contains("[done] exec"), "{stderr}");
-    assert!(!stderr.contains("approval"), "{stderr}");
+    assert!(
+        !stderr.contains("Interactive approval required"),
+        "{stderr}"
+    );
     for (args, marker) in [
         (vec!["--permission", "full-access"], "resumed-ran"),
         (vec![], "kept-ran"),
@@ -932,7 +939,10 @@ fn real_daemon_exec_presets_decide_process_tools_without_automatic_approval() {
         let (code, stdout, stderr) = daemon.run(&command);
         assert_eq!(code, Some(0), "{stderr}");
         assert!(stdout.contains(marker), "{stdout}");
-        assert!(!stderr.contains("approval"), "{stderr}");
+        assert!(
+            !stderr.contains("Interactive approval required"),
+            "{stderr}"
+        );
     }
     let (code, stdout, stderr) = daemon.run(&[
         "exec",
@@ -949,7 +959,10 @@ fn real_daemon_exec_presets_decide_process_tools_without_automatic_approval() {
         "{stdout}"
     );
     assert!(!stdout.contains("denied-ran"), "{stdout}");
-    assert!(!stderr.contains("approval"), "{stderr}");
+    assert!(
+        !stderr.contains("Interactive approval required"),
+        "{stderr}"
+    );
 }
 
 #[test]
