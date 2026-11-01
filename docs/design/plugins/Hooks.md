@@ -203,7 +203,7 @@ sequenceDiagram
   end
 ```
 
-`PostToolUse` runs per matching call of a `step/tool-result` batch whose result is not an error, `PostToolUseFailure` per matching call whose result has `is_error`; one batch writes one Append input. `Stop` runs on `turn/end` with status `completed`; a block writes a Queue follow-up carrying the reason, at most 3 consecutive (A8). `SessionStart` runs once on `main` when its history has no `turn/start` and no `hooks:session-start/*` keyed block; its Append input waits, as any idle Append does, for the first driving input. `SessionStart` output is also dropped once a turn has started on the branch, because its block must come before the first turn. `Notification` runs on `approval/request` and writes nothing. Handlers with `async: true` run on any of these points and nothing waits for or reads their output. `HooksBranch` resolves the migration alias of each tool event from the declaration the branch uses: the tool part of the adopted `context/configured`, or, when the branch adopted none, the Session's current host and registered tools (G.2).
+`PostToolUse` runs per matching call of a `step/tool-result` batch whose result is not an error, `PostToolUseFailure` per matching call whose result has `is_error`; one batch writes one Append input. `Stop` runs on `turn/end` with status `completed`; a block writes a Queue follow-up carrying the reason, at most 3 consecutive (A8). `SessionStart` runs once on `main` when its history has no `turn/start` and no `hooks:session-start/*` keyed block; its Append input waits, as any idle Append does, for the first driving input. `SessionStart` output is also dropped once a turn has started on the branch, because its block must come before the first turn. `Notification` runs on `approval/request` and writes nothing. Handlers with `async: true` run on any of these points and nothing waits for or reads their output. `HooksBranch` resolves the migration alias of each tool event from the declaration in force on the branch (G.2).
 
 ## 4. Timing and conflicts
 
@@ -593,7 +593,7 @@ Matchers are tested against the Dim tool name and its alias, so pasted matchers 
 
 | Dim tool | Alias accepted by matchers |
 | --- | --- |
-| Any tool with risk `execute_process` (`exec`, the shell tool) | `Bash` |
+| Any tool with declared risk `execute_process` (`exec`, the shell tool) | `Bash` |
 | `read` | `Read` |
 | `write` | `Write` |
 | `edit` | `Edit` |

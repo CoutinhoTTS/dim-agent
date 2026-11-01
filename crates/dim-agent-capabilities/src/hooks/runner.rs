@@ -972,6 +972,8 @@ struct ToolRun {
     turn_id: String,
     name: String,
     input: JsonObject,
+    /// The alias of the declaration in force where the result batch folded,
+    /// so a reconfiguration queued before the drain does not change it.
     alias: Option<String>,
     content: ToolContent,
     is_error: bool,
@@ -1006,8 +1008,7 @@ struct View {
     calls: HashMap<String, (String, JsonObject, String)>,
     /// The matcher aliases of the tool part the last consumed
     /// `context/configured` carried, by tool name; `None` when it carried
-    /// none. Without a part, each request declares the Session's current host
-    /// and registered tools, and the registry answers for the aliases.
+    /// none, and the registry answers for the aliases.
     tool_aliases: Option<HashMap<String, String>>,
     /// The id of the follow-up input Hooks wrote and no turn has consumed yet.
     follow_up_input: Option<String>,
@@ -1196,8 +1197,7 @@ impl Branch {
     /// The alias a matcher of a tool event is tested against (G.2): a
     /// property of the declaration the branch uses. A branch that adopted a
     /// tool part uses that part, and a name it does not declare has no alias.
-    /// Without one, each request declares the Session's current host and
-    /// registered tools, and the registry answers for it.
+    /// Without one, the registry answers for the alias.
     fn alias(&self, view: &View, name: &str) -> Option<String> {
         if let Some(aliases) = &view.tool_aliases {
             return aliases.get(name).cloned();
@@ -1208,8 +1208,7 @@ impl Branch {
             .and_then(|tool| alias(&tool.definition))
     }
 
-    /// Fills a settled batch's aliases from the declaration in force when it
-    /// folded.
+    /// Fills a settled batch's aliases from the view it folded under.
     fn with_aliases(&self, view: &View, job: Job) -> Job {
         match job {
             Job::ToolResults { trigger, calls } => Job::ToolResults {
@@ -1488,7 +1487,7 @@ impl Branch {
         request: &ToolAdviceRequest,
         cancel: &CancellationToken,
     ) -> ToolAdviceReply {
-        // The alias comes from the call's declaration, never from the risk
+        // The alias comes from the declaration in force, never from the risk
         // this admission carries, so the same matcher selects the call on
         // every tool event (G.2).
         let alias = {
