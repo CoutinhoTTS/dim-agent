@@ -28,10 +28,8 @@ Commands:\n\
   models PROVIDER [--refresh | --clear-preferences MODEL\n\
                   | --set-limits MODEL --context-window N --max-output-tokens N\n\
                   | --set-missing-limits --context-window N --max-output-tokens N]\n\
-                                   List a Provider's models; --refresh reloads
-\
-                                   the area's list
-\
+                                   List a Provider's models; --refresh reloads\n\
+                                   the area's list\n\
   models PROVIDER enable|disable|remove|inspect MODEL\n\
   models PROVIDER edit MODEL       Edit the model's fields in the editor\n\
   models PROVIDER set MODEL PATH   Write the model's fields from PATH,\n\

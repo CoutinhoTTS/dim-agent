@@ -13,6 +13,12 @@ fn help_describes_a_standalone_server_binary() {
         "{help}"
     );
     assert!(help.contains("app-server subcommand"), "{help}");
+    // The models area's own command line sits in the table like every other
+    // area's.
+    assert!(
+        help.contains("\nmodels PROVIDER enable|disable|remove|inspect MODEL\n"),
+        "{help}"
+    );
 }
 
 /// The product executable is not that binary, under its own path or a link
