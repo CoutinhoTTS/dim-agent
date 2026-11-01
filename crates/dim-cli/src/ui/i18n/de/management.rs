@@ -1,10 +1,5 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
-        "Enter toggle" => "Enter umschalten",
-        "Ctrl+R reload" => "Ctrl+R neu laden",
-        "Enter toggle · Ctrl+R reload · Esc close" => {
-            "Enter umschalten · Ctrl+R neu laden · Esc schließen"
-        }
         "Loading..." => "Wird geladen…",
         "No entries." => "Keine Einträge.",
         "No matching entry." => "Kein passender Eintrag.",
@@ -16,6 +11,27 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Disabled {name}." => "{name} deaktiviert.",
         "Reloaded {area}: {entries} entries, {disabled} disabled." => {
             "{area} neu geladen: {entries} Einträge, {disabled} deaktiviert."
+        }
+        "Hooks" => "Hooks",
+        "invalid" => "ungültig",
+        "Saved." => "Gespeichert.",
+        "No change." => "Keine Änderung.",
+        "Your text is kept in {path}." => "Dein Text bleibt in {path} erhalten.",
+        "The user's own document; always in effect." => {
+            "Das eigene Dokument des Benutzers; immer wirksam."
+        }
+        "No .dimcode/hooks.json in this workspace." => {
+            "Keine .dimcode/hooks.json in diesem Arbeitsbereich."
+        }
+        "Owned by plugin {plugin}." => "Gehört zum Plugin {plugin}.",
+        "The user document turns every hook off (disableAllHooks)." => {
+            "Das Benutzerdokument schaltet alle Hooks ab (disableAllHooks)."
+        }
+        "Enter toggle" => "Enter umschalten",
+        "Ctrl+E edit" => "Ctrl+E bearbeiten",
+        "Ctrl+R reload" => "Ctrl+R neu laden",
+        "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
+            "Das Benutzerdokument wurde seit dem Lesen geändert; es wurde nichts geschrieben. Deine nächste Bearbeitung öffnet das aktuelle Dokument."
         }
         _ => return None,
     })

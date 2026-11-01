@@ -115,7 +115,7 @@ revision 冲突；后端原因；保存后 `exec` 在新边界下运行——Net
 - 终端 UI 面板 `/<area>`，两种 TUI 模式都有，遵循[命令菜单契约](#命令菜单)；
 - 子命令 `dimcode <area> <verb>`。
 
-两个界面使用同一个领域适配器。`dimcode hooks list|enable|disable` 保持现有输出与退出码，由 hooks 适配器提供。
+两个界面使用同一个领域适配器。`dimcode hooks list|enable|disable` 保持现有输出与退出码，`dimcode hooks edit` 与 `dimcode hooks set PATH` 经同一个适配器写入。
 
 ### 适配器
 
@@ -125,7 +125,7 @@ revision 冲突；后端原因；保存后 `exec` 在新边界下运行——Net
 
 ### 视图
 
-条目按所有者报告的分组归类——user、project、`plugin:<id>`、内置——顺序与所有者的报告顺序一致。每个条目有标签、详情、它的状态（已启用、已禁用、无效、被覆盖、只读）以及它提供的动作。所有者不允许客户端写入的条目（插件所有、已锁定）不提供写入动作，详情说明原因。所有者无法使用的东西作为 issue 列在条目之后。
+条目按所有者报告的分组归类——user、project、`plugin:<id>`、内置——顺序与所有者的报告顺序一致；一个 Hook 来源本身就是一个条目，归在 `sources` 分组下。每个条目有标签、详情、它的状态（已启用、已禁用、无效、被覆盖、只读）以及它提供的动作。所有者不允许客户端写入的条目（插件所有、已锁定）不提供写入动作，详情说明原因。所有者无法使用的东西作为 issue 列在条目之后。
 
 ```text
 ╭─ Skills ──────────────────────────────────────╮
@@ -164,17 +164,18 @@ Esc 关闭面板。动作键要么是 Ctrl 组合键，要么是筛选从不接�
 写入遵循[执行设置](#执行设置)：
 
 - 适配器保存它与草稿一起读到的 revision，revision 不是用户输入的字段；
-- 冲突时什么都不写并显示错误；从不自动重试，也从不覆盖更新的文档；
+- 冲突时什么都不写并显示错误；随后重新读取该领域，丢弃草稿与过期 revision 的关联，下次编辑打开已存储的文档。它从不自动重试，也从不覆盖更新的文档；
 - 重新加载丢弃草稿并重新读取；
 - 因冲突而未写入的编辑不会静默丢失：消息说明用户文本所在的文件；
+- 与更新文档无关的拒绝——文本解析失败，或所有者拒绝该文本——保留草稿的 revision，所以编辑键会带着用户的文本再次打开并再次写入；
 - 读取和写入期间禁止修改。
 
 ### 外部编辑器
 
-- 编辑器依次取 `$VISUAL`、`$EDITOR`、平台默认值：`vi`，Windows 上为 `notepad`。
-- 文档写入一个只有用户可读的文件（Unix 上权限 0600），位于产品 home 下的临时目录（`<home>/edit/`），它既不是原生存储、不是 Web 工作区，也不被导出。写入成功后删除该文件；被拒绝时保留该文件，消息说明它的路径，用户可再次打开。
+- 编辑器依次取 `$VISUAL`、`$EDITOR`、平台默认值：`vi`，Windows 上为 `notepad`。Unix 上像 git 一样经 `sh -c '<editor> "$@"' <editor> <file>` 运行，所以带引号的值或含空格的路径都能用。
+- 每次编辑写入自己的文件，独占创建且只有用户可读（Unix 上权限 0600），位于产品 home 下的临时目录（`<home>/edit/<area>-<unique>.json`），它既不是原生存储、不是 Web 工作区，也不被导出。写入成功或草稿没有变化时删除该文件；保留的草稿一直留到用户删除它，每条保留草稿的消息都说明它的路径。
 - 编辑器运行期间终端 UI 挂起——退出原始模式和备用屏幕，结束后恢复——两种 TUI 模式都一样。
-- 文件内容没有变化时不写入。
+- 文件内容没有变化时不写入；编辑器以非零状态退出时同样不写入：消息说明退出状态和保留用户文本的文件。
 - 文本解析失败或所有者拒绝时，显示错误，编辑键带着用户的文本再次打开编辑器。
 - 交互式编辑需要终端。每次编辑都有一个非交互的孪生命令 `dimcode <area> set PATH`（`-` 表示 stdin），它用写入前紧邻读到的那次 revision 写入。
 - 文档可以包含命令、环境变量和请求头。临时文件的暴露面与用户自己的设置文件相同，不会更多。
@@ -193,17 +194,20 @@ Esc 关闭面板。动作键要么是 Ctrl 组合键，要么是筛选从不接�
                           Update::Management ◄───────┴ 分组、条目、状态、动作、issues
 面板  ◄───────────────────{ area, view }◄──────────┘
    │
-   └─ Enter ──► Command { area, Toggle { id, enabled } } ──► skills.set_enabled ──► skills.catalog
-                                                                                    （再次给出视图）
+   ├─ Enter ──► Command { area, Toggle { id, enabled } } ──► skills.set_enabled ──► skills.catalog
+   │                                                                                （再次给出视图）
+   └─ Ctrl+E ──► 外部编辑器 ──► Command { area, Save { expectedRevision, document } }
+                                ──► hooks.save ──► hooks.catalog
 
 dimcode skills enable ID ──────────────────────────────► 同一个适配器，用自己的连接
+dimcode hooks set PATH   ──────────────────────────────► 同一个适配器，用自己的连接
 ```
 
 ### 最先承载的两个领域
 
 Skills（#814）：`/skills` 面板与 `dimcode skills list|enable|disable|reload`，经 `skills.catalog`、`skills.set_enabled` 与 `skills.refresh`；`/reload-skills` 不打开面板，直接运行 reload 动作并报告结果。条目按 id 启用或停用，所以 toggle 不需要自己的 revision。安装和删除 Skill 包仍归插件安装（[总览](overview.md#附录-d-cli-层)）所有。
 
-Hooks（#809）：`/hooks` 面板与 `dimcode hooks list|enable|disable|edit|set PATH`。面板列出各来源及其状态；toggle 经 `hooks.set_enabled` 启用或停用项目来源（项目来源初始为停用，只有用户可以启用它）；edit 用编辑器打开用户文档，并以 `hooks.save` 写入，即 Settings 来源 `hooks` 的 CAS 写入。用户来源、插件来源以及客户端不得写入的项目文件不提供写入动作，详情说明原因。
+Hooks（#809）：`/hooks` 面板与 `dimcode hooks list|enable|disable|edit|set PATH`。面板把每个来源列为一个带状态的条目；toggle 经 `hooks.set_enabled` 启用或停用项目来源（项目来源初始为停用，只有用户可以启用它）；edit 用编辑器打开用户文档，并以 `hooks.save` 写入，即 Settings 来源 `hooks` 的 CAS 写入。`dimcode hooks set PATH`（`-` 表示 stdin）是不经编辑器的同一次写入；revision 过期时两者都把用户文本留在 `<home>/edit/` 下它自己的文件里。用户来源提供 edit、不提供 toggle，因为它始终生效；插件来源两者都不提供，详情说明所属插件。
 
 ## 命令
 
@@ -222,14 +226,18 @@ Hooks（#809）：`/hooks` 面板与 `dimcode hooks list|enable|disable|edit|set
 | `/reload-skills` | 不打开面板，直接为会话所在工作区运行 reload 动作并报告找到的条目与 issues。 |
 | `dimcode hooks list [--cwd DIR]` | 经 `hooks.catalog` 列出生效的 Hook 目录（[Hooks](plugins/Hooks.md#a7-管理方法)）：每个来源的路径、启用状态与状态，以及每个处理器的事件、匹配器、命令与状态。 |
 | `dimcode hooks enable\|disable [--cwd DIR]` | 经 `hooks.set_enabled` 启用或停用 `DIR`（默认当前目录）所在工作区的项目 Hook，记录在 Settings 为其授权的项目根上。 |
+| `dimcode hooks edit` | 用 `$VISUAL`、`$EDITOR` 或平台默认编辑器打开用户 Hook 文档，并以 `hooks.catalog` 报告的 revision 经 `hooks.save` 写回；交互式编辑需要终端。 |
+| `dimcode hooks set PATH` | 从 `PATH`（`-` 表示 stdin）读取用户 Hook 文档并写入，用写入前紧邻读到的 revision；内容没有变化时不写入。 |
+| `/hooks` | 打开会话所在工作区的 Hooks 面板（[管理界面](#管理界面)）：每个来源一个条目，项目来源提供 toggle，用户文档提供 edit。 |
 | `/exit` | 在空闲的交互提示符处断开并退出。 |
 | `!command` / `!!command` | 以 record/private 模式调用 Session 现有的 `shell.run`，模型回合进行中也可用。 |
 | `--permission read-only\|workspace-write\|full-access` | 为 `dimcode`、`tui`、`exec` 和 `exec resume` 选择新建或恢复的 Session 的预设（[权限控制](#权限控制)）。 |
 | `/approval` | 在终端界面里为当前 Session 和之后的 Session 选择询问（`workspace-write`）或完全访问（[权限控制](#权限控制)）。 |
 | `/approvals`（别名 `/permissions`） | 交互客户端空闲时查看、切换和管理预设与命令规则。 |
 
-`dimcode hooks` 从不写 Hook 文档。用户文档是守护进程所服务 home 的 Settings 来源 `hooks`
-（原生存储中为 `user/hooks`，独立 home 中为 `hooks.json`），由 `hooks.save` 写入；
+`dimcode hooks` 只写用户的 Hook 文档，而且只经 edit 这一种类：`dimcode hooks edit`、
+`dimcode hooks set PATH` 以及 `/hooks` 里的 Ctrl+E 都调用守护进程所服务 home 的 Settings
+来源 `hooks`（原生存储中为 `user/hooks`，独立 home 中为 `hooks.json`）上的 `hooks.save`。
 项目文档是仓库中的 `.dimcode/hooks.json`，在仓库里编辑。`dimcode hooks enable|disable`
 把该工作区记录在用户本地的 `hooks-projects` 中，所以项目文件不能启用自己
 （[Hooks](plugins/Hooks.md#a7-管理方法)）。

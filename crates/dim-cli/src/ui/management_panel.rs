@@ -18,11 +18,11 @@
 //! ```
 //!
 //! The entry's actions decide the keys it offers: the hint names only those,
-//! and Enter, Space and Ctrl+R keep one meaning in every area.
+//! and Enter, Space, Ctrl+E and Ctrl+R keep one meaning in every area.
 
 use crate::model::session::{
-    ActionKind, Area, EntryState, ManagementAction, ManagementEntry, ManagementReply,
-    ManagementRequest, ManagementView,
+    ActionKind, Area, EntryState, ManagementAction, ManagementEntry, ManagementRefusal,
+    ManagementReply, ManagementRequest, ManagementView,
 };
 use crate::ui::i18n::{t, tf};
 use crate::ui::list_panel::{Event, Item, ListPanel};
@@ -37,8 +37,10 @@ use crate::ui::theme::ansi::fg;
 #[cfg(test)]
 pub const STRINGS: &[&str] = &[
     "Skills",
+    "Hooks",
     "Esc close",
     "Enter toggle",
+    "Ctrl+E edit",
     "Ctrl+R reload",
     "Loading...",
     "No entries.",
@@ -46,11 +48,22 @@ pub const STRINGS: &[&str] = &[
     "Issues",
     "enabled",
     "disabled",
+    "invalid",
+    "read-only",
     "shadowed by {name}",
+    "Working...",
     "Reloaded.",
+    "Saved.",
+    "No change.",
+    "Your text is kept in {path}.",
     "Enabled {name}.",
     "Disabled {name}.",
     "Reloaded {area}: {entries} entries, {disabled} disabled.",
+    "The user's own document; always in effect.",
+    "No .dimcode/hooks.json in this workspace.",
+    "Owned by plugin {plugin}.",
+    "The user document turns every hook off (disableAllHooks).",
+    "The user document changed since it was read; nothing was written. Your next edit opens the current document.",
 ];
 
 pub struct ManagementPanel {
@@ -98,13 +111,18 @@ impl ManagementPanel {
                 };
                 self.set_view(view.clone());
             }
-            Err(error) => {
+            Err(ManagementRefusal::Refused(error)) => {
                 self.message = Some(Err(error.clone()));
                 if self.view.is_none() {
                     // Nothing was shown yet: the list says why instead of
                     // keeping "Loading...".
                     self.list.set_items(Err(error.clone()), None);
                 }
+            }
+            Err(ManagementRefusal::Conflict { message, view }) => {
+                // The owner wrote nothing; this is the document as it now is.
+                self.message = Some(Err(message.clone()));
+                self.set_view((**view).clone());
             }
         }
         self.refresh_hint();
@@ -158,6 +176,40 @@ impl ManagementPanel {
         self.list.set_hint(hint(&kinds));
     }
 
+    /// The editor has the terminal: the panel takes no key until the draft
+    /// comes back.
+    pub fn saving(&mut self) {
+        self.busy = true;
+        self.message = Some(Ok(t("Working...").to_owned()));
+    }
+
+    /// The edit could not go on: say why, and let the keys through again.
+    pub fn failed(&mut self, error: String) {
+        self.busy = false;
+        self.message = Some(Err(error));
+    }
+
+    /// The document this panel read, which a draft is compared with.
+    pub fn document(&self) -> Option<&serde_json::Value> {
+        self.view.as_ref()?.document.as_ref()
+    }
+
+    /// The editor left the text as it was, so nothing is written.
+    pub fn unchanged(&mut self) {
+        self.busy = false;
+        self.message = Some(Ok(t("No change.").to_owned()));
+    }
+
+    /// A draft was written but the owner kept the stored document: the
+    /// message names where the user's text still is.
+    pub fn kept(&mut self, path: &str) {
+        let kept = tf("Your text is kept in {path}.", &[("path", path)]);
+        self.message = Some(match self.message.take() {
+            Some(Err(error)) => Err(format!("{error} {kept}")),
+            _ => Err(kept),
+        });
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
         if key.code == KeyCode::Esc {
             return match self.list.handle_key(key) {
@@ -181,6 +233,11 @@ impl ManagementPanel {
                 area: self.area,
                 action: ManagementAction::Reload,
             });
+        }
+        // Ctrl holds the actions off the filter, which takes every plain
+        // letter.
+        if key.code == KeyCode::Char('e') && key.mods.contains(Modifiers::CTRL) {
+            return self.edit();
         }
         // Space toggles as Enter does, as in `/settings > Execution`.
         let key = if matches!(key.code, KeyCode::Char(' ')) {
@@ -208,6 +265,30 @@ impl ManagementPanel {
         };
         self.busy = true;
         Effect::Management(request)
+    }
+
+    /// The selected entry's document for the external editor, with the
+    /// revision this panel read it at.
+    fn edit(&mut self) -> Effect {
+        if !self.offers(ActionKind::Edit) {
+            return Effect::None;
+        }
+        let Some((revision, document)) = self
+            .view
+            .as_ref()
+            .and_then(|view| Some((view.revision.clone()?, view.document.clone()?)))
+        else {
+            return Effect::None;
+        };
+        let Ok(json) = serde_json::to_string_pretty(&document) else {
+            return Effect::None;
+        };
+        self.busy = true;
+        Effect::EditManagement {
+            area: self.area,
+            revision,
+            text: format!("{json}\n"),
+        }
     }
 
     pub fn render(&self, width: usize, rows: usize, p: &Palette) -> Vec<String> {
@@ -263,6 +344,7 @@ pub fn reloaded(area: Area, view: &ManagementView) -> String {
 fn title(area: Area) -> &'static str {
     match area {
         Area::Skills => "Skills",
+        Area::Hooks => "Hooks",
     }
 }
 
@@ -270,13 +352,14 @@ fn title(area: Area) -> &'static str {
 fn label(kind: ActionKind) -> &'static str {
     match kind {
         ActionKind::Toggle => "Enter toggle",
+        ActionKind::Edit => "Ctrl+E edit",
         ActionKind::Reload => "Ctrl+R reload",
     }
 }
 
 /// The keys the area and the selected entry offer, as one hint.
 fn hint(kinds: &[ActionKind]) -> String {
-    let mut parts: Vec<&str> = [ActionKind::Toggle, ActionKind::Reload]
+    let mut parts: Vec<&str> = [ActionKind::Toggle, ActionKind::Edit, ActionKind::Reload]
         .into_iter()
         .filter(|kind| kinds.contains(kind))
         .map(label)
@@ -313,7 +396,9 @@ fn states(entry: &ManagementEntry) -> Vec<String> {
     let mut states = vec![t(if entry.enabled { "enabled" } else { "disabled" }).to_owned()];
     for state in &entry.states {
         states.push(match state {
+            EntryState::Invalid => t("invalid").to_owned(),
             EntryState::Shadowed { by } => tf("shadowed by {name}", &[("name", by)]),
+            EntryState::ReadOnly => t("read-only").to_owned(),
         });
     }
     states
@@ -338,6 +423,7 @@ fn outcome(action: &ManagementAction, view: &ManagementView) -> String {
             },
             &[("name", &name(id))],
         ),
+        ManagementAction::Save { .. } => t("Saved.").to_owned(),
         ManagementAction::List | ManagementAction::Reload => t("Reloaded.").to_owned(),
     }
 }
@@ -567,12 +653,137 @@ mod tests {
                 area: Area::Skills,
                 action: ManagementAction::List,
             },
-            result: Err("This daemon cannot manage skills.".into()),
+            result: Err(ManagementRefusal::Refused(
+                "This daemon cannot manage skills.".into(),
+            )),
         });
         assert!(
             shown(&panel, 60, 10)
                 .join(" ")
                 .contains("This daemon cannot manage skills.")
+        );
+    }
+
+    /// A hooks view: the user document can be edited, a plugin's source is
+    /// read-only, and an unreadable source says it is invalid.
+    fn hooks_view() -> ManagementView {
+        ManagementView {
+            revision: Some("user:1".into()),
+            document: Some(serde_json::json!({"hooks": {}})),
+            actions: vec![ActionKind::Reload],
+            groups: vec![ManagementGroup {
+                heading: "sources".into(),
+                entries: vec![
+                    ManagementEntry {
+                        id: "user".into(),
+                        label: "user".into(),
+                        detail: vec!["The user's own document; always in effect.".into()],
+                        enabled: true,
+                        states: Vec::new(),
+                        actions: vec![ActionKind::Edit],
+                    },
+                    ManagementEntry {
+                        id: "plugin:kit".into(),
+                        label: "plugin:kit".into(),
+                        detail: vec!["Owned by plugin kit.".into()],
+                        enabled: true,
+                        states: vec![EntryState::ReadOnly, EntryState::Invalid],
+                        actions: vec![],
+                    },
+                ],
+            }],
+            issues: Vec::new(),
+        }
+    }
+
+    /// Ctrl+E opens the document it read, with the revision it read it at;
+    /// a read-only source offers no write at all.
+    #[test]
+    fn edit_offers_the_document_and_a_read_only_source_offers_no_write() {
+        let mut panel = ManagementPanel::new(Area::Hooks);
+        panel.set_result(&ManagementReply {
+            request: ManagementRequest {
+                area: Area::Hooks,
+                action: ManagementAction::List,
+            },
+            result: Ok(hooks_view()),
+        });
+        let text = shown(&panel, 72, 20).join("\n");
+        assert!(text.contains("read-only  invalid"), "{text}");
+        match panel.handle_key(KeyEvent::new(KeyCode::Char('e'), Modifiers::CTRL)) {
+            Effect::EditManagement {
+                area,
+                revision,
+                text,
+            } => {
+                assert_eq!(area, Area::Hooks);
+                assert_eq!(revision, "user:1");
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+                    serde_json::json!({"hooks": {}})
+                );
+            }
+            _ => panic!("expected an edit"),
+        }
+        // The editor has the terminal: no key reaches the area until it is
+        // back.
+        assert!(matches!(
+            panel.handle_key(key(KeyCode::Enter)),
+            Effect::None
+        ));
+        panel.saving();
+        assert!(shown(&panel, 72, 20).join("\n").contains("Working..."));
+        panel.kept("/home/u/edit/hooks.json");
+        let text = shown(&panel, 72, 20).join(" ");
+        assert!(
+            text.contains("Your text is kept in /home/u/edit/hooks.json."),
+            "{text}"
+        );
+        // A read-only source ignores Enter and Ctrl+E.
+        let mut panel = ManagementPanel::new(Area::Hooks);
+        panel.set_result(&ManagementReply {
+            request: ManagementRequest {
+                area: Area::Hooks,
+                action: ManagementAction::List,
+            },
+            result: Ok(hooks_view()),
+        });
+        panel.handle_key(key(KeyCode::End));
+        let text = shown(&panel, 72, 20).join("\n");
+        assert!(!text.contains("Ctrl+E"), "no edit key is offered: {text}");
+        assert!(matches!(
+            panel.handle_key(key(KeyCode::Enter)),
+            Effect::None
+        ));
+        assert!(matches!(
+            panel.handle_key(KeyEvent::new(KeyCode::Char('e'), Modifiers::CTRL)),
+            Effect::None
+        ));
+    }
+
+    /// An area whose daemon reports no document offers no edit, and a
+    /// reload without a panel names the area's size in its own title.
+    #[test]
+    fn an_area_without_a_document_offers_no_edit() {
+        let mut view = hooks_view();
+        view.document = None;
+        view.groups[0].entries[0].actions = vec![ActionKind::Reload];
+        let mut panel = ManagementPanel::new(Area::Hooks);
+        panel.set_result(&ManagementReply {
+            request: ManagementRequest {
+                area: Area::Hooks,
+                action: ManagementAction::List,
+            },
+            result: Ok(view),
+        });
+        assert!(matches!(
+            panel.handle_key(KeyEvent::new(KeyCode::Char('e'), Modifiers::CTRL)),
+            Effect::None
+        ));
+        let text = reloaded(Area::Hooks, &hooks_view());
+        assert!(
+            text.starts_with("Reloaded Hooks: 2 entries, 0 disabled."),
+            "{text}"
         );
     }
 
@@ -608,7 +819,9 @@ mod tests {
                 area: Area::Skills,
                 action: ManagementAction::List,
             },
-            result: Err("This daemon cannot manage skills.".into()),
+            result: Err(ManagementRefusal::Refused(
+                "This daemon cannot manage skills.".into(),
+            )),
         });
         let text = shown(&panel, 60, 12).join("\n");
         assert!(text.contains("This daemon cannot manage skills."), "{text}");
@@ -617,6 +830,48 @@ mod tests {
             Effect::Management(request) => assert_eq!(request.action, ManagementAction::Reload),
             _ => panic!("expected a reload"),
         }
+    }
+
+    /// A conflict writes nothing, drops the entry's link to the stale
+    /// revision and shows the area as its owner now reports it.
+    #[test]
+    fn a_conflict_shows_the_newer_document() {
+        let mut panel = ManagementPanel::new(Area::Hooks);
+        panel.set_result(&ManagementReply {
+            request: ManagementRequest {
+                area: Area::Hooks,
+                action: ManagementAction::List,
+            },
+            result: Ok(hooks_view()),
+        });
+        panel.set_result(&ManagementReply {
+            request: ManagementRequest {
+                area: Area::Hooks,
+                action: ManagementAction::Save {
+                    expected_revision: "user:1".into(),
+                    document: serde_json::json!({"hooks": {}}),
+                },
+            },
+            result: Err(ManagementRefusal::Conflict {
+                message: "The user document changed since it was read.".into(),
+                view: Box::new(ManagementView {
+                    revision: Some("user:2".into()),
+                    document: Some(serde_json::json!({"hooks": {}})),
+                    actions: vec![ActionKind::Reload],
+                    ..hooks_view()
+                }),
+            }),
+        });
+        let text = shown(&panel, 72, 20).join(" ");
+        assert!(
+            text.contains("The user document changed since it was read."),
+            "{text}"
+        );
+        panel.kept("/home/u/edit/hooks-1.json");
+        let text = shown(&panel, 72, 20).join(" ");
+        assert!(text.contains("Your text is kept in"), "{text}");
+        assert!(text.contains("hooks-1.json"), "{text}");
+        assert_eq!(panel.document(), Some(&serde_json::json!({"hooks": {}})));
     }
 
     /// Filtering keeps the entry's keys: the hint follows the new selection.

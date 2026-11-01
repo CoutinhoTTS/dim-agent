@@ -12,14 +12,16 @@
 //! kind it has. [`supported`], [`actions`] and the views read that table, so
 //! adding an area, or a kind to an area, writes the method once.
 
+pub mod editor;
+pub mod hooks;
 pub mod skills;
 
 use std::path::Path;
 
 use crate::client::Client;
 use crate::model::session::{
-    ActionKind, Area, ManagementAction, ManagementEntry, ManagementGroup, ManagementRequest,
-    ManagementView,
+    ActionKind, Area, ManagementAction, ManagementEntry, ManagementGroup, ManagementRefusal,
+    ManagementRequest, ManagementView,
 };
 
 /// One area's management methods: the read that reports the area, and the
@@ -46,9 +48,20 @@ const SKILLS: Methods = Methods {
     ],
 };
 
+const HOOKS: Methods = Methods {
+    catalog: "hooks.catalog",
+    kinds: &[
+        (ActionKind::Toggle, "hooks.set_enabled"),
+        (ActionKind::Edit, "hooks.save"),
+        // A reload re-reads the document, so it needs no rescan method.
+        (ActionKind::Reload, "hooks.catalog"),
+    ],
+};
+
 fn methods_of(area: Area) -> &'static Methods {
     match area {
         Area::Skills => &SKILLS,
+        Area::Hooks => &HOOKS,
     }
 }
 
@@ -58,6 +71,7 @@ fn kind(action: &ManagementAction) -> Option<ActionKind> {
         ManagementAction::List => None,
         ManagementAction::Toggle { .. } => Some(ActionKind::Toggle),
         ManagementAction::Reload => Some(ActionKind::Reload),
+        ManagementAction::Save { .. } => Some(ActionKind::Edit),
     }
 }
 
@@ -138,14 +152,26 @@ pub async fn apply(
     client: &mut Client,
     request: &ManagementRequest,
     cwd: &Path,
-) -> Result<ManagementView, String> {
-    supported(client, request)?;
+) -> Result<ManagementView, ManagementRefusal> {
+    supported(client, request).map_err(ManagementRefusal::Refused)?;
     let actions = actions(client, request.area);
     match request.area {
-        Area::Skills => Ok(skills::view(
-            &skills::apply(client, &request.action, cwd).await?,
-            &actions,
-        )),
+        Area::Skills => {
+            let catalog = skills::apply(client, &request.action, cwd)
+                .await
+                .map_err(ManagementRefusal::Refused)?;
+            Ok(skills::view(&catalog, &actions))
+        }
+        Area::Hooks => match hooks::apply(client, &request.action, cwd).await {
+            Ok(catalog) => Ok(hooks::view(&catalog, &actions)),
+            Err(hooks::Failure::Refused(message)) => Err(ManagementRefusal::Refused(message)),
+            Err(hooks::Failure::Conflict { message, catalog }) => {
+                Err(ManagementRefusal::Conflict {
+                    message,
+                    view: Box::new(hooks::view(&catalog, &actions)),
+                })
+            }
+        },
     }
 }
 

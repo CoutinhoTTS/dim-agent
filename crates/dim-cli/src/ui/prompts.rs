@@ -121,6 +121,13 @@ pub enum Effect {
     Plugin(crate::model::session::PluginAction),
     /// One request to a management area (`/skills`, `/hooks`).
     Management(crate::model::session::ManagementRequest),
+    /// Open a management area's document in the external editor, with the
+    /// revision the panel read it at.
+    EditManagement {
+        area: crate::model::session::Area,
+        revision: String,
+        text: String,
+    },
     /// Change a provider (`/connect`).
     Provider(crate::model::session::ProviderAction),
     /// Begin a sign-in on the worker.

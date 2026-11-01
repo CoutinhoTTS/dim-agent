@@ -68,6 +68,9 @@ pub async fn apply(
                 .await
                 .map_err(|error| error.to_string())?;
         }
+        ManagementAction::Save { .. } => {
+            return Err("A Skill has no document to edit.".into());
+        }
     }
     catalog(client, &cwd.to_string_lossy()).await
 }

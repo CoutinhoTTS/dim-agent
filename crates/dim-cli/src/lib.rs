@@ -7,7 +7,6 @@ mod composer;
 mod configure;
 mod display;
 mod export;
-mod hooks_command;
 mod images;
 mod input;
 mod leaf;
@@ -839,13 +838,11 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         Action::Management(request) => {
             management_command::run(&mut client, &options, request).await
         }
-        Action::HooksList => {
-            hooks_command::list(&mut client, &options).await?;
-            Ok(0)
+        Action::ManagementEdit(area) => {
+            management_command::edit(&mut client, &options, *area).await
         }
-        Action::HooksEnable { enabled } => {
-            hooks_command::set_enabled(&mut client, &options, *enabled).await?;
-            Ok(0)
+        Action::ManagementSet { area, path } => {
+            management_command::set(&mut client, &options, *area, path).await
         }
         Action::Recording { enabled } => recording::run(&mut client, &options, *enabled).await,
         Action::Chat | Action::Tui | Action::Exec => {

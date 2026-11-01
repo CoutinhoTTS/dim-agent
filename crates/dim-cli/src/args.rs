@@ -35,6 +35,9 @@ Commands:\n\
   hooks list                       List hook handlers, their sources and states\n\
   hooks enable                     Run this workspace's .dimcode/hooks.json\n\
   hooks disable                    Stop running this workspace's hooks\n\
+  hooks edit                       Edit the user's hook document\n\
+  hooks set PATH                   Write the user's hook document from PATH,\n\
+                                   or from stdin for -\n\
   recording [on|off]               Record model requests to the home's\n\
                                    model-log/recordings.jsonl; prompts, code\n\
                                    and tool output are written there\n\
@@ -129,12 +132,16 @@ pub enum Action {
         id: String,
         enabled: bool,
     },
-    HooksList,
-    HooksEnable {
-        enabled: bool,
-    },
-    /// `skills ...`: one request to a management area's owner.
+    /// `<area> ...`: one request to a management area's owner.
     Management(crate::model::session::ManagementRequest),
+    /// `<area> edit`: the area's document in the external editor.
+    ManagementEdit(crate::model::session::Area),
+    /// `<area> set PATH`: the area's document from a file, or from stdin for
+    /// `-`.
+    ManagementSet {
+        area: crate::model::session::Area,
+        path: std::path::PathBuf,
+    },
     /// `recording [on|off]`: the daemon's model request record.
     Recording {
         enabled: Option<bool>,
@@ -501,12 +508,31 @@ impl Options {
                     });
                 }
                 "hooks" if matches!(options.action, Action::Chat) => {
-                    options.action = match value(&mut args)?.as_str() {
-                        "list" => Action::HooksList,
-                        command @ ("enable" | "disable") => Action::HooksEnable {
-                            enabled: command == "enable",
+                    use crate::model::session::{Area, ManagementAction, ManagementRequest};
+                    let verb = value(&mut args)?;
+                    options.action = match verb.as_str() {
+                        "list" => Action::Management(ManagementRequest {
+                            area: Area::Hooks,
+                            action: ManagementAction::List,
+                        }),
+                        command @ ("enable" | "disable") => Action::Management(ManagementRequest {
+                            area: Area::Hooks,
+                            action: ManagementAction::Toggle {
+                                id: crate::management::hooks::PROJECT.to_owned(),
+                                enabled: command == "enable",
+                            },
+                        }),
+                        "edit" => Action::ManagementEdit(Area::Hooks),
+                        "set" => Action::ManagementSet {
+                            area: Area::Hooks,
+                            path: value(&mut args)?.into(),
                         },
-                        _ => return Err("Use hooks list, hooks enable or hooks disable".into()),
+                        _ => {
+                            return Err(
+                                "Use hooks list, hooks enable, hooks disable, hooks edit or hooks set PATH"
+                                    .into(),
+                            );
+                        }
                     };
                 }
                 "recording" if matches!(options.action, Action::Chat) => {

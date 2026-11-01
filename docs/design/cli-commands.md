@@ -146,7 +146,7 @@ Each area has two surfaces in the native client:
 - a subcommand, `dimcode <area> <verb>`.
 
 Both surfaces use the same area adapter. `dimcode hooks list|enable|disable` keeps its output and
-exit codes, and the hooks adapter serves it.
+exit codes, and `dimcode hooks edit` and `dimcode hooks set PATH` write through the same adapter.
 
 ### The adapter
 
@@ -162,10 +162,11 @@ carry gets that fact from the producer: `skills.catalog` reports each entry's `s
 ### The view
 
 Entries are grouped under source headings — user, project, `plugin:<id>`, built-in — as the
-owner reports them. Each entry has a label, a detail, its states (enabled, disabled, invalid,
-shadowed, read-only) and the actions it offers. An entry its owner does not let the client write
-(plugin-owned, locked) offers no write action, and its detail says why. What the owner could not
-use is listed after the entries as its issues.
+owner reports them; a hook source is itself an entry, under the heading `sources`. Each entry has a
+label, a detail, its states (enabled, disabled, invalid, shadowed, read-only) and the actions it
+offers. An entry its owner does not let the client write (plugin-owned, locked) offers no write
+action, and its detail says why. What the owner could not use is listed after the entries as its
+issues.
 
 ```text
 ╭─ Skills ──────────────────────────────────────╮
@@ -211,31 +212,38 @@ Writes follow [Execution settings](#execution-settings):
 
 - the adapter keeps the revision it read with the draft, and the revision is not a field the user
   types;
-- a conflict writes nothing and shows the error; it never retries automatically and never
-  overwrites a newer document;
+- a conflict writes nothing and shows the error; the area is read again, the draft's link to the
+  stale revision is dropped, and the next edit opens the stored document. It never retries
+  automatically and never overwrites a newer document;
 - reload discards the draft and reads again;
 - an edit the conflict prevented is not lost silently: the message names the file that holds the
   user's text;
+- a refusal that does not involve a newer document — text that does not parse, or one the owner
+  refuses — keeps the draft's revision, so the edit key reopens the user's text and writes it
+  again;
 - loading and writing disable mutation.
 
 ### The external editor
 
 - The editor is `$VISUAL`, then `$EDITOR`, then the platform default: `vi`, or `notepad` on
-  Windows.
-- The document is written to a file only the user can read (mode 0600 on Unix), in a temporary
-  directory under the product home (`<home>/edit/`), which is not the native store, the Web
-  workspace or anything exported. A successful write removes the file; a refused one keeps it
-  and the message names it, so the user can reopen it.
-- The terminal UI suspends while the editor runs — raw mode and the alternate screen are left and
-  restored — and works in both TUI modes.
-- If the file is unchanged, nothing is written.
+  Windows. On Unix it runs through `sh -c '<editor> "$@"' <editor> <file>`, as git does, so a
+  value with quotes or a path with a space works.
+- Each edit writes its own file, created exclusively and readable only by the user (mode 0600 on
+  Unix), in a temporary directory under the product home (`<home>/edit/<area>-<unique>.json`),
+  which is not the native store, the Web workspace or anything exported. A successful write, or
+  an unchanged draft, removes its file; a draft that is kept stays until the user removes it,
+  and every message that keeps one names it.
+- The terminal UI suspends while the editor runs — raw mode and the alternate screen are left
+  and restored — and works in both TUI modes.
+- If the file is unchanged, nothing is written. A non-zero editor exit writes nothing either:
+  the message names the status and the file that keeps the user's text.
 - If the text does not parse, or the owner refuses it, the error is shown and the edit key opens
   the editor again with the user's text.
-- An interactive edit needs a terminal. Every edit has a non-interactive twin,
-  `dimcode <area> set PATH` (`-` for stdin), which writes with the revision it reads immediately
-  before the write.
-- A document can hold commands, environment and headers. The temporary file has the same exposure
-  as the user's own settings file, and nothing more.
+- An interactive edit needs a terminal. Every edit has a non-interactive twin, `dimcode <area>
+  set PATH` (`-` for stdin), which writes with the revision it reads immediately before the
+  write.
+- A document can hold commands, environment and headers. The temporary file has the same
+  exposure as the user's own settings file, and nothing more.
 
 ### The session port and the one panel
 
@@ -257,10 +265,13 @@ Writes follow [Execution settings](#execution-settings):
                           Update::Management ◄───────┴ group, entries, states, actions, issues
 Panel  ◄───────────────────{ area, view }◄──────────┘
    │
-   └─ Enter ──► Command { area, Toggle { id, enabled } } ──► skills.set_enabled ──► skills.catalog
-                                                                                    (the view again)
+   ├─ Enter ──► Command { area, Toggle { id, enabled } } ──► skills.set_enabled ──► skills.catalog
+   │                                                                                (the view again)
+   └─ Ctrl+E ──► the external editor ──► Command { area, Save { expectedRevision, document } }
+                                          ──► hooks.save ──► hooks.catalog
 
 dimcode skills enable ID ──────────────────────────────► the same adapter, over its own connection
+dimcode hooks set PATH   ──────────────────────────────► the same adapter, over its own connection
 ```
 
 ### The first two areas
@@ -272,11 +283,13 @@ toggle needs no revision of its own. Installing and removing a Skill package sta
 installation ([overview](overview.md#appendix-d-cli-layer)), which owns it.
 
 Hooks (#809): the `/hooks` panel and `dimcode hooks list|enable|disable|edit|set PATH`. The panel
-lists the sources with their state; a toggle enables or disables the project source through
-`hooks.set_enabled` (a project source starts disabled, and only the user can enable it); and edit
-opens the user document in the editor and writes it with `hooks.save`, which is the CAS write of
-the Settings source `hooks`. The user source, a plugin source and a project file the client may
-not write offer no write action of their own, and their detail says why.
+lists each source as an entry with its state; a toggle enables or disables the project source
+through `hooks.set_enabled` (a project source starts disabled, and only the user can enable it), and
+edit opens the user document in the editor and writes it with `hooks.save`, which is the CAS write
+of the Settings source `hooks`. `dimcode hooks set PATH` (`-` for stdin) is the same write without
+an editor, and either one keeps the user's text in its own file under `<home>/edit/` when the
+revision is stale. The user source offers edit and no toggle, because it is always in effect; a
+plugin's source offers neither, and its detail names the plugin.
 
 ## Commands
 
@@ -299,17 +312,21 @@ not write offer no write action of their own, and their detail says why.
 | `/reload-skills` | Run the reload action for the Session's workspace with no panel and report the entries and issues it found. |
 | `dimcode hooks list [--cwd DIR]` | List the effective hook catalog over `hooks.catalog` ([Hooks](plugins/Hooks.md#a7-management-methods)): each source with its path, enablement and state, and each handler with its event, matcher, command and state. |
 | `dimcode hooks enable\|disable [--cwd DIR]` | Enable or disable the project hooks of the workspace at `DIR` (the current directory by default) over `hooks.set_enabled`, recorded against the project root Settings authorizes for it. |
+| `dimcode hooks edit` | Open the user's hook document in `$VISUAL`, `$EDITOR` or the platform default, and write it over `hooks.save` with the revision `hooks.catalog` reported; an interactive edit needs a terminal. |
+| `dimcode hooks set PATH` | Write the user's hook document from `PATH`, or from stdin for `-`, with the revision read immediately before the write; unchanged text writes nothing. |
+| `/hooks` | Open the Hooks panel of the Session's workspace ([management surfaces](#management-surfaces)): a source per entry, the project's toggle and the user document's edit. |
 | `/exit` | Detach and exit from the idle interactive prompt. |
 | `!command` / `!!command` | Call the Session's existing `shell.run` in record/private mode, including during a model turn. |
 | `--permission read-only\|workspace-write\|full-access` | Select the preset of a new or resumed Session for `dimcode`, `tui`, `exec` and `exec resume` ([permission controls](#permission-controls)). |
 | `/approval` | In the terminal UI, choose Ask (`workspace-write`) or full access for this session and later ones ([permission controls](#permission-controls)). |
 | `/approvals` (alias `/permissions`) | Show, switch and manage the preset and command rules while the interactive client is idle. |
 
-`dimcode hooks` never writes a hook document. The user's document is the Settings source `hooks`
-of the home the daemon serves (`user/hooks` in native storage, `hooks.json` in a standalone home),
-written by `hooks.save`; the project document is `.dimcode/hooks.json` in the repository, edited
-there. `dimcode hooks enable|disable` records the workspace in the user-local `hooks-projects`, so a
-project file cannot enable itself ([Hooks](plugins/Hooks.md#a7-management-methods)).
+`dimcode hooks` writes only the user's hook document, and only through the edit kind: `dimcode hooks
+edit` and `dimcode hooks set PATH`, and Ctrl+E in `/hooks`, call `hooks.save` on the Settings source
+`hooks` of the home the daemon serves (`user/hooks` in native storage, `hooks.json` in a standalone
+home). The project document is `.dimcode/hooks.json` in the repository, edited there. `dimcode hooks
+enable|disable` records the workspace in the user-local `hooks-projects`, so a project file cannot
+enable itself ([Hooks](plugins/Hooks.md#a7-management-methods)).
 
 Global home, workspace, server and model-profile options retain their current
 meanings and work before or after the command. Existing login/account/logout,

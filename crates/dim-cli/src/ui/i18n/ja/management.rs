@@ -1,10 +1,5 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
-        "Enter toggle" => "Enter 切り替え",
-        "Ctrl+R reload" => "Ctrl+R 再読み込み",
-        "Enter toggle · Ctrl+R reload · Esc close" => {
-            "Enter 切り替え · Ctrl+R 再読み込み · Esc 閉じる"
-        }
         "Loading..." => "読み込み中…",
         "No entries." => "項目がありません。",
         "No matching entry." => "一致する項目がありません。",
@@ -16,6 +11,27 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Disabled {name}." => "{name} を無効にしました。",
         "Reloaded {area}: {entries} entries, {disabled} disabled." => {
             "{area} を再読み込みしました：{entries} 件、{disabled} 件が無効。"
+        }
+        "Hooks" => "フック",
+        "invalid" => "無効",
+        "Saved." => "保存しました。",
+        "No change." => "変更はありません。",
+        "Your text is kept in {path}." => "入力した内容は {path} に残しています。",
+        "The user's own document; always in effect." => {
+            "ユーザー自身のドキュメント。常に有効です。"
+        }
+        "No .dimcode/hooks.json in this workspace." => {
+            "このワークスペースに .dimcode/hooks.json はありません。"
+        }
+        "Owned by plugin {plugin}." => "プラグイン {plugin} が所有しています。",
+        "The user document turns every hook off (disableAllHooks)." => {
+            "ユーザードキュメントがすべてのフックを無効にしています（disableAllHooks）。"
+        }
+        "Enter toggle" => "Enter 切り替え",
+        "Ctrl+E edit" => "Ctrl+E 編集",
+        "Ctrl+R reload" => "Ctrl+R 再読み込み",
+        "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
+            "ユーザードキュメントは読み取り後に変更されています。今回は何も書き込んでいません。次回の編集では現在のドキュメントを開きます。"
         }
         _ => return None,
     })

@@ -316,6 +316,9 @@ async fn a_user_document_is_saved_with_revisions_and_reports_disable_all_hooks()
         revision
     );
 
+    // The revision from before the update is stale: the CAS refuses it and
+    // writes nothing.
+    let previous = revision.clone();
     // disableAllHooks is reported and does not change the catalog.
     let updated = fixture
         .call(
@@ -334,6 +337,18 @@ async fn a_user_document_is_saved_with_revisions_and_reports_disable_all_hooks()
     let catalog = fixture.call("hooks.catalog", json!({})).await.unwrap();
     assert_eq!(catalog["userRevision"], revision);
     assert_eq!(catalog["disableAllHooks"], true);
+    let stale = fixture
+        .call(
+            "hooks.save",
+            json!({"expectedRevision": previous, "document": {"hooks": {}}}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(stale.data.as_ref().unwrap().app_error, "hooks_conflict");
+    assert_eq!(
+        fixture.call("hooks.catalog", json!({})).await.unwrap()["disableAllHooks"],
+        true
+    );
     fixture.root.shutdown().await.unwrap();
     fs::remove_dir_all(&fixture.home).unwrap();
 }

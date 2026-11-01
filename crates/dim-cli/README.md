@@ -963,6 +963,7 @@ The terminal UI reaches the same Session methods as the line client:
 | `/plugins install PATH` | Installs and turns on the plugin directory at `PATH`, relative to the workspace (`plugin.install`), then opens the list with the outcome, including when a restart is required. Git installs, update and remove are `dimcode plugin ...` |
 | `/skills` | Lists the Skills of the Session's workspace from `skills.catalog`, grouped under the source each was found in (`user`, `project`, `plugin:<id>`), with its state and, for the selected one, its description and file; the catalog's issues follow the entries. `Enter` or `Space` enables or disables the selected Skill (`skills.set_enabled`) and the list is read again; `Ctrl+R` rescans the roots (`skills.refresh`). A daemon without the methods says it cannot manage Skills |
 | `/reload-skills` | Runs the rescan of the Session's workspace with no panel and reports the entry and issue counts it found, plus each issue |
+| `/hooks` | Lists each hook source of the Session's workspace as an entry from `hooks.catalog`, with its state and detail; `Enter` or `Space` enables or disables the Session's project source (`hooks.set_enabled`), `Ctrl+E` opens the user document in `$EDITOR` and writes it with `hooks.save` and the revision the panel read, `Ctrl+R` reads the area again. A plugin source is read-only and offers no write |
 | `/login` | Opens the Dim sign-in panel. It shows the account from `account.status` as a status line; signed out, its entries are browser, enterprise-email or device sign-in through `account.login.*` at the entry's account directory (below), each entering its own flow (`Esc` after a failure returns to the entries); signed in, it shows the account's name and email, its plan, credits, token windows and feature meters from `account.usage` (`Ctrl+R` asks again; a plugin without the method shows why), and its entries open `/models`, open the plan page at the account directory's `/console/subscription` in the browser, or sign out with `account.logout`, after which the panel shows the sign-in entries again. Browser sign-in redirects to `http://localhost:54321/auth/callback` (`--redirect-uri` overrides it), catches the callback on a loopback listener when that port is free and opens the authorization URL (neither over SSH); a callback URL pasted in the panel completes it too; device sign-in shows the code and polls the attempt every second. `Esc` closes the panel and cancels a pending attempt. On success the catalog is refreshed with `provider.refresh` and `/models` opens |
 | `/connect` | Reads safe connection snapshots with `provider.management`. `Test + apply` probes the unsaved draft, then updates only changed fields at the form's original version with `provider.update`; a record whose models are its own has them replaced by the new endpoint's listing in that same write when the edit changes `baseUrl`, `credential` or `headers`, so the catalog follows the new endpoint, while a proxy or timeout edit saves alone and a builtin whose models are the bundled catalog's keeps them; unsupported model listing still permits saving and reports that the key was not tested. Other probe failures keep the draft. `Disconnect` atomically clears credentials and disables the record, and a catalog of the record's own goes with it, because the listing taken with that key is that key's view; the next connect lists the endpoint again. Enable/Disable update only that flag. `Add custom provider` probes a Name, Base URL and API Key draft, then calls `provider.create` with the form's retained UUID and discovered defaults. IDs never derive from names. Failures retain edits; rereads update the safe status/version and require confirmation before retrying. `Ctrl+R` rereads without discarding the draft. Fields and filters use the composer's line editor. Account sign-in retains its existing owner |
 | `/resume` | Lists saved Sessions across workspaces, 50 at a time through `session.catalog`; moving near the end loads the next page. The filter searches the server after 150 ms, including Sessions not loaded yet. Ctrl+R refreshes; closing, refreshing or replacing a search cancels the pending read when the daemon advertises `session.catalog.cancel`. Older daemons use `session.summaries` and local filtering |
@@ -1071,11 +1072,24 @@ than one per feature ([management surfaces](../../docs/design/cli-commands.md#ma
 - `dimcode <area> <verb>` calls the same adapter over its own connection, so a subcommand needs
   no Session.
 
-The keys are one per action kind in every area: `Enter` or `Space` toggles, `Ctrl+R` re-reads
-the area or asks its owner to rescan, and `Esc` closes. An action key is a Ctrl chord, or a key
-the filter never takes, because the filter takes every plain letter. The bottom border names the
-area's kinds plus the selected entry's; reload acts on the area, so it works with no entry
-selected and retries a failed read.
+The keys are one per action kind in every area: `Enter` or `Space` toggles, `Ctrl+E` opens the
+area's document in the external editor, `Ctrl+R` re-reads the area or asks its owner to rescan,
+and `Esc` closes. An action key is a Ctrl chord, or a key the filter never takes, because the
+filter takes every plain letter. The bottom border names the area's kinds plus the selected
+entry's; reload acts on the area, so it works with no entry selected and retries a failed read.
+The panel reads and writes the Session's workspace, not the directory the client started in.
+
+The external editor is `$VISUAL`, then `$EDITOR`, then `vi` (`notepad` on Windows), run on Unix
+through `sh -c '<editor> "$@"' <editor> <file>` as git does, so a quoted path with a space
+works. Each edit gets its own file, `<home>/edit/<area>-<unique>.json`: created exclusively,
+mode 0600 in a 0700 directory, so a kept draft is never overwritten and two clients editing one
+area never share a file. The terminal UI releases raw mode and the alternate screen while the
+editor runs. A successful write, or an unchanged draft, removes its file. A write the owner
+refuses keeps it and the message names it; a refused editor exit (`:cq`, a non-zero status)
+writes nothing and does the same. `Ctrl+E` opens the user's text again from that file, unless
+the owner's refusal was a conflict: then the area is read again and the next edit opens the
+current document at its new revision. `dimcode <area> set PATH` (`-` for stdin) is the same
+write without an editor.
 
 ```text
 /skills ──► Command::Management { area, List } ──► adapter ──► skills.catalog
@@ -1083,6 +1097,7 @@ selected and retries a failed read.
 Panel  ◄── Update::Management { area, view } ◄────────┘  groups, entries, states, actions
 
 Enter ────► Command { area, Toggle { id, enabled } } ─► skills.set_enabled ─► skills.catalog
+Ctrl+E ───► external editor ─► Command { area, Save { expectedRevision, document } } ─► hooks.save
 ```
 
 ## Accounts

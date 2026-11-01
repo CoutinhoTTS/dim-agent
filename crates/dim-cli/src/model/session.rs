@@ -263,6 +263,7 @@ pub enum Command {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Area {
     Skills,
+    Hooks,
 }
 
 impl Area {
@@ -270,6 +271,7 @@ impl Area {
     pub fn name(self) -> &'static str {
         match self {
             Self::Skills => "skills",
+            Self::Hooks => "hooks",
         }
     }
 }
@@ -283,6 +285,11 @@ pub enum ManagementAction {
     Toggle { id: String, enabled: bool },
     /// Re-read the area, or ask its owner to rescan it.
     Reload,
+    /// Replace the area's document if it is still at `expected_revision`.
+    Save {
+        expected_revision: String,
+        document: serde_json::Value,
+    },
 }
 
 /// One request to a management area, carrying the area and what it asks.
@@ -336,8 +343,14 @@ pub struct ManagementEntry {
 /// A property of an entry that its row names besides on and off.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntryState {
+    /// The owner could not use what it found there; the entry's detail says
+    /// what the owner reported.
+    Invalid,
     /// Another entry of the same name takes precedence.
     Shadowed { by: String },
+    /// The owner does not let the client write the entry; the entry's detail
+    /// says why.
+    ReadOnly,
 }
 
 /// An action kind the client offers. Every kind has one key in every panel.
@@ -345,6 +358,7 @@ pub enum EntryState {
 pub enum ActionKind {
     Toggle,
     Reload,
+    Edit,
 }
 
 /// What a management request came to: the area's view after it, or why the
@@ -352,7 +366,30 @@ pub enum ActionKind {
 #[derive(Debug, Clone)]
 pub struct ManagementReply {
     pub request: ManagementRequest,
-    pub result: Result<ManagementView, String>,
+    pub result: Result<ManagementView, ManagementRefusal>,
+}
+
+/// Why a management request did not produce a view.
+#[derive(Debug, Clone)]
+pub enum ManagementRefusal {
+    /// The owner kept the stored document because it changed since the client
+    /// read it. Nothing was written, the area was read again, and this is what
+    /// it now is.
+    Conflict {
+        message: String,
+        view: Box<ManagementView>,
+    },
+    /// The daemon does not advertise the methods, or the owner refused the
+    /// text: nothing was written.
+    Refused(String),
+}
+
+impl std::fmt::Display for ManagementRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Conflict { message, .. } | Self::Refused(message) => formatter.write_str(message),
+        }
+    }
 }
 
 /// One change the `/plugins` panel asks PluginManager for.
