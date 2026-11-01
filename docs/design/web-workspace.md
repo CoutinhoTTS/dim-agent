@@ -371,10 +371,10 @@ host file path.
 | Legacy surface | Current contract | On this page |
 | --- | --- | --- |
 | Diagnostics metadata | `hello` and `daemon.ping` fields listed above | Kept |
-| `off` | No `RUST_LOG`: the daemon keeps errors only ([ADR 005](../../adr/005-observability.md) D1) | The default; nothing to set |
+| `off` | No `RUST_LOG`: the daemon keeps errors only ([ADR 005](../adr/005-observability.md) D1) | The default; nothing to set |
 | `on` | A `RUST_LOG` directive string read when the daemon starts; not run-time state (D1) | The start-up rule and its steps; no control |
 | `auto` | None: no daemon-side rule raises its own logging | Deliberately absent, below |
-| Trace archive location | Removed with the diagnostics channel ([ADR 005](../../adr/005-observability.md) D2, D5) | `dimcode export` and `daemon.log` named as the read paths |
+| Trace archive location | Removed with the diagnostics channel ([ADR 005](../adr/005-observability.md) D2, D5) | `dimcode export` and `daemon.log` named as the read paths |
 | Component and subscription records | Not restored (D2, D4); a failed assembly is `session_build_failed`, and `xtask graph` shows the assembled services | Not shown |
 | Effective log filter | The daemon does not report it | Not shown |
 
@@ -408,9 +408,9 @@ reconstructed), and no archive to point at. Raising process logging takes
 (`RUST_LOG=debug dimcode`); `daemon.log` appends across starts, so a diagnosis
 keeps the earlier evidence in one file. The complete record of what a run
 committed is `dimcode export SESSION_ID`
-([Timeline export](../appserver/timeline-export.md)), and the model-request
+([Timeline export](appserver/timeline-export.md)), and the model-request
 recording switch on the same page is the record of model wire exchanges
-([ADR 016](../../adr/016-model-request-log.md)); that switch stays user scope,
+([ADR 016](../adr/016-model-request-log.md)); that switch stays user scope,
 so project content cannot enable it. The page keeps the three as separate cards:
 the recording switch is not a process-log mode, and no card presents one as the
 other.
