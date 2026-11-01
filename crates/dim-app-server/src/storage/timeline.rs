@@ -819,10 +819,10 @@ pub struct SessionStore {
     files: SessionFiles,
     /// Title metadata (S5b): its one writer.
     pub(super) titles: Titles,
-    /// Serializes output removal and row deletion across Sessions, so two
-    /// deletes cannot both see the other's rows and leave a directory that
-    /// no row names (ADR 013 D4).
-    deletes: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes output ownership across Sessions: a delete's shared-owner
+    /// check, removal and row deletion, and a fork's copy of the output rows,
+    /// so a fork either copies before the removal or sees no rows (ADR 013 D4).
+    ownership: Arc<tokio::sync::Mutex<()>>,
 }
 impl SessionStore {
     /// `ctx` is SessionStore's own context, from which each file step reads
@@ -836,7 +836,7 @@ impl SessionStore {
             timeline,
             files,
             titles,
-            deletes: Arc::new(tokio::sync::Mutex::new(())),
+            ownership: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
     pub fn timeline_store(&self) -> Arc<dyn TimelineStore> {
@@ -1197,7 +1197,7 @@ impl SessionStore {
     /// `id` is one path component, as Agents checked (D3). Returns whether
     /// this database had rows of the id.
     pub async fn delete_session(&self, id: &str) -> Result<bool> {
-        let _deleting = self.deletes.lock().await;
+        let _ownership = self.ownership.lock().await;
         let stored = self.has_records(id).await?;
         if stored {
             self.files.remove_output(id).await?;
@@ -1217,6 +1217,7 @@ impl SessionStore {
     /// source whose delete committed first is `Closed`. The runtime
     /// validates the copy when it builds the fork.
     pub async fn fork_session(&self, source: &str, fork: &str, at: u64) -> Result<()> {
+        let _ownership = self.ownership.lock().await;
         let (source, fork) = (source.to_owned(), fork.to_owned());
         self.timeline
             .db

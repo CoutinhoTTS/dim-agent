@@ -22732,6 +22732,7 @@
         "path SessionFiles",
         "path SessionFiles::new",
         "path like_prefix",
+        "path release",
         "path share"
       ]
     },

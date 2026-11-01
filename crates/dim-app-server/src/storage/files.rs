@@ -218,15 +218,27 @@ pub(super) fn share(connection: &Connection, source: &str, fork: &str) -> rusqli
     )
 }
 /// ADR 013 D4: the fork copies the source's output rows in its transaction.
+/// A row an interrupted delete left behind names a file the delete already
+/// removed; copying it would give the fork ownership of nothing.
 pub(super) fn share_output(
     connection: &Connection,
     source: &str,
     fork: &str,
 ) -> rusqlite::Result<usize> {
-    connection.execute(
-        "INSERT INTO session_output_owners (session_id, path) SELECT ?2, path FROM session_output_owners WHERE session_id = ?1",
-        params![source, fork],
-    )
+    let paths = connection
+        .prepare("SELECT path FROM session_output_owners WHERE session_id = ?1")?
+        .query_map([source], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut insert = connection
+        .prepare("INSERT INTO session_output_owners (session_id, path) VALUES (?1, ?2)")?;
+    let mut copied = 0;
+    for path in paths {
+        if Path::new(&path).exists() {
+            insert.execute(params![fork, path])?;
+            copied += 1;
+        }
+    }
+    Ok(copied)
 }
 /// The delete and creation-rollback step, run inside their transaction
 /// before the Session's own rows: the Session stops owning its files. After
@@ -389,7 +401,7 @@ impl SessionFiles {
                 .map_err(error)?;
         }
         #[cfg(test)]
-        tests::after_output_removal(session_id)?;
+        tests::after_output_removal(session_id).await?;
         Ok(())
     }
 

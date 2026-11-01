@@ -11,6 +11,7 @@ use dim_agent_capabilities::host_platform::{HostPlatform, ShellStatus};
 use dim_agent_runtime::{SessionConfig, TimelineStore};
 use rutis::host::CtxHost;
 use std::path::PathBuf;
+use tokio::sync::Semaphore;
 
 /// Hooks that run once, for the named Session, right before the
 /// cancellation check that precedes txn 2.
@@ -37,15 +38,48 @@ fn on_commit(session_id: &str, hook: impl FnOnce() + Send + 'static) {
 /// Sessions whose next delete stops after its output removal.
 static STOP_AFTER_OUTPUT: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-pub(super) fn after_output_removal(session_id: &str) -> dim_agent_runtime::Result<()> {
-    let mut stops = STOP_AFTER_OUTPUT.lock().unwrap();
-    match stops.iter().position(|stopped| stopped == session_id) {
-        Some(index) => {
-            stops.swap_remove(index);
-            Err(error("stopped after the output removal"))
-        }
-        None => Ok(()),
+/// Sessions whose next delete waits after its output removal: the first
+/// semaphore is signalled when the delete reaches the pause, the second
+/// releases it.
+type OutputPause = (String, Arc<Semaphore>, Arc<Semaphore>);
+static PAUSE_AFTER_OUTPUT: Mutex<Vec<OutputPause>> = Mutex::new(Vec::new());
+
+fn pause_after_output_removal(session_id: &str) -> (Arc<Semaphore>, Arc<Semaphore>) {
+    let reached = Arc::new(Semaphore::new(0));
+    let release = Arc::new(Semaphore::new(0));
+    PAUSE_AFTER_OUTPUT
+        .lock()
+        .unwrap()
+        .push((session_id.into(), reached.clone(), release.clone()));
+    (reached, release)
+}
+
+pub(super) async fn after_output_removal(session_id: &str) -> dim_agent_runtime::Result<()> {
+    let stopped = {
+        let mut stops = STOP_AFTER_OUTPUT.lock().unwrap();
+        stops
+            .iter()
+            .position(|stopped| stopped == session_id)
+            .map(|index| stops.swap_remove(index))
+    };
+    if stopped.is_some() {
+        return Err(error("stopped after the output removal"));
     }
+    let paused = {
+        let mut pauses = PAUSE_AFTER_OUTPUT.lock().unwrap();
+        pauses
+            .iter()
+            .position(|(paused, _, _)| paused == session_id)
+            .map(|index| pauses.swap_remove(index))
+    };
+    if let Some((_, reached, release)) = paused {
+        reached.add_permits(1);
+        let _released = release
+            .acquire()
+            .await
+            .map_err(|_| error("the test released no delete"))?;
+    }
+    Ok(())
 }
 
 struct Fixture {
@@ -327,6 +361,90 @@ async fn an_interrupted_delete_converges_on_retry_and_the_next_sweep() {
     assert_eq!(fixture.rows(), [format!("{}|-|1", kept.file_id)]);
     assert_eq!(fixture.entries(), [kept.file_id]);
     next.close().await;
+    drop(store);
+    fixture.close().await;
+}
+
+/// ADR 013 D4: an interrupted delete has removed the file but not its row;
+/// a later fork must not copy that row and own a removed file.
+#[tokio::test]
+async fn a_fork_does_not_copy_output_of_an_interrupted_delete() {
+    let fixture = Fixture::new().await;
+    let store = SessionStore::new(fixture.db.clone(), fixture.root.clone(), 0);
+    fixture.session("stopped-source").await;
+    let log = fixture.home.join("command-output/stopped-source/exec.log");
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    std::fs::write(&log, b"output").unwrap();
+    fixture
+        .files
+        .register("stopped-source".into(), log.clone())
+        .await
+        .unwrap();
+
+    STOP_AFTER_OUTPUT
+        .lock()
+        .unwrap()
+        .push("stopped-source".into());
+    assert!(store.delete_session("stopped-source").await.is_err());
+    assert!(!log.exists());
+    store
+        .fork_session("stopped-source", "stopped-fork", 0)
+        .await
+        .unwrap();
+    let copied: i64 = fixture
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM session_output_owners WHERE session_id='stopped-fork'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(copied, 0, "the fork owns no removed output");
+
+    drop(store);
+    fixture.close().await;
+}
+
+/// ADR 013 D4: a fork and a delete serialize on the ownership lock. A fork
+/// admitted while the delete is removing output cannot copy a row for it.
+#[tokio::test]
+async fn a_fork_waits_for_a_delete_that_removed_output() {
+    let fixture = Fixture::new().await;
+    let store = SessionStore::new(fixture.db.clone(), fixture.root.clone(), 0);
+    fixture.session("paused-source").await;
+    let log = fixture.home.join("command-output/paused-source/exec.log");
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    std::fs::write(&log, b"output").unwrap();
+    fixture
+        .files
+        .register("paused-source".into(), log.clone())
+        .await
+        .unwrap();
+
+    let (reached, release) = pause_after_output_removal("paused-source");
+    let deleting = {
+        let store = store.clone();
+        tokio::spawn(async move { store.delete_session("paused-source").await })
+    };
+    let _reached = reached.acquire().await.unwrap();
+    let forking = {
+        let store = store.clone();
+        tokio::spawn(async move { store.fork_session("paused-source", "paused-fork", 0).await })
+    };
+    release.add_permits(1);
+    assert!(deleting.await.unwrap().unwrap());
+    assert!(forking.await.unwrap().is_err(), "the source is gone");
+    let copied: i64 = fixture
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM session_output_owners WHERE session_id='paused-fork'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(copied, 0, "the fork owns no removed output");
+    assert!(!log.exists());
+
     drop(store);
     fixture.close().await;
 }
