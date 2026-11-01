@@ -2269,3 +2269,55 @@ fn acp_stdio_member_approval_shows_the_original_action_and_rechecks_before_allow
         daemon.join().unwrap();
     }
 }
+
+/// Appendix D 7: a blocked prompt ends the ACP turn with `refusal`, and the check's
+/// message is the text the user sees.
+#[test]
+fn acp_stdio_reports_a_blocked_prompt_as_refusal_with_the_reason() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(METHODS);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let submit = wire.read("session.submit");
+        wire.send(
+            json!({"jsonrpc":"2.0","id":submit["id"],"error":{"code":-32000,
+            "message":"Hook user: no prompts today","data":{"appError":"input_blocked"}}}),
+        );
+        detached_eof(wire);
+    });
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+    assert!(peer.response(2).get("error").is_none());
+    peer.send(
+        3,
+        "session/prompt",
+        json!({"sessionId":"session","prompt":[{"type":"text","text":"Prompt"}]}),
+    );
+    let response = peer.response(3);
+    assert_eq!(
+        response["result"]["stopReason"],
+        "refusal",
+        "{response}: {updates:?}",
+        updates = peer.updates
+    );
+    assert!(
+        peer.updates.iter().any(|frame| {
+            frame["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+                && frame["params"]["update"]["content"]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("Hook user: no prompts today"))
+        }),
+        "the block's message is text: {:?}",
+        peer.updates
+    );
+    peer.close();
+    daemon.join().unwrap();
+}

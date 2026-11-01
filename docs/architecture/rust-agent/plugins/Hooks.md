@@ -6,8 +6,9 @@ document format, the per-event protocol and the acceptance criteria live in the
 local-execution parts are assembled and what each one owns.
 
 Two Session/branch parts are in scope here: HooksSession, which binds the
-runtime and decides `SessionStart`, and HooksBranch, which observes one branch
-and runs the handlers of its hook points. The configuration owner,
+runtime, decides `SessionStart` and answers `UserPromptSubmit`, and
+HooksBranch, which observes one branch and runs the handlers of its hook
+points. The configuration owner,
 HooksSettings, is an App Server plugin: it registers the `hooks`,
 `hooks-projects` and `hooks-plugins` Settings sources, the `hooks.*` management
 methods, the `P:HooksService` that PluginManager's owner operations call, and
@@ -26,7 +27,15 @@ environment.
 Owner: [hooks/runner.rs](../../../../crates/dim-agent-capabilities/src/hooks/runner.rs).
 Provides the Session's single `S:HooksRuntime`, which reads the effective hook
 sources for the Session's working directory, builds the payload of one hook
-point, and runs its commands.
+point, and runs its commands. It also registers the submit check `hooks` with
+the Session's `submitChecks` ([InputQueue](InputQueue.md)), which the
+operator-input entries call before writing: the check reads the sources, runs
+the matching `UserPromptSubmit` handlers concurrently, and answers with the
+first block in catalog order or the contexts as text blocks after the
+operator's own content. Handlers after the first block are terminated. A
+failure, a timeout and a cancellation are the handler's `onFailure`; an unload
+settles a pending check by `onFailure` before the part is withdrawn, and an
+interruption of the entry's own call cancels the check, so nothing is written.
 
 The runtime reads sources when a hook point is evaluated, never at Session
 start: a change to the user's `hooks.json` or to a project document applies to
@@ -50,12 +59,13 @@ cancellation token terminates its process tree on close.
 | `P:HostPlatform` | Build each command's process spec, environment and process tree. |
 | `S:SessionConfig` | Pass the working directory and permission facts to the payload. |
 | `S:SessionIdentity` | Name the Session in the payload and `DIM_SESSION_ID`. |
+| `S:SubmitChecks` | Register `hooks`, the `UserPromptSubmit` check the operator-input entries call. |
 
 <!-- generated:plugin HooksSession — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `P:HostPlatform`、`S:HookSourcesHost`、`S:SessionConfig`、`S:SessionIdentity` |
+| 注入 | `P:HostPlatform`、`S:HookSourcesHost`、`S:SessionConfig`、`S:SessionIdentity`、`S:SubmitChecks` |
 | 提供 | `S:HooksRuntime` |
 | 被注入于 | `HooksBranch` |
 <!-- /generated -->
@@ -146,6 +156,7 @@ reported by `hooks.catalog` rather than at the hook point.
 `the_session_start_block_is_still_in_context_after_compaction`,
 `post_tool_use_follows_the_protocol_for_success_block_and_failure`,
 `a_hook_context_cannot_close_its_runtime_block`,
+`a_prompt_context_cannot_close_its_runtime_block`,
 `post_tool_use_failure_runs_only_for_error_results`,
 `a_timeout_is_a_failure_and_a_blocking_failure_still_answers`,
 `identical_commands_at_one_point_run_once`,
@@ -170,9 +181,19 @@ reported by `hooks.catalog` rather than at the hook point.
 `a_hook_sees_its_environment_and_no_plugin_root`,
 `a_project_source_runs_nothing_until_the_user_enables_it`,
 `a_plugin_source_runs_like_any_other_source`,
-`disable_all_hooks_turns_every_source_off`;
+`disable_all_hooks_turns_every_source_off`,
+`a_blocked_steer_writes_nothing_and_the_old_input_still_applies`,
+`the_prompt_context_follows_the_operator_text_and_keeps_it_operator_input`,
+`a_source_input_runs_no_prompt_hook`,
+`an_unload_settles_a_pending_prompt_check_by_on_failure`,
+`an_unload_with_the_default_on_failure_writes_the_input`,
+`the_handlers_after_the_first_block_are_terminated`,
+`two_proceeding_handlers_keep_their_contexts_in_catalog_order`,
+`a_failure_finishing_after_a_later_result_blocks_by_its_own_handler`;
 `runner.rs`'s `a_settled_tool_call_leaves_nothing_behind_in_the_view` pins
 that a settled call's input does not stay in the folded view;
+`a_json_array_on_stdout_is_prompt_context` pins that plain text, other JSON
+values included, is prompt context (A.3's exit-0 row);
 `the_follow_up_state_is_rebuilt_from_the_branch` pins that the follow-up's
 identity and consecutive count are rebuilt from the branch, not carried in
 memory; `a_deleted_operator_input_is_forgotten` pins that a withdrawn operator

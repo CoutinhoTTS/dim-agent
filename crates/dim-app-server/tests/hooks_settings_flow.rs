@@ -132,6 +132,7 @@ async fn catalog_reports_sources_states_and_never_reads_foreign_hook_files() {
 
     fixture.write_project(documents(json!({
         "Stop": [{"hooks": [handler("notify")]}],
+        "UserPromptSubmit": [{"hooks": [handler("prompt-check")]}],
         "PreToolUse": [{"matcher": "read", "hooks": [handler("guard")]}],
         "UnknownEvent": [{"hooks": [handler("ignored")]}],
     })));
@@ -145,7 +146,7 @@ async fn catalog_reports_sources_states_and_never_reads_foreign_hook_files() {
     assert_eq!(catalog["sources"][1]["state"], "ok");
     assert_eq!(catalog["sources"][1]["enabled"], false);
     let hooks = catalog["hooks"].as_array().unwrap();
-    assert_eq!(hooks.len(), 3, "{hooks:?}");
+    assert_eq!(hooks.len(), 4, "{hooks:?}");
     let by_event = |event: &str| {
         hooks
             .iter()
@@ -154,6 +155,7 @@ async fn catalog_reports_sources_states_and_never_reads_foreign_hook_files() {
     };
     assert_eq!(by_event("Stop")["state"], "ok");
     assert_eq!(by_event("Stop")["source"], "project");
+    assert_eq!(by_event("UserPromptSubmit")["state"], "ok");
     // Listed, and not run until its owner lands (#758).
     assert_eq!(by_event("PreToolUse")["state"], "unsupported");
     assert_eq!(by_event("UnknownEvent")["state"], "unsupported");

@@ -13,7 +13,9 @@ use crate::{
         HookEvent, HookHandler, HookSourceId, HookSourcesHost, HookSourcesSnapshot, OnFailure,
         handlers,
     },
+    host::{HostError, HostFuture},
     host_platform::{HostPlatform, Os},
+    input_queue::{CheckSubmission, SubmitCheckReply, SubmitCheckRequest, SubmitChecks},
 };
 use dim_agent_runtime::{
     BranchLifecycle, Delivery, Dispatcher, Names, SessionConfig, SessionIdentity, Timeline,
@@ -21,8 +23,8 @@ use dim_agent_runtime::{
 };
 use dim_agent_types::{
     AgentEvent, ApprovalCancelledData, ApprovalDecision, ApprovalRequestData, ApprovalRespondData,
-    BranchSource, EventKind, InputBlock, InputMessageData, InputMode, JsonObject, PermissionPreset,
-    ToolCallResult, ToolContent, ToolDefinition, TurnOutcome,
+    BranchSource, ContentBlock, EventKind, InputBlock, InputMessageData, InputMode, JsonObject,
+    PermissionPreset, ToolCallResult, ToolContent, ToolDefinition, TurnOutcome, UserInput,
 };
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -30,7 +32,9 @@ use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     ffi::OsString,
+    future::Future,
     path::Path,
+    pin::Pin,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -91,6 +95,9 @@ pub struct HookRun {
     /// raises after the run (A.4).
     pub source: HookSourceId,
 }
+
+/// One running prompt handler: its catalog position, then its result.
+type PendingPrompt = Pin<Box<dyn Future<Output = (usize, HookResult)> + Send>>;
 
 /// The Session service that reads the sources and runs commands.
 pub struct HooksRuntime {
@@ -186,6 +193,134 @@ impl HooksRuntime {
                 _ = owner.run_one(&handler, stdin, &generation) => {}
             }
         });
+    }
+
+    /// `UserPromptSubmit` at an operator-input entry (A.6.2): the entry waits
+    /// for its hooks before writing anything. `Err` means the entry's own
+    /// call was interrupted, and nothing may be written.
+    async fn submit_check(
+        self: &Arc<Self>,
+        request: &SubmitCheckRequest,
+        cancel: &CancellationToken,
+    ) -> Result<SubmitCheckReply, HostError> {
+        let interrupted = || HostError::Cancelled("the entry's call was interrupted".into());
+        if cancel.is_cancelled() {
+            return Err(interrupted());
+        }
+        let Some(snapshot) = self.snapshot().await else {
+            return Ok(SubmitCheckReply::Proceed { blocks: Vec::new() });
+        };
+        let matching = handlers(&snapshot, HookEvent::UserPromptSubmit, None, None);
+        if matching.is_empty() {
+            return Ok(SubmitCheckReply::Proceed { blocks: Vec::new() });
+        }
+        let mut payload = self.payload(HookEvent::UserPromptSubmit, &request.branch_id);
+        payload.insert(
+            "prompt".into(),
+            Value::String(prompt_text(request.user.as_ref())),
+        );
+        payload.insert("mode".into(), Value::String(mode_name(request.mode).into()));
+        if cancel.is_cancelled() {
+            return Err(interrupted());
+        }
+        // An unload settles the pending check before the part goes: the
+        // running commands are terminated and every handler answers by its
+        // `onFailure` (§1, A.5).
+        let decisions = tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => return Ok(unfinished_prompt(&matching)),
+            decisions = self.run_prompt_handlers(&matching, &payload, cancel) => decisions,
+        };
+        if cancel.is_cancelled() {
+            return Err(interrupted());
+        }
+        let mut blocks = Vec::new();
+        for decision in decisions {
+            match decision {
+                PromptDecision::Blocked { message } => {
+                    return Ok(SubmitCheckReply::Block { message });
+                }
+                PromptDecision::Context(context) => blocks.push(element(
+                    "dim-hooks",
+                    &[("kind", "prompt-submit")],
+                    &escaped(&[context]),
+                )),
+                PromptDecision::None => {}
+            }
+        }
+        Ok(SubmitCheckReply::Proceed { blocks })
+    }
+
+    /// Runs the handlers concurrently and returns their decisions in catalog
+    /// order up to and including the first block; the handlers after it are
+    /// terminated (A.5). An `async` handler starts and is not waited for.
+    async fn run_prompt_handlers(
+        self: &Arc<Self>,
+        handlers: &[HookHandler],
+        payload: &JsonObject,
+        cancel: &CancellationToken,
+    ) -> Vec<PromptDecision> {
+        let mut running: Vec<HookHandler> = Vec::new();
+        let mut tokens: Vec<CancellationToken> = Vec::new();
+        // Each future carries its handler's catalog position in `running`,
+        // which is also its slot: `select_all` reorders the pending futures
+        // as each one finishes, so its own index is not a catalog position.
+        let mut pending: Vec<PendingPrompt> = Vec::new();
+        for handler in handlers {
+            let mut fields = payload.clone();
+            fields.insert(
+                "dim_source".into(),
+                Value::String(handler.source.to_string()),
+            );
+            let stdin = serde_json::to_vec(&Value::Object(fields)).unwrap_or_default();
+            if handler.asynchronous {
+                self.spawn_async(handler.clone(), stdin, cancel.clone());
+                continue;
+            }
+            let position = running.len();
+            let token = cancel.child_token();
+            tokens.push(token.clone());
+            let owner = self.clone();
+            let owned = handler.clone();
+            let future_handler = owned.clone();
+            pending.push(Box::pin(async move {
+                let result = owner.run_one(&future_handler, stdin, &token).await;
+                (position, result)
+            }));
+            running.push(owned);
+        }
+        let mut slots: Vec<Option<HookRun>> = (0..running.len()).map(|_| None).collect();
+        let mut decisions = Vec::new();
+        let mut blocked = None;
+        for next in 0..running.len() {
+            // `pending` holds exactly the futures whose result has not
+            // arrived. Every slot from `next` on is either filled or owned by
+            // one of them, so the loop never selects on an empty list.
+            while slots[next].is_none() {
+                let ((position, result), _, rest) = futures_util::future::select_all(pending).await;
+                pending = rest;
+                slots[position] = Some(HookRun {
+                    result,
+                    on_failure: running[position].on_failure,
+                    source: running[position].source.clone(),
+                });
+            }
+            let run = slots[next].take().expect("the slot was just filled");
+            let decision = prompt_decision(&running[next], &run);
+            let stops = matches!(decision, PromptDecision::Blocked { .. });
+            decisions.push(decision);
+            if stops {
+                blocked = Some(next);
+                break;
+            }
+        }
+        if let Some(blocked) = blocked {
+            for token in tokens.iter().skip(blocked + 1) {
+                token.cancel();
+            }
+            pending.clear();
+        }
+        decisions
     }
 
     async fn run_one(
@@ -502,6 +637,93 @@ fn stop_output(run: &HookRun) -> StopOutput {
     }
 }
 
+/// The prompt a `UserPromptSubmit` hook reads (A.3): its text blocks joined by
+/// newlines; images are not passed.
+fn prompt_text(user: Option<&UserInput>) -> String {
+    user.map(|user| {
+        user.content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Image { .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
+    .unwrap_or_default()
+}
+
+/// The mode name of A.3's `mode` field.
+fn mode_name(mode: InputMode) -> &'static str {
+    match mode {
+        InputMode::Queue => "queue",
+        InputMode::Steer => "steer",
+        InputMode::Append => "append",
+    }
+}
+
+/// What an unload answers for the handlers that were running (A.5): each one
+/// did not finish, so the first `onFailure: block` in catalog order blocks.
+fn unfinished_prompt(handlers: &[HookHandler]) -> SubmitCheckReply {
+    for handler in handlers.iter().filter(|handler| !handler.asynchronous) {
+        if handler.on_failure == OnFailure::Block {
+            return SubmitCheckReply::Block {
+                message: format!("Hook {} did not finish", handler.source),
+            };
+        }
+    }
+    SubmitCheckReply::Proceed { blocks: Vec::new() }
+}
+
+/// What one `UserPromptSubmit` run does to the entry's input (A.4, A.5).
+enum PromptDecision {
+    Blocked { message: String },
+    Context(String),
+    None,
+}
+
+fn prompt_decision(handler: &HookHandler, run: &HookRun) -> PromptDecision {
+    let blocked = |reason: &str| PromptDecision::Blocked {
+        message: format!("Hook {}: {}", handler.source, reason.trim()),
+    };
+    match &run.result {
+        HookResult::Blocked { reason } => blocked(reason),
+        // A failed run follows the run's own `onFailure` (A.5); its
+        // diagnostic carries the bounded stderr excerpt (§7).
+        HookResult::Failed { .. } if run.on_failure == OnFailure::Block => {
+            PromptDecision::Blocked {
+                message: format!("Hook {} did not finish", handler.source),
+            }
+        }
+        HookResult::Failed { .. } => PromptDecision::None,
+        HookResult::Success { stdout } => {
+            let trimmed = stdout.trim();
+            if trimmed.is_empty() {
+                return PromptDecision::None;
+            }
+            match serde_json::from_str::<Value>(trimmed) {
+                Ok(Value::Object(object)) => {
+                    report_ignored_fields(&object);
+                    if object.get("decision").and_then(Value::as_str) == Some("block") {
+                        let reason = object
+                            .get("reason")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        return blocked(reason);
+                    }
+                    object
+                        .get("hookSpecificOutput")
+                        .and_then(|output| output.get("additionalContext"))
+                        .and_then(Value::as_str)
+                        .and_then(capped)
+                        .map_or(PromptDecision::None, PromptDecision::Context)
+                }
+                _ => capped(trimmed).map_or(PromptDecision::None, PromptDecision::Context),
+            }
+        }
+    }
+}
+
 /// Output fields this build knows and ignores, at the top level or under
 /// `hookSpecificOutput` (A.4).
 const IGNORED_OUTPUT: [&str; 10] = [
@@ -564,11 +786,26 @@ fn permission_decision(run: &HookRun) -> Option<ApprovalDecision> {
     }
 }
 
+/// `UserPromptSubmit` registered with the Session's `submitChecks` (A.6.2).
+struct PromptSubmitCheck {
+    runtime: Arc<HooksRuntime>,
+}
+impl CheckSubmission for PromptSubmitCheck {
+    fn check(
+        &self,
+        request: SubmitCheckRequest,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, SubmitCheckReply> {
+        Box::pin(async move { self.runtime.submit_check(&request, &cancel).await })
+    }
+}
+
 pub struct HooksSessionPlugin {
     sources: Key<HookSourcesHost>,
     platform: Key<HostPlatform>,
     config: Key<SessionConfig>,
     identity: Key<SessionIdentity>,
+    checks: Key<SubmitChecks>,
     runtime: Key<HooksRuntime>,
 }
 impl HooksSessionPlugin {
@@ -578,6 +815,7 @@ impl HooksSessionPlugin {
             platform: names.key()?,
             config: names.key()?,
             identity: names.key()?,
+            checks: names.key()?,
             runtime: names.key()?,
         })
     }
@@ -592,6 +830,7 @@ impl DynPlugin for HooksSessionPlugin {
             self.platform.erase(),
             self.config.erase(),
             self.identity.erase(),
+            self.checks.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -600,6 +839,7 @@ impl DynPlugin for HooksSessionPlugin {
             let platform = ctx.require_at(&self.platform)?;
             let config = ctx.require_at(&self.config)?;
             let identity = ctx.require_at(&self.identity)?;
+            let checks = ctx.require_at(&self.checks)?;
             let runtime = Arc::new(HooksRuntime {
                 sources,
                 platform,
@@ -614,6 +854,10 @@ impl DynPlugin for HooksSessionPlugin {
                 closing.tasks.wait().await;
                 Ok(())
             })?;
+            let check = PromptSubmitCheck {
+                runtime: runtime.clone(),
+            };
+            checks.register(ctx, "hooks", Arc::new(check))?;
             ctx.provide_at(self.runtime.clone(), runtime)?;
             Ok(Effect::Done)
         })
@@ -1392,6 +1636,33 @@ mod tests {
             panic!("a failure");
         };
         assert_eq!(stderr, "denied\n");
+    }
+
+    /// A.3's exit-0 row: stdout that is not one JSON object is plain text,
+    /// and for `UserPromptSubmit` plain text is prompt context.
+    #[test]
+    fn a_json_array_on_stdout_is_prompt_context() {
+        let handler = HookHandler {
+            event: HookEvent::UserPromptSubmit,
+            source: HookSourceId::User,
+            plugin_root: None,
+            command: String::new(),
+            command_windows: None,
+            timeout: Duration::from_secs(30),
+            on_failure: OnFailure::Continue,
+            asynchronous: false,
+        };
+        let run = HookRun {
+            result: HookResult::Success {
+                stdout: "[\"bonus\"]".into(),
+            },
+            on_failure: OnFailure::Continue,
+            source: handler.source.clone(),
+        };
+        let PromptDecision::Context(context) = prompt_decision(&handler, &run) else {
+            panic!("a JSON array on stdout is context");
+        };
+        assert_eq!(context, "[\"bonus\"]");
     }
 
     /// A.4's Exit 2 column: at `SessionStart` and `Notification`, exit 2 is a

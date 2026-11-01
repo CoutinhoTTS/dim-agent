@@ -1516,6 +1516,7 @@ fn submit_errors_on_a_live_connection_exit_without_resending() {
         (None, true),
         (Some("session_invalid_input"), false),
         (Some("invalid_params"), false),
+        (Some("input_blocked"), false),
     ] {
         let home = Home::new();
         let daemon = home.daemon(move |wire| {
@@ -1545,6 +1546,42 @@ fn submit_errors_on_a_live_connection_exit_without_resending() {
             assert!(!diagnostic.contains("instead of sending it again"));
         }
     }
+}
+
+/// Appendix D 5: a blocked prompt is reported as the block, never as an uncertain
+/// submission that may have been queued.
+#[test]
+fn a_blocked_prompt_reports_the_hooks_message() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.send(
+            json!({"jsonrpc":"2.0","id":submit["id"],"error":{"code":-32000,
+            "message":"Hook user: no prompts today","data":{"appError":"input_blocked"}}}),
+        );
+        wire.detach();
+    });
+    let output = home
+        .command()
+        .args(["exec", "-p", "once"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        diagnostic.contains("Hook user: no prompts today"),
+        "{diagnostic}"
+    );
+    assert!(
+        !diagnostic.contains("input may already be queued"),
+        "{diagnostic}"
+    );
+    assert!(
+        !diagnostic.contains("instead of sending it again"),
+        "{diagnostic}"
+    );
 }
 
 #[test]
