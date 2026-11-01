@@ -1768,11 +1768,12 @@ impl App {
                             ManagementResult::Refused(ManagementRefusal::Conflict { .. })
                                 if creating =>
                             {
-                                panel.kept(&settled.draft.path().display().to_string());
+                                panel.conflicted(true, &settled.draft.path().display().to_string());
                                 self.hold_draft(settled);
                             }
                             ManagementResult::Refused(ManagementRefusal::Conflict { .. }) => {
-                                panel.kept(&settled.draft.path().display().to_string());
+                                panel
+                                    .conflicted(false, &settled.draft.path().display().to_string());
                             }
                             ManagementResult::Refused(_) => {
                                 panel.kept(&settled.draft.path().display().to_string());

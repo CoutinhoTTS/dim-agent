@@ -81,7 +81,9 @@ pub const STRINGS: &[&str] = &[
     "No .dimcode/hooks.json in this workspace.",
     "Owned by plugin {plugin}.",
     "The user document turns every hook off (disableAllHooks).",
-    "The user document changed since it was read; nothing was written. Your next edit opens the current document.",
+    "The user document changed since it was read; nothing was written.",
+    "Your next edit opens the current document.",
+    "Your next add reopens your text.",
     "Added {name}.",
     "Run {name}: {outcome}.",
     "Recent runs of {name}",
@@ -93,8 +95,8 @@ pub const STRINGS: &[&str] = &[
     "at {instant}",
     "cron {expression}",
     "cron {expression} in {zone}",
-    "The job changed since it was read; nothing was written. Your next edit opens the current job.",
-    "The jobs changed since they were read; nothing was written. Your next add opens your text again.",
+    "The job changed since it was read; nothing was written.",
+    "The jobs changed since they were read; nothing was written.",
     "The job changed since it was read; nothing was removed.",
     "The Scheduler has no area document.",
     "No scheduled job has that id.",
@@ -318,10 +320,32 @@ impl ManagementPanel {
     /// A draft was written but the owner kept the stored document: the
     /// message names where the user's text still is.
     pub fn kept(&mut self, path: &str) {
+        self.keep_text(path, &[]);
+    }
+
+    /// A conflict kept the user's text: the message names what the next
+    /// attempt does with it and where the text is.
+    pub fn conflicted(&mut self, creating: bool, path: &str) {
+        let next = if creating {
+            t("Your next add reopens your text.")
+        } else {
+            t("Your next edit opens the current document.")
+        };
+        self.keep_text(path, &[next]);
+    }
+
+    /// Adds `sentences`, then where the text is, to the message the reply
+    /// left, which stands first.
+    fn keep_text(&mut self, path: &str, sentences: &[&str]) {
         let kept = tf("Your text is kept in {path}.", &[("path", path)]);
+        let mut tail = sentences.join(" ");
+        if !tail.is_empty() {
+            tail.push(' ');
+        }
+        tail.push_str(&kept);
         self.message = Some(match self.message.take() {
-            Some(Err(error)) => Err(format!("{error} {kept}")),
-            _ => Err(kept),
+            Some(Err(error)) => Err(format!("{error} {tail}")),
+            _ => Err(tail),
         });
     }
 
@@ -1158,6 +1182,36 @@ mod tests {
             }),
             Some(&serde_json::json!({"hooks": {}}))
         );
+    }
+
+    /// A conflict kept the user's text: the panel says what the next attempt
+    /// does with it, by kind, and where the text is.
+    #[test]
+    fn a_conflict_names_what_the_next_attempt_does_with_the_kept_text() {
+        for (creating, sentence) in [
+            (false, "Your next edit opens the current document."),
+            (true, "Your next add reopens your text."),
+        ] {
+            let mut panel = opened_hooks();
+            panel.set_result(&reply(
+                Area::Hooks,
+                ManagementAction::Save {
+                    id: None,
+                    expected_revision: "user:1".into(),
+                    document: serde_json::json!({"hooks": {}}),
+                },
+                ManagementResult::Refused(ManagementRefusal::Conflict {
+                    message: "The user document changed since it was read; nothing was written."
+                        .into(),
+                    view: Box::new(hooks_view()),
+                }),
+            ));
+            panel.conflicted(creating, "/home/u/edit/hooks-1.json");
+            let text = shown(&panel, 72, 20).join(" ");
+            assert!(text.contains(sentence), "{text}");
+            assert!(text.contains("Your text is kept in"), "{text}");
+            assert!(text.contains("hooks-1.json"), "{text}");
+        }
     }
 
     /// Filtering keeps the entry's keys: the hint follows the new selection.

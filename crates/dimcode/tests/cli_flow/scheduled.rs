@@ -698,6 +698,47 @@ fn scheduled_set_sends_no_session_id_when_the_mode_becomes_create() {
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "Saved job-1.\n");
 }
 
+/// A stale revision on `set` states the owner's fact and where the text is,
+/// and nothing a surface adds: the panel's next-edit sentence belongs to
+/// the panel, not to the command line.
+#[test]
+fn scheduled_set_reports_a_conflict_without_the_panels_sentences() {
+    let home = Home::new();
+    let path = home.0.join("job.json");
+    fs::write(&path, serde_json::to_string(&edited_document()).unwrap()).unwrap();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
+        let request = wire.read("schedule.save");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"The job changed; read it before updating",
+            "data":{"appError":"schedule_conflict"}}}));
+        // The conflict wrote nothing, so the jobs are read again.
+        let request = wire.read("schedule.list");
+        wire.reply(&request, newer_jobs());
+    });
+    let output = home
+        .command()
+        .args(["scheduled", "set", "job-1"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("The job changed since it was read; nothing was written."),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Your text is kept in"), "{stderr}");
+    assert!(!stderr.contains("Your next edit"), "{stderr}");
+    assert!(!stderr.contains("Your next add"), "{stderr}");
+}
+
 /// `scheduled edit ID` opens the job's own document in the editor and
 /// writes it at the revision the listing reported.
 #[test]

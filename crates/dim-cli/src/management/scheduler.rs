@@ -378,12 +378,8 @@ enum ConflictKind {
 /// nothing was written. Where the text still is belongs to the surface.
 fn conflict_message(kind: ConflictKind) -> &'static str {
     match kind {
-        ConflictKind::Job => {
-            "The job changed since it was read; nothing was written. Your next edit opens the current job."
-        }
-        ConflictKind::Create => {
-            "The jobs changed since they were read; nothing was written. Your next add opens your text again."
-        }
+        ConflictKind::Job => "The job changed since it was read; nothing was written.",
+        ConflictKind::Create => "The jobs changed since they were read; nothing was written.",
         ConflictKind::Remove => "The job changed since it was read; nothing was removed.",
     }
 }

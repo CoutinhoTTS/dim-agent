@@ -44,9 +44,19 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Added." => "Hinzugefügt.",
         "Removed {name}." => "{name} entfernt.",
         "Ran {name}." => "{name} ausgeführt.",
-        "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
-            "Das Benutzerdokument wurde seit dem Lesen geändert; es wurde nichts geschrieben. Deine nächste Bearbeitung öffnet das aktuelle Dokument."
+        "The user document changed since it was read; nothing was written." => {
+            "Das Benutzerdokument wurde seit dem Lesen geändert; es wurde nichts geschrieben."
         }
+        "The job changed since it was read; nothing was written." => {
+            "Der Job wurde seit dem Lesen geändert; es wurde nichts geschrieben."
+        }
+        "The jobs changed since they were read; nothing was written." => {
+            "Die Jobs wurden seit dem Lesen geändert; es wurde nichts geschrieben."
+        }
+        "Your next edit opens the current document." => {
+            "Deine nächste Bearbeitung öffnet das aktuelle Dokument."
+        }
+        "Your next add reopens your text." => "Dein nächstes Hinzufügen öffnet deinen Text erneut.",
         "Scheduler" => "Scheduler",
         "Added {name}." => "{name} hinzugefügt.",
         "Run {name}: {outcome}." => "{name} ausgeführt: {outcome}.",
@@ -59,12 +69,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "at {instant}" => "um {instant}",
         "cron {expression}" => "cron {expression}",
         "cron {expression} in {zone}" => "cron {expression} in {zone}",
-        "The job changed since it was read; nothing was written. Your next edit opens the current job." => {
-            "Der Job wurde seit dem Lesen geändert; es wurde nichts geschrieben. Deine nächste Bearbeitung öffnet den aktuellen Job."
-        }
-        "The jobs changed since they were read; nothing was written. Your next add opens your text again." => {
-            "Die Jobs wurden seit dem Lesen geändert; es wurde nichts geschrieben. Dein nächstes Hinzufügen öffnet deinen Text erneut."
-        }
         "The job changed since it was read; nothing was removed." => {
             "Der Job wurde seit dem Lesen geändert; es wurde nichts entfernt."
         }

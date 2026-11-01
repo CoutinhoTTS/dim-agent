@@ -44,9 +44,19 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Added." => "作成しました。",
         "Removed {name}." => "{name} を削除しました。",
         "Ran {name}." => "{name} を実行しました。",
-        "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
-            "ユーザードキュメントは読み取り後に変更されています。今回は何も書き込んでいません。次回の編集では現在のドキュメントを開きます。"
+        "The user document changed since it was read; nothing was written." => {
+            "ユーザードキュメントは読み取り後に変更されています。今回は何も書き込んでいません。"
         }
+        "The job changed since it was read; nothing was written." => {
+            "ジョブは読み取り後に変更されています。今回は何も書き込んでいません。"
+        }
+        "The jobs changed since they were read; nothing was written." => {
+            "ジョブは読み取り後に変更されています。今回は何も書き込んでいません。"
+        }
+        "Your next edit opens the current document." => {
+            "次回の編集では現在のドキュメントを開きます。"
+        }
+        "Your next add reopens your text." => "次回の作成では入力した内容を開きます。",
         "Scheduler" => "スケジューラー",
         "Added {name}." => "{name} を作成しました。",
         "Run {name}: {outcome}." => "{name} を実行しました：{outcome}。",
@@ -59,12 +69,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "at {instant}" => "{instant} に",
         "cron {expression}" => "cron {expression}",
         "cron {expression} in {zone}" => "cron {expression}（{zone}）",
-        "The job changed since it was read; nothing was written. Your next edit opens the current job." => {
-            "ジョブは読み取り後に変更されています。今回は何も書き込んでいません。次回の編集では現在のジョブを開きます。"
-        }
-        "The jobs changed since they were read; nothing was written. Your next add opens your text again." => {
-            "ジョブは読み取り後に変更されています。今回は何も書き込んでいません。次回の作成では入力した内容を開きます。"
-        }
         "The job changed since it was read; nothing was removed." => {
             "ジョブは読み取り後に変更されています。今回は何も削除していません。"
         }

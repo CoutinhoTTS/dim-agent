@@ -42,9 +42,17 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Added." => "Ditambahkan.",
         "Removed {name}." => "{name} dihapus.",
         "Ran {name}." => "{name} dijalankan.",
-        "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
-            "Dokumen pengguna berubah sejak dibaca; tidak ada yang ditulis. Edit berikutnya membuka dokumen saat ini."
+        "The user document changed since it was read; nothing was written." => {
+            "Dokumen pengguna berubah sejak dibaca; tidak ada yang ditulis."
         }
+        "The job changed since it was read; nothing was written." => {
+            "Tugas berubah sejak dibaca; tidak ada yang ditulis."
+        }
+        "The jobs changed since they were read; nothing was written." => {
+            "Tugas berubah sejak dibaca; tidak ada yang ditulis."
+        }
+        "Your next edit opens the current document." => "Edit berikutnya membuka dokumen saat ini.",
+        "Your next add reopens your text." => "Tambah berikutnya membuka kembali teks Anda.",
         "Scheduler" => "Penjadwal",
         "Added {name}." => "{name} ditambahkan.",
         "Run {name}: {outcome}." => "{name} dijalankan: {outcome}.",
@@ -57,12 +65,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "at {instant}" => "pada {instant}",
         "cron {expression}" => "cron {expression}",
         "cron {expression} in {zone}" => "cron {expression} di {zone}",
-        "The job changed since it was read; nothing was written. Your next edit opens the current job." => {
-            "Tugas berubah sejak dibaca; tidak ada yang ditulis. Edit berikutnya membuka tugas saat ini."
-        }
-        "The jobs changed since they were read; nothing was written. Your next add opens your text again." => {
-            "Tugas berubah sejak dibaca; tidak ada yang ditulis. Tambah berikutnya membuka kembali teks Anda."
-        }
         "The job changed since it was read; nothing was removed." => {
             "Tugas berubah sejak dibaca; tidak ada yang dihapus."
         }

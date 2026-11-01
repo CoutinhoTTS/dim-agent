@@ -44,8 +44,20 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Added." => "Añadido.",
         "Removed {name}." => "{name} eliminado.",
         "Ran {name}." => "{name} ejecutado.",
-        "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
-            "El documento del usuario cambió desde que se leyó; no se escribió nada. Tu próxima edición abre el documento actual."
+        "The user document changed since it was read; nothing was written." => {
+            "El documento del usuario cambió desde que se leyó; no se escribió nada."
+        }
+        "The job changed since it was read; nothing was written." => {
+            "La tarea cambió desde que se leyó; no se escribió nada."
+        }
+        "The jobs changed since they were read; nothing was written." => {
+            "Las tareas cambiaron desde que se leyeron; no se escribió nada."
+        }
+        "Your next edit opens the current document." => {
+            "Tu próxima edición abre el documento actual."
+        }
+        "Your next add reopens your text." => {
+            "Tu próxima acción de añadir vuelve a abrir tu texto."
         }
         "Scheduler" => "Programador",
         "Added {name}." => "{name} añadido.",
@@ -59,12 +71,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "at {instant}" => "a las {instant}",
         "cron {expression}" => "cron {expression}",
         "cron {expression} in {zone}" => "cron {expression} en {zone}",
-        "The job changed since it was read; nothing was written. Your next edit opens the current job." => {
-            "La tarea cambió desde que se leyó; no se escribió nada. Tu próxima edición abre la tarea actual."
-        }
-        "The jobs changed since they were read; nothing was written. Your next add opens your text again." => {
-            "Las tareas cambiaron desde que se leyeron; no se escribió nada. Tu próxima acción de añadir vuelve a abrir tu texto."
-        }
         "The job changed since it was read; nothing was removed." => {
             "La tarea cambió desde que se leyó; no se eliminó nada."
         }

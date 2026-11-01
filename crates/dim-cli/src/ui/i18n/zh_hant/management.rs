@@ -38,9 +38,17 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Added." => "已新增。",
         "Removed {name}." => "已刪除 {name}。",
         "Ran {name}." => "已執行 {name}。",
-        "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
-            "使用者文件在讀取後已被修改；這次沒有寫入。下次編輯會開啟目前文件。"
+        "The user document changed since it was read; nothing was written." => {
+            "使用者文件在讀取後已被修改；這次沒有寫入。"
         }
+        "The job changed since it was read; nothing was written." => {
+            "工作在讀取後已被修改；這次沒有寫入。"
+        }
+        "The jobs changed since they were read; nothing was written." => {
+            "工作在讀取後已被修改；這次沒有寫入。"
+        }
+        "Your next edit opens the current document." => "下次編輯會開啟目前文件。",
+        "Your next add reopens your text." => "下次新增會重新開啟你的文字。",
         "Scheduler" => "排程器",
         "Added {name}." => "已新增 {name}。",
         "Run {name}: {outcome}." => "已執行 {name}：{outcome}。",
@@ -53,12 +61,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "at {instant}" => "於 {instant}",
         "cron {expression}" => "cron {expression}",
         "cron {expression} in {zone}" => "cron {expression}（{zone}）",
-        "The job changed since it was read; nothing was written. Your next edit opens the current job." => {
-            "工作在讀取後已被修改；這次沒有寫入。下次編輯會開啟目前工作。"
-        }
-        "The jobs changed since they were read; nothing was written. Your next add opens your text again." => {
-            "工作在讀取後已被修改；這次沒有寫入。下次新增會重新開啟你的文字。"
-        }
         "The job changed since it was read; nothing was removed." => {
             "工作在讀取後已被修改；這次沒有刪除。"
         }

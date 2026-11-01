@@ -44,9 +44,19 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Added." => "Ajouté.",
         "Removed {name}." => "{name} supprimé.",
         "Ran {name}." => "{name} exécuté.",
-        "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
-            "Le document utilisateur a changé depuis sa lecture ; rien n'a été écrit. Votre prochaine modification ouvrira le document actuel."
+        "The user document changed since it was read; nothing was written." => {
+            "Le document utilisateur a changé depuis sa lecture ; rien n'a été écrit."
         }
+        "The job changed since it was read; nothing was written." => {
+            "La tâche a changé depuis sa lecture ; rien n'a été écrit."
+        }
+        "The jobs changed since they were read; nothing was written." => {
+            "Les tâches ont changé depuis leur lecture ; rien n'a été écrit."
+        }
+        "Your next edit opens the current document." => {
+            "Votre prochaine modification ouvrira le document actuel."
+        }
+        "Your next add reopens your text." => "Votre prochain ajout rouvrira votre texte.",
         "Scheduler" => "Planificateur",
         "Added {name}." => "{name} ajouté.",
         "Run {name}: {outcome}." => "{name} exécuté : {outcome}.",
@@ -59,12 +69,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "at {instant}" => "à {instant}",
         "cron {expression}" => "cron {expression}",
         "cron {expression} in {zone}" => "cron {expression} en {zone}",
-        "The job changed since it was read; nothing was written. Your next edit opens the current job." => {
-            "La tâche a changé depuis sa lecture ; rien n'a été écrit. Votre prochaine modification ouvrira la tâche actuelle."
-        }
-        "The jobs changed since they were read; nothing was written. Your next add opens your text again." => {
-            "Les tâches ont changé depuis leur lecture ; rien n'a été écrit. Votre prochain ajout rouvrira votre texte."
-        }
         "The job changed since it was read; nothing was removed." => {
             "La tâche a changé depuis sa lecture ; rien n'a été supprimé."
         }

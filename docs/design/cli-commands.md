@@ -442,8 +442,10 @@ Writes follow [Execution settings](#execution-settings):
   stale revision is dropped, and the next edit opens the stored document. It never retries
   automatically and never overwrites a newer document;
 - reload discards the draft and reads again;
-- an edit the conflict prevented is not lost silently: the message names the file that holds the
-  user's text;
+- a conflict message states the owner's fact — what changed, and that nothing was written — and
+  leaves where the text is to the surface that holds it: the panel says what the next edit or add
+  does with the kept text and names its file, and the command line names the file that holds the
+  text, a stdin input included, and exits 1;
 - a refusal that does not involve a newer document — text that does not parse, or one the owner
   refuses — keeps the draft's revision, so the edit key reopens the user's text and writes it
   again;
