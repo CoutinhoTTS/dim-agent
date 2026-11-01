@@ -2273,6 +2273,13 @@ impl Terminal {
             thread::sleep(Duration::from_millis(10));
         }
     }
+    /// Waits until the terminal has shown `expected` anywhere, for a frame
+    /// whose place among the frames already consumed the flow does not fix.
+    fn until_anywhere(&mut self, expected: &str) {
+        let consumed = std::mem::take(&mut self.consumed);
+        self.until(expected);
+        self.consumed = consumed;
+    }
     fn until(&mut self, expected: &str) {
         let deadline = Instant::now() + PATIENCE;
         loop {
