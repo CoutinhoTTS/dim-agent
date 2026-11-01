@@ -238,7 +238,7 @@ impl HistoryRenderer {
 
     /// Streams a branch in batches and returns only the projection. `fallback`
     /// means the caller must use the full `rendered_context` path (ancestry,
-    /// compaction, or an empty range).
+    /// a cut the stream cannot follow, or an empty range).
     pub async fn rendered_stream(
         &self,
         timeline: &Timeline,
@@ -262,6 +262,7 @@ impl HistoryRenderer {
         let mut state = None;
         let mut history = Vec::new();
         let mut compaction = None;
+        let mut cut_in_effect = None;
         let mut start = 1;
         while start <= through {
             let events = timeline
@@ -273,23 +274,22 @@ impl HistoryRenderer {
             let end = events.last().map_or(start, |event| event.sequence);
             let projected = project_batch(&events, state.as_ref())
                 .map_err(|error| AgentError::fault("History", error))?;
-            if projected.compacted
-                && let Some(event) = &projected.compaction
-                && let EventKind::ContextCompaction(data) = &event.kind
-                && let ContextCompactionResult::Completed { retain_from, .. } = &data.outcome
-                && !order.iter().any(|event| event.id == retain_from.as_str())
-            {
-                return Ok(StreamedContext::fallback());
-            }
             history.extend(projected.history);
             if projected.compacted
                 && let Some(event) = &projected.compaction
                 && let EventKind::ContextCompaction(data) = &event.kind
                 && let ContextCompactionResult::Completed { retain_from, .. } = &data.outcome
-                && let Some(cut) = order
+            {
+                let Some(cut) = order
                     .iter()
                     .position(|event| event.id == retain_from.as_str())
-            {
+                else {
+                    return Ok(StreamedContext::fallback());
+                };
+                if cut_in_effect.is_some_and(|previous| cut < previous) {
+                    return Ok(StreamedContext::fallback());
+                }
+                cut_in_effect = Some(cut);
                 let kept = history
                     .iter()
                     .position(|entry| {

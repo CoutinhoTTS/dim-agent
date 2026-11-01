@@ -1175,3 +1175,328 @@ fn an_unclosed_call_or_an_open_output_fails_the_next_request_context() {
         assert!(error.contains("previous model output"), "{error}");
     }
 }
+
+/// A branch appended through the public interface, for the streamed reads.
+async fn paged_branch(name: &str) -> Timeline {
+    let store = Arc::new(MemoryTimelineStore::default());
+    store
+        .create_session(name, &SessionConfig::default())
+        .await
+        .unwrap();
+    Timeline::new(
+        rutis::Ctx::root().unwrap(),
+        TimelineKey {
+            session_id: name.into(),
+            branch_id: "main".into(),
+        },
+        vec![],
+        store,
+    )
+}
+
+fn model_start(turn: &str, request: &str) -> EventKind {
+    EventKind::ModelStart(StepData {
+        turn_id: turn.into(),
+        request_id: request.into(),
+    })
+}
+
+fn delta(turn: &str, request: &str, text: &str) -> EventKind {
+    EventKind::Text(DeltaData {
+        turn_id: turn.into(),
+        request_id: request.into(),
+        delta: text.into(),
+    })
+}
+
+fn output_end(turn: &str, request: &str) -> EventKind {
+    EventKind::ModelOutputEnd(ModelOutputEndData {
+        turn_id: turn.into(),
+        request_id: request.into(),
+        outcome: ModelOutputOutcome::Completed {
+            finish_reason: FinishReason::EndTurn,
+        },
+    })
+}
+
+fn turn_start(turn: &str) -> EventKind {
+    EventKind::TurnStart(TurnStartData {
+        turn_id: turn.into(),
+    })
+}
+
+fn turn_end(turn: &str) -> EventKind {
+    EventKind::TurnEnd(TurnEndData {
+        turn_id: turn.into(),
+        outcome: TurnOutcome::Completed {
+            reason: "end_turn".into(),
+        },
+    })
+}
+
+/// One model step from `start` through `end`, one delta per entry.
+fn step(timeline: &Timeline, turn: &str, request: &str, deltas: &[&str]) {
+    timeline.append(model_start(turn, request).into()).unwrap();
+    for text in deltas {
+        timeline.append(delta(turn, request, text).into()).unwrap();
+    }
+    timeline.append(output_end(turn, request).into()).unwrap();
+}
+
+fn input(timeline: &Timeline, text: &str) -> Arc<AgentEvent> {
+    timeline
+        .append(
+            EventKind::InputMessage(InputMessageData::text(text, Some(InputMode::Queue))).into(),
+        )
+        .unwrap()
+}
+
+fn consumed(timeline: &Timeline, event: &AgentEvent) {
+    timeline
+        .append(
+            EventKind::InputConsumed(InputConsumedData {
+                input_id: event.id.clone(),
+            })
+            .into(),
+        )
+        .unwrap();
+}
+
+async fn assert_stream_matches_full(name: &str, timeline: &Timeline, through: u64) {
+    use dim_agent_capabilities::history::context_messages;
+    let renderer = HistoryRenderer::default();
+    let (full, full_history) = renderer.rendered_context(timeline, through).await.unwrap();
+    let full_messages: Vec<Message> = context_messages(&full, &full_history)
+        .into_iter()
+        .map(Arc::unwrap_or_clone)
+        .collect();
+    let compacted = full
+        .events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextCompaction(data)
+                if matches!(data.outcome, ContextCompactionResult::Completed { .. }) =>
+            {
+                Some(event.id.clone())
+            }
+            _ => None,
+        });
+    for batch in [1, 2, 3, through + 1] {
+        let streamed = renderer
+            .rendered_stream(timeline, through, batch)
+            .await
+            .unwrap();
+        assert!(!streamed.fallback, "{name} batch {batch} fell back");
+        assert_eq!(
+            streamed.history, full_history,
+            "{name} batch {batch} entries"
+        );
+        assert_eq!(
+            context_messages(&full, &streamed.history)
+                .into_iter()
+                .map(Arc::unwrap_or_clone)
+                .collect::<Vec<_>>(),
+            full_messages,
+            "{name} batch {batch} messages"
+        );
+        assert_eq!(
+            streamed.compaction.as_ref().map(|event| event.id.clone()),
+            compacted,
+            "{name} batch {batch} compaction"
+        );
+    }
+}
+
+/// The streamed read and the full render agree on entries, messages and the
+/// compaction, at page sizes that cut through outputs, atomic batches and
+/// compaction cuts.
+#[tokio::test]
+async fn streamed_and_full_renders_agree_across_pages() {
+    let mut cases = Vec::new();
+
+    let timeline = paged_branch("turn-tool-output").await;
+    let hello = input(&timeline, "hello");
+    consumed(&timeline, &hello);
+    timeline.append(turn_start("one").into()).unwrap();
+    timeline.append(model_start("one", "r1").into()).unwrap();
+    timeline.append(delta("one", "r1", "a").into()).unwrap();
+    timeline.append(delta("one", "r1", "b").into()).unwrap();
+    timeline
+        .append(
+            EventKind::Thinking(DeltaData {
+                turn_id: "one".into(),
+                request_id: "r1".into(),
+                delta: "hmm".into(),
+            })
+            .into(),
+        )
+        .unwrap();
+    timeline
+        .append(
+            EventKind::ToolUseStart(ToolUseStartData {
+                turn_id: "one".into(),
+                request_id: "r1".into(),
+                call_id: "call-1".into(),
+                name: "read".into(),
+            })
+            .into(),
+        )
+        .unwrap();
+    timeline
+        .append(
+            EventKind::ToolUse(ToolUseData {
+                turn_id: "one".into(),
+                request_id: "r1".into(),
+                call: ToolCall {
+                    id: "call-1".into(),
+                    name: "read".into(),
+                    input: JsonObject::new(),
+                },
+            })
+            .into(),
+        )
+        .unwrap();
+    timeline.append(output_end("one", "r1").into()).unwrap();
+    timeline
+        .append(
+            EventKind::ToolResult(ToolResultData {
+                turn_id: "one".into(),
+                request_id: "r1".into(),
+                call_event_id: None,
+                results: vec![ToolCallResult {
+                    call_id: "call-1".into(),
+                    result: ToolResult::text("ok"),
+                }],
+            })
+            .into(),
+        )
+        .unwrap();
+    step(&timeline, "one", "r2", &["c", "d"]);
+    timeline.append(turn_end("one").into()).unwrap();
+    let through = timeline.sequence();
+    cases.push(("a turn with a tool call and its result", timeline, through));
+
+    let timeline = paged_branch("atomic-batch").await;
+    let hello = input(&timeline, "hello");
+    consumed(&timeline, &hello);
+    timeline.append(turn_start("one").into()).unwrap();
+    timeline
+        .append_batch_registered(
+            vec![
+                model_start("one", "r1").into(),
+                delta("one", "r1", "a").into(),
+                output_end("one", "r1").into(),
+            ],
+            |_| Ok(()),
+        )
+        .unwrap();
+    timeline.append(turn_end("one").into()).unwrap();
+    let through = timeline.sequence();
+    cases.push(("an atomic batch across a page edge", timeline, through));
+
+    let timeline = paged_branch("cut-in-earlier-page").await;
+    let hello = input(&timeline, "hello");
+    let cut = timeline
+        .append(
+            EventKind::InputConsumed(InputConsumedData {
+                input_id: hello.id.clone(),
+            })
+            .into(),
+        )
+        .unwrap();
+    step(&timeline, "one", "r1", &["a", "b"]);
+    timeline
+        .append(completed(&cut.id, "summary", timeline.sequence(), Vec::new()).into())
+        .unwrap();
+    timeline.append(turn_start("two").into()).unwrap();
+    step(&timeline, "two", "r2", &["c"]);
+    let through = timeline.sequence();
+    cases.push(("a compaction cut in an earlier page", timeline, through));
+
+    let timeline = paged_branch("two-compactions").await;
+    let hello = input(&timeline, "hello");
+    let first = timeline
+        .append(
+            EventKind::InputConsumed(InputConsumedData {
+                input_id: hello.id.clone(),
+            })
+            .into(),
+        )
+        .unwrap();
+    step(&timeline, "one", "r1", &["a"]);
+    timeline
+        .append(completed(&first.id, "first", timeline.sequence(), Vec::new()).into())
+        .unwrap();
+    let second = timeline.append(turn_start("two").into()).unwrap();
+    step(&timeline, "two", "r2", &["b"]);
+    timeline
+        .append(completed(&second.id, "second", timeline.sequence(), Vec::new()).into())
+        .unwrap();
+    timeline.append(turn_start("three").into()).unwrap();
+    step(&timeline, "three", "r3", &["c"]);
+    let through = timeline.sequence();
+    cases.push(("two compactions with advancing cuts", timeline, through));
+
+    let timeline = paged_branch("keyed-blocks").await;
+    let hello = input(&timeline, "hello");
+    timeline
+        .append(
+            EventKind::InputMessage(InputMessageData {
+                blocks: vec![context_block::raw(
+                    "<live>a</live>".into(),
+                    Some("a".into()),
+                )],
+                ..InputMessageData::text("first", Some(InputMode::Queue))
+            })
+            .into(),
+        )
+        .unwrap();
+    consumed(&timeline, &hello);
+    timeline.append(turn_start("one").into()).unwrap();
+    step(&timeline, "one", "r1", &["a"]);
+    let second = input(&timeline, "second");
+    consumed(&timeline, &second);
+    step(&timeline, "one", "r2", &["b"]);
+    let through = timeline.sequence();
+    cases.push(("keyed input blocks", timeline, through));
+
+    for (name, timeline, through) in cases {
+        assert_stream_matches_full(name, &timeline, through).await;
+    }
+}
+
+/// A completed compaction whose cut is earlier than the cut in effect is data
+/// the stream cannot follow, so it falls back to the full render, which keeps
+/// the entries that cut retains.
+#[tokio::test]
+async fn a_cut_that_moves_backwards_falls_back_to_the_full_render() {
+    let timeline = paged_branch("backwards-cut").await;
+    let hello = input(&timeline, "hello");
+    let early = timeline
+        .append(
+            EventKind::InputConsumed(InputConsumedData {
+                input_id: hello.id.clone(),
+            })
+            .into(),
+        )
+        .unwrap();
+    let late = timeline.append(model_start("one", "r1").into()).unwrap();
+    timeline.append(delta("one", "r1", "a").into()).unwrap();
+    timeline.append(output_end("one", "r1").into()).unwrap();
+    timeline
+        .append(completed(&late.id, "late", timeline.sequence(), Vec::new()).into())
+        .unwrap();
+    timeline
+        .append(completed(&early.id, "early", timeline.sequence(), Vec::new()).into())
+        .unwrap();
+    let through = timeline.sequence();
+    let renderer = HistoryRenderer::default();
+    let streamed = renderer
+        .rendered_stream(&timeline, through, 1)
+        .await
+        .unwrap();
+    assert!(streamed.fallback, "a backwards cut falls back");
+    let (_, full) = renderer.rendered_context(&timeline, through).await.unwrap();
+    assert_eq!(full.len(), 2, "the full render keeps what the cut retains");
+}
