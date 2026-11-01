@@ -172,6 +172,12 @@ same rule is that a view's call goes to the entry whose document it mounted, bec
 makes `"app"` mean "callable from this server's views". A different entry is the host breaking its own
 contract, not something the daemon can detect.
 
+A view may call any tool its server declares an app may call, model-visible or app-only, including the
+tool that rendered it. The call is the user's action on an entry they enabled, and a view that can
+refresh its own tool's data is the ordinary case; requiring `visibility: ["app"]` for view-driven tools
+would be stricter than the specification's default and would refuse that refresh on servers that do not
+annotate their tools. Restricting it later is a policy change to this decision, not a mechanism one.
+
 ### D8. The daemon advertises the extension on every MCP connection
 
 A server registers widget tools only when its client declares support, so the daemon's MCP client
@@ -187,7 +193,9 @@ client's fallback, and a client that does not render views ignores the descripto
 
 `ui/message` is a message to the conversation on the user's behalf, which is `session.submit`: the
 Session input boundary validates it like any other user input, and the daemon records it as an ordinary
-adopted input. The host decides whether to send it; nothing records which view produced it.
+adopted input. It therefore enters the model context exactly as a typed message does, which is intended
+and is the point of the request: the user sent it. The host decides whether to send it; nothing records
+which view produced it.
 
 `ui/update-model-context` has no conforming path and stays unsupported: the specification lets the view
 replace its model context on every update, while an adopted input is handed over once and is final
@@ -286,7 +294,7 @@ The reply is the result the connection returned, in the shape the Timeline uses 
 | `content` | string or block array | The result's content, as `ToolResult.content` carries it |
 | `structuredContent` | object or absent | The result's structured content; it is for the view, not the model |
 | `isError` | boolean or absent | The server reported the call as failed; the call still happened |
-| `meta` | object or absent | The result's `_meta`, which only this reply carries (§6) |
+| `meta` | object or absent | The result's `_meta`, which only this reply carries (§7) |
 
 ```text
 client (host)                Session                       MCP entry
@@ -323,7 +331,38 @@ same connection has none either (D11).
 No code is borrowed from admission: the daemon never refuses a view's call because of a permission mode
 or an approval, so it has nothing to report about one.
 
-## 5. What changes for a client
+## 5. Security boundary
+
+A view is third-party HTML running in a sandbox the daemon does not control. Everything it may reach
+through this contract is fixed by one binding, and nothing else is reachable.
+
+- **One entry, one generation.** A view is mounted from a published tool name and belongs to that
+  tool's entry. Its calls name that entry and run on the connection the Session holds for it now (D5),
+  and no cross-entry and no cross-server call exists in this contract. The daemon cannot see which view
+  a host forwards for, so same-entry forwarding is a host obligation (D7); what the daemon can see, it
+  enforces.
+- **Fail closed.** An entry that is not enabled, not `ready`, or whose connection was replaced answers
+  `mcp_unavailable`. Nothing falls back to another entry, another tool or another generation, and
+  nothing is retried against a server the view did not come from.
+- **Credentials stay in the connection.** The daemon is the MCP client: headers, bearer tokens, OAuth
+  tokens and endpoints live in the connection and are never returned by this surface — not to a host
+  and not to a view. A view's HTTP calls to the outside are governed by the document's declared CSP,
+  which the host enforces; the daemon is not a proxy for them.
+- **Bounded payloads.** The document is capped (D11) because the daemon hands it to a sandbox; a call's
+  result is the same MCP payload a model tool call already accepts, with the same behavior, and the
+  `_meta` a result carries is returned to the view only.
+- **The view is not trusted with the daemon's authority.** It cannot name a resource outside its
+  document (D10), cannot make the daemon read files, cannot see another Session's entries, and cannot
+  ask for a tool its server did not declare callable by an app (D7).
+- **Authority is the enabled entry.** A view's call is the user's action on an MCP server they enabled,
+  not an agent decision, so `Permission` and `Approval` do not gate it (D5; ADR 003 D1–D3). Enabling
+  the entry is what authorizes the server's tools, exactly as it authorizes the server's startup.
+- **The host shows it.** Because the conversation does not record a view's call (§8), the client must
+  show in its own UI that the app issued the action and which entry it belongs to, next to the view.
+  That is a host obligation of this contract, not a client nicety: without it the user cannot tell an
+  app's action from the agent's.
+
+## 6. What changes for a client
 
 - A host mounts a view from a `tool/call` fact: it reads `session.mcp.app.widget` with the tool name it
   has, and caches the reply under the entry's `version` from `session.mcp`. It re-reads when that
@@ -332,8 +371,8 @@ or an approval, so it has nothing to report about one.
   requires. Building the CSP, the `allow` list and the host context is the client's work and is not
   part of this contract.
 - `tools/call` from the view becomes `session.mcp.app.call`, addressed to the entry of the document it
-  mounted and never to another entry. Whether the host asks the user first, and how it shows what the
-  view called, is the host's policy.
+  mounted and never to another entry. Whether the host asks the user first is the host's own policy;
+  showing that the app issued the action is its obligation (§5).
 - `resources/read` from the view is answered from the mounted document; any other URI is a refusal the
   client produces itself (D10). `ui/update-model-context` is refused by the client (D9).
 - `ui/message` becomes `session.submit` and is validated as any user input is. Whether the user is
@@ -344,7 +383,7 @@ or an approval, so it has nothing to report about one.
   so a session they view is unaffected; the web entry is served the methods but its phase-1 UI mounts
   nothing.
 
-## 6. What does not change
+## 7. What does not change
 
 - `session.mcp`, `session.mcp.refresh`, `mcp.*`, `mcp.auth.*` and the probe keep their requests and
   replies. A view's state is read from `session.mcp`; this design adds no per-entry field there.
@@ -359,7 +398,7 @@ or an approval, so it has nothing to report about one.
 - No new plugin, part, service, port or notification; the MCP Session part, its connections and the
   assembly are untouched.
 
-## 7. Events and state
+## 8. Events and state
 
 None in the Timeline. A view's call writes no fact and changes no persisted state: the only record is
 the process log entry of D10, which carries identifiers, the outcome and the duration. The discovered
@@ -367,7 +406,7 @@ tools a Session keeps — including the ones not published to the model — are 
 `tools/list` on every connection, so a reload or a restart loses nothing. The client owns everything
 else: the mounted document, the sandbox, the view's own state.
 
-## 8. Dependencies
+## 9. Dependencies
 
 | Dependency | Use |
 | --- | --- |
@@ -376,7 +415,7 @@ else: the mounted document, the sandbox, the view's own state.
 | MCP client (`rmcp`) | `resources/read` beside the existing `tools/list` and `tools/call` |
 | The App Server's process log (`tracing`) | The audit entry of D10 |
 
-## 9. Cross-module requirements
+## 10. Cross-module requirements
 
 None. Every operation is served by the owner that already holds the state: the MCP Session part for the
 connection, and the existing input path for a message. No requirement is raised to the runtime, the
@@ -386,17 +425,17 @@ The two capabilities this design does not provide are decisions, not gaps in ano
 `ui/update-model-context` conflicts with the finality of an adopted input (D9), and a resource read
 beyond the mounted document is not served at all (D10).
 
-## 10. Tests
+## 11. Tests
 
 Flow level, in `crates/dim-app-server/tests`, reusing the Node MCP fixtures under
 `crates/dim-app-server/tests/fixtures/` (they already run the official SDK):
 
 | File | What it protects |
 | --- | --- |
-| `mcp_session_flow.rs` | A widget tool's document is mounted from its published tool name and names its entry and the server's tool; a tool that declares no resource is `mcp_app_absent`; a document that is not a `ui://` `text/html;profile=mcp-app` or is larger than the limit is `mcp_app_unsupported`; a tool whose visibility is `["app"]` is absent from the Session's tool list but answers `session.mcp.app.call`, and one whose visibility is `["model"]` answers `mcp_app_not_callable`; a call naming an entry the Session does not hold answers `mcp_unknown_server`; a call on a disabled or unauthorized entry answers `mcp_unavailable` |
+| `mcp_session_flow.rs` | A widget tool's document is mounted from its published tool name and names its entry and the server's tool; a tool that declares no resource is `mcp_app_absent`; a document that is not a `ui://` `text/html;profile=mcp-app` or is larger than the limit is `mcp_app_unsupported`; a tool whose visibility is `["app"]` is absent from the Session's tool list but answers `session.mcp.app.call`, and one whose visibility is `["model"]` answers `mcp_app_not_callable`; a call naming an entry the Session does not hold answers `mcp_unknown_server`; a call on a disabled or unauthorized entry answers `mcp_unavailable`; neither reply carries a header value, a bearer token, an OAuth token or an endpoint URL |
 | `transport_flow/product_protocol.rs` | The wire contract: both methods are advertised in `hello.features`, refused with `local_transport_required` on a bare entry, and answer the error codes of §4.3; a view's call leaves no `tool/call`, `tool/start` or `tool/result` fact and does not enter the next turn's context; a `read-only` Session's view call is not refused by the daemon |
 
-## 11. Rule check
+## 12. Rule check
 
 | Rule | Answer |
 | --- | --- |
@@ -418,12 +457,13 @@ Flow level, in `crates/dim-app-server/tests`, reusing the Node MCP fixtures unde
 | ADR 003 D1 (approval covers agent decisions) | Applied as written: a view's call is the user acting on an enabled entry, not the agent deciding, so `Permission` and `Approval` do not apply; the agent's own tool calls are unchanged |
 | ADR 003 D3 (project entries start disabled) | Unchanged: a view of a disabled or unauthorized entry has no connection, so both methods answer `mcp_unavailable` |
 
-## 12. Alternatives considered
+## 13. Alternatives considered
 
 | Alternative | Why not |
 | --- | --- |
 | Route a view's call through the agent's tool loop | It would need a turn and a request batch, write `tool/*` facts and put the result into the model context; the view's interaction is not the model's decision |
 | Give a view's call the branch's `Permission` and `Approval` | It treats the user's action inside an enabled entry as an agent decision, and makes a view unusable in a `read-only` session for no safety gain: the view calls the tools the entry already exposes |
+| Restrict a view to `visibility: ["app"]` tools | Stricter than the specification's default, and it refuses the ordinary case of a view refreshing the data of the tool that rendered it, for every server that does not annotate its tools. It is a policy that can tighten D7 later without changing the contract |
 | A management namespace `mcp.apps` | The connection and its discovery are Session state; a process-scoped method reaching into a Session is the wiring this repository removes |
 | A widget handle: `app.open` returns a token, later calls carry it | State to create, replace and expire, and cleanup on several owners' lifetimes; the entry id and the tool name already identify the view, and the client's cache key is the version `session.mcp` reports |
 | Let the client open its own MCP connection for the view | Duplicates daemon-owned configuration, credentials and OAuth state, and lets one entry run two connections with different authorization |
@@ -437,16 +477,10 @@ Flow level, in `crates/dim-app-server/tests`, reusing the Node MCP fixtures unde
 | Prefetch every declared document on discovery | One request per tool for documents a client may never render; the client caches per version instead |
 | Return the probe's tool list with descriptors | That reply belongs to [MCP configuration management](mcp-management.md); this design reads the descriptor in the Session, where a view lives |
 
-## 13. Open questions
+## 14. Open questions
 
-1. **May a view call any tool the server exposes, or only app-scoped ones?** The specification
-   defaults `visibility` to `["model", "app"]`, so this design lets a view call a tool the model can
-   also call — the common case being a view refreshing the data of the tool that rendered it.
-   Restricting view-driven calls to `visibility: ["app"]` would be stricter than that default and
-   would refuse the refresh on servers that do not annotate their tools. It is a policy question,
-   not a mechanism one: both readings fit this contract.
-2. **Should the extension declaration be per daemon profile?** D8 declares it on every connection. A
+1. **Should the extension declaration be per daemon profile?** D8 declares it on every connection. A
    profile whose clients never render views could stop declaring it; that would need a setting, which
    is why this design does not add one.
-3. **Do views render in the Web workspace?** Phase 1 renders none; the methods are served to its
+2. **Do views render in the Web workspace?** Phase 1 renders none; the methods are served to its
    loopback connection already, so a later phase is a client change, not a contract change.
