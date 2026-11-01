@@ -1,5 +1,8 @@
 #![cfg(unix)]
 
+#[path = "cli_flow/accounts.rs"]
+mod accounts;
+
 #[path = "cli_flow/acp.rs"]
 mod acp;
 
@@ -4488,7 +4491,7 @@ fn fullscreen_login_releases_mouse_for_the_link_and_restores_the_preference_on_c
         )
         .unwrap();
         let daemon = home.daemon(|wire| {
-            wire.hello(&[]);
+            wire.hello(&["account.login.browser.begin", "account.login.cancel"]);
             wire.created();
             let attach = wire.read("session.attach");
             wire.reply(&attach, attach_record(&attach));
@@ -4573,9 +4576,9 @@ fn browser_login_hides_callback_and_uses_only_generic_account_rpc() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
-        let providers = wire.read("account.providers");
-        wire.reply(&providers,json!([{"providerId":"fixture","displayName":"Fixture","loginMethods":["browser"]}]));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list","provider.management","account.login.browser.begin","account.login.browser.complete"]}));
+        let listed = wire.read("provider.management");
+        wire.reply(&listed,json!({"providers":[{"providerId":"fixture","displayName":"Fixture","account":{"namespace":"account","loginMethods":["browser"]}}]}));
         let begin = wire.read("account.login.browser.begin");
         assert_eq!(begin["params"]["directory"],"https://fixture.invalid");
         wire.reply(&begin,json!({"attemptId":"attempt","authorizationUrl":"urn:fixture:authorization","expiresAt":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() + 60_000}));
@@ -4584,7 +4587,12 @@ fn browser_login_hides_callback_and_uses_only_generic_account_rpc() {
         wire.reply(&complete,json!({"credentialEpoch":"epoch","generation":1,"account":{"issuer":"fixture","subject":"test","grantedScopes":[]}}));
     });
     let mut command = home.command();
-    command.args(["login", "fixture", "--directory", "https://fixture.invalid"]);
+    command.env("DIMCODE_OAUTH_MANUAL", "1").args([
+        "login",
+        "fixture",
+        "--directory",
+        "https://fixture.invalid",
+    ]);
     let mut terminal = Terminal::launch(command);
     terminal.until("Callback URL: ");
     terminal.write(b"http://localhost:1455/auth/callback?code=secret-code&state=state\n");
@@ -4615,9 +4623,9 @@ fn device_login_polls_and_cancels_the_attempt_on_ctrl_c() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
-        let providers = wire.read("account.providers");
-        wire.reply(&providers,json!([{"providerId":"fixture","displayName":"Fixture","loginMethods":["device"]}]));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list","provider.management","account.login.begin","account.login.status","account.login.cancel"]}));
+        let listed = wire.read("provider.management");
+        wire.reply(&listed,json!({"providers":[{"providerId":"fixture","displayName":"Fixture","account":{"namespace":"account","loginMethods":["device"]}}]}));
         let begin = wire.read("account.login.begin");
         wire.reply(&begin,json!({"attemptId":"device","verificationUri":"https://fixture.invalid/device","userCode":"TEST-CODE","expiresAt":999999}));
         let status = wire.read("account.login.status"); wire.reply(&status,json!({"status":"pending"}));
