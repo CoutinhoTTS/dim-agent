@@ -294,6 +294,112 @@ fn workflow_enable_refuses_a_name_the_owner_does_not_list_as_a_project() {
     );
 }
 
+/// A project definition starts disabled, and its bare name still names it:
+/// `edit` and `set` answer with the file to edit, and `history` reads its
+/// detail instead of refusing the name.
+#[test]
+fn workflow_edit_set_and_history_find_a_disabled_project_definition() {
+    // `edit`: the editor is never opened, since there is no document to give
+    // it; the answer names the definition's file.
+    let home = Home::new();
+    let (project, _) = workspace(&home);
+    let script = editor(&home, "exit 0");
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("workflow.list");
+        wire.reply(&request, definitions());
+        let request = wire.read("settings.read");
+        wire.reply(&request, settings());
+        drains(wire);
+    });
+    let mut command = home.command();
+    command
+        .env_remove("VISUAL")
+        .env("EDITOR", &script)
+        .arg("--cwd")
+        .arg(&project)
+        .args(["workflow", "edit", "nightly-check"]);
+    let mut terminal = Terminal::launch_tui(command);
+    let status = terminal.wait();
+    daemon.join().unwrap();
+    assert_eq!(status.code(), Some(1));
+    assert!(
+        terminal
+            .transcript
+            .contains("A project definition is a file; edit ")
+            && terminal.transcript.contains("nightly-check.yaml"),
+        "{}",
+        terminal.transcript
+    );
+
+    // `set`: the same resolution, before the text it would write matters.
+    let home = Home::new();
+    let (project, _) = workspace(&home);
+    let text = home.0.join("nightly.json");
+    fs::write(
+        &text,
+        json!({"schema": "dim.workflow/v1", "name": "nightly-check"}).to_string(),
+    )
+    .unwrap();
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("workflow.list");
+        wire.reply(&request, definitions());
+        let request = wire.read("settings.read");
+        wire.reply(&request, settings());
+        drains_without_saving(wire);
+    });
+    let output = home
+        .command()
+        .arg("--cwd")
+        .arg(&project)
+        .args(["workflow", "set", "nightly-check"])
+        .arg(&text)
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("A project definition is a file; edit "),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // `history`: the detail is the definition's lines and its runs.
+    let home = Home::new();
+    let (project, _) = workspace(&home);
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("workflow.list");
+        wire.reply(&request, definitions());
+        let request = wire.read("workflow.status");
+        assert_eq!(request["params"], json!({}));
+        wire.reply(&request, json!([]));
+        drains(wire);
+    });
+    let output = home
+        .command()
+        .arg("--cwd")
+        .arg(&project)
+        .args(["workflow", "history", "nightly-check"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Nightly checks"), "{stdout}");
+    assert!(stdout.contains("nightly-check.yaml"), "{stdout}");
+    assert!(
+        stdout.contains("Starts only after you enable it."),
+        "{stdout}"
+    );
+    assert!(stdout.contains("No run yet."), "{stdout}");
+}
+
 /// A save may not rename its definition: the owner keys by the document's
 /// name, and the area has no remove. Nothing is written and the text stays.
 #[test]

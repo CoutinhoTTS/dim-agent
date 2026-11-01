@@ -662,10 +662,11 @@ the Settings document, and a project definition by deleting its file.
 issues of the invalid ones; `enable` and `disable` address the project definition of that name;
 `edit` and `set` address the user definition and refuse a project name with the file to edit;
 `add` is the create without an editor; `start NAME [PATH]` takes the parameters from PATH, or from
-stdin for `-`, or starts with none; `history NAME` resolves the name by the precedence
-`workflow.start` uses (project, then user, then package) and prints the detail's lines. A command
-run in a workspace that Settings does not know prints the owner's `definition_source_failed`
-message and exits 1.
+stdin for `-`, or starts with none; `history NAME` prints the detail's lines. A bare name resolves
+the way `workflow.start` resolves it: an enabled definition first, then any definition, and within
+each pass project, then user, then package. Project definitions start disabled, so a bare name still
+names one. A command run in a workspace that Settings does not know prints the owner's
+`definition_source_failed` message and exits 1.
 
 ## Commands
 
@@ -707,7 +708,7 @@ message and exits 1.
 | `dimcode workflow set NAME PATH` | Write the user definition from `PATH`, or from stdin for `-`, with the revision read immediately before the write; unchanged text writes nothing. |
 | `dimcode workflow add PATH` | Create or replace a definition from `PATH`, or from stdin for `-`, over `workflow.save`: the document names `source` (`user` by default) and `document`. |
 | `dimcode workflow start NAME [PATH]` | Start the definition over `workflow.start` with the parameters from `PATH`, or from stdin for `-`, or with none; report `Started NAME: RUN_ID`, without a `report_to`. |
-| `dimcode workflow history NAME` | Print the definition's lines and its recent runs over `workflow.status`, resolving the name by `workflow.start`'s precedence. |
+| `dimcode workflow history NAME` | Print the definition's lines and its recent runs over `workflow.status`, resolving the name as `workflow.start` does. |
 | `/workflow` | Open the Workflow panel of the Session's workspace ([management surfaces](#management-surfaces)): a definition per entry with its source, state, parameters and issues, and the toggle, edit, add, run and inspect kinds. |
 | `/workflow:save` | Open the Workflow panel and its create editor: the add kind at the command surface. |
 | `dimcode login [PROVIDER] [--directory URL] [--device] [--redirect-uri URI]` | Start the described account's browser or device sign-in ([Provider accounts](#provider-accounts)); without PROVIDER, list the described accounts. |

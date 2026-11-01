@@ -445,7 +445,7 @@ inspect 读取 `workflow.status {}`，把保留的运行过滤到该条目的名
 ╰─ Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+T run · Tab inspect · Esc close ─────────────╯
 ```
 
-`dimcode workflow list` 每个定义打印一行（名称、来源、状态、描述）以及无效定义的问题；`enable` 与 `disable` 作用于该名称的项目定义；`edit` 与 `set` 作用于用户定义，遇到项目名称时给出要编辑的文件并拒绝；`add` 是不经编辑器的新建；`start NAME [PATH]` 从 PATH（`-` 表示 stdin）读取参数，没有 PATH 时不带参数启动；`history NAME` 按 `workflow.start` 的优先级（project，然后 user，然后 package）解析名称并打印详情的行。在 Settings 不认识的工作区运行命令时，打印所有者的 `definition_source_failed` 消息并以 1 退出。
+`dimcode workflow list` 每个定义打印一行（名称、来源、状态、描述）以及无效定义的问题；`enable` 与 `disable` 作用于该名称的项目定义；`edit` 与 `set` 作用于用户定义，遇到项目名称时给出要编辑的文件并拒绝；`add` 是不经编辑器的新建；`start NAME [PATH]` 从 PATH（`-` 表示 stdin）读取参数，没有 PATH 时不带参数启动；`history NAME` 打印详情的行。裸名称按 `workflow.start` 的规则解析：先找启用的定义，再找任何定义，每一轮都按 project、然后 user、然后 package 的顺序。项目定义默认停用，因此裸名称仍能指向它。在 Settings 不认识的工作区运行命令时，打印所有者的 `definition_source_failed` 消息并以 1 退出。
 
 ## 命令
 
@@ -483,7 +483,7 @@ inspect 读取 `workflow.status {}`，把保留的运行过滤到该条目的名
 | `dimcode workflow set NAME PATH` | 从 `PATH`（`-` 表示 stdin）读取用户定义并写入，用写入前紧邻读到的 revision；内容没有变化时不写入。 |
 | `dimcode workflow add PATH` | 从 `PATH`（`-` 表示 stdin）读取定义，经 `workflow.save` 创建或替换：文档给出 `source`（默认 `user`）与 `document`。 |
 | `dimcode workflow start NAME [PATH]` | 经 `workflow.start` 启动定义，参数取自 `PATH`（`-` 表示 stdin），没有 PATH 时不带参数；报告 `Started NAME: RUN_ID`，不带 `report_to`。 |
-| `dimcode workflow history NAME` | 经 `workflow.status` 打印定义的行与最近的运行，并按 `workflow.start` 的优先级解析名称。 |
+| `dimcode workflow history NAME` | 经 `workflow.status` 打印定义的行与最近的运行，并按 `workflow.start` 的规则解析名称。 |
 | `/workflow` | 打开会话所在工作区的 Workflow 面板（[管理界面](#管理界面)）：每个定义一个条目，带来源、状态、参数与问题，以及 toggle、edit、add、run 与 inspect 种类。 |
 | `/workflow:save` | 打开 Workflow 面板及其新建编辑器：命令行上的 add 种类。 |
 | `dimcode login [PROVIDER] [--directory URL] [--device] [--redirect-uri URI]` | 启动被描述账号的浏览器或设备签到（[提供方账号](#提供方账号)）；不给 PROVIDER 时列出被描述的账号。 |

@@ -75,8 +75,12 @@ pub struct Listing {
 
 impl Listing {
     /// The entry `id` names: one of the panel's ids (`user:<name>`,
-    /// `project:<name>`, `plugin:<package>:<name>`), or a bare name, which
-    /// resolves by the precedence `workflow.start` uses.
+    /// `project:<name>`, `plugin:<package>:<name>`), or a bare name.
+    ///
+    /// A bare name resolves by source precedence, project then user then
+    /// package, and an enabled entry first: a name several sources define
+    /// takes the one that can start, and a name only a disabled definition
+    /// carries still resolves, since a project definition starts disabled.
     pub fn find(&self, id: &str) -> Option<&Entry> {
         if let Some((source, rest)) = id.split_once(':') {
             return match source {
@@ -97,11 +101,15 @@ impl Listing {
                 _ => None,
             };
         }
-        ["project", "user", "plugin"].iter().find_map(|source| {
+        let named = |source: &&str| {
             self.entries
                 .iter()
-                .find(|entry| entry.name == id && entry.source == *source && entry.enabled)
-        })
+                .find(|entry| entry.name == id && entry.source == *source)
+        };
+        ["project", "user", "plugin"]
+            .iter()
+            .find_map(|source| named(source).filter(|entry| entry.enabled))
+            .or_else(|| ["project", "user", "plugin"].iter().find_map(named))
     }
 
     /// The user definition `entry` names, with the revision a write of it
@@ -416,18 +424,7 @@ async fn start(
         entries: catalog(client, cwd).await.map_err(Failure::Refused)?,
         settings: None,
     };
-    // The same resolution `workflow.start` makes: the entry under the id the
-    // panel built, or the enabled definition a typed name selects by the
-    // owner's precedence. A typed name the area lists only disabled still
-    // reaches the owner, whose `definition_not_found` names its state; only
-    // a name the area does not know is refused here.
-    let entry = match id.split_once(':') {
-        Some(_) => listing.find(id),
-        None => listing
-            .find(id)
-            .or_else(|| listing.entries.iter().find(|entry| entry.name == id)),
-    }
-    .ok_or_else(|| {
+    let entry = listing.find(id).ok_or_else(|| {
         Failure::Refused(tf(
             "No workflow definition is named {name}.",
             &[("name", name_of(id))],
