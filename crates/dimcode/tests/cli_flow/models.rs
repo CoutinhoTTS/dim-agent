@@ -487,3 +487,380 @@ fn tui_models_area_keeps_a_refresh_whose_read_fails() {
     terminal.wait();
     daemon.join().unwrap();
 }
+
+/// The capabilities a picker catalog entry and a management entry share.
+fn capabilities() -> Value {
+    json!({
+        "modalities": ["text"],
+        "toolCalling": true,
+        "streaming": true,
+        "structuredOutput": true,
+        "vision": false,
+        "audio": false,
+        "reasoning": false,
+        "contextWindow": 128000,
+        "maxOutputTokens": 16384
+    })
+}
+
+/// `provider.catalog` as the picker reads it.
+fn picker_catalog() -> Value {
+    json!({"catalog": {"version": 3, "disabledModelIds": [], "models": [
+        {"id": "flash", "name": "Flash", "capabilities": capabilities()}]}})
+}
+
+/// `provider.management` for the picker's Provider: a catalog model, an
+/// override and a user model.
+fn test_provider(models: Value, version: u64) -> Value {
+    json!({"providers": [{
+        "providerId": "test",
+        "displayName": "Test",
+        "source": "static",
+        "credentialAuthority": "static",
+        "version": version,
+        "enabled": true,
+        "actions": ["models.create", "models.edit", "models.delete", "models.reset",
+                    "models.set_enabled", "preferences.update", "refresh"],
+        "connection": {"driverKind": "new-api-router"},
+        "models": models,
+        "preferences": {},
+    }]})
+}
+
+/// The three classes of model, with `flash_enabled` for the catalog one.
+fn area_models(flash_enabled: bool) -> Value {
+    json!([
+        model(
+            "flash",
+            "flash",
+            "default",
+            flash_enabled,
+            &["set_enabled", "edit"]
+        ),
+        model(
+            "tuned",
+            "Tuned",
+            "override",
+            true,
+            &["set_enabled", "edit", "reset"]
+        ),
+        model(
+            "custom",
+            "Custom",
+            "user",
+            true,
+            &["set_enabled", "edit", "delete"]
+        ),
+    ])
+}
+
+/// `/models` → `Edit models` opens one Provider's area: the title names the
+/// Provider, rows are grouped by source, Enter toggles with the complete
+/// enabled set at the read's version, Tab shows the descriptor, and Esc
+/// closes back to the prompt.
+#[test]
+fn tui_models_area_opens_and_toggles_a_model() {
+    let home = Home::new();
+    let (shown, wait_shown) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        for _ in 0..2 {
+            let request = wire.read_any();
+            match request["method"].as_str() {
+                Some("account.providers") => wire.reply(&request, json!([])),
+                Some("session.context.usage") => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                    "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+                method => panic!("unexpected request {method:?}"),
+            }
+        }
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        // The picker's own load.
+        let request = wire.read("provider.list");
+        wire.reply(
+            &request,
+            json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
+        );
+        let request = wire.read("account.providers");
+        wire.reply(&request, json!([]));
+        let request = wire.read("provider.catalog");
+        wire.reply(&request, picker_catalog());
+        let request = wire.read("provider.management");
+        wire.reply(&request, test_provider(area_models(true), 3));
+        // Edit models opens the Provider's area.
+        let request = wire.read("provider.management");
+        wire.reply(&request, test_provider(area_models(true), 3));
+        // Enter: the toggle reads, writes the complete set, reads again.
+        let request = wire.read("provider.management");
+        wire.reply(&request, test_provider(area_models(true), 3));
+        let request = wire.read("provider.models.set_enabled");
+        assert_eq!(
+            request["params"],
+            json!({"providerId": "test", "expectedVersion": 3,
+                "modelIds": ["tuned", "custom"]})
+        );
+        wire.reply(&request, json!({}));
+        let request = wire.read("provider.management");
+        wire.reply(&request, test_provider(area_models(false), 4));
+        // Tab: the selected model's descriptor.
+        let request = wire.read("provider.management");
+        wire.reply(&request, test_provider(area_models(false), 4));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/models\r");
+    terminal.until("Test / flash");
+    terminal.until("Edit models");
+    // The edit row follows the Provider's model row.
+    terminal.raw(b"\x1b[B");
+    terminal.until("Edit models");
+    terminal.raw(b"\r");
+    terminal.until("Models · Test");
+    terminal.until("catalog");
+    terminal.until("overrides");
+    terminal.until("added");
+    terminal.raw(b"\r");
+    terminal.until("Disabled flash.");
+    terminal.raw(b"\t");
+    terminal.until("ID flash");
+    terminal.raw(b"\x1b");
+    terminal.raw(b"\x1b");
+    terminal.until("Ask anything...");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+/// A write the owner refuses keeps the panel and its list, and shows the
+/// owner's message.
+#[test]
+fn tui_models_area_keeps_the_panel_on_a_refused_write() {
+    let home = Home::new();
+    let (shown, wait_shown) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        for _ in 0..2 {
+            let request = wire.read_any();
+            match request["method"].as_str() {
+                Some("account.providers") => wire.reply(&request, json!([])),
+                Some("session.context.usage") => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                    "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+                method => panic!("unexpected request {method:?}"),
+            }
+        }
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        let request = wire.read("provider.list");
+        wire.reply(
+            &request,
+            json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
+        );
+        let request = wire.read("account.providers");
+        wire.reply(&request, json!([]));
+        let request = wire.read("provider.catalog");
+        wire.reply(&request, picker_catalog());
+        let request = wire.read("provider.management");
+        wire.reply(&request, test_provider(area_models(true), 3));
+        let request = wire.read("provider.management");
+        wire.reply(&request, test_provider(area_models(true), 3));
+        // Enter on the user model: its delete is refused, nothing is read
+        // again, and the list stays as it was.
+        let request = wire.read("provider.management");
+        wire.reply(&request, test_provider(area_models(true), 3));
+        let request = wire.read("provider.models.delete");
+        assert_eq!(
+            request["params"],
+            json!({"providerId": "test", "expectedVersion": 3, "modelId": "custom"})
+        );
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"Only user models can be deleted",
+            "data":{"appError":"provider_unsupported"}}}));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/models\r");
+    terminal.until("Test / flash");
+    terminal.raw(b"\x1b[B");
+    terminal.raw(b"\r");
+    terminal.until("Models · Test");
+    // Down to the user model, then Ctrl+X and Enter.
+    terminal.raw(b"\x1b[B");
+    terminal.until("tuned");
+    terminal.raw(b"\x1b[B");
+    terminal.until("Custom");
+    terminal.raw(b"\x18");
+    terminal.until("Custom? Enter confirm");
+    terminal.raw(b"\r");
+    terminal.until("Only user models can be deleted");
+    // The panel still has its list: the next key moves within it.
+    terminal.raw(b"\x1b[A");
+    terminal.until("tuned");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+/// The area after the owner's own write: the flash model carries a new name.
+fn area_models_later() -> Value {
+    let mut models = area_models(true);
+    models[0]["model"]["displayName"] = json!("Flash v4");
+    models
+}
+
+/// A conflict on an edit rereads the area, shows the owner's sentence and
+/// the fresh rows, keeps the user's text where it is, and drops the link to
+/// the stale revision: the next Ctrl+E opens the current document and writes
+/// at the version it reports.
+#[test]
+fn tui_models_area_rereads_after_a_conflict() {
+    let home = Home::new();
+    let script = home.0.join("editor.sh");
+    let count = home.0.join("editor-count");
+    let captured = home.0.join("edited-document");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n\
+             run=$(( $(cat '{count}' 2>/dev/null || echo 0) + 1 ))\n\
+             printf '%s' \"$run\" > '{count}'\n\
+             cp \"$1\" '{captured}'\n\
+             printf '%s' '{{\"displayName\":\"Edited by hand\"}}' > \"$1\"\n",
+            count = count.display(),
+            captured = captured.display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let (shown, wait_shown) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        for _ in 0..2 {
+            let request = wire.read_any();
+            match request["method"].as_str() {
+                Some("account.providers") => wire.reply(&request, json!([])),
+                Some("session.context.usage") => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                    "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+                method => panic!("unexpected request {method:?}"),
+            }
+        }
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        let request = wire.read("provider.list");
+        wire.reply(
+            &request,
+            json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
+        );
+        let request = wire.read("account.providers");
+        wire.reply(&request, json!([]));
+        let request = wire.read("provider.catalog");
+        wire.reply(&request, picker_catalog());
+        let request = wire.read("provider.management");
+        wire.reply(&request, test_provider(area_models(true), 3));
+        // Edit models opens the Provider's area.
+        let request = wire.read("provider.management");
+        wire.reply(&request, test_provider(area_models(true), 3));
+        // Ctrl+E reads the fresh template, then writes at the revision the
+        // panel read; the owner moved the version in the meantime.
+        let request = wire.read("provider.management");
+        wire.reply(&request, test_provider(area_models(true), 3));
+        let request = wire.read("provider.models.edit");
+        assert_eq!(
+            request["params"],
+            json!({"providerId": "test", "expectedVersion": 3, "modelId": "flash",
+                "edit": {"displayName": "Edited by hand"}})
+        );
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"Provider version changed; reread before retrying",
+            "data":{"appError":"provider_conflict"}}}));
+        // The conflict is classified by a fresh read, and that view is the
+        // one the panel shows.
+        let request = wire.read("provider.management");
+        wire.reply(&request, test_provider(area_models_later(), 4));
+        // The next Ctrl+E opens the current document and writes at it.
+        let request = wire.read("provider.management");
+        wire.reply(&request, test_provider(area_models_later(), 4));
+        let request = wire.read("provider.models.edit");
+        assert_eq!(
+            request["params"],
+            json!({"providerId": "test", "expectedVersion": 4, "modelId": "flash",
+                "edit": {"displayName": "Edited by hand"}})
+        );
+        wire.reply(&request, json!({}));
+        let request = wire.read("provider.management");
+        wire.reply(&request, test_provider(area_models_later(), 5));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut command = home.command();
+    command.env_remove("VISUAL").env("EDITOR", &script);
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/models\r");
+    terminal.until("Test / flash");
+    terminal.raw(b"\x1b[B");
+    terminal.raw(b"\r");
+    terminal.until("Models · Test");
+    terminal.raw(b"\x05");
+    // The fresh list is what the panel shows now, with the owner's sentence
+    // and the place the user's text is kept.
+    terminal.until("Flash v4");
+    terminal.until("The models changed since they were read");
+    terminal.until("Your text is kept in");
+    terminal.raw(b"\x05");
+    terminal.until("Saved.");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+    // The second editor was handed the current document, not the stale
+    // draft: the link to the old revision is gone.
+    let document = fs::read_to_string(&captured).unwrap();
+    assert!(document.contains("\"Flash v4\""), "{document}");
+    assert!(!document.contains("Edited by hand"), "{document}");
+    // The user's text is still in the file the conflict named.
+    let kept: Vec<std::path::PathBuf> = fs::read_dir(home.0.join("edit"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert!(
+        kept.iter().any(|path| fs::read_to_string(path)
+            .unwrap_or_default()
+            .contains("Edited by hand")),
+        "no kept file holds the user's text: {kept:?}"
+    );
+}

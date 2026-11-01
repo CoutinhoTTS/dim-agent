@@ -4183,6 +4183,7 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
+        "panic",
         "vec"
       ]
     },
@@ -30187,6 +30188,7 @@
       "from": "dim_cli::ui::models_panel",
       "to": "dim_cli::model::session",
       "references": [
+        "path Area::Models",
         "path EmptyProvider",
         "path EmptyReason::Disabled",
         "path EmptyReason::Mixed",
@@ -30204,6 +30206,7 @@
         "path SubagentModelPolicy::Agent",
         "path SubagentModelPolicy::Fixed",
         "path SubagentModelPolicy::Inherit",
+        "use crate::model::session::Area",
         "use crate::model::session::EmptyProvider",
         "use crate::model::session::EmptyReason",
         "use crate::model::session::ModelItem",
@@ -30256,7 +30259,7 @@
         "path Effect::ClearModelPreferences",
         "path Effect::Close",
         "path Effect::None",
-        "path Effect::Notice",
+        "path Effect::OpenArea",
         "path Effect::ReadModelPolicy",
         "path Effect::SelectModel",
         "path Effect::SetModelPolicy",
@@ -30288,6 +30291,7 @@
       "from": "dim_cli::ui::models_panel::tests",
       "to": "dim_cli::model::session",
       "references": [
+        "path Area::Models",
         "path ModelItem",
         "path ModelList"
       ]
@@ -30303,10 +30307,19 @@
     },
     {
       "from": "dim_cli::ui::models_panel::tests",
+      "to": "dim_cli::ui::prompts",
+      "references": [
+        "path Effect::OpenArea"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::models_panel::tests",
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path KeyCode",
         "path KeyCode::Char",
+        "path KeyCode::Down",
+        "path KeyCode::Enter",
         "path KeyEvent",
         "path KeyEvent::new",
         "path Modifiers::NONE",
@@ -33933,6 +33946,7 @@
         "path Effect::OauthCancel",
         "path Effect::OauthPaste",
         "path Effect::OauthStart",
+        "path Effect::OpenArea",
         "path Effect::OpenModels",
         "path Effect::OpenPermissions",
         "path Effect::OpenUrl",

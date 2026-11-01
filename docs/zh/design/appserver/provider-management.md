@@ -433,7 +433,10 @@ credential clear 和 enabled:false，修复只 clear 导致已启用记录缺凭
 非交互入口为 `dimcode models PROVIDER --clear-preferences MODEL`，先重读版本再同样更新。
 两者都不改当前 Session 已采用的模型；发现和采用失败不会自动删除历史偏好。
 `←` 与 `→` 在选中模型上循环其声明的推理强度。Enter 采用该模型；若强度被切换过，
-先把它存成该模型的 `reasoningEffort`，再连同其余已保存偏好一起发送。
+先把它存成该模型的 `reasoningEffort`，再连同其余已保存偏好一起发送。编辑提供方的模型列表属于
+Models 管理领域（[CLI 命令 § Models 领域](../cli-commands.md#models-领域)）：`/models` 的
+`Edit models` 与 `dimcode models PROVIDER add|edit|set|remove|inspect` 读取
+`provider.management`，并经 `provider.models.*` 写入；上面的选择器动作保持不变。
 
 catalog 条目带 `zdr: true` 的模型在推理强度前显示 `ZDR` 标签，固定子代理模型选择器也一样。
 搜索 `zdr` 会包含这些模型；字段缺失或为 false 时不显示标签。替换模型列表时，

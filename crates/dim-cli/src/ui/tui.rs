@@ -2824,6 +2824,7 @@ impl App {
                 self.prompt = Some(Prompt::Models(ModelsPanel::new()));
                 self.host.send(Command::ListModels);
             }
+            Effect::OpenArea(area) => self.open_management(area),
             Effect::Logout(target) => self.host.send(Command::Logout(target)),
             Effect::LoginStatus(provider_id) => self.host.send(Command::LoginStatus(provider_id)),
             Effect::LoginUsage(provider_id) => self.host.send(Command::LoginUsage(provider_id)),

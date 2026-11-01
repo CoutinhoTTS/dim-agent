@@ -632,6 +632,24 @@ date, pricing, rate limit, the bundled match and the capability overrides.
 ╰──── Enter toggle · Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Tab inspect ─╯
 ```
 
+The picker gains one row per Provider: `Edit models`, inside that Provider's block, its detail
+naming the Provider, so a Provider with no selectable model can be opened too. The row is absent
+when the daemon does not advertise `provider.management`. It opens the area in place of the
+picker, and Esc there closes the area to the prompt, not back to the picker.
+
+```text
+Select a model
+> Ready / flash              ZDR  ‹ high ›  current
+  Ready / plain              low
+  Edit models                Ready  ready
+  Other / model-x
+  Edit models                Other  other
+  Manual: no models · add a model with provider.models.create
+  Edit models                Manual  manual
+  Subagent models: Agent choice
+Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close
+```
+
 `dimcode models PROVIDER remove MODEL` removes without the panel's confirmation, and `dimcode
 models PROVIDER inspect MODEL` prints the lines the detail shows.
 

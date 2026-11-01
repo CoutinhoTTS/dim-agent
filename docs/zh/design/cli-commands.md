@@ -446,6 +446,21 @@ Ctrl+R 读取该领域，并在提供方的 actions 含 `refresh` 时先发送 `
 ╰──── Enter toggle · Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Tab inspect ─╯
 ```
 
+选择器为每个提供方增加一行：`Edit models`，位于该提供方的块内，detail 写明提供方，因此没有可选模型的提供方也能打开。守护进程未声明 `provider.management` 时没有这一行。它在选择器的位置打开该领域，在那里按 Esc 关闭到提示符，而不是回到选择器。
+
+```text
+Select a model
+> Ready / flash              ZDR  ‹ high ›  current
+  Ready / plain              low
+  Edit models                Ready  ready
+  Other / model-x
+  Edit models                Other  other
+  Manual: no models · add a model with provider.models.create
+  Edit models                Manual  manual
+  Subagent models: Agent choice
+Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close
+```
+
 `dimcode models PROVIDER remove MODEL` 不经面板的确认直接移除；`dimcode models PROVIDER inspect MODEL` 打印详情显示的那些行。
 
 ## 命令

@@ -1,5 +1,6 @@
 //! The `/models` picker (port of `ModelPanel` and `buildModelRows` for the
-//! models a daemon offers; "Edit models" is not built yet), and its
+//! models a daemon offers, with an "Edit models" row per Provider that opens
+//! that Provider's management area), and its
 //! "Subagent models" action when the daemon manages that policy:
 //!
 //! ```text
@@ -30,10 +31,10 @@
 //! Choosing a policy writes only `collaboration.set_model_policy`; the leader's
 //! model and the provider default are untouched.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model::session::{
-    EmptyProvider, EmptyReason, ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider,
+    Area, EmptyProvider, EmptyReason, ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider,
     SubagentModelPolicy,
 };
 use crate::ui::i18n::{t, tf};
@@ -182,13 +183,20 @@ impl ModelsPanel {
             View::Policy => Some(Ok(self.policy_rows(mode))),
             View::Models | View::Fixed => self.listed.as_ref().map(|listed| {
                 listed.clone().map(|list| {
+                    let manage = list.manage && self.view == View::Models;
+                    let listed: BTreeSet<&str> = list
+                        .models
+                        .iter()
+                        .map(|model| model.provider_id.as_str())
+                        .collect();
                     let mut items = model_rows(
                         &list.models,
                         marked.as_deref(),
                         show_effort.then_some(focus.as_deref()).flatten(),
                         show_effort.then_some(&self.chosen),
+                        manage,
                     );
-                    items.extend(limits_rows(&list.limits));
+                    items.extend(limits_rows(&list.limits, manage, &listed));
                     let empty: Vec<EmptyProvider> = list
                         .empty
                         .iter()
@@ -200,17 +208,16 @@ impl ModelsPanel {
                         })
                         .cloned()
                         .collect();
-                    items.extend(empty_rows(&empty));
-                    if self.view == View::Models {
-                        items.push(Item::new(EDIT_MODELS, t("Edit models"), ""));
-                        if let Some(policy) = &self.policy {
-                            let label = self.label(policy.current.as_ref());
-                            items.push(Item::new(
-                                SUBAGENT_MODELS,
-                                tf("Subagent models: {policy}", &[("policy", &label)]),
-                                "",
-                            ));
-                        }
+                    items.extend(empty_rows(&empty, manage, &listed));
+                    if self.view == View::Models
+                        && let Some(policy) = &self.policy
+                    {
+                        let label = self.label(policy.current.as_ref());
+                        items.push(Item::new(
+                            SUBAGENT_MODELS,
+                            tf("Subagent models: {policy}", &[("policy", &label)]),
+                            "",
+                        ));
                     }
                     items
                 })
@@ -326,8 +333,16 @@ impl ModelsPanel {
                 self.open(View::Policy, Some(FIXED));
                 Effect::None
             }
-            (View::Models, Event::Pick(id)) if id == EDIT_MODELS => {
-                Effect::Notice(t("Editing models is not available yet").to_owned())
+            (View::Models, Event::Pick(id)) if id.starts_with(EDIT_MODELS) => {
+                match id
+                    .strip_prefix(EDIT_MODELS)
+                    .and_then(|rest| rest.strip_prefix("::"))
+                {
+                    Some(provider_id) => Effect::OpenArea(Area::Models {
+                        provider_id: provider_id.to_owned(),
+                    }),
+                    None => Effect::None,
+                }
             }
             (View::Models, Event::Pick(id)) if id == SUBAGENT_MODELS => {
                 self.open(View::Policy, None);
@@ -430,12 +445,13 @@ fn model_rows(
     marked: Option<&str>,
     focus: Option<&str>,
     chosen: Option<&BTreeMap<String, String>>,
+    manage: bool,
 ) -> Vec<Item> {
     let mut items: Vec<Item> = Vec::new();
     if !models.is_empty() {
         items.push(Item::heading(t(SECTION)));
     }
-    for model in models {
+    for (index, model) in models.iter().enumerate() {
         let id = key(&model.provider_id, &model.model_id);
         let mut row = Item::new(
             id.clone(),
@@ -459,6 +475,14 @@ fn model_rows(
             row.search.push_str(" ZDR");
         }
         items.push(row);
+        // The Provider's first block ends here: its edit row follows it.
+        if manage
+            && models
+                .get(index + 1)
+                .is_none_or(|next| next.provider_id != model.provider_id)
+        {
+            items.push(edit_row(&model.provider_id, &model.provider_name));
+        }
     }
     items
 }
@@ -487,92 +511,120 @@ fn effort_detail(model: &ModelItem, chosen: Option<&str>, focused: bool, current
 
 /// A provider that offers nothing selectable keeps a muted row, after the
 /// models, naming it, why and the command that shows the details.
-fn empty_rows(providers: &[EmptyProvider]) -> Vec<Item> {
-    providers
-        .iter()
-        .map(|provider| {
-            let name = ("provider", provider.provider_name.as_str());
-            let id = ("id", provider.provider_id.as_str());
-            let text = match provider.reason {
-                EmptyReason::NoModels { listable: true } => tf(
-                    "{provider}: no models · dimcode models {id} --refresh",
-                    &[name, id],
-                ),
-                EmptyReason::NoModels { listable: false } => tf(
-                    "{provider}: no models · add a model with provider.models.create",
-                    &[name],
-                ),
-                EmptyReason::Mixed {
-                    unavailable,
-                    disabled,
-                } => {
-                    let unavailable = unavailable.to_string();
-                    let disabled = disabled.to_string();
-                    tf(
-                        "{provider}: {unavailable} unavailable and {disabled} disabled · dimcode models {id}",
-                        &[name, ("unavailable", &unavailable), ("disabled", &disabled), id],
-                    )
-                }
-                EmptyReason::Unavailable { count: 1 } => tf(
-                    "{provider}: 1 model unavailable · dimcode models {id}",
-                    &[name, id],
-                ),
-                EmptyReason::Unavailable { count } => {
-                    let count = count.to_string();
-                    tf(
-                        "{provider}: {count} models unavailable · dimcode models {id}",
-                        &[name, ("count", &count), id],
-                    )
-                }
-                EmptyReason::Disabled { count: 1 } => tf(
-                    "{provider}: 1 model disabled · dimcode models {id}",
-                    &[name, id],
-                ),
-                EmptyReason::Disabled { count } => {
-                    let count = count.to_string();
-                    tf(
-                        "{provider}: {count} models disabled · dimcode models {id}",
-                        &[name, ("count", &count), id],
-                    )
-                }
-                EmptyReason::Unreadable => tf(
-                    "{provider}: catalog unreadable · dimcode models {id}",
-                    &[name, id],
-                ),
-            };
-            let mut row = Item::heading(text);
-            row.sticky = true;
-            row
-        })
-        .collect()
+fn empty_rows(providers: &[EmptyProvider], manage: bool, listed: &BTreeSet<&str>) -> Vec<Item> {
+    let mut items = Vec::new();
+    for provider in providers {
+        let name = ("provider", provider.provider_name.as_str());
+        let id = ("id", provider.provider_id.as_str());
+        let text = match provider.reason {
+            EmptyReason::NoModels { listable: true } => tf(
+                "{provider}: no models · dimcode models {id} --refresh",
+                &[name, id],
+            ),
+            EmptyReason::NoModels { listable: false } => tf(
+                "{provider}: no models · add a model with provider.models.create",
+                &[name],
+            ),
+            EmptyReason::Mixed {
+                unavailable,
+                disabled,
+            } => {
+                let unavailable = unavailable.to_string();
+                let disabled = disabled.to_string();
+                tf(
+                    "{provider}: {unavailable} unavailable and {disabled} disabled · dimcode models {id}",
+                    &[
+                        name,
+                        ("unavailable", &unavailable),
+                        ("disabled", &disabled),
+                        id,
+                    ],
+                )
+            }
+            EmptyReason::Unavailable { count: 1 } => tf(
+                "{provider}: 1 model unavailable · dimcode models {id}",
+                &[name, id],
+            ),
+            EmptyReason::Unavailable { count } => {
+                let count = count.to_string();
+                tf(
+                    "{provider}: {count} models unavailable · dimcode models {id}",
+                    &[name, ("count", &count), id],
+                )
+            }
+            EmptyReason::Disabled { count: 1 } => tf(
+                "{provider}: 1 model disabled · dimcode models {id}",
+                &[name, id],
+            ),
+            EmptyReason::Disabled { count } => {
+                let count = count.to_string();
+                tf(
+                    "{provider}: {count} models disabled · dimcode models {id}",
+                    &[name, ("count", &count), id],
+                )
+            }
+            EmptyReason::Unreadable => tf(
+                "{provider}: catalog unreadable · dimcode models {id}",
+                &[name, id],
+            ),
+        };
+        let mut row = Item::heading(text);
+        row.sticky = true;
+        items.push(row);
+        if manage && !listed.contains(provider.provider_id.as_str()) {
+            items.push(edit_row(&provider.provider_id, &provider.provider_name));
+        }
+    }
+    items
 }
 
 /// A provider whose catalog holds models no source declares a window for
 /// keeps one muted row, after the models, counting them and naming the
 /// command that declares both limits; it replaces the provider's empty row.
-fn limits_rows(providers: &[NeedsLimitsProvider]) -> Vec<Item> {
-    providers
-        .iter()
-        .map(|provider| {
-            let name = ("provider", provider.provider_name.as_str());
-            let id = ("id", provider.provider_id.as_str());
-            let text = if provider.count == 1 {
-                tf(
-                    "{provider}: 1 model needs a window · dimcode models {id} --set-missing-limits",
-                    &[name, id],
-                )
-            } else {
-                let count = provider.count.to_string();
-                tf(
-                    "{provider}: {count} models need a window · dimcode models {id} --set-missing-limits",
-                    &[name, ("count", &count), id],
-                )
-            };
-            let mut row = Item::heading(text);
-            row.sticky = true;
-            row
-        })
-        .collect()
+fn limits_rows(
+    providers: &[NeedsLimitsProvider],
+    manage: bool,
+    listed: &BTreeSet<&str>,
+) -> Vec<Item> {
+    let mut items = Vec::new();
+    for provider in providers {
+        let name = ("provider", provider.provider_name.as_str());
+        let id = ("id", provider.provider_id.as_str());
+        let text = if provider.count == 1 {
+            tf(
+                "{provider}: 1 model needs a window · dimcode models {id} --set-missing-limits",
+                &[name, id],
+            )
+        } else {
+            let count = provider.count.to_string();
+            tf(
+                "{provider}: {count} models need a window · dimcode models {id} --set-missing-limits",
+                &[name, ("count", &count), id],
+            )
+        };
+        let mut row = Item::heading(text);
+        row.sticky = true;
+        items.push(row);
+        if manage && !listed.contains(provider.provider_id.as_str()) {
+            items.push(edit_row(&provider.provider_id, &provider.provider_name));
+        }
+    }
+    items
+}
+
+/// One Provider's `Edit models` row: its detail carries the name and the id,
+/// so two Providers are never confused.
+fn edit_row(provider_id: &str, provider_name: &str) -> Item {
+    let detail = if provider_name.is_empty() || provider_name == provider_id {
+        provider_id.to_owned()
+    } else {
+        format!("{provider_name}  {provider_id}")
+    };
+    Item::new(
+        format!("{EDIT_MODELS}::{provider_id}"),
+        t("Edit models"),
+        detail,
+    )
 }
 
 fn provider_name(model: &ModelItem) -> &str {
@@ -630,6 +682,7 @@ mod tests {
     fn panel() -> ModelsPanel {
         let mut panel = ModelsPanel::new();
         panel.set_models(Ok(ModelList {
+            manage: false,
             models: vec![
                 item("flash", &["low", "high"], Some("low"), Some("low")),
                 item("plain", &[], None, None),
@@ -660,6 +713,7 @@ mod tests {
         let mut models = panel.models().to_vec();
         models[0].zdr = true;
         panel.set_models(Ok(ModelList {
+            manage: false,
             models: models.clone(),
             current: Some(("dim".into(), "flash".into())),
             empty: Vec::new(),
@@ -677,6 +731,7 @@ mod tests {
         ));
         models[0].zdr = false;
         panel.set_models(Ok(ModelList {
+            manage: false,
             models,
             current: None,
             empty: Vec::new(),
@@ -742,6 +797,7 @@ mod tests {
         assert_eq!(panel.handle_key(key_of(KeyCode::Right)), Effect::None);
         assert!(drawn(&panel).contains("‹ high ›"));
         panel.set_models(Ok(ModelList {
+            manage: false,
             models: vec![
                 item("flash", &["low", "high"], Some("low"), Some("low")),
                 item("plain", &[], None, None),
@@ -776,6 +832,7 @@ mod tests {
         assert_eq!(panel.handle_key(key_of(KeyCode::Right)), Effect::None);
         assert!(drawn(&panel).contains("‹ high ›"));
         panel.set_models(Ok(ModelList {
+            manage: false,
             models: vec![item("flash", &["low"], Some("low"), Some("low"))],
             current: Some(("dim".into(), "flash".into())),
             empty: Vec::new(),
@@ -804,6 +861,7 @@ mod tests {
         ));
         assert!(drawn(&panel).contains("‹ low ›"), "{}", drawn(&panel));
         panel.set_models(Ok(ModelList {
+            manage: false,
             models: vec![
                 item("flash", &["low", "high"], None, Some("low")),
                 item("plain", &[], None, None),
@@ -828,6 +886,7 @@ mod tests {
     fn a_provider_whose_models_need_a_window_keeps_one_counted_row() {
         let mut panel = panel();
         panel.set_models(Ok(ModelList {
+            manage: false,
             models: vec![
                 item("flash", &[], None, None),
                 item("plain", &[], None, None),
@@ -851,6 +910,7 @@ mod tests {
         assert!(models < row, "{screen}");
 
         panel.set_models(Ok(ModelList {
+            manage: false,
             models: vec![item("flash", &[], None, None)],
             current: None,
             empty: Vec::new(),
@@ -873,6 +933,7 @@ mod tests {
     fn a_limits_row_replaces_the_providers_empty_row() {
         let mut panel = panel();
         panel.set_models(Ok(ModelList {
+            manage: false,
             models: Vec::new(),
             current: None,
             empty: vec![EmptyProvider {
@@ -893,5 +954,53 @@ mod tests {
         );
         assert!(screen.contains("dimcode models dim"), "{screen}");
         assert!(!screen.contains("models unavailable"), "{screen}");
+    }
+
+    /// Each Provider offers its own edit row, after its first block, and
+    /// picking one asks for that Provider's area; a daemon without
+    /// `provider.management` offers none.
+    #[test]
+    fn each_provider_offers_edit_models_with_its_own_row() {
+        let mut panel = ModelsPanel::new();
+        panel.set_models(Ok(ModelList {
+            manage: true,
+            models: vec![
+                item_for("dim", "Dim OAuth", "flash", &[], None, None),
+                item_for("other", "Other", "plain", &[], None, None),
+            ],
+            current: None,
+            empty: vec![EmptyProvider {
+                provider_id: "third".into(),
+                provider_name: "Third".into(),
+                reason: EmptyReason::NoModels { listable: false },
+            }],
+            limits: Vec::new(),
+        }));
+        let screen = drawn(&panel);
+        assert_eq!(screen.matches("Edit models").count(), 3, "{screen}");
+        for text in ["Dim OAuth  dim", "Other  other", "Third  third"] {
+            assert!(screen.contains(text), "{text}: {screen}");
+        }
+        // The rows follow their Provider's first block: flash, its edit row,
+        // plain, its edit row.
+        panel.handle_key(key_of(KeyCode::Down));
+        match panel.handle_key(key_of(KeyCode::Enter)) {
+            Effect::OpenArea(Area::Models { provider_id }) => {
+                assert_eq!(provider_id, "dim");
+            }
+            _ => panic!("expected the Provider's area"),
+        }
+
+        // Without `provider.management`, no Provider offers the row.
+        let mut panel = ModelsPanel::new();
+        panel.set_models(Ok(ModelList {
+            manage: false,
+            models: vec![item_for("dim", "Dim OAuth", "flash", &[], None, None)],
+            current: None,
+            empty: Vec::new(),
+            limits: Vec::new(),
+        }));
+        let screen = drawn(&panel);
+        assert!(!screen.contains("Edit models"), "{screen}");
     }
 }

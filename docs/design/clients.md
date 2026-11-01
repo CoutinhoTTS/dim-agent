@@ -100,7 +100,7 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 | Capability | CLI | Web | Source |
 | --- | --- | --- | --- |
 | Sign in, sign out (OAuth, every Provider the daemon describes) | done | — | [Provider accounts](cli-commands.md#provider-accounts) |
-| API-key Providers, add/edit/test/enable/disable/switch | done; remove and model-list edits: none in the CLI (server supports them) | read-only `provider.*` | [Provider management](appserver/provider-management.md) |
+| API-key Providers, add/edit/test/enable/disable/switch | done; removal: none in the CLI (server supports it); model-list editing: `/models` → `Edit models` and `dimcode models PROVIDER` | read-only `provider.*` | [Provider management](appserver/provider-management.md) |
 | Switch model | done | done | `session.model.update` |
 | Reasoning effort, fast mode | done (`/effort`, `/fast`, and ←/→ in `/models`) | — | [Model configuration](model-configuration.md) |
 | Subagent model policy | done (`/models` → Subagent models) | — | [Subagent model policy](subagent-model-policy.md), [#263](https://github.com/arcships/dim/issues/263) |

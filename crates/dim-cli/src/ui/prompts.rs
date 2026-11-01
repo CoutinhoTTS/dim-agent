@@ -148,6 +148,8 @@ pub enum Effect {
     Connected(String),
     /// Open the `/models` picker in place of this panel.
     OpenModels,
+    /// Open a management area's panel: a Provider's models from the picker.
+    OpenArea(crate::model::session::Area),
     /// Sign this described account out; the host reports its state again.
     Logout(crate::model::session::AccountTarget),
     /// Read this account's state; the host reports it back.

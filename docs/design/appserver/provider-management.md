@@ -592,7 +592,11 @@ Neither action changes an adopted Session model. Discovery and adoption errors
 keep historical preferences until this explicit user action.
 `←` and `→` cycle the selected model's advertised reasoning efforts. Enter
 adopts that model; a cycled effort is saved as its `reasoningEffort` and sent
-with the model's other saved preferences.
+with the model's other saved preferences. Editing a Provider's model list is the
+models management area ([CLI commands § The Models area](../cli-commands.md#the-models-area)):
+`Edit models` in `/models` and `dimcode models PROVIDER add|edit|set|remove|inspect`
+read `provider.management` and write through `provider.models.*`; the picker
+actions above are unchanged.
 
 Models whose catalog entry has `zdr: true` show a `ZDR` tag before the
 reasoning effort, including in the fixed subagent model picker. Searching

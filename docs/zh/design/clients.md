@@ -67,7 +67,7 @@ CLI 要求协议 v3，以及 `session.create` 和 `session.history` 两项功能
 | 能力 | CLI | Web | 来源 |
 | --- | --- | --- | --- |
 | 登录、登出（OAuth，守护进程描述的每个提供方） | 已实现 | — | [提供方账号](cli-commands.md#提供方账号) |
-| API-key Provider 的添加/编辑/测试/启用/禁用/切换 | 已实现；删除和模型列表编辑：CLI 中无（服务端已支持） | 只读的 `provider.*` | [Provider 管理](appserver/provider-management.md) |
+| API-key Provider 的添加/编辑/测试/启用/禁用/切换 | 已实现；删除：CLI 中无（服务端已支持）；模型列表编辑：`/models` → `Edit models` 与 `dimcode models PROVIDER` | 只读的 `provider.*` | [Provider 管理](appserver/provider-management.md) |
 | 切换模型 | 已实现 | 已实现 | `session.model.update` |
 | 推理强度、快速模式 | 已实现（`/effort`、`/fast`，以及 `/models` 中用 ←/→ 调整） | — | [模型配置](../../design/model-configuration.md) |
 | 子 agent 模型策略 | 已完成（`/models` → Subagent models） | — | [子 agent 模型策略](../../design/subagent-model-policy.md)、[#263](https://github.com/arcships/dim/issues/263) |

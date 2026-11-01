@@ -8673,6 +8673,48 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
     );
 }
 
+/// `/models` lists a Provider's models without offering `Edit models` when
+/// the daemon does not advertise the area's method.
+#[test]
+fn tui_models_picker_hides_edit_models_without_management_methods() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            let request: Value = serde_json::from_str(&line).unwrap();
+            line.clear();
+            let result = match request["method"].as_str().unwrap() {
+                "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,
+                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history",
+                    "provider.list","provider.catalog","provider.selection","provider.select"]}),
+                "session.create" => json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}),
+                "session.history" => json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+                "session.idle" => json!({"sequence":8}),
+                "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
+                "provider.catalog" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
+                    {"id":"model","name":"Model","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]}}),
+                "account.providers" => json!([]),
+                _ => json!({}),
+            };
+            wire.reply(&request, result);
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/models\r");
+    terminal.until("Test / model");
+    thread::sleep(Duration::from_millis(300));
+    let opened = terminal.transcript.clone();
+    assert!(opened.contains("Model"), "{opened}");
+    assert!(!opened.contains("Edit models"), "{opened}");
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
 /// ←/→ in `/models` cycles advertised reasoning efforts, including `none`
 /// when the model can turn reasoning off. Enter saves the cycled effort and
 /// adopts the model with that effort plus the other saved preferences.
@@ -9090,7 +9132,6 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
     terminal.until("Blank: no models · dimcode models blank --refresh");
     terminal.until("Manual: no models · add a model with provider.models.create");
     terminal.until("Broken: catalog unreadable · dimcode models broken");
-    terminal.until("Edit models");
     assert!(
         !terminal.transcript.contains("Ready / vendor/hidden-b"),
         "a disabled model is not selectable"

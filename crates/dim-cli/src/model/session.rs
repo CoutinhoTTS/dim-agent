@@ -787,6 +787,9 @@ pub enum ModelPolicyUpdate {
 #[derive(Debug, Clone, Default)]
 pub struct ModelList {
     pub models: Vec<ModelItem>,
+    /// Whether the daemon manages Providers through `provider.management`:
+    /// the picker offers a Provider's models for editing only when it does.
+    pub manage: bool,
     pub current: Option<(String, String)>,
     /// The usable providers that offer no selectable model, with why, so the
     /// picker can name them.
