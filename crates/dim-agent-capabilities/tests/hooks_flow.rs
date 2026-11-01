@@ -7,7 +7,7 @@ use dim_agent_capabilities::{
     history::HistoryRenderer,
     hooks::{
         HookSourceId, HookSourceSnapshot, HookSourceState, HookSourcesHost, HookSourcesSnapshot,
-        HooksDocument, HooksSessionPlugin, ReadHookSources,
+        HooksBranchPlugin, HooksDocument, HooksSessionPlugin, ReadHookSources,
     },
     host::*,
     host_platform::{
@@ -15,7 +15,7 @@ use dim_agent_capabilities::{
     },
     methods::{RpcError, SessionMethods},
     model_provider::ModelProviderPlugin,
-    permission::{CommandRulesHost, NoCommandRules},
+    permission::{CommandRulesHost, ReadCommandRules},
     skill_settings::SkillSettingsHost,
     skills::{MemorySkillSettings, SkillsCatalogPlugin},
     workspace_tools::WorkspaceToolsConfig,
@@ -229,7 +229,85 @@ impl ModelDriver for Model {
                 })
             });
         }
+        if let Some(calls) = last_user_text(&request).and_then(tool_batch) {
+            return Box::pin(async move {
+                let message = uuid::Uuid::new_v4().to_string();
+                let mut chunks = vec![Ok(ModelChunk::MessageStart {
+                    message_id: message.clone(),
+                })];
+                for call in calls {
+                    chunks.push(Ok(ModelChunk::ToolStart {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                    }));
+                    chunks.push(Ok(ModelChunk::ToolUse(call)));
+                }
+                chunks.push(Ok(ModelChunk::MessageStop {
+                    message_id: message,
+                    reason: ModelStopReason::ToolUse,
+                }));
+                Ok(Box::pin(futures_util::stream::iter(chunks)) as ModelStream)
+            });
+        }
         dim_agent_capabilities::adapters::EchoModel.invoke(request, connection, cancel)
+    }
+}
+
+/// The text parts of one message, as the echo model reads them.
+fn message_text(message: &Message) -> String {
+    match &message.content {
+        MessageContent::Text(text) => text.clone(),
+        MessageContent::Parts(parts) => parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
+fn last_user_text(request: &ModelRequest) -> Option<String> {
+    request
+        .messages
+        .last()
+        .filter(|message| message.role == Role::User)
+        .map(|message| message_text(message))
+}
+
+/// The calls of a `tools: name input | name input` submission, in order, so a
+/// test can drive one batch of several calls.
+fn tool_batch(text: String) -> Option<Vec<ToolCall>> {
+    let commands = text.strip_prefix("tools:")?;
+    Some(
+        commands
+            .split(" | ")
+            .map(|command| {
+                let command = command.trim();
+                let (name, input) = command.split_once(' ').unwrap_or((command, "{}"));
+                ToolCall {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name: name.into(),
+                    input: serde_json::from_str(input).expect("test tool command JSON"),
+                }
+            })
+            .collect(),
+    )
+}
+
+/// The Session's command rules as the test sets them.
+#[derive(Default)]
+struct TestRules(Mutex<Vec<CommandRule>>);
+impl TestRules {
+    fn set(&self, rules: Vec<CommandRule>) {
+        *self.0.lock().unwrap() = rules;
+    }
+}
+impl ReadCommandRules for TestRules {
+    fn rules(&self, _: CancellationToken) -> HostFuture<'_, Vec<CommandRule>> {
+        let rules = self.0.lock().unwrap().clone();
+        Box::pin(async move { Ok(rules) })
     }
 }
 impl Model {
@@ -251,9 +329,13 @@ struct Env {
     sources: Arc<Sources>,
     model: Arc<Model>,
     dir: PathBuf,
+    /// The Session's command rules as the test sets them.
+    rules: Arc<TestRules>,
     /// The `HooksSession` instance the test can unload, when the harness
     /// mounts it through an owner (`Env::with_mounted_hooks`).
     hooks: Arc<Mutex<Vec<FiberView>>>,
+    /// The `HooksBranch` instance the same owner mounts, per branch.
+    branch_hooks: Arc<Mutex<Vec<FiberView>>>,
 }
 impl Env {
     async fn new() -> Self {
@@ -300,6 +382,7 @@ impl Env {
         platform.home = dir.join("home");
         let sources = Arc::new(Sources::default());
         *sources.home.lock().unwrap() = Some(dir.join("home"));
+        let rules = Arc::new(TestRules::default());
         let mut builder = AgentBuilder::new(AgentConfig::default());
         builder.timeline_store(Arc::new(MemoryTimelineStore::default()));
         builder
@@ -307,7 +390,7 @@ impl Env {
             .process_value(Arc::new(ModelHost(model.clone())))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(context_model)))
-            .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))))
+            .session_value(Arc::new(CommandRulesHost(rules.clone())))
             .session_value(Arc::new(CompactionStrategyHost(compaction)))
             .session_value(Arc::new(HookSourcesHost(sources.clone())))
             .require_feature(Feature::new("PrepareModelHost").session(
@@ -328,10 +411,10 @@ impl Env {
         );
         builder.plugin(|names| Ok(Box::new(SkillsCatalogPlugin::new(names)?)));
         let hooks: Arc<Mutex<Vec<FiberView>>> = Arc::new(Mutex::new(Vec::new()));
+        let branch_hooks: Arc<Mutex<Vec<FiberView>>> = Arc::new(Mutex::new(Vec::new()));
         if mounted_hooks {
-            // `HooksSession` is mounted as a child of a test owner, so a test
-            // can unload it mid-call. No branch part is mounted: these tests
-            // reach no branch hook point.
+            // Both Hooks parts are mounted as children of test owners, so a
+            // test can unload either mid-call.
             let views = hooks.clone();
             builder.require_feature(Feature::new("HooksTest").session(
                 "HooksSessionOwner",
@@ -339,6 +422,17 @@ impl Env {
                     let plugin = HooksSessionPlugin::new(names)?;
                     Ok(Box::new(HooksSessionOwner {
                         injects: plugin.injects(),
+                        plugin: Mutex::new(Some(plugin)),
+                        views: views.clone(),
+                    }))
+                },
+            ));
+            let views = branch_hooks.clone();
+            builder.require_feature(Feature::new("HooksBranchTest").branch(
+                "HooksBranchOwner",
+                move |names| {
+                    let plugin = HooksBranchPlugin::new(names)?;
+                    Ok(Box::new(HooksBranchOwner {
                         plugin: Mutex::new(Some(plugin)),
                         views: views.clone(),
                     }))
@@ -361,8 +455,22 @@ impl Env {
             sources,
             model,
             dir,
+            rules,
             hooks,
+            branch_hooks,
         }
+    }
+
+    /// Disposes the mounted `HooksBranch`, as unloading the plugin does.
+    async fn unload_branch_hooks(&self) {
+        let view = self
+            .branch_hooks
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .expect("a mounted HooksBranch");
+        view.dispose().await.unwrap();
     }
 
     /// Unloads and reloads `HooksSession`, as a provider reload does: its
@@ -431,6 +539,39 @@ impl DynPlugin for HooksSessionOwner {
                 .unwrap()
                 .take()
                 .expect("the owner mounts its HooksSession once");
+            let view = dim_agent_runtime::mount_active(ctx, plugin).await?;
+            self.views.lock().unwrap().push(view);
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// Mounts the real `HooksBranch` as a child, so a test can unload it and
+/// read what an unload settles (A.6.1's reload row).
+struct HooksBranchOwner {
+    plugin: Mutex<Option<HooksBranchPlugin>>,
+    views: Arc<Mutex<Vec<FiberView>>>,
+}
+impl DynPlugin for HooksBranchOwner {
+    fn name(&self) -> &str {
+        "HooksBranchOwner"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        self.plugin
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(DynPlugin::injects)
+            .unwrap_or_default()
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let plugin = self
+                .plugin
+                .lock()
+                .unwrap()
+                .take()
+                .expect("the owner mounts its HooksBranch once");
             let view = dim_agent_runtime::mount_active(ctx, plugin).await?;
             self.views.lock().unwrap().push(view);
             Ok(Effect::Done)
@@ -2661,5 +2802,465 @@ async fn an_unload_with_the_default_on_failure_writes_the_input() {
     wait_gone(prompted_pid(&pid_file)).await;
     let _ = release.send(());
 
+    env.close().await;
+}
+
+fn result_text(result: &ToolResult) -> &str {
+    match &result.content {
+        ToolContent::Text(text) => text,
+        other => panic!("a text result was expected: {other:?}"),
+    }
+}
+
+async fn approval_request_count(session: &Session) -> usize {
+    events(session)
+        .await
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::ApprovalRequest(_)))
+        .count()
+}
+
+/// Answers the request `approval_id` on `main`.
+async fn answer(session: &Session, approval_id: &str, decision: ApprovalDecision) {
+    session
+        .service::<dim_agent_capabilities::approval::Approval>("main")
+        .unwrap()
+        .respond(approval_id, decision)
+        .await
+        .unwrap();
+}
+
+/// Appendix D 2: under a full-access preset, a `PreToolUse` deny for one call
+/// of three: that call writes no `approval/request` and never runs, its error
+/// text is the hook's in the one batch `step/tool-result`, and the other two
+/// run. Hooks writes no `step/tool-result` of its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pre_tool_use_deny_fails_one_call_of_a_batch_and_runs_the_others() {
+    let env = Env::new().await;
+    env.sources.set(document(serde_json::json!({
+        "PreToolUse": [command(serde_json::json!({
+            "type": "command",
+            "command": "input=$(cat); case \"$input\" in *ran-denied*) \
+                        printf 'blocked by the guard' >&2; exit 2;; esac",
+        }))],
+    })));
+    let session = env.session().await;
+    let ran_one = env.path("ran-one");
+    let ran_denied = env.path("ran-denied");
+    let ran_three = env.path("ran-three");
+    turn(
+        &session,
+        &format!(
+            "tools: exec {{\"command\":\"printf one > {}\"}} | \
+             exec {{\"command\":\"printf denied > {}\"}} | \
+             exec {{\"command\":\"printf three > {}\"}}",
+            ran_one.display(),
+            ran_denied.display(),
+            ran_three.display(),
+        ),
+    )
+    .await;
+    assert!(ran_one.exists(), "the first call did not run");
+    assert!(ran_three.exists(), "the third call did not run");
+    assert!(!ran_denied.exists(), "the denied call ran");
+    let local = events(&session).await;
+    let batches: Vec<&ToolResultData> = local
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ToolResult(data) => Some(data),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        batches.len(),
+        1,
+        "the calls did not settle in one batch result"
+    );
+    assert_eq!(
+        batches[0].results.len(),
+        3,
+        "a call of the batch is missing"
+    );
+    let calls: Vec<ToolCall> = local
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ToolCall(data) => Some(data.calls.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    let result_of = |marker: &Path| {
+        let call = calls
+            .iter()
+            .find(|call| {
+                call.input
+                    .get("command")
+                    .and_then(|command| command.as_str())
+                    .is_some_and(|command| command.contains(&marker.display().to_string()))
+            })
+            .unwrap_or_else(|| panic!("no call writes {}", marker.display()));
+        batches[0]
+            .results
+            .iter()
+            .find(|result| result.call_id == call.id)
+            .expect("the call has a result")
+            .result
+            .clone()
+    };
+    let denied = result_of(&ran_denied);
+    assert_eq!(denied.is_error, Some(true));
+    assert_eq!(result_text(&denied), "Hook user: blocked by the guard");
+    assert_eq!(result_of(&ran_one).is_error, None);
+    assert_eq!(result_of(&ran_three).is_error, None);
+    assert_eq!(
+        approval_request_count(&session).await,
+        0,
+        "a full-access call asked for approval"
+    );
+    env.close().await;
+}
+
+/// Appendix D 3: under a preset that asks for `exec`, a `PreToolUse` `allow`
+/// runs the call with no `approval/request`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pre_tool_use_allow_runs_a_call_the_preset_would_ask_about() {
+    let env = Env::new().await;
+    env.sources.set(document(serde_json::json!({
+        "PreToolUse": [command(serde_json::json!({
+            "type": "command",
+            "command": "printf '{\"hookSpecificOutput\":{\"permissionDecision\":\"allow\"}}'",
+        }))],
+    })));
+    let session = env.session_with(PermissionPreset::WorkspaceWrite).await;
+    let ran = env.path("allowed-ran");
+    turn(
+        &session,
+        &format!(
+            "tool:exec {{\"command\":\"printf ran > {}\"}}",
+            ran.display()
+        ),
+    )
+    .await;
+    assert_eq!(
+        approval_request_count(&session).await,
+        0,
+        "an allowed call asked for approval"
+    );
+    assert!(ran.exists(), "the allowed call did not run");
+    assert_eq!(last_result(&session).await.is_error, None);
+    env.close().await;
+}
+
+/// Appendix D 3: an `ask` from a hook at the same point produces an ordinary
+/// `approval/request`, and the user's answer decides the call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pre_tool_use_ask_asks_the_user_like_any_other_ask() {
+    let env = Env::new().await;
+    env.sources.set(document(serde_json::json!({
+        "PreToolUse": [command(serde_json::json!({
+            "type": "command",
+            "command": "printf '{\"hookSpecificOutput\":{\"permissionDecision\":\"ask\",\
+                       \"permissionDecisionReason\":\"the guard is unsure\"}}'",
+        }))],
+    })));
+    let session = env.session_with(PermissionPreset::WorkspaceWrite).await;
+    let ran = env.path("asked-ran");
+    session
+        .submit(
+            format!(
+                "tool:exec {{\"command\":\"printf ran > {}\"}}",
+                ran.display()
+            ),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    let approval_id = wait_event(&session, |kind| match kind {
+        EventKind::ApprovalRequest(data) => Some(data.approval_id.clone()),
+        _ => None,
+    })
+    .await;
+    let reason = events(&session)
+        .await
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ApprovalRequest(data) if data.approval_id == approval_id => {
+                Some(data.reason.clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(reason, "Hook user: the guard is unsure");
+    answer(&session, &approval_id, ApprovalDecision::Deny).await;
+    session.idle("main").await.unwrap();
+    assert_eq!(
+        result_text(&last_result(&session).await),
+        "Tool execution denied by user"
+    );
+    assert!(!ran.exists(), "a denied call ran");
+    env.close().await;
+}
+
+/// Appendix D 3: a command-rule deny is not overridden, and no hook runs for
+/// it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_command_rule_deny_runs_no_pre_tool_use_hook() {
+    let env = Env::new().await;
+    let ran = env.path("rule-hook-ran");
+    env.sources.set(document(serde_json::json!({
+        "PreToolUse": [command(serde_json::json!({
+            "type": "command",
+            "command": format!(
+                "printf ran > {}; printf '{{\"hookSpecificOutput\":{{\"permissionDecision\":\"allow\"}}}}'",
+                ran.display(),
+            ),
+        }))],
+    })));
+    env.rules.set(vec![CommandRule {
+        command: "rm -rf".into(),
+        matching: CommandMatch::Exact,
+        decision: CommandRuleDecision::Deny,
+    }]);
+    let session = env.session_with(PermissionPreset::WorkspaceWrite).await;
+    turn(&session, "tool:exec {\"command\":\"rm -rf\"}").await;
+    assert_eq!(
+        result_text(&last_result(&session).await),
+        "Command denied by command rule `rm -rf` (exact)"
+    );
+    assert!(!ran.exists(), "a hook ran for a denied call");
+    env.close().await;
+}
+
+/// Appendix D 3: Approval's recheck after an answer runs no hook; the marker
+/// counts the hook's runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_recheck_after_an_answer_runs_no_pre_tool_use_hook() {
+    let env = Env::new().await;
+    let runs = env.path("recheck-runs");
+    env.sources.set(document(serde_json::json!({
+        "PreToolUse": [command(serde_json::json!({
+            "type": "command",
+            "command": format!(
+                "printf x >> {}; \
+                 printf '{{\"hookSpecificOutput\":{{\"permissionDecision\":\"ask\",\
+                 \"permissionDecisionReason\":\"the guard is unsure\"}}}}'",
+                runs.display(),
+            ),
+        }))],
+    })));
+    let session = env.session_with(PermissionPreset::WorkspaceWrite).await;
+    session
+        .submit(
+            "tool:exec {\"command\":\"true\"}".into(),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    let approval_id = wait_event(&session, |kind| match kind {
+        EventKind::ApprovalRequest(data) => Some(data.approval_id.clone()),
+        _ => None,
+    })
+    .await;
+    answer(&session, &approval_id, ApprovalDecision::Allow).await;
+    session.idle("main").await.unwrap();
+    assert_eq!(last_result(&session).await.is_error, None);
+    assert_eq!(
+        std::fs::read_to_string(&runs).unwrap(),
+        "x",
+        "the recheck ran the hook again"
+    );
+    env.close().await;
+}
+
+/// Appendix D 9: a pasted Claude group with matcher `Bash` runs for `exec`,
+/// and its script reads `tool_input.command` from stdin.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pasted_bash_matcher_runs_for_exec_and_reads_the_command() {
+    let env = Env::new().await;
+    let stdin_file = env.path("pre-tool-stdin");
+    env.sources.set(document(serde_json::json!({
+        "PreToolUse": [{
+            "matcher": "Bash",
+            "hooks": [{
+                "type": "command",
+                "command": format!("printf ran > {}.marker; cat > {}", stdin_file.display(), stdin_file.display()),
+            }],
+        }],
+    })));
+    let session = env.session().await;
+    turn(&session, "tool:exec {\"command\":\"echo hi\"}").await;
+    // `cat` returns once its standard input closes, so the file is complete
+    // before the turn ends.
+    let stdin = std::fs::read_to_string(&stdin_file).expect("the Bash matcher ran for exec");
+    let payload: serde_json::Value = serde_json::from_str(&stdin).unwrap();
+    assert_eq!(payload["hook_event_name"], "PreToolUse");
+    assert_eq!(payload["tool_name"], "exec");
+    assert_eq!(payload["tool_input"]["command"], "echo hi");
+    assert_eq!(payload["risk"], "execute_process");
+    assert_eq!(payload["permission_decision"], "allow");
+    assert_eq!(payload["branch_id"], "main");
+    assert_eq!(payload["dim_source"], "user");
+    assert_eq!(payload["permission_mode"], "full-access");
+    assert!(
+        payload["tool_use_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()),
+        "{payload}"
+    );
+    assert!(
+        payload["turn_id"].as_str().is_some_and(|id| !id.is_empty()),
+        "{payload}"
+    );
+    env.close().await;
+}
+
+/// Appendix D 10: two denying handlers that finish in reverse catalog order
+/// yield the first handler's reason. The handlers order themselves with
+/// marker files, not with sleeps.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_first_deny_in_catalog_order_is_the_reason() {
+    let env = Env::new().await;
+    let finished = env.path("second-finished");
+    env.sources.set(document(serde_json::json!({
+        "PreToolUse": [{
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": format!(
+                        "while [ ! -e {} ]; do sleep 0.05; done; \
+                         printf 'first denies' >&2; exit 2",
+                        finished.display(),
+                    ),
+                },
+                {
+                    "type": "command",
+                    "command": format!(
+                        "printf done > {}; printf 'second denies' >&2; exit 2",
+                        finished.display(),
+                    ),
+                },
+            ],
+        }],
+    })));
+    let session = env.session().await;
+    let ran = env.path("reverse-order-ran");
+    turn(
+        &session,
+        &format!(
+            "tool:exec {{\"command\":\"printf ran > {}\"}}",
+            ran.display()
+        ),
+    )
+    .await;
+    let result = last_result(&session).await;
+    assert_eq!(result.is_error, Some(true));
+    assert_eq!(result_text(&result), "Hook user: first denies");
+    assert!(!ran.exists(), "a denied call ran");
+    env.close().await;
+}
+
+/// §4: an interrupt while a `PreToolUse` command runs settles the call as
+/// cancelled, and the command is terminated.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_interrupt_while_pre_tool_use_runs_cancels_the_call_and_ends_the_command() {
+    let env = Env::new().await;
+    let started = env.path("pre-tool-started");
+    let pid_file = env.path("pre-tool-pid");
+    env.sources.set(document(serde_json::json!({
+        "PreToolUse": [command(serde_json::json!({
+            "type": "command",
+            "command": format!(
+                "printf '%s' $$ > {pid}; printf started > {started}; sleep 30",
+                pid = pid_file.display(),
+                started = started.display(),
+            ),
+        }))],
+    })));
+    let session = env.session().await;
+    let ran = env.path("interrupted-ran");
+    session
+        .submit(
+            format!(
+                "tool:exec {{\"command\":\"printf ran > {}\"}}",
+                ran.display()
+            ),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    wait_file(&started, "the PreToolUse hook did not start").await;
+    session.interrupt("main", "stop".into()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), session.idle("main"))
+        .await
+        .expect("the interrupted turn settled")
+        .unwrap();
+    assert!(!ran.exists(), "the interrupted call ran");
+    assert_eq!(last_result(&session).await.is_error, Some(true));
+    assert!(
+        events(&session).await.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Cancelled { .. },
+                ..
+            })
+        )),
+        "the turn did not end cancelled"
+    );
+    wait_gone(prompted_pid(&pid_file)).await;
+    env.close().await;
+}
+
+/// §1 and A.6.1: a Hooks unload while a `PreToolUse` command runs drops the
+/// advice as none, so Permission decides alone, and the command is
+/// terminated.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hooks_unload_drops_a_pending_pre_tool_use_advice() {
+    let env = Env::with_mounted_hooks(Arc::new(Model::default()), None).await;
+    let started = env.path("pre-tool-started");
+    let pid_file = env.path("pre-tool-pid");
+    env.sources.set(document(serde_json::json!({
+        "PreToolUse": [command(serde_json::json!({
+            "type": "command",
+            "command": format!(
+                "printf '%s' $$ > {pid}; printf started > {started}; sleep 30",
+                pid = pid_file.display(),
+                started = started.display(),
+            ),
+        }))],
+    })));
+    let session = env.session_with(PermissionPreset::WorkspaceWrite).await;
+    let ran = env.path("unloaded-ran");
+    session
+        .submit(
+            format!(
+                "tool:exec {{\"command\":\"printf ran > {}\"}}",
+                ran.display()
+            ),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    wait_file(&started, "the PreToolUse hook did not start").await;
+    env.unload_branch_hooks().await;
+    let approval_id = wait_event(&session, |kind| match kind {
+        EventKind::ApprovalRequest(data) => Some(data.approval_id.clone()),
+        _ => None,
+    })
+    .await;
+    answer(&session, &approval_id, ApprovalDecision::Deny).await;
+    tokio::time::timeout(Duration::from_secs(10), session.idle("main"))
+        .await
+        .expect("the turn settled")
+        .unwrap();
+    assert_eq!(
+        result_text(&last_result(&session).await),
+        "Tool execution denied by user"
+    );
+    assert!(!ran.exists(), "a denied call ran");
+    wait_gone(prompted_pid(&pid_file)).await;
     env.close().await;
 }

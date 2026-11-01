@@ -6,6 +6,12 @@
 //! Session's `fileAccessFacts` service, which resolves the workspace, system,
 //! owned and grant facts; without that service a write keeps the
 //! workspace-only rule and a read the preset rule.
+//!
+//! The admission decision also asks the advisors registered with it (Hooks
+//! A.6.1): a branch part registers one with [`Permission::register_advice`]
+//! while it runs, and the advice is folded with Permission's own decision.
+//! [`Permission::decide`] stays the plain decision, for the admission's
+//! recheck after an answer.
 use crate::{
     file_access::FileAccessFacts,
     host::{HostError, HostFuture},
@@ -13,10 +19,11 @@ use crate::{
     workspace_tools::files::{canonical_prefix, resolve_path},
 };
 use dim_agent_runtime::{
-    AgentError, Delivery, Dispatcher, Names, SessionConfig, SessionIdentity, StateCell, Timeline,
+    AgentError, Delivery, Dispatcher, Names, Registration, Registrations, SessionConfig,
+    SessionIdentity, StateCell, Timeline,
 };
 use dim_agent_types::{
-    AgentEvent, ApprovalCallData, COMMAND_SEPARATORS, CommandMatch, CommandRule,
+    AgentEvent, ApprovalCallData, BranchSource, COMMAND_SEPARATORS, CommandMatch, CommandRule,
     CommandRuleDecision, EventKind, PermissionChangedData, PermissionPolicy, PermissionPreset,
     grant::GrantMode,
 };
@@ -35,6 +42,46 @@ pub enum Decision {
     Allow,
     Ask { reason: String },
     Deny { reason: String },
+}
+
+const CANCELLED: &str = "Tool execution cancelled.";
+
+/// Permission's own decision when advisors are asked: `allow` or `ask`,
+/// never `deny` (Hooks A.6.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdmissionDecision {
+    Allow,
+    Ask,
+}
+
+/// The admission decision asked of one registered advisor (Hooks A.6.1).
+#[derive(Clone, Debug)]
+pub struct ToolAdviceRequest {
+    pub source: BranchSource,
+    pub call: ApprovalCallData,
+    pub risk: Option<String>,
+    pub decision: AdmissionDecision,
+}
+
+/// What one advisor answers (Hooks A.6.1). It is advice, not authority:
+/// Permission folds it with its own decision, and it never overrides a deny.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToolAdviceReply {
+    None,
+    Allow,
+    Ask { reason: String },
+    Deny { reason: String },
+}
+
+/// An advisor registered with the branch's Permission (Hooks A.6.1): asked
+/// at each admission whose own decision is not a deny, in name order. An
+/// error counts as no advice.
+pub trait AdviseTool: Send + Sync + 'static {
+    fn advise(
+        &self,
+        request: ToolAdviceRequest,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ToolAdviceReply>;
 }
 
 /// The dispatched policy; `version` is the local sequence of the last
@@ -92,8 +139,81 @@ pub struct Permission {
     session_id: String,
     cwd: PathBuf,
     inner: Mutex<Inner>,
+    advisors: Arc<Registrations<Arc<dyn AdviseTool>>>,
 }
 impl Permission {
+    /// Registers `advise` under `name` on behalf of the part that owns `ctx`,
+    /// until that part unloads (Hooks A.6.1). A second advisor of the same
+    /// name fails.
+    pub fn register_advice(
+        &self,
+        ctx: &Ctx,
+        name: &str,
+        advise: Arc<dyn AdviseTool>,
+    ) -> Result<(), Error> {
+        self.advisors.register(ctx, name, advise).map(|_| ())
+    }
+
+    /// The admission decision (Hooks A.6.1): its own decision first, then
+    /// the advisors registered when it is made, in name order, when that
+    /// decision is not a deny. Any deny wins, then any ask, then any allow;
+    /// a provider error counts as none, and an advisor withdrawn while its
+    /// advice is pending has that advice dropped as none. A cancelled batch
+    /// drops the advice and fails the admission as cancelled.
+    pub async fn admit_decision(
+        &self,
+        call: &ApprovalCallData,
+        source: &BranchSource,
+        risk: Option<&str>,
+        cancel: &CancellationToken,
+    ) -> Result<Decision, HostError> {
+        let decision = self.decide(call, risk, cancel).await?;
+        let own = match decision {
+            Decision::Deny { .. } => return Ok(decision),
+            Decision::Allow => AdmissionDecision::Allow,
+            Decision::Ask { .. } => AdmissionDecision::Ask,
+        };
+        let (mut allow, mut ask, mut deny) = (false, None, None);
+        for registration in self.advisors.all() {
+            if cancel.is_cancelled() {
+                return Err(HostError::Cancelled(CANCELLED.into()));
+            }
+            let request = ToolAdviceRequest {
+                source: source.clone(),
+                call: call.clone(),
+                risk: risk.map(str::to_owned),
+                decision: own,
+            };
+            let advised = tokio::select! {
+                biased;
+                advised = registration.value.advise(request, cancel.clone()) => Some(advised),
+                _ = withdrawn(&self.advisors, &registration) => None,
+                _ = cancel.cancelled() => {
+                    return Err(HostError::Cancelled(CANCELLED.into()));
+                }
+            };
+            if cancel.is_cancelled() {
+                return Err(HostError::Cancelled(CANCELLED.into()));
+            }
+            match advised {
+                None | Some(Err(_)) | Some(Ok(ToolAdviceReply::None)) => {}
+                Some(Ok(ToolAdviceReply::Deny { reason })) => {
+                    deny.get_or_insert(reason);
+                }
+                Some(Ok(ToolAdviceReply::Ask { reason })) => {
+                    ask.get_or_insert(reason);
+                }
+                Some(Ok(ToolAdviceReply::Allow)) => allow = true,
+            }
+        }
+        Ok(match (deny, ask) {
+            (Some(reason), _) => Decision::Deny { reason },
+            (None, Some(reason)) => Decision::Ask { reason },
+            (None, None) if allow => Decision::Allow,
+            (None, None) => decision,
+        })
+    }
+
     /// Decides with the policy dispatched when the decision is made and, for a
     /// command call, the rules read now. A file call resolves its target before
     /// sampling that policy. Cancelled reads stop admission.
@@ -146,7 +266,7 @@ impl Permission {
             if let (Some(Ok((_, target))), Some(facts)) = (&target, facts) {
                 let facts = tokio::select! {
                     result = facts.0.facts(&self.session_id, policy.preset, target, GrantMode::Write) => result,
-                    _ = cancel.cancelled() => return Err(HostError::Cancelled("Tool execution cancelled.".into())),
+                    _ = cancel.cancelled() => return Err(HostError::Cancelled(CANCELLED.into())),
                 };
                 let facts = match facts {
                     Ok(facts) => facts,
@@ -232,7 +352,7 @@ impl Permission {
             };
             let facts = tokio::select! {
                 result = facts.0.facts(&self.session_id, policy.preset, target, GrantMode::Read) => result,
-                _ = cancel.cancelled() => return Err(HostError::Cancelled("Tool execution cancelled.".into())),
+                _ = cancel.cancelled() => return Err(HostError::Cancelled(CANCELLED.into())),
             };
             let facts = match facts {
                 Ok(facts) => facts,
@@ -336,7 +456,7 @@ impl Permission {
         });
         let target = tokio::select! {
             result = target => result.map_err(|error| HostError::failed(error.to_string()))?,
-            _ = cancel.cancelled() => return Err(HostError::Cancelled("Tool execution cancelled.".into())),
+            _ = cancel.cancelled() => return Err(HostError::Cancelled(CANCELLED.into())),
         };
         Ok(Some(target))
     }
@@ -417,6 +537,26 @@ impl Permission {
         });
         if let Some(waiter) = inner.waiters.remove(&event.id) {
             let _ = waiter.send(event.sequence);
+        }
+    }
+}
+
+/// Resolves when `registration` is no longer the advisor of its name, which
+/// is how its part's unload appears to an admission in flight (Hooks A.6.1).
+async fn withdrawn(
+    advisors: &Registrations<Arc<dyn AdviseTool>>,
+    registration: &Arc<Registration<Arc<dyn AdviseTool>>>,
+) {
+    let mut changes = advisors.changes();
+    loop {
+        if !advisors
+            .get(&registration.name)
+            .is_some_and(|current| Arc::ptr_eq(&current, registration))
+        {
+            return;
+        }
+        if changes.changed().await.is_err() {
+            return;
         }
     }
 }
@@ -558,6 +698,7 @@ impl DynPlugin for PermissionPlugin {
                 session_id: identity.session_id.clone(),
                 cwd: PathBuf::from(&config.cwd),
                 inner: Mutex::new(Inner::default()),
+                advisors: Arc::new(Registrations::default()),
             });
             let closing = service.clone();
             ctx.effect(move || async move {

@@ -1590,18 +1590,26 @@ impl App {
             Update::Login(account) => {
                 let signed_in = matches!(account, Ok(Some(_)));
                 self.signed_in = signed_in;
-                if let Some(Prompt::Login(view)) = &mut self.prompt {
-                    view.set_account(account);
-                    if signed_in {
-                        self.host.send(Command::LoginUsage(DIM_OAUTH_ID.into()));
+                let dim = match &mut self.prompt {
+                    Some(Prompt::Login(view)) => {
+                        view.set_account(account);
+                        Some(DIM_OAUTH_ID.to_owned())
                     }
+                    Some(Prompt::Providers(panel)) => {
+                        panel.set_account(account);
+                        panel.dim_provider_id().map(str::to_owned)
+                    }
+                    _ => None,
+                };
+                if signed_in && let Some(provider_id) = dim {
+                    self.host.send(Command::LoginUsage(provider_id));
                 }
             }
-            Update::Usage(usage) => {
-                if let Some(Prompt::Login(view)) = &mut self.prompt {
-                    view.set_usage(usage);
-                }
-            }
+            Update::Usage(usage) => match &mut self.prompt {
+                Some(Prompt::Login(view)) => view.set_usage(usage),
+                Some(Prompt::Providers(panel)) => panel.set_usage(usage),
+                _ => {}
+            },
             Update::UsageReport(usage) => self.reports.push(match usage {
                 Ok(usage) => Block::AccountUsage(usage),
                 Err(reason) => Block::Status {
@@ -2579,7 +2587,8 @@ impl App {
                 self.prompt = Some(Prompt::Models(ModelsPanel::new()));
                 self.host.send(Command::ListModels);
             }
-            Effect::Logout(provider_id) => self.host.send(Command::Logout(provider_id)),
+            Effect::Logout(target) => self.host.send(Command::Logout(target)),
+            Effect::LoginStatus(provider_id) => self.host.send(Command::LoginStatus(provider_id)),
             Effect::LoginUsage(provider_id) => self.host.send(Command::LoginUsage(provider_id)),
             Effect::OpenUrl(url) => {
                 let opened = crate::browser::open(&url);
@@ -3029,7 +3038,7 @@ impl App {
             }
             "login" => {
                 self.login_attempts += 1_000;
-                self.open_prompt(Prompt::Login(Box::new(OauthView::new(
+                self.open_prompt(Prompt::Login(Box::new(OauthView::dim(
                     DIM_OAUTH_ID,
                     "DimAgent",
                     self.login_attempts,
@@ -5637,7 +5646,7 @@ mod tests {
             plan.price_amount = Some(100.0);
             plan.price_currency = Some("\u{1b}]2;injected-title\u{7}custom".into());
             plan.price_interval = Some("\u{1b}[2Jperiod".into());
-            let mut view = OauthView::new(DIM_OAUTH_ID, "DimAgent", 0);
+            let mut view = OauthView::dim(DIM_OAUTH_ID, "DimAgent", 0);
             view.set_account(Ok(Some(crate::model::session::Account {
                 issuer: "fixture".into(),
                 subject: "signed-in".into(),

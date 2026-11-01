@@ -33,6 +33,30 @@ preset rule, and one without HostPlatform keeps the fallback for relative
 targets. Neither is an injected dependency, so their absence does not gate the
 part.
 
+### Tool advice
+
+A branch part may register an advisor with the branch's Permission while it
+runs, with `Permission::register_advice(ctx, name, advise)`; the registration
+is an effect of that part, so it is withdrawn when the part unloads, and a
+second advisor of the same name fails. Hooks' `HooksBranch` registers `hooks`
+for `PreToolUse` ([Hooks A.6.1](../../../design/plugins/Hooks.md#a61-tool-advice-in-permission)).
+
+`Approval::admit` calls `Permission::admit_decision(call, source, risk, cancel)`,
+and only the admission decision asks advisors: `decide` stays the plain
+decision, so the recheck after an answer, and every other caller of `decide`,
+asks none. `admit_decision` settles policy, command rules and file facts
+first; when its own result is not a deny it asks the advisors registered at
+that moment, in name order, each with the call, its source, its risk and its
+own `allow` or `ask`. Advice combines as any deny, then any ask, then any
+allow, and without advice the decision stands: advice never overrides a deny,
+because it is not asked then. An advisor error counts as no advice.
+
+Cancelling the caller's batch drops a pending advice, so the admission fails
+as cancelled without waiting for the advisor to look at its token, as a
+cancelled command-rules read does. An advisor withdrawn while its advice is
+pending has that advice dropped and counted as none, so Permission decides
+alone. ToolExecutor and the event formats are unchanged: a denied call's error
+text is the advisor's, written by ToolExecutor in its existing batch result.
 
 ### Events and lifetime
 
@@ -122,10 +146,9 @@ itself, so there is one path resolver. A grant read failure denies; a cancelled
 read propagates. No grant becomes a Timeline fact, preset or
 output-directory exemption. A write grant also admits a read; a read grant
 never admits a write. Session attachments are Session-owned facts, so reading
-them needs no grant; ADR 013's output table extends `owns` to command output in
-[#784](https://github.com/arcships/dim/pull/784), and until it lands a
-command-output read is outside the facts, so it asks under `read-only` and
-`workspace-write`. Host-generated output and
+them needs no grant; ADR 013's output table is the second ownership table, so
+`owns` also answers for command output and a read of it needs no approval under
+`read-only` and `workspace-write`. Host-generated output and
 configured commands retain their own execution contracts under ADR 003. This is
 tool admission, not an OS filesystem sandbox against concurrent filesystem
 mutation.
@@ -183,7 +206,18 @@ it waits decides the call. See [permission command rules](../../../design/appser
 `a_composition_without_facts_builds_and_asks`,
 `file_write_facts_decide_each_path_by_preset`,
 `file_read_facts_decide_each_path_by_preset`,
-`a_session_grant_matches_only_the_canonical_target_and_mode`.
+`a_session_grant_matches_only_the_canonical_target_and_mode`,
+`advisors_are_asked_in_name_order_and_an_ask_refines_an_allow`,
+`an_allow_advice_admits_a_call_the_preset_would_ask_about`,
+`a_deny_advice_wins_over_an_allow_and_an_ask`,
+`a_second_registration_of_the_same_name_fails`,
+`a_registration_is_withdrawn_when_its_part_unloads`,
+`advisors_are_not_asked_when_the_policy_denies`,
+`advisors_are_not_asked_when_a_command_rule_denies`,
+`an_advisor_error_counts_as_none`,
+`cancelling_the_batch_fails_the_admission_and_the_advisor_sees_it`,
+`cancelling_the_batch_drops_an_advice_that_never_answers`,
+`an_advisor_withdrawn_while_its_advice_is_pending_counts_as_none`.
 
 [session_files_flow.rs](../../../../crates/dim-app-server/tests/session_files_flow.rs)
 checks `sessionFiles.owns` against the attachment owner rows.
@@ -208,7 +242,7 @@ and exits 3.
 | 作用域 | 分支 |
 | 注入 | `B:Dispatcher`、`B:Timeline`、`S:CommandRulesHost`、`S:SessionConfig`、`S:SessionIdentity` |
 | 提供 | `B:Permission`、`B:StateCell<PermissionState>` |
-| 被注入于 | `Approval` |
+| 被注入于 | `Approval`、`HooksBranch` |
 <!-- /generated -->
 
 ## Approval
@@ -263,7 +297,8 @@ fails with `invalid_params`, which ends the prompt.
 [permission_flow.rs](../../../../crates/dim-agent-capabilities/tests/permission_flow.rs):
 `an_allowed_approval_is_rechecked_against_the_current_policy`,
 `a_response_that_finds_its_batch_stopped_ends_as_an_interrupt`,
-`a_deny_rule_written_while_approval_is_pending_cancels_the_allowed_call`;
+`a_deny_rule_written_while_approval_is_pending_cancels_the_allowed_call`,
+`advisors_are_not_asked_on_the_recheck_after_an_answer`;
 [local_product.rs](../../../../tests/integration/tests/local_product.rs).
 
 <!-- generated:plugin Approval — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
