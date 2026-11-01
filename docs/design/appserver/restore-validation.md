@@ -55,7 +55,7 @@ A restore starts at `Agent::restore_session`
 config, then `Agent::create` receives `SessionStart::Restore` and calls `store.branches(id)`
 ([agent.rs:174](../../../crates/dim-agent-runtime/src/agent.rs#L174)) before it builds anything. For
 the native store that is `validate_session`
-([timeline.rs:2977](../../../crates/dim-app-server/src/storage/timeline.rs#L2977)):
+([timeline.rs:3275](../../../crates/dim-app-server/src/storage/timeline.rs#L3275)):
 
 ```text
 store.branches(id)  — one connection hold: the directory
@@ -88,16 +88,16 @@ Who calls `branches`:
 | --- | --- | --- |
 | `Agent::restore_session` (attach, `sessions` call, Collaboration, Scheduler) | unloaded stored Session | full |
 | `Agent::create_prepared_session` (fork) | new Session copied from a source | full (its own rows) |
-| Timeline export | any Session, read-only store, one shot | full, always ([export.rs:81](../../../crates/dim-app-server/src/storage/export.rs#L81)) |
+| Timeline export | any Session, read-only store, one shot | full, always ([export.rs:82](../../../crates/dim-app-server/src/storage/export.rs#L82)) |
 
 `TimelineStore::branches` itself has no documented validation contract
-([timeline_store.rs:133](../../../crates/dim-agent-runtime/src/timeline_store.rs#L133)); the full pass
+([timeline_store.rs:138](../../../crates/dim-agent-runtime/src/timeline_store.rs#L138)); the full pass
 is the SQLite implementation's boundary check, and the in-memory store computes the directory from its
 own map.
 
 Idle unload is what makes the repetition common: Agents closes a Session after 60 s without a lease
 ([idle-unload.md §2, §6.1](idle-unload.md#61-the-pass)), and the next `acquire`
-([agents.rs:753](../../../crates/dim-app-server/src/agents.rs#L753)) restores it, validates it, opens
+([agents.rs:758](../../../crates/dim-app-server/src/agents.rs#L758)) restores it, validates it, opens
 every branch and appends `branch/resume`. A Collaboration member asked again later, a Desktop thread
 reopened after a minute, or a `sessions` call after the grace pays this every time.
 
@@ -107,15 +107,15 @@ The argument for reuse rests on the store's writer and on the database lease:
 
 | Fact | Where |
 | --- | --- |
-| One process owns the database for writing: `SqliteStorage::open` takes a file lease, and a second open fails with "another process owns the SQLite database" | [sqlite.rs:421](../../../crates/dim-app-server/src/storage/sqlite.rs#L421) |
-| The export opens read-only without a lease and only reads | [sqlite.rs:552](../../../crates/dim-app-server/src/storage/sqlite.rs#L552) |
-| Appends go through the store's one writer thread, which commits each round in one SQLite transaction and only then publishes; a failed round is rolled back or fails the Session | [timeline.rs:315](../../../crates/dim-app-server/src/storage/timeline.rs#L315), [timeline-storage §3](../../architecture/rust-agent/timeline-storage.md#3-写入与发布), [§6](../../architecture/rust-agent/timeline-storage.md#6-故障) |
-| A Session id has at most one live load per store, and callers serialize closing and restoring it | [timeline_store.rs:109](../../../crates/dim-agent-runtime/src/timeline_store.rs#L109) |
-| `create_session` writes the Session row and the `main` directory in one transaction; `branch/create` writes the event and the child directory in the same batch | [timeline.rs:1687](../../../crates/dim-app-server/src/storage/timeline.rs#L1687), [timeline.rs:1936](../../../crates/dim-app-server/src/storage/timeline.rs#L1936) |
-| `rollback_session` removes every row of a newly created Session, and `session.delete` uses it | [timeline.rs:725](../../../crates/dim-app-server/src/storage/timeline.rs#L725), [timeline.rs:1441](../../../crates/dim-app-server/src/storage/timeline.rs#L1441) |
-| `release_session` drains the Session's prior appends and clears its failure state without deleting history | [timeline.rs:2570](../../../crates/dim-app-server/src/storage/timeline.rs#L2570) |
+| One process owns the database for writing: `SqliteStorage::open` takes a file lease, and a second open fails with "another process owns the SQLite database" | [sqlite.rs:423](../../../crates/dim-app-server/src/storage/sqlite.rs#L423) |
+| The export opens read-only without a lease and only reads | [sqlite.rs:556](../../../crates/dim-app-server/src/storage/sqlite.rs#L556) |
+| Appends go through the store's one writer thread, which commits each round in one SQLite transaction and only then publishes; a failed round is rolled back or fails the Session | [timeline.rs:226](../../../crates/dim-app-server/src/storage/timeline.rs#L226), [timeline.rs:445](../../../crates/dim-app-server/src/storage/timeline.rs#L445), [timeline-storage §3](../../architecture/rust-agent/timeline-storage.md#3-写入与发布), [§6](../../architecture/rust-agent/timeline-storage.md#6-故障) |
+| A Session id has at most one live load per store, and callers serialize closing and restoring it | [timeline_store.rs:108](../../../crates/dim-agent-runtime/src/timeline_store.rs#L108) |
+| `create_session` writes the Session row and the `main` directory in one transaction; `branch/create` writes the event and the child directory in the same batch | [timeline.rs:2730](../../../crates/dim-app-server/src/storage/timeline.rs#L2730), [timeline.rs:2139](../../../crates/dim-app-server/src/storage/timeline.rs#L2139) |
+| `rollback_session` removes every row of a newly created Session, and `session.delete` uses it | [timeline.rs:898](../../../crates/dim-app-server/src/storage/timeline.rs#L898), [timeline.rs:1644](../../../crates/dim-app-server/src/storage/timeline.rs#L1644) |
+| `release_session` drains the Session's prior appends and clears its failure state without deleting history | [timeline.rs:2778](../../../crates/dim-app-server/src/storage/timeline.rs#L2778) |
 | `save_snapshot` writes `timeline_snapshots` outside the writer, but restore validation does not read snapshot state; `latest_snapshot` checks its anchor when it is read | [native-storage-format.md §可丢弃恢复快照](native-storage-format.md#可丢弃恢复快照) |
-| `agent_sessions.config` is written only with the Session (create, fork copy); no runtime call updates it | [timeline.rs:1687](../../../crates/dim-app-server/src/storage/timeline.rs#L1687), [timeline.rs:1461](../../../crates/dim-app-server/src/storage/timeline.rs#L1461) |
+| `agent_sessions.config` is written only with the Session (create, fork copy); no runtime call updates it | [timeline.rs:2730](../../../crates/dim-app-server/src/storage/timeline.rs#L2730), [timeline.rs:1664](../../../crates/dim-app-server/src/storage/timeline.rs#L1664) |
 
 So, within one store generation, every mutation of a Session's Timeline is a transaction this process
 wrote, or a whole-Session create/rollback/delete. The directory is a complete summary of those
@@ -340,7 +340,7 @@ The applicable rules:
 1. **Reuse and miss.** In `tests/storage_flow.rs`, on a disposable database: create a Session, append
    events, call `branches` (full pass), then `release_session`; damage an event row in a way only the
    event pass checks (a batch boundary in the body, as the existing
-   [`recovery_rejects_corrupt_records_and_preserves_them`](../../../crates/dim-app-server/tests/storage_flow.rs#L2173)
+   [`recovery_rejects_corrupt_records_and_preserves_them`](../../../crates/dim-app-server/tests/storage_flow.rs#L2271)
    does, or the event-id index); `branches` returns the same branches and heads — the pass did not
    run. Then append a valid event through the store (the head changes) and `branches` fails with the
    existing validation error — the pass ran.
