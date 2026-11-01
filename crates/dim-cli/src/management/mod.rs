@@ -24,7 +24,7 @@ use crate::model::session::{
     ActionKind, Area, ManagementAction, ManagementEntry, ManagementGroup, ManagementRefusal,
     ManagementRequest, ManagementResult,
 };
-use crate::ui::i18n::{t, tf};
+use crate::ui::i18n::{self, t, tf};
 
 /// One area's management methods: the read that reports the area, the
 /// method behind each kind it has, and the name the area goes by.
@@ -204,6 +204,15 @@ pub fn applied_line(request: &ManagementRequest) -> String {
         ManagementAction::List | ManagementAction::Inspect { .. } => {
             unreachable!("a read does not report an applied action")
         }
+    }
+}
+
+/// Sets the language management text is composed in, from a locale code
+/// (`config.json` stores the same spelling). The session thread composes the
+/// panel's text, so the interface hands it the language it chose.
+pub fn use_language(code: &str) {
+    if let Some(locale) = i18n::Locale::from_code(code) {
+        i18n::set(locale);
     }
 }
 

@@ -118,6 +118,11 @@ pub fn saved_locale(home: &std::path::Path) -> Option<Locale> {
         .and_then(Locale::from_code)
 }
 
+/// The interface language: the saved locale, else the system's.
+pub fn interface_locale(home: &std::path::Path) -> Locale {
+    saved_locale(home).unwrap_or_else(system_locale)
+}
+
 thread_local! {
     static ACTIVE: Cell<Locale> = const { Cell::new(Locale::En) };
 }

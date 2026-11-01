@@ -24355,9 +24355,8 @@
       "from": "dim_cli",
       "to": "dim_cli::ui::i18n",
       "references": [
-        "path crate::ui::i18n::saved_locale",
+        "path crate::ui::i18n::interface_locale",
         "path crate::ui::i18n::set",
-        "path crate::ui::i18n::system_locale",
         "path crate::ui::i18n::t",
         "path crate::ui::i18n::tf"
       ]
@@ -25405,8 +25404,11 @@
       "from": "dim_cli::management",
       "to": "dim_cli::ui::i18n",
       "references": [
+        "path i18n::Locale::from_code",
+        "path i18n::set",
         "path t",
         "path tf",
+        "use crate::ui::i18n",
         "use crate::ui::i18n::t",
         "use crate::ui::i18n::tf"
       ]
@@ -26357,6 +26359,13 @@
     },
     {
       "from": "dim_cli::plugins",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path ui::i18n::interface_locale"
+      ]
+    },
+    {
+      "from": "dim_cli::plugins",
       "to": "dim_cli::ui::terminal",
       "references": [
         "path ui::terminal::EXIT_BUDGET",
@@ -27166,7 +27175,8 @@
       "from": "dim_cli::session_host",
       "to": "dim_cli::management",
       "references": [
-        "path crate::management::apply"
+        "path crate::management::apply",
+        "path crate::management::use_language"
       ]
     },
     {
@@ -27242,6 +27252,7 @@
         "path Command::RetryApproval",
         "path Command::SaveIsolation",
         "path Command::SelectModel",
+        "path Command::SetLocale",
         "path Command::SetModelPolicy",
         "path Command::SetPermission",
         "path Command::ShellRun",
@@ -33419,6 +33430,7 @@
         "path Command::RetryApproval",
         "path Command::SaveIsolation",
         "path Command::SelectModel",
+        "path Command::SetLocale",
         "path Command::SetModelPolicy",
         "path Command::SetPermission",
         "path Command::ShellRun",
@@ -33660,6 +33672,7 @@
       "to": "dim_cli::ui::i18n",
       "references": [
         "path i18n::LOCALE_KEY",
+        "path i18n::interface_locale",
         "path i18n::saved_locale",
         "path i18n::set",
         "path i18n::system_locale",

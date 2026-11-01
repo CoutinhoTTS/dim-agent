@@ -261,6 +261,9 @@ pub enum Command {
     ListPlugins,
     /// One request to a management area's owner, through its adapter.
     Management(ManagementRequest),
+    /// The interface language's code (`en`, `zh-CN`, ...), which the worker
+    /// composes management text in from the next command on.
+    SetLocale(&'static str),
     /// Change one plugin; the worker lists the plugins again after it.
     Plugin(PluginAction),
     /// A configuration command line (`/effort high`, `/agent`, ...).

@@ -220,7 +220,7 @@ fn run_terminal(
             return 1;
         }
     };
-    i18n::set(i18n::saved_locale(&surroundings.home).unwrap_or_else(i18n::system_locale));
+    i18n::set(i18n::interface_locale(&surroundings.home));
     let synchronized = !crate::ui::terminal::in_tmux();
     let notify_terminal = crate::ui::notify::Terminal::from_env();
     let mut status = Reporter::from_env();
@@ -2786,7 +2786,9 @@ impl App {
             }
             Effect::LanguageApply(locale) => {
                 self.prompt = None;
-                i18n::set(locale.unwrap_or_else(i18n::system_locale));
+                let active = locale.unwrap_or_else(i18n::system_locale);
+                i18n::set(active);
+                self.host.send(Command::SetLocale(active.code()));
                 let saved = match locale {
                     Some(locale) => {
                         crate::ui::config::write(&self.home, i18n::LOCALE_KEY, locale.code().into())

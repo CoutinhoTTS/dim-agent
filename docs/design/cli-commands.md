@@ -337,6 +337,9 @@ Each area has two surfaces in the native client:
 Both surfaces use the same area adapter. `dimcode hooks list|enable|disable` keeps its output and
 exit codes, and `dimcode hooks edit` and `dimcode hooks set PATH` write through the same adapter.
 
+Management text is composed in the interface language on both surfaces. The panel's text follows
+`/language` from the next reply, and `dimcode <area>` uses the saved language, else the system's.
+
 ### The adapter
 
 An adapter talks to the daemon through the client connection, so a subcommand needs no Session.

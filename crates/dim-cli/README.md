@@ -1149,6 +1149,10 @@ than one per feature ([management surfaces](../../docs/design/cli-commands.md#ma
 - `dimcode <area> <verb>` calls the same adapter over its own connection, so a subcommand needs
   no Session.
 
+Both surfaces compose their text in the interface language ([`/language`](#terminal-ui-modes)).
+The session starts in the language the interface chose and switches on every `/language` save,
+so a switch shows from the next reply. A subcommand uses the saved language, else the system's.
+
 The keys are one per action kind in every area, and each keeps one meaning: `Enter` or `Space`
 toggles, `Ctrl+E` opens a document in the external editor, `Ctrl+R` re-reads the area or asks its
 owner to rescan, `Ctrl+N` adds, `Ctrl+X` removes, `Ctrl+T` runs, `Tab` inspects, and `Esc`
