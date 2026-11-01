@@ -2,7 +2,16 @@ import { z } from 'zod'
 import { parseDocument } from 'yaml'
 import type { PermissionPolicy } from '../../../npm/plugin.js'
 
-export const definitionBytes = 16 * 1024 * 1024
+/** One definition's compact JSON; several share a user document and the run store. */
+export const definitionBytes = 1024 * 1024
+/** One Workflow payload crossing the bridge: the user document or `runs.json` text.
+ * Half of the 16 MiB frame stays for the service envelope and JSON escaping. */
+export const payloadBytes = 8 * 1024 * 1024
+/** A run's stored stage result texts in total. */
+export const resultBytes = 512 * 1024
+/** One stored run log message. */
+export const logMessageBytes = 512
+export const logEntries = 500
 
 export class WorkflowError extends Error {
   readonly code: string
@@ -117,7 +126,7 @@ export function decodeDefinition(value: unknown): Definition {
   const decoded = definitionSchema.safeParse(value)
   if (!decoded.success) throw new WorkflowError('invalid_definition', decoded.error.message)
   if (!withinDefinitionLimit(decoded.data)) {
-    throw new WorkflowError('invalid_definition', 'Definition exceeds 16 MiB')
+    throw new WorkflowError('invalid_definition', 'Definition exceeds 1 MiB')
   }
   return decoded.data
 }

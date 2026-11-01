@@ -66,14 +66,16 @@ Source precedence is enabled project, user, then plugin; invalid enabled definit
 instead of silently falling through. Duplicate names across installed packages are invalid.
 Templates accept only declared parameters and results of earlier steps, never sibling stages.
 Supplied/default values are inserted literally; an omitted optional parameter inserts empty text.
-Definition files have an 8 MiB read/replace limit so their base64 payload fits the existing 16 MiB bridge frame. Project saves check serialized YAML before a binary call and leave an existing file unchanged on rejection. Larger files are reported as invalid entries. Decoded definitions retain a separate 16 MiB compact-JSON admission limit; parameters, including unused values and defaults, remain capped at 32 KiB each and 256 KiB total in UTF-8. Rejection precedes run persistence; existing inner-v2 snapshots remain readable.
+Definition files have an 8 MiB read/replace limit so their base64 payload fits the existing 16 MiB bridge frame. Project saves check serialized YAML before a binary call and leave an existing file unchanged on rejection. Larger files are reported as invalid entries. One Workflow payload crossing the bridge is capped at 8 MiB: a new definition's compact JSON is capped at 1 MiB, and a user save that would make the `workflow` document exceed 8 MiB is rejected without writing. Parameters, including unused values and defaults, remain capped at 32 KiB each and 256 KiB total in UTF-8. Rejection precedes run persistence; existing inner-v2 snapshots remain decodable without these admission bounds.
 
 Each stage runs in its own non-interactive Session. The actual first launch reply fixes the run's
 permission ceiling before any sibling receives input. Management starts default to ReadOnly.
 The Settings document contains `max_concurrent_runs` and per-run `max_concurrent_stages`, both
 defaulting to 4; each new run reads their current values. A parallel step is rendered completely
 before admission. A rendered prompt above 32 KiB fails that step without launching any sibling;
-stored stage text is bounded to 64 KiB and report previews to 4 KiB, all measured in UTF-8 bytes.
+stored stage text is bounded to 64 KiB per stage and 512 KiB per run, each stored log message to
+512 bytes, and report previews to 4 KiB, all measured in UTF-8 bytes. Later result text is truncated
+at a UTF-8 boundary to the run's remaining payload.
 
 ## Ownership and recovery
 
@@ -92,11 +94,18 @@ An `ambiguous` reply (duplicates written before branches accepted each id once) 
 delivered and records a violation. Missing destinations are undeliverable.
 
 Run storage is `workflow/runs.json`, with inner `{version:2,runs:[...]}` inside the host's S10 v1
-wrapper. Invalid, v1, unknown-version or missing-marker records return `invalid_data` and preserve
-their bytes. There is no migration. After a crash, unfinished runs become interrupted/lost without
-relaunch; a lost stage's running turn or pending approval is left untouched. Only orderly unload
-stops stages under A13. Active runs, pending reports and uncertain deletion records are retained;
-other terminal history is limited to 100. Owned Sessions are deleted before removing their last ownership record.
+wrapper. Runs admitted under the bounds below keep the text within the 8 MiB payload: a start
+projects the store with every active run's remaining result/log allowance plus the new record; if
+that exceeds the payload it first expires the oldest settled terminal runs and otherwise returns
+`limit_exceeded` without persisting. The retained store, therefore, keeps each read, write and
+`workflow.status` reply within one bridge frame; a record committed before these bounds keeps its
+original size. Invalid, v1,
+unknown-version or missing-marker records return `invalid_data` and preserve their bytes. There is
+no migration. After a crash, unfinished runs become interrupted/lost without relaunch; a lost
+stage's running turn or pending approval is left untouched. Only orderly unload stops stages under
+A13. Active runs, pending reports and uncertain deletion records are retained; other terminal
+history is limited to 100, and a start may expire older settled records for frame space. Owned
+Sessions are deleted before removing their last ownership record.
 A successful launch that stop overtakes before input remains named in its retained run; no turn
 stop is sent without observed consumption. A.4's retained-reference calculation and 100-run policy
 still apply, and #126 remains the loaded-idle-Session shipping prerequisite. An applied input that
@@ -139,8 +148,9 @@ Node rows, Settings, file authority, S2 calls, publication and Session history. 
 | 6 | Native project default-disabled/client enablement, editing a running definition and the next run reading the edit |
 | 7 | Native running-stage Node crash, row/runtime report replacement, complete host restart and Agents-index reload; no stage relaunch |
 | 8–11 | Native live first-admission narrowing with the sibling launch gated, cap persistence before siblings, starter loss, non-interactive/default-profile stage Sessions with and without `workflow` in the mount list, ReadOnly denial and handler refusal when it is declared |
-| 12 | Native retention keeps the latest 100 terminal records, newer active/pending work and retained references; SDK flows prove that older active/pending records also survive the terminal limit; user forks and external Sessions survive owned-parent deletion. Real deletion/read/atomic-replace failures preserve ownership, minute maintenance retries without active runs or definitions, and Node restart reconciles deletion before record removal. Native terminal/report-settlement triggers continue with an unreadable definition source; native source CAS and invalid-file preservation are also covered |
+| 12 | Native retention keeps the latest 100 terminal records, newer active/pending work and retained references; SDK flows prove that older active/pending records also survive the terminal limit and that a start expires older settled records for frame space; user forks and external Sessions survive owned-parent deletion. Real deletion/read/atomic-replace failures preserve ownership, minute maintenance retries without active runs or definitions, and Node restart reconciles deletion before record removal. Native terminal/report-settlement triggers continue with an unreadable definition source; native source CAS and invalid-file preservation are also covered |
 | 13 | Native resubmission across row/runtime replacement with the append held, before/after-input crashes, failed atomic replacement, a resubmitted report written once and host restart; SDK rejected, failed, ambiguous, reloading and publication-unknown replies |
+| 14 | SDK definition, user-document and run-store payload flows: over-1-MiB definitions are rejected, a user save over the 8 MiB document is rejected without writing, a run's stored results stop at 512 KiB, an over-payload active admission returns `limit_exceeded` without persisting, a start expires older settled records to fit, and the store and status replies stay within 8 MiB. Native inner-v2 records remain decodable |
 
 Scope cleanup also exercises a failing parallel reader while another native launch is admitted:
 the original task joins its siblings before its file scope can close. No additional lock or owner

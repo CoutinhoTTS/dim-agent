@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import type { FileScope, PermissionPolicy } from '../../../npm/plugin.js'
-import { definitionSchema, issues, stages, WorkflowError } from './definition.ts'
+import { definitionSchema, issues, logEntries, logMessageBytes, resultBytes, stages, WorkflowError } from './definition.ts'
 
 const id = z.string().min(1)
 const timestamp = z.iso.datetime({ precision: 3 })
@@ -29,7 +29,7 @@ const runSchema = z.strictObject({
   created_at: timestamp, ended_at: timestamp.optional(),
   state: z.enum(['running', 'stopping', 'completed', 'failed', 'stopped', 'interrupted']),
   stages: z.array(stageSchema).min(1).max(256),
-  log: z.array(z.strictObject({ at: timestamp, message: z.string() })).max(500),
+  log: z.array(z.strictObject({ at: timestamp, message: z.string() })).max(logEntries),
   report: z.discriminatedUnion('state', [
     z.strictObject({ state: z.literal('none') }),
     z.strictObject({ state: z.literal('pending'), submission_id: id, attempt_open: z.boolean() }),
@@ -65,8 +65,8 @@ export function stageTerminal(stage: Stage): boolean {
 }
 
 export function log(run: Run, message: string) {
-  run.log.push({ at: new Date().toISOString(), message })
-  if (run.log.length > 500) run.log.splice(0, run.log.length - 500)
+  run.log.push({ at: new Date().toISOString(), message: bounded(message, logMessageBytes) })
+  if (run.log.length > logEntries) run.log.splice(0, run.log.length - logEntries)
 }
 
 export function bounded(text: string, limit: number): string {
@@ -75,6 +75,34 @@ export function bounded(text: string, limit: number): string {
   let end = limit
   while ((bytes[end] & 0xc0) === 0x80) end--
   return bytes.subarray(0, end).toString('utf8')
+}
+
+function resultTextBytes(run: Run): number {
+  return run.stages.reduce((total, stage) => total + Buffer.byteLength(stage.result_text ?? ''), 0)
+}
+
+/** The text a stage stores: within its own cap and the run's remaining result payload. */
+export function storedResultText(run: Run, stage: Stage, text: string): string {
+  const used = run.stages.reduce((total, entry) =>
+    total + (entry === stage ? 0 : Buffer.byteLength(entry.result_text ?? '')), 0)
+  return bounded(text, Math.max(0, resultBytes - used))
+}
+
+/** Record fields an admitted run gains later: stage identities and the report. */
+const admittedFieldsBytes = 64 * 1024
+
+/** The run store's text plus every active run's remaining result/log allowance
+ * and later fields: what a start must fit and the most the text can grow to. */
+export function projectedBytes(runs: Run[]): number {
+  let total = Buffer.byteLength(JSON.stringify({ version: 2, runs }))
+  for (const run of runs) {
+    if (terminal(run)) continue
+    total += admittedFieldsBytes
+    total += Math.max(0, resultBytes - resultTextBytes(run))
+    total += Math.max(0, logEntries * logMessageBytes
+      - run.log.reduce((sum, entry) => sum + Buffer.byteLength(entry.message), 0))
+  }
+  return total
 }
 
 /** The only decoder for the committed inner-v2 run document. */

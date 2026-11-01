@@ -554,7 +554,7 @@ test('new definitions and accepted parameters enforce byte limits before run per
     Array.from({ length: 9 }, (_, i) => ({ name: `p${i}` })))
   {
     const edge = { ...doc, description: '界"\\\n\ud800' }
-    edge.description += 'x'.repeat(16 * 1024 * 1024 - Buffer.byteLength(JSON.stringify(edge)))
+    edge.description += 'x'.repeat(1024 * 1024 - Buffer.byteLength(JSON.stringify(edge)))
     const saved = await f.method('save', { source: 'user', document: edge })
     assert.equal(saved.kind, 'value', JSON.stringify(saved))
     assert.equal((await f.method('save', { source: 'user', document: { ...edge, description: `${edge.description}x` } })).code, 'invalid_definition')
@@ -563,6 +563,21 @@ test('new definitions and accepted parameters enforce byte limits before run per
   const large = { ...doc, description: 'x'.repeat(16 * 1024 * 1024) }
   assert.equal((await f.method('save', { source: 'user', document: large })).code, 'invalid_definition')
   assert.deepEqual(f.state.document.definitions, {})
+  {
+    const saved = []
+    for (let i = 0; i < 9; i++) {
+      const entry = { ...definition(`bulk-${i}`, [{ stage: { id: 'one', prompt: 'bulk' } }]) }
+      entry.description = 'x'.repeat(1024 * 1024 - Buffer.byteLength(JSON.stringify(entry)) - 8)
+      const reply = await f.method('save', { source: 'user', document: entry })
+      if (reply.kind === 'value') { saved.push(entry.name); continue }
+      assert.equal(reply.code, 'invalid_definition')
+      assert.match(reply.message, /8 MiB/)
+      assert.ok(!Object.hasOwn(f.state.document.definitions, entry.name))
+      break
+    }
+    assert.ok(saved.length > 0 && saved.length < 9)
+    for (const name of saved) delete f.state.document.definitions[name]
+  }
   assert.equal((await f.method('save', { source: 'project', cwd: '/workspace', document: doc })).kind, 'value')
   const original = f.state.files.get('project:/workspace/bounded.yaml')
   const oversizedFile = await f.method('save', { source: 'project', cwd: '/workspace',
@@ -613,7 +628,7 @@ test('oversized definition entries do not hide valid sources or expand YAML alia
   for (const name of ['aliases', 'oversized']) {
     const entry = listed.value.find(entry => entry.name === name)
     assert.equal(entry.valid, false)
-    assert.match(entry.issues.join('; '), name === 'aliases' ? /exceeds 16 MiB/ : /exceeds 8 MiB/)
+    assert.match(entry.issues.join('; '), name === 'aliases' ? /exceeds 1 MiB/ : /exceeds 8 MiB/)
   }
   assert.equal(listed.value.find(entry => entry.name === 'usable').valid, true)
   assert.equal((await f.settled((await f.execute({ action: 'start', name: 'usable' })).structuredContent.run_id)).state, 'completed')
@@ -636,6 +651,67 @@ test('source and parameter admission limits do not reject existing inner-v2 run 
   const read = await f.method('status', { run_id: id })
   assert.equal(read.value.definition.description.length, 16 * 1024 * 1024)
   assert.equal(read.value.params.unused.length, 256 * 1024 + 1)
+})
+
+test('stored stage results and the run store stay within one bridge payload', async t => {
+  const f = await fixture(t)
+  const steps = Array.from({ length: 9 }, (_, index) => ({ stage: { id: `s${index}`, prompt: `s${index}` } }))
+  await f.method('save', { source: 'user', document: definition('bounded-results', steps) })
+  f.state.response = () => 'x'.repeat(80 * 1024)
+  const id = (await f.method('start', { name: 'bounded-results', cwd: '/workspace' })).value.run_id
+  const run = await f.settled(id)
+  const total = run.stages.reduce((sum, stage) => sum + Buffer.byteLength(stage.result_text ?? ''), 0)
+  assert.equal(total, 512 * 1024)
+  assert.equal(run.stages.length, 9)
+  for (const stage of run.stages.slice(0, 8)) assert.equal(Buffer.byteLength(stage.result_text), 64 * 1024)
+  assert.equal(run.stages[8].result_text, '')
+  assert.ok(Buffer.byteLength(f.state.stored) <= 8 * 1024 * 1024)
+  const all = await f.method('status')
+  assert.ok(Buffer.byteLength(JSON.stringify(all.value)) <= 8 * 1024 * 1024)
+})
+
+test('run admission keeps the run store within one bridge payload', async t => {
+  const f = await fixture(t)
+  f.state.document.max_concurrent_runs = 8
+  const large = { ...definition('large', [{ stage: { id: 'one', prompt: 'held' } }]) }
+  large.description = 'x'.repeat(1024 * 1024 - Buffer.byteLength(JSON.stringify(large)) - 8)
+  await f.method('save', { source: 'user', document: large })
+  f.state.behavior = () => 'held'
+  const admitted = []
+  let refused
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const reply = await f.method('start', { name: 'large', cwd: '/workspace' })
+    if (reply.kind !== 'value') { refused = reply; break }
+    admitted.push(reply.value.run_id)
+    assert.ok(Buffer.byteLength(f.state.stored) <= 8 * 1024 * 1024)
+  }
+  assert.ok(refused, `the store admits a limited set of active runs: ${admitted.length}`)
+  assert.equal(refused.code, 'limit_exceeded')
+  assert.ok(admitted.length > 1 && admitted.length < 8)
+  for (const id of admitted) await f.method('stop', { run_id: id })
+})
+
+test('a start expires the oldest settled history to keep the store within one payload', async t => {
+  const seed = await fixture(t)
+  await seed.method('save', { source: 'user', document: definition('history',
+    Array.from({ length: 4 }, (_, index) => ({ stage: { id: `s${index}`, prompt: 'done' } }))) })
+  const started = await seed.method('start', { name: 'history', cwd: '/workspace' })
+  await seed.settled(started.value.run_id)
+  const first = JSON.parse(seed.state.stored).runs[0]
+  const runs = Array.from({ length: 40 }, (_, index) => ({ ...structuredClone(first), run_id: randomUUID(),
+    created_at: new Date(Date.UTC(2026, 0, 1) + index - 1).toISOString(),
+    ended_at: new Date(Date.UTC(2026, 0, 1) + index).toISOString(),
+    stages: first.stages.map((stage, at) => ({ ...stage, session_id: `owned-${index}-${at}`,
+      result_text: 'x'.repeat(64 * 1024) })),
+  }))
+  const f = await fixture(t, { stored: JSON.stringify({ version: 2, runs }) })
+  assert.ok(Buffer.byteLength(f.state.stored) > 8 * 1024 * 1024)
+  await f.method('save', { source: 'user', document: definition('small', [{ stage: { id: 'one', prompt: 'done' } }]) })
+  const admitted = await f.method('start', { name: 'small', cwd: '/workspace' })
+  assert.equal(admitted.kind, 'value', JSON.stringify(admitted))
+  assert.ok(Buffer.byteLength(f.state.stored) <= 8 * 1024 * 1024)
+  assert.ok(f.state.deletes.length > 0)
+  assert.equal((await f.settled(admitted.value.run_id)).state, 'completed')
 })
 
 test('tool errors retain the source diagnostic in model-visible content', async t => {
