@@ -1665,6 +1665,11 @@ impl App {
                     panel.set_snapshot(result);
                 }
             }
+            Update::IsolationBackend(result) => {
+                if let Some(Prompt::Isolation(panel)) = &mut self.prompt {
+                    panel.set_backend(result);
+                }
+            }
             Update::ModelPolicy(update) => {
                 if let Some(Prompt::Models(panel)) = &mut self.prompt
                     && let Some(notice) = panel.set_policy(update)

@@ -256,3 +256,29 @@ async fn unchanged_shell_preferences_reuse_detection_and_edits_recover() {
     ));
     root.shutdown().await.unwrap();
 }
+
+#[cfg(not(target_os = "macos"))]
+#[tokio::test]
+async fn sandbox_backend_reports_the_bubblewrap_preparation_uses() {
+    use std::os::unix::fs::PermissionsExt;
+    let base = tokio::fs::canonicalize(std::env::temp_dir())
+        .await
+        .unwrap()
+        .join(format!("dim-backend-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&base).unwrap();
+    let mut platform = HostPlatform::current(ShellStatus::Unavailable {
+        code: "test",
+        reason: String::new(),
+    })
+    .unwrap();
+    platform.env = env(&[("PATH", base.to_str().unwrap())]);
+    assert!(matches!(
+        platform.sandbox_backend(),
+        SandboxBackend::Unavailable { reason } if reason.contains("bubblewrap")
+    ));
+    let bwrap = base.join("bwrap");
+    std::fs::write(&bwrap, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&bwrap, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(platform.sandbox_backend(), SandboxBackend::Available);
+    std::fs::remove_dir_all(base).unwrap();
+}

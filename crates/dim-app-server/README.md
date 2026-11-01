@@ -303,6 +303,19 @@ selection and atomically updates its configured `exec-shell.json` through FileSt
 Stale writes return `exec_shell_conflict`; other host/storage failures are
 `exec_shell_failed`. New commands reread the preference; running shells are unchanged.
 
+### Sandbox backend availability
+
+`host.execution.backend({})` returns `{available: true}` or `{available: false, reason}` for the
+host that would start the next process. macOS uses the seatbelt backend and answers
+`{available: true}`; Linux answers `{available: true}` when preparation would find bubblewrap on
+the captured `PATH`, and `{available: false, reason}` otherwise; Windows always answers
+`{available: false, reason}`. The App Server's `ExecutionBackend` part reads `HostPlatform`, which
+resolves the same bubblewrap executable preparation uses. The reason is the text the next process
+start would use. The Execution row in `/settings` and the Web Permissions page read this method and
+display the reason; neither infers the platform from its own environment. The switches stay on
+`settings.read`/`settings.update`, and a sandboxed process on a host without a backend still fails
+as `isolation_unavailable`.
+
 ### Permission command rules
 
 With local execution, `permission.rules({})` returns `{revision, commandRules}` and
