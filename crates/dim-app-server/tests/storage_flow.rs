@@ -6186,11 +6186,19 @@ async fn streamed_context_reads_complete_batches_across_the_window() {
     )
     .await
     .unwrap();
-    let streamed = HistoryRenderer::default()
-        .rendered_stream(&timeline, 257, 256)
-        .await
-        .unwrap();
+    let renderer = HistoryRenderer::default();
+    let streamed = renderer.rendered_stream(&timeline, 257, 256).await.unwrap();
     assert!(!streamed.fallback);
+    for limit in 1..=3 {
+        let page = timeline.stored_page(254, limit, 257).await.unwrap();
+        assert_eq!(
+            page.iter().map(|event| event.sequence).collect::<Vec<_>>(),
+            vec![255, 256, 257],
+            "a page whose limit would end inside the atomic batch reads it whole: {limit}"
+        );
+    }
+    let (_, full) = renderer.rendered_context(&timeline, 257).await.unwrap();
+    assert_eq!(streamed.history, full);
     db.close().await.unwrap();
 }
 

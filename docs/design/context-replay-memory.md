@@ -142,7 +142,8 @@ compaction（[agent_loop.rs:359](../../crates/dim-agent-capabilities/src/agent_l
 不保留投影 cache，也不把整段历史装进 `ContextHistory.events`。每次 prepare 按批读取事件，
 边读边投影，投影之外的批立即释放。没有跨 prepare 的派生状态，也没有缓存失效规则。
 
-- **读取**：`Timeline::stored_local` 按范围直接读 store，`HistoryRenderer::rendered_stream`
+- **读取**：`Timeline::stored_page` 在固定 head 上读取某个位置之后的完整原子批次，
+  目标是一批的事件数、永不在原子批次中间结束；`HistoryRenderer::rendered_stream`
   以 256 条为默认批大小顺序读取；不经过 hot cache，不保留事件体。
 - **投影**：`project_batch` 接受上一批的 `ProjectionCheckpointState`，返回新的 entries/state；
   `rendered_stream` 合并 entries，事件只活到当前批。
