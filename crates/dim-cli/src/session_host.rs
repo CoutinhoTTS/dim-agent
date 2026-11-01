@@ -386,6 +386,15 @@ async fn run(
         refilled_catalogs: Default::default(),
         refill_requests: Vec::new(),
     };
+    worker.send(Update::Permissions(Ok(dim_agent_types::PermissionPolicy {
+        preset: worker
+            .options
+            .permission
+            .unwrap_or(dim_agent_types::PermissionPreset::WorkspaceWrite),
+        file_access: worker.options.file_access,
+        tool_approval: worker.options.tool_approval,
+        ..Default::default()
+    })));
     if let Err(error) = worker.open().await {
         if worker.options.resume.is_some() {
             let _ = updates.send(Update::Failed(error.to_string()));
@@ -747,8 +756,8 @@ impl Worker {
     /// the permission preset, which the Session's branches and members inherit.
     fn create_params(&self) -> serde_json::Value {
         let mut params = json!({"cwd": self.options.cwd});
-        if let Some(preset) = self.options.permission {
-            params["permissionPolicy"] = json!({"preset": preset});
+        if let Some(policy) = permission::creation_policy(&self.options) {
+            params["permissionPolicy"] = policy;
         }
         params
     }
@@ -800,11 +809,11 @@ impl Worker {
         self.send(Update::Ready(configuration));
         self.send(features);
         if self.client.supports(&permission::PRESET_METHODS) {
-            let preset = permission::read(&mut self.client, &session_id)
+            let policy = permission::read(&mut self.client, &session_id)
                 .await
-                .map(|state| permission::name(state.policy.preset).to_owned())
+                .map(|state| state.policy)
                 .map_err(|error| format!("permission: unavailable ({error})"));
-            self.send(Update::Approvals(preset));
+            self.send(Update::Permissions(policy));
         }
         self.send(Update::Switched { session_id, kind });
         self.context_stale = true;
@@ -1156,6 +1165,15 @@ impl Worker {
             Command::NewSession => {
                 if !self.session_id.is_empty() {
                     self.parked = self.invalidate_projection();
+                    self.send(Update::Permissions(Ok(dim_agent_types::PermissionPolicy {
+                        preset: self
+                            .options
+                            .permission
+                            .unwrap_or(dim_agent_types::PermissionPreset::WorkspaceWrite),
+                        file_access: self.options.file_access,
+                        tool_approval: self.options.tool_approval,
+                        ..Default::default()
+                    })));
                     self.send(Update::Context(None));
                     self.send(Update::Switched {
                         session_id: String::new(),
@@ -1371,31 +1389,37 @@ impl Worker {
                     Err(error) => error.to_string(),
                 }));
             }
-            Command::SetApprovals(mode) => {
-                let result = match permission::parse_preset(&mode) {
-                    Err(error) => Err(error.to_string()),
-                    Ok(_)
-                        if !self.session_id.is_empty()
-                            && !self.client.supports(&permission::PRESET_METHODS) =>
-                    {
-                        Err("This daemon cannot change the permission preset".to_owned())
-                    }
-                    Ok(preset) => {
-                        let result = if self.session_id.is_empty() {
-                            Ok(())
-                        } else {
-                            let session_id = self.session_id.clone();
-                            permission::select(&mut self.client, &session_id, preset).await
-                        };
-                        result
-                            .map(|()| {
-                                self.options.permission = Some(preset);
-                                permission::name(preset).to_owned()
-                            })
-                            .map_err(|error| error.to_string())
-                    }
+            Command::SetPermission(change) => {
+                let result = if self.session_id.is_empty() {
+                    let mut policy = dim_agent_types::PermissionPolicy {
+                        preset: self
+                            .options
+                            .permission
+                            .unwrap_or(dim_agent_types::PermissionPreset::WorkspaceWrite),
+                        file_access: self.options.file_access,
+                        tool_approval: self.options.tool_approval,
+                        ..Default::default()
+                    };
+                    change.apply(&mut policy);
+                    Ok(policy)
+                } else {
+                    let session_id = self.session_id.clone();
+                    permission::select_control(&mut self.client, &session_id, change)
+                        .await
+                        .map_err(|error| error.to_string())
                 };
-                self.send(Update::Approvals(result));
+                if result.is_ok() {
+                    match change {
+                        permission::Change::FileAccess(value) => {
+                            self.options.file_access = Some(value)
+                        }
+                        permission::Change::ToolApproval(value) => {
+                            self.options.tool_approval = Some(value)
+                        }
+                    }
+                    self.send(Update::PermissionSelected(change));
+                }
+                self.send(Update::Permissions(result));
             }
             Command::ListProviders => {
                 let providers = self.providers().await;
@@ -3543,9 +3567,7 @@ impl Worker {
         if branch_id == "main"
             && let EventContent::PermissionChanged(data) = &event.content
         {
-            self.send(Update::Approvals(Ok(
-                permission::name(data.policy.preset).to_owned()
-            )));
+            self.send(Update::Permissions(Ok(data.policy.clone())));
         }
         if branch_id == "main" && matches!(event.content, EventContent::Compaction(_)) {
             self.context_stale = true;

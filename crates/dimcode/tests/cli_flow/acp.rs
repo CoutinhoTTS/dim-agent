@@ -1170,6 +1170,8 @@ fn acp_terminal_auth_helper_rediscovers_the_method_and_uses_the_same_home() {
     for directory in [Some("https://fixture.invalid/directory"), None] {
         let expected_directory = directory.unwrap_or("https://dimagent.com");
         let home = Home::new();
+        let app_server = home.0.join("dim-app-server");
+        fs::write(&app_server, "").unwrap();
         let endpoint = home.0.join("rust/daemon.sock");
         let listener = UnixListener::bind(&endpoint).unwrap();
         fs::set_permissions(&endpoint, fs::Permissions::from_mode(0o600)).unwrap();
@@ -1217,7 +1219,7 @@ fn acp_terminal_auth_helper_rediscovers_the_method_and_uses_the_same_home() {
             "--redirect-uri",
             "http://localhost:54322/auth/callback",
             "--server",
-            env!("CARGO_BIN_EXE_dimcode"),
+            app_server.to_str().unwrap(),
         ]);
         if let Some(directory) = directory {
             command.args(["--directory", directory]);
@@ -1245,7 +1247,7 @@ fn acp_terminal_auth_helper_rediscovers_the_method_and_uses_the_same_home() {
             args.windows(2)
                 .any(|pair| pair == ["--redirect-uri", "http://localhost:54322/auth/callback"])
         );
-        let server = fs::canonicalize(env!("CARGO_BIN_EXE_dimcode")).unwrap();
+        let server = fs::canonicalize(&app_server).unwrap();
         assert!(
             args.windows(2)
                 .any(|pair| pair == ["--server", server.to_str().unwrap()])

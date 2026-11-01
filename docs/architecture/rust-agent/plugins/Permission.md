@@ -16,6 +16,38 @@ The facts service is owned by the Session part in
 Session facade and holds its Session lease; it adds no Permission dependency,
 cache or event.
 
+### Policy contract
+
+[ADR 017](../../../adr/017-independent-permission-controls.md) extends the public policy
+additively. `preset` remains the legacy compatibility seed; `allowedTools` and `disallowedTools`
+retain their tool-name lists. The independent optional fields are:
+
+| Field | Values | When omitted |
+| --- | --- | --- |
+| `fileAccess` | `read-only`, `workspace-read-write`, `unrestricted` | Keep the preset's exact file behavior |
+| `toolApproval` | `ask`, `bypass` | Keep the preset's exact risk-based behavior |
+
+An explicit file override changes no tool-risk rule; an explicit tool override changes no file
+rule. With explicit `ask`, every call asks unless an explicit tool allow or matching simple-command
+allow answers the tool question. Explicit `bypass` skips that question only. A tool disallow or
+command deny still wins. Neither tool choice bypasses file checks or changes process isolation.
+File-scope Ask and tool Ask produce one approval for the same call, not sequential questions;
+the existing Approval recheck still applies before execution.
+
+Omission is not an explicit Ask. Legacy `read-only` denies process/network/unknown risks and
+allows read/Session risks; `workspace-write` allows read/Session risks and workspace writes,
+asking for the other risks; `full-access` allows risks. Existing tool-list exceptions remain.
+Clients may show these as legacy tool exceptions, but must not silently replace the policy with
+an explicit override or imply that a legacy Ask label asks on every call. Explicit `ask` or
+`bypass` replaces only this risk behavior, including legacy risk denials, not explicit denies.
+
+Session configuration and `permission/changed {policy}` carry the same extended type. Existing
+policy versions, dispatch, ancestry and restoration rules are unchanged. Missing overrides remain
+absent when serialized; old Timeline/database records and frozen fixtures are not rewritten.
+New clients preserve all untouched policy fields when updating one dimension. The ability to
+read old policies does not imply that older servers accept the new fields; failed updates must
+not fall back to a wider preset.
+
 ### Dependencies
 
 | Service | Purpose |
@@ -29,7 +61,7 @@ cache or event.
 `S:FileAccessFacts` and `P:HostPlatform` are looked up when a file call is
 decided, after the part is active, not while it loads; a composition without the
 App Server facts part decides a write by the workspace alone and keeps a read's
-preset rule, and one without HostPlatform keeps the fallback for relative
+file-scope fallback, and one without HostPlatform keeps the fallback for relative
 targets. Neither is an injected dependency, so their absence does not gate the
 part.
 
@@ -81,13 +113,13 @@ decided differently.
 
 [ADR 014](../../../adr/014-file-access-facts.md) fixes what a file operation is
 decided from. The `FileAccessFacts` Session part registers `fileAccessFacts`
-with `facts(session_id, preset, path, mode) -> FileFacts`: `workspace` from
+with `facts(session_id, fileAccess, path, mode) -> FileFacts`: `workspace` from
 `SessionConfig`, `system` from HostPlatform's platform roots, `owned` from
 `SessionFiles.owns`, and `grant` from the Session's grants. The part holds no
 state; it reads at use time and imports no SessionStore. A query failure denies.
 
 For a file call, Permission resolves the call's path to the same canonical target
-the tool owner admitted and calls the service with the branch preset and the
+the tool owner admitted and calls the service with the effective file access and the
 call's mode (`read` for `read`, `grep` and `glob`; `write` for `write` and
 `edit`). It uses WorkspaceTools' `resolve_path` for both absolute and relative
 targets, so cwd, `~`, `..` and symlinks are settled before the query; a
@@ -96,22 +128,27 @@ HostPlatform cannot expand `~` or join a relative target and keeps the fallback
 rules below. The path check runs before the tool lists and `allowedTools`, so an
 allowed tool does not bypass a path fact; a resolution failure refuses the call.
 
-For a write, a system root or Session-owned artifact is denied, not asked, under
-`read-only` and `workspace-write`, including when `allowedTools` names the tool.
-A `read-only` write is otherwise denied by its preset; `full-access` admits
-file-tool writes everywhere without a query. `workspace-write` allows a
-workspace target, allows a target covered by a write grant, and asks otherwise.
-A write grant is inert under `read-only`; a read grant never permits a write.
+Effective file access is the explicit `fileAccess`, or the legacy preset's corresponding scope:
+`read-only` → Read only, `workspace-write` → Workspace read/write, `full-access` → Unrestricted.
+The fixed facts themselves do not depend on tool approval or sandbox state.
 
-For a read, a target inside the workspace, a system root, a Session-owned
-artifact or a grant is allowed under `read-only` and `workspace-write`; another
-target asks. `full-access` allows reads without a query. Without the facts
-service a read keeps the preset rule: `read_filesystem` is allowed.
+| File access | Read scope | Write scope |
+| --- | --- | --- |
+| Read only | Workspace, system roots, Session-owned artifacts and grants pass; others ask | Denied, even with an explicit tool allow or write grant |
+| Workspace read/write | The same read facts pass; others ask | Workspace or matching write grant passes; system roots and Session-owned artifacts denied; other targets ask |
+| Unrestricted | Passes without a facts query | Passes without a facts query |
+
+Passing file scope does not answer an explicit tool Ask. Tool allows, command allows and Bypass
+cannot answer a file-scope question or lift a file denial. A read grant never permits a write.
+For policies with no file override, retain the exact legacy file behavior, including existing
+tool-list interactions; do not reinterpret old history as an explicit Read only selection.
+Without the facts service a read has the legacy unrestricted read-scope fallback, then the tool
+gate applies; workspace writes use the fallback below.
 
 ### Write targets without the facts
 
-Decision for [#294](https://github.com/arcships/dim/issues/294): under
-`workspace-write`, a `write_filesystem` call runs automatically only when the
+Decision for [#294](https://github.com/arcships/dim/issues/294): with Workspace read/write
+file access, a `write_filesystem` call passes the file gate only when the
 facts say its resolved `path` is inside the Session workspace. Every outside
 write asks for approval for that call, including a model write to a host-owned
 output directory. `allowedTools` does not bypass this question;
@@ -159,7 +196,7 @@ the reason and a Session-scoped grant action for file tools:
 ```text
 [approval] read: Reading outside the session workspace requires approval: /home/user/.ssh/config
   path: /home/user/.ssh/config
-› Allow once   Allow for this session   Reject   Full access
+› Allow once   Allow for this session   Reject
 ```
 
 ### Rule check
@@ -178,8 +215,8 @@ the reason and a Session-scoped grant action for file tools:
   existing HostPlatform dependency. The bound handler's `resolve_write`
   prepares the actual call at its external path boundary before admission; it
   reads metadata and performs no file mutation or process execution.
-- ADR 002 D4–D5: policy state and public request/reply formats stay unchanged.
-  Clients display the existing language-neutral approval request.
+- ADR 002 D4–D5: policy gains the optional language-neutral fields defined above under ADR 017;
+  approval request/reply formats stay unchanged. No structural configuration changes.
 - §4 rule 8: no new Timeline, Dispatcher, loader or rutis mechanism is required.
 
 ### Requirements raised to mechanism owners

@@ -225,7 +225,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Nothing is running" => "실행 중인 작업 없음",
         "No queued message" => "대기 중인 메시지 없음",
         "Only in fullscreen (/tui)" => "전체 화면에서만 가능 (/tui)",
-        "/{name} is not yet available" => "/{name} 아직 사용 불가",
         "new session" => "새 세션",
         "resumed {id} · {count} messages" => "{id} 재개됨 · 메시지 {count}개",
         " · earlier history: /timeline" => " · 이전 기록: /timeline",
@@ -238,9 +237,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "answer required" => "답변 필요",
         "permission required" => "권한 필요",
         "esc interrupt" => "esc 중단",
-        "↑ edit · ctrl+s steer now · /queue" => "↑ 편집 · ctrl+s 지금 steer · /queue",
-        "+{count} more · ↑ edit · ctrl+s steer now · /queue" => {
-            "+{count}개 더 · ↑ 편집 · ctrl+s 지금 steer · /queue"
+        "↑ edit · ctrl+s steer now" => "↑ 편집 · ctrl+s 지금 steer",
+        "+{count} more · ↑ edit · ctrl+s steer now" => {
+            "+{count}개 더 · ↑ 편집 · ctrl+s 지금 steer"
         }
         "Queue ({count})" => "대기열 ({count})",
         "Thinking…" => "생각 중…",

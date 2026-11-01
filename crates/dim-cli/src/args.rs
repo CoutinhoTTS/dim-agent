@@ -2,6 +2,10 @@ use crate::{Result, export::Format, permission};
 use dim_agent_types::PermissionPreset;
 use std::path::PathBuf;
 
+/// What `--server` must name, shared by every error about the value it
+/// supplies.
+pub(crate) const SERVER_REQUIREMENT: &str = "--server must name a standalone dim-app-server binary";
+
 pub const HELP: &str = "dimcode [OPTIONS]\n\n\
 Pure Rust scrollback client. With redirected stdin, run one prompt and exit.\n\n\
 Commands:\n\
@@ -67,7 +71,9 @@ Options:\n\
   --cwd PATH                       Workspace (default: current directory)\n\
   --no-tui                         Line client instead of the terminal UI\n\
   --fullscreen | --scrollback      Terminal UI mode; append 'default' to save it\n\
-  --server PATH                    App Server binary (default: this executable)\n\
+  --server PATH                    Run a standalone dim-app-server binary;\n\
+                                   the default runs this executable's\n\
+                                   app-server subcommand\n\
   --model-config PATH              Explicit API-key model configuration\n\
   --provider ID --model ID         Model selection for a new session\n\
   --permission PRESET              read-only, workspace-write or full-access for a\n\
@@ -78,10 +84,10 @@ Ctrl+C stops a running turn and waits for settlement; idle Ctrl+C or EOF exits.\
 Without -p, exec reads redirected stdin through EOF, including with --image.\n\
 Idle commands: /export <markdown|json> PATH, /exit.\n\
 PATH is relative to the CLI current directory; ~ is literal.\n\
-/approvals (alias /permissions) shows the preset and command rules; it also takes\n\
-  PRESET, allow|deny exact|prefix COMMAND, or remove N.\n\
-/approval in the terminal UI chooses ask (workspace-write) or full access for\n\
-  this session and later ones. The line prompt keeps /approvals.\n\
+/permissions (aliases /approvals, /approval) opens separate File access, Tool\n\
+  approval (Ask/Bypass), and Process isolation controls in the terminal UI.\n\
+The line prompt accepts file-access read-only|workspace-read-write|unrestricted,\n\
+  tool-approval ask|bypass, PRESET, allow|deny exact|prefix COMMAND, or remove N.\n\
 Approval accepts only y/yes; empty input denies. For a simple exec command, a/always\n\
   also saves a command rule. Noninteractive approval exits 3.\n\
 The terminal UI offers a newer version on its npm channel (alpha, beta or latest),\n\
@@ -190,6 +196,8 @@ pub struct Options {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub permission: Option<PermissionPreset>,
+    pub file_access: Option<dim_agent_types::FileAccess>,
+    pub tool_approval: Option<dim_agent_types::ToolApproval>,
     pub directory: Option<String>,
     pub device: bool,
     /// Set only for a hosted leaf `Tui`.
@@ -230,6 +238,8 @@ impl Options {
             provider: None,
             model: None,
             permission: None,
+            file_access: None,
+            tool_approval: None,
             directory: None,
             device: false,
             ui_identity: None,
@@ -667,13 +677,26 @@ impl Options {
         if matches!(options.action, Action::DaemonStop) {
             return Ok(options);
         }
-        for path in [&mut options.model_config, &mut options.server]
-            .into_iter()
-            .flatten()
-        {
+        if let Some(path) = &mut options.server {
+            *path = std::fs::canonicalize(&*path).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    format!("{SERVER_REQUIREMENT}; {} does not exist", path.display())
+                } else {
+                    format!("{SERVER_REQUIREMENT}; {}: {error}", path.display())
+                }
+            })?;
+            if !path.is_file() {
+                return Err(format!(
+                    "{SERVER_REQUIREMENT}; {} is not a regular file",
+                    path.display()
+                )
+                .into());
+            }
+        }
+        if let Some(path) = &mut options.model_config {
             *path = std::fs::canonicalize(&*path)?;
             if !path.is_file() {
-                return Err("--server and --model-config must name regular files".into());
+                return Err("--model-config must name a regular file".into());
             }
         }
         Ok(options)
