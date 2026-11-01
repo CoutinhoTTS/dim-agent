@@ -1415,7 +1415,7 @@ async fn drive(
                             .rpc(
                                 "approval.respond",
                                 json!({"sessionId": session, "branchId": branch,
-                                       "requestId": request, "decision": {"kind": "allow"}}),
+                                       "requestId": request, "decision": "allow"}),
                             )
                             .await;
                     }
