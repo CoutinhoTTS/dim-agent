@@ -99,8 +99,10 @@ async fn serve_streaming(directory: &std::path::Path, model: Arc<StreamingModel>
     .unwrap()
 }
 
+/// A short path under `/tmp`: a socket path must stay below `SUN_LEN`, which a
+/// runner's `temp_dir` can exceed.
 fn new_directory(name: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("dim-{name}-{}", uuid::Uuid::new_v4()))
+    std::path::PathBuf::from("/tmp").join(format!("dim-hw-{name}-{}", uuid::Uuid::new_v4()))
 }
 
 fn error_name(value: &Value) -> &str {
@@ -178,7 +180,7 @@ async fn read_window(client: &mut Client, id: &str) -> (Vec<Value>, usize, usize
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_latest_turn_window_carries_the_prompt_and_folds_like_forward_paging() {
-    let directory = new_directory("window-small");
+    let directory = new_directory("small");
     let model = Arc::new(StreamingModel::default());
     let server = serve_streaming(&directory, model.clone()).await;
     let mut client = Client::new_version(&server, false, 3).await;
@@ -239,7 +241,7 @@ async fn the_latest_turn_window_carries_the_prompt_and_folds_like_forward_paging
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_latest_turn_window_bounds_a_large_turn_and_continues_with_before() {
-    let directory = new_directory("window-large");
+    let directory = new_directory("large");
     let model = Arc::new(StreamingModel::default());
     let server = serve_streaming(&directory, model.clone()).await;
     let mut client = Client::new_version(&server, false, 3).await;
@@ -310,7 +312,7 @@ async fn the_latest_turn_window_bounds_a_large_turn_and_continues_with_before() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_latest_turn_window_returns_a_batch_above_the_target_and_rejects_a_frame_breaker() {
-    let directory = new_directory("window-bytes");
+    let directory = new_directory("bytes");
     let model = Arc::new(StreamingModel::default());
     let server = serve_streaming(&directory, model.clone()).await;
     let mut client = Client::new_version(&server, false, 3).await;
@@ -373,7 +375,7 @@ async fn the_latest_turn_window_returns_a_batch_above_the_target_and_rejects_a_f
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_latest_turn_window_measures_the_three_issue_sizes() {
-    let directory = new_directory("window-measure");
+    let directory = new_directory("measure");
     let model = Arc::new(StreamingModel::default());
     let server = serve_streaming(&directory, model.clone()).await;
     let mut client = Client::new_version(&server, false, 3).await;
@@ -414,7 +416,7 @@ async fn the_latest_turn_window_measures_the_three_issue_sizes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_branch_without_a_turn_returns_its_newest_events() {
-    let directory = new_directory("window-no-turn");
+    let directory = new_directory("noturn");
     let model = Arc::new(StreamingModel::default());
     let server = serve_streaming(&directory, model.clone()).await;
     let mut client = Client::new_version(&server, false, 3).await;
