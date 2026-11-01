@@ -18,7 +18,7 @@ fn catalog() -> Value {
         ],
         "hooks": [
             {"source": "user", "event": "SessionStart", "matcher": null, "command": "welcome", "timeout": 600, "onFailure": "continue", "async": false, "state": "ok"},
-            {"source": "project", "event": "PreToolUse", "matcher": "read", "command": "guard", "timeout": 600, "onFailure": "continue", "async": false, "state": "unsupported"},
+            {"source": "project", "event": "UnknownEvent", "matcher": "read", "command": "guard", "timeout": 600, "onFailure": "continue", "async": false, "state": "unsupported"},
         ],
     })
 }
@@ -42,13 +42,48 @@ fn hooks_list_prints_the_catalog_and_its_source_states() {
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
         "SessionStart\t*\tuser\tenabled\tok\t600s\tcontinue\tsync\twelcome\n\
-         PreToolUse\tread\tproject\tdisabled\tunsupported\t600s\tcontinue\tsync\tguard\n"
+         UnknownEvent\tread\tproject\tdisabled\tunsupported\t600s\tcontinue\tsync\tguard\n"
     );
     assert!(
         String::from_utf8_lossy(&output.stderr)
             .contains("project hooks (/work/.dimcode/hooks.json): disabled"),
         "{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn hooks_list_prints_a_plugin_source_as_enabled() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("hooks.catalog");
+        wire.reply(
+            &request,
+            json!({
+                "userRevision": "user:1",
+                "projectsRevision": "missing",
+                "disableAllHooks": false,
+                "sources": [
+                    {"source": "user", "enabled": true, "state": "ok"},
+                    {"source": "plugin:kit", "path": "/work/plugins/kit", "enabled": true, "state": "ok"},
+                ],
+                "hooks": [
+                    {"source": "plugin:kit", "event": "Stop", "matcher": null, "command": "guard", "timeout": 600, "onFailure": "continue", "async": false, "state": "ok"},
+                ],
+            }),
+        );
+    });
+    let output = home.command().args(["hooks", "list"]).output().unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Stop\t*\tplugin:kit\tenabled\tok\t600s\tcontinue\tsync\tguard\n"
     );
 }
 

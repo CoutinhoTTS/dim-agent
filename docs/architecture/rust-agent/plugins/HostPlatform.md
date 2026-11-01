@@ -48,6 +48,12 @@ has members. Dropping a `ProcessTree` signals only when the tree was neither
 confirmed terminated nor reaped on its own; otherwise a recycled pid or reused
 group could receive `SIGKILL`.
 
+`exec_root()` is `<home>/.dim/exec`, the persistent shell's own directory.
+`remove_exec_directory(path)` removes one directory below it and syncs the
+parent on Unix; it never reads ownership rows. SessionStore calls it during a
+delete after deciding with `session_output_owners` that no Session still needs
+the directory (ADR 013 D4). An absent directory counts as removed.
+
 `read_exec_shell_settings(cancel)` reads the current version-1 preference and
 detected shell choices, returning the byte revision, optional explicit executable
 and any parse error. `update_exec_shell_settings(expected_revision, executable_path,

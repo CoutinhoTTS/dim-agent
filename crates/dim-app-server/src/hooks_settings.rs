@@ -1,6 +1,7 @@
-//! Hooks configuration: the `hooks` and `hooks-projects` Settings sources,
-//! the project file `.dimcode/hooks.json`, the `hooks.*` management methods
-//! and the Session binding of Hooks' `HookSourcesHost` (Hooks A.1, A.2, A.7).
+//! Hooks configuration: the `hooks`, `hooks-projects` and `hooks-plugins`
+//! Settings sources, the project file `.dimcode/hooks.json`, the `hooks.*`
+//! management methods and the Session binding of Hooks' `HookSourcesHost`
+//! (Hooks A.1, A.2, A.7).
 use crate::{
     methods::{ManagementMethods, SelectionScope},
     protocol::canonical_cwd,
@@ -9,8 +10,8 @@ use crate::{
 use dim_agent_capabilities::{
     file_storage::{FileStorage, FileStorageError},
     hooks::{
-        HookSourceId, HookSourceSnapshot, HookSourceState, HookSourcesHost, HookSourcesSnapshot,
-        HooksDocument, ReadHookSources, entries,
+        HookGroup, HookSourceId, HookSourceSnapshot, HookSourceState, HookSourcesHost,
+        HookSourcesSnapshot, HooksDocument, ReadHookSources, entries,
     },
     methods::{Interruption, MethodDecl, RpcError, params, reply},
 };
@@ -19,9 +20,9 @@ use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -69,6 +70,61 @@ impl BusinessDocument for HooksProjects {
     }
 }
 
+/// The hook documents plugins registered, by plugin id (A.2). PluginManager's
+/// owner operations write them and Hooks keeps them here, so a registration
+/// survives Hooks' reload; its commands read the entry's `dir` as
+/// `DIM_PLUGIN_ROOT`.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HooksPlugins {
+    #[serde(default)]
+    pub plugins: BTreeMap<String, HooksPluginDocument>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HooksPluginDocument {
+    pub dir: PathBuf,
+    pub hooks: BTreeMap<String, Vec<HookGroup>>,
+}
+impl BusinessDocument for HooksPlugins {
+    const NAMESPACE: &'static str = "hooks-plugins";
+    const USER_FILE: &'static str = "hooks-plugins.json";
+
+    fn validate(&self) -> crate::settings::Result<()> {
+        if self.extra.contains_key("plugins")
+            || self
+                .plugins
+                .iter()
+                .any(|(plugin, document)| plugin.trim().is_empty() || !document.dir.is_absolute())
+        {
+            return Err(SettingsError::Invalid("invalid hook plugin registration"));
+        }
+        Ok(())
+    }
+}
+
+/// The sources plugins registered, after the user's and the project's (A.2).
+/// A plugin source is enabled while PluginManager keeps it registered, so it
+/// needs no workspace enablement.
+fn plugin_sources(documents: HooksPlugins) -> Vec<HookSourceSnapshot> {
+    documents
+        .plugins
+        .into_iter()
+        .map(|(plugin, registration)| HookSourceSnapshot {
+            id: HookSourceId::Plugin(plugin),
+            path: Some(registration.dir),
+            enabled: true,
+            state: HookSourceState::Ok,
+            document: Some(HooksDocument {
+                hooks: registration.hooks,
+                disable_all_hooks: false,
+            }),
+        })
+        .collect()
+}
+
 /// Reads the effective sources for a working directory. The user document is
 /// a Settings source; the project file is read through FileStorage under the
 /// root Settings authorized for the workspace.
@@ -112,12 +168,18 @@ impl ReadHookSources for SettingsHookSources {
                 .read::<HooksProjects>(SettingsScope::User, &cancel)
                 .await
                 .map_err(host_error)?;
+            let plugins = self
+                .settings
+                .read::<HooksPlugins>(SettingsScope::User, &cancel)
+                .await
+                .map_err(host_error)?;
             let mut sources = vec![user_source(&user.revision, user.document)];
             // A hook point reads; it never authorizes. The Session's own
             // creation registered its root.
             if let Some(root) = self.settings.project_root(&cwd) {
                 sources.push(self.project(root, &projects.document, &cancel).await?);
             }
+            sources.extend(plugin_sources(plugins.document));
             Ok(HookSourcesSnapshot { sources })
         })
     }
@@ -134,14 +196,15 @@ impl SettingsHookSources {
         root: usize,
         user: &SettingsSnapshot<HooksDocument>,
         projects: &SettingsSnapshot<HooksProjects>,
+        plugins: &SettingsSnapshot<HooksPlugins>,
         cancel: &CancellationToken,
     ) -> Result<HookSourcesSnapshot, dim_agent_capabilities::host::HostError> {
-        Ok(HookSourcesSnapshot {
-            sources: vec![
-                user_source(&user.revision, user.document.clone()),
-                self.project(root, &projects.document, cancel).await?,
-            ],
-        })
+        let mut sources = vec![
+            user_source(&user.revision, user.document.clone()),
+            self.project(root, &projects.document, cancel).await?,
+        ];
+        sources.extend(plugin_sources(plugins.document.clone()));
+        Ok(HookSourcesSnapshot { sources })
     }
 
     /// The workspace's source, from the root Settings authorized for it.
@@ -281,7 +344,7 @@ struct Catalog {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SourceView {
-    source: &'static str,
+    source: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<String>,
     enabled: bool,
@@ -297,7 +360,7 @@ impl SourceView {
             HookSourceState::Invalid(message) => ("invalid", Some(message.clone())),
         };
         Self {
-            source: source.id.as_str(),
+            source: source.id.to_string(),
             path: source
                 .path
                 .as_ref()
@@ -346,6 +409,131 @@ fn reader(
     })
 }
 
+/// Hooks' owner operations (PluginManager §3.7): PluginManager registers and
+/// withdraws a plugin's hook document here, and Hooks keeps it in
+/// `hooks-plugins`.
+pub struct HooksService {
+    settings: Arc<SettingsService>,
+    /// Why the last registration of a plugin was refused, by plugin id.
+    refused: Mutex<BTreeMap<String, String>>,
+}
+impl HooksService {
+    /// Adds or replaces the hook document of `plugin` (a plugin id, §3.7),
+    /// whose commands read `dir` as `DIM_PLUGIN_ROOT` (Hooks A.2, A.3). The
+    /// registration is kept in `hooks-plugins.json` and survives Hooks'
+    /// reload. A document that does not parse is refused: the plugin then has
+    /// none, and [`Self::plugin_refusal`] reports why.
+    pub async fn register_plugin(
+        &self,
+        plugin: String,
+        dir: PathBuf,
+        document: serde_json::Value,
+        cancel: &CancellationToken,
+    ) -> crate::settings::Result<()> {
+        let registration = serde_json::from_value::<HooksDocument>(document)
+            .map_err(|_| SettingsError::Invalid("invalid hook document"))
+            .and_then(|document| {
+                let registration = HooksPluginDocument {
+                    dir,
+                    hooks: document.hooks,
+                };
+                HooksPlugins {
+                    plugins: BTreeMap::from([(plugin.clone(), registration.clone())]),
+                    extra: BTreeMap::new(),
+                }
+                .validate()
+                .map(|()| registration)
+            });
+        let result = match registration {
+            Ok(registration) => {
+                self.set_plugin(plugin.clone(), Some(registration), cancel)
+                    .await
+            }
+            Err(error) => {
+                let _ = self.set_plugin(plugin.clone(), None, cancel).await;
+                Err(error)
+            }
+        };
+        let mut refused = self.refused.lock().unwrap();
+        match &result {
+            Err(error) => refused.insert(plugin, error.to_string()),
+            Ok(()) => refused.remove(&plugin),
+        };
+        result
+    }
+
+    /// Withdraws the hook document of `plugin`; nothing when it registered
+    /// none.
+    pub async fn withdraw_plugin(
+        &self,
+        plugin: String,
+        cancel: &CancellationToken,
+    ) -> crate::settings::Result<()> {
+        self.refused.lock().unwrap().remove(&plugin);
+        self.set_plugin(plugin, None, cancel).await
+    }
+
+    /// Why Hooks refused the last document `plugin` registered.
+    pub fn plugin_refusal(&self, plugin: &str) -> Option<String> {
+        self.refused.lock().unwrap().get(plugin).cloned()
+    }
+
+    /// The plugin ids whose hook documents Hooks holds.
+    pub async fn plugins(
+        &self,
+        cancel: &CancellationToken,
+    ) -> crate::settings::Result<Vec<String>> {
+        Ok(self
+            .settings
+            .read::<HooksPlugins>(SettingsScope::User, cancel)
+            .await?
+            .document
+            .plugins
+            .into_keys()
+            .collect())
+    }
+
+    /// Registers or withdraws one entry. Registrations of different plugins
+    /// commute, so a lost race on the shared document is retried rather than
+    /// reported as a conflict the caller cannot observe.
+    async fn set_plugin(
+        &self,
+        plugin: String,
+        registration: Option<HooksPluginDocument>,
+        cancel: &CancellationToken,
+    ) -> crate::settings::Result<()> {
+        loop {
+            let current = self
+                .settings
+                .read::<HooksPlugins>(SettingsScope::User, cancel)
+                .await?;
+            let mut document = current.document;
+            if document.plugins.get(&plugin) == registration.as_ref() {
+                return Ok(());
+            }
+            match &registration {
+                Some(registration) => {
+                    document
+                        .plugins
+                        .insert(plugin.clone(), registration.clone());
+                }
+                None => {
+                    document.plugins.remove(&plugin);
+                }
+            }
+            match self
+                .settings
+                .update(SettingsScope::User, &current.revision, document, cancel)
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(SettingsError::Conflict) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+
 /// Process owner of the `hooks` sources and their management methods.
 pub struct HooksSettingsPlugin {
     settings: Key<SettingsService>,
@@ -381,6 +569,12 @@ impl DynPlugin for HooksSettingsPlugin {
             let methods = ctx.require_at(&self.methods)?;
             settings.register::<HooksDocument>(ctx)?;
             settings.register::<HooksProjects>(ctx)?;
+            settings.register::<HooksPlugins>(ctx)?;
+            let service = Arc::new(HooksService {
+                settings: settings.clone(),
+                refused: Mutex::default(),
+            });
+            ctx.provide_as::<HooksService>(service)?;
             let reader = reader(&settings, &files, self.product_home.clone());
             methods.register(
                 ctx,
@@ -406,6 +600,10 @@ impl DynPlugin for HooksSettingsPlugin {
                                     .read::<HooksProjects>(SettingsScope::User, &stopping)
                                     .await
                                     .map_err(error)?;
+                                let plugins = settings
+                                    .read::<HooksPlugins>(SettingsScope::User, &stopping)
+                                    .await
+                                    .map_err(error)?;
                                 let snapshot = match p.cwd {
                                     Some(cwd) => {
                                         let cwd = canonical_cwd(&cwd).await?;
@@ -414,18 +612,24 @@ impl DynPlugin for HooksSettingsPlugin {
                                             .await
                                             .map_err(error)?;
                                         reader
-                                            .authorized(root, &user, &projects, &stopping)
+                                            .authorized(root, &user, &projects, &plugins, &stopping)
                                             .await
                                             .map_err(|error| {
-                                            RpcError::app(-32000, "hooks_failed", error.to_string())
-                                        })?
+                                                RpcError::app(
+                                                    -32000,
+                                                    "hooks_failed",
+                                                    error.to_string(),
+                                                )
+                                            })?
                                     }
-                                    None => HookSourcesSnapshot {
-                                        sources: vec![user_source(
+                                    None => {
+                                        let mut sources = vec![user_source(
                                             &user.revision,
                                             user.document.clone(),
-                                        )],
-                                    },
+                                        )];
+                                        sources.extend(plugin_sources(plugins.document));
+                                        HookSourcesSnapshot { sources }
+                                    }
                                 };
                                 let disable_all_hooks = snapshot
                                     .sources

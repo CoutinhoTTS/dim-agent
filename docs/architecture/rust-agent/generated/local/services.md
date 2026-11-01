@@ -119,6 +119,7 @@ flowchart LR
   p57 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p66
   p60 -->|"dim_agent_capabilities::approval::Approval@main"| p65
   p38 -->|"dim_agent_capabilities::hooks::runner::HooksRuntime@session"| p65
+  p69 -->|"dim_agent_capabilities::permission::Permission@main"| p65
   p57 -->|"dim_agent_runtime::config::BranchLifecycle@main"| p65
   p57 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p65
   p57 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p65
@@ -192,6 +193,7 @@ flowchart LR
   p50 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p39
   p32 -->|"dim_agent_capabilities::hooks::sources::HookSourcesHost@session"| p38
   p5 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p38
+  p39 -->|"dim_agent_capabilities::input_queue::SubmitChecks@session"| p38
   p32 -->|"dim_agent_runtime::config::SessionConfig@session"| p38
   p32 -->|"dim_agent_runtime::config::SessionIdentity@session"| p38
   p50 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p37

@@ -1,9 +1,30 @@
 use super::*;
 use crate::tree_protocol as wire;
+use dim_agent_capabilities::input_queue::{
+    CheckInterrupted, SubmitCheckReply, SubmitCheckRequest, SubmitChecks, SubmitEntry,
+    append_blocks,
+};
 use dim_agent_runtime::BranchOptions;
-use dim_agent_types::BranchSource;
+use dim_agent_types::{BranchSource, InputMode};
 
 impl Connection {
+    /// Runs the Session's submit checks before writing operator input (Hooks
+    /// A.6.2); `Err` is the error the call answers with.
+    async fn submit_check(
+        &self,
+        rpc: &RpcService,
+        session: &Session,
+        request: SubmitCheckRequest,
+    ) -> Result<SubmitCheckReply, RpcError> {
+        let checks = session
+            .session_service::<SubmitChecks>()
+            .map_err(RpcError::from)?;
+        checks
+            .check(&request, &rpc.unloading.child_token())
+            .await
+            .map_err(|CheckInterrupted| RpcError::reloading())
+    }
+
     pub(super) async fn submit(&self, rpc: &RpcService, params: Submit) -> Result<Reply, RpcError> {
         if params.text.is_some() && params.user.is_some() {
             return Err(RpcError::invalid("text and user are mutually exclusive"));
@@ -16,18 +37,31 @@ impl Connection {
                 content: vec![ContentBlock::Text { text }],
             })
         });
-        let event = session
-            .input(
-                InputMessageData {
-                    submission_id: params.submission_id,
-                    user,
-                    mode: params.mode,
-                    ..InputMessageData::default()
+        let mut data = InputMessageData {
+            submission_id: params.submission_id,
+            user,
+            mode: params.mode,
+            ..InputMessageData::default()
+        };
+        match self
+            .submit_check(
+                rpc,
+                &session,
+                SubmitCheckRequest {
+                    entry: SubmitEntry::Submit,
+                    branch_id: branch.to_owned(),
+                    user: data.user.clone(),
+                    mode: data.effective_mode(),
                 },
-                branch,
             )
-            .await
-            .map_err(RpcError::from)?;
+            .await?
+        {
+            SubmitCheckReply::Block { message } => {
+                return Err(RpcError::app(-32000, "input_blocked", message));
+            }
+            SubmitCheckReply::Proceed { blocks } => append_blocks(&mut data.user, blocks),
+        }
+        let event = session.input(data, branch).await.map_err(RpcError::from)?;
         if self.protocol_version() == 3 {
             let mut published = publication.watch();
             tokio::select! {
@@ -189,6 +223,37 @@ impl Connection {
             .map_err(RpcError::from)?;
         dim_agent_capabilities::history::validate_context_boundary(&prefix)
             .map_err(RpcError::invalid)?;
+        // A blocked prompt creates no branch (Hooks A.6.2). A branch's first
+        // input is built from the prompt alone, so the checks' contexts are
+        // dropped.
+        match self
+            .submit_check(
+                rpc,
+                &session,
+                SubmitCheckRequest {
+                    entry: SubmitEntry::Branch,
+                    branch_id: params.parent_branch_id.clone(),
+                    user: Some(UserInput {
+                        content: vec![ContentBlock::Text {
+                            text: params.prompt.clone(),
+                        }],
+                    }),
+                    mode: InputMode::Queue,
+                },
+            )
+            .await?
+        {
+            SubmitCheckReply::Block { message } => {
+                return Err(RpcError::app(-32000, "input_blocked", message));
+            }
+            SubmitCheckReply::Proceed { blocks } if !blocks.is_empty() => {
+                tracing::warn!(
+                    contexts = blocks.len(),
+                    "submit check contexts dropped: a branch's first input is its prompt"
+                );
+            }
+            SubmitCheckReply::Proceed { .. } => {}
+        }
         let id = session
             .branch(
                 params.parent_branch_id,

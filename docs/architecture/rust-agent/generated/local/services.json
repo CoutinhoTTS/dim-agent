@@ -1158,6 +1158,11 @@
             "status": "Ready"
           },
           {
+            "service": "dim_agent_capabilities::permission::Permission@main",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
             "service": "dim_agent_runtime::config::BranchLifecycle@main",
             "scope": null,
             "status": "Ready"
@@ -1189,6 +1194,12 @@
             "service": "dim_agent_capabilities::hooks::runner::HooksRuntime@session",
             "scope": null,
             "provider": 38,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_capabilities::permission::Permission@main",
+            "scope": null,
+            "provider": 69,
             "generation": 1
           },
           {
@@ -1226,6 +1237,12 @@
           {
             "service": "dim_agent_capabilities::hooks::runner::HooksRuntime@session",
             "provider": 38,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_capabilities::permission::Permission@main",
+            "provider": 69,
             "declared": true,
             "external": true
           },
@@ -2211,6 +2228,12 @@
         ],
         "reads": [
           {
+            "service": "dim_agent_capabilities::host::SessionFilesHost",
+            "provider": 1,
+            "declared": false,
+            "external": false
+          },
+          {
             "service": "dim_agent_capabilities::host_platform::HostPlatform",
             "provider": 5,
             "declared": true,
@@ -3065,6 +3088,11 @@
             "status": "Ready"
           },
           {
+            "service": "dim_agent_capabilities::input_queue::SubmitChecks@session",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
             "service": "dim_agent_runtime::config::SessionConfig@session",
             "scope": null,
             "status": "Ready"
@@ -3086,6 +3114,12 @@
             "service": "dim_agent_capabilities::host_platform::HostPlatform",
             "scope": null,
             "provider": 5,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_capabilities::input_queue::SubmitChecks@session",
+            "scope": null,
+            "provider": 39,
             "generation": 1
           },
           {
@@ -3111,6 +3145,12 @@
           {
             "service": "dim_agent_capabilities::host_platform::HostPlatform",
             "provider": 5,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_capabilities::input_queue::SubmitChecks@session",
+            "provider": 39,
             "declared": true,
             "external": true
           },
@@ -3325,6 +3365,12 @@
       {
         "service": "dim_agent_capabilities::host::ToolHost@session",
         "provider": 53,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_agent_capabilities::input_queue::SubmitChecks@session",
+        "provider": 39,
         "generation": 1,
         "removing": false
       },

@@ -43,11 +43,14 @@ settings; model preferences requiring capability declarations are rejected rathe
 
 For protocol v3 `session.submit`, `error.data.appError` values `invalid_params`,
 `session_invalid_input`, `session_closed`, `session_build_failed`,
-`service_reloading` and `unknown_method` guarantee that this request did not
-commit an input. They identify parameter/admission, Session acquisition or
-pre-commit input rejection; the server must not return this set after accepting
-the input. This guarantee is specific to `session.submit`, not a retry policy
-for other methods or an assertion that a rejected request will succeed unchanged.
+`service_reloading`, `unknown_method` and `input_blocked` guarantee that this
+request did not commit an input. They identify parameter/admission, Session
+acquisition or pre-commit input rejection; the server must not return this set
+after accepting the input. `input_blocked` is a submit check's block (Hooks
+A.6.2): its message is the check's own, nothing was written, and a retry runs
+the checks again. This guarantee is specific to `session.submit`, not a retry
+policy for other methods or an assertion that a rejected request will succeed
+unchanged.
 
 After commit, failure to confirm publication remains uncertain even on a live
 connection: `submission_unknown`, an opaque `-32603` publication/storage error,
@@ -324,9 +327,9 @@ and paired devices cannot read or write them. See
 
 The configured digest is SHA-256 of the same original bytes parsed and validated for that server launch. It excludes neither whitespace nor environment-variable reference names, and never prints file contents or resolved environment values. A client must refuse another profile or configuration rather than reuse, delete or terminate its daemon.
 
-`--home` and `--database` are mutually exclusive. The SQLite store uses native format v28. It holds user settings in the unchanged v13 settings data contract, normalized managed-provider records, Timeline facts with optional recovery snapshots kept separate, Session file rows (v15), Session title metadata (v16), request messages stored as content-addressed node lists (v17), extension event rows (v18), Session configurations and Agent profiles that may omit their mount list (v19), the branch end events (v20) and the tool-effect and digest fields, which need no schema change either (v21), tool schemas that may omit `type` (v22), the Session catalog projection (v23) and a configuration's System source, which needs no schema change either (v24). Format v25 removes the unused timeline end-sequence index, format v26 stores a model limit only when a declaration supplies it, which needs no schema change either, and format v27 adds an Agent owner and a member Session leader, two nullable columns with an index each. Format v28 adds Session file grants.
+`--home` and `--database` are mutually exclusive. The SQLite store uses native format v29. It holds user settings in the unchanged v13 settings data contract, normalized managed-provider records, Timeline facts with optional recovery snapshots kept separate, Session file rows (v15), Session title metadata (v16), request messages stored as content-addressed node lists (v17), extension event rows (v18), Session configurations and Agent profiles that may omit their mount list (v19), the branch end events (v20) and the tool-effect and digest fields, which need no schema change either (v21), tool schemas that may omit `type` (v22), the Session catalog projection (v23) and a configuration's System source, which needs no schema change either (v24). Format v25 removes the unused timeline end-sequence index, format v26 stores a model limit only when a declaration supplies it, which needs no schema change either, and format v27 adds an Agent owner and a member Session leader, two nullable columns with an index each. Format v28 adds Session file grants, and format v29 adds command output ownership.
 
-Startup opens a store with the exact v28 schema and a single marker of 28. A store with the exact v27, v26, v25, v24, v23, v22, v21, v20, v19, v18, v17, v16, v15 or v13 schema and its own single marker is upgraded in place to v28 inside the startup admission transaction, before any writable PRAGMA. The transaction replaces the marker table once, then applies each step from that version on:
+Startup opens a store with the exact v29 schema and a single marker of 29. A store with the exact v28, v27, v26, v25, v24, v23, v22, v21, v20, v19, v18, v17, v16, v15 or v13 schema and its own single marker is upgraded in place to v29 inside the startup admission transaction, before any writable PRAGMA. The transaction replaces the marker table once, then applies each step from that version on:
 
 - v13 → v15 adds `session_files`, `session_file_owners` and the `session_file_owners_by_file` index.
 - v15 → v16 adds `session_metadata`.
@@ -337,8 +340,9 @@ Startup opens a store with the exact v28 schema and a single marker of 28. A sto
 - v25 → v26 rewrites each stored Provider model limit, dropping the ones no source declares, and replaces the marker; facts and all other rows are unchanged.
 - v26 → v27 alters `agents` and `agent_sessions` to add the owner and leader columns, then creates their indexes and replaces the marker; facts and all other rows are unchanged and both columns stay NULL.
 - v27 → v28 adds the empty `session_grants` table and replaces the marker; existing rows and delegation ownership remain unchanged.
+- v28 → v29 adds the empty `session_output_owners` table and its `path` index and replaces the marker; existing rows and output written before the upgrade remain unowned.
 
-Existing facts, v13 settings bytes and v16 request rows are preserved, and a failure rolls back to the untouched store. The upgrade is one-way: the daemon writes `Upgraded native store <path> from format v<N> to v28; earlier dimcode versions cannot open it.` to stderr once, and earlier daemons refuse the upgraded store. Any other database is rejected and preserved: an older format such as v12, the removed branch-only v14, a mismatched marker, a partly upgraded schema or an unknown one. There is no migration command or startup option. [Native storage format](../../docs/design/appserver/native-storage-format.md) defines the SQL and JSON contract.
+Existing facts, v13 settings bytes and v16 request rows are preserved, and a failure rolls back to the untouched store. The upgrade is one-way: the daemon writes `Upgraded native store <path> from format v<N> to v29; earlier dimcode versions cannot open it.` to stderr once, and earlier daemons refuse the upgraded store. Any other database is rejected and preserved: an older format such as v12, the removed branch-only v14, a mismatched marker, a partly upgraded schema or an unknown one. There is no migration command or startup option. [Native storage format](../../docs/design/appserver/native-storage-format.md) defines the SQL and JSON contract.
 
 ### Timeline export
 

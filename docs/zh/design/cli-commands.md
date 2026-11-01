@@ -63,6 +63,54 @@ End     scroll to the bottom (fullscreen, empty draft)
   [######----------------------------------]
 ```
 
+## 提供方账号
+
+原生客户端为每个在 `provider.management` 里带 [`account` 描述符](appserver/provider-management.md#31-读取模型)
+的提供方签到。描述符是唯一来源：客户端不保存按提供方维护的列表，也不比较任何提供方 id。
+被描述的账号就是签到列表；描述符的 `loginMethods` 决定每个账号走哪种流程（`browser` 或
+`device`）；调用是描述符命名空间下的方法——`<namespace>.login.begin`（设备）、
+`<namespace>.login.browser.begin`、`<namespace>.login.browser.complete`、
+`<namespace>.login.status`、`<namespace>.login.cancel` 和 `<namespace>.logout`。
+守护进程没有公布的方法按「不支持」报告，而不是启动一个无法完成的流程。
+
+`account` 命名空间就是 Dim 账号。它的调用还带 `providerId` 和账号目录；`/login` 保留其账号面板
+（身份、套餐与用量、企业邮箱入口），因为描述符既不带身份也不带用量。其他命名空间都是单一账号，
+调用只带 attempt id。
+
+终端界面在 `/connect` 的每一行上提供这些操作：未登录的账号显示 `Sign in`，打开即进入它唯一的
+流程；已登录的账号显示状态并提供 `Sign out`。命名空间为 `account` 的行改为打开 Dim 账号的
+`/login` 面板，其中包含身份、套餐与用量。没有描述符的提供方保留连接表单，打开时什么也不启动。
+
+```text
+/connect
+╭─ Providers ──────────────────────────────────╮
+│  OpenAI Codex                     Sign in    │
+│  Grok Build                       Sign in    │
+│› Add custom provider                         │
+╰─ Enter open · Esc clear/close ───────────────╯
+        │ 在未登录的被描述行上按 Enter
+        ▼
+╭─ OpenAI Codex OAuth ─────────────────────────╮
+│   Browser login                              │
+│ https://…/authorize?…                        │
+│   Callback URL: (paste here)                 │
+│   Submit callback                            │
+╰─ Select to copy · Enter opens link ──────────╯
+
+╭─ Grok Build OAuth ───────────────────────────╮
+│   Device login                               │
+│   Enter code:    ABCD-EFGH                   │
+│ https://…/device                             │
+│   Restart device login                       │
+│   Waiting for authorization                  │
+╰─ Select to copy · Enter opens link ──────────╯
+```
+
+`dimcode login [PROVIDER]` 在行客户端启动同样的流程，并打印守护进程返回的 URL 或验证码；
+不给 PROVIDER 时列出被描述的账号。`dimcode logout PROVIDER` 让其中一个账号退出；
+`dimcode account PROVIDER` 打印它的非机密状态。`--help` 列出这些形式，且从不连接守护进程。
+没有 Dim 账号提供方的构建会从这些命令里说明这一点，并指出 API-key 提供方这一替代方式。
+
 ## 执行设置
 
 现有 `/settings` 面板在 `Tool approvals` 旁有一个 `Execution` 行。它是进程边界的唯一用户配置入口：
@@ -118,6 +166,10 @@ revision 冲突；后端原因；保存后 `exec` 在新边界下运行——Net
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | 不经守护进程，把 Session 的完整 Timeline 写成带版本的 JSONL（[Timeline 导出](appserver/timeline-export.md)）；未给输出路径时写到 stdout。 |
 | `dimcode hooks list [--cwd DIR]` | 经 `hooks.catalog` 列出生效的 Hook 目录（[Hooks](plugins/Hooks.md#a7-管理方法)）：每个来源的路径、启用状态与状态，以及每个处理器的事件、匹配器、命令与状态。 |
 | `dimcode hooks enable\|disable [--cwd DIR]` | 经 `hooks.set_enabled` 启用或停用 `DIR`（默认当前目录）所在工作区的项目 Hook，记录在 Settings 为其授权的项目根上。 |
+| `dimcode login [PROVIDER] [--directory URL] [--device] [--redirect-uri URI]` | 启动被描述账号的浏览器或设备签到（[提供方账号](#提供方账号)）；不给 PROVIDER 时列出被描述的账号。 |
+| `dimcode account PROVIDER` | 打印被描述账号的非机密状态。 |
+| `dimcode logout PROVIDER` | 让被描述的账号退出。 |
+| `/connect` | 列出 `provider.management` 报告的提供方；被描述的账号打开签到或退出步骤，其他提供方打开连接表单。 |
 | `/exit` | 在空闲的交互提示符处断开并退出。 |
 | `!command` / `!!command` | 以 record/private 模式调用 Session 现有的 `shell.run`，模型回合进行中也可用。 |
 | `--permission read-only\|workspace-write\|full-access` | 为 `dimcode`、`tui`、`exec` 和 `exec resume` 选择新建或恢复的 Session 的预设（[权限控制](#权限控制)）。 |
@@ -225,10 +277,10 @@ Session 保留 Approval 现有的所有者侧策略（#98 D10）。`--permission
 仍需审批的调用照样被拒绝（[无头执行](#无头执行)）。其他退出码保持原生 CLI 合同，包括回合失败为 2、
 中断为 130。传输失败不重试提交。重复的 `--image` 参数遵循无头附件合同：先文本，再按参数顺序放入
 经过校验的原始图片字节，路径相对于调用进程。只有图片的调用是有效的。连接仍在时，提交错误保持
-"结果不确定"的诊断/退出路径，除非其 `error.data.appError` 是六种
+"结果不确定"的诊断/退出路径，除非其 `error.data.appError` 是七种
 [保证在提交前拒绝](../../../crates/dim-app-server/README.md#session-submission-errors)之一：
 `invalid_params`、`session_invalid_input`、`session_closed`、`session_build_failed`、
-`service_reloading` 或 `unknown_method`。这些保留普通的错误诊断。其他错误，包括
+`service_reloading`、`unknown_method` 或 `input_blocked`。这些保留普通的错误诊断。其他错误，包括
 `submission_unknown` 和不透明的发布/存储失败，都可能发生在提交之后，不得触发再次发送。
 
 JSON 模式下，stdout 每行一条紧凑的 JSON-RPC 通知，使用守护进程现有的 `method` 和 `params`。只输出

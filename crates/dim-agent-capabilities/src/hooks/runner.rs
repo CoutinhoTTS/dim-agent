@@ -13,7 +13,10 @@ use crate::{
         HookEvent, HookHandler, HookSourceId, HookSourcesHost, HookSourcesSnapshot, OnFailure,
         handlers,
     },
+    host::{HostError, HostFuture},
     host_platform::{HostPlatform, Os},
+    input_queue::{CheckSubmission, SubmitCheckReply, SubmitCheckRequest, SubmitChecks},
+    permission::{AdmissionDecision, AdviseTool, Permission, ToolAdviceReply, ToolAdviceRequest},
 };
 use dim_agent_runtime::{
     BranchLifecycle, Delivery, Dispatcher, Names, SessionConfig, SessionIdentity, Timeline,
@@ -21,8 +24,9 @@ use dim_agent_runtime::{
 };
 use dim_agent_types::{
     AgentEvent, ApprovalCancelledData, ApprovalDecision, ApprovalRequestData, ApprovalRespondData,
-    BranchSource, EventKind, InputBlock, InputMessageData, InputMode, JsonObject, PermissionPreset,
-    ToolCallResult, ToolContent, ToolDefinition, TurnOutcome,
+    BranchSource, ContentBlock, EventKind, InputBlock, InputMessageData, InputMode, JsonObject,
+    PermissionPreset, ToolCallResult, ToolContent, ToolDefinition, ToolMetadata, TurnOutcome,
+    UserInput,
 };
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -30,7 +34,9 @@ use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     ffi::OsString,
+    future::Future,
     path::Path,
+    pin::Pin,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -54,11 +60,12 @@ const MAIN_BRANCH: &str = "main";
 /// from one that has not run it.
 const SESSION_START_KEY: &str = "hooks:session-start/";
 /// Variables the hook environment sets and never inherits.
-const MANAGED_ENV: [&str; 6] = [
+const MANAGED_ENV: [&str; 7] = [
     "DIM_PROJECT_DIR",
     "DIM_HOOK_EVENT",
     "DIM_SESSION_ID",
     "DIMCODE_HOME",
+    "DIM_PLUGIN_ROOT",
     "CLAUDE_PLUGIN_ROOT",
     "GROK_PLUGIN_ROOT",
 ];
@@ -90,6 +97,9 @@ pub struct HookRun {
     /// raises after the run (A.4).
     pub source: HookSourceId,
 }
+
+/// One running handler: its catalog position, then its result.
+type PendingRun = Pin<Box<dyn Future<Output = (usize, HookResult)> + Send>>;
 
 /// The Session service that reads the sources and runs commands.
 pub struct HooksRuntime {
@@ -150,7 +160,7 @@ impl HooksRuntime {
             let mut fields = payload.clone();
             fields.insert(
                 "dim_source".into(),
-                Value::String(handler.source.as_str().into()),
+                Value::String(handler.source.to_string()),
             );
             let stdin = serde_json::to_vec(&Value::Object(fields)).unwrap_or_default();
             if handler.asynchronous {
@@ -185,6 +195,151 @@ impl HooksRuntime {
                 _ = owner.run_one(&handler, stdin, &generation) => {}
             }
         });
+    }
+
+    /// `UserPromptSubmit` at an operator-input entry (A.6.2): the entry waits
+    /// for its hooks before writing anything. `Err` means the entry's own
+    /// call was interrupted, and nothing may be written.
+    async fn submit_check(
+        self: &Arc<Self>,
+        request: &SubmitCheckRequest,
+        cancel: &CancellationToken,
+    ) -> Result<SubmitCheckReply, HostError> {
+        let interrupted = || HostError::Cancelled("the entry's call was interrupted".into());
+        if cancel.is_cancelled() {
+            return Err(interrupted());
+        }
+        let Some(snapshot) = self.snapshot().await else {
+            return Ok(SubmitCheckReply::Proceed { blocks: Vec::new() });
+        };
+        let matching = handlers(&snapshot, HookEvent::UserPromptSubmit, None, None);
+        if matching.is_empty() {
+            return Ok(SubmitCheckReply::Proceed { blocks: Vec::new() });
+        }
+        let mut payload = self.payload(HookEvent::UserPromptSubmit, &request.branch_id);
+        payload.insert(
+            "prompt".into(),
+            Value::String(prompt_text(request.user.as_ref())),
+        );
+        payload.insert("mode".into(), Value::String(mode_name(request.mode).into()));
+        if cancel.is_cancelled() {
+            return Err(interrupted());
+        }
+        // An unload settles the pending check before the part goes: the
+        // running commands are terminated and every handler answers by its
+        // `onFailure` (§1, A.5).
+        let decisions = tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => return Ok(unfinished_prompt(&matching)),
+            decisions = self.run_prompt_handlers(&matching, &payload, cancel) => decisions,
+        };
+        if cancel.is_cancelled() {
+            return Err(interrupted());
+        }
+        let mut blocks = Vec::new();
+        for decision in decisions {
+            match decision {
+                PromptDecision::Blocked { message } => {
+                    return Ok(SubmitCheckReply::Block { message });
+                }
+                PromptDecision::Context(context) => blocks.push(element(
+                    "dim-hooks",
+                    &[("kind", "prompt-submit")],
+                    &escaped(&[context]),
+                )),
+                PromptDecision::None => {}
+            }
+        }
+        Ok(SubmitCheckReply::Proceed { blocks })
+    }
+
+    /// Runs the handlers concurrently and returns their decisions in catalog
+    /// order up to and including the first one that stops the point; the
+    /// handlers after it are terminated (A.5). An `async` handler starts and
+    /// is not waited for.
+    async fn run_ordered<T>(
+        self: &Arc<Self>,
+        handlers: &[HookHandler],
+        payload: &JsonObject,
+        cancel: &CancellationToken,
+        decide: impl Fn(&HookHandler, &HookRun) -> (bool, T),
+    ) -> Vec<T> {
+        let mut running: Vec<HookHandler> = Vec::new();
+        let mut tokens: Vec<CancellationToken> = Vec::new();
+        // Each future carries its handler's catalog position in `running`,
+        // which is also its slot: `select_all` reorders the pending futures
+        // as each one finishes, so its own index is not a catalog position.
+        let mut pending: Vec<PendingRun> = Vec::new();
+        for handler in handlers {
+            let mut fields = payload.clone();
+            fields.insert(
+                "dim_source".into(),
+                Value::String(handler.source.to_string()),
+            );
+            let stdin = serde_json::to_vec(&Value::Object(fields)).unwrap_or_default();
+            if handler.asynchronous {
+                self.spawn_async(handler.clone(), stdin, cancel.clone());
+                continue;
+            }
+            let position = running.len();
+            let token = cancel.child_token();
+            tokens.push(token.clone());
+            let owner = self.clone();
+            let owned = handler.clone();
+            let future_handler = owned.clone();
+            pending.push(Box::pin(async move {
+                let result = owner.run_one(&future_handler, stdin, &token).await;
+                (position, result)
+            }));
+            running.push(owned);
+        }
+        let mut slots: Vec<Option<HookRun>> = (0..running.len()).map(|_| None).collect();
+        let mut decisions = Vec::new();
+        let mut stopped = None;
+        for next in 0..running.len() {
+            // `pending` holds exactly the futures whose result has not
+            // arrived. Every slot from `next` on is either filled or owned by
+            // one of them, so the loop never selects on an empty list.
+            while slots[next].is_none() {
+                let ((position, result), _, rest) = futures_util::future::select_all(pending).await;
+                pending = rest;
+                slots[position] = Some(HookRun {
+                    result,
+                    on_failure: running[position].on_failure,
+                    source: running[position].source.clone(),
+                });
+            }
+            let run = slots[next].take().expect("the slot was just filled");
+            let (stops, decision) = decide(&running[next], &run);
+            decisions.push(decision);
+            if stops {
+                stopped = Some(next);
+                break;
+            }
+        }
+        if let Some(stopped) = stopped {
+            for token in tokens.iter().skip(stopped + 1) {
+                token.cancel();
+            }
+            pending.clear();
+        }
+        decisions
+    }
+
+    /// `UserPromptSubmit`'s decisions in catalog order, up to and including
+    /// the first block (A.5).
+    async fn run_prompt_handlers(
+        self: &Arc<Self>,
+        handlers: &[HookHandler],
+        payload: &JsonObject,
+        cancel: &CancellationToken,
+    ) -> Vec<PromptDecision> {
+        self.run_ordered(handlers, payload, cancel, |handler, run| {
+            let decision = prompt_decision(handler, run);
+            let stops = matches!(decision, PromptDecision::Blocked { .. });
+            (stops, decision)
+        })
+        .await
     }
 
     async fn run_one(
@@ -285,7 +440,7 @@ impl HooksRuntime {
             return;
         };
         tracing::warn!(
-            source = handler.source.as_str(),
+            source = %handler.source,
             event = handler.event.name(),
             reason = %reason,
             stderr = %stderr,
@@ -305,6 +460,9 @@ impl HooksRuntime {
         ];
         if let Some(home) = self.sources.0.home() {
             vars.push(("DIMCODE_HOME", home.into_os_string()));
+        }
+        if let Some(root) = &handler.plugin_root {
+            vars.push(("DIM_PLUGIN_ROOT", root.clone().into_os_string()));
         }
         vars
     }
@@ -498,6 +656,175 @@ fn stop_output(run: &HookRun) -> StopOutput {
     }
 }
 
+/// The prompt a `UserPromptSubmit` hook reads (A.3): its text blocks joined by
+/// newlines; images are not passed.
+fn prompt_text(user: Option<&UserInput>) -> String {
+    user.map(|user| {
+        user.content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Image { .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
+    .unwrap_or_default()
+}
+
+/// The mode name of A.3's `mode` field.
+fn mode_name(mode: InputMode) -> &'static str {
+    match mode {
+        InputMode::Queue => "queue",
+        InputMode::Steer => "steer",
+        InputMode::Append => "append",
+    }
+}
+
+/// What an unload answers for the handlers that were running (A.5): each one
+/// did not finish, so the first `onFailure: block` in catalog order blocks.
+fn unfinished_prompt(handlers: &[HookHandler]) -> SubmitCheckReply {
+    for handler in handlers.iter().filter(|handler| !handler.asynchronous) {
+        if handler.on_failure == OnFailure::Block {
+            return SubmitCheckReply::Block {
+                message: format!("Hook {} did not finish", handler.source),
+            };
+        }
+    }
+    SubmitCheckReply::Proceed { blocks: Vec::new() }
+}
+
+/// What one `UserPromptSubmit` run does to the entry's input (A.4, A.5).
+enum PromptDecision {
+    Blocked { message: String },
+    Context(String),
+    None,
+}
+
+fn prompt_decision(handler: &HookHandler, run: &HookRun) -> PromptDecision {
+    let blocked = |reason: &str| PromptDecision::Blocked {
+        message: hook_message(&handler.source, reason),
+    };
+    match &run.result {
+        HookResult::Blocked { reason } => blocked(reason),
+        // A failed run follows the run's own `onFailure` (A.5); its
+        // diagnostic carries the bounded stderr excerpt (§7).
+        HookResult::Failed { .. } if run.on_failure == OnFailure::Block => {
+            PromptDecision::Blocked {
+                message: format!("Hook {} did not finish", handler.source),
+            }
+        }
+        HookResult::Failed { .. } => PromptDecision::None,
+        HookResult::Success { stdout } => {
+            let trimmed = stdout.trim();
+            if trimmed.is_empty() {
+                return PromptDecision::None;
+            }
+            match serde_json::from_str::<Value>(trimmed) {
+                Ok(Value::Object(object)) => {
+                    report_ignored_fields(&object);
+                    if object.get("decision").and_then(Value::as_str) == Some("block") {
+                        let reason = object
+                            .get("reason")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        return blocked(reason);
+                    }
+                    object
+                        .get("hookSpecificOutput")
+                        .and_then(|output| output.get("additionalContext"))
+                        .and_then(Value::as_str)
+                        .and_then(capped)
+                        .map_or(PromptDecision::None, PromptDecision::Context)
+                }
+                _ => capped(trimmed).map_or(PromptDecision::None, PromptDecision::Context),
+            }
+        }
+    }
+}
+
+/// The text a hook's own reason is shown as (§3.3, A.6.1).
+fn hook_message(source: &HookSourceId, reason: &str) -> String {
+    format!("Hook {}: {}", source, reason.trim())
+}
+
+/// The advice one `PreToolUse` run gives (A.4, A.5). A deny's or ask's
+/// reason is bounded per A.4 and reads like a prompt block's message.
+fn advice_of(run: &HookRun) -> ToolAdviceReply {
+    let named = |reason: &str| hook_message(&run.source, &capped(reason).unwrap_or_default());
+    match &run.result {
+        // Exit 2 is the event's blocking result (A.4): a deny, with the
+        // bounded stderr as its reason.
+        HookResult::Blocked { reason } => ToolAdviceReply::Deny {
+            reason: named(reason),
+        },
+        // A failure, timeout or cancellation follows the run's `onFailure`
+        // (A.5): `block` denies, `continue` has no opinion.
+        HookResult::Failed { .. } if run.on_failure == OnFailure::Block => ToolAdviceReply::Deny {
+            reason: format!("Hook {} did not finish", run.source),
+        },
+        HookResult::Failed { .. } => ToolAdviceReply::None,
+        HookResult::Success { stdout } => {
+            let trimmed = stdout.trim();
+            if trimmed.is_empty() {
+                return ToolAdviceReply::None;
+            }
+            let Ok(Value::Object(object)) = serde_json::from_str::<Value>(trimmed) else {
+                return ToolAdviceReply::None;
+            };
+            report_ignored_fields(&object);
+            // A.4 reads the permission decision first; the legacy `decision`
+            // field answers only when it names no permission decision.
+            let reason = object
+                .get("hookSpecificOutput")
+                .and_then(|output| output.get("permissionDecisionReason"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let specific = object
+                .get("hookSpecificOutput")
+                .and_then(|output| output.get("permissionDecision"))
+                .and_then(Value::as_str);
+            match specific {
+                Some("deny") => ToolAdviceReply::Deny {
+                    reason: named(reason),
+                },
+                Some("ask") => ToolAdviceReply::Ask {
+                    reason: named(reason),
+                },
+                Some("allow") => ToolAdviceReply::Allow,
+                Some("defer") => ToolAdviceReply::None,
+                _ => match object.get("decision").and_then(Value::as_str) {
+                    Some("block") => ToolAdviceReply::Deny {
+                        reason: named(
+                            object
+                                .get("reason")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default(),
+                        ),
+                    },
+                    Some("approve") => ToolAdviceReply::Allow,
+                    _ => ToolAdviceReply::None,
+                },
+            }
+        }
+    }
+}
+
+/// The `PreToolUse` advice HooksBranch registers with the branch's Permission
+/// (A.6.1).
+struct HookAdvice {
+    branch: Arc<Branch>,
+}
+impl AdviseTool for HookAdvice {
+    fn advise(
+        &self,
+        request: ToolAdviceRequest,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ToolAdviceReply> {
+        Box::pin(async move { Ok(self.branch.advise(&request, &cancel).await) })
+    }
+}
+
 /// Output fields this build knows and ignores, at the top level or under
 /// `hookSpecificOutput` (A.4).
 const IGNORED_OUTPUT: [&str; 10] = [
@@ -560,11 +887,26 @@ fn permission_decision(run: &HookRun) -> Option<ApprovalDecision> {
     }
 }
 
+/// `UserPromptSubmit` registered with the Session's `submitChecks` (A.6.2).
+struct PromptSubmitCheck {
+    runtime: Arc<HooksRuntime>,
+}
+impl CheckSubmission for PromptSubmitCheck {
+    fn check(
+        &self,
+        request: SubmitCheckRequest,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, SubmitCheckReply> {
+        Box::pin(async move { self.runtime.submit_check(&request, &cancel).await })
+    }
+}
+
 pub struct HooksSessionPlugin {
     sources: Key<HookSourcesHost>,
     platform: Key<HostPlatform>,
     config: Key<SessionConfig>,
     identity: Key<SessionIdentity>,
+    checks: Key<SubmitChecks>,
     runtime: Key<HooksRuntime>,
 }
 impl HooksSessionPlugin {
@@ -574,6 +916,7 @@ impl HooksSessionPlugin {
             platform: names.key()?,
             config: names.key()?,
             identity: names.key()?,
+            checks: names.key()?,
             runtime: names.key()?,
         })
     }
@@ -588,6 +931,7 @@ impl DynPlugin for HooksSessionPlugin {
             self.platform.erase(),
             self.config.erase(),
             self.identity.erase(),
+            self.checks.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -596,6 +940,7 @@ impl DynPlugin for HooksSessionPlugin {
             let platform = ctx.require_at(&self.platform)?;
             let config = ctx.require_at(&self.config)?;
             let identity = ctx.require_at(&self.identity)?;
+            let checks = ctx.require_at(&self.checks)?;
             let runtime = Arc::new(HooksRuntime {
                 sources,
                 platform,
@@ -610,6 +955,10 @@ impl DynPlugin for HooksSessionPlugin {
                 closing.tasks.wait().await;
                 Ok(())
             })?;
+            let check = PromptSubmitCheck {
+                runtime: runtime.clone(),
+            };
+            checks.register(ctx, "hooks", Arc::new(check))?;
             ctx.provide_at(self.runtime.clone(), runtime)?;
             Ok(Effect::Done)
         })
@@ -778,13 +1127,19 @@ impl View {
 
 /// The migration alias a pasted Claude or Codex matcher selects (G.2).
 fn alias(tool: &ToolDefinition) -> Option<String> {
-    if let Some(metadata) = &tool.metadata
+    alias_of(&tool.name, tool.risk.as_deref(), tool.metadata.as_ref())
+}
+
+/// [`alias`] from what the name carries: a tool declaration, or the call
+/// Permission is admitting.
+fn alias_of(name: &str, risk: Option<&str>, metadata: Option<&ToolMetadata>) -> Option<String> {
+    if let Some(metadata) = metadata
         && let (Some(server), Some(original)) =
             (&metadata.mcp_server_id, &metadata.mcp_original_tool_name)
     {
         return Some(format!("mcp__{server}__{original}"));
     }
-    match (tool.name.as_str(), tool.risk.as_deref()) {
+    match (name, risk) {
         (_, Some("execute_process")) => Some("Bash".into()),
         ("read", _) => Some("Read".into()),
         ("write", _) => Some("Write".into()),
@@ -1027,7 +1382,7 @@ impl Branch {
         for (run, output) in runs.iter().zip(&outputs) {
             if output.blocked && output.reason.is_none() {
                 tracing::warn!(
-                    source = run.source.as_str(),
+                    source = %run.source,
                     event = HookEvent::Stop.name(),
                     "Stop block carried no reason; it writes no follow-up"
                 );
@@ -1096,6 +1451,104 @@ impl Branch {
         );
         if let Some(decision) = decision {
             let _ = self.approval.respond(&data.approval_id, decision).await;
+        }
+    }
+
+    /// `PreToolUse` for one admission (§3.1): the matching handlers run
+    /// concurrently and combine in catalog order (A.5). The branch's unload
+    /// drops a pending advice as none and terminates its commands (§1).
+    async fn advise(
+        self: &Arc<Self>,
+        request: &ToolAdviceRequest,
+        cancel: &CancellationToken,
+    ) -> ToolAdviceReply {
+        // A branch that adopted no tool part has no alias map, so the name
+        // and risk the call declares answer for the built-in aliases (G.2).
+        let alias = {
+            let view = self.view.lock().unwrap();
+            view.aliases
+                .get(&request.call.name)
+                .cloned()
+                .or_else(|| alias_of(&request.call.name, request.risk.as_deref(), None))
+        };
+        let Some(snapshot) = self.runtime.snapshot().await else {
+            return ToolAdviceReply::None;
+        };
+        let matching = handlers(
+            &snapshot,
+            HookEvent::PreToolUse,
+            Some(&request.call.name),
+            alias.as_deref(),
+        );
+        if matching.is_empty() {
+            return ToolAdviceReply::None;
+        }
+        let mut payload = self.runtime.payload(HookEvent::PreToolUse, &self.branch_id);
+        payload.insert("tool_name".into(), Value::String(request.call.name.clone()));
+        payload.insert(
+            "tool_input".into(),
+            Value::Object(request.call.input.clone()),
+        );
+        payload.insert(
+            "risk".into(),
+            request.risk.clone().map_or(Value::Null, Value::String),
+        );
+        payload.insert(
+            "permission_decision".into(),
+            Value::String(
+                match request.decision {
+                    AdmissionDecision::Allow => "allow",
+                    AdmissionDecision::Ask => "ask",
+                }
+                .into(),
+            ),
+        );
+        if let BranchSource::Tool {
+            call_id, turn_id, ..
+        } = &request.source
+        {
+            payload.insert("tool_use_id".into(), Value::String(call_id.clone()));
+            payload.insert("turn_id".into(), Value::String(turn_id.clone()));
+        }
+        let unload = async {
+            tokio::select! {
+                _ = self.cancel.cancelled() => {}
+                _ = self.runtime.cancel.cancelled() => {}
+            }
+        };
+        let token = cancel.child_token();
+        let mut run = Box::pin(
+            self.runtime
+                .run_ordered(&matching, &payload, &token, |_, run| {
+                    let advice = advice_of(run);
+                    (matches!(advice, ToolAdviceReply::Deny { .. }), advice)
+                }),
+        );
+        let replies = tokio::select! {
+            biased;
+            _ = unload => None,
+            replies = &mut run => Some(replies),
+        };
+        let Some(replies) = replies else {
+            token.cancel();
+            let _ = run.await;
+            return ToolAdviceReply::None;
+        };
+        let (mut ask, mut allow) = (None, false);
+        for reply in replies {
+            match reply {
+                ToolAdviceReply::Deny { reason } => return ToolAdviceReply::Deny { reason },
+                ToolAdviceReply::Ask { reason } => {
+                    ask.get_or_insert(reason);
+                }
+                ToolAdviceReply::Allow => allow = true,
+                ToolAdviceReply::None => {}
+            }
+        }
+        match ask {
+            Some(reason) => ToolAdviceReply::Ask { reason },
+            None if allow => ToolAdviceReply::Allow,
+            None => ToolAdviceReply::None,
         }
     }
 
@@ -1267,6 +1720,7 @@ pub struct HooksBranchPlugin {
     timeline: Key<Timeline>,
     dispatcher: Key<Dispatcher>,
     approval: Key<Approval>,
+    permission: Key<Permission>,
     identity: Key<TimelineIdentity>,
     lifecycle: Key<BranchLifecycle>,
 }
@@ -1277,6 +1731,7 @@ impl HooksBranchPlugin {
             timeline: names.key()?,
             dispatcher: names.key()?,
             approval: names.key()?,
+            permission: names.key()?,
             identity: names.key()?,
             lifecycle: names.key()?,
         })
@@ -1292,6 +1747,7 @@ impl DynPlugin for HooksBranchPlugin {
             self.timeline.erase(),
             self.dispatcher.erase(),
             self.approval.erase(),
+            self.permission.erase(),
             self.identity.erase(),
             self.lifecycle.erase(),
         ]
@@ -1302,6 +1758,7 @@ impl DynPlugin for HooksBranchPlugin {
             let timeline = ctx.require_at(&self.timeline)?;
             let dispatcher = ctx.require_at(&self.dispatcher)?;
             let approval = ctx.require_at(&self.approval)?;
+            let permission = ctx.require_at(&self.permission)?;
             let identity = ctx.require_at(&self.identity)?;
             let lifecycle = ctx.require_at(&self.lifecycle)?;
             let (sender, receiver) = mpsc::unbounded_channel();
@@ -1337,6 +1794,13 @@ impl DynPlugin for HooksBranchPlugin {
                 closing.wait().await;
                 Ok(())
             })?;
+            permission.register_advice(
+                ctx,
+                "hooks",
+                Arc::new(HookAdvice {
+                    branch: branch.clone(),
+                }),
+            )?;
             let owner = branch.clone();
             tracker.spawn(async move {
                 if !lifecycle.activated().await {
@@ -1390,6 +1854,33 @@ mod tests {
         assert_eq!(stderr, "denied\n");
     }
 
+    /// A.3's exit-0 row: stdout that is not one JSON object is plain text,
+    /// and for `UserPromptSubmit` plain text is prompt context.
+    #[test]
+    fn a_json_array_on_stdout_is_prompt_context() {
+        let handler = HookHandler {
+            event: HookEvent::UserPromptSubmit,
+            source: HookSourceId::User,
+            plugin_root: None,
+            command: String::new(),
+            command_windows: None,
+            timeout: Duration::from_secs(30),
+            on_failure: OnFailure::Continue,
+            asynchronous: false,
+        };
+        let run = HookRun {
+            result: HookResult::Success {
+                stdout: "[\"bonus\"]".into(),
+            },
+            on_failure: OnFailure::Continue,
+            source: handler.source.clone(),
+        };
+        let PromptDecision::Context(context) = prompt_decision(&handler, &run) else {
+            panic!("a JSON array on stdout is context");
+        };
+        assert_eq!(context, "[\"bonus\"]");
+    }
+
     /// A.4's Exit 2 column: at `SessionStart` and `Notification`, exit 2 is a
     /// failure, so the run is the one `report` logs, carrying the stderr
     /// excerpt, and contributes no block.
@@ -1414,7 +1905,7 @@ mod tests {
                     .run_one(&matching[0], Vec::new(), &runtime.cancel)
                     .await,
                 on_failure: matching[0].on_failure,
-                source: matching[0].source,
+                source: matching[0].source.clone(),
             };
             assert!(
                 matches!(&run.result, HookResult::Failed { stderr, .. } if stderr.as_str() == "bad config\n"),
@@ -1471,6 +1962,144 @@ mod tests {
             !failed.blocked && failed.reason.is_none(),
             "a failure counted as a block"
         );
+    }
+
+    /// A.4's `PreToolUse` outcomes: the permission decision, the legacy
+    /// `decision` field, exit 2, and a failure under both `onFailure`s. An
+    /// empty reason keeps the deny and leaves the message's tail empty.
+    #[test]
+    fn pre_tool_use_outcomes_follow_the_protocol() {
+        let run = |result: HookResult, on_failure: OnFailure| HookRun {
+            result,
+            on_failure,
+            source: HookSourceId::User,
+        };
+        let stdout = |text: &str| HookResult::Success {
+            stdout: text.into(),
+        };
+        let cases = [
+            (
+                run(
+                    stdout(
+                        "{\"hookSpecificOutput\":{\"permissionDecision\":\"deny\",\
+                         \"permissionDecisionReason\":\"not that file\"}}",
+                    ),
+                    OnFailure::Continue,
+                ),
+                ToolAdviceReply::Deny {
+                    reason: "Hook user: not that file".into(),
+                },
+            ),
+            (
+                run(
+                    stdout(
+                        "{\"hookSpecificOutput\":{\"permissionDecision\":\"ask\",\
+                         \"permissionDecisionReason\":\"check this\"}}",
+                    ),
+                    OnFailure::Continue,
+                ),
+                ToolAdviceReply::Ask {
+                    reason: "Hook user: check this".into(),
+                },
+            ),
+            (
+                run(
+                    stdout("{\"hookSpecificOutput\":{\"permissionDecision\":\"allow\"}}"),
+                    OnFailure::Continue,
+                ),
+                ToolAdviceReply::Allow,
+            ),
+            (
+                run(
+                    stdout("{\"hookSpecificOutput\":{\"permissionDecision\":\"defer\"}}"),
+                    OnFailure::Continue,
+                ),
+                ToolAdviceReply::None,
+            ),
+            (
+                run(
+                    stdout("{\"decision\":\"block\",\"reason\":\"legacy deny\"}"),
+                    OnFailure::Continue,
+                ),
+                ToolAdviceReply::Deny {
+                    reason: "Hook user: legacy deny".into(),
+                },
+            ),
+            (
+                run(stdout("{\"decision\":\"approve\"}"), OnFailure::Continue),
+                ToolAdviceReply::Allow,
+            ),
+            (
+                run(
+                    HookResult::Blocked {
+                        reason: "exit two reason\n".into(),
+                    },
+                    OnFailure::Continue,
+                ),
+                ToolAdviceReply::Deny {
+                    reason: "Hook user: exit two reason".into(),
+                },
+            ),
+            (
+                run(
+                    HookResult::Failed {
+                        reason: "exited with 1".into(),
+                        stderr: "boom".into(),
+                    },
+                    OnFailure::Continue,
+                ),
+                ToolAdviceReply::None,
+            ),
+            (
+                run(
+                    HookResult::Failed {
+                        reason: "exited with 1".into(),
+                        stderr: "boom".into(),
+                    },
+                    OnFailure::Block,
+                ),
+                ToolAdviceReply::Deny {
+                    reason: "Hook user did not finish".into(),
+                },
+            ),
+            (
+                run(
+                    HookResult::Failed {
+                        reason: "timed out after 1s".into(),
+                        stderr: String::new(),
+                    },
+                    OnFailure::Block,
+                ),
+                ToolAdviceReply::Deny {
+                    reason: "Hook user did not finish".into(),
+                },
+            ),
+            (
+                run(
+                    HookResult::Failed {
+                        reason: "timed out after 1s".into(),
+                        stderr: String::new(),
+                    },
+                    OnFailure::Continue,
+                ),
+                ToolAdviceReply::None,
+            ),
+            (
+                run(
+                    stdout(
+                        "{\"hookSpecificOutput\":{\"permissionDecision\":\"deny\",\
+                         \"updatedInput\":{\"command\":\"rm -rf /\"}}}",
+                    ),
+                    OnFailure::Continue,
+                ),
+                ToolAdviceReply::Deny {
+                    reason: "Hook user: ".into(),
+                },
+            ),
+        ];
+        for (run, expected) in cases {
+            assert_eq!(advice_of(&run), expected);
+        }
     }
 
     /// A.4 gives `SessionStart` only `hookSpecificOutput.additionalContext`,

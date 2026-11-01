@@ -2415,6 +2415,12 @@
         "removing": false
       },
       {
+        "service": "dim_app_server::hooks_settings::HooksService",
+        "provider": 27,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dim_app_server::managed_provider::ManagedProviders",
         "provider": 9,
         "generation": 1,

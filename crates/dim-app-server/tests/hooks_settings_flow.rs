@@ -1,11 +1,11 @@
-//! Hooks configuration: the `hooks` and `hooks-projects` Settings sources, the
-//! project file `.dimcode/hooks.json` and the `hooks.*` management methods
-//! (Hooks design A.1, A.2, A.7, appendix D item 8).
+//! Hooks configuration: the `hooks`, `hooks-projects` and `hooks-plugins`
+//! Settings sources, the project file `.dimcode/hooks.json` and the `hooks.*`
+//! management methods (Hooks design A.1, A.2, A.7, appendix D item 8).
 use dim_agent_capabilities::{file_storage::FileStoragePlugin, methods::Owner};
 use dim_agent_runtime::Names;
 use dim_agent_runtime::wait_active;
 use dim_app_server::{
-    hooks_settings::HooksSettingsPlugin,
+    hooks_settings::{HooksService, HooksSettingsPlugin},
     methods::{ManagementMethods, ManagementMethodsPlugin},
     settings::SettingsPlugin,
 };
@@ -132,6 +132,7 @@ async fn catalog_reports_sources_states_and_never_reads_foreign_hook_files() {
 
     fixture.write_project(documents(json!({
         "Stop": [{"hooks": [handler("notify")]}],
+        "UserPromptSubmit": [{"hooks": [handler("prompt-check")]}],
         "PreToolUse": [{"matcher": "read", "hooks": [handler("guard")]}],
         "UnknownEvent": [{"hooks": [handler("ignored")]}],
     })));
@@ -145,7 +146,7 @@ async fn catalog_reports_sources_states_and_never_reads_foreign_hook_files() {
     assert_eq!(catalog["sources"][1]["state"], "ok");
     assert_eq!(catalog["sources"][1]["enabled"], false);
     let hooks = catalog["hooks"].as_array().unwrap();
-    assert_eq!(hooks.len(), 3, "{hooks:?}");
+    assert_eq!(hooks.len(), 4, "{hooks:?}");
     let by_event = |event: &str| {
         hooks
             .iter()
@@ -154,8 +155,8 @@ async fn catalog_reports_sources_states_and_never_reads_foreign_hook_files() {
     };
     assert_eq!(by_event("Stop")["state"], "ok");
     assert_eq!(by_event("Stop")["source"], "project");
-    // Listed, and not run until its owner lands (#758).
-    assert_eq!(by_event("PreToolUse")["state"], "unsupported");
+    assert_eq!(by_event("UserPromptSubmit")["state"], "ok");
+    assert_eq!(by_event("PreToolUse")["state"], "ok");
     assert_eq!(by_event("UnknownEvent")["state"], "unsupported");
 
     // An invalid document is a source state, not a failed call.
@@ -313,6 +314,129 @@ async fn a_user_document_is_saved_with_revisions_and_reports_disable_all_hooks()
     let catalog = fixture.call("hooks.catalog", json!({})).await.unwrap();
     assert_eq!(catalog["userRevision"], revision);
     assert_eq!(catalog["disableAllHooks"], true);
+    fixture.root.shutdown().await.unwrap();
+    fs::remove_dir_all(&fixture.home).unwrap();
+}
+
+/// A.2 and PluginManager §3.7: Hooks' owner operations keep a plugin's
+/// document in `hooks-plugins`, list it as the source `plugin:<id>`, report a
+/// document they refuse, and are the only writers of that source.
+#[tokio::test]
+async fn plugin_documents_are_registered_listed_and_kept_by_their_owner() {
+    let fixture = Fixture::new().await;
+    let service = fixture.root.get::<HooksService>().unwrap();
+    let dir = fixture.home.join("plugins/kit");
+    fs::create_dir_all(&dir).unwrap();
+    let document = documents(json!({
+        "Stop": [{"hooks": [handler("guard")]}],
+    }));
+
+    service
+        .register_plugin("kit".into(), dir.clone(), document, &fixture.cancel)
+        .await
+        .unwrap();
+    assert!(service.plugin_refusal("kit").is_none());
+    assert_eq!(service.plugins(&fixture.cancel).await.unwrap(), ["kit"]);
+    let stored: Value =
+        serde_json::from_slice(&fs::read(fixture.home.join("hooks-plugins.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        stored["plugins"]["kit"]["dir"],
+        dir.to_string_lossy().as_ref(),
+        "{stored}"
+    );
+    assert_eq!(
+        stored["plugins"]["kit"]["hooks"]["Stop"][0]["hooks"][0]["command"], "guard",
+        "{stored}"
+    );
+
+    // The source is listed after the user's, enabled without any workspace
+    // enablement, with the plugin directory as its path.
+    let cwd = fixture.project.to_str().unwrap().to_owned();
+    let catalog = fixture
+        .call("hooks.catalog", json!({"cwd": cwd}))
+        .await
+        .unwrap();
+    let sources = catalog["sources"].as_array().unwrap();
+    let names: Vec<&Value> = sources.iter().map(|source| &source["source"]).collect();
+    assert_eq!(
+        names,
+        [&json!("user"), &json!("project"), &json!("plugin:kit")]
+    );
+    assert_eq!(sources[2]["enabled"], true);
+    assert_eq!(sources[2]["state"], "ok");
+    assert_eq!(sources[2]["path"], dir.to_string_lossy().as_ref());
+    assert_eq!(catalog["hooks"][0]["source"], "plugin:kit");
+    assert_eq!(catalog["hooks"][0]["event"], "Stop");
+    assert_eq!(catalog["hooks"][0]["state"], "ok");
+
+    // No `hooks.*` method writes the registrations.
+    let kept = fs::read(fixture.home.join("hooks-plugins.json")).unwrap();
+    let user_revision = catalog["userRevision"].as_str().unwrap().to_owned();
+    fixture
+        .call(
+            "hooks.save",
+            json!({"expectedRevision": user_revision, "document": documents(json!({
+                "Stop": [{"hooks": [handler("user")]}],
+            }))}),
+        )
+        .await
+        .unwrap();
+    fixture
+        .call(
+            "hooks.set_enabled",
+            json!({"cwd": cwd, "enabled": true, "expectedRevision": catalog["projectsRevision"]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fs::read(fixture.home.join("hooks-plugins.json")).unwrap(),
+        kept,
+        "a hooks.* method wrote hooks-plugins"
+    );
+
+    // A document that does not parse is refused, leaves no entry, and is
+    // remembered for PluginManager.
+    let refused = service
+        .register_plugin(
+            "broken".into(),
+            dir.clone(),
+            json!({"hooks": []}),
+            &fixture.cancel,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("invalid hook document"),
+        "{refused}"
+    );
+    assert!(service.plugin_refusal("broken").is_some());
+    assert_eq!(service.plugins(&fixture.cancel).await.unwrap(), ["kit"]);
+
+    // A second registration replaces the first, and withdrawal removes it.
+    service
+        .register_plugin(
+            "kit".into(),
+            dir.clone(),
+            documents(json!({"Stop": [{"hooks": [handler("second")]}]})),
+            &fixture.cancel,
+        )
+        .await
+        .unwrap();
+    let catalog = fixture.call("hooks.catalog", json!({})).await.unwrap();
+    assert_eq!(catalog["hooks"][1]["command"], "second", "{catalog}");
+    service
+        .withdraw_plugin("kit".into(), &fixture.cancel)
+        .await
+        .unwrap();
+    assert!(service.plugins(&fixture.cancel).await.unwrap().is_empty());
+    let catalog = fixture.call("hooks.catalog", json!({})).await.unwrap();
+    assert_eq!(
+        catalog["sources"],
+        json!([{"source": "user", "enabled": true, "state": "ok"}]),
+        "{catalog}"
+    );
+    assert_eq!(catalog["hooks"][0]["source"], "user", "{catalog}");
     fixture.root.shutdown().await.unwrap();
     fs::remove_dir_all(&fixture.home).unwrap();
 }

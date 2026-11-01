@@ -6,19 +6,36 @@ document format, the per-event protocol and the acceptance criteria live in the
 local-execution parts are assembled and what each one owns.
 
 Two Session/branch parts are in scope here: HooksSession, which binds the
-runtime and decides `SessionStart`, and HooksBranch, which observes one branch
-and runs the handlers of its hook points. The configuration owner,
-HooksSettings, is an App Server plugin: it registers the `hooks` and
-`hooks-projects` Settings sources, the `hooks.*` management methods and the
-`HookSources` Session part that binds `S:HookSourcesHost`. Their assembly is in
-the generated App Server services page.
+runtime, decides `SessionStart` and answers `UserPromptSubmit`, and
+HooksBranch, which observes one branch and runs the handlers of its hook
+points. The configuration owner,
+HooksSettings, is an App Server plugin: it registers the `hooks`,
+`hooks-projects` and `hooks-plugins` Settings sources, the `hooks.*` management
+methods, the `P:HooksService` that PluginManager's owner operations call, and
+the `HookSources` Session part that binds `S:HookSourcesHost`. Their assembly
+is in the generated App Server services page.
+
+A plugin's document is registered through `P:HooksService`, kept as the
+`{dir, hooks}` entry of `hooks-plugins` and read after the user's and the
+project's sources as `plugin:<id>`; its commands read the entry's `dir` as
+`DIM_PLUGIN_ROOT`. The user's and the project's commands never set it, and
+`CLAUDE_PLUGIN_ROOT` and `GROK_PLUGIN_ROOT` stay out of every command's
+environment.
 
 ## HooksSession
 
 Owner: [hooks/runner.rs](../../../../crates/dim-agent-capabilities/src/hooks/runner.rs).
 Provides the Session's single `S:HooksRuntime`, which reads the effective hook
 sources for the Session's working directory, builds the payload of one hook
-point, and runs its commands.
+point, and runs its commands. It also registers the submit check `hooks` with
+the Session's `submitChecks` ([InputQueue](InputQueue.md)), which the
+operator-input entries call before writing: the check reads the sources, runs
+the matching `UserPromptSubmit` handlers concurrently, and answers with the
+first block in catalog order or the contexts as text blocks after the
+operator's own content. Handlers after the first block are terminated. A
+failure, a timeout and a cancellation are the handler's `onFailure`; an unload
+settles a pending check by `onFailure` before the part is withdrawn, and an
+interruption of the entry's own call cancels the check, so nothing is written.
 
 The runtime reads sources when a hook point is evaluated, never at Session
 start: a change to the user's `hooks.json` or to a project document applies to
@@ -38,16 +55,17 @@ cancellation token terminates its process tree on close.
 
 | Service | Purpose |
 | --- | --- |
-| `S:HookSourcesHost` | Read the effective documents of the user and the workspace. |
+| `S:HookSourcesHost` | Read the effective documents of the user, the workspace and the plugins. |
 | `P:HostPlatform` | Build each command's process spec, environment and process tree. |
 | `S:SessionConfig` | Pass the working directory and permission facts to the payload. |
 | `S:SessionIdentity` | Name the Session in the payload and `DIM_SESSION_ID`. |
+| `S:SubmitChecks` | Register `hooks`, the `UserPromptSubmit` check the operator-input entries call. |
 
 <!-- generated:plugin HooksSession — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `P:HostPlatform`、`S:HookSourcesHost`、`S:SessionConfig`、`S:SessionIdentity` |
+| 注入 | `P:HostPlatform`、`S:HookSourcesHost`、`S:SessionConfig`、`S:SessionIdentity`、`S:SubmitChecks` |
 | 提供 | `S:HooksRuntime` |
 | 被注入于 | `HooksBranch` |
 <!-- /generated -->
@@ -59,6 +77,19 @@ Folds the branch's committed events into a consumed view and evaluates the hook
 points that follow from them: `PostToolUse` and `PostToolUseFailure` after a
 settled tool result, `PermissionRequest` and `Notification` at an approval
 request, and `Stop` at a completed turn.
+
+It also registers the advisor `hooks` with the branch's Permission
+([Permission](Permission.md), Hooks A.6.1), which is how `PreToolUse` reaches
+the admission: `Permission::admit_decision` asks it while it decides a call,
+and the advisor reads the sources, runs the matching `PreToolUse` handlers
+concurrently, and answers with the combination A.5 fixes — any deny, then any
+ask, then any allow, and the first deny in catalog order is the reason, so the
+handlers after it are terminated while the ones before it run to completion.
+The advice is not authority: Permission folds it with its own decision, a deny
+of its own is not asked about, and Approval's recheck after an answer asks
+nothing. A deny or ask reason reads `Hook <source>: <reason>`. While the part
+is mounted the branch's calls wait for their advice; an unload drops a pending
+advice as no opinion, so Permission decides alone.
 
 The dispatcher handler only folds the event and starts the work; it never
 runs a command and never waits. A branch task drains the queued points in
@@ -105,6 +136,7 @@ compacted context baseline.
 | Service | Purpose |
 | --- | --- |
 | `B:Approval` | Answer a `PermissionRequest` decision for the pending admission. |
+| `B:Permission` | Register the `hooks` advisor the admission decision asks (`PreToolUse`). |
 | `S:HooksRuntime` | Read sources, build payloads and run the point's handlers. |
 | `B:BranchLifecycle` | Close the branch's jobs and settle its processes. |
 | `B:TimelineIdentity` | Name the branch in the payload and in the main-branch rule. |
@@ -115,7 +147,7 @@ compacted context baseline.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | 分支 |
-| 注入 | `B:Approval`、`B:BranchLifecycle`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:HooksRuntime` |
+| 注入 | `B:Approval`、`B:BranchLifecycle`、`B:Dispatcher`、`B:Permission`、`B:Timeline`、`B:TimelineIdentity`、`S:HooksRuntime` |
 | 提供 | — |
 | 被注入于 | — |
 <!-- /generated -->
@@ -123,10 +155,10 @@ compacted context baseline.
 ## Diagnostics
 
 A handler that fails, times out or is cancelled is reported with its source
-(`user`, `project`), its event, its exit status and duration, and the bounded
-standard-error excerpt. A hook's own output never appears in diagnostics beyond
-that excerpt, and a handler whose document does not parse is reported by
-`hooks.catalog` rather than at the hook point.
+(`user`, `project` or `plugin:<id>`), its event, its exit status and duration,
+and the bounded standard-error excerpt. A hook's own output never appears in
+diagnostics beyond that excerpt, and a handler whose document does not parse is
+reported by `hooks.catalog` rather than at the hook point.
 
 ## Tests
 
@@ -138,9 +170,12 @@ that excerpt, and a handler whose document does not parse is reported by
 `the_session_start_block_is_still_in_context_after_compaction`,
 `post_tool_use_follows_the_protocol_for_success_block_and_failure`,
 `a_hook_context_cannot_close_its_runtime_block`,
+`a_prompt_context_cannot_close_its_runtime_block`,
 `post_tool_use_failure_runs_only_for_error_results`,
 `a_timeout_is_a_failure_and_a_blocking_failure_still_answers`,
 `identical_commands_at_one_point_run_once`,
+`an_identical_command_in_the_user_and_project_sources_runs_once`,
+`identical_commands_from_two_plugins_run_with_their_own_roots`,
 `stop_follow_ups_are_bounded_at_three_and_flag_the_driven_turns`,
 `a_context_only_stop_writes_no_follow_up_and_starts_no_turn`,
 `a_stop_follow_up_carries_the_block_reason_then_the_context`,
@@ -159,9 +194,32 @@ that excerpt, and a handler whose document does not parse is reported by
 `an_async_handler_does_not_delay_the_turn_or_the_next_point`,
 `a_hook_sees_its_environment_and_no_plugin_root`,
 `a_project_source_runs_nothing_until_the_user_enables_it`,
-`disable_all_hooks_turns_every_source_off`;
-`runner.rs`'s `a_settled_tool_call_leaves_nothing_behind_in_the_view` pins
+`a_plugin_source_runs_like_any_other_source`,
+`disable_all_hooks_turns_every_source_off`,
+`a_blocked_steer_writes_nothing_and_the_old_input_still_applies`,
+`the_prompt_context_follows_the_operator_text_and_keeps_it_operator_input`,
+`a_source_input_runs_no_prompt_hook`,
+`an_unload_settles_a_pending_prompt_check_by_on_failure`,
+`an_unload_with_the_default_on_failure_writes_the_input`,
+`the_handlers_after_the_first_block_are_terminated`,
+`two_proceeding_handlers_keep_their_contexts_in_catalog_order`,
+`a_failure_finishing_after_a_later_result_blocks_by_its_own_handler`,
+`a_pre_tool_use_deny_fails_one_call_of_a_batch_and_runs_the_others`,
+`a_pre_tool_use_allow_runs_a_call_the_preset_would_ask_about`,
+`a_pre_tool_use_ask_asks_the_user_like_any_other_ask`,
+`a_command_rule_deny_runs_no_pre_tool_use_hook`,
+`the_recheck_after_an_answer_runs_no_pre_tool_use_hook`,
+`a_pasted_bash_matcher_runs_for_exec_and_reads_the_command`,
+`the_first_deny_in_catalog_order_is_the_reason`,
+`an_interrupt_while_pre_tool_use_runs_cancels_the_call_and_ends_the_command`,
+`a_hooks_unload_drops_a_pending_pre_tool_use_advice`;
+`runner.rs`'s `pre_tool_use_outcomes_follow_the_protocol` pins A.4's outcomes
+for the event, exit 2 and the `onFailure` mapping included, and that
+`updatedInput` never rewrites the call;
+`a_settled_tool_call_leaves_nothing_behind_in_the_view` pins
 that a settled call's input does not stay in the folded view;
+`a_json_array_on_stdout_is_prompt_context` pins that plain text, other JSON
+values included, is prompt context (A.3's exit-0 row);
 `the_follow_up_state_is_rebuilt_from_the_branch` pins that the follow-up's
 identity and consecutive count are rebuilt from the branch, not carried in
 memory; `a_deleted_operator_input_is_forgotten` pins that a withdrawn operator
@@ -183,6 +241,13 @@ pins that reading a Session's sources never authorizes a workspace.
 [hooks_settings_flow.rs](../../../../crates/dim-app-server/tests/hooks_settings_flow.rs):
 `catalog_reports_sources_states_and_never_reads_foreign_hook_files`,
 `project_hooks_stay_disabled_until_the_user_enables_them_and_edits_apply`,
-`a_user_document_is_saved_with_revisions_and_reports_disable_all_hooks`;
+`a_user_document_is_saved_with_revisions_and_reports_disable_all_hooks`,
+`plugin_documents_are_registered_listed_and_kept_by_their_owner`;
+[transport_flow/plugin_manager.rs](../../../../crates/dim-app-server/tests/transport_flow/plugin_manager.rs):
+`plugin_hooks_run_with_their_plugin_root_and_follow_the_record` and
+`a_refused_plugin_hook_document_stops_only_its_own_kind` pin the owner
+operations end to end, and `plugin_hooks_follow_the_hooks_owner` pins that an
+absent owner skips only its kind and that turning HooksSettings on registers
+that kind;
 [host_platform_flow.rs](../../../../crates/dim-agent-capabilities/tests/host_platform_flow.rs):
 `spawn_with_stdin_delivers_the_bytes_and_closes_the_pipe`.
