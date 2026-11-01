@@ -301,6 +301,12 @@ impl Area {
             Self::Scheduled => "scheduled",
         }
     }
+
+    /// Whether the area's documents are per entry, so `edit` and `set` name
+    /// one, rather than one document for the area.
+    pub fn per_entry(self) -> bool {
+        matches!(self, Self::Scheduled)
+    }
 }
 
 /// What a management request asks of its area's owner.
@@ -352,7 +358,9 @@ pub struct ManagementView {
     pub create: Option<serde_json::Value>,
     /// The kinds that act on the area itself rather than on one entry, in the
     /// order a panel offers them: reload and add, neither of which needs a
-    /// selection, so they work on an empty area and after a failed read.
+    /// selection, so both work on an empty area. Add still needs this view's
+    /// create document; without a view there is none, and the hint offers
+    /// only reload.
     pub actions: Vec<ActionKind>,
     /// Entries under the source headings their owner reports.
     pub groups: Vec<ManagementGroup>,

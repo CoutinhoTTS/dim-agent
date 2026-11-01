@@ -58,6 +58,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Your next add reopens your text." => "次回の作成では入力した内容を開きます。",
         "Scheduler" => "スケジューラー",
+        "jobs" => "ジョブ",
         "Added {name}." => "{name} を作成しました。",
         "Run {name}: {outcome}." => "{name} を実行しました：{outcome}。",
         "Recent runs of {name}" => "{name} の最近の実行",

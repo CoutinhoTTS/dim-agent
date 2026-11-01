@@ -58,6 +58,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Your next add reopens your text." => "A sua próxima adição abre novamente o seu texto.",
         "Scheduler" => "Agendador",
+        "jobs" => "tarefas",
         "Added {name}." => "{name} adicionado.",
         "Run {name}: {outcome}." => "{name} executado: {outcome}.",
         "Recent runs of {name}" => "Execuções recentes de {name}",

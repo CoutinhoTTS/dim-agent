@@ -50,6 +50,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Your next edit opens the current document." => "下次編輯會開啟目前文件。",
         "Your next add reopens your text." => "下次新增會重新開啟你的文字。",
         "Scheduler" => "排程器",
+        "jobs" => "工作",
         "Added {name}." => "已新增 {name}。",
         "Run {name}: {outcome}." => "已執行 {name}：{outcome}。",
         "Recent runs of {name}" => "{name} 的最近執行",

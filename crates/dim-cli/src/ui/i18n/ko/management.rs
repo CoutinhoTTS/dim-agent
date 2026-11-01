@@ -54,6 +54,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Your next edit opens the current document." => "다음 편집은 현재 문서를 엽니다.",
         "Your next add reopens your text." => "다음 추가는 작성한 내용을 다시 엽니다.",
         "Scheduler" => "스케줄러",
+        "jobs" => "작업",
         "Added {name}." => "{name}을(를) 추가했습니다.",
         "Run {name}: {outcome}." => "{name}을(를) 실행했습니다: {outcome}.",
         "Recent runs of {name}" => "{name}의 최근 실행",

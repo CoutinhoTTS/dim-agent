@@ -446,7 +446,7 @@ pub(super) fn view(catalog: &Catalog, available: &[ActionKind], cwd: &Path) -> M
             states.push(EntryState::Invalid);
         }
         groups.push(
-            "jobs",
+            t("jobs"),
             ManagementEntry {
                 id: job.id.clone(),
                 label: job.name.clone(),

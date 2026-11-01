@@ -3195,7 +3195,9 @@
       "crate": "dim_cli",
       "parent": "dim_cli::model",
       "file": "crates/dim-cli/src/model/session.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "matches"
+      ]
     },
     {
       "id": "dim_cli::model::shell",

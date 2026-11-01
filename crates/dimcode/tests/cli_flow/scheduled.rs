@@ -207,6 +207,33 @@ fn scheduled_remove_reports_a_conflict() {
     );
 }
 
+/// An interactive edit needs a terminal; the error names the twin, which for
+/// a job takes the id and a path.
+#[test]
+fn scheduled_edit_refuses_stdin_that_is_not_a_terminal() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let output = home
+        .command()
+        .args(["scheduled", "edit", "job-1"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("scheduled edit needs a terminal"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("scheduled set ID PATH"), "{stderr}");
+}
+
 #[test]
 fn scheduled_run_reports_what_the_owner_answered() {
     let home = Home::new();

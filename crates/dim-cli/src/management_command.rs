@@ -44,9 +44,13 @@ pub async fn edit(
     id: Option<String>,
 ) -> Result<i32> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        let set = if area.per_entry() {
+            format!("{} set ID PATH", area.name())
+        } else {
+            format!("{} set PATH", area.name())
+        };
         return Err(format!(
-            "{} edit needs a terminal; {} set PATH writes a file, or - its input",
-            area.name(),
+            "{} edit needs a terminal; {set} writes a file, or - its input",
             area.name()
         )
         .into());

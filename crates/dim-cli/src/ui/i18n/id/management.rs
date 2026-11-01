@@ -54,6 +54,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Your next edit opens the current document." => "Edit berikutnya membuka dokumen saat ini.",
         "Your next add reopens your text." => "Tambah berikutnya membuka kembali teks Anda.",
         "Scheduler" => "Penjadwal",
+        "jobs" => "tugas",
         "Added {name}." => "{name} ditambahkan.",
         "Run {name}: {outcome}." => "{name} dijalankan: {outcome}.",
         "Recent runs of {name}" => "Eksekusi terbaru {name}",
