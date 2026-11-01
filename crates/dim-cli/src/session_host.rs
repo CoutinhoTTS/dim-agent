@@ -2262,15 +2262,15 @@ impl Worker {
                 if id.is_empty() {
                     return Err(USAGE.into());
                 }
-                let (rows, notes) = crate::mcp_command::set_enabled(
+                let state = crate::management::mcp::set_enabled(
                     &mut self.client,
-                    &self.options,
+                    &self.options.cwd,
                     id,
                     command == "enable",
                 )
                 .await?;
-                let mut lines = rows;
-                lines.extend(notes);
+                let mut lines = vec![state.sentence()];
+                lines.extend(state.notes);
                 self.report(lines.join("\n"), false);
             }
             _ => return Err(USAGE.into()),

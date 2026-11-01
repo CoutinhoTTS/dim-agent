@@ -318,11 +318,11 @@ Reset 要求确认后把两个布尔值都写为 false。Off 可保留无效的�
 | run | Ctrl+T | 该领域的具名操作，例如 test、run now 或 start。 |
 | inspect | Tab | 只读的详情视图。 |
 
-Esc 关闭面板。动作键要么是 Ctrl 组合键，要么是筛选从不接收的键，因为筛选会接收所有普通字母。作用于领域本身的种类属于领域的视图而不是某个条目——reload，以及新建条目的 add——所以它不需要选中项：无论是否选中条目，键提示都会列出它，读取失败后 Ctrl+R 会重新读取该领域。最先承载的两个领域用 toggle、reload 和 edit。Scheduler 领域引入 add、remove、run 和 inspect，客户端写的就是这四个种类；之后的领域只需加入自己的适配器以及它所用种类调用的方法，并在此表中写下它新增的种类。
+Esc 关闭面板。动作键要么是 Ctrl 组合键，要么是筛选从不接收的键，因为筛选会接收所有普通字母。作用于领域本身的种类属于领域的视图而不是某个条目——reload，以及新建条目的 add——所以它不需要选中项：无论是否选中条目，键提示都会列出它，读取失败后 Ctrl+R 会重新读取该领域。最先承载的两个领域用 toggle、reload 和 edit。Scheduler 领域引入 add、remove、run 和 inspect，客户端写的就是这四个种类；之后的领域只需加入自己的适配器以及它所用种类调用的方法，并在此表中写下它新增的种类。如果领域给 run 种类起了名字，键提示就用那个名字：MCP 的提示是 `Ctrl+T test`。
 
 - add 用外部编辑器打开适配器给出的新建条目文档——所有者的创建形态，填入示例值——并以领域的创建方法写入。文档没有改动时不写入；被拒绝时保留草稿，下次 Ctrl+N 重新打开用户的文本，与 Ctrl+E 对编辑的处理一致。冲突时也同样保留：新建没有 revision，丢弃草稿与过期 revision 的关联只是编辑的规则，不适用于新建。`dimcode <area> add PATH`（`-` 表示 stdin）是不经编辑器的同一次写入。
 - remove 先在键提示里询问：键提示变为 `Remove <label>? Enter confirm · Esc cancel`，除 Enter 外的任何键都取消且什么都不改。Enter 调用领域的删除方法，然后重新读取该领域。`dimcode <area> remove ID` 不提问直接删除，因为命令行上输入的 id 就是意图，与 `dimcode logout PROVIDER` 不提问直接退出一致。
-- run 对所选条目调用领域的具名操作，然后重新读取该领域，消息报告所有者的答复——所有者跳过的一次运行会说明原因。需要参数的操作是该领域自己的步骤，不属于这个种类。
+- run 对所选条目调用领域的具名操作。答复会改变领域所列内容的运行——Scheduler 的立即运行会加入任务的历史和上次结果——重新读取该领域，并把答复作为消息报告；所有者跳过的一次运行会说明原因。答复不改变领域所列内容的运行，像 inspect 一样把答复作为详情显示，且不重新读取该领域：MCP 的 test 是临时连接发现的工具列表。所有者是否把该方法声明为 mutating 并不决定这一点，因为 `mcp.test` 会运行该条目，却仍然不写入领域所列的任何内容。需要参数的操作是该领域自己的步骤，不属于这个种类。
 - inspect 向适配器索取条目的详情：一个标题和若干行，而不是一个视图。面板用它替代列表显示，方向键与 PageUp/PageDown 滚动，Esc 带着保留的选中项回到列表，再按一次 Esc 关闭面板。`dimcode <area> inspect ID` 打印同样的行，或该领域自己的动词，如果它的设计另有规定。
 
 文档按条目分存的领域，其条目为它自己的文档提供 edit：此时 Save 动作携带该条目的 id，适配器保留它与草稿一起读到的 revision。
@@ -411,6 +411,50 @@ Ctrl+T 立即运行所选任务，并报告所有者的答复——`launching`�
 ```
 
 `dimcode scheduled add PATH`（`-` 表示 stdin）是不经编辑器的创建；`dimcode scheduled history ID` 打印详情显示的那些行；`dimcode scheduled remove ID` 不经面板的确认直接删除。
+
+### MCP 领域
+
+MCP 不新增种类。它的条目就是生效目录——各服务器按 id 合并，project 最后——按 `user`、`project`、`plugin` 的顺序分组，组内按 id 排列；条目的标签和 id 都是服务器的 id。面板与 `dimcode mcp` 用 toggle、edit、reload、add、remove、run 与 inspect，经 `mcp.catalog`、`mcp.configuration`、`mcp.update`、`mcp.save`、`mcp.remove`、`mcp.set_enabled`、`mcp.test` 与 `mcp.inspect`（[MCP 管理](appserver/mcp-management.md)）。
+
+toggle 以 `mcp.catalog` 紧接写入前报告的 revision 写该来源的启用状态，所以比较并交换只覆盖这段窗口；它只作用于一个 id，不会覆盖来源中别处的改动。用户条目的启用状态是本地记录；项目条目一开始是停用的，只有 toggle 或 `dimcode mcp enable|disable` 会启用它。edit 先读 `mcp.configuration` 取得条目的 revision 与文档，再写 `mcp.update`，绝不用 `mcp.save`：save 接收完整配置，而读取会隐藏机密，往返一次就会把它们抹掉。
+
+编辑文档就是 patch：省略的字段保留已存值，给出的值替换它，`env` 或 `headers` 只改动它点名的键。种子文档给出命令与工作目录、空的 `env` 与 `headers`，以及已配置 OAuth 的已报告字段；它从不给出已存参数、环境变量值、请求头值、Bearer 令牌或 URL，因为这些要么被隐藏，要么整体替换。文档不带 transport，因为已存条目的 transport 是固定的。
+
+add 用目录的来源 revision——`userRevision`，来源为 `project` 时用 `projectRevision`——写 `mcp.save`，并拒绝目录中已列出的 id，因为一次 save 会替换该条目。新建文档就是一个条目，带它的来源与 `mcp.save` 接收的定义：
+
+```json
+{
+  "id": "example",
+  "source": "user",
+  "configuration": {
+    "type": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-everything"],
+    "env": {},
+    "enabled": false
+  }
+}
+```
+
+两种远程形态把 `configuration` 换成 `{"type": "http", "url": "https://mcp.example.com/mcp", "headers": {}, "enabled": false}`，或把 `"type"` 换成 `"sse"` 的同样内容；静态凭据再加 `"auth": {"type": "bearer", "token": "…"}`，OAuth 则加 `"oauth": {"clientId": "…", "callbackPort": 1456, "scopes": "…", "authServerMetadataUrl": "…"}`；两者互斥，OAuth 还与 `Authorization` 请求头互斥。编辑器没有 transport 选择器，所以文档展示 stdio，并说明如何切换。
+
+run 就是 `mcp.test`：它执行或联系已存条目一次，不写入领域所列的任何内容，所以答复是详情——临时连接发现的工具，标题为 `Tools of <id>`——且不再重新读取领域。inspect 就是 `mcp.inspect`：生效条目与它的会话连接，标题为 `MCP entry <id>`，从不写回。插件条目的配置没有 revision，所以不提供写动作，状态带 `read-only`，详情说明它属于某个插件；test 与 inspect 仍然可用。登录、退出、回调与断开连接是状态机或只作用于连接的动作，不是种类，所以它们仍是行命令与动词。
+
+```text
+╭─ MCP ────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│   user                                                                                                               │
+│ › docs      enabled                                                                                                  │
+│     user · stdio · signed in                                                                                         │
+│     Executable: npx                                                                                                  │
+│     Stored arguments (hidden): 2                                                                                     │
+│     Working directory: —                                                                                             │
+│     Environment names: DOCS_TOKEN                                                                                    │
+│   project                                                                                                            │
+│   metrics   disabled                                                                                                 │
+│   plugin                                                                                                             │
+│   notes     enabled  read-only                                                                                       │
+╰───── Enter toggle · Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Ctrl+T test · Tab inspect · Esc close ─╯
+```
 
 ## 命令
 

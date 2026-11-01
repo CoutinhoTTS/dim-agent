@@ -399,7 +399,8 @@ view rather than to one entry — reload, and add, which creates one — so it n
 the hint lists it whether or not an entry is selected, and Ctrl+R reads the area again after a
 failed read. The first two areas use toggle, reload and edit. The Scheduler area introduces
 add, remove, run and inspect, and the client's kinds are what it writes; a later area adds its
-adapter and the methods its kinds call, and names here the kinds it adds.
+adapter and the methods its kinds call, and names here the kinds it adds. The hint names the run
+kind's operation where an area names one: MCP's hint reads `Ctrl+T test`.
 
 - add opens the external editor on a new-entry document that the adapter supplies — the owner's
   create shape, filled with example values — and writes it with the area's create method. An
@@ -411,9 +412,14 @@ adapter and the methods its kinds call, and names here the kinds it adds.
   every key but Enter cancels without changing anything. Enter sends the area's delete method
   and reads the area again. `dimcode <area> remove ID` deletes without a prompt, because the id
   typed on the command line is the intent, as `dimcode logout PROVIDER` signs out without one.
-- run sends the area's named operation for the selected entry, reads the area again, and its
-  message reports what the owner answered — a run the owner skipped says why. An operation that
-  takes parameters is the area's own step, not this kind's.
+- run sends the area's named operation for the selected entry. A run whose answer changes what the
+  area lists — the Scheduler's run now joins the job's history and its last outcome — reads the
+  area again and shows the answer as the message; a run the owner skipped says why. A run whose
+  answer changes nothing the area lists shows the answer as a detail, as inspect does, and does
+  not read the area again: MCP's test is the tools a temporary connection found. Whether the owner
+  declares the method mutating does not decide this, since `mcp.test` runs the entry and still
+  writes nothing the area lists. An operation that takes parameters is the area's own step, not
+  this kind's.
 - inspect asks the adapter for the entry's detail: a title and lines, not a view. The panel
   shows it in place of the list, the arrows and PageUp/PageDown scroll it, Esc returns to the
   list with the selection kept, and a second Esc closes the panel. `dimcode <area> inspect ID`
@@ -569,6 +575,79 @@ the run was skipped — and Tab shows the job's history in place of the list:
 `dimcode scheduled add PATH` (`-` for stdin) is the create without an editor, `dimcode scheduled
 history ID` prints the lines the detail shows, and `dimcode scheduled remove ID` deletes without
 the panel's confirmation.
+
+### The MCP area
+
+MCP adds no kind. Its entries are the effective catalog — the servers merged by id with project
+last — grouped `user`, `project` and `plugin` in that order, and by id within a group; an entry's
+label and id are its id. The panel and `dimcode mcp` use toggle, edit, reload, add, remove, run
+and inspect over `mcp.catalog`, `mcp.configuration`, `mcp.update`, `mcp.save`, `mcp.remove`,
+`mcp.set_enabled`, `mcp.test` and `mcp.inspect` ([MCP management](appserver/mcp-management.md)).
+
+A toggle writes the source's enablement at the revision `mcp.catalog` reported immediately before
+it, so the compare-and-swap covers that window; it acts on one id, so a change elsewhere in the
+source is not overwritten. A user entry's enablement is a local record, and a project entry starts
+disabled because only the toggle or `dimcode mcp enable|disable` turns it on. An edit reads
+`mcp.configuration` for the entry's revision and its document, then writes `mcp.update`, never
+`mcp.save`: a save takes a complete configuration, and the read withholds the secrets, so a save
+round trip would erase them.
+
+The edit document is the patch: an omitted field keeps its stored value, a present value replaces
+it, and `env` or `headers` changes only the keys it names. The seed names the command and working
+directory, empty `env` and `headers`, and a configured OAuth's reported fields; it never names a
+stored argument, environment value, header value, bearer token or URL, because those are withheld
+or wholesale-replaced. The document carries no transport, since the stored entry's transport is
+fixed.
+
+Add writes `mcp.save` with the catalog's source revision — `userRevision`, or `projectRevision`
+for a source of `project` — and refuses an id the catalog already lists, since a save would replace
+that entry. The create document is one entry with its source and the definition `mcp.save` takes:
+
+```json
+{
+  "id": "example",
+  "source": "user",
+  "configuration": {
+    "type": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-everything"],
+    "env": {},
+    "enabled": false
+  }
+}
+```
+
+The two remote forms replace `configuration` with
+`{"type": "http", "url": "https://mcp.example.com/mcp", "headers": {}, "enabled": false}` or the
+same with `"type": "sse"`, and add `"auth": {"type": "bearer", "token": "…"}` for a static
+credential or `"oauth": {"clientId": "…", "callbackPort": 1456, "scopes": "…",
+"authServerMetadataUrl": "…"}` for OAuth; the two exclude each other, and OAuth also excludes an
+`Authorization` header. The editor has no transport picker, so the document shows stdio and the
+document says how to switch.
+
+A run is `mcp.test`: it executes or contacts the stored entry once and writes nothing the area
+lists, so its answer is a detail — the tools a temporary connection found, titled `Tools of <id>` —
+and the area is not read again. An inspect is `mcp.inspect`: the effective entry and its Session
+connections, titled `MCP entry <id>`, and never written back. A plugin entry's configuration has no
+revision, so it offers no write, carries `read-only` and says its plugin owns it; test and inspect
+still serve it. Sign-in, sign-out, the callback and disconnect are a state machine or a
+connection-only action, not a kind, so they stay line commands and verbs.
+
+```text
+╭─ MCP ────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│   user                                                                                                               │
+│ › docs      enabled                                                                                                  │
+│     user · stdio · signed in                                                                                         │
+│     Executable: npx                                                                                                  │
+│     Stored arguments (hidden): 2                                                                                     │
+│     Working directory: —                                                                                             │
+│     Environment names: DOCS_TOKEN                                                                                    │
+│   project                                                                                                            │
+│   metrics   disabled                                                                                                 │
+│   plugin                                                                                                             │
+│   notes     enabled  read-only                                                                                       │
+╰───── Enter toggle · Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Ctrl+T test · Tab inspect · Esc close ─╯
+```
 
 ## Commands
 

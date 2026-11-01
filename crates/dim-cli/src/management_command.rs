@@ -15,7 +15,7 @@ use serde_json::Value;
 use crate::Result;
 use crate::args::Options;
 use crate::client::Client;
-use crate::management::{self, editor, hooks, scheduler, skills};
+use crate::management::{self, editor, hooks, mcp, scheduler, skills};
 use crate::mcp_command::print_report;
 use crate::model::session::{
     ActionKind, Area, ManagementAction, ManagementRequest, ManagementResult,
@@ -31,6 +31,7 @@ pub async fn run(
     match request.area {
         Area::Skills => run_skills(client, options, request).await,
         Area::Hooks => run_hooks(client, options, request).await,
+        Area::Mcp => run_mcp(client, options, request).await,
         Area::Scheduled => run_scheduled(client, request).await,
     }
 }
@@ -205,6 +206,24 @@ async fn read(
                 .ok_or("The daemon reports no hook document to edit.")?;
             Ok((catalog.user_revision, document))
         }
+        Area::Mcp => {
+            let Some(id) = id else {
+                return Err("mcp edit and set take an entry id.".to_owned().into());
+            };
+            let server = mcp::target(client, &cwd, id).await?;
+            if server.source == "plugin" {
+                return Err("plugin MCP entries change through their plugin".into());
+            }
+            let editable = mcp::editable(client, &cwd, &server).await?;
+            // A plugin entry's read reports no revision; the refusal above
+            // already covers it, and any other missing revision leaves
+            // nothing to write.
+            let revision = editable
+                .revision
+                .ok_or("The daemon reports no revision for this MCP entry to edit.")?;
+            let document = mcp::seed(&editable.configuration)?;
+            Ok((revision, document))
+        }
         Area::Scheduled => {
             let Some(id) = id else {
                 return Err("scheduled edit and set take a job id.".to_owned().into());
@@ -313,6 +332,7 @@ async fn create(
 /// The notice a successful write leaves.
 fn saved(area: Area) -> String {
     match area {
+        Area::Mcp => "Saved the MCP entry.".to_owned(),
         Area::Scheduled => "Saved the job.".to_owned(),
         Area::Skills | Area::Hooks => format!("Saved the {} document.", area.name()),
     }
@@ -449,6 +469,74 @@ async fn run_scheduled(client: &mut Client, request: &ManagementRequest) -> Resu
         // the read error goes to stderr with the exit still 0.
         Err(scheduler::Failure::ReadFailed { note, error }) => {
             let lines = note.iter().map(|note| safe(note)).collect();
+            print_report(lines, vec![error])
+        }
+        Err(error) => return Err(error.to_string().into()),
+    }
+    Ok(0)
+}
+
+/// `mcp ...`: the entries the catalog reports, or one entry's detail and
+/// what the owner answered.
+async fn run_mcp(
+    client: &mut Client,
+    options: &Options,
+    request: &ManagementRequest,
+) -> Result<i32> {
+    management::supported(client, request)?;
+    // A read reports the area exactly as `mcp list` does.
+    if matches!(
+        request.action,
+        ManagementAction::List | ManagementAction::Reload
+    ) {
+        let (rows, notes) = crate::mcp::catalog_report(client, options).await?;
+        print_report(rows, notes);
+        return Ok(0);
+    }
+    match mcp::apply(client, &request.action, &options.cwd).await {
+        Ok(mcp::Answer::Tools { id, tools }) => {
+            print_report(mcp::tools_detail(&id, &tools).lines, Vec::new())
+        }
+        Ok(mcp::Answer::Detail(detail)) => {
+            // The adapter's lines and the owner's words are made safe before
+            // they reach the terminal.
+            let lines = detail.lines.iter().map(|line| safe(line)).collect();
+            let notes = match &request.action {
+                ManagementAction::Run { .. } => {
+                    let mut notes = vec![
+                        "The connection was temporary; no configuration was saved.".to_owned(),
+                    ];
+                    if detail.lines.len() != 1
+                        || detail.lines[0] != crate::ui::i18n::t("The server exposes no tools.")
+                    {
+                        notes.insert(0, "Columns: tool, description.".to_owned());
+                    }
+                    notes
+                }
+                ManagementAction::Inspect { .. } => {
+                    vec!["Inspection does not connect or contact the server.".to_owned()]
+                }
+                _ => Vec::new(),
+            };
+            print_report(lines, notes)
+        }
+        Ok(mcp::Answer::Area { note, .. }) => match (&request.action, note) {
+            (_, Some(note)) => print_report(vec![safe(&note)], Vec::new()),
+            (ManagementAction::Remove { id }, None) => {
+                print_report(vec![format!("Removed {}.", safe(id))], Vec::new())
+            }
+            _ => print_report(Vec::new(), Vec::new()),
+        },
+        // The action was applied; only the report after it failed. The
+        // owner's answer stands, made safe, and the read error goes to
+        // stderr with the exit still 0.
+        Err(mcp::Failure::ReadFailed { note, error }) => {
+            let mut lines: Vec<String> = note.iter().map(|note| safe(note)).collect();
+            if lines.is_empty() {
+                if let ManagementAction::Remove { id } = &request.action {
+                    lines.push(format!("Removed {}.", safe(id)));
+                }
+            }
             print_report(lines, vec![error])
         }
         Err(error) => return Err(error.to_string().into()),

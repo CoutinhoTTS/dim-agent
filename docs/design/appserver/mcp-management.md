@@ -331,8 +331,10 @@ probe while Mcp is not serving answers `service_reloading`
 - The reply of `mcp.configuration` stops being the bare projection and becomes
   `{revision?, enabled, configuration}`. That is a breaking change on protocol v3 for any client
   that decodes the old reply: the projection is now under `configuration`. This repository's Web
-  settings page changes in the same implementation; the native CLI decodes `mcp.catalog` only and
-  is unaffected; every other client sees the projection replaced by the wrapper.
+  settings page changes in the same implementation; the native CLI adopts this read and patch:
+  `dimcode mcp edit`/`set` and the `/mcp` panel read `mcp.configuration` and write `mcp.update`,
+  and every other native verb keeps its reply; every other client sees the projection replaced by
+  the wrapper.
 - An empty `id` on the entry read answers `mcp_invalid_config`, the code `mcp.save` already
   returns, instead of `invalid_params`.
 - The reply of `mcp.test` stops being `{tools}` and becomes the probe report in §4.5, and a probe

@@ -14,6 +14,7 @@
 
 pub mod editor;
 pub mod hooks;
+pub mod mcp;
 pub mod scheduler;
 pub mod skills;
 
@@ -59,6 +60,20 @@ const HOOKS: Methods = Methods {
     ],
 };
 
+const MCP: Methods = Methods {
+    catalog: "mcp.catalog",
+    kinds: &[
+        (ActionKind::Toggle, "mcp.set_enabled"),
+        (ActionKind::Edit, "mcp.update"),
+        // A reload re-reads every Settings source; the catalog call does it.
+        (ActionKind::Reload, "mcp.catalog"),
+        (ActionKind::Add, "mcp.save"),
+        (ActionKind::Remove, "mcp.remove"),
+        (ActionKind::Run, "mcp.test"),
+        (ActionKind::Inspect, "mcp.inspect"),
+    ],
+};
+
 const SCHEDULED: Methods = Methods {
     catalog: "schedule.list",
     kinds: &[
@@ -77,6 +92,7 @@ fn methods_of(area: Area) -> &'static Methods {
     match area {
         Area::Skills => &SKILLS,
         Area::Hooks => &HOOKS,
+        Area::Mcp => &MCP,
         Area::Scheduled => &SCHEDULED,
     }
 }
@@ -167,6 +183,7 @@ fn unsupported(area: Area) -> String {
     match area {
         // The Scheduler is one owner by name, not a plural noun.
         Area::Scheduled => "This daemon cannot manage the Scheduler.".to_owned(),
+        Area::Mcp => "This daemon cannot manage MCP.".to_owned(),
         Area::Skills | Area::Hooks => format!("This daemon cannot manage {}.", area.name()),
     }
 }
@@ -211,6 +228,33 @@ pub async fn apply(
                 ManagementResult::Refused(ManagementRefusal::Conflict {
                     message,
                     view: Box::new(hooks::view(&catalog, &actions)),
+                })
+            }
+        },
+        Area::Mcp => match mcp::apply(client, &request.action, cwd).await {
+            Ok(mcp::Answer::Area { catalog, note }) => {
+                let view = mcp::view(client, cwd, &catalog, &actions).await;
+                ManagementResult::View {
+                    view: Box::new(view),
+                    note,
+                }
+            }
+            Ok(mcp::Answer::Tools { id, tools }) => {
+                ManagementResult::Detail(mcp::tools_detail(&id, &tools))
+            }
+            Ok(mcp::Answer::Detail(detail)) => ManagementResult::Detail(detail),
+            Err(mcp::Failure::ReadFailed { note, error }) => ManagementResult::Applied {
+                note,
+                read_error: error,
+            },
+            Err(mcp::Failure::Refused(message)) => {
+                ManagementResult::Refused(ManagementRefusal::Refused(message))
+            }
+            Err(mcp::Failure::Conflict { message, catalog }) => {
+                let view = mcp::view(client, cwd, &catalog, &actions).await;
+                ManagementResult::Refused(ManagementRefusal::Conflict {
+                    message,
+                    view: Box::new(view),
                 })
             }
         },

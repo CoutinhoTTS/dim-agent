@@ -13,28 +13,34 @@ pub struct Catalog {
     pub user_revision: String,
     pub project_revision: Option<String>,
     pub servers: Vec<Server>,
-    user_application: Application,
-    project_application: Option<Application>,
+    pub user_application: Application,
+    /// The plugin source's application row; a daemon older than that row
+    /// reports none.
+    #[serde(default)]
+    pub plugin_application: Option<Application>,
+    pub project_application: Option<Application>,
 }
 #[derive(Deserialize)]
 pub struct Server {
     pub id: String,
+    /// `user`, `project` or `plugin`.
     pub source: String,
-    enabled: bool,
-    transport: String,
-    auth: Option<Auth>,
+    pub enabled: bool,
+    pub transport: String,
+    pub auth: Option<Auth>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Auth {
-    status: String,
-    missing_scopes: Option<Vec<String>>,
+pub struct Auth {
+    /// `required`, `authorized` or `expired`.
+    pub status: String,
+    pub missing_scopes: Option<Vec<String>>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Application {
-    error: Option<String>,
-    cleanup_error: Option<String>,
+pub struct Application {
+    pub error: Option<String>,
+    pub cleanup_error: Option<String>,
 }
 
 /// What `mcp list` prints: the rows on stdout, then the notes on stderr.
