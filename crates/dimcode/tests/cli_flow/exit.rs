@@ -132,8 +132,8 @@ fn an_incompatible_store_reports_the_startup_note() {
     rusqlite::Connection::open(&database)
         .unwrap()
         .execute_batch(
-            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 29));
-             INSERT INTO agent_store_format VALUES (29);",
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 30));
+             INSERT INTO agent_store_format VALUES (30);",
         )
         .unwrap();
     let original = fs::read(&database).unwrap();
@@ -145,10 +145,10 @@ fn an_incompatible_store_reports_the_startup_note() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("Cannot open native store"), "{stderr}");
-    assert!(stderr.contains("Store format: v29"), "{stderr}");
-    assert!(stderr.contains("Daemon format: v28"), "{stderr}");
+    assert!(stderr.contains("Store format: v30"), "{stderr}");
+    assert!(stderr.contains("Daemon format: v29"), "{stderr}");
     assert!(stderr.contains("Existing data was preserved"), "{stderr}");
-    assert!(stderr.contains("Run a build supporting v29"), "{stderr}");
+    assert!(stderr.contains("Run a build supporting v30"), "{stderr}");
     assert!(stderr.contains("Details:"), "{stderr}");
     assert!(!stderr.contains("App Server exited"), "{stderr}");
     assert_eq!(fs::read(&database).unwrap(), original);
@@ -172,4 +172,86 @@ fn a_daemon_that_exits_without_a_note_keeps_the_generic_error() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("App Server exited"), "{stderr}");
     assert!(!stderr.contains("Cannot open native store"), "{stderr}");
+}
+
+/// The startup note path the client reads for `home`.
+fn startup_note(home: &Home) -> PathBuf {
+    home.0.join("rust/dimcode.sqlite.startup")
+}
+
+/// A server that runs `script` and exits before the client connects.
+fn script_server(home: &Home, name: &str, script: &str) -> Command {
+    let server = home.0.join(name);
+    fs::write(&server, format!("#!/bin/sh\n{script}\nexit 1\n")).unwrap();
+    fs::set_permissions(&server, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut command = home.command();
+    command.args(["--server", server.to_str().unwrap(), "exec", "-p", "hello"]);
+    command
+}
+
+/// Writes a private startup note whose header names `pid`; `$$` is the
+/// server's own pid, which is the child pid the client checks.
+fn note_script(note: &std::path::Path, pid: &str, body: &str) -> String {
+    format!(
+        "printf '%s\\n%s\\n' \"dimcode-startup-failure v1 pid={pid}\" '{body}' > '{note}'\nchmod 0600 '{note}'",
+        note = note.display()
+    )
+}
+
+#[test]
+fn a_startup_note_for_another_pid_is_not_printed() {
+    let home = Home::new();
+    let note = startup_note(&home);
+    let mut server = script_server(
+        &home,
+        "wrong-pid-server",
+        &note_script(&note, "1", "Cannot open native store /elsewhere."),
+    );
+    let output = server.output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("App Server exited"), "{stderr}");
+    assert!(!stderr.contains("Cannot open native store"), "{stderr}");
+    assert!(!note.exists(), "the client removes the note it rejects");
+}
+
+#[test]
+fn a_startup_note_other_users_can_read_is_not_printed() {
+    let home = Home::new();
+    let note = startup_note(&home);
+    let script = format!(
+        "{}\nchmod 0644 '{}'",
+        note_script(&note, "$$", "Cannot open native store /elsewhere."),
+        note.display()
+    );
+    let mut server = script_server(&home, "shared-note-server", &script);
+    let output = server.output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("App Server exited"), "{stderr}");
+    assert!(!stderr.contains("Cannot open native store"), "{stderr}");
+    assert!(!note.exists(), "the client removes the note it rejects");
+}
+
+#[test]
+fn a_startup_note_body_loses_control_characters() {
+    let home = Home::new();
+    let note = startup_note(&home);
+    let mut server = script_server(
+        &home,
+        "escaped-body-server",
+        &note_script(
+            &note,
+            "$$",
+            "Cannot open \u{1b}[31mnative store\u{1b}[0m.\n  Store format: v30",
+        ),
+    );
+    let output = server.output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Cannot open"), "{stderr}");
+    assert!(stderr.contains("native store"), "{stderr}");
+    assert!(stderr.contains("Store format: v30"), "{stderr}");
+    assert!(stderr.contains("Details:"), "{stderr}");
+    assert!(!stderr.contains('\u{1b}'), "{stderr}");
 }
