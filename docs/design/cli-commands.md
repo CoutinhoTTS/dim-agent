@@ -690,9 +690,10 @@ connection-only action, not a kind, so they stay line commands and verbs.
 | `dimcode mcp remove ID` | Delete one entry over `mcp.remove` at its source revision, without a prompt: the id on the command line is the intent. |
 | `dimcode mcp test ID` | Run the stored entry once over `mcp.test` and print the tools the temporary connection found; nothing is saved. |
 | `dimcode mcp inspect ID` | Print the effective configuration and the Session's connections over `mcp.inspect`, without contacting the server. |
+| `dimcode mcp disconnect ID` | Close the entry's live connections over `mcp.disconnect`; it writes no configuration, and the entry reconnects on next use. |
 | `dimcode mcp login\|logout\|enable\|disable ID` | Keep their behavior: browser or device sign-in, sign-out, and the enablement both `/mcp` clients share. |
 | `/mcp` | Open the MCP panel of the Session's workspace ([management surfaces](#management-surfaces)): an entry per server, grouped `user`, `project` and `plugin`, with the toggle, edit, add, remove, test and inspect kinds. |
-| `/mcp list\|login\|callback\|logout\|enable\|disable` | The line commands, unchanged: `list` prints the catalog and the Session's server states, and the rest sign in, complete a callback, sign out or toggle. |
+| `/mcp list\|login\|callback\|logout\|disconnect\|enable\|disable` | The line commands, unchanged: `list` prints the catalog and the Session's server states, `disconnect` closes one entry's live connections, and the rest sign in, complete a callback, sign out or toggle. |
 | `dimcode login [PROVIDER] [--directory URL] [--device] [--redirect-uri URI]` | Start the described account's browser or device sign-in ([Provider accounts](#provider-accounts)); without PROVIDER, list the described accounts. |
 | `dimcode account PROVIDER` | Print the described account's non-secret state. |
 | `dimcode logout PROVIDER` | Sign the described account out. |

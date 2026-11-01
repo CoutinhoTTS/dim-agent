@@ -161,6 +161,7 @@ pub enum Action {
         id: String,
         enabled: bool,
     },
+    McpDisconnect(String),
     /// `<area> ...`: one request to a management area's owner.
     Management(crate::model::session::ManagementRequest),
     /// `<area> edit [ID]`: the area's document in the external editor, or one
@@ -522,6 +523,7 @@ impl Options {
                             Action::McpLogin(id)
                         }
                         "logout" => Action::McpLogout(value(&mut args)?),
+                        "disconnect" => Action::McpDisconnect(value(&mut args)?),
                         command @ ("enable" | "disable") => Action::McpEnable {
                             id: value(&mut args)?,
                             enabled: command == "enable",
@@ -558,7 +560,7 @@ impl Options {
                             },
                         }),
                         _ => {
-                            return Err("Use mcp list, mcp add PATH, mcp edit ID, mcp set ID PATH, mcp remove ID, mcp test ID, mcp inspect ID, mcp login ID, mcp logout ID, mcp enable ID or mcp disable ID".into());
+                            return Err("Use mcp list, mcp add PATH, mcp edit ID, mcp set ID PATH, mcp remove ID, mcp test ID, mcp inspect ID, mcp disconnect ID, mcp login ID, mcp logout ID, mcp enable ID or mcp disable ID".into());
                         }
                     };
                 }

@@ -238,6 +238,15 @@ pub async fn sign_out(client: &mut Client, options: &Options, id: &str) -> Resul
     Ok(0)
 }
 
+/// Closes the entry's live connections. It writes no configuration, and the
+/// entry reconnects on next use.
+pub async fn disconnect(client: &mut Client, options: &Options, id: &str) -> Result<i32> {
+    let params = target(client, options, id).await?;
+    client.rpc("mcp.disconnect", params).await?;
+    println!("Disconnected {}.", safe(id));
+    Ok(0)
+}
+
 pub async fn session_status(client: &mut Client, session: &str) -> Result<()> {
     for line in session_report(client, session).await? {
         println!("{line}");
@@ -262,7 +271,7 @@ pub async fn command(
         return session_status(client, session).await;
     }
     let (action, mut id) = rest.split_once(char::is_whitespace).ok_or(
-        "Usage: /mcp [list|login [--no-browser] [--client-secret] ID|logout ID|enable ID|disable ID]",
+        "Usage: /mcp [list|login [--no-browser] [--client-secret] ID|logout ID|disconnect ID|enable ID|disable ID]",
     )?;
     id = id.trim_start();
     match action {
@@ -288,6 +297,12 @@ pub async fn command(
             sign_out(client, options, id).await?;
             Ok(())
         }
+        "disconnect"
+            if !id.is_empty() && !id.split_whitespace().any(|word| word.starts_with("--")) =>
+        {
+            disconnect(client, options, id).await?;
+            Ok(())
+        }
         "enable" | "disable"
             if !id.is_empty() && !id.split_whitespace().any(|word| word.starts_with("--")) =>
         {
@@ -298,7 +313,7 @@ pub async fn command(
             Ok(())
         }
         _ => Err(
-            "Usage: /mcp [list|login [--no-browser] [--client-secret] ID|logout ID|enable ID|disable ID]"
+            "Usage: /mcp [list|login [--no-browser] [--client-secret] ID|logout ID|disconnect ID|enable ID|disable ID]"
                 .into(),
         ),
     }

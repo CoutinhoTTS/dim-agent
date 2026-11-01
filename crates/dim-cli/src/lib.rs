@@ -812,6 +812,7 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             .await
         }
         Action::McpLogout(id) => mcp_command::sign_out(&mut client, &options, id).await,
+        Action::McpDisconnect(id) => mcp_command::disconnect(&mut client, &options, id).await,
         Action::McpEnable { id, enabled } => {
             let state =
                 management::mcp::set_enabled(&mut client, &options.cwd, id, *enabled).await?;

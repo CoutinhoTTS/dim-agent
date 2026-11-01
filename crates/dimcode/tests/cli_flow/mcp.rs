@@ -1169,6 +1169,89 @@ fn mcp_enable_keeps_its_existing_output() {
     );
 }
 
+/// `mcp disconnect` closes the entry's live connections over the owner's
+/// method and reports them closed; the line command does the same, and an
+/// unknown id is refused before any request.
+#[test]
+fn mcp_disconnect_closes_the_entry_connections() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, cli_catalog());
+        let request = wire.read("mcp.disconnect");
+        assert_eq!(request["params"]["id"], "docs");
+        assert_eq!(request["params"]["source"], "user");
+        assert!(request["params"]["cwd"].is_string());
+        wire.reply(&request, json!({}));
+    });
+    let output = home
+        .command()
+        .args(["mcp", "disconnect", "docs"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Disconnected docs.\n"
+    );
+
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, cli_catalog());
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            assert!(
+                !line.contains("mcp.disconnect"),
+                "the unknown id wrote: {line:?}"
+            );
+            line.clear();
+        }
+    });
+    let output = home
+        .command()
+        .args(["mcp", "disconnect", "missing"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("No matching MCP server"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        started(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, cli_catalog());
+        let request = wire.read("mcp.disconnect");
+        assert_eq!(request["params"]["id"], "docs");
+        assert_eq!(request["params"]["source"], "user");
+        assert!(request["params"]["cwd"].is_string());
+        wire.reply(&request, json!({}));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/mcp disconnect docs\r");
+    terminal.until("Disconnected docs.");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
 /// A create the owner refuses over a newer document keeps the user's text
 /// and reads the area again; the next add writes it at the newer revision.
 #[test]

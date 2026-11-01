@@ -24058,6 +24058,7 @@
         "path Action::ManagementAdd",
         "path Action::ManagementEdit",
         "path Action::ManagementSet",
+        "path Action::McpDisconnect",
         "path Action::McpEnable",
         "path Action::McpList",
         "path Action::McpLogin",
@@ -24243,6 +24244,7 @@
       "to": "dim_cli::mcp_command",
       "references": [
         "mod mcp_command",
+        "path mcp_command::disconnect",
         "path mcp_command::list",
         "path mcp_command::print_report",
         "path mcp_command::sign_in",

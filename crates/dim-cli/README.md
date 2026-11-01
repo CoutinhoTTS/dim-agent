@@ -291,8 +291,9 @@ patch like `{"command": "npx", "cwd": "/work", "env": {"TOKEN": "value"}}` chang
 only. `dimcode mcp remove ID` deletes one entry at its source revision. `dimcode mcp test ID`
 runs the stored entry once and prints the tools the temporary connection found, and `dimcode mcp
 inspect ID` prints the effective configuration and the Session's connections without contacting
-the server. The `/mcp` panel does the same on a list: `Enter`, `Ctrl+E`, `Ctrl+N`, `Ctrl+X`,
-`Ctrl+T` and `Tab`.
+the server. `dimcode mcp disconnect ID` closes the entry's live connections without changing its
+enablement or stored configuration; the entry reconnects on next use. The `/mcp` panel does the
+same on a list: `Enter`, `Ctrl+E`, `Ctrl+N`, `Ctrl+X`, `Ctrl+T` and `Tab`.
 
 ```bash
 dimcode --home /path/to/isolated-home --model-config model.json --cwd /path/to/project mcp list
@@ -1045,6 +1046,7 @@ The terminal UI reaches the same Session methods as the line client:
 | `/mcp list` | MCP servers with their authorization, then the Session's server states; a state line carries its reason below it: a failed server's message, `Version VERSION rejected: REASON` for a refused tool-source version, and one `MCP catalog: ERROR` note for the Session. With no server configured, one line says so instead of the column legend. Without a Session it shows the configuration alone, the report `mcp list` prints |
 | `/mcp login [--no-browser] ID` | Starts sign-in, opens the browser unless `--no-browser` or SSH, and catches the callback on a loopback listener when the redirect port is free; `/mcp callback URL` completes it with a pasted callback instead. A client secret needs hidden input, so `--client-secret` points to `dimcode mcp login ID --client-secret` |
 | `/mcp logout ID` | Signs out and reports whether the token was revoked |
+| `/mcp disconnect ID` | Closes the entry's live connections without changing its enablement or stored configuration; the entry reconnects on next use |
 | `/mcp enable ID` / `/mcp disable ID` | Turns a server on or off with the request `dimcode mcp enable` / `mcp disable` sends and the same result text. Enabling a project entry runs this workspace's `.mcp.json` entry, including later edits, in active and new sessions; disabling stops it in every session before the call returns. The next `/mcp` lists the new state |
 | `/plugins` (`/plugin`) | Lists every plugin name from `plugin.list` (built-in, default, installed): the candidate in use, its state, whether it is locked, and for the selected one its candidates and any error, wait or refused content. `Enter` turns an off plugin on (`plugin.enable`) or, after a confirmation, turns it off (`plugin.disable`); a locked one says why it cannot be turned off. `r` reloads it (`plugin.reload`), `Ctrl+R` lists again. The list is read again after each change, and a failed call shows the method's message |
 | `/plugins install PATH` | Installs and turns on the plugin directory at `PATH`, relative to the workspace (`plugin.install`), then opens the list with the outcome, including when a restart is required. Git installs, update and remove are `dimcode plugin ...` |
