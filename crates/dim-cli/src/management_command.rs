@@ -514,8 +514,10 @@ async fn run_workflow(
         // owner's answer, when there is one, is the outcome, and the read
         // error goes to stderr with the exit still 0.
         Err(workflow::Failure::ReadFailed { note, error }) => {
-            let lines = note.iter().map(|note| safe(note)).collect();
-            print_report(lines, vec![error])
+            // The action was applied, so its own line stands, as the shared
+            // apply reports it for the Scheduler.
+            let line = note.unwrap_or_else(|| management::applied_line(request));
+            print_report(vec![safe(&line)], vec![error])
         }
         Err(error) => return Err(error.to_string().into()),
     }

@@ -286,6 +286,49 @@ fn workflow_enable_writes_the_enablement_and_keeps_the_document_as_read() {
     );
 }
 
+/// The toggle was written and only the read that reports the definitions
+/// failed: the action's own line still stands, and the read error goes to
+/// stderr with exit 0.
+#[test]
+fn workflow_enable_reports_its_line_when_the_read_after_it_fails() {
+    let home = Home::new();
+    let (project, _) = workspace(&home);
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("workflow.list");
+        wire.reply(&request, definitions());
+        let request = wire.read("settings.read");
+        wire.reply(&request, settings());
+        let request = wire.read("settings.update");
+        wire.reply(
+            &request,
+            json!({"revision": "settings:2", "document": request["params"]["document"]}),
+        );
+        let request = wire.read("workflow.list");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,"message":"the definitions are unavailable"}}));
+        drains(wire);
+    });
+    let output = home
+        .command()
+        .arg("--cwd")
+        .arg(&project)
+        .args(["workflow", "enable", "nightly-check"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Enabled nightly-check.\n"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("the definitions are unavailable"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn workflow_enable_refuses_a_name_the_owner_does_not_list_as_a_project() {
     let home = Home::new();
