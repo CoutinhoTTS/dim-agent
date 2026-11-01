@@ -416,6 +416,8 @@ Event fields:
 | `SessionStart` | `hookSpecificOutput.additionalContext` | failure | Keyed Append block |
 | `Notification` | — | failure | — |
 
+A `Stop` block whose reason is empty, an exit 2 with no stderr or a `decision: "block"` without a `reason`, writes no follow-up; the runner logs a warning naming the handler's source and the event.
+
 Context and reasons are each at most 16 KiB per hook. Fields Dim does not support (`updatedInput`, `updatedPermissions`, `updatedToolOutput`, `message`, `continue`, `stopReason`, `suppressOutput`, `systemMessage`, `initialUserMessage`, `sessionTitle`) are ignored with a diagnostic.
 
 ### A.5 Concurrency, combination, timeouts and failure

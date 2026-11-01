@@ -416,6 +416,8 @@ AcpGateway 已经把 `session.submit` 的 `input_blocked` 映射为停止原因 
 | `SessionStart` | `hookSpecificOutput.additionalContext` | 失败 | 带键 Append 块 |
 | `Notification` | — | 失败 | — |
 
+`Stop` 的阻止若原因为空（退出 2 而无 stderr，或 `decision: "block"` 没有 `reason`），不写续跑输入；运行器记一条警告，写明处理器的来源与事件。
+
 上下文与原因每个 Hook 各最多 16 KiB。Dim 不支持的字段（`updatedInput`、`updatedPermissions`、`updatedToolOutput`、`message`、`continue`、`stopReason`、`suppressOutput`、`systemMessage`、`initialUserMessage`、`sessionTitle`）被忽略并记诊断。
 
 ### A.5 并发、合并、超时与失败

@@ -9,7 +9,10 @@ use crate::{
     approval::Approval,
     branch_input::append_own,
     context_block::{element, raw},
-    hooks::{HookEvent, HookHandler, HookSourcesHost, HookSourcesSnapshot, OnFailure, handlers},
+    hooks::{
+        HookEvent, HookHandler, HookSourceId, HookSourcesHost, HookSourcesSnapshot, OnFailure,
+        handlers,
+    },
     host_platform::{HostPlatform, Os},
 };
 use dim_agent_runtime::{
@@ -83,6 +86,9 @@ pub struct HookRun {
     /// What the handler asks for when its command fails, times out or is
     /// cancelled (A.5).
     pub on_failure: OnFailure,
+    /// The source of the handler that ran, for the diagnostics a point
+    /// raises after the run (A.4).
+    pub source: HookSourceId,
 }
 
 /// The Session service that reads the sources and runs commands.
@@ -156,6 +162,7 @@ impl HooksRuntime {
                 HookRun {
                     result: self.run_one(&handler, stdin, cancel).await,
                     on_failure: handler.on_failure,
+                    source: handler.source,
                 }
             });
         }
@@ -444,8 +451,11 @@ fn contribution_of(event: HookEvent, run: &HookRun) -> Option<String> {
 /// context rides along with a block from any handler (A.4).
 #[derive(Default)]
 struct StopOutput {
+    /// The handler blocked (A.4): exit 2 or `decision: "block"`, with or
+    /// without a reason.
+    blocked: bool,
     /// The reason the handler blocks with: exit 2's stderr, or
-    /// `decision: "block"` with its `reason`.
+    /// `decision: "block"` with its `reason`. A block may carry none.
     reason: Option<String>,
     /// `hookSpecificOutput.additionalContext`.
     context: Option<String>,
@@ -456,6 +466,7 @@ fn stop_output(run: &HookRun) -> StopOutput {
     match &run.result {
         HookResult::Failed { .. } => StopOutput::default(),
         HookResult::Blocked { reason } => StopOutput {
+            blocked: true,
             reason: capped(reason),
             context: None,
         },
@@ -468,7 +479,8 @@ fn stop_output(run: &HookRun) -> StopOutput {
                 return StopOutput::default();
             };
             report_ignored_fields(&object);
-            let reason = (object.get("decision").and_then(Value::as_str) == Some("block"))
+            let blocked = object.get("decision").and_then(Value::as_str) == Some("block");
+            let reason = blocked
                 .then(|| object.get("reason").and_then(Value::as_str))
                 .flatten()
                 .and_then(capped);
@@ -477,7 +489,11 @@ fn stop_output(run: &HookRun) -> StopOutput {
                 .and_then(|output| output.get("additionalContext"))
                 .and_then(Value::as_str)
                 .and_then(capped);
-            StopOutput { reason, context }
+            StopOutput {
+                blocked,
+                reason,
+                context,
+            }
         }
     }
 }
@@ -1005,13 +1021,27 @@ impl Branch {
         payload.insert("stop_hook_active".into(), Value::Bool(from_follow_up));
         let runs = self.runtime.run(&matching, &payload, &self.cancel).await;
         let outputs: Vec<StopOutput> = runs.iter().map(stop_output).collect();
+        // A Stop block with an empty reason writes no follow-up (A.4); name
+        // the handler and the event, in the fields `report` uses, so the
+        // dropped block leaves a trace.
+        for (run, output) in runs.iter().zip(&outputs) {
+            if output.blocked && output.reason.is_none() {
+                tracing::warn!(
+                    source = run.source.as_str(),
+                    event = HookEvent::Stop.name(),
+                    "Stop block carried no reason; it writes no follow-up"
+                );
+            }
+        }
         let mut parts: Vec<String> = outputs
             .iter()
             .filter_map(|out| out.reason.clone())
             .collect();
         if parts.is_empty() {
             // A Stop context alone does not drive a turn (§3.4, §5).
-            if outputs.iter().any(|out| out.context.is_some()) {
+            if !outputs.iter().any(|out| out.blocked)
+                && outputs.iter().any(|out| out.context.is_some())
+            {
                 tracing::info!("Stop context ignored: no handler blocked");
             }
             return;
@@ -1384,6 +1414,7 @@ mod tests {
                     .run_one(&matching[0], Vec::new(), &runtime.cancel)
                     .await,
                 on_failure: matching[0].on_failure,
+                source: matching[0].source,
             };
             assert!(
                 matches!(&run.result, HookResult::Failed { stderr, .. } if stderr.as_str() == "bad config\n"),
@@ -1401,6 +1432,47 @@ mod tests {
         }
     }
 
+    /// A.4: a `Stop` block with no reason, exit 2 with an empty stderr or
+    /// `decision: "block"` without a `reason`, is still a block: the point
+    /// names it in a diagnostic and writes no follow-up for it.
+    #[test]
+    fn a_stop_block_without_a_reason_is_still_a_block() {
+        let run = |result: HookResult| HookRun {
+            result,
+            on_failure: OnFailure::Continue,
+            source: HookSourceId::User,
+        };
+        let blocks = [
+            HookResult::Blocked {
+                reason: String::new(),
+            },
+            HookResult::Success {
+                stdout: "{\"decision\":\"block\"}".into(),
+            },
+            HookResult::Success {
+                stdout: "{\"decision\":\"block\",\"reason\":\"  \"}".into(),
+            },
+        ];
+        for result in blocks {
+            let output = stop_output(&run(result));
+            assert!(output.blocked, "an empty-reason block was not a block");
+            assert!(output.reason.is_none(), "an empty reason was kept");
+        }
+        let context = stop_output(&run(HookResult::Success {
+            stdout: "{\"hookSpecificOutput\":{\"additionalContext\":\"note\"}}".into(),
+        }));
+        assert!(!context.blocked, "a context-only run counted as a block");
+        assert_eq!(context.context.as_deref(), Some("note"));
+        let failed = stop_output(&run(HookResult::Failed {
+            reason: "exited with 1".into(),
+            stderr: String::new(),
+        }));
+        assert!(
+            !failed.blocked && failed.reason.is_none(),
+            "a failure counted as a block"
+        );
+    }
+
     /// A.4 gives `SessionStart` only `hookSpecificOutput.additionalContext`,
     /// so a top-level `decision: "block"` with its `reason` is not that
     /// event's protocol; the `PostToolUse` rows read both. Plain text stays a
@@ -1414,6 +1486,7 @@ mod tests {
                 stdout: stdout.into(),
             },
             on_failure: OnFailure::Continue,
+            source: HookSourceId::User,
         };
         assert_eq!(
             contribution_of(HookEvent::SessionStart, &run(object)).as_deref(),
