@@ -54,6 +54,16 @@ Commands:\n\
   scheduled remove ID              Delete a job\n\
   scheduled run ID                 Run a job now\n\
   scheduled history ID             List a job's recent runs\n\
+  workflow list                    List workflow definitions, their sources\n\
+                                   and states\n\
+  workflow enable|disable NAME     Turn a project definition on or off\n\
+  workflow edit NAME               Edit a user definition in the editor\n\
+  workflow set NAME PATH           Write a user definition from PATH,\n\
+                                   or from stdin for -\n\
+  workflow add PATH                Create a definition from PATH,\n\
+                                   or from stdin for -\n\
+  workflow start NAME [PATH]       Start a definition with parameters from PATH\n\
+  workflow history NAME            List a definition's recent runs\n\
   recording [on|off]               Record model requests to the home's\n\
                                    model-log/recordings.jsonl; prompts, code\n\
                                    and tool output are written there\n\

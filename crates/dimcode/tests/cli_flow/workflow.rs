@@ -202,6 +202,26 @@ fn workflow_list_prints_the_definitions_and_their_issues() {
     );
 }
 
+/// `--help` lists the Workflow area with the other management areas.
+#[test]
+fn help_lists_the_workflow_commands() {
+    let home = Home::new();
+    let output = home.command().arg("--help").output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    for line in [
+        "workflow list",
+        "workflow enable|disable NAME",
+        "workflow edit NAME",
+        "workflow set NAME PATH",
+        "workflow add PATH",
+        "workflow start NAME [PATH]",
+        "workflow history NAME",
+    ] {
+        assert!(help.contains(line), "{help}");
+    }
+}
+
 /// Enabling a project definition is a client write of the user document: the
 /// document is copied as read, so an unknown member and another workspace's
 /// map survive, and the write CASes the revision the read reported.
