@@ -444,6 +444,13 @@ async fn run_scheduled(client: &mut Client, request: &ManagementRequest) -> Resu
             }
             _ => print_report(job_rows(&catalog), job_notes(&catalog)),
         },
+        // The action was applied; only the report after it failed. The
+        // owner's answer, when there is one, is the outcome, made safe, and
+        // the read error goes to stderr with the exit still 0.
+        Err(scheduler::Failure::ReadFailed { note, error }) => {
+            let lines = note.iter().map(|note| safe(note)).collect();
+            print_report(lines, vec![error])
+        }
         Err(error) => return Err(error.to_string().into()),
     }
     Ok(0)

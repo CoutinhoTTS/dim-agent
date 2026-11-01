@@ -170,6 +170,7 @@ impl ManagementPanel {
         self.read_error = None;
         match &reply.result {
             ManagementResult::View { view, note } => {
+                let view = &**view;
                 // The read that opens a panel says nothing; every later
                 // answer names what it did.
                 self.message = match (&reply.request.action, self.view.is_some()) {
@@ -813,7 +814,14 @@ mod tests {
     }
 
     fn view_reply(area: Area, action: ManagementAction, view: ManagementView) -> ManagementReply {
-        reply(area, action, ManagementResult::View { view, note: None })
+        reply(
+            area,
+            action,
+            ManagementResult::View {
+                view: Box::new(view),
+                note: None,
+            },
+        )
     }
 
     fn opened() -> ManagementPanel {
@@ -1445,7 +1453,7 @@ mod tests {
             Area::Skills,
             ManagementAction::Run { id: "job-1".into() },
             ManagementResult::View {
-                view: catalogue(),
+                view: Box::new(catalogue()),
                 note: Some("Run nightly: skipped (overlap).".into()),
             },
         ));
@@ -1471,6 +1479,49 @@ mod tests {
         assert!(!text.contains("Removed job-1."), "{text}");
     }
 
+    /// A remove whose read-back fails still names the entry it removed:
+    /// the label comes from the view the panel had before the failed read.
+    #[test]
+    fn an_applied_remove_names_the_entry_it_removed() {
+        let mut panel = opened_catalogue();
+        panel.handle_key(ctrl('x'));
+        panel.handle_key(key(KeyCode::Enter));
+        panel.set_result(&reply(
+            Area::Skills,
+            ManagementAction::Remove { id: "job-1".into() },
+            ManagementResult::Applied {
+                note: None,
+                read_error: "the scheduler is unavailable".into(),
+            },
+        ));
+        let text = shown(&panel, 100, 20).join(" ");
+        assert!(text.contains("Removed nightly."), "{text}");
+        assert!(!text.contains("Removed job-1."), "{text}");
+    }
+
+    /// A run whose read-back fails keeps the owner's answer, and the read
+    /// error is drawn once, in the footer.
+    #[test]
+    fn an_applied_run_keeps_the_owners_answer_and_draws_the_read_error_once() {
+        let mut panel = opened_catalogue();
+        panel.handle_key(ctrl('t'));
+        panel.set_result(&reply(
+            Area::Skills,
+            ManagementAction::Run { id: "job-1".into() },
+            ManagementResult::Applied {
+                note: Some("Run nightly: skipped (overlap).".into()),
+                read_error: "the scheduler is unavailable".into(),
+            },
+        ));
+        let text = shown(&panel, 100, 20).join("\n");
+        assert!(text.contains("Run nightly: skipped (overlap)."), "{text}");
+        assert_eq!(
+            text.matches("the scheduler is unavailable").count(),
+            1,
+            "the read error is drawn once: {text}"
+        );
+    }
+
     /// Owner text is made safe before the panel draws it: a heading, a name,
     /// a detail line, an issue, the note and an inspect's detail cannot carry
     /// an escape sequence to the screen.
@@ -1486,7 +1537,7 @@ mod tests {
             Area::Skills,
             ManagementAction::Run { id: "job-1".into() },
             ManagementResult::View {
-                view,
+                view: Box::new(view),
                 note: Some("Run nightly\u{1b}[2J.".into()),
             },
         ));

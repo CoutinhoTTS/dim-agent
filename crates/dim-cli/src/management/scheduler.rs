@@ -156,6 +156,10 @@ pub enum Failure {
         message: String,
         catalog: Box<Catalog>,
     },
+    /// The action was applied and the read that reports the jobs failed: the
+    /// change was made, the owner's answer is kept, and this is why the jobs
+    /// are not shown.
+    ReadFailed { note: Option<String>, error: String },
     /// The daemon or the owner refused it: nothing was written.
     Refused(String),
 }
@@ -163,7 +167,9 @@ pub enum Failure {
 impl std::fmt::Display for Failure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Conflict { message, .. } | Self::Refused(message) => formatter.write_str(message),
+            Self::Conflict { message, .. }
+            | Self::ReadFailed { error: message, .. }
+            | Self::Refused(message) => formatter.write_str(message),
         }
     }
 }
@@ -262,7 +268,25 @@ pub async fn apply(client: &mut Client, action: &ManagementAction) -> Result<Ans
         }
         ManagementAction::Inspect { id } => return detail(client, id).await,
     };
-    let catalog = catalog(client).await.map_err(Failure::Refused)?;
+    // Every action that gets here but a read called a method its owner
+    // declares mutating; `schedule.history` is the other read, and it
+    // returned above.
+    let applied = !matches!(action, ManagementAction::List | ManagementAction::Reload);
+    let catalog = match catalog(client).await {
+        Ok(catalog) => catalog,
+        Err(error) if applied => {
+            // The action was applied: only the read that reports the jobs
+            // failed, so the change stands and the owner's answer is kept.
+            let note = match &answered {
+                Answered::Nothing => None,
+                Answered::Created(name) => Some(tf("Added {name}.", &[("name", name)])),
+                // The read that names the job failed; the id names it.
+                Answered::Run { id, run } => Some(run_note(id, run)),
+            };
+            return Err(Failure::ReadFailed { note, error });
+        }
+        Err(error) => return Err(Failure::Refused(error)),
+    };
     let note = match &answered {
         Answered::Nothing => None,
         Answered::Created(name) => Some(tf("Added {name}.", &[("name", name)])),

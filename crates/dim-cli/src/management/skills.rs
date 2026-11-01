@@ -56,6 +56,25 @@ pub enum Outcome {
     Refused(String),
 }
 
+/// The message a kind this area never offers is refused with, or none for a
+/// kind the adapter performs.
+///
+/// `management::supported` refuses these kinds before the adapter runs; the
+/// adapter refuses them too, naming the kind, rather than reading the area
+/// as if nothing was asked.
+fn refusal(action: &ManagementAction) -> Option<&'static str> {
+    Some(match action {
+        ManagementAction::Add { .. } => "A Skill has no add action.",
+        ManagementAction::Remove { .. } => "A Skill has no remove action.",
+        ManagementAction::Run { .. } => "A Skill has no run action.",
+        ManagementAction::Inspect { .. } => "A Skill has no inspect action.",
+        ManagementAction::List
+        | ManagementAction::Toggle { .. }
+        | ManagementAction::Reload
+        | ManagementAction::Save { .. } => return None,
+    })
+}
+
 /// Performs `action`, then reads the area back as its owner reports it.
 ///
 /// The action is applied once the method behind it returns: the owner
@@ -63,6 +82,9 @@ pub enum Outcome {
 /// `skills.refresh` that succeeded rescanned the roots even when the read
 /// after it fails.
 pub async fn apply(client: &mut Client, action: &ManagementAction, cwd: &Path) -> Outcome {
+    if let Some(message) = refusal(action) {
+        return Outcome::Refused(message.to_owned());
+    }
     let params = json!({"cwd": cwd.to_string_lossy()});
     let applied = match action {
         ManagementAction::Reload => {
@@ -82,21 +104,7 @@ pub async fn apply(client: &mut Client, action: &ManagementAction, cwd: &Path) -
         }
         // A read applies nothing, and a Skill has no document, so
         // `management::supported` refuses a save before the adapter runs.
-        ManagementAction::List | ManagementAction::Save { .. } => false,
-        // `supported` refuses a kind this area does not have before `apply`;
-        // the adapter refuses it too, naming the kind, and reads nothing.
-        ManagementAction::Add { .. } => {
-            return Outcome::Refused("A Skill has no add action.".to_owned());
-        }
-        ManagementAction::Remove { .. } => {
-            return Outcome::Refused("A Skill has no remove action.".to_owned());
-        }
-        ManagementAction::Run { .. } => {
-            return Outcome::Refused("A Skill has no run action.".to_owned());
-        }
-        ManagementAction::Inspect { .. } => {
-            return Outcome::Refused("A Skill has no inspect action.".to_owned());
-        }
+        _ => false,
     };
     match catalog(client, &cwd.to_string_lossy()).await {
         Ok(catalog) => Outcome::Catalog(catalog),
@@ -147,5 +155,52 @@ pub(super) fn view(catalog: &Catalog, actions: &[ActionKind]) -> ManagementView 
             .iter()
             .map(|issue| format!("{}: {}", issue.path, issue.message))
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The kinds this area never offers are refused by name before anything
+    /// is read, so a caller that skipped `management::supported` cannot make
+    /// the adapter treat one as a read; a kind it does offer is not refused.
+    #[test]
+    fn a_kind_the_area_never_offers_is_refused_by_name() {
+        assert_eq!(
+            refusal(&ManagementAction::Add {
+                document: json!({})
+            }),
+            Some("A Skill has no add action.")
+        );
+        assert_eq!(
+            refusal(&ManagementAction::Remove { id: "skill".into() }),
+            Some("A Skill has no remove action.")
+        );
+        assert_eq!(
+            refusal(&ManagementAction::Run { id: "skill".into() }),
+            Some("A Skill has no run action.")
+        );
+        assert_eq!(
+            refusal(&ManagementAction::Inspect { id: "skill".into() }),
+            Some("A Skill has no inspect action.")
+        );
+        assert_eq!(refusal(&ManagementAction::List), None);
+        assert_eq!(refusal(&ManagementAction::Reload), None);
+        assert_eq!(
+            refusal(&ManagementAction::Toggle {
+                id: "skill".into(),
+                enabled: true
+            }),
+            None
+        );
+        assert_eq!(
+            refusal(&ManagementAction::Save {
+                id: None,
+                expected_revision: "1".into(),
+                document: json!({}),
+            }),
+            None
+        );
     }
 }

@@ -431,7 +431,7 @@ pub enum ManagementResult {
     /// owner answered beyond the view: a run's state, or the entry an add
     /// created. A read has no note.
     View {
-        view: ManagementView,
+        view: Box<ManagementView>,
         note: Option<String>,
     },
     /// The action was applied and the read that reports the area failed:

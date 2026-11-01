@@ -184,7 +184,7 @@ pub async fn apply(
     match request.area {
         Area::Skills => match skills::apply(client, &request.action, cwd).await {
             skills::Outcome::Catalog(catalog) => ManagementResult::View {
-                view: skills::view(&catalog, &actions),
+                view: Box::new(skills::view(&catalog, &actions)),
                 note: None,
             },
             skills::Outcome::ReadFailed(error) => ManagementResult::Applied {
@@ -197,7 +197,7 @@ pub async fn apply(
         },
         Area::Hooks => match hooks::apply(client, &request.action, cwd).await {
             Ok(catalog) => ManagementResult::View {
-                view: hooks::view(&catalog, &actions),
+                view: Box::new(hooks::view(&catalog, &actions)),
                 note: None,
             },
             Err(hooks::Failure::ReadFailed(error)) => ManagementResult::Applied {
@@ -216,10 +216,14 @@ pub async fn apply(
         },
         Area::Scheduled => match scheduler::apply(client, &request.action).await {
             Ok(scheduler::Answer::Jobs { catalog, note }) => ManagementResult::View {
-                view: scheduler::view(&catalog, &actions, cwd),
+                view: Box::new(scheduler::view(&catalog, &actions, cwd)),
                 note,
             },
             Ok(scheduler::Answer::Detail(detail)) => ManagementResult::Detail(detail),
+            Err(scheduler::Failure::ReadFailed { note, error }) => ManagementResult::Applied {
+                note,
+                read_error: error,
+            },
             Err(scheduler::Failure::Refused(message)) => {
                 ManagementResult::Refused(ManagementRefusal::Refused(message))
             }

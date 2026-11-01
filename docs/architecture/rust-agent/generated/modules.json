@@ -3109,6 +3109,7 @@
       "unexpandedMacros": [
         "format",
         "json",
+        "matches",
         "vec"
       ]
     },
@@ -3120,6 +3121,15 @@
       "unexpandedMacros": [
         "format",
         "json"
+      ]
+    },
+    {
+      "id": "dim_cli::management::skills::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::management::skills",
+      "file": "crates/dim-cli/src/management/skills.rs",
+      "unexpandedMacros": [
+        "assert_eq"
       ]
     },
     {
@@ -25335,6 +25345,7 @@
         "path scheduler::Answer::Detail",
         "path scheduler::Answer::Jobs",
         "path scheduler::Failure::Conflict",
+        "path scheduler::Failure::ReadFailed",
         "path scheduler::Failure::Refused",
         "path scheduler::apply",
         "path scheduler::view"
@@ -25544,6 +25555,13 @@
     },
     {
       "from": "dim_cli::management::skills",
+      "to": "dim_cli::management::skills::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::management::skills",
       "to": "dim_cli::model::session",
       "references": [
         "path ActionKind",
@@ -25635,6 +25653,7 @@
         "path scheduler::Answer::Detail",
         "path scheduler::Answer::Jobs",
         "path scheduler::Catalog",
+        "path scheduler::Failure::ReadFailed",
         "path scheduler::apply",
         "path scheduler::catalog",
         "use crate::management::scheduler"
@@ -29935,6 +29954,7 @@
         "path ManagementReply",
         "path ManagementRequest",
         "path ManagementResult",
+        "path ManagementResult::Applied",
         "path ManagementResult::Detail",
         "path ManagementResult::Refused",
         "path ManagementResult::View",
@@ -34260,6 +34280,7 @@
       "to": "dim_cli::model::session",
       "references": [
         "path Area::Hooks",
+        "path Area::Scheduled",
         "path Command",
         "path Command::AskAnswers",
         "path Command::InputControl",
@@ -34269,6 +34290,7 @@
         "path Command::Stop",
         "path Command::Submit",
         "path DIM_OAUTH_ID",
+        "path ManagementAction::Add",
         "path ManagementAction::Save",
         "path ManagementRefusal::Conflict",
         "path ManagementRefusal::Refused",
@@ -34346,6 +34368,13 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::management_panel",
+      "references": [
+        "path ManagementPanel::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::oauth_view",
       "references": [
         "path OauthView::dim"
@@ -34356,7 +34385,8 @@
       "to": "dim_cli::ui::prompts",
       "references": [
         "path AskUserPrompt::new",
-        "path WriteTarget::Area"
+        "path WriteTarget::Area",
+        "path WriteTarget::Create"
       ]
     },
     {
@@ -34485,6 +34515,7 @@
         "path ManagementDraft",
         "path Prompt::Ask",
         "path Prompt::Login",
+        "path Prompt::Management",
         "path QUEUE_HINT",
         "path QUEUE_HINT_MORE",
         "path ThemeContext",

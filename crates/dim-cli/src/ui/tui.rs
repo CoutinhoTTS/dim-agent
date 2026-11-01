@@ -1812,8 +1812,10 @@ impl App {
                 } else if reply.request.action == ManagementAction::Reload {
                     match &reply.result {
                         ManagementResult::View { view, .. } => {
-                            let text =
-                                crate::ui::management_panel::reloaded(reply.request.area, view);
+                            let text = crate::ui::management_panel::reloaded(
+                                reply.request.area,
+                                view.as_ref(),
+                            );
                             self.reports.push(Block::Status {
                                 text,
                                 tone: Tone::Muted,
@@ -8793,7 +8795,7 @@ mod tests {
         // Written: the file goes and the outcome is a notice.
         let path = draft(&mut app);
         app.apply(save_reply(ManagementResult::View {
-            view: view(),
+            view: Box::new(view()),
             note: None,
         }));
         assert!(!path.exists(), "the written draft is removed");
@@ -8845,5 +8847,72 @@ mod tests {
         assert!(text.contains("The user document changed"), "{text}");
         assert!(text.contains(&path.display().to_string()), "{text}");
         assert!(app.management_edit.is_none(), "a conflict drops the link");
+    }
+
+    /// A create the owner refuses, or a conflict on one, keeps the draft
+    /// file and its link: a create has no revision to lose, so the next
+    /// Ctrl+N reopens the user's text, with the panel open or closed.
+    #[test]
+    fn a_create_reply_keeps_the_draft_and_its_link() {
+        use crate::model::session::{ManagementReply, ManagementView};
+        fn create_reply(result: ManagementResult) -> Update {
+            Update::Management(ManagementReply {
+                request: ManagementRequest {
+                    area: Area::Scheduled,
+                    action: ManagementAction::Add {
+                        document: serde_json::json!({}),
+                    },
+                },
+                result,
+            })
+        }
+        fn refused() -> ManagementResult {
+            ManagementResult::Refused(ManagementRefusal::Refused("nope".into()))
+        }
+        fn conflict() -> ManagementResult {
+            ManagementResult::Refused(ManagementRefusal::Conflict {
+                message: "The jobs changed since they were read.".into(),
+                view: Box::new(ManagementView::default()),
+            })
+        }
+        let root = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            root.path().join("home"),
+            "/w".into(),
+        );
+        let draft = |app: &mut App| {
+            app.management_edit = Some(ManagementDraft {
+                area: Area::Scheduled,
+                target: WriteTarget::Create,
+                draft: editor::Draft::open(root.path(), Area::Scheduled, "{}").unwrap(),
+            });
+            app.management_edit
+                .as_ref()
+                .unwrap()
+                .draft
+                .path()
+                .to_path_buf()
+        };
+        // Esc closed the panel while the create was in flight.
+        for result in [refused(), conflict()] {
+            let path = draft(&mut app);
+            app.apply(create_reply(result));
+            assert!(path.exists(), "a create keeps its file: {path:?}");
+            let kept = app.management_edit.as_ref().expect("the link stays");
+            assert_eq!(kept.draft.path(), path.as_path());
+        }
+        // The panel is open: the file and the link stay for the next Ctrl+N.
+        for result in [refused(), conflict()] {
+            app.prompt = Some(Prompt::Management(ManagementPanel::new(Area::Scheduled)));
+            let path = draft(&mut app);
+            app.apply(create_reply(result));
+            assert!(path.exists(), "a create keeps its file: {path:?}");
+            let kept = app.management_edit.as_ref().expect("the link stays");
+            assert_eq!(kept.draft.path(), path.as_path());
+        }
     }
 }

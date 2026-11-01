@@ -233,6 +233,111 @@ fn scheduled_run_reports_what_the_owner_answered() {
     );
 }
 
+/// The scheduler's answer to a failed read that follows an applied action:
+/// an error the client reports as the read error.
+fn read_failed(wire: &mut Wire, request: &Value) {
+    wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+        "code":-32000,
+        "message":"the scheduler is unavailable"}}));
+}
+
+/// A run the daemon accepted is reported as done even when the read that
+/// follows fails: the owner's answer is printed, the read error goes to
+/// stderr, and the command exits 0.
+#[test]
+fn scheduled_run_keeps_the_owners_answer_when_the_read_back_fails() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("schedule.run_now");
+        wire.reply(
+            &request,
+            run("skipped", "overlap", "2026-11-01T09:00:00.000Z"),
+        );
+        let request = wire.read("schedule.list");
+        read_failed(wire, &request);
+    });
+    let output = home
+        .command()
+        .args(["scheduled", "run", "job-1"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Run job-1: skipped (overlap).\n"
+    );
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "the scheduler is unavailable (RPC -32000)\n"
+    );
+}
+
+/// An add the daemon accepted reports the entry it made even when the read
+/// that follows fails, with the read error on stderr and the exit 0.
+#[test]
+fn scheduled_add_keeps_the_owners_answer_when_the_read_back_fails() {
+    let home = Home::new();
+    let path = home.0.join("new.json");
+    let new_job = json!({
+        "name": "digest",
+        "schedule": {"every_minutes": 60},
+        "prompt": "Summarize the day.",
+        "cwd": "/workspace",
+    });
+    fs::write(&path, serde_json::to_string(&new_job).unwrap()).unwrap();
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("schedule.save");
+        wire.reply(
+            &request,
+            json!({"job": job("job-3", "digest", 1, true, Value::Null)}),
+        );
+        let request = wire.read("schedule.list");
+        read_failed(wire, &request);
+    });
+    let output = home
+        .command()
+        .args(["scheduled", "add"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "Added digest.\n");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "the scheduler is unavailable (RPC -32000)\n"
+    );
+}
+
+/// A remove the daemon accepted exits 0 when the read that follows fails,
+/// with the read error on stderr and nothing on stdout.
+#[test]
+fn scheduled_remove_exits_zero_when_the_read_back_fails() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("schedule.delete");
+        wire.reply(&request, json!({"job_id": "job-1"}));
+        let request = wire.read("schedule.list");
+        read_failed(wire, &request);
+    });
+    let output = home
+        .command()
+        .args(["scheduled", "remove", "job-1"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "the scheduler is unavailable (RPC -32000)\n"
+    );
+}
+
 #[test]
 fn scheduled_history_prints_the_jobs_recent_runs() {
     let home = Home::new();

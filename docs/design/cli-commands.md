@@ -404,8 +404,9 @@ adapter and the methods its kinds call, and names here the kinds it adds.
 - add opens the external editor on a new-entry document that the adapter supplies — the owner's
   create shape, filled with example values — and writes it with the area's create method. An
   unchanged document writes nothing, and a refusal keeps the draft, which the next Ctrl+N
-  reopens, as Ctrl+E does for an edit. `dimcode <area> add PATH` (`-` for stdin) is the same
-  write without an editor.
+  reopens, as Ctrl+E does for an edit. A conflict keeps it too: a create has no revision, so
+  dropping the draft's link to a stale revision is an edit's rule, not a create's.
+  `dimcode <area> add PATH` (`-` for stdin) is the same write without an editor.
 - remove asks in the hint first: it becomes `Remove <label>? Enter confirm · Esc cancel`, and
   every key but Enter cancels without changing anything. Enter sends the area's delete method
   and reads the area again. `dimcode <area> remove ID` deletes without a prompt, because the id
@@ -447,7 +448,8 @@ Writes follow [Execution settings](#execution-settings):
   the action's line, then the read error on standard error, and exits 0; a toggle's line names
   the id, since the read is what supplies the name, and a read on its own that fails is still a
   failure. The panel shows the action's message and the read error, keeps no view until the next
-  read, and settles the draft as on success: its file is removed and its link dropped;
+  read, and settles the draft as on success: its file is removed and its link dropped. An
+  applied action keeps the owner's answer even when the read after it fails;
 - loading and writing disable mutation.
 
 ### The external editor
