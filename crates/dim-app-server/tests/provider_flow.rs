@@ -1365,6 +1365,20 @@ async fn selectable_models_match_execution_and_hide_unavailable_models() {
         stored_selection(&bundled, MINE, &mine_record, "missing"),
         Err(StoredSelectionError::NotFound)
     );
+    assert!(
+        provider
+            .configuration(
+                Some(ModelId {
+                    provider_id: MINE.into(),
+                    model_id: "missing".into(),
+                }),
+                None,
+                ModelPreferences::default(),
+                &cancel,
+            )
+            .await
+            .is_err()
+    );
     assert!(matches!(
         stored_selection(&bundled, MINE, &mine_record, "text"),
         Err(StoredSelectionError::Unavailable { disabled: true, .. })
