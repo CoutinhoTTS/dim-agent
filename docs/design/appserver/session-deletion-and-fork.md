@@ -117,8 +117,9 @@ are Rust methods over the native store, not services: only Agents calls them.
    serializes this removal with step 4's row deletion across Sessions with its ownership lock:
    two concurrent deletes could otherwise both see the other's rows, both keep the shared
    directory, and leave it with no owner after both commits. The fork step takes the same lock
-   while it copies output rows, and copies a row only while its file exists, so a row left by an
-   interrupted delete is not copied. `command-output`
+   while it copies every current output row; the lock, not a file-existence check, keeps fork and
+   delete consistent, so the row a running command registered before writing its file is copied
+   and F owns the file the command creates. `command-output`
    directories go through the FileStorage of S's resource node, looked up per call as in S5a;
    HostPlatform removes the `.dim/exec` directories it owns. HostPlatform does not read ownership
    rows. An absent directory counts as removed. Each removal must be durable before step 4 (§4).

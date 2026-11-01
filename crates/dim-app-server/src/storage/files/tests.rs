@@ -365,41 +365,41 @@ async fn an_interrupted_delete_converges_on_retry_and_the_next_sweep() {
     fixture.close().await;
 }
 
-/// ADR 013 D4: an interrupted delete has removed the file but not its row;
-/// a later fork must not copy that row and own a removed file.
+/// ADR 013 D4: the fork copies every output row, including one for a file
+/// that does not exist yet. `run_background` registers the output path before
+/// its command writes it, so the fork must own the file the command creates
+/// and keep it after the source delete.
 #[tokio::test]
-async fn a_fork_does_not_copy_output_of_an_interrupted_delete() {
+async fn a_fork_owns_output_registered_before_the_file_exists() {
     let fixture = Fixture::new().await;
     let store = SessionStore::new(fixture.db.clone(), fixture.root.clone(), 0);
-    fixture.session("stopped-source").await;
-    let log = fixture.home.join("command-output/stopped-source/exec.log");
-    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
-    std::fs::write(&log, b"output").unwrap();
+    fixture.session("running-source").await;
+    let log = fixture.home.join("command-output/running-source/exec.log");
     fixture
         .files
-        .register("stopped-source".into(), log.clone())
+        .register("running-source".into(), log.clone())
         .await
         .unwrap();
-
-    STOP_AFTER_OUTPUT
-        .lock()
-        .unwrap()
-        .push("stopped-source".into());
-    assert!(store.delete_session("stopped-source").await.is_err());
     assert!(!log.exists());
+
     store
-        .fork_session("stopped-source", "stopped-fork", 0)
+        .fork_session("running-source", "running-fork", 0)
         .await
         .unwrap();
-    let copied: i64 = fixture
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    std::fs::write(&log, b"output").unwrap();
+
+    assert!(store.delete_session("running-source").await.unwrap());
+    assert_eq!(std::fs::read(&log).unwrap(), b"output");
+    let owned: i64 = fixture
         .connection()
         .query_row(
-            "SELECT COUNT(*) FROM session_output_owners WHERE session_id='stopped-fork'",
+            "SELECT COUNT(*) FROM session_output_owners WHERE session_id='running-fork'",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(copied, 0, "the fork owns no removed output");
+    assert_eq!(owned, 1, "the fork owns the file the command created");
 
     drop(store);
     fixture.close().await;
