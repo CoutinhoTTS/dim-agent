@@ -432,6 +432,16 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_agent_capabilities::file_access",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities",
+      "file": "crates/dim-agent-capabilities/src/file_access.rs",
+      "unexpandedMacros": [
+        "format",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::file_storage",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -580,6 +590,7 @@
       "parent": "dim_agent_capabilities::host_platform",
       "file": "crates/dim-agent-capabilities/src/host_platform/isolation.rs",
       "unexpandedMacros": [
+        "assert",
         "assert_eq",
         "cfg",
         "format",
@@ -691,8 +702,8 @@
       "file": "crates/dim-agent-capabilities/src/permission.rs",
       "unexpandedMacros": [
         "format",
-        "matches",
         "tokio::select",
+        "unreachable",
         "vec"
       ]
     },
@@ -1814,6 +1825,7 @@
       "file": "crates/dim-app-server/src/execution_settings.rs",
       "unexpandedMacros": [
         "json",
+        "unreachable",
         "vec"
       ]
     },
@@ -6356,6 +6368,14 @@
     },
     {
       "from": "dim_agent_capabilities",
+      "to": "dim_agent_capabilities::file_access",
+      "references": [
+        "mod file_access",
+        "path file_access::FileAccessFacts"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
         "mod file_storage",
@@ -7938,6 +7958,93 @@
       ]
     },
     {
+      "from": "dim_agent_capabilities::file_access",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostError::failed",
+        "path HostFuture",
+        "path SessionFilesHost",
+        "use crate::host::HostError",
+        "use crate::host::HostFuture",
+        "use crate::host::SessionFilesHost"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_access",
+      "to": "dim_agent_capabilities::host_platform",
+      "references": [
+        "path HostPlatform",
+        "use crate::host_platform::HostPlatform"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_access",
+      "to": "dim_agent_capabilities::session_grants",
+      "references": [
+        "path SessionGrantsHost",
+        "use crate::session_grants::SessionGrantsHost"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_access",
+      "to": "dim_agent_capabilities::workspace_tools::files",
+      "references": [
+        "path canonical_prefix",
+        "use crate::workspace_tools::files::canonical_prefix"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_access",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path AgentBuilder",
+        "use dim_agent_runtime::AgentBuilder"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_access",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionConfig",
+        "use dim_agent_runtime::SessionConfig"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_access",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_access",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path Feature::new",
+        "use dim_agent_runtime::Feature"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_access",
+      "to": "dim_agent_types::grant",
+      "references": [
+        "path GrantMode",
+        "path GrantMode::Read",
+        "path GrantMode::Write",
+        "use dim_agent_types::grant::GrantMode"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_access",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path PermissionPreset",
+        "path PermissionPreset::WorkspaceWrite",
+        "use dim_agent_types::PermissionPreset"
+      ]
+    },
+    {
       "from": "dim_agent_capabilities::file_storage",
       "to": "dim_agent_capabilities::file_storage::native",
       "references": [
@@ -8784,7 +8891,9 @@
       "from": "dim_agent_capabilities::host_platform",
       "to": "dim_agent_capabilities::host_platform::isolation",
       "references": [
-        "mod isolation"
+        "mod isolation",
+        "path isolation::BWRAP_UNAVAILABLE",
+        "path isolation::bubblewrap"
       ]
     },
     {
@@ -8868,10 +8977,12 @@
       "to": "dim_agent_capabilities::host_platform",
       "references": [
         "path HostPlatform",
+        "path HostPlatform::current",
         "path Isolation",
         "path ProcessSpec",
         "path ProcessSpecError",
         "path TemporaryDirectory",
+        "path super::ShellStatus::Unavailable",
         "path super::path_entries",
         "use super::HostPlatform",
         "use super::Isolation",
@@ -9406,6 +9517,14 @@
     },
     {
       "from": "dim_agent_capabilities::permission",
+      "to": "dim_agent_capabilities::file_access",
+      "references": [
+        "path FileAccessFacts",
+        "use crate::file_access::FileAccessFacts"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::permission",
       "to": "dim_agent_capabilities::host",
       "references": [
         "path HostError",
@@ -9417,12 +9536,10 @@
     },
     {
       "from": "dim_agent_capabilities::permission",
-      "to": "dim_agent_capabilities::session_grants",
+      "to": "dim_agent_capabilities::host_platform",
       "references": [
-        "path SessionGrantsHost",
-        "path resolve_grant_path",
-        "use crate::session_grants::SessionGrantsHost",
-        "use crate::session_grants::resolve_grant_path"
+        "path HostPlatform",
+        "use crate::host_platform::HostPlatform"
       ]
     },
     {
@@ -9430,7 +9547,9 @@
       "to": "dim_agent_capabilities::workspace_tools::files",
       "references": [
         "path canonical_prefix",
-        "use crate::workspace_tools::files::canonical_prefix"
+        "path resolve_path",
+        "use crate::workspace_tools::files::canonical_prefix",
+        "use crate::workspace_tools::files::resolve_path"
       ]
     },
     {
@@ -9438,7 +9557,9 @@
       "to": "dim_agent_runtime::config",
       "references": [
         "path SessionConfig",
-        "use dim_agent_runtime::SessionConfig"
+        "path SessionIdentity",
+        "use dim_agent_runtime::SessionConfig",
+        "use dim_agent_runtime::SessionIdentity"
       ]
     },
     {
@@ -9504,8 +9625,6 @@
       "from": "dim_agent_capabilities::permission",
       "to": "dim_agent_types::grant",
       "references": [
-        "path GrantMode::Read",
-        "path GrantMode::Write",
         "use dim_agent_types::grant::GrantMode"
       ]
     },
@@ -14910,6 +15029,7 @@
       "to": "dim_app_server::execution_settings",
       "references": [
         "mod execution_settings",
+        "path execution_settings::ExecutionBackendPlugin::new",
         "path execution_settings::ExecutionSettingsPlugin::new"
       ]
     },
@@ -16056,6 +16176,13 @@
         "path defaults::mock_model_hosts",
         "path defaults::tool_host",
         "use dim_agent_capabilities::defaults"
+      ]
+    },
+    {
+      "from": "dim_app_server::cli",
+      "to": "dim_agent_capabilities::file_access",
+      "references": [
+        "path dim_agent_capabilities::file_access::install"
       ]
     },
     {
@@ -17763,6 +17890,29 @@
     },
     {
       "from": "dim_app_server::execution_settings",
+      "to": "dim_agent_capabilities::host_platform",
+      "references": [
+        "path HostPlatform",
+        "path SandboxBackend::Available",
+        "path SandboxBackend::Unavailable",
+        "use dim_agent_capabilities::host_platform::HostPlatform",
+        "use dim_agent_capabilities::host_platform::SandboxBackend"
+      ]
+    },
+    {
+      "from": "dim_app_server::execution_settings",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path params",
+        "path reply",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::params",
+        "use dim_agent_capabilities::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_app_server::execution_settings",
       "to": "dim_agent_capabilities::settings",
       "references": [
         "path SettingsScope::User",
@@ -17775,6 +17925,22 @@
       "references": [
         "path Names",
         "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::execution_settings",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path ManagementMethods",
+        "use crate::methods::ManagementMethods"
+      ]
+    },
+    {
+      "from": "dim_app_server::execution_settings",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path Empty",
+        "use crate::protocol::Empty"
       ]
     },
     {
@@ -22100,6 +22266,16 @@
     },
     {
       "from": "dim_app_server::storage::catalog::tests",
+      "to": "dim_app_server::connection",
+      "references": [
+        "path ConnectionHub",
+        "path Entry::Bare",
+        "use crate::connection::ConnectionHub",
+        "use crate::connection::Entry"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::catalog::tests",
       "to": "dim_app_server::storage::catalog",
       "references": [
         "path create"
@@ -22285,7 +22461,6 @@
       "from": "dim_app_server::storage::files",
       "to": "dim_agent_capabilities::host",
       "references": [
-        "path PutSessionFile",
         "path SessionFileError",
         "path SessionFileErrorCode",
         "path SessionFileErrorCode::Cancelled",
@@ -22294,10 +22469,11 @@
         "path SessionFileErrorCode::NotFound",
         "path SessionFileErrorCode::Storage",
         "path SessionFileErrorCode::TooLarge",
+        "path SessionFilesService",
         "path StoredSessionFile",
-        "use dim_agent_capabilities::host::PutSessionFile",
         "use dim_agent_capabilities::host::SessionFileError",
         "use dim_agent_capabilities::host::SessionFileErrorCode",
+        "use dim_agent_capabilities::host::SessionFilesService",
         "use dim_agent_capabilities::host::StoredSessionFile"
       ]
     },
@@ -25820,6 +25996,7 @@
         "path ProviderAction::Create",
         "path ProviderAction::Disconnect",
         "path ProviderEntry",
+        "path SandboxBackend",
         "path SessionItem",
         "path SessionPort",
         "path SubagentModelPolicy",
@@ -25834,6 +26011,7 @@
         "path Update::Context",
         "path Update::Failed",
         "path Update::Isolation",
+        "path Update::IsolationBackend",
         "path Update::Login",
         "path Update::ModelFeatures",
         "path Update::ModelPolicy",
@@ -25881,6 +26059,7 @@
         "use crate::model::session::PluginReply",
         "use crate::model::session::ProviderAction",
         "use crate::model::session::ProviderEntry",
+        "use crate::model::session::SandboxBackend",
         "use crate::model::session::SessionItem",
         "use crate::model::session::SessionPort",
         "use crate::model::session::SubagentModelPolicy",
@@ -27729,7 +27908,10 @@
       "to": "dim_cli::model::session",
       "references": [
         "path ExecutionSnapshot",
-        "use crate::model::session::ExecutionSnapshot"
+        "path SandboxBackend",
+        "path SandboxBackend::Unavailable",
+        "use crate::model::session::ExecutionSnapshot",
+        "use crate::model::session::SandboxBackend"
       ]
     },
     {
@@ -29064,6 +29246,7 @@
         "path Effect::Approval",
         "path ExitConfirm::new",
         "path ExitReason::AgentRunning",
+        "path PermissionPrompt::grant_for",
         "path PermissionPrompt::new"
       ]
     },
@@ -31587,6 +31770,7 @@
         "path Update::Failed",
         "path Update::FilesChanged",
         "path Update::Isolation",
+        "path Update::IsolationBackend",
         "path Update::Login",
         "path Update::MemberConversation",
         "path Update::ModelFeatures",
@@ -34607,6 +34791,14 @@
     {
       "module": "dim_cli::mcp_command",
       "path": "char::is_whitespace"
+    },
+    {
+      "module": "dim_cli::model::session",
+      "path": "D::Error"
+    },
+    {
+      "module": "dim_cli::model::session",
+      "path": "Reply::deserialize"
     },
     {
       "module": "dim_cli::plugin_command::tests",

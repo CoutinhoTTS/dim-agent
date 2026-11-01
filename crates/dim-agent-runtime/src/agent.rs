@@ -366,8 +366,7 @@ impl Agent {
                     }
                 }
                 match result.borrow().clone() {
-                    Some(Err(AgentError::Cancelled(_) | AgentError::Closed(_))) => {}
-                    Some(Err(error)) => errors.push(error),
+                    Some(Err(error)) => errors.extend(error.without_cancellation()),
                     None => errors.push(AgentError::fault(
                         "session build",
                         "build ended without a result",

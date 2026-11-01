@@ -1554,6 +1554,23 @@ mod tests {
             p.handle_key(key(KeyCode::Char('y'))),
             Effect::FullAccess { .. }
         ));
+
+        let read = PermissionPrompt::grant_for("read", &serde_json::json!({"path": "a"})).unwrap();
+        assert_eq!(
+            (read.path.as_str(), read.kind.as_str(), read.mode.as_str()),
+            ("a", "file", "read")
+        );
+        let write =
+            PermissionPrompt::grant_for("write", &serde_json::json!({"path": "a"})).unwrap();
+        assert_eq!(
+            (
+                write.path.as_str(),
+                write.kind.as_str(),
+                write.mode.as_str()
+            ),
+            ("a", "file", "write")
+        );
+        assert!(PermissionPrompt::grant_for("exec", &serde_json::json!({"path": "a"})).is_none());
     }
 
     #[test]

@@ -1,17 +1,19 @@
-//! Branch permission: decides a tool call by risk, workspace target and policy.
-//! The policy is `SessionConfig.permission_policy` folded with this branch's
-//! dispatched `permission/changed` events. The user's command rules, read
-//! through the Session's `CommandRulesHost` on each decision, deny or approve
-//! commands of process-starting calls. The Session's grants, read through
-//! `SessionGrantsHost` when the policy asks, can turn only that Ask into an
-//! Allow.
+//! Branch permission: decides a tool call by risk, its file-access facts and
+//! policy. The policy is `SessionConfig.permission_policy` folded with this
+//! branch's dispatched `permission/changed` events. The user's command rules,
+//! read through the Session's `CommandRulesHost` on each decision, deny or
+//! approve commands of process-starting calls. A file read or write reads the
+//! Session's `fileAccessFacts` service, which resolves the workspace, system,
+//! owned and grant facts; without that service a write keeps the
+//! workspace-only rule and a read the preset rule.
 use crate::{
+    file_access::FileAccessFacts,
     host::{HostError, HostFuture},
-    session_grants::{SessionGrantsHost, resolve_grant_path},
-    workspace_tools::files::canonical_prefix,
+    host_platform::HostPlatform,
+    workspace_tools::files::{canonical_prefix, resolve_path},
 };
 use dim_agent_runtime::{
-    AgentError, Delivery, Dispatcher, Names, SessionConfig, StateCell, Timeline,
+    AgentError, Delivery, Dispatcher, Names, SessionConfig, SessionIdentity, StateCell, Timeline,
 };
 use dim_agent_types::{
     AgentEvent, ApprovalCallData, COMMAND_SEPARATORS, CommandMatch, CommandRule,
@@ -82,42 +84,46 @@ pub struct Permission {
     timeline: Arc<Timeline>,
     state: Arc<StateCell<PermissionState>>,
     rules: Arc<CommandRulesHost>,
-    /// Absent compositions have no grant source; every Ask stays an Ask.
-    grants: Option<Arc<SessionGrantsHost>>,
-    config: Arc<SessionConfig>,
+    /// Held for reads after publication: the optional facts and platform are
+    /// looked up at decision time, never while the part loads.
+    ctx: Ctx,
+    facts: Key<FileAccessFacts>,
+    platform: Key<HostPlatform>,
+    session_id: String,
+    cwd: PathBuf,
     inner: Mutex<Inner>,
 }
 impl Permission {
     /// Decides with the policy dispatched when the decision is made and, for a
-    /// command call, the rules read now. Workspace writes resolve their target
-    /// before sampling that policy. Cancelled reads stop admission.
+    /// command call, the rules read now. A file call resolves its target before
+    /// sampling that policy. Cancelled reads stop admission.
     pub async fn decide(
         &self,
         call: &ApprovalCallData,
         risk: Option<&str>,
         cancel: &CancellationToken,
     ) -> Result<Decision, HostError> {
-        let write_target = if matches!(Risk::of(risk), Risk::Write)
-            && self.state.get().policy.preset == PermissionPreset::WorkspaceWrite
-            && let Some(path) = call.input.get("path").and_then(|path| path.as_str())
-            && std::path::Path::new(path).is_absolute()
-        {
-            let cwd = PathBuf::from(&self.config.cwd);
-            let path = PathBuf::from(path);
-            let target = tokio::task::spawn_blocking(move || {
-                let workspace = std::fs::canonicalize(&cwd).map_err(|error| {
-                    format!("Failed to resolve workspace {}: {error}", cwd.display())
-                })?;
-                canonical_prefix(path).map(|target| (workspace, target))
-            });
-            Some(tokio::select! {
-                result = target => result.map_err(|error| HostError::failed(error.to_string()))?,
-                _ = cancel.cancelled() => return Err(HostError::Cancelled("Tool execution cancelled.".into())),
+        let category = Risk::of(risk);
+        let write = category == Risk::Write;
+        let home = (write || category == Risk::Read)
+            .then(|| {
+                self.ctx
+                    .get_at(&self.platform)
+                    .map(|platform| platform.home.clone())
             })
-        } else {
-            None
-        };
-        let command = match (Risk::of(risk), call.input.get("command")) {
+            .flatten();
+        let read_facts = (category == Risk::Read)
+            .then(|| self.ctx.get_at(&self.facts))
+            .flatten();
+        let path = call
+            .input
+            .get("path")
+            .and_then(|path| path.as_str())
+            .filter(|path| !path.is_empty());
+        let target = self
+            .resolve_target(category, path, home, read_facts.is_some(), cancel)
+            .await?;
+        let command = match (category, call.input.get("command")) {
             (Risk::Execute, Some(serde_json::Value::String(command))) => Some(command.as_str()),
             _ => None,
         };
@@ -128,9 +134,6 @@ impl Permission {
             },
             None => None,
         };
-        let grant_path = matches!(Risk::of(risk), Risk::Read | Risk::Write)
-            .then(|| call.input.get("path").and_then(|path| path.as_str()))
-            .flatten();
         let policy = self.state.get().policy;
         let name = &call.name;
         if policy.disallowed_tools.contains(name) {
@@ -138,34 +141,121 @@ impl Permission {
                 reason: format!("Tool `{name}` is disallowed by the permission policy"),
             });
         }
-        if policy.preset == PermissionPreset::WorkspaceWrite
-            && matches!(Risk::of(risk), Risk::Write)
-        {
-            let decision = match write_target {
-                Some(Ok((workspace, target))) if target.starts_with(&workspace) => {
-                    decide(&policy, name, risk)
+        if write && policy.preset != PermissionPreset::FullAccess {
+            let facts = self.ctx.get_at(&self.facts);
+            if let (Some(Ok((_, target))), Some(facts)) = (&target, facts) {
+                let facts = tokio::select! {
+                    result = facts.0.facts(&self.session_id, policy.preset, target, GrantMode::Write) => result,
+                    _ = cancel.cancelled() => return Err(HostError::Cancelled("Tool execution cancelled.".into())),
+                };
+                let facts = match facts {
+                    Ok(facts) => facts,
+                    Err(HostError::Cancelled(reason)) => {
+                        return Err(HostError::Cancelled(reason));
+                    }
+                    Err(error) => {
+                        return Ok(Decision::Deny {
+                            reason: format!("File access facts could not be read: {error}"),
+                        });
+                    }
+                };
+                let preset = match policy.preset {
+                    PermissionPreset::ReadOnly => "read-only",
+                    PermissionPreset::WorkspaceWrite => "workspace-write",
+                    PermissionPreset::FullAccess => unreachable!("full-access skips the facts"),
+                };
+                if facts.system {
+                    return Ok(Decision::Deny {
+                        reason: format!(
+                            "Writing to a system path is not allowed by the {preset} preset"
+                        ),
+                    });
                 }
-                Some(Ok((_, target))) => Decision::Ask {
+                if facts.owned {
+                    return Ok(Decision::Deny {
+                        reason: format!(
+                            "Writing to a session-owned file is not allowed by the {preset} preset"
+                        ),
+                    });
+                }
+                if policy.preset == PermissionPreset::WorkspaceWrite {
+                    if facts.workspace {
+                        return Ok(decide(&policy, name, risk));
+                    }
+                    if facts.grant {
+                        return Ok(Decision::Allow);
+                    }
+                    return Ok(Decision::Ask {
+                        reason: format!(
+                            "Writing outside the session workspace requires approval: {}",
+                            target.display()
+                        ),
+                    });
+                }
+            } else if policy.preset == PermissionPreset::WorkspaceWrite {
+                return Ok(match target {
+                    Some(Ok((workspace, target))) if target.starts_with(&workspace) => {
+                        decide(&policy, name, risk)
+                    }
+                    Some(Ok((_, target))) => Decision::Ask {
+                        reason: format!(
+                            "Writing outside the session workspace requires approval: {}",
+                            target.display()
+                        ),
+                    },
+                    Some(Err(reason)) => Decision::Deny { reason },
+                    None => Decision::Ask {
+                        reason:
+                            "A file write without a verified workspace target requires approval"
+                                .into(),
+                    },
+                });
+            }
+        }
+        if category == Risk::Read
+            && policy.preset != PermissionPreset::FullAccess
+            && path.is_some()
+            && let Some(facts) = &read_facts
+        {
+            let target = match &target {
+                Some(Ok((_, target))) => target,
+                Some(Err(reason)) => {
+                    return Ok(Decision::Deny {
+                        reason: reason.clone(),
+                    });
+                }
+                None => {
+                    return Ok(Decision::Deny {
+                        reason: "A file read without a resolved target cannot be allowed".into(),
+                    });
+                }
+            };
+            let facts = tokio::select! {
+                result = facts.0.facts(&self.session_id, policy.preset, target, GrantMode::Read) => result,
+                _ = cancel.cancelled() => return Err(HostError::Cancelled("Tool execution cancelled.".into())),
+            };
+            let facts = match facts {
+                Ok(facts) => facts,
+                Err(HostError::Cancelled(reason)) => {
+                    return Err(HostError::Cancelled(reason));
+                }
+                Err(error) => {
+                    return Ok(Decision::Deny {
+                        reason: format!("File access facts could not be read: {error}"),
+                    });
+                }
+            };
+            if !(facts.workspace || facts.system || facts.owned || facts.grant) {
+                return Ok(Decision::Ask {
                     reason: format!(
-                        "Writing outside the session workspace requires approval: {}",
+                        "Reading outside the session workspace requires approval: {}",
                         target.display()
                     ),
-                },
-                Some(Err(reason)) => Decision::Deny { reason },
-                None => Decision::Ask {
-                    reason: "A file write without a verified workspace target requires approval"
-                        .into(),
-                },
-            };
-            return self
-                .apply_grant(decision, Risk::Write, grant_path, cancel)
-                .await;
+                });
+            }
         }
         let (Some(command), Some(rules)) = (command, rules) else {
-            let decision = decide(&policy, name, risk);
-            return self
-                .apply_grant(decision, Risk::of(risk), grant_path, cancel)
-                .await;
+            return Ok(decide(&policy, name, risk));
         };
         let rules = match rules {
             Ok(rules) => rules,
@@ -192,7 +282,7 @@ impl Permission {
                 ),
             });
         }
-        let decision = match decide(&policy, name, risk) {
+        Ok(match decide(&policy, name, risk) {
             Decision::Ask { .. }
                 if !command.contains(COMMAND_SEPARATORS)
                     && rules.iter().any(|rule| {
@@ -202,58 +292,55 @@ impl Permission {
                 Decision::Allow
             }
             decision => decision,
-        };
-        self.apply_grant(decision, Risk::of(risk), grant_path, cancel)
-            .await
+        })
     }
 
-    /// Applies a matching Session grant only to an Ask. The target is
-    /// resolved against the Session workspace to the same canonical path the
-    /// grant store holds. A grant read failure denies, as ADR 012 D2
-    /// requires; a cancelled read propagates.
-    async fn apply_grant(
+    /// Resolves the call's file target before admission, like the tool owner
+    /// will: `~`, cwd, `..` and symlinks are settled. `None` means no facts
+    /// query needs a target: the call has no path, no facts service is bound to
+    /// a read, a relative path cannot be resolved without HostPlatform, or the
+    /// preset is full-access.
+    async fn resolve_target(
         &self,
-        decision: Decision,
-        risk: Risk,
+        category: Risk,
         path: Option<&str>,
+        home: Option<PathBuf>,
+        facts: bool,
         cancel: &CancellationToken,
-    ) -> Result<Decision, HostError> {
-        let (Decision::Ask { .. }, Some(path), Some(grants)) = (&decision, path, &self.grants)
-        else {
-            return Ok(decision);
+    ) -> Result<Option<Result<(PathBuf, PathBuf), String>>, HostError> {
+        let resolvable = match category {
+            Risk::Write => {
+                path.is_some_and(|path| home.is_some() || std::path::Path::new(path).is_absolute())
+            }
+            Risk::Read => path.is_some_and(|path| {
+                facts && (home.is_some() || std::path::Path::new(path).is_absolute())
+            }),
+            _ => false,
         };
-        let cwd = PathBuf::from(&self.config.cwd);
-        let path = path.to_owned();
-        let target = tokio::task::spawn_blocking(move || resolve_grant_path(&cwd, &path));
+        let Some(path) = path.filter(|_| resolvable) else {
+            return Ok(None);
+        };
+        if self.state.get().policy.preset == PermissionPreset::FullAccess {
+            return Ok(None);
+        }
+        let (cwd, path) = (self.cwd.clone(), path.to_owned());
+        let target = tokio::task::spawn_blocking(move || {
+            let workspace = std::fs::canonicalize(&cwd).map_err(|error| {
+                format!("Failed to resolve workspace {}: {error}", cwd.display())
+            })?;
+            let target = match home {
+                Some(home) => resolve_path(&cwd, &home, &path),
+                None => canonical_prefix(PathBuf::from(path)),
+            };
+            target.map(|target| (workspace, target))
+        });
         let target = tokio::select! {
             result = target => result.map_err(|error| HostError::failed(error.to_string()))?,
             _ = cancel.cancelled() => return Err(HostError::Cancelled("Tool execution cancelled.".into())),
         };
-        // An unresolvable target cannot match a canonical grant; the base
-        // decision (Ask or Deny) stands.
-        let Ok(target) = target else {
-            return Ok(decision);
-        };
-        let grants = match grants.0.grants(cancel.clone()).await {
-            Ok(grants) => grants,
-            Err(HostError::Cancelled(reason)) => return Err(HostError::Cancelled(reason)),
-            Err(error) => {
-                return Ok(Decision::Deny {
-                    reason: format!("Session grants could not be read: {error}"),
-                });
-            }
-        };
-        let mode = if risk == Risk::Write {
-            GrantMode::Write
-        } else {
-            GrantMode::Read
-        };
-        Ok(if grants.iter().any(|grant| grant.matches(&target, mode)) {
-            Decision::Allow
-        } else {
-            decision
-        })
+        Ok(Some(target))
     }
+
     /// Writes `permission/changed` when `expected` is the last written
     /// version; returns the new version once it is dispatched.
     pub async fn update(
@@ -417,7 +504,9 @@ pub struct PermissionPlugin {
     permission: Key<Permission>,
     config: Key<SessionConfig>,
     rules: Key<CommandRulesHost>,
-    grants: Key<SessionGrantsHost>,
+    facts: Key<FileAccessFacts>,
+    identity: Key<SessionIdentity>,
+    platform: Key<HostPlatform>,
     timeline: Key<Timeline>,
     dispatcher: Key<Dispatcher>,
 }
@@ -428,7 +517,9 @@ impl PermissionPlugin {
             permission: names.key()?,
             config: names.key()?,
             rules: names.key()?,
-            grants: names.key()?,
+            facts: names.key()?,
+            identity: names.key()?,
+            platform: names.key()?,
             timeline: names.key()?,
             dispatcher: names.key()?,
         })
@@ -442,6 +533,7 @@ impl DynPlugin for PermissionPlugin {
         vec![
             self.config.erase(),
             self.rules.erase(),
+            self.identity.erase(),
             self.timeline.erase(),
             self.dispatcher.erase(),
         ]
@@ -450,9 +542,7 @@ impl DynPlugin for PermissionPlugin {
         Box::pin(async move {
             let config = ctx.require_at(&self.config)?;
             let rules = ctx.require_at(&self.rules)?;
-            // A composition without a grants part has no stored grants; its
-            // Ask decisions stay asks.
-            let grants = ctx.get_at(&self.grants);
+            let identity = ctx.require_at(&self.identity)?;
             let timeline = ctx.require_at(&self.timeline)?;
             let dispatcher = ctx.require_at(&self.dispatcher)?;
             let service = Arc::new(Permission {
@@ -462,8 +552,11 @@ impl DynPlugin for PermissionPlugin {
                     policy: config.permission_policy.clone(),
                 })),
                 rules,
-                grants,
-                config,
+                ctx: ctx.clone(),
+                facts: self.facts.clone(),
+                platform: self.platform.clone(),
+                session_id: identity.session_id.clone(),
+                cwd: PathBuf::from(&config.cwd),
                 inner: Mutex::new(Inner::default()),
             });
             let closing = service.clone();

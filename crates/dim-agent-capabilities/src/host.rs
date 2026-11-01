@@ -836,10 +836,12 @@ pub struct SessionFileError {
     pub code: SessionFileErrorCode,
     pub message: String,
 }
-/// `sessionFiles.put`: stores `content` once, read-only, as the file `name`
-/// owned by `session_id`. Cancellation takes effect until the file is
-/// committed; afterwards the reply stands.
-pub trait PutSessionFile: Send + Sync + 'static {
+/// The process service `sessionFiles`, provided by SessionStore: it stores a
+/// Session file and answers which artifacts a Session owns.
+pub trait SessionFilesService: Send + Sync + 'static {
+    /// Stores `content` once, read-only, as the file `name` owned by
+    /// `session_id`. Cancellation takes effect until the file is committed;
+    /// afterwards the reply stands.
     fn put(
         &self,
         session_id: String,
@@ -847,10 +849,19 @@ pub trait PutSessionFile: Send + Sync + 'static {
         content: Vec<u8>,
         cancel: CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Result<StoredSessionFile, SessionFileError>> + Send + '_>>;
+    /// Whether `session_id` owns the artifact at `path`, a resolved absolute
+    /// path: an attachment path lies in the directory of an owned file id
+    /// ([ADR 013](../../../docs/adr/013-command-output-ownership.md) D3). A
+    /// query failure is an error, which denies access.
+    fn owns(
+        &self,
+        session_id: String,
+        path: std::path::PathBuf,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, SessionFileError>> + Send + '_>>;
 }
 /// The process service `sessionFiles`, provided by SessionStore, so that its
 /// consumers name no App Server type.
-pub struct SessionFilesHost(pub Arc<dyn PutSessionFile>);
+pub struct SessionFilesHost(pub Arc<dyn SessionFilesService>);
 
 pub struct IdentityContext;
 impl PrepareContext for IdentityContext {

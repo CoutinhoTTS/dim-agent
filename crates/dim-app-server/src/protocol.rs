@@ -240,6 +240,7 @@ pub const WEB_MANAGEMENT_METHODS: &[&str] = &[
     "collaboration.set_model_policy",
     "host.exec_shell.get",
     "host.exec_shell.update",
+    "host.execution.backend",
     "mcp.catalog",
     "mcp.configuration",
     "mcp.inspect",

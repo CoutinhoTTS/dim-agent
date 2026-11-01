@@ -72,7 +72,7 @@ Green parts are new and orange-bordered parts are changed. Each new plugin part 
 | Hooks | Configuration (`hooks`, `hooks-projects` and `hooks-plugins` Settings sources, `hooks.*` management methods and plugin `register`/`withdraw`/`plugins()`, `HookSources` port) in App Server | Hook documents (user, project and plugin); runner; a submit check registered with the Session's `submitChecks`, which the operator-input entries call (`UserPromptSubmit`) | advice registered with Permission (`PreToolUse`); `PermissionRequest` answered through Approval; `PostToolUse`, `PostToolUseFailure`, `Stop`, `SessionStart`, `Notification` from the Dispatcher | Rules apply to a Session; execution happens in a branch |
 | ShellInput | — | `shell.*` Session methods; runs in the Session's workspace and writes its input | — | Commands belong to the Session |
 | Attachments | — | `attachment.put`; Session files through SessionStore | — | Attachments are Session data |
-| SessionGrants | — | `session.grants.add/remove/list/lookup`; grants stored by SessionStore and read by Permission | — | A grant belongs to exactly one Session |
+| SessionGrants | — | `session.grants.add/remove`; grants stored by SessionStore and read by Permission | — | A grant belongs to exactly one Session |
 | Web | — | `web_search`, `web_fetch` tools | — | No state shared across Sessions |
 | SessionTitle | — | Observes the adoption (`input/applied`) of the first user input through the Session broadcast; `session.rename`; title stored by SessionStore | — | The title belongs to the Session |
 | **Withdrawn (Notifications withdrawn).** Notifications | — | Observes the Session broadcast; `notify` tool | — | Triggers are the Session's events |
@@ -342,7 +342,7 @@ The table in [§3](#3-integration-by-existing-mechanisms) is exhaustive. A new p
 
 ### 6.3 Multiple nodes
 
-rutis nodes connect through connection rows: a connection hands a channel to a rutis session, and the two kernels greet each other with their ids (`LocalId`). A session exports every process-wide shared name to its far end and announces its listener names, so events reach listeners at either end; a plugin runs on the far end as the loader row `<row>:<plugin>`, where `<row>` is the connection's row. rutis-host's `dial` and `listen` rows are such connections; Dim uses none yet ([rutis 0.19 migration](https://github.com/arcships/rutis/blob/v0.19.2/docs/migration-0.19.en.md), [#5](https://github.com/arcships/dim/issues/5)).
+rutis nodes connect through connection rows: a connection hands a channel to a rutis session, and the two kernels greet each other with their ids (`LocalId`). A session exports every process-wide shared name to its far end and announces its listener names, so events reach listeners at either end; a plugin runs on the far end as the loader row `<row>:<plugin>`, where `<row>` is the connection's row. rutis-host's `dial` and `listen` rows are such connections; Dim uses none yet ([rutis 0.19 migration](https://github.com/arcships/rutis/blob/v0.19.3/docs/migration-0.19.en.md), [#5](https://github.com/arcships/dim/issues/5)).
 
 | Rule | Content |
 | --- | --- |

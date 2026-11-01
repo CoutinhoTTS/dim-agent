@@ -54,6 +54,12 @@ keeps the boundary it started with. Shell and runtime discovery stay outside the
 
 ## Platform bindings
 
+`HostPlatform` captures the fixed platform-roots list below when it mounts. The sandbox binds
+the installed roots, and the `FileAccessFacts` service reads the same list as its system fact
+([ADR 014](../adr/014-file-access-facts.md) D1), so the fact holds with the sandbox off. The
+developer directory and git's global configuration files are per-process additions and are not
+facts.
+
 ### macOS
 
 `/usr/bin/sandbox-exec` with a `HostPlatform`-generated Seatbelt profile: deny by default, allow
@@ -91,7 +97,8 @@ file, not as a subtree, because git's credential store also reads `credentials` 
 ungranted. `include.path` and `includeIf` targets elsewhere in the home are not granted, so git
 fails with `Operation not permitted`; a `core.excludesFile` or `core.attributesFile` elsewhere
 draws a warning and is not applied. Reads of the home are not the model's secret boundary: the
-`read` tool is path-independent and runs without approval under workspace-write
+`read` tool asks the user for a home path through [ADR 014's facts](../adr/014-file-access-facts.md)
+rather than relying on the sandbox
 ([session files §11.2](appserver/session-files.md#112-requirement-for-path-scoped-file-access)),
 and this is a narrow tool-configuration grant.
 
@@ -157,6 +164,13 @@ A port that is missing or a source that cannot be read fails preparation as
 without a backend fails as `isolation_unavailable` — on Windows always, on Linux when bwrap is not
 on the captured `PATH`. Nothing starts a payload at a weaker boundary; there is no implicit
 fallback. A denied write or a refused socket reaches the command as an ordinary error.
+
+The same backend state is readable before a process starts. `HostPlatform::sandbox_backend()`
+reports `Available`, or `Unavailable` with the reason the preparation failure would use; the App
+Server's `ExecutionBackend` part exposes it as `host.execution.backend` to the Execution row. The
+Linux answer comes from the same captured-`PATH` bubblewrap resolution preparation uses, so a host
+that reports the reason cannot start a different boundary. ADR 010 D1 keeps the preparation failure
+as the enforcement; the row only names it earlier.
 
 ## Visibility
 

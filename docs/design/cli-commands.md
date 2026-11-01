@@ -87,6 +87,7 @@ sandbox is in `/settings > Execution`; the sandbox is not another Permission pre
 ```text
 Settings > Execution
   Applies to new processes and persistent shells.
+  Sandbox is unavailable on this host: <reason>   shown only when the host has no backend
   Sandbox             off  >                    toggle off | on
   Network             off  >                    ignored while Sandbox is off, and shown as
                                                 "off (ignored while Sandbox is off)"
@@ -96,7 +97,12 @@ Settings > Execution
 ```
 
 Opening the panel reads `{source: "execution", scope: "user"}` and keeps the returned revision with
-the draft, not as a user-entered field. ↑↓ move, Enter or Space toggles the selected row, Esc
+the draft, not as a user-entered field. When the daemon advertises `host.execution.backend`, the
+panel also reads `{}` from it: `{available: true}` or `{available: false, reason}`. The reason is
+the text the next process start would use; the panel shows it and leaves both switches editable.
+The Web Permissions page reads the same method and shows the same reason. Neither client infers the
+platform or the backend from its own environment.
+↑↓ move, Enter or Space toggles the selected row, Esc
 closes the panel and asks before discarding edits. Save submits both switches with the inspected
 revision; Reset to defaults asks for confirmation, then writes both switches off with that
 revision. Neither action retries a stale revision automatically: a conflict keeps the draft and
@@ -106,15 +112,22 @@ Sandbox is turned on can be read. Loading disables mutation, and a daemon withou
 methods displays an unsupported-daemon error instead of falling back to the host.
 
 The row reports the stored switches, not the boundary of a running command: a running process,
-including a persistent shell, keeps the boundary it started with. A platform without a sandbox
-backend is reported by the next process start as `isolation_unavailable`; showing that state on
-the row is [#691](https://github.com/arcships/dim/issues/691)'s item.
+including a persistent shell, keeps the boundary it started with. On a platform with no sandbox
+backend — Windows, or Linux without `bwrap` — the row names the reason, and the next process start
+still fails as `isolation_unavailable`; showing the state does not weaken that refusal.
+
+The switches are stored configuration. A model that can write the source — under `full-access`, or
+through an approved outside write under `workspace-write` — changes the value for the next process.
+That write has the same authority as changing the row, creates no grant and does not change a
+running process; a user who wants a boundary does not approve such a write
+([ADR 011 D2](../adr/011-execution-settings.md)).
 
 Verification covers what the row shows and what the daemon does with it: the read, the toggle that
-keeps the stored Network value visible while Sandbox is off, the CAS conflict, and a save followed
-by `exec` under the new boundary, where a write outside the workspace fails while the sandbox is on
-and succeeds once it is off. Reset, reload after an external edit, the unsupported-daemon branch
-and a persistent shell started before the change have no flow coverage yet.
+keeps the stored Network value visible while Sandbox is off, the CAS conflict, the backend reason,
+and a save followed by `exec` under the new boundary, with Network off and with Network on, where a
+write outside the workspace fails while the sandbox is on and succeeds once it is off. Reset,
+reload after an external edit, the unsupported-daemon branch and a persistent shell started before
+the change have no flow coverage yet.
 
 ## Commands
 
@@ -429,15 +442,15 @@ The App Server already owns everything needed to decide tool calls: a branch pre
 at `session.create {permissionPolicy}` and changed with `session.permission.get/update`
 (versioned per branch), and the user's command rules read and replaced with
 `permission.rules`/`permission.set_rules` ([F2](appserver/permission-command-rules.md)).
-Session file grants are stored by the App Server's `session.grants.*` methods under
+Session file grants are stored by the App Server's `session.grants.add/remove` methods under
 [ADR 012](../../adr/012-session-grants.md). The CLI only answered each approval once with `y`.
 This section adds CLI entry points over those contracts and the
 [F2 §5.4](appserver/permission-command-rules.md#54-always-allow-client-flow) client flow.
 
 | Preset | What runs (Permission's existing decision, after `disallowedTools` and deny rules) |
 | --- | --- |
-| `read-only` | Reads and Session tools run; file writes, commands, network and unclassified tools are denied |
-| `workspace-write` | Reads, workspace file writes and Session tools run; outside writes without a matching write grant, commands, network and unclassified tools ask |
+| `read-only` | Reads of the workspace, system roots, Session-owned files and granted paths run, and other reads ask; Session tools run; file writes, commands, network and unclassified tools are denied |
+| `workspace-write` | Those reads run and other reads ask; workspace file writes and Session tools run; writes to system roots or Session-owned files are denied; other outside writes without a matching write grant, commands, network and unclassified tools ask |
 | `full-access` | Every tool call runs without asking |
 
 A deny rule applies under every preset. An allow rule only turns a question into a run for a
@@ -641,7 +654,7 @@ Approval
 
 | Choice | Preset | What runs |
 | --- | --- | --- |
-| Ask | `workspace-write` | Reads and workspace writes run; commands, network, outside writes and unclassified tools ask |
+| Ask | `workspace-write` | Reads of the workspace, system roots, Session-owned files and granted paths run, and other reads ask; workspace writes run; writes to system roots or Session-owned files are denied; commands, network, other outside writes and unclassified tools ask |
 | Full access | `full-access` | Every tool call runs without asking |
 
 Ask is the product default. Enter on the choice already in force closes the menu. Full access
@@ -751,24 +764,27 @@ filter.
 ### "Allow for this session"
 
 For `read`, `write` and `edit` calls with a `path`, the prompt also offers `Allow for this
-session` (ADR 012). The CLI sends the tool's path unchanged to `session.grants.add
-{sessionId, path, kind: "file", mode}`: the mode is `read` for `read` and `write` otherwise.
-The daemon resolves `~`, a relative path, `..` and symlinks against the Session workspace and
-stores the canonical path; a new file is resolved by its parent and final name. The CLI decides
-no path or kind locally.
+session` (ADR 012). Under `read-only` and `workspace-write`, `read` asks for a path outside the
+workspace, system roots, Session-owned files and granted paths, so the action appears for it
+([ADR 014](../../adr/014-file-access-facts.md#d2-read-and-write)). The CLI sends the tool's path
+unchanged to `session.grants.add {sessionId, path, kind: "file", mode}`: the mode is `read` for
+`read` and `write` otherwise. The daemon resolves `~`, a relative path, `..` and symlinks against
+the Session workspace and stores the canonical path; a new file is resolved by its parent and
+final name. The CLI decides no path or kind locally.
 
 ```text
-[approval] write: Writing outside the session workspace requires approval: /home/user/.zshrc
-  path: /home/user/.zshrc
+[approval] read: Reading outside the session workspace requires approval: /home/user/.ssh/config
+  path: /home/user/.ssh/config
 › Allow once   Allow for this session   Reject   Full access
 ```
 
 `Allow for this session` writes the grant first, then answers `approval.respond allow`; the
 recheck sees the grant. If the write fails, the CLI shows `Grant not saved: <error>` and still
-allows the call once, as the user asked, so no failed store write blocks the turn. This prompt
-does not list or remove grants; `session.grants.remove/list/lookup` are the contract for a
-client that does. A grant is consulted only at the `Ask` step, a `read` grant never authorizes a
-write, and a fork starts without the source's grants.
+allows the call once, as the user asked, so no failed store write blocks the turn. A read
+outside the facts in a non-interactive run (`exec`) is denied with the ordinary refusal and exit
+code 3; no new error path is added. This prompt does not list or remove grants; revocation has
+no client surface yet. A grant is consulted only at the `Ask` step, a write grant also admits a
+read, a `read` grant never authorizes a write, and a fork starts without the source's grants.
 
 ### Decisions
 
