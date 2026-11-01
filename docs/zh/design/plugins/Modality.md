@@ -36,7 +36,7 @@ flowchart LR
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-所有依赖都是同一作用域的进程服务（[ADR 002 D3](../../adr/002-plugin-scope.md)）。适配器查找是 [#40](https://github.com/arcships/dim/issues/40) 在 [#19](https://github.com/arcships/dim/issues/19) 中决定的按任务解析；它所需的运行时机制尚未交付（[#861](https://github.com/arcships/dim/issues/861)）。本设计依赖该查找，不重复定义适配器如何注册与发现。**在它落地之前**，本设计的回退是：把每个进程作用域的 `modalityAdapter` 服务按名称声明为依赖。该收集会让 Modality 受全部适配器门控：一个适配器 Pending 或 Failed 就使 Modality Pending，适配器重载会重载 Modality，移除一个适配器会影响所有操作。凡涉及“按任务解析适配器”的陈述（§4 的表、附录 B 与流程测试 8）描述的是 [#861](https://github.com/arcships/dim/issues/861) 落地后的目标设计；本页其余陈述今天即成立。Rpc 按调用在 `managementMethods` 中查找 Modality 的 `modality` 命名空间，不随它重载（[方法 §3.2](../contracts/session-boundary.md#32-管理方法)）。没有 Session 或分支插件依赖 Modality。
+所有依赖都是同一作用域的进程服务（[ADR 002 D3](../../adr/002-plugin-scope.md)）。适配器查找是 [#40](https://github.com/arcships/dim/issues/40) 在 [#19](https://github.com/arcships/dim/issues/19) 中决定的按任务解析；它所需的运行时机制尚未交付（[#861](https://github.com/arcships/dim/issues/861)）。本设计依赖该查找，不重复定义适配器如何注册与发现。**在它落地之前**，本设计的回退是：把每个进程作用域的 `modalityAdapter` 服务按名称声明为依赖。该收集会让 Modality 受全部适配器门控：一个适配器 Pending 或 Failed 就使 Modality Pending，适配器重载会重载 Modality，移除一个适配器会影响所有操作。图像切片只有一个进程 `modalityAdapter` 服务，并在每次调用时读取它而不声明依赖：它缺失时只有适配器操作不可用，不产生门控与重载关系，这正是单个适配器的目标解析形态；按适配器名枚举多个适配器仍需 [#861](https://github.com/arcships/dim/issues/861)。凡涉及“按任务解析适配器”的陈述（§4 的表、附录 B 与流程测试 8）描述的是 [#861](https://github.com/arcships/dim/issues/861) 落地后的目标设计；本页其余陈述今天即成立。Rpc 按调用在 `managementMethods` 中查找 Modality 的 `modality` 命名空间，不随它重载（[方法 §3.2](../contracts/session-boundary.md#32-管理方法)）。没有 Session 或分支插件依赖 Modality。
 
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
@@ -277,6 +277,7 @@ Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列�
 - **现有机制。** 用 `Keyed` 声明每个适配器会在每个提供方 Active 之前门控使用方；按名称收集服务同样如此。可选的按调用读取（`Ctx::get`、`Ctx::get_at`）不门控，Rpc 与 `AgentIndex` 就以这种方式读取 `managementMethods`、`sessions` 与 `auxiliaryModel`；但目录把一个名字映射到每个副本的一个 key，桥接插件的 `provides` 条目也不带按提供方的实例 key，因此同一名字的多个提供方无法按各自的适配器名解析，使用方也无法枚举当前哪些可用。注册表（`managementMethods`、`toolRegistry`）把贡献交给所有者，但它们不是服务：适配器将不得不依赖一个表所有者并注册回调，这颠倒了声明依赖，也重复了 `modalityAdapter` 契约。
 - **需要的能力。** 按提供方标识（适配器名）对进程作用域提供方做按调用解析，既不门控使用方，也不在两个方向上建立重载关系：缺失、Pending、Failed 或正在重载的提供方在当次调用中就是解析不到，下一次调用在它回来时看到它。等价形态也可以接受，例如每个已配置提供方使用一个单独登记的名字、由所有者按调用可选读取，只要所有者能在提供方出现或消失时无需重载就枚举当前可用的提供方。
 - **顺序影响。** 适配器的卸载/重载只影响它的操作；Modality 不重载，也没有 Timeline 或批次改动；在途任务按 A.6 结算。
+- **首个切片。** 在该能力落地之前，图像切片每次调用读取单个进程 `modalityAdapter` 服务（`Ctx::get`），不声明适配器依赖：缺失时只有适配器操作不可用，不产生门控与重载关系。这是单个适配器的目标解析形态；按适配器名枚举多个适配器并按名收集仍需本 issue。
 - **所有者/issue。** 运行时/装配，[#861](https://github.com/arcships/dim/issues/861)。[#40](https://github.com/arcships/dim/issues/40) 已在 [#19](https://github.com/arcships/dim/issues/19) 中决定使用方一侧并已关闭；Modality 只声明该依赖。
 
 ### 9.2 Provider 只读契约
@@ -382,7 +383,7 @@ Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列�
 }
 ```
 
-- `revision` 是 `modality` 设置文档的 revision；只有 `configure` 使用它。
+- `revision` 是 `modality` 设置文档的 revision；一次 CAS 覆盖该文档中的全部操作 key，因此对某个操作的 `configure` 也会让持有其他操作草稿的客户端失效。只有 `configure` 使用它。
 - `default` 是已持久化的选择或 `null`。模型不再可选、或没有可用适配器服务它时（对 `image.understand`，是它不是可选的视觉模型时），`available` 为 `false`，`reason` 说明原因。
 - `effective` 是任务或使用方现在会使用的模型。默认值可用时就是默认值。`default` 为 `null` 时它是自动解析：Provider 的全局默认选择可选且服务该操作时用它，否则用 Provider 自身自动选择顺序中第一个可选的、服务该操作的模型；`source` 为 `"automatic"`。不可用的默认值给出 `effective: null`，从不替换成别的模型。
 - `options` 列出服务该操作且 Provider 可选的模型：对 `generate`、`edit` 与 `enhance`，由可用适配器服务；对 `image.understand`，由可选的视觉模型服务。适配器的 `operations` 决定它服务哪些模型；Provider 的 `modalityCapabilities` 声明对这些操作不是路由输入，`image.understand` 需要 Provider 的 `vision` 能力。当前默认值不再可选时也会列出，并标注原因。所有者读取时从 Provider 的只读契约（#790）与可用适配器计算它们；客户端不自行推导。选项只带 `{providerId, modelId, available, reason?}`：#790 返回 id 与能力，不返回展示名，因此客户端按 `{providerId, modelId}` 从它已有的 Provider 列表或目录读取中并入名字，取不到名字时显示 id。
