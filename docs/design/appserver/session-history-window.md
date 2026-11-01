@@ -182,7 +182,7 @@ the event and byte limits like any other window.
 | --- | --- |
 | `events` | Unchanged form and ascending order: the branch's own events, filtered as today. Every page starts and ends on a batch boundary |
 | `through` | As today: the watermark this read is pinned to |
-| `nextAfter` | Forward: as today, the last returned sequence (raw, before filtering), or `after` when the page is empty; the client passes it back as `after`. Backward: the page's top, that is its last event's sequence, or the top boundary when the page is empty |
+| `nextAfter` | Forward: as today, the last returned sequence (raw, before filtering), or `after` when the page is empty; the client passes it back as `after`. Backward: the same last returned sequence, or `through` when the page is empty; a backward read pages with `nextBefore` |
 | `done` | The end of the read in its direction: forward, `nextAfter == through` (unchanged); backward, the page reached the window start |
 | `nextBefore?` | Backward reads: the sequence of the first returned event. Pass it back as `before` to continue, also after `done`, to read below the window. Absent when the page is empty |
 | `turnStart?` | `latestTurn` reads only: the sequence of the newest `turn/start` at or below `through`. Absent when the branch has none and when the request is not a window read |
@@ -201,7 +201,9 @@ the event and byte limits like any other window.
   runs to the end of that batch. Backward: it takes up to `limit` events
   downward from the top and runs to the start of the batch that holds the oldest
   taken event. A page can therefore exceed `limit` by its boundary batch, as
-  forward pages already can.
+  forward pages already can. Only `before` clamps: a `through` inside a batch is
+  rejected (§4.5 row 9), so a pinned watermark never silently loses the events
+  between the batch end below it and itself.
 - A truncated window is a suffix: `done` is false and `nextBefore` is behind
   `turnStart` or inside the turn. The client shows what it has and decides
   whether to load the rest. A window can begin inside a turn, inside a step,
@@ -236,7 +238,7 @@ the existing `-32602 invalid_params`.
 | 9 | `through` is inside a batch | storage error (unchanged) |
 | 10 | `after` is above `through`, or `after` is inside a batch | `invalid` (unchanged) |
 | 11 | `before` is above `through` | `invalid` |
-| 12 | `latestTurn` is true and the newest batch of the page encodes to more than the transport frame minus 64 KiB | `-32000 history_too_large`: the reply cannot be framed |
+| 12 | the newest batch of a window page encodes to more than the transport frame minus 64 KiB | `-32000 history_too_large`: the reply cannot be framed |
 
 Every other combination is accepted: `latestTurn` with or without `through`;
 `latestTurn` with or without `before`; `before` with or without `latestTurn`;
