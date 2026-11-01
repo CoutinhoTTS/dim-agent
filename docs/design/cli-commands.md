@@ -232,9 +232,13 @@ Help/version and argument errors do not start the daemon.
 ### Daemon startup failure
 
 All entries that start a daemon share the client startup in `connect_inner`.
-Before spawning, the CLI removes `<native home>/dimcode.sqlite.startup`. When
-the spawned daemon exits before the client connects, the CLI reads that note
-(at most 16 KiB, a private regular file owned by the user), requires the
+The daemon is detached and its stderr is the append-only `daemon.log`, so a
+per-launch note is the only channel that does not parse history or depend on a
+pipe the client may close. Before spawning, the CLI removes
+`<native home>/dimcode.sqlite.startup`. When the spawned daemon exits before the
+client connects, the CLI reads that note (at most 16 KiB; it validates only that
+it is a regular file owned by the current user with no group/other permissions,
+inside the private home), requires the
 `dimcode-startup-failure v1 pid=<child pid>` header, removes control
 characters other than newline and tab from the body, and returns it as the
 command's error followed by `Details: <native home>/rust/daemon.log`. The
