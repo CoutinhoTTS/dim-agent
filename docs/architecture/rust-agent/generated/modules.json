@@ -9723,6 +9723,17 @@
     },
     {
       "from": "dim_agent_capabilities::permission",
+      "to": "dim_agent_runtime::registrations",
+      "references": [
+        "path Registration",
+        "path Registrations",
+        "path Registrations::default",
+        "use dim_agent_runtime::Registration",
+        "use dim_agent_runtime::Registrations"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::permission",
       "to": "dim_agent_runtime::state",
       "references": [
         "path StateCell",
@@ -9736,9 +9747,11 @@
       "references": [
         "path AgentEvent",
         "path ApprovalCallData",
+        "path BranchSource",
         "path EventKind::PermissionChanged",
         "use dim_agent_types::AgentEvent",
         "use dim_agent_types::ApprovalCallData",
+        "use dim_agent_types::BranchSource",
         "use dim_agent_types::EventKind"
       ]
     },
