@@ -622,11 +622,21 @@ pub async fn apply(
                 ));
             }
             let catalog = catalog(client, &cwd).await.map_err(Failure::Refused)?;
-            if catalog.servers.iter().any(|server| server.id == entry.id) {
-                return Err(Failure::Refused(tf(
-                    "{id} is already in mcp list; remove it first or choose another id.",
-                    &[("id", &safe_line(&entry.id))],
-                )));
+            if let Some(existing) = catalog.servers.iter().find(|server| server.id == entry.id) {
+                // A plugin entry is removed through its plugin, so the only
+                // step left is another id.
+                let message = if existing.source == "plugin" {
+                    tf(
+                        "{id} is already in mcp list; choose another id, or change it through its plugin.",
+                        &[("id", &safe_line(&entry.id))],
+                    )
+                } else {
+                    tf(
+                        "{id} is already in mcp list; remove it first or choose another id.",
+                        &[("id", &safe_line(&entry.id))],
+                    )
+                };
+                return Err(Failure::Refused(message));
             }
             let expected = if entry.source == "project" {
                 catalog.project_revision.ok_or_else(|| {
@@ -883,6 +893,10 @@ pub(super) async fn view(
     available: &[ActionKind],
 ) -> ManagementView {
     let cwd = cwd.to_string_lossy().into_owned();
+    // A daemon older than `mcp.configuration` lists what its catalog carries:
+    // no entry detail and no edit, and no entry is invalid for the read it
+    // cannot serve.
+    let configurations = client.supports(&["mcp.configuration"]);
     let mut groups = Groups::default();
     for source in ["user", "project", "plugin"] {
         for server in catalog
@@ -894,8 +908,21 @@ pub(super) async fn view(
             let mut states = Vec::new();
             let mut lines = Vec::new();
             let mut document = None;
-            match editable(client, &cwd, server).await {
-                Ok(edition) => match Configuration::decode(&edition.configuration) {
+            let edition = if configurations {
+                Some(editable(client, &cwd, server).await)
+            } else {
+                None
+            };
+            match edition {
+                // The daemon cannot read a configuration: the entry is listed
+                // as the catalog reports it.
+                None => lines.push(header(
+                    &server.source,
+                    &server.transport,
+                    server.auth.as_ref(),
+                    None,
+                )),
+                Some(Ok(edition)) => match Configuration::decode(&edition.configuration) {
                     Ok(configuration) => {
                         lines.push(header(
                             &server.source,
@@ -934,7 +961,7 @@ pub(super) async fn view(
                 },
                 // A failed configuration read leaves the entry listed with
                 // what the catalog says, and no edit.
-                Err(error) => {
+                Some(Err(error)) => {
                     states.push(EntryState::Invalid);
                     lines.push(header(
                         &server.source,

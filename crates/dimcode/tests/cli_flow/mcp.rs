@@ -57,6 +57,15 @@ fn metrics() -> Value {
     }})
 }
 
+/// The same entry after a patch removed its OAuth settings: the stored
+/// header is still reported.
+fn metrics_without_oauth() -> Value {
+    json!({"revision": "project:2", "enabled": false, "configuration": {
+        "type": "http", "endpoint": "https://metrics.example.com",
+        "headerNames": ["X-Key"], "authConfigured": false, "oauthConfigured": false,
+    }})
+}
+
 fn notes() -> Value {
     json!({"enabled": true, "configuration": {
         "type": "stdio", "command": "notes", "argsCount": 0, "cwd": "/w", "envNames": [],
@@ -339,6 +348,169 @@ fn tui_mcp_panel_edits_and_creates_entries() {
     }
 }
 
+/// A remote entry's edit seed names no stored value: the endpoint, the
+/// header names and the stored values stay out of it. A patch that changes
+/// another field keeps the stored header, which the next read reports.
+#[test]
+fn tui_mcp_panel_seeds_a_remote_patch_without_stored_values() {
+    let home = Home::new();
+    let script = editor(
+        &home,
+        "editor.sh",
+        "seed=\"$(cat \"$1\")\"\n\
+         case \"$seed\" in *metrics.example.com*|*X-Key*) exit 1;; esac\n\
+         case \"$seed\" in *'\"headers\": {}'*) ;; *) exit 1;; esac\n\
+         case \"$seed\" in *'\"oauth\"'*) ;; *) exit 1;; esac\n\
+         printf '%s' '{\"oauth\":{\"action\":\"remove\"}}' > \"$1\"",
+    );
+    let (shown, wait_shown) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        started(wire);
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        area(wire, catalog(true, None), docs(true));
+        // Ctrl+E writes the patch the seed produced at the read's revision.
+        source(wire);
+        let request = wire.read("mcp.update");
+        assert_eq!(
+            request["params"],
+            json!({"cwd": "/workspace", "id": "metrics", "source": "project",
+                   "expectedVersion": "project:1",
+                   "patch": {"oauth": {"action": "remove"}}})
+        );
+        wire.reply(&request, json!({}));
+        // The read after the write reports the settings the patch removed
+        // and the stored header it left alone.
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, catalog(true, None));
+        configuration(wire, "docs", "user", docs(true));
+        configuration(wire, "metrics", "project", metrics_without_oauth());
+        configuration(wire, "notes", "plugin", notes());
+        wire.hold();
+    });
+    let mut command = home.command();
+    command.env_remove("VISUAL").env("EDITOR", &script);
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/mcp\r");
+    terminal.until("Executable: npx");
+    terminal.raw(b"\x1b[B");
+    terminal.until("OAuth: configured (client ID client-1)");
+    terminal.raw(b"\x05");
+    // The read after the write reports the OAuth settings the patch removed.
+    terminal.until("OAuth: not configured");
+    // The nearest header line before the entry's OAuth line is the one this
+    // read reported: the stored header the patch kept.
+    let at = terminal.transcript.rfind("OAuth: not configured").unwrap();
+    let header = terminal.transcript[..at].rfind("Header names:").unwrap();
+    assert!(
+        terminal.transcript[header..].starts_with("Header names: X-Key"),
+        "{}",
+        &terminal.transcript[header..]
+    );
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+/// One entry's configuration read fails: that entry shows the error, and the
+/// entries beside it keep their detail.
+#[test]
+fn tui_mcp_panel_shows_one_entries_failed_configuration_read() {
+    let home = Home::new();
+    let (shown, wait_shown) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        started(wire);
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, catalog(true, None));
+        let request = wire.read("mcp.configuration");
+        assert_eq!(request["params"]["id"], "docs");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"MCP settings are unavailable",
+            "data":{"appError":"mcp_unavailable"}}}));
+        configuration(wire, "metrics", "project", metrics());
+        configuration(wire, "notes", "plugin", notes());
+        wire.hold();
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/mcp\r");
+    // The failed entry is marked, and its error stands under it.
+    terminal.until("invalid");
+    terminal.until("MCP settings are unavailable");
+    // The entry after it kept the detail its own read supplied.
+    terminal.raw(b"\x1b[B");
+    terminal.until("Endpoint: https://metrics.example.com");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+/// A daemon older than `mcp.configuration` lists its entries from the
+/// catalog: no detail, no error, and no entry marked invalid.
+#[test]
+fn tui_mcp_panel_lists_entries_when_the_read_is_absent() {
+    let home = Home::new();
+    let (shown, wait_shown) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["mcp.catalog", "mcp.set_enabled", "mcp.save", "mcp.remove"]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        for _ in 0..2 {
+            let request = wire.read_any();
+            match request["method"].as_str() {
+                Some("account.providers") => wire.reply(&request, json!([])),
+                Some("session.context.usage") => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                    "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+                method => panic!("unexpected request {method:?}"),
+            }
+        }
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, catalog(true, None));
+        // A client that asks anyway is answered as this daemon would.
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            if let Ok(request) = serde_json::from_str::<Value>(&line)
+                && request["method"] == "mcp.configuration"
+            {
+                wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                    "code":-32601,"message":"Unknown method",
+                    "data":{"appError":"unknown_method"}}}));
+            }
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/mcp\r");
+    // The catalog's own line stands for the entry, with nothing under it.
+    terminal.until("user · stdio · signed in");
+    assert!(
+        !terminal.transcript.contains("invalid"),
+        "an absent read marked an entry invalid: {}",
+        terminal.transcript
+    );
+    assert!(
+        !terminal.transcript.contains("Executable:"),
+        "a detail appeared without a read: {}",
+        terminal.transcript
+    );
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
 /// A stale revision writes nothing, says so, reads the area again, and the
 /// next edit opens the stored entry, in both terminal modes.
 #[test]
@@ -616,38 +788,51 @@ fn mcp_add_creates_an_entry_with_the_sources_revision() {
 }
 
 /// An id the catalog already lists is refused before anything is written:
-/// `mcp.save` would replace that entry.
+/// `mcp.save` would replace that entry. The refusal names the step the
+/// existing entry leaves open, which for a plugin entry is another id.
 #[test]
 fn mcp_add_refuses_an_id_the_catalog_lists() {
-    let home = Home::new();
-    let path = home.0.join("entry.json");
-    let mut document = new_entry("user");
-    document["id"] = json!("docs");
-    fs::write(&path, serde_json::to_string(&document).unwrap()).unwrap();
-    let daemon = home.daemon(move |wire| {
-        hello(wire);
-        let request = wire.read("mcp.catalog");
-        wire.reply(&request, cli_catalog());
-        let mut line = String::new();
-        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
-            assert!(
-                !line.contains("mcp.save"),
-                "the refused add wrote: {line:?}"
-            );
-            line.clear();
-        }
-    });
-    let output = home
-        .command()
-        .args(["mcp", "add"])
-        .arg(&path)
-        .output()
-        .unwrap();
-    daemon.join().unwrap();
-    assert_eq!(output.status.code(), Some(1));
-    let error = String::from_utf8_lossy(&output.stderr);
-    assert!(error.contains("docs is already in mcp list"), "{error}");
-    assert!(error.contains(path.to_str().unwrap()), "{error}");
+    for (id, sentence) in [
+        ("docs", "remove it first or choose another id"),
+        (
+            "notes",
+            "choose another id, or change it through its plugin",
+        ),
+    ] {
+        let home = Home::new();
+        let path = home.0.join("entry.json");
+        let mut document = new_entry("user");
+        document["id"] = json!(id);
+        fs::write(&path, serde_json::to_string(&document).unwrap()).unwrap();
+        let daemon = home.daemon(move |wire| {
+            hello(wire);
+            let request = wire.read("mcp.catalog");
+            wire.reply(&request, cli_catalog());
+            let mut line = String::new();
+            while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+                assert!(
+                    !line.contains("mcp.save"),
+                    "the refused add wrote: {line:?}"
+                );
+                line.clear();
+            }
+        });
+        let output = home
+            .command()
+            .args(["mcp", "add"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        daemon.join().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains(&format!("{id} is already in mcp list")),
+            "{error}"
+        );
+        assert!(error.contains(sentence), "{error}");
+        assert!(error.contains(path.to_str().unwrap()), "{error}");
+    }
 }
 
 /// `mcp edit` opens the patch the configuration read seeds, without a

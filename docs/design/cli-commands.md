@@ -615,7 +615,20 @@ it, and `env` or `headers` changes only the keys it names. The seed names the co
 directory, empty `env` and `headers`, and a configured OAuth's reported fields; it never names a
 stored argument, environment value, header value, bearer token or URL, because those are withheld
 or wholesale-replaced. The document carries no transport, since the stored entry's transport is
-fixed.
+fixed. A stdio patch names the command, the working directory and the environment keys it
+changes:
+
+```json
+{"command": "npx", "cwd": "/work", "env": {"TOKEN": "value"}}
+```
+
+A remote patch does the same for the endpoint and the headers. Both are withheld from the seed,
+so a patch that changes them supplies them: an omitted `url` or `headers` key keeps what is
+stored.
+
+```json
+{"url": "https://mcp.example.com/mcp", "headers": {"X-Key": "value"}}
+```
 
 Add writes `mcp.save` with the catalog's source revision — `userRevision`, or `projectRevision`
 for a source of `project` — and refuses an id the catalog already lists, since a save would replace

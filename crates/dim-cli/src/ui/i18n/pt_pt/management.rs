@@ -122,6 +122,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{id} is already in mcp list; remove it first or choose another id." => {
             "{id} já está em mcp list; remova-o primeiro ou escolha outro id."
         }
+        "{id} is already in mcp list; choose another id, or change it through its plugin." => {
+            "{id} já está em mcp list; escolha outro id ou altere-o pelo plugin."
+        }
         "This entry's settings changed since they were read; nothing was written." => {
             "As configurações desta entrada mudaram desde a leitura; nada foi escrito."
         }

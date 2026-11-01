@@ -288,7 +288,10 @@ template has: its id, its source (`user` or `project`) and the definition `mcp.s
 `dimcode mcp set ID PATH` (`-` for stdin) and `dimcode mcp edit ID` write the `mcp.update` patch,
 whose omitted fields keep their stored values, at the revision `mcp.configuration` reported; a
 patch like `{"command": "npx", "cwd": "/work", "env": {"TOKEN": "value"}}` changes those fields
-only. `dimcode mcp remove ID` deletes one entry at its source revision. `dimcode mcp test ID`
+only. A remote entry's patch names the `url` and the `headers` it changes, since the seed
+withholds both: `{"url": "https://mcp.example.com/mcp", "headers": {"X-Key": "value"}}`. An
+omitted `url` or header key keeps the stored one. `dimcode mcp remove ID` deletes one entry at its
+source revision. `dimcode mcp test ID`
 runs the stored entry once and prints the tools the temporary connection found, and `dimcode mcp
 inspect ID` prints the effective configuration and the Session's connections without contacting
 the server. `dimcode mcp disconnect ID` closes the entry's live connections without changing its

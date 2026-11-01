@@ -130,6 +130,7 @@ pub const STRINGS: &[&str] = &[
     "The add document needs a source of user or project.",
     "The add document needs a configuration object.",
     "{id} is already in mcp list; remove it first or choose another id.",
+    "{id} is already in mcp list; choose another id, or change it through its plugin.",
     "This entry's settings changed since they were read; nothing was written.",
     "The MCP entry changed since it was read; nothing was written.",
     "The MCP entries changed since they were read; nothing was written.",

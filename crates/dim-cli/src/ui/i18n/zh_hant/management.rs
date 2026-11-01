@@ -110,6 +110,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{id} is already in mcp list; remove it first or choose another id." => {
             "{id} 已在 mcp list 中；請先移除它或換一個 id。"
         }
+        "{id} is already in mcp list; choose another id, or change it through its plugin." => {
+            "{id} 已在 mcp list 中；請換一個 id，或透過其外掛變更。"
+        }
         "This entry's settings changed since they were read; nothing was written." => {
             "此項目的設定已在讀取後變更；本次沒有寫入。"
         }
