@@ -478,6 +478,7 @@ impl SqliteTimelineStore {
                     !branches.is_empty()
                 });
         }
+        self.db.checkpoint();
     }
     fn commit_prepared(&self, prepared: BTreeMap<String, (Vec<Pending>, Prepared)>) {
         let mut guard = self
@@ -883,6 +884,8 @@ impl SqliteTimelineStore {
             fault();
         }
         tx.commit().map_err(error)?;
+        drop(guard);
+        self.db.checkpoint();
         if released > 0 {
             self.sweep_files.notify_one();
         }
