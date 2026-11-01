@@ -262,7 +262,6 @@ impl HistoryRenderer {
         let mut state = None;
         let mut history = Vec::new();
         let mut compaction = None;
-        let mut streamed_state = None;
         let mut start = 1;
         while start <= through {
             let events = timeline
@@ -302,31 +301,17 @@ impl HistoryRenderer {
                     .unwrap_or(history.len());
                 history.drain(..kept);
             }
-            streamed_state = projected.checkpoint.or(streamed_state);
             compaction = projected.compaction.or(compaction);
             state = Some(projected.state);
             start = end + 1;
         }
         let state = state.unwrap_or_default();
-        let checkpoint = streamed_state.and_then(|streamed| {
-            let event = order
-                .iter()
-                .find(|event| event.id == streamed.resume_event)?;
-            Some(ProjectionCheckpoint {
-                resume: dim_agent_types::TimelinePosition {
-                    branch_id: event.branch_id.clone(),
-                    sequence: event.sequence,
-                },
-                state: streamed.state,
-            })
-        });
         Ok(StreamedContext {
             history,
             configuration: state.configuration,
             prompt: PromptSnapshot::from_checkpoint(&state.prompts).revision,
             ancestry: ancestors.into_iter().map(|(branch, _)| branch).collect(),
             order,
-            checkpoint,
             compaction,
             fallback: false,
         })
@@ -341,7 +326,6 @@ pub struct StreamedContext {
     pub prompt: Option<PromptReference>,
     pub ancestry: Vec<String>,
     pub order: Vec<dim_agent_runtime::PolicyOrderEvent>,
-    pub checkpoint: Option<ProjectionCheckpoint>,
     pub compaction: Option<Arc<AgentEvent>>,
     /// The caller must use the full `rendered_context` path.
     pub fallback: bool,
@@ -355,7 +339,6 @@ impl StreamedContext {
             prompt: None,
             ancestry: Vec::new(),
             order: Vec::new(),
-            checkpoint: None,
             compaction: None,
             fallback: true,
         }
@@ -480,19 +463,11 @@ struct Projection {
     state: ProjectionCheckpointState,
 }
 
-/// One batch of a streaming projection.
-#[derive(Debug, Clone)]
-pub struct StreamedState {
-    pub resume_event: String,
-    pub state: ProjectionCheckpointState,
-}
-
 pub struct ProjectedBatch {
     pub history: Vec<HistoryEntry>,
     pub state: ProjectionCheckpointState,
     pub compacted: bool,
     pub compaction: Option<Arc<AgentEvent>>,
-    pub checkpoint: Option<StreamedState>,
 }
 
 /// Projects one contiguous event batch from `initial` without retaining the
@@ -510,7 +485,6 @@ pub fn project_batch(
                 if matches!(data.outcome, ContextCompactionResult::Completed { .. })
         )
     });
-    let mut checkpoint = None;
     if let Some(event) = compaction
         && let EventKind::ContextCompaction(data) = &event.kind
         && let ContextCompactionResult::Completed { retain_from, .. } = &data.outcome
@@ -526,7 +500,6 @@ pub fn project_batch(
                 state: projection.state,
                 compacted: true,
                 compaction: compaction.cloned(),
-                checkpoint: None,
             });
         };
         let kept = projection
@@ -538,20 +511,6 @@ pub fn project_batch(
                     .is_some_and(|index| *index >= cut)
             })
             .unwrap_or(projection.history.len());
-        checkpoint = (|| {
-            let resume_event = projection
-                .history
-                .get(kept)
-                .map(|entry| entry.source.clone())
-                .or_else(|| events.last().map(|event| event.id.clone()))?;
-            let resume = order.get(resume_event.as_str()).copied()?;
-            let mut state = replay(events[..resume].as_ref(), initial).ok()?.state;
-            state.retain_from = retain_from.clone();
-            Some(StreamedState {
-                resume_event,
-                state,
-            })
-        })();
         projection.history.drain(..kept);
         projection.state.retain_from = retain_from.clone();
     }
@@ -560,7 +519,6 @@ pub fn project_batch(
         state: projection.state,
         compacted: compaction.is_some(),
         compaction: compaction.cloned(),
-        checkpoint,
     })
 }
 

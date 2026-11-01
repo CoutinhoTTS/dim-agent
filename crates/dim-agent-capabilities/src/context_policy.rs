@@ -71,7 +71,6 @@ pub(crate) struct PolicyContext {
     compaction: Option<ContextCompactionData>,
     order: Vec<PolicyOrderEvent>,
     full: Option<ContextHistory>,
-    checkpoint: Option<ProjectionCheckpoint>,
 }
 
 impl PolicyContext {
@@ -101,7 +100,6 @@ impl PolicyContext {
             compaction,
             order,
             full: Some(context),
-            checkpoint: None,
         }
     }
 
@@ -118,7 +116,6 @@ impl PolicyContext {
             compaction,
             order: streamed.order.clone(),
             full: None,
-            checkpoint: streamed.checkpoint.clone(),
         }
     }
 
@@ -185,10 +182,6 @@ impl PolicyContext {
 
     pub fn full(&self) -> Option<&ContextHistory> {
         self.full.as_ref()
-    }
-
-    pub fn checkpoint(&self) -> Option<&ProjectionCheckpoint> {
-        self.checkpoint.as_ref()
     }
 
     pub fn sequence(&self, id: &str) -> Option<u64> {
@@ -938,18 +931,12 @@ impl ContextPolicy {
             });
         if request.is_ok() {
             let saved = async {
-                let snapshot = match (view.context.full(), view.context.checkpoint()) {
-                    (Some(context), _) => {
-                        Some(self.history.snapshot(context, retain_from, &fact)?)
-                    }
-                    (None, Some(checkpoint)) => {
-                        Some(self.history.snapshot_from_checkpoint(checkpoint, &fact)?)
-                    }
-                    (None, None)
-                        if std::ptr::eq(
-                            self.history.checkpoint as *const (),
-                            projection_checkpoint as *const (),
-                        ) =>
+                let snapshot = match view.context.full() {
+                    Some(context) => Some(self.history.snapshot(context, retain_from, &fact)?),
+                    None if std::ptr::eq(
+                        self.history.checkpoint as *const (),
+                        projection_checkpoint as *const (),
+                    ) =>
                     {
                         let checkpoint = self
                             .history
@@ -958,7 +945,7 @@ impl ContextPolicy {
                             .map_err(|error| error.to_string())?;
                         Some(self.history.snapshot_from_checkpoint(&checkpoint, &fact)?)
                     }
-                    (None, None) => {
+                    None => {
                         let (context, _) = self
                             .history
                             .rendered_context(&self.timeline, view.facts.through)

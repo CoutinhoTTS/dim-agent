@@ -162,10 +162,11 @@ policy 需要的事实和窗口单独查询，不经过 `ContextHistory.events`�
   用于合法 cut 枚举和 `regrown`。
 - `PolicyWindow`：锚点、当前 turn 输入、`input/consumed`、上一次 cut 之后的 tool-result；
   合并 ancestry，用于 pinning 和 digest。
-- `ContextPolicy` 的输入改为 `PolicyContext`，只持有 configuration、compaction、order、
-  streamed checkpoint 和可选的 full context；`full` 只用于自定义 renderer/损坏数据回退。
-- `compact_step` 的 snapshot 优先使用 streamed checkpoint；没有 checkpoint 时按
-  `stream_checkpoint` 二次流式重放到 cut；自定义 checkpoint builder 仍走完整路径。
+- `ContextPolicy` 的输入改为 `PolicyContext`，只持有 configuration、compaction、order
+  和可选的 full context；`full` 只用于自定义 renderer/损坏数据回退。
+- `compact_step` 的 snapshot 只按本次压缩自己的 `retain_from` 构建：有完整 context 时用它，
+  否则按 `stream_checkpoint` 二次流式重放到 cut；自定义 checkpoint builder 仍走完整路径。
+  准备视图时（本次压缩尚不存在）不会留下可复用的 checkpoint。
 
 #### 与快照的关系
 
