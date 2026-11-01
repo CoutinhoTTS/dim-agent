@@ -188,15 +188,11 @@ impl ManagementPanel {
                 self.message = None;
             }
             ManagementResult::Applied { note, read_error } => {
-                // The action was done, so its own message stands; what failed
-                // is the read, which the footer reports once, wrapped. The
-                // view before the failed read still names what was removed.
-                let previous = self.view.take().unwrap_or_default();
-                let message = match note {
-                    Some(note) => note.clone(),
-                    None => outcome(&reply.request.action, &previous, None),
-                };
-                self.message = Some(Ok(message));
+                // The action was done, so its own line stands; what failed is
+                // the read, which the footer reports once, wrapped. No view
+                // is kept until the next read.
+                self.view = None;
+                self.message = Some(Ok(note.clone()));
                 self.read_error = Some(read_error.clone());
                 self.list.loading();
             }
@@ -1481,10 +1477,10 @@ mod tests {
         assert!(!text.contains("Removed job-1."), "{text}");
     }
 
-    /// A remove whose read-back fails still names the entry it removed:
-    /// the label comes from the view the panel had before the failed read.
+    /// An applied action always carries its line, even when the read-back
+    /// failed, and the panel draws it with the read error once.
     #[test]
-    fn an_applied_remove_names_the_entry_it_removed() {
+    fn an_applied_remove_shows_its_line_and_draws_the_read_error_once() {
         let mut panel = opened_catalogue();
         panel.handle_key(ctrl('x'));
         panel.handle_key(key(KeyCode::Enter));
@@ -1492,13 +1488,17 @@ mod tests {
             Area::Skills,
             ManagementAction::Remove { id: "job-1".into() },
             ManagementResult::Applied {
-                note: None,
+                note: "Removed job-1.".into(),
                 read_error: "the scheduler is unavailable".into(),
             },
         ));
-        let text = shown(&panel, 100, 20).join(" ");
-        assert!(text.contains("Removed nightly."), "{text}");
-        assert!(!text.contains("Removed job-1."), "{text}");
+        let text = shown(&panel, 100, 20).join("\n");
+        assert!(text.contains("Removed job-1."), "{text}");
+        assert_eq!(
+            text.matches("the scheduler is unavailable").count(),
+            1,
+            "the read error is drawn once: {text}"
+        );
     }
 
     /// A run whose read-back fails keeps the owner's answer, and the read
@@ -1511,7 +1511,7 @@ mod tests {
             Area::Skills,
             ManagementAction::Run { id: "job-1".into() },
             ManagementResult::Applied {
-                note: Some("Run nightly: skipped (overlap).".into()),
+                note: "Run nightly: skipped (overlap).".into(),
                 read_error: "the scheduler is unavailable".into(),
             },
         ));

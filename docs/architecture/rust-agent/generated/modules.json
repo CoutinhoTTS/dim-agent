@@ -3077,6 +3077,7 @@
       "unexpandedMacros": [
         "format",
         "matches",
+        "unreachable",
         "vec"
       ]
     },
@@ -25410,6 +25411,16 @@
     },
     {
       "from": "dim_cli::management",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path t",
+        "path tf",
+        "use crate::ui::i18n::t",
+        "use crate::ui::i18n::tf"
+      ]
+    },
+    {
+      "from": "dim_cli::management",
       "to": "dim_client",
       "references": [
         "path Client",
@@ -25620,6 +25631,7 @@
       "from": "dim_cli::management_command",
       "to": "dim_cli::management",
       "references": [
+        "path management::applied_line",
         "path management::apply",
         "path management::supported",
         "path management::supports_kind",
@@ -25691,7 +25703,7 @@
         "path Area::Skills",
         "path ManagementAction::Add",
         "path ManagementAction::List",
-        "path ManagementAction::Remove",
+        "path ManagementAction::Reload",
         "path ManagementAction::Save",
         "path ManagementAction::Toggle",
         "path ManagementRequest",
@@ -33366,6 +33378,14 @@
     },
     {
       "from": "dim_cli::ui::tui",
+      "to": "dim_cli::management",
+      "references": [
+        "path management::applied_line",
+        "use crate::management"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
       "to": "dim_cli::management::editor",
       "references": [
         "path editor::Draft",
@@ -33447,6 +33467,7 @@
         "path ManagementAction::Save",
         "path ManagementRefusal::Conflict",
         "path ManagementRequest",
+        "path ManagementResult",
         "path ManagementResult::Applied",
         "path ManagementResult::Detail",
         "path ManagementResult::Refused",
@@ -34298,6 +34319,7 @@
         "path Command::Submit",
         "path DIM_OAUTH_ID",
         "path ManagementAction::Add",
+        "path ManagementAction::Run",
         "path ManagementAction::Save",
         "path ManagementRefusal::Conflict",
         "path ManagementRefusal::Refused",

@@ -17,6 +17,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Hooks" => "钩子",
         "invalid" => "无效",
         "Saved." => "已保存。",
+        "Saved {name}." => "已保存 {name}。",
         "No change." => "没有变化。",
         "Your text is kept in {path}." => "你的内容保留在 {path}。",
         "The user's own document; always in effect." => "用户自己的文档；始终生效。",

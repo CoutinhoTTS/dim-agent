@@ -17,6 +17,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Hooks" => "Hooks",
         "invalid" => "inválido",
         "Saved." => "Guardado.",
+        "Saved {name}." => "{name} guardado.",
         "No change." => "Nenhuma alteração.",
         "Your text is kept in {path}." => "O seu texto está guardado em {path}.",
         "The user's own document; always in effect." => {

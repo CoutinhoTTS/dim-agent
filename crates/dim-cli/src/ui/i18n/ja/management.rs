@@ -17,6 +17,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Hooks" => "フック",
         "invalid" => "無効",
         "Saved." => "保存しました。",
+        "Saved {name}." => "{name} を保存しました。",
         "No change." => "変更はありません。",
         "Your text is kept in {path}." => "入力した内容は {path} に残しています。",
         "The user's own document; always in effect." => {

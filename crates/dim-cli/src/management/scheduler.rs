@@ -156,9 +156,9 @@ pub enum Failure {
         message: String,
         catalog: Box<Catalog>,
     },
-    /// The action was applied and the read that reports the jobs failed: the
-    /// change was made, the owner's answer is kept, and this is why the jobs
-    /// are not shown.
+    /// The action was applied and what follows it could not be read: the
+    /// change was made, the owner's answer is kept when it was read, and this
+    /// is why the jobs are not shown.
     ReadFailed { note: Option<String>, error: String },
     /// The daemon or the owner refused it: nothing was written.
     Refused(String),
@@ -215,8 +215,14 @@ pub async fn apply(client: &mut Client, action: &ManagementAction) -> Result<Ans
                 Ok(saved) => saved,
                 Err(error) => return Err(conflict(client, &error, ConflictKind::Create).await),
             };
-            let saved: Saved = serde_json::from_value(saved)
-                .map_err(|error| Failure::Refused(format!("schedule.save: {error}")))?;
+            // The method returned, so the job was written. What failed is the
+            // answer: reporting a refusal here would keep the draft and invite
+            // a duplicate.
+            let saved: Saved =
+                serde_json::from_value(saved).map_err(|error| Failure::ReadFailed {
+                    note: None,
+                    error: format!("schedule.save: {error}"),
+                })?;
             Answered::Created(saved.job.name)
         }
         ManagementAction::Save {
@@ -259,8 +265,12 @@ pub async fn apply(client: &mut Client, action: &ManagementAction) -> Result<Ans
                 .rpc("schedule.run_now", json!({"job_id": id}))
                 .await
                 .map_err(|error| Failure::Refused(error.to_string()))?;
-            let run: Run = serde_json::from_value(run)
-                .map_err(|error| Failure::Refused(format!("schedule.run_now: {error}")))?;
+            // The method returned, so the run was accepted. What failed is
+            // the answer, not the work.
+            let run: Run = serde_json::from_value(run).map_err(|error| Failure::ReadFailed {
+                note: None,
+                error: format!("schedule.run_now: {error}"),
+            })?;
             Answered::Run {
                 id: id.clone(),
                 run,

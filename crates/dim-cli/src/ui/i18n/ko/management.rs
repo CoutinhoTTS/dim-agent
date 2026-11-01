@@ -17,6 +17,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Hooks" => "훅",
         "invalid" => "유효하지 않음",
         "Saved." => "저장했습니다.",
+        "Saved {name}." => "{name}을(를) 저장했습니다.",
         "No change." => "변경 사항이 없습니다.",
         "Your text is kept in {path}." => "작성한 내용은 {path}에 보관됩니다.",
         "The user's own document; always in effect." => "사용자 자신의 문서이며 항상 적용됩니다.",

@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::management::editor;
+use crate::management::{self, editor};
 use crate::model::session::{
     Area, Command, CompactReply, ContextReading, DIM_OAUTH_ID, DraftPart, ManagementAction,
     ManagementRefusal, ManagementRequest, ManagementResult, SessionPort, SubmitMode, SwitchKind,
@@ -959,6 +959,16 @@ struct ManagementDraft {
     draft: editor::Draft,
 }
 
+/// What a management reply says beyond its view: the owner's answer, or an
+/// applied action's own line.
+fn reported_note(result: &ManagementResult) -> Option<&str> {
+    match result {
+        ManagementResult::View { note, .. } => note.as_deref(),
+        ManagementResult::Applied { note, .. } => Some(note),
+        ManagementResult::Detail(_) | ManagementResult::Refused(_) => None,
+    }
+}
+
 /// Where a line the user is drafting opens.
 /// A fork waiting for its `y`.
 struct ForkAsk {
@@ -1799,11 +1809,17 @@ impl App {
                         }
                         (result, Some(settled)) => {
                             settled.draft.remove();
+                            // The reply's own note, else the line its action
+                            // reports; never a line that names only "saved".
+                            let note = reported_note(result).map_or_else(
+                                || management::applied_line(&reply.request),
+                                str::to_owned,
+                            );
                             let notice = match result {
                                 ManagementResult::Applied { read_error, .. } => {
-                                    format!("{} {read_error}", t("Saved."))
+                                    format!("{note} {read_error}")
                                 }
-                                _ => t("Saved.").to_owned(),
+                                _ => note,
                             };
                             self.set_notice(notice);
                         }
@@ -1824,14 +1840,24 @@ impl App {
                         // The owner rescanned; only the read of the result
                         // failed, so the rescan stands and the read is what
                         // the notice reports after it.
-                        ManagementResult::Applied { read_error, .. } => {
-                            self.set_notice(format!("{} {read_error}", t("Reloaded.")))
+                        ManagementResult::Applied { note, read_error } => {
+                            self.set_notice(format!("{note} {read_error}"))
                         }
                         ManagementResult::Refused(error) => self.set_notice(error.to_string()),
                         // A reload is not an inspect: the adapter answers it
                         // with the area or a refusal, never a detail.
                         ManagementResult::Detail(_) => {}
                     }
+                } else if let Some(note) = reported_note(&reply.result) {
+                    // An action that opened no draft, such as a run, still
+                    // reports what the owner answered.
+                    let notice = match &reply.result {
+                        ManagementResult::Applied { read_error, .. } => {
+                            format!("{note} {read_error}")
+                        }
+                        _ => note.to_owned(),
+                    };
+                    self.set_notice(notice);
                 }
             }
             Update::Login(account) => {
@@ -8832,7 +8858,7 @@ mod tests {
         // the text, so the file goes too and the notice says what failed.
         let path = draft(&mut app);
         app.apply(save_reply(ManagementResult::Applied {
-            note: None,
+            note: "Saved.".into(),
             read_error: "catalog unavailable".into(),
         }));
         assert!(!path.exists(), "an applied write keeps no draft");
@@ -8840,6 +8866,51 @@ mod tests {
         assert_eq!(text, "Saved. catalog unavailable");
         assert!(!text.contains("kept in"), "{text}");
         assert!(app.management_edits.is_empty());
+        // A create's own answer is the notice, not a fixed "Saved.".
+        app.management_edits.push(ManagementDraft {
+            area: Area::Scheduled,
+            target: WriteTarget::Create,
+            draft: editor::Draft::open(root.path(), Area::Scheduled, "{}").unwrap(),
+        });
+        let path = app
+            .management_edits
+            .last()
+            .unwrap()
+            .draft
+            .path()
+            .to_path_buf();
+        app.apply(Update::Management(ManagementReply {
+            request: ManagementRequest {
+                area: Area::Scheduled,
+                action: ManagementAction::Add {
+                    document: serde_json::json!({}),
+                },
+            },
+            result: ManagementResult::View {
+                view: Box::new(view()),
+                note: Some("Added digest.".into()),
+            },
+        }));
+        assert!(!path.exists(), "the created draft is removed");
+        assert_eq!(
+            app.notice.as_ref().map(|(text, _)| text.as_str()),
+            Some("Added digest.")
+        );
+        // A run opened no draft; its answer is reported too.
+        app.apply(Update::Management(ManagementReply {
+            request: ManagementRequest {
+                area: Area::Scheduled,
+                action: ManagementAction::Run { id: "job-1".into() },
+            },
+            result: ManagementResult::View {
+                view: Box::new(view()),
+                note: Some("Run job-1: skipped (overlap).".into()),
+            },
+        }));
+        assert_eq!(
+            app.notice.as_ref().map(|(text, _)| text.as_str()),
+            Some("Run job-1: skipped (overlap).")
+        );
         // Refused: the file stays, the notice names it, and the link keeps
         // the revision the draft came from.
         let path = draft(&mut app);

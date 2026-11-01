@@ -435,12 +435,10 @@ pub enum ManagementResult {
         note: Option<String>,
     },
     /// The action was applied and the read that reports the area failed:
-    /// the change was made, the owner's answer is kept, and `read_error`
-    /// says why the area is not shown.
-    Applied {
-        note: Option<String>,
-        read_error: String,
-    },
+    /// the change was made, and `read_error` says why the area is not shown.
+    /// `note` is the action's own line, always: the owner's answer when that
+    /// is more than the view, else the line its kind reports.
+    Applied { note: String, read_error: String },
     /// What an inspect found, in place of the list.
     Detail(ManagementDetail),
     /// Nothing was applied, and this is why.

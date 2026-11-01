@@ -377,7 +377,7 @@ fn project_hooks_start_disabled_and_the_user_enables_them() {
         String::from_utf8_lossy(&saved.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&saved.stdout).contains("Saved the hooks document."),
+        String::from_utf8_lossy(&saved.stdout).contains("Saved."),
         "{}",
         String::from_utf8_lossy(&saved.stdout)
     );
@@ -592,7 +592,7 @@ fn hooks_edit_writes_what_the_editor_leaves() {
     daemon.join().unwrap();
     assert!(status.success(), "{}", terminal.transcript);
     assert!(
-        terminal.transcript.contains("Saved the hooks document."),
+        terminal.transcript.contains("Saved."),
         "{}",
         terminal.transcript
     );
@@ -796,7 +796,7 @@ fn hooks_edit_runs_an_editor_path_with_a_space() {
     daemon.join().unwrap();
     assert!(status.success(), "{}", terminal.transcript);
     assert!(
-        terminal.transcript.contains("Saved the hooks document."),
+        terminal.transcript.contains("Saved."),
         "{}",
         terminal.transcript
     );
@@ -854,10 +854,7 @@ fn hooks_set_writes_a_file_with_the_revision_read_before_it() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "Saved the hooks document.\n"
-    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "Saved.\n");
 }
 
 /// `hooks set -` reads its document from stdin and keeps it when the write
@@ -1263,10 +1260,7 @@ fn hooks_set_reports_the_save_when_the_read_after_it_fails() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "Saved the hooks document.\n"
-    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "Saved.\n");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("hooks catalog unavailable"), "{stderr}");
     assert!(drafts(&home).is_empty(), "the written draft is removed");
