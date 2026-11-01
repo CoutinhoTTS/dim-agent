@@ -6,13 +6,22 @@ use dim_app_server::modality::{AdapterOperation, ModalityAdapter, ModalityAdapte
 use rutis::Ctx;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The first slice's only adapter: it serves the image operations a test
 /// declares per model id, and nothing else.
-#[derive(Default)]
 struct FixtureAdapter {
     /// Model id to the operation ids it serves; `None` serves all three.
     served: Mutex<Option<BTreeMap<String, BTreeSet<String>>>>,
+    available: AtomicBool,
+}
+impl Default for FixtureAdapter {
+    fn default() -> Self {
+        Self {
+            served: Mutex::new(None),
+            available: AtomicBool::new(true),
+        }
+    }
 }
 impl FixtureAdapter {
     fn serve(&self, served: &[(&str, &[&str])]) {
@@ -31,10 +40,13 @@ impl FixtureAdapter {
                 .collect(),
         );
     }
+    fn set_available(&self, available: bool) {
+        self.available.store(available, Ordering::SeqCst);
+    }
 }
 impl ModalityAdapter for FixtureAdapter {
     fn available(&self) -> bool {
-        true
+        self.available.load(Ordering::SeqCst)
     }
     fn operations(&self, model: &ModelId) -> Vec<AdapterOperation> {
         let served = self.served.lock().unwrap();
@@ -119,19 +131,23 @@ async fn start(
     prefix: &str,
 ) -> (RunningServer, std::path::PathBuf) {
     let home = home(prefix);
+    let server = start_in(home.clone(), fixture).await;
+    (server, home)
+}
+
+async fn start_in(home: std::path::PathBuf, fixture: Option<Arc<FixtureAdapter>>) -> RunningServer {
     let config = ServerConfig {
         product_home: Some(home.clone()),
         target_home: Some(home.join("native")),
         ..Default::default()
     };
-    let server = launch_with(Arc::new(MockTools), config, |builder| {
+    launch_with(Arc::new(MockTools), config, |builder| {
         if let Some(fixture) = fixture.clone() {
             builder.plugin(move |_| Ok(Box::new(FixturePlugin(fixture.clone()))));
         }
     })
     .await
-    .0;
-    (server, home)
+    .0
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -223,6 +239,17 @@ async fn capabilities_and_configure_resolve_defaults_through_the_fixture_adapter
         configured["result"], reread["result"],
         "reply equals the next read"
     );
+    let edit = client
+        .rpc(
+            "modality.configure",
+            json!({"expectedRevision": reread["result"]["revision"], "category": "image", "operation": "edit", "model": model("beta")}),
+        )
+        .await;
+    assert_ok(&edit);
+    assert_eq!(
+        operation(&edit, "edit")["effective"],
+        json!({"providerId": PROVIDER, "modelId": "beta", "source": "default"})
+    );
 
     let conflict = client
         .rpc(
@@ -274,9 +301,16 @@ async fn capabilities_and_configure_resolve_defaults_through_the_fixture_adapter
             json!({"expectedRevision": stale["result"]["revision"], "category": "video", "operation": "generate", "model": model("alpha")}),
         )
         .await;
+    assert_eq!(other["error"]["data"]["appError"], "modality_unavailable");
+    let missing_model = client
+        .rpc(
+            "modality.configure",
+            json!({"expectedRevision": stale["result"]["revision"], "category": "image", "operation": "generate"}),
+        )
+        .await;
     assert_eq!(
-        other["error"]["data"]["appError"],
-        "modality_unknown_operation"
+        missing_model["error"]["data"]["appError"], "invalid_params",
+        "an absent model is malformed; only null clears"
     );
 
     let catalog = client
@@ -351,11 +385,36 @@ async fn capabilities_and_configure_resolve_defaults_through_the_fixture_adapter
         "selecting a nondefault model changes the model a task resolves"
     );
     assert!(
-        operation(&beta_generate, "edit")["options"]
+        !operation(&beta_generate, "edit")["options"]
             .as_array()
             .unwrap()
-            .is_empty(),
+            .iter()
+            .any(|option| option["available"] == true),
         "the adapter serves edit only for the models it declares"
+    );
+    let unserved = client.rpc("modality.capabilities", json!({})).await;
+    let edit = operation(&unserved, "edit");
+    assert_eq!(
+        edit["default"]["available"], false,
+        "a selectable default that no adapter serves is unavailable: {edit}"
+    );
+    assert_eq!(edit["default"]["reason"]["dimension"], "adapter");
+    assert!(edit["effective"].is_null());
+
+    fixture.set_available(false);
+    let offline = client.rpc("modality.capabilities", json!({})).await;
+    let generate = operation(&offline, "generate");
+    assert_eq!(generate["available"], false);
+    assert_eq!(generate["reasons"][0]["dimension"], "runtime");
+    let refused = client
+        .rpc(
+            "modality.configure",
+            json!({"expectedRevision": offline["result"]["revision"], "category": "image", "operation": "generate", "model": model("beta")}),
+        )
+        .await;
+    assert_eq!(
+        refused["error"]["data"]["appError"], "modality_invalid_selection",
+        "an unavailable adapter cannot serve a new default"
     );
 
     let mut bare = Client::new_version(&server, true, 3).await;
@@ -379,6 +438,23 @@ async fn the_product_build_reports_image_operations_without_an_adapter() {
     create_provider(&mut client).await;
     let snapshot = client.rpc("modality.capabilities", json!({})).await;
     assert_ok(&snapshot);
+    let categories = snapshot["result"]["categories"].as_array().unwrap();
+    assert_eq!(categories.len(), 9, "every category is present");
+    for category in categories
+        .iter()
+        .filter(|category| category["category"] != "image")
+    {
+        assert_eq!(category["available"], false, "{category}");
+        assert_eq!(category["reasons"][0]["dimension"], "build", "{category}");
+        assert!(
+            category["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|operation| operation["reasons"][0]["dimension"] == "build"),
+            "{category}"
+        );
+    }
     for name in ["generate", "edit", "enhance"] {
         let entry = operation(&snapshot, name);
         assert_eq!(entry["available"], false, "{entry}");
@@ -386,22 +462,160 @@ async fn the_product_build_reports_image_operations_without_an_adapter() {
         assert!(entry["options"].as_array().unwrap().is_empty());
         assert!(entry["default"].is_null());
         assert!(entry["effective"].is_null());
+        let refused = client
+            .rpc(
+                "modality.configure",
+                json!({"expectedRevision": snapshot["result"]["revision"], "category": "image", "operation": name, "model": model("alpha")}),
+            )
+            .await;
+        assert_eq!(
+            refused["error"]["data"]["appError"], "modality_invalid_selection",
+            "{name} cannot have a default without an adapter: {refused}"
+        );
     }
+    let understand = operation(&snapshot, "understand");
     assert_eq!(
-        operation(&snapshot, "understand")["available"],
-        true,
+        understand["available"], true,
         "understanding resolves a selectable vision model"
     );
-    let refused = client
+    assert_eq!(
+        understand["options"],
+        json!([{"providerId": PROVIDER, "modelId": "alpha", "available": true}])
+    );
+    assert_eq!(
+        understand["effective"],
+        json!({"providerId": PROVIDER, "modelId": "alpha", "source": "automatic"})
+    );
+    let configured = client
         .rpc(
             "modality.configure",
-            json!({"expectedRevision": snapshot["result"]["revision"], "category": "image", "operation": "generate", "model": model("alpha")}),
+            json!({"expectedRevision": snapshot["result"]["revision"], "category": "image", "operation": "understand", "model": model("alpha")}),
         )
         .await;
+    assert_ok(&configured);
     assert_eq!(
-        refused["error"]["data"]["appError"],
-        "modality_invalid_selection"
+        operation(&configured, "understand")["default"],
+        json!({"providerId": PROVIDER, "modelId": "alpha", "available": true})
     );
+    assert_eq!(
+        operation(&configured, "understand")["effective"]["source"],
+        "default"
+    );
+    let reread = client.rpc("modality.capabilities", json!({})).await;
+    assert_eq!(configured["result"], reread["result"]);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clearing_an_operation_after_all_defaults_matches_the_next_read() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let (server, home) = start(Some(fixture), "dm-clear").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let mut vision = CatalogCapabilities::with_limits(128_000, 16_384);
+    vision.vision = true;
+    assert_ok(
+        &client
+            .rpc(
+                "provider.create",
+                json!({
+                    "providerId": PROVIDER,
+                    "displayName": "Fixture",
+                    "connection": {"driverKind": "openai-compatible", "baseUrl": "http://127.0.0.1:1/v1", "auth": {"type": "anonymous"}},
+                    "models": [
+                        {"modelId": "alpha", "displayName": "alpha", "status": "active", "capabilities": vision},
+                        {"modelId": "gamma", "displayName": "gamma", "status": "active", "capabilities": vision}
+                    ],
+                    "enabled": true
+                }),
+            )
+            .await,
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "provider.select",
+                json!({"providerId": PROVIDER, "modelId": "gamma"}),
+            )
+            .await,
+    );
+    let initial = client.rpc("modality.capabilities", json!({})).await;
+    assert_ok(&initial);
+    let mut revision = initial["result"]["revision"].as_str().unwrap().to_owned();
+    for operation in ["generate", "edit", "enhance", "understand"] {
+        let configured = client
+            .rpc(
+                "modality.configure",
+                json!({"expectedRevision": revision, "category": "image", "operation": operation, "model": model("alpha")}),
+            )
+            .await;
+        assert_ok(&configured);
+        revision = configured["result"]["revision"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+    }
+    let cleared = client
+        .rpc(
+            "modality.configure",
+            json!({"expectedRevision": revision, "category": "image", "operation": "understand", "model": null}),
+        )
+        .await;
+    assert_ok(&cleared);
+    assert_eq!(
+        operation(&cleared, "understand")["effective"],
+        json!({"providerId": PROVIDER, "modelId": "gamma", "source": "automatic"}),
+        "the reply uses the global selection that serves the cleared operation"
+    );
+    let next = client.rpc("modality.capabilities", json!({})).await;
+    assert_eq!(
+        cleared["result"], next["result"],
+        "reply equals the next read"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_configured_default_survives_a_restart() {
+    let home = home("dm-reload");
+    let fixture = Arc::new(FixtureAdapter::default());
+    let server = start_in(home.clone(), Some(fixture.clone())).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_provider(&mut client).await;
+    assert_ok(
+        &client
+            .rpc(
+                "provider.select",
+                json!({"providerId": PROVIDER, "modelId": "beta"}),
+            )
+            .await,
+    );
+    let initial = client.rpc("modality.capabilities", json!({})).await;
+    assert_ok(&initial);
+    let saved = client
+        .rpc(
+            "modality.configure",
+            json!({"expectedRevision": initial["result"]["revision"], "category": "image", "operation": "generate", "model": model("alpha")}),
+        )
+        .await;
+    assert_ok(&saved);
+    let revision = saved["result"]["revision"].as_str().unwrap().to_owned();
+    server.shutdown();
+    server.join().await.unwrap();
+
+    let server = start_in(home.clone(), Some(fixture)).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let restored = client.rpc("modality.capabilities", json!({})).await;
+    assert_ok(&restored);
+    assert_eq!(
+        operation(&restored, "generate")["default"]["modelId"],
+        "alpha",
+        "the persisted default is read from the modality settings document"
+    );
+    assert_eq!(restored["result"]["revision"], revision);
     server.shutdown();
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
