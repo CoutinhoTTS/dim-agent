@@ -107,7 +107,9 @@ impl<'de> Deserialize<'de> for Event {
             ("branch", "ended") => EventContent::BranchEnded(
                 serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
             ),
-            ("session", "forked") => EventContent::SessionForked(SessionForkedData {}),
+            ("session", "forked") => EventContent::SessionForked(
+                serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
+            ),
             ("context", "configured") => EventContent::Configuration(
                 serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
             ),

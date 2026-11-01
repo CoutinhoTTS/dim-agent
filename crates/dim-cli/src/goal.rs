@@ -48,10 +48,11 @@ impl Status {
 /// One goal block the line's own events carry, kept so a deletion can be
 /// folded out again (Goal §2).
 enum Block {
-    /// `goal:objective`, written by `set` (`set`) or by `edit`.
+    /// `goal:objective`, written by `set` (`set`) or by `edit`; `text` is
+    /// none when the block carries no `Objective:` line.
     Objective {
         input: String,
-        text: String,
+        text: Option<String>,
         set: bool,
         judge: Option<String>,
     },
@@ -107,6 +108,11 @@ impl Fold {
                     else {
                         continue;
                     };
+                    // Goal reads a block only when it opens with a marker, the
+                    // retired ones included, whatever its `kind` says.
+                    if marker(text).is_none() {
+                        continue;
+                    }
                     if *retire {
                         self.blocks.push(if key == OBJECTIVE_KEY {
                             Block::ObjectiveRetire {
@@ -119,13 +125,10 @@ impl Fold {
                         });
                         continue;
                     }
-                    if attribute(text, "kind").is_none() {
-                        continue;
-                    }
                     if key == OBJECTIVE_KEY {
                         self.blocks.push(Block::Objective {
                             input: event.id.clone(),
-                            text: body(text, "Objective:"),
+                            text: value(text, "Objective:"),
                             set: attribute(text, "op").as_deref() == Some("set"),
                             judge: attribute(text, "judge"),
                         });
@@ -141,7 +144,16 @@ impl Fold {
                     });
                 }
             }
-            EventContent::InputDeleted(data) => {
+            // Only an input this fold keeps a block for can change the goal;
+            // a deletion always follows its input, so the block is already
+            // here. Holding every id the line deletes would grow with the
+            // line, not with its goal edits.
+            EventContent::InputDeleted(data)
+                if self
+                    .blocks
+                    .iter()
+                    .any(|block| block.input() == data.input_id) =>
+            {
                 self.deleted.insert(data.input_id.clone());
             }
             _ => {}
@@ -163,7 +175,7 @@ impl Fold {
                     judge: made,
                     ..
                 } => {
-                    objective = Some(text.clone());
+                    objective = text.clone();
                     if *set {
                         judge = made.as_deref() == Some("evaluator");
                     }
@@ -211,19 +223,17 @@ fn status_of(text: &str) -> Option<Status> {
 }
 
 /// The value after a block's `label` line, up to its last blank line, with
-/// the marker's escaping reversed (Goal §A.5).
-fn body(text: &str, label: &str) -> String {
-    let Some(start) = text.find(&format!("\n{label}\n")) else {
-        return String::new();
-    };
-    let Some(end) = text.rfind("\n\n") else {
-        return String::new();
-    };
-    if end > start {
-        unescape(&text[start + label.len() + 2..end])
-    } else {
-        String::new()
+/// the marker's escaping reversed; none when the block has no such line
+/// (Goal's `value()`).
+fn value(text: &str, label: &str) -> Option<String> {
+    let start = text.find(&format!("\n{label}\n"))?;
+    let end = text.rfind("\n\n")?;
+    if end < start {
+        return None;
     }
+    Some(unescape(
+        text.get(start + label.len() + 2..end).unwrap_or(""),
+    ))
 }
 
 fn unescape(text: &str) -> String {
@@ -233,15 +243,32 @@ fn unescape(text: &str) -> String {
         .replace("&amp;", "&")
 }
 
-/// The value of `name="value"` in the block's leading marker.
+/// The attributes of a block's leading `<dim-goal ...>` marker, if the block
+/// opens with one (Goal's `marker()`).
+fn marker(text: &str) -> Option<&str> {
+    text.strip_prefix("<dim-goal ")?
+        .split_once('>')
+        .map(|(attrs, _)| attrs)
+}
+
+/// The value of `name="value"` in the block's marker, read as Goal's
+/// `(\w+)="([^"]*)"` reads it.
 fn attribute(text: &str, name: &str) -> Option<String> {
-    if !text.starts_with("<dim-goal ") {
-        return None;
+    let attrs = marker(text)?;
+    let mut offset = 0;
+    while let Some(found) = attrs[offset..].find("=\"") {
+        let eq = offset + found;
+        let start = attrs[..eq]
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .map_or(0, |at| at + 1);
+        let quote = eq + 2;
+        let end = attrs[quote..].find('"')? + quote;
+        if &attrs[start..eq] == name {
+            return Some(unescape(&attrs[quote..end]));
+        }
+        offset = end + 1;
     }
-    let needle = format!("{name}=\"");
-    let start = text.find(&needle)? + needle.len();
-    let end = text[start..].find('"')? + start;
-    (end <= text.find('>')?).then(|| unescape(&text[start..end]))
+    None
 }
 
 /// The words after `/goal`.
@@ -533,6 +560,21 @@ mod tests {
     }
 
     #[test]
+    fn only_a_deletion_of_a_goal_block_is_kept() {
+        let mut fold = Fold::default();
+        fold.apply(&set(10));
+        // An input with no goal block changes nothing and is not kept: the
+        // set grows with the line's goal edits, not with its deletions.
+        fold.apply(&deleted(11, "input-99"));
+        assert!(fold.deleted.is_empty());
+        assert_eq!(fold.goal().unwrap().objective, "Make the tests pass");
+        // A goal block's own input still hides it when deleted.
+        fold.apply(&deleted(12, "input-10"));
+        assert!(fold.deleted.contains("input-10"));
+        assert_eq!(fold.goal(), None);
+    }
+
+    #[test]
     fn an_objective_without_a_status_has_none() {
         let mut fold = Fold::default();
         fold.apply(&change(10, "edit", OBJECTIVE_KEY, "", false));
@@ -559,6 +601,32 @@ mod tests {
                 "<dim-goal kind=\"goal\" op=\"set\" branch=\"main\">\nObjective:\n&lt;/dim-goal&gt; &amp; &quot;quoted&quot;\n\nGoal.\n</dim-goal>"}]),
         ));
         assert_eq!(fold.goal().unwrap().objective, "</dim-goal> & \"quoted\"");
+    }
+
+    #[test]
+    fn an_objective_block_without_a_kind_folds_like_goal() {
+        // Goal reads every block that opens with a marker, whatever its
+        // `kind` attribute says (goal.ts `:393`).
+        let mut fold = Fold::default();
+        fold.apply(&input(
+            10,
+            json!([{"type":"raw","key":OBJECTIVE_KEY,"text":
+                "<dim-goal op=\"set\" branch=\"main\">\nObjective:\nShip it\n\nGoal.\n</dim-goal>"}]),
+        ));
+        assert_eq!(fold.goal().unwrap().objective, "Ship it");
+    }
+
+    #[test]
+    fn a_block_with_no_objective_line_yields_no_goal() {
+        // Goal's `value()` returns undefined there, so the fold holds no
+        // objective even though the block is live.
+        let mut fold = Fold::default();
+        fold.apply(&input(
+            10,
+            json!([{"type":"raw","key":OBJECTIVE_KEY,"text":
+                "<dim-goal kind=\"goal\" op=\"set\" branch=\"main\">\nNo objective line here.\n</dim-goal>"}]),
+        ));
+        assert_eq!(fold.goal(), None);
     }
 
     #[test]
