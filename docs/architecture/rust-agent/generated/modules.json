@@ -23219,7 +23219,9 @@
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
-        "path EventKind::ContextConfigured"
+        "path EventKind::ContextConfigured",
+        "path EventKind::SessionForked",
+        "path SessionForkedData"
       ]
     },
     {
