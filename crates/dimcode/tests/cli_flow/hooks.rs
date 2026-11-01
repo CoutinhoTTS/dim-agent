@@ -18,7 +18,7 @@ fn catalog() -> Value {
         ],
         "hooks": [
             {"source": "user", "event": "SessionStart", "matcher": null, "command": "welcome", "timeout": 600, "onFailure": "continue", "async": false, "state": "ok"},
-            {"source": "project", "event": "PreToolUse", "matcher": "read", "command": "guard", "timeout": 600, "onFailure": "continue", "async": false, "state": "unsupported"},
+            {"source": "project", "event": "UnknownEvent", "matcher": "read", "command": "guard", "timeout": 600, "onFailure": "continue", "async": false, "state": "unsupported"},
         ],
     })
 }
@@ -42,7 +42,7 @@ fn hooks_list_prints_the_catalog_and_its_source_states() {
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
         "SessionStart\t*\tuser\tenabled\tok\t600s\tcontinue\tsync\twelcome\n\
-         PreToolUse\tread\tproject\tdisabled\tunsupported\t600s\tcontinue\tsync\tguard\n"
+         UnknownEvent\tread\tproject\tdisabled\tunsupported\t600s\tcontinue\tsync\tguard\n"
     );
     assert!(
         String::from_utf8_lossy(&output.stderr)

@@ -915,9 +915,31 @@ async fn a_fork_waits_for_background_work_and_keeps_preset_and_model() {
     assert_eq!(calls.last().map(String::as_str), Some("beta"), "{calls:?}");
 
     assert_ok(&client.rpc("session.delete", json!({"sessionId":sid})).await);
-    assert!(!store.output(&sid).exists());
+    assert!(
+        store.output(&sid).exists(),
+        "the fork's output rows keep the source directory"
+    );
     assert!(store.rows(&sid).is_empty());
     assert!(!store.rows(&fid).is_empty());
+    let forked_output: String = store
+        .connection()
+        .query_row(
+            "SELECT path FROM session_output_owners WHERE session_id=?1 ORDER BY path LIMIT 1",
+            [&fid],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        std::fs::read(&forked_output).is_ok(),
+        "the fork can read {forked_output}"
+    );
+
+    assert_ok(&client.rpc("session.delete", json!({"sessionId":fid})).await);
+    assert!(
+        !store.output(&sid).exists(),
+        "the last owner's delete removes the directory"
+    );
+    assert!(store.rows(&fid).is_empty());
     drop((client, fork, source, agent));
     let socket = server.unix_path.clone().unwrap();
     server.shutdown();
