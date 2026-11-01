@@ -8,10 +8,18 @@ local-execution parts are assembled and what each one owns.
 Two Session/branch parts are in scope here: HooksSession, which binds the
 runtime and decides `SessionStart`, and HooksBranch, which observes one branch
 and runs the handlers of its hook points. The configuration owner,
-HooksSettings, is an App Server plugin: it registers the `hooks` and
-`hooks-projects` Settings sources, the `hooks.*` management methods and the
-`HookSources` Session part that binds `S:HookSourcesHost`. Their assembly is in
-the generated App Server services page.
+HooksSettings, is an App Server plugin: it registers the `hooks`,
+`hooks-projects` and `hooks-plugins` Settings sources, the `hooks.*` management
+methods, the `P:HooksService` that PluginManager's owner operations call, and
+the `HookSources` Session part that binds `S:HookSourcesHost`. Their assembly
+is in the generated App Server services page.
+
+A plugin's document is registered through `P:HooksService`, kept as the
+`{dir, hooks}` entry of `hooks-plugins` and read after the user's and the
+project's sources as `plugin:<id>`; its commands read the entry's `dir` as
+`DIM_PLUGIN_ROOT`. The user's and the project's commands never set it, and
+`CLAUDE_PLUGIN_ROOT` and `GROK_PLUGIN_ROOT` stay out of every command's
+environment.
 
 ## HooksSession
 
@@ -38,7 +46,7 @@ cancellation token terminates its process tree on close.
 
 | Service | Purpose |
 | --- | --- |
-| `S:HookSourcesHost` | Read the effective documents of the user and the workspace. |
+| `S:HookSourcesHost` | Read the effective documents of the user, the workspace and the plugins. |
 | `P:HostPlatform` | Build each command's process spec, environment and process tree. |
 | `S:SessionConfig` | Pass the working directory and permission facts to the payload. |
 | `S:SessionIdentity` | Name the Session in the payload and `DIM_SESSION_ID`. |
@@ -123,10 +131,10 @@ compacted context baseline.
 ## Diagnostics
 
 A handler that fails, times out or is cancelled is reported with its source
-(`user`, `project`), its event, its exit status and duration, and the bounded
-standard-error excerpt. A hook's own output never appears in diagnostics beyond
-that excerpt, and a handler whose document does not parse is reported by
-`hooks.catalog` rather than at the hook point.
+(`user`, `project` or `plugin:<id>`), its event, its exit status and duration,
+and the bounded standard-error excerpt. A hook's own output never appears in
+diagnostics beyond that excerpt, and a handler whose document does not parse is
+reported by `hooks.catalog` rather than at the hook point.
 
 ## Tests
 
@@ -141,6 +149,8 @@ that excerpt, and a handler whose document does not parse is reported by
 `post_tool_use_failure_runs_only_for_error_results`,
 `a_timeout_is_a_failure_and_a_blocking_failure_still_answers`,
 `identical_commands_at_one_point_run_once`,
+`an_identical_command_in_the_user_and_project_sources_runs_once`,
+`identical_commands_from_two_plugins_run_with_their_own_roots`,
 `stop_follow_ups_are_bounded_at_three_and_flag_the_driven_turns`,
 `a_context_only_stop_writes_no_follow_up_and_starts_no_turn`,
 `a_stop_follow_up_carries_the_block_reason_then_the_context`,
@@ -159,6 +169,7 @@ that excerpt, and a handler whose document does not parse is reported by
 `an_async_handler_does_not_delay_the_turn_or_the_next_point`,
 `a_hook_sees_its_environment_and_no_plugin_root`,
 `a_project_source_runs_nothing_until_the_user_enables_it`,
+`a_plugin_source_runs_like_any_other_source`,
 `disable_all_hooks_turns_every_source_off`;
 `runner.rs`'s `a_settled_tool_call_leaves_nothing_behind_in_the_view` pins
 that a settled call's input does not stay in the folded view;
@@ -183,6 +194,13 @@ pins that reading a Session's sources never authorizes a workspace.
 [hooks_settings_flow.rs](../../../../crates/dim-app-server/tests/hooks_settings_flow.rs):
 `catalog_reports_sources_states_and_never_reads_foreign_hook_files`,
 `project_hooks_stay_disabled_until_the_user_enables_them_and_edits_apply`,
-`a_user_document_is_saved_with_revisions_and_reports_disable_all_hooks`;
+`a_user_document_is_saved_with_revisions_and_reports_disable_all_hooks`,
+`plugin_documents_are_registered_listed_and_kept_by_their_owner`;
+[transport_flow/plugin_manager.rs](../../../../crates/dim-app-server/tests/transport_flow/plugin_manager.rs):
+`plugin_hooks_run_with_their_plugin_root_and_follow_the_record` and
+`a_refused_plugin_hook_document_stops_only_its_own_kind` pin the owner
+operations end to end, and `plugin_hooks_follow_the_hooks_owner` pins that an
+absent owner skips only its kind and that turning HooksSettings on registers
+that kind;
 [host_platform_flow.rs](../../../../crates/dim-agent-capabilities/tests/host_platform_flow.rs):
 `spawn_with_stdin_delivers_the_bytes_and_closes_the_pipe`.

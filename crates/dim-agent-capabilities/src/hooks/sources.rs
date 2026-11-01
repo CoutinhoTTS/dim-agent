@@ -3,24 +3,34 @@
 use super::document::HooksDocument;
 use crate::host::{HostError, HostFuture};
 use std::{
+    fmt,
     path::{Path, PathBuf},
     sync::Arc,
 };
 use tokio_util::sync::CancellationToken;
 
 /// One source of hook documents, in catalog order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HookSourceId {
     User,
     Project,
+    /// The document a plugin registered, named by its plugin id (A.2).
+    Plugin(String),
 }
-impl HookSourceId {
-    pub fn as_str(self) -> &'static str {
+/// The source's id in the catalog and in the `dim_source` field: `user`,
+/// `project` or `plugin:<id>` (A.2, A.3).
+impl fmt::Display for HookSourceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::User => "user",
-            Self::Project => "project",
+            Self::User => f.write_str("user"),
+            Self::Project => f.write_str("project"),
+            Self::Plugin(plugin) => write!(f, "plugin:{plugin}"),
         }
+    }
+}
+impl serde::Serialize for HookSourceId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
     }
 }
 
@@ -36,6 +46,9 @@ pub enum HookSourceState {
 #[derive(Clone, Debug)]
 pub struct HookSourceSnapshot {
     pub id: HookSourceId,
+    /// Where the document lives: the user file, the project file, or a
+    /// plugin's directory, which its commands read as `DIM_PLUGIN_ROOT` (A.2,
+    /// A.3).
     pub path: Option<PathBuf>,
     pub enabled: bool,
     pub state: HookSourceState,

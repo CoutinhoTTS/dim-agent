@@ -199,7 +199,12 @@ impl Matcher {
 pub struct HookHandler {
     pub event: HookEvent,
     pub source: HookSourceId,
-    /// The document command, which de-duplicates handlers at one point.
+    /// The directory of the plugin whose document carries this handler, which
+    /// its commands read as `DIM_PLUGIN_ROOT`; `None` for the user and project
+    /// sources (A.3).
+    pub plugin_root: Option<std::path::PathBuf>,
+    /// The document command; with the plugin directory it is the handler's
+    /// de-duplication key at one point (A.2).
     pub command: String,
     /// The Windows replacement, used on a Windows node.
     pub command_windows: Option<String>,
@@ -243,7 +248,8 @@ fn effective(snapshot: &HookSourcesSnapshot) -> bool {
 }
 
 /// The handlers of `event` that run, in catalog order: source table order,
-/// then document order; handlers sharing a command run once.
+/// then document order; handlers sharing a command and a plugin directory run
+/// once (A.2).
 ///
 /// `name` is the tool name of a tool event and `alias` its migration alias;
 /// `None` for an event whose matcher is an input of its own.
@@ -290,12 +296,17 @@ pub fn handlers(
                 let Some(command) = setting.command.clone() else {
                     continue;
                 };
-                if !seen.insert(command.clone()) {
+                let plugin_root = match &source.id {
+                    HookSourceId::Plugin(_) => source.path.clone(),
+                    HookSourceId::User | HookSourceId::Project => None,
+                };
+                if !seen.insert((command.clone(), plugin_root.clone())) {
                     continue;
                 }
                 handlers.push(HookHandler {
                     event,
-                    source: source.id,
+                    source: source.id.clone(),
+                    plugin_root,
                     command,
                     command_windows: setting.command_windows.clone(),
                     timeout: setting
@@ -329,7 +340,7 @@ pub fn entries(snapshot: &HookSourcesSnapshot) -> Vec<HookEntry> {
                         (false, state) => state,
                     };
                     entries.push(HookEntry {
-                        source: source.id,
+                        source: source.id.clone(),
                         event: event.clone(),
                         matcher: group.matcher.clone(),
                         command: setting.command.clone(),

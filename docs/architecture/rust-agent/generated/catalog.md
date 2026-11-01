@@ -20,6 +20,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `executionSettingsHost` | process | ExecutionSettings | Rust-only | — |
 | `fileStorage` | process | FileStorage | Rust-only | — |
 | `grokOAuthService` | process | GrokOAuth | Rust-only | — |
+| `hooksService` | process | HooksSettings | Rust-only | — |
 | `hostPlatform` | process | HostPlatform | Rust-only | — |
 | `listenAddresses` | process | Transport | Rust-only | — |
 | `loader` | process | rutis-loader | Rust-only | — |
