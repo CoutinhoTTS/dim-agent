@@ -229,6 +229,36 @@ same existing global options. Supplying the Session twice or the prompt twice
 is an argument error. `--json` serves `exec` and `migration`, and `tui` requires a terminal.
 Help/version and argument errors do not start the daemon.
 
+### Daemon startup failure
+
+All entries that start a daemon share the client startup in `connect_inner`.
+Before spawning, the CLI removes `<native home>/dimcode.sqlite.startup`. When
+the spawned daemon exits before the client connects, the CLI reads that note
+(at most 16 KiB, a private regular file owned by the user), requires the
+`dimcode-startup-failure v1 pid=<child pid>` header, removes control
+characters other than newline and tab from the body, and returns it as the
+command's error followed by `Details: <native home>/rust/daemon.log`. The
+storage gate writes the note on a diagnosed incompatibility and names the
+store, its marker, the daemon's supported format, whether the store is newer,
+mismatched, unrecognized or too old, and the recovery paths ([native storage format §
+startup incompatibility](appserver/native-storage-format.md#启动不兼容诊断)).
+Without a matching note the existing `App Server exited (<status>); see ...`
+remains. The failed launch removes the note after reading; a successful
+connection removes any note. The CLI never prints `daemon.log`, never deletes,
+recreates, downgrades or rewrites the store, and exits 1.
+Development documentation continues to use `./dev` and its isolated home; the
+terminal note itself names a compatible build or `--home PATH`.
+
+```text
+$ dima
+Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
+  Store format: v29
+  Daemon format: v28
+  This daemon cannot read the store. Existing data was preserved.
+  Run a build supporting v29, or use --home PATH for a separate environment.
+  Details: /Users/me/.dimcode-alpha/rust/daemon.log
+```
+
 The interactive export parser reads the format token and treats the remainder
 of the line as a literal path, including spaces, without shell evaluation or
 quote expansion. Missing paths and unsupported formats print usage and return
