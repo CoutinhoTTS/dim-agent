@@ -16,7 +16,9 @@ Commands:\n\
                                    it holds prompts, code and tool output.\n\
                                    --database defaults to the home's\n\
                                    rust/dimcode.sqlite\n\
-  login PROVIDER [--directory URL] [--device] [--redirect-uri URI]\n\
+  login [PROVIDER] [--directory URL] [--device] [--redirect-uri URI]\n\
+                                   Sign in to a Provider the daemon describes;\n\
+                                   without PROVIDER, list the accounts it describes\n\
   account PROVIDER                 Show non-secret account status\n\
   logout PROVIDER                  Sign out of an account provider\n\
   models PROVIDER [--refresh | --clear-preferences MODEL\n\
@@ -91,6 +93,8 @@ It also draws a progress bar where the terminal is known to (OSC 9;4);\n\
   DIM_TERMINAL_PROGRESS=off turns that off, =on draws it in any terminal.\n\
 Questions take option numbers (comma separated for several) or 0 to type your\n\
   own; empty input on the first question declines. Noninteractive questions exit 3.\n\
+Account commands sign in to every Provider the daemon describes with a login\n\
+  method.\n\
 Exit codes: 0 success, 1 configuration/transport error, 2 model/turn failure,\n\
             3 interactive approval or answer required, 130 interrupted.\n";
 
@@ -115,7 +119,8 @@ pub enum Action {
         output: Option<PathBuf>,
         database: Option<PathBuf>,
     },
-    Login(String),
+    /// `login [PROVIDER]`: without one, list the described accounts.
+    Login(Option<String>),
     Account(String),
     Logout(String),
     Models(String),
@@ -547,13 +552,24 @@ impl Options {
                 "login" | "account" | "logout" | "models"
                     if matches!(options.action, Action::Chat) =>
                 {
-                    let provider = value(&mut args)?;
-                    options.action = match arg.as_str() {
-                        "login" => Action::Login(provider),
-                        "account" => Action::Account(provider),
-                        "logout" => Action::Logout(provider),
-                        _ => Action::Models(provider),
+                    let provider = match args.peek().map(String::as_str) {
+                        Some("-h" | "--help") => {
+                            options.action = Action::Help;
+                            return Ok(options);
+                        }
+                        Some(next) if !next.starts_with('-') => Some(value(&mut args)?),
+                        _ => None,
                     };
+                    if arg == "login" {
+                        options.action = Action::Login(provider);
+                    } else {
+                        let provider = provider.ok_or_else(|| format!("{arg} requires a value"))?;
+                        options.action = match arg.as_str() {
+                            "account" => Action::Account(provider),
+                            "logout" => Action::Logout(provider),
+                            _ => Action::Models(provider),
+                        };
+                    }
                 }
                 _ if options.client_secret => {
                     return Err(

@@ -1183,7 +1183,11 @@ fn acp_terminal_auth_helper_rediscovers_the_method_and_uses_the_same_home() {
             };
             let mut wire = accept_native(&listener);
             let mut methods = METHODS.to_vec();
-            methods.push("account.providers");
+            methods.extend([
+                "account.providers",
+                "provider.management",
+                "account.login.begin",
+            ]);
             wire.hello(&methods);
             providers(&mut wire);
             let status = wire.read("account.status");
@@ -1193,7 +1197,11 @@ fn acp_terminal_auth_helper_rediscovers_the_method_and_uses_the_same_home() {
             let mut wire = accept_native(&listener);
             wire.hello(&methods);
             providers(&mut wire);
-            providers(&mut wire);
+            let listed = wire.read("provider.management");
+            wire.reply(
+                &listed,
+                json!({"providers":[{"providerId":"fixture","displayName":"Fixture","account":{"namespace":"account","loginMethods":["device"]}}]}),
+            );
             let begin = wire.read("account.login.begin");
             assert_eq!(begin["params"]["providerId"], "fixture");
             assert_eq!(begin["params"]["directory"], expected_directory);

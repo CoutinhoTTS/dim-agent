@@ -23719,8 +23719,10 @@
       "to": "dim_cli::login",
       "references": [
         "mod login",
+        "path login::account",
         "path login::account_directory",
-        "path login::login"
+        "path login::login",
+        "path login::logout"
       ]
     },
     {
