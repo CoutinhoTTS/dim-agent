@@ -221,7 +221,9 @@ clears preferences together with descriptor overrides and disables; a same-accou
 refresh preserves them.
 Descriptor edits to a user model replace that model's `userModels` entry; they
 never write the user ID into `modelConfigOverrides`. `models.set_enabled` accepts IDs
-from both defaults and user models. These operations update the effective catalog
+from both defaults and user models and names the complete set the account can use:
+an ID that names no entry is rejected, and an entry that is unavailable keeps the
+enablement it already has. These operations update the effective catalog
 and routes from the same record; endpoint overrides remain their separate map.
 Managed account catalogs do not gain user-added routes/models through these methods.
 

@@ -584,26 +584,31 @@ impl ProviderService {
                                 ));
                             }
                             if ids.iter().any(|id| {
-                                !record.models.iter().any(|model| {
-                                    &model.entry.model_id == id
-                                        && model.unavailable_reason.is_none()
-                                })
+                                !record
+                                    .models
+                                    .iter()
+                                    .any(|model| &model.entry.model_id == id)
                             }) {
                                 return Err(ProviderError::InvalidConfig(
                                     "Model is unavailable".into(),
                                 ));
                             }
+                            // An unavailable entry keeps the enablement it has:
+                            // the set governs the entries this account can use.
                             record.disabled_model_ids.retain(|id| {
-                                !record
-                                    .models
-                                    .iter()
-                                    .any(|model| &model.entry.model_id == id)
+                                !record.models.iter().any(|model| {
+                                    &model.entry.model_id == id
+                                        && model.unavailable_reason.is_none()
+                                })
                             });
                             record.disabled_model_ids.extend(
                                 record
                                     .models
                                     .iter()
-                                    .filter(|model| !ids.contains(&model.entry.model_id))
+                                    .filter(|model| {
+                                        model.unavailable_reason.is_none()
+                                            && !ids.contains(&model.entry.model_id)
+                                    })
                                     .map(|model| model.entry.model_id.clone()),
                             );
                             record.version =

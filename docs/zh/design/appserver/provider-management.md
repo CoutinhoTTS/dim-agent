@@ -180,7 +180,8 @@ models.reset 恢复仍存在的默认项，用户项用 delete。refresh 保留�
 显式禁用，沿用 admitted 配置冲突检查。托管目录换账号 refresh 时，偏好随 descriptor 覆盖
 和禁用项一起清空；同账号 refresh 则保留它们。托管账号目录不通过这些方法新增用户模型/路由。
 models.edit 修改用户模型的 descriptor 时替换该项 userModels，不把用户 ID 写入 modelConfigOverrides。
-models.set_enabled 接受默认模型及用户模型的 ID；这些操作从同一记录更新有效目录和路由，
+models.set_enabled 接受默认模型及用户模型的 ID，并给出账号可用的完整集合：不对应任何目录项的
+ID 被拒绝，不可用项保持原有启用状态。这些操作从同一记录更新有效目录和路由，
 endpointOverrides 仍是独立映射。
 
 删除自定义 Provider 时，同事务清理其自有选择。内置项 delete 禁用记录并保留 scoped 选择，

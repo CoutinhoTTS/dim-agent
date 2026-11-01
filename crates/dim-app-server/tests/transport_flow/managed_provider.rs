@@ -32,6 +32,8 @@ use std::sync::{Mutex as StdMutex, Weak};
 struct Fixture {
     base_url: String,
     account: StdMutex<AccountSnapshot>,
+    /// Whether the account's catalog offers a second, unavailable model.
+    mixed: StdMutex<bool>,
     recovered: AtomicUsize,
     released: StdMutex<Vec<String>>,
 }
@@ -144,14 +146,27 @@ impl ManagedProvider for Provider {
             "capabilities":dim_agent_types::CatalogCapabilities {
                 reasoning: true, ..dim_agent_types::CatalogCapabilities::with_limits(32_000, 128) }}))
         .unwrap();
-        ready(Ok(ManagedCatalog {
-            account: self.0.account.lock().unwrap().clone(),
-            models: vec![ManagedModel {
+        let mut models = vec![ManagedModel {
+            entry,
+            protocol: ModelProtocol::OpenaiCompatible,
+            unavailable_reason: None,
+            zdr: false,
+        }];
+        if *self.0.mixed.lock().unwrap() {
+            let entry: ModelEntry = serde_json::from_value(json!({"modelId":"limited-model",
+                "displayName":"Limited model","status":"active",
+                "capabilities":dim_agent_types::CatalogCapabilities::default()}))
+            .unwrap();
+            models.push(ManagedModel {
                 entry,
                 protocol: ModelProtocol::OpenaiCompatible,
-                unavailable_reason: None,
+                unavailable_reason: Some("limits_undeclared".into()),
                 zdr: false,
-            }],
+            });
+        }
+        ready(Ok(ManagedCatalog {
+            account: self.0.account.lock().unwrap().clone(),
+            models,
         }))
     }
     fn credential(&self, _: &str, _: &str) -> ManagedFuture<CredentialLease> {
@@ -224,6 +239,7 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
                 granted_scopes: vec!["model".into()],
             }),
         }),
+        mixed: StdMutex::new(false),
         recovered: AtomicUsize::new(0),
         released: StdMutex::new(vec![]),
     });
@@ -455,6 +471,43 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
         "high"
     );
     assert_ok(&client.rpc("provider.models.set_enabled", json!({"providerId":"managed-fixture","expectedVersion":5,"modelIds":["fixture-model"]})).await);
+    // A catalog that holds one unavailable model still toggles the rest. The
+    // client's toggle sends the whole enabled set, the unavailable model
+    // included, and a set that omits the model leaves its state alone.
+    *fixture.mixed.lock().unwrap() = true;
+    let mixed = client
+        .rpc("provider.refresh", json!({"providerId":"managed-fixture"}))
+        .await;
+    assert_ok(&mixed);
+    assert_eq!(mixed["result"]["disabledModelIds"], json!([]));
+    let listed = client
+        .rpc(
+            "provider.management",
+            json!({"providerId":"managed-fixture"}),
+        )
+        .await;
+    assert_eq!(
+        listed["result"]["providers"][0]["models"][1]["unavailableReason"],
+        "limits_undeclared"
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "provider.models.set_enabled",
+                json!({"providerId":"managed-fixture","expectedVersion":7,
+                    "modelIds":["fixture-model","limited-model"]}),
+            )
+            .await,
+    );
+    let omitted = client
+        .rpc(
+            "provider.models.set_enabled",
+            json!({"providerId":"managed-fixture","expectedVersion":8,
+                "modelIds":["fixture-model"]}),
+        )
+        .await;
+    assert_ok(&omitted);
+    assert_eq!(omitted["result"]["disabledModelIds"], json!([]));
     let created = client
         .rpc(
             "session.create",
@@ -509,7 +562,7 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
         )
         .await;
     assert_ok(&stale);
-    assert_eq!(stale["result"]["providers"][0]["version"], 6);
+    assert_eq!(stale["result"]["providers"][0]["version"], 9);
     assert_eq!(
         stale["result"]["providers"][0]["models"][0]["unavailableReason"],
         "account_changed"
@@ -545,7 +598,7 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
         )
         .await;
     assert_ok(&signed_out);
-    assert_eq!(signed_out["result"]["providers"][0]["version"], 7);
+    assert_eq!(signed_out["result"]["providers"][0]["version"], 10);
     assert_eq!(
         signed_out["result"]["providers"][0]["models"][0]["unavailableReason"],
         "account_required"
