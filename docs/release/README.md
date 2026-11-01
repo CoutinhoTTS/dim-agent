@@ -14,6 +14,15 @@ The public host does not migrate or rewrite the account-owned `auth.json` when r
 
 Release cloning supplies its Git authentication header through process-local Git environment configuration, with shell tracing disabled. The credential is absent from Git arguments and is unset before checkout and build commands. Release jobs continue to use self-hosted runners isolated from PR jobs.
 
+## File access
+
+Under `read-only` and `workspace-write`, a file tool read (`read`, `grep` or `glob`) whose
+resolved path is outside the Session workspace, the platform's system roots, the Session's own
+artifacts and any Session grant now asks for approval instead of running silently. A
+non-interactive run (`exec`) answers that prompt with the ordinary denial and exits 3. The same
+facts now deny, instead of ask, a write to a system root or a Session-owned artifact under
+`workspace-write`. `full-access` is unchanged.
+
 ## Member-approval client compatibility
 
 Upgrade the CLI, bundled Web workspace and ACP gateway together when enabling native member

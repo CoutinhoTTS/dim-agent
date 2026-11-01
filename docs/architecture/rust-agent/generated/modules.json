@@ -648,7 +648,6 @@
       "file": "crates/dim-agent-capabilities/src/permission.rs",
       "unexpandedMacros": [
         "format",
-        "matches",
         "tokio::select",
         "unreachable",
         "vec"
@@ -28405,6 +28404,7 @@
         "path Effect::Approval",
         "path ExitConfirm::new",
         "path ExitReason::AgentRunning",
+        "path PermissionPrompt::grant_for",
         "path PermissionPrompt::new"
       ]
     },

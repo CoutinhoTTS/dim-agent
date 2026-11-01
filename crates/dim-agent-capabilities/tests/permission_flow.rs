@@ -370,6 +370,33 @@ async fn write_verdict(permission: &Permission, path: &Path) -> &'static str {
         Decision::Deny { .. } => "deny",
     }
 }
+/// Decides a file-read tool `name` for `path`; `None` omits the path input,
+/// which `grep` and `glob` read as the Session cwd.
+async fn decide_read(permission: &Permission, name: &str, path: Option<&Path>) -> Decision {
+    let mut input = JsonObject::new();
+    if let Some(path) = path {
+        input.insert("path".into(), path.to_string_lossy().into_owned().into());
+    }
+    permission
+        .decide(
+            &ApprovalCallData {
+                name: name.into(),
+                input,
+            },
+            Some("read_filesystem"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+}
+/// Decides a `read` call for `path`; returns its verdict.
+async fn read_verdict(permission: &Permission, path: &Path) -> &'static str {
+    match decide_read(permission, "read", Some(path)).await {
+        Decision::Allow => "allow",
+        Decision::Ask { .. } => "ask",
+        Decision::Deny { .. } => "deny",
+    }
+}
 fn temporary_directory(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!("dim-permission-{name}-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&path).unwrap();
@@ -502,6 +529,175 @@ async fn file_write_facts_decide_each_path_by_preset() {
     })
     .await
     .expect("file facts flow completed");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_read_facts_decide_each_path_by_preset() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let root = temporary_directory("reads");
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let inside = work.join("file.txt");
+        std::fs::write(&inside, b"inside").unwrap();
+        let outside = root.join("outside.txt");
+        std::fs::write(&outside, b"outside").unwrap();
+        let owned = root.join("owned").join("artifact.txt");
+        std::fs::create_dir_all(owned.parent().unwrap()).unwrap();
+        std::fs::write(&owned, b"owned").unwrap();
+        let system =
+            PathBuf::from("/usr/bin").join(format!("dim-permission-{}", uuid::Uuid::new_v4()));
+        let granted = root.join("granted");
+        std::fs::create_dir_all(&granted).unwrap();
+        let read_granted = granted.join("read.txt");
+        std::fs::write(&read_granted, b"read").unwrap();
+        let write_granted = granted.join("write.txt");
+        std::fs::write(&write_granted, b"write").unwrap();
+        let grants = TestGrants::new(vec![
+            grant(&read_granted, GrantKind::File, GrantMode::Read),
+            grant(&write_granted, GrantKind::File, GrantMode::Write),
+        ]);
+        let files = TestFiles::new();
+        files.own(owned.clone());
+        let agent = granted_agent(
+            Arc::new(RiskTools::default()),
+            grants.clone(),
+            files.clone(),
+        )
+        .await;
+
+        for (policy, expected) in [
+            (
+                PermissionPreset::ReadOnly,
+                ["allow", "ask", "allow", "allow", "allow", "ask"],
+            ),
+            (
+                PermissionPreset::WorkspaceWrite,
+                ["allow", "ask", "allow", "allow", "allow", "ask"],
+            ),
+            (PermissionPreset::FullAccess, ["allow"; 6]),
+        ] {
+            let session = agent
+                .create_session(config_in(&work, preset(policy)))
+                .await
+                .unwrap();
+            let permission = session.service::<Permission>("main").unwrap();
+            let ask = root.join("ask.txt");
+            for (path, expected) in [&inside, &outside, &owned, &system, &read_granted, &ask]
+                .into_iter()
+                .zip(expected)
+            {
+                assert_eq!(
+                    read_verdict(&permission, path).await,
+                    expected,
+                    "{policy:?} {}",
+                    path.display()
+                );
+            }
+            // A write grant also permits reads.
+            assert_eq!(read_verdict(&permission, &write_granted).await, "allow");
+            session.close().await.unwrap();
+        }
+
+        // A relative read is resolved against the Session cwd with the tools'
+        // resolver before the facts. `grep` and `glob` without a path search
+        // the cwd, which is the workspace.
+        let session = agent
+            .create_session(config_in(&work, preset(PermissionPreset::WorkspaceWrite)))
+            .await
+            .unwrap();
+        let permission = session.service::<Permission>("main").unwrap();
+        assert_eq!(
+            read_verdict(&permission, Path::new("file.txt")).await,
+            "allow"
+        );
+        assert_eq!(
+            read_verdict(&permission, Path::new("../outside.txt")).await,
+            "ask"
+        );
+        for name in ["grep", "glob"] {
+            for path in [None, Some(Path::new(""))] {
+                assert_eq!(
+                    decide_read(&permission, name, path).await,
+                    Decision::Allow,
+                    "{name} without a path searches the cwd"
+                );
+            }
+            assert!(
+                matches!(
+                    decide_read(&permission, name, Some(Path::new("../outside.txt"))).await,
+                    Decision::Ask { .. }
+                ),
+                "{name} outside the workspace"
+            );
+        }
+        session.close().await.unwrap();
+
+        // A workspace symlink that points outside does not match the workspace,
+        // and one that points inside does.
+        let escape = work.join("escape");
+        let into_workspace = root.join("into-workspace");
+        std::fs::create_dir_all(&into_workspace).unwrap();
+        std::os::unix::fs::symlink(&root, &escape).unwrap();
+        std::os::unix::fs::symlink(&work, into_workspace.join("work")).unwrap();
+        let session = agent
+            .create_session(config_in(&work, preset(PermissionPreset::WorkspaceWrite)))
+            .await
+            .unwrap();
+        let permission = session.service::<Permission>("main").unwrap();
+        assert_eq!(
+            read_verdict(&permission, &escape.join("outside.txt")).await,
+            "ask"
+        );
+        assert_eq!(
+            read_verdict(&permission, &into_workspace.join("work/file.txt")).await,
+            "allow"
+        );
+        session.close().await.unwrap();
+
+        // An explicit tool allow does not bypass a path fact.
+        let session = agent
+            .create_session(config_in(
+                &work,
+                PermissionPolicy {
+                    preset: PermissionPreset::ReadOnly,
+                    allowed_tools: vec!["read".into()],
+                    ..Default::default()
+                },
+            ))
+            .await
+            .unwrap();
+        let permission = session.service::<Permission>("main").unwrap();
+        assert_eq!(read_verdict(&permission, &inside).await, "allow");
+        assert_eq!(read_verdict(&permission, &outside).await, "ask");
+        session.close().await.unwrap();
+
+        // An unreadable ownership or grants source denies instead of asking.
+        files.fail(true);
+        let session = agent
+            .create_session(config_in(&work, preset(PermissionPreset::WorkspaceWrite)))
+            .await
+            .unwrap();
+        let permission = session.service::<Permission>("main").unwrap();
+        for path in [&inside, &outside] {
+            assert_eq!(read_verdict(&permission, path).await, "deny");
+        }
+        session.close().await.unwrap();
+        grants.set(None);
+        files.fail(false);
+        let session = agent
+            .create_session(config_in(&work, preset(PermissionPreset::WorkspaceWrite)))
+            .await
+            .unwrap();
+        let permission = session.service::<Permission>("main").unwrap();
+        assert_eq!(read_verdict(&permission, &outside).await, "deny");
+        session.close().await.unwrap();
+
+        agent.close().await.unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    })
+    .await
+    .expect("file read facts flow completed");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

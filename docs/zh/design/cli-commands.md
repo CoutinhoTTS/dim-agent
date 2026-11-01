@@ -280,8 +280,8 @@ Permission、Approval、事件、协议和存储都不变。
 
 | 预设 | 哪些会运行（Permission 现有的判定，在 `disallowedTools` 与 deny 规则之后） |
 | --- | --- |
-| `read-only` | 读取和 Session 工具运行；文件写入、命令、网络和未分类工具被拒绝 |
-| `workspace-write` | 读取、工作区内文件写入和 Session 工具运行；写入系统目录或 Session 自有文件被拒绝；其他工作区外写入、命令、网络和未分类工具需要询问 |
+| `read-only` | 读取工作区、系统目录、Session 自有文件和已授权路径直接运行，其他读取需要询问；Session 工具运行；文件写入、命令、网络和未分类工具被拒绝 |
+| `workspace-write` | 上述读取直接运行、其他读取需要询问；工作区内文件写入和 Session 工具运行；写入系统目录或 Session 自有文件被拒绝；其他工作区外写入、命令、网络和未分类工具需要询问 |
 | `full-access` | 每个工具调用都直接运行，不询问 |
 
 deny 规则在任何预设下都生效。allow 规则只把简单命令的询问变成运行，从不解除拒绝。产品和配置型
@@ -388,7 +388,7 @@ Approval
 
 | 选项 | 预设 | 哪些会运行 |
 | --- | --- | --- |
-| 询问（Ask） | `workspace-write` | 读取和工作区写入直接运行；写入系统目录或 Session 自有文件被拒绝；命令、网络、其他工作区外写入和未分类工具先询问 |
+| 询问（Ask） | `workspace-write` | 读取工作区、系统目录、Session 自有文件和已授权路径直接运行、其他读取需要询问；工作区写入直接运行；写入系统目录或 Session 自有文件被拒绝；命令、网络、其他工作区外写入和未分类工具先询问 |
 | 完全访问（Full access） | `full-access` | 每次工具调用都不询问 |
 
 询问是产品默认。已经生效的选项上按 Enter 关闭菜单。完全访问仍要和 `/approvals` 一样先确认。
@@ -483,6 +483,27 @@ EOF 和 Ctrl+C 含义不变：EOF 拒绝并关闭输入，Ctrl+C 停止回合。
 CLI 报告规则的结果，不发送回答。Ctrl+C 之后不再发起新的写入：挂起的读取以 `[rule not saved]`
 结束，由停止来收尾该请求。允许之后的重新判定（F2 §5.3）仍然适用，所以期间写入的 deny 规则优先。
 命令文本经终端过滤后显示。
+
+### "本次会话内允许"
+
+对于带 `path` 的 `read`、`write` 和 `edit` 调用，提示还提供"本次会话内允许"（ADR 012）。在
+`read-only` 和 `workspace-write` 下，`read` 对工作区、系统目录、Session 自有文件和已授权路径之外的
+路径需要询问，所以该动作也会对 `read` 出现（[ADR 014](../../adr/014-file-access-facts.md#d2-read-and-write)）。
+CLI 把工具给出的路径原样发给 `session.grants.add {sessionId, path, kind: "file", mode}`：`read` 的
+mode 是 `read`，其余是 `write`。守护进程按 Session 工作区解析 `~`、相对路径、`..` 和符号链接并保存
+规范路径；尚不存在的文件按父目录和最终名称解析。CLI 不在本地决定路径或 kind。
+
+```text
+[approval] read: Reading outside the session workspace requires approval: /home/user/.ssh/config
+  path: /home/user/.ssh/config
+› Allow once   Allow for this session   Reject   Full access
+```
+
+"本次会话内允许"先写入授权，再回答 `approval.respond allow`；重新判定会看到该授权。写入失败时 CLI
+显示 `Grant not saved: <error>`，仍按用户要求本次允许，失败的存储写入不会阻塞回合。非交互运行
+（`exec`）把事实之外的读取以普通拒绝结束，并以 3 退出；不增加新的错误路径。该提示不列出也不删除授权；
+撤销尚无客户端入口。授权只在 `Ask` 步骤生效；write 授权也允许读取，read 授权从不允许写入，分叉不继承
+源的授权。
 
 ### 决定
 

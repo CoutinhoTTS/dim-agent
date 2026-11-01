@@ -97,7 +97,8 @@ file, not as a subtree, because git's credential store also reads `credentials` 
 ungranted. `include.path` and `includeIf` targets elsewhere in the home are not granted, so git
 fails with `Operation not permitted`; a `core.excludesFile` or `core.attributesFile` elsewhere
 draws a warning and is not applied. Reads of the home are not the model's secret boundary: the
-`read` tool is path-independent and runs without approval under workspace-write
+`read` tool asks the user for a home path through [ADR 014's facts](../adr/014-file-access-facts.md)
+rather than relying on the sandbox
 ([session files §11.2](appserver/session-files.md#112-requirement-for-path-scoped-file-access)),
 and this is a narrow tool-configuration grant.
 

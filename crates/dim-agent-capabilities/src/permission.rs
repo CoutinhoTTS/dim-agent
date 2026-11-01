@@ -2,9 +2,10 @@
 //! policy. The policy is `SessionConfig.permission_policy` folded with this
 //! branch's dispatched `permission/changed` events. The user's command rules,
 //! read through the Session's `CommandRulesHost` on each decision, deny or
-//! approve commands of process-starting calls. A write reads the Session's
-//! `fileAccessFacts` service, which resolves the workspace, system, owned and
-//! grant facts; without that service a write keeps the workspace-only rule.
+//! approve commands of process-starting calls. A file read or write reads the
+//! Session's `fileAccessFacts` service, which resolves the workspace, system,
+//! owned and grant facts; without that service a write keeps the
+//! workspace-only rule and a read the preset rule.
 use crate::{
     file_access::FileAccessFacts,
     host::{HostError, HostFuture},
@@ -94,51 +95,35 @@ pub struct Permission {
 }
 impl Permission {
     /// Decides with the policy dispatched when the decision is made and, for a
-    /// command call, the rules read now. Workspace writes resolve their target
-    /// before sampling that policy. Cancelled reads stop admission.
+    /// command call, the rules read now. A file call resolves its target before
+    /// sampling that policy. Cancelled reads stop admission.
     pub async fn decide(
         &self,
         call: &ApprovalCallData,
         risk: Option<&str>,
         cancel: &CancellationToken,
     ) -> Result<Decision, HostError> {
-        let write = matches!(Risk::of(risk), Risk::Write);
-        let home = write
+        let category = Risk::of(risk);
+        let write = category == Risk::Write;
+        let home = (write || category == Risk::Read)
             .then(|| {
                 self.ctx
                     .get_at(&self.platform)
                     .map(|platform| platform.home.clone())
             })
             .flatten();
+        let read_facts = (category == Risk::Read)
+            .then(|| self.ctx.get_at(&self.facts))
+            .flatten();
         let path = call
             .input
             .get("path")
             .and_then(|path| path.as_str())
             .filter(|path| !path.is_empty());
-        let write_target = if write
-            && self.state.get().policy.preset != PermissionPreset::FullAccess
-            && let Some(path) =
-                path.filter(|path| home.is_some() || std::path::Path::new(path).is_absolute())
-        {
-            let (cwd, path) = (self.cwd.clone(), path.to_owned());
-            let target = tokio::task::spawn_blocking(move || {
-                let workspace = std::fs::canonicalize(&cwd).map_err(|error| {
-                    format!("Failed to resolve workspace {}: {error}", cwd.display())
-                })?;
-                let target = match home {
-                    Some(home) => resolve_path(&cwd, &home, &path),
-                    None => canonical_prefix(PathBuf::from(path)),
-                };
-                target.map(|target| (workspace, target))
-            });
-            Some(tokio::select! {
-                result = target => result.map_err(|error| HostError::failed(error.to_string()))?,
-                _ = cancel.cancelled() => return Err(HostError::Cancelled("Tool execution cancelled.".into())),
-            })
-        } else {
-            None
-        };
-        let command = match (Risk::of(risk), call.input.get("command")) {
+        let target = self
+            .resolve_target(category, path, home, read_facts.is_some(), cancel)
+            .await?;
+        let command = match (category, call.input.get("command")) {
             (Risk::Execute, Some(serde_json::Value::String(command))) => Some(command.as_str()),
             _ => None,
         };
@@ -158,7 +143,7 @@ impl Permission {
         }
         if write && policy.preset != PermissionPreset::FullAccess {
             let facts = self.ctx.get_at(&self.facts);
-            if let (Some(Ok((_, target))), Some(facts)) = (&write_target, facts) {
+            if let (Some(Ok((_, target))), Some(facts)) = (&target, facts) {
                 let facts = tokio::select! {
                     result = facts.0.facts(&self.session_id, policy.preset, target, GrantMode::Write) => result,
                     _ = cancel.cancelled() => return Err(HostError::Cancelled("Tool execution cancelled.".into())),
@@ -208,7 +193,7 @@ impl Permission {
                     });
                 }
             } else if policy.preset == PermissionPreset::WorkspaceWrite {
-                return Ok(match write_target {
+                return Ok(match target {
                     Some(Ok((workspace, target))) if target.starts_with(&workspace) => {
                         decide(&policy, name, risk)
                     }
@@ -224,6 +209,48 @@ impl Permission {
                             "A file write without a verified workspace target requires approval"
                                 .into(),
                     },
+                });
+            }
+        }
+        if category == Risk::Read
+            && policy.preset != PermissionPreset::FullAccess
+            && path.is_some()
+            && let Some(facts) = &read_facts
+        {
+            let target = match &target {
+                Some(Ok((_, target))) => target,
+                Some(Err(reason)) => {
+                    return Ok(Decision::Deny {
+                        reason: reason.clone(),
+                    });
+                }
+                None => {
+                    return Ok(Decision::Deny {
+                        reason: "A file read without a resolved target cannot be allowed".into(),
+                    });
+                }
+            };
+            let facts = tokio::select! {
+                result = facts.0.facts(&self.session_id, policy.preset, target, GrantMode::Read) => result,
+                _ = cancel.cancelled() => return Err(HostError::Cancelled("Tool execution cancelled.".into())),
+            };
+            let facts = match facts {
+                Ok(facts) => facts,
+                Err(HostError::Cancelled(reason)) => {
+                    return Err(HostError::Cancelled(reason));
+                }
+                Err(error) => {
+                    return Ok(Decision::Deny {
+                        reason: format!("File access facts could not be read: {error}"),
+                    });
+                }
+            };
+            if !(facts.workspace || facts.system || facts.owned || facts.grant) {
+                return Ok(Decision::Ask {
+                    reason: format!(
+                        "Reading outside the session workspace requires approval: {}",
+                        target.display()
+                    ),
                 });
             }
         }
@@ -266,6 +293,52 @@ impl Permission {
             }
             decision => decision,
         })
+    }
+
+    /// Resolves the call's file target before admission, like the tool owner
+    /// will: `~`, cwd, `..` and symlinks are settled. `None` means no facts
+    /// query needs a target: the call has no path, no facts service is bound to
+    /// a read, a relative path cannot be resolved without HostPlatform, or the
+    /// preset is full-access.
+    async fn resolve_target(
+        &self,
+        category: Risk,
+        path: Option<&str>,
+        home: Option<PathBuf>,
+        facts: bool,
+        cancel: &CancellationToken,
+    ) -> Result<Option<Result<(PathBuf, PathBuf), String>>, HostError> {
+        let resolvable = match category {
+            Risk::Write => {
+                path.is_some_and(|path| home.is_some() || std::path::Path::new(path).is_absolute())
+            }
+            Risk::Read => path.is_some_and(|path| {
+                facts && (home.is_some() || std::path::Path::new(path).is_absolute())
+            }),
+            _ => false,
+        };
+        let Some(path) = path.filter(|_| resolvable) else {
+            return Ok(None);
+        };
+        if self.state.get().policy.preset == PermissionPreset::FullAccess {
+            return Ok(None);
+        }
+        let (cwd, path) = (self.cwd.clone(), path.to_owned());
+        let target = tokio::task::spawn_blocking(move || {
+            let workspace = std::fs::canonicalize(&cwd).map_err(|error| {
+                format!("Failed to resolve workspace {}: {error}", cwd.display())
+            })?;
+            let target = match home {
+                Some(home) => resolve_path(&cwd, &home, &path),
+                None => canonical_prefix(PathBuf::from(path)),
+            };
+            target.map(|target| (workspace, target))
+        });
+        let target = tokio::select! {
+            result = target => result.map_err(|error| HostError::failed(error.to_string()))?,
+            _ = cancel.cancelled() => return Err(HostError::Cancelled("Tool execution cancelled.".into())),
+        };
+        Ok(Some(target))
     }
 
     /// Writes `permission/changed` when `expected` is the last written
