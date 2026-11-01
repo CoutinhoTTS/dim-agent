@@ -159,6 +159,7 @@ pub struct Restart {
 pub fn run(host: Box<dyn SessionPort>, surroundings: Env) -> Leave {
     let mut restart = None;
     let code = run_terminal(host, surroundings, &mut restart);
+    history::flush();
     match restart {
         Some(restart) => Leave::Restart(restart),
         None => Leave::Exit(code),
@@ -1968,7 +1969,7 @@ impl App {
             }
             ComposerOutcome::Submit(text) => {
                 let text = text.trim().to_owned();
-                let _ = history::append(&self.home, &self.cwd_key, &text);
+                history::append(&self.home, &self.cwd_key, &text);
                 self.composer.push_history(&text);
                 self.jump = Some(Jump::Bottom);
                 if self.running() {
@@ -1978,7 +1979,7 @@ impl App {
             }
             ComposerOutcome::SubmitDraft { text, parts } => {
                 let text = text.trim().to_owned();
-                let _ = history::append(&self.home, &self.cwd_key, &text);
+                history::append(&self.home, &self.cwd_key, &text);
                 self.composer.push_history(&text);
                 self.jump = Some(Jump::Bottom);
                 if self.running() {
@@ -1988,7 +1989,7 @@ impl App {
             }
             ComposerOutcome::Shell { command, shell } => {
                 let entry = format!("{}{command}", shell.prefix());
-                let _ = history::append(&self.home, &self.cwd_key, &entry);
+                history::append(&self.home, &self.cwd_key, &entry);
                 self.composer.push_history(&entry);
                 self.jump = Some(Jump::Bottom);
                 let running = crate::ui::shell::Running::new(command, shell == Shell::Private);
@@ -2270,7 +2271,7 @@ impl App {
             return;
         };
         let text = text.trim().to_owned();
-        let _ = history::append(&self.home, &self.cwd_key, &text);
+        history::append(&self.home, &self.cwd_key, &text);
         self.composer.push_history(&text);
         self.host.send(Command::OpenLine {
             session_id: draft.session_id,

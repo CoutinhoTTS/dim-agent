@@ -27324,7 +27324,7 @@
       "to": "dim_cli::ui::atomic",
       "references": [
         "path sibling",
-        "path update_within"
+        "path update"
       ]
     },
     {
@@ -27525,8 +27525,10 @@
         "path FILE",
         "path Store",
         "path append",
+        "path flush",
         "path load",
-        "path path"
+        "path path",
+        "path writer"
       ]
     },
     {
@@ -32415,6 +32417,7 @@
       "to": "dim_cli::ui::composer::history",
       "references": [
         "path history::append",
+        "path history::flush",
         "path history::load",
         "use crate::ui::composer::history"
       ]
