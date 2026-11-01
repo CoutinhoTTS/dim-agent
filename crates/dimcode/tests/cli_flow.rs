@@ -190,7 +190,9 @@ impl Wire {
 }
 
 /// The record `session.attach` replies for the Session it names: that
-/// Session's `SessionInfo`, as `session.list` gives it.
+/// Session's `SessionInfo`, whose model follows its latest adopted
+/// configuration rather than the creation model `session.list` reports until
+/// #795 lands.
 fn attach_record(request: &Value) -> Value {
     json!({
         "sessionId": request["params"]["sessionId"],
@@ -2272,6 +2274,13 @@ impl Terminal {
             );
             thread::sleep(Duration::from_millis(10));
         }
+    }
+    /// Waits until the terminal has shown `expected` anywhere, for a frame
+    /// whose place among the frames already consumed the flow does not fix.
+    fn until_anywhere(&mut self, expected: &str) {
+        let consumed = std::mem::take(&mut self.consumed);
+        self.until(expected);
+        self.consumed = consumed;
     }
     fn until(&mut self, expected: &str) {
         let deadline = Instant::now() + PATIENCE;

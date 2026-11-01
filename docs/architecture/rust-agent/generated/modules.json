@@ -1807,6 +1807,7 @@
       "parent": "dim_app_server::connection",
       "file": "crates/dim-app-server/src/connection/tree.rs",
       "unexpandedMacros": [
+        "format",
         "tokio::select",
         "tracing::warn",
         "vec"
@@ -2329,6 +2330,15 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_app_server::provider::preferences::tests",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::provider::preferences",
+      "file": "crates/dim-app-server/src/provider/preferences.rs",
+      "unexpandedMacros": [
+        "assert_eq"
+      ]
+    },
+    {
       "id": "dim_app_server::provider::remote",
       "crate": "dim_app_server",
       "parent": "dim_app_server::provider",
@@ -2593,6 +2603,7 @@
       "unexpandedMacros": [
         "eprintln",
         "format",
+        "rusqlite::params",
         "tokio::pin"
       ]
     },
@@ -15620,6 +15631,7 @@
       "to": "dim_agent_runtime::timeline_store",
       "references": [
         "path TimelineKey",
+        "path dim_agent_runtime::StoredEvent",
         "path dim_agent_runtime::TimelineKey",
         "use dim_agent_runtime::TimelineKey"
       ]
@@ -15757,6 +15769,7 @@
       "to": "dim_app_server::storage::timeline",
       "references": [
         "path SessionStore",
+        "path crate::storage::TurnWindow",
         "use crate::storage::SessionStore"
       ]
     },
@@ -17417,8 +17430,7 @@
       "from": "dim_app_server::connection",
       "to": "dim_agent_types::model",
       "references": [
-        "path crate::provider::ModelPreferences",
-        "path crate::provider::ModelPreferences::default"
+        "path crate::provider::ModelPreferences"
       ]
     },
     {
@@ -17756,6 +17768,14 @@
     },
     {
       "from": "dim_app_server::connection::subscription",
+      "to": "dim_agent_capabilities::prompt_state",
+      "references": [
+        "path PromptSnapshot",
+        "use dim_agent_capabilities::prompt_state::PromptSnapshot"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection::subscription",
       "to": "dim_agent_capabilities::session_broadcast",
       "references": [
         "path SessionBroadcast",
@@ -17811,6 +17831,13 @@
         "path dim_agent_types::ApprovalRequestData",
         "use dim_agent_types::AgentEvent",
         "use dim_agent_types::EventKind"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection::subscription",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path dim_agent_types::ModelId"
       ]
     },
     {
@@ -17940,6 +17967,7 @@
         "path RpcError::from",
         "path RpcError::invalid",
         "path RpcError::reloading",
+        "path RpcError::wire",
         "path params"
       ]
     },
@@ -17962,8 +17990,16 @@
       "from": "dim_app_server::connection::tree",
       "to": "dim_agent_runtime::error",
       "references": [
+        "path AgentError",
         "path AgentError::BranchEnded",
         "path AgentError::InvalidInput"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection::tree",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path dim_agent_runtime::StoredEvent"
       ]
     },
     {
@@ -17989,6 +18025,13 @@
     },
     {
       "from": "dim_app_server::connection::tree",
+      "to": "dim_app_server::outbound",
+      "references": [
+        "path crate::outbound::MAX_FRAME_BYTES"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection::tree",
       "to": "dim_app_server::protocol",
       "references": [
         "path BranchCreate",
@@ -18005,6 +18048,13 @@
         "path Reply::empty",
         "path Submit",
         "path SubmitResult"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection::tree",
+      "to": "dim_app_server::storage::timeline",
+      "references": [
+        "path crate::storage::TurnWindow"
       ]
     },
     {
@@ -18749,8 +18799,12 @@
         "mod server",
         "path McpServer",
         "path McpServerError",
-        "path McpServerError::Cleanup",
-        "path McpServerError::Timeout",
+        "path server::McpServerError",
+        "path server::McpServerError::AuthRequired",
+        "path server::McpServerError::Cleanup",
+        "path server::McpServerError::InsufficientScope",
+        "path server::McpServerError::InvalidResponse",
+        "path server::McpServerError::Timeout",
         "path server::McpServerPlugin::new",
         "path server::McpServerState",
         "path server::McpTool",
@@ -20550,6 +20604,8 @@
         "path ResolveModelConnection",
         "path ResolveModelSelection",
         "path ResolvedModelConnection",
+        "path SelectableModels",
+        "path SelectableModelsHost",
         "path dim_agent_capabilities::host::adopted_preferences"
       ]
     },
@@ -20585,6 +20641,7 @@
         "path CatalogCapabilities",
         "path ModelCapabilitySnapshot",
         "path ModelConfig",
+        "path ModelConfig::default",
         "path ModelPreferences",
         "path ModelPreferences::default",
         "path ModelRequest",
@@ -20707,6 +20764,13 @@
     },
     {
       "from": "dim_app_server::provider",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path crate::protocol::ModelPreferenceUpdate"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider",
       "to": "dim_app_server::provider::auxiliary",
       "references": [
         "mod auxiliary",
@@ -20785,7 +20849,9 @@
       "references": [
         "mod preferences",
         "path preferences",
-        "path preferences::configure"
+        "path preferences::configure",
+        "path preferences::restore_reasoning",
+        "path preferences::restore_service_tier"
       ]
     },
     {
@@ -21306,10 +21372,14 @@
       "to": "dim_agent_capabilities::host",
       "references": [
         "path ModelProtocol",
+        "path ModelProtocol::Anthropic",
         "path ModelProtocol::Bedrock",
+        "path ModelProtocol::Gemini",
         "path ModelProtocol::OpenaiChat",
         "path ModelProtocol::OpenaiCompatible",
         "path ModelProtocol::OpenaiResponses",
+        "path ModelProtocol::Xai",
+        "path ModelProtocol::XaiResponses",
         "path reasoning_config",
         "use dim_agent_capabilities::host::ModelProtocol",
         "use dim_agent_capabilities::host::reasoning_config"
@@ -21322,7 +21392,51 @@
         "path ModelCapabilitySnapshot",
         "path ModelConfig",
         "path ModelPreferences",
-        "path ModelPreferences::default"
+        "path ModelPreferences::default",
+        "path ProviderOptions",
+        "path ProviderReasoningConfig::default"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::preferences",
+      "to": "dim_app_server::provider::preferences::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::preferences::tests",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path ModelProtocol::Anthropic",
+        "path ModelProtocol::OpenaiChat",
+        "path ModelProtocol::OpenaiCompatible",
+        "path ModelProtocol::OpenaiResponses",
+        "path ModelProtocol::Xai",
+        "path ModelProtocol::XaiResponses"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::preferences::tests",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path AnthropicProviderOptions",
+        "path CompatibleThinking",
+        "path ModelConfig",
+        "path ModelConfig::default",
+        "path OpenAiCompatibleProviderOptions",
+        "path ProviderOptions",
+        "path ProviderReasoningConfig",
+        "path SummaryStyle::Auto",
+        "path ThinkingType::Disabled"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::preferences::tests",
+      "to": "dim_app_server::provider::preferences",
+      "references": [
+        "path restore_reasoning",
+        "path restore_service_tier"
       ]
     },
     {
@@ -22355,7 +22469,8 @@
         "mod timeline",
         "use timeline::SessionStore",
         "use timeline::SessionStorePlugin",
-        "use timeline::SqliteTimelineStore"
+        "use timeline::SqliteTimelineStore",
+        "use timeline::TurnWindow"
       ]
     },
     {
@@ -26347,6 +26462,7 @@
         "path Update::Usage",
         "path Update::UsageReport",
         "path Update::Web",
+        "path Update::Withdrawn",
         "path Usage",
         "use crate::model::session::ACCOUNT_NAMESPACE",
         "use crate::model::session::Account",
@@ -32044,6 +32160,8 @@
         "path ContextReading",
         "path DIM_OAUTH_ID",
         "path SessionPort",
+        "path SubmitMode::Queue",
+        "path SubmitMode::Steer",
         "path SwitchKind",
         "path SwitchKind::Forked",
         "path SwitchKind::New",
@@ -32086,6 +32204,7 @@
         "path Update::Usage",
         "path Update::UsageReport",
         "path Update::Web",
+        "path Update::Withdrawn",
         "path crate::model::session::PluginAction::Install",
         "use crate::model::session::Command",
         "use crate::model::session::CompactReply",
@@ -32093,6 +32212,7 @@
         "use crate::model::session::DIM_OAUTH_ID",
         "use crate::model::session::DraftPart",
         "use crate::model::session::SessionPort",
+        "use crate::model::session::SubmitMode",
         "use crate::model::session::SwitchKind",
         "use crate::model::session::Update"
       ]
@@ -32558,10 +32678,12 @@
         "path KeyCode::Enter",
         "path KeyCode::Esc",
         "path KeyCode::Home",
+        "path KeyCode::Left",
         "path KeyCode::PageDown",
         "path KeyCode::Tab",
         "path KeyCode::Up",
         "path KeyEvent",
+        "path KeyEvent::new",
         "path Modifiers::CTRL",
         "path Modifiers::NONE",
         "path Modifiers::SHIFT",
@@ -32840,9 +32962,11 @@
       "references": [
         "path Command",
         "path Command::AskAnswers",
+        "path Command::InputControl",
         "path Command::ListPlugins",
         "path Command::OpenLine",
         "path Command::Plugin",
+        "path Command::Stop",
         "path Command::Submit",
         "path DIM_OAUTH_ID",
         "path SessionPort",
@@ -32857,6 +32981,7 @@
         "path Update::Snapshot",
         "path Update::Switched",
         "path Update::UsageReport",
+        "path Update::Withdrawn",
         "path crate::model::session::Account",
         "path crate::model::session::ExecutionSnapshot",
         "path crate::model::session::SwitchKind::Resumed"
@@ -32882,7 +33007,8 @@
         "path SideLine",
         "path ViewRow",
         "path ViewSnapshot",
-        "path ViewSnapshot::default"
+        "path ViewSnapshot::default",
+        "path crate::model::view::QueuedInput"
       ]
     },
     {
@@ -32966,11 +33092,13 @@
         "path KeyCode::Enter",
         "path KeyCode::Esc",
         "path KeyCode::Home",
+        "path KeyCode::Left",
         "path KeyCode::Tab",
         "path KeyCode::Up",
         "path KeyEvent::new",
         "path Modifiers::CTRL",
         "path Modifiers::NONE",
+        "path Modifiers::SHIFT",
         "path crate::ui::terminal::KeyEvent::new"
       ]
     },
