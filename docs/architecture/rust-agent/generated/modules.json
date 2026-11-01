@@ -19085,6 +19085,7 @@
         "path McpError::MoveConflict",
         "path McpError::MovePartial",
         "path McpError::Settings",
+        "path McpError::StaleSecretRecord",
         "path McpError::UnknownServer",
         "path McpError::Worker",
         "path McpService",

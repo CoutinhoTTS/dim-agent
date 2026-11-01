@@ -1461,3 +1461,80 @@ async fn an_into_project_partial_is_finished_after_a_restart() {
     assert_eq!(overlay.url.as_deref(), Some("https://example.test/mcp"));
     restarted.close().await;
 }
+
+#[tokio::test]
+async fn a_save_racing_a_move_keeps_the_moves_overlay() {
+    let fixture = Fixture::new().await;
+    let cancel = CancellationToken::new();
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    let expected_version = catalog.project_revision.clone().unwrap();
+
+    assert!(matches!(
+        fixture
+            .mcp
+            .editable(McpSource::Project(1), "user-only".into(), &cancel)
+            .await,
+        Err(McpError::UnknownServer)
+    ));
+    assert!(
+        fixture
+            .mcp
+            .overlay(SettingsScope::Project(1), "user-only".into(), &cancel)
+            .await
+            .unwrap()
+            .is_none(),
+        "client A saves an id the project does not hold and has no record for"
+    );
+
+    fixture
+        .mcp
+        .move_entry(
+            McpSource::User,
+            McpSource::Project(1),
+            "user-only".into(),
+            catalog.user_revision,
+            expected_version.clone(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(
+            fixture
+                .mcp
+                .update(
+                    SettingsScope::Project(1),
+                    expected_version,
+                    "user-only".into(),
+                    McpChange::Put(
+                        serde_json::from_value(json!({"command":"overwritten"})).unwrap()
+                    ),
+                    &cancel,
+                )
+                .await,
+            Err(McpError::Settings(SettingsError::Conflict)),
+        ),
+        "the save that raced the move loses its project revision check"
+    );
+    let overlay = fixture
+        .mcp
+        .overlay(SettingsScope::Project(1), "user-only".into(), &cancel)
+        .await
+        .unwrap()
+        .expect("the failed save does not delete the move's overlay");
+    assert!(overlay.auth.is_some());
+    assert_eq!(overlay.url.as_deref(), Some("https://example.test/mcp"));
+    let editable = fixture
+        .mcp
+        .editable(McpSource::Project(1), "user-only".into(), &cancel)
+        .await
+        .unwrap();
+    assert!(editable.secrets_in_user_scope);
+    let McpServerSettings::Remote { url, auth, .. } = &editable.configuration else {
+        panic!("the moved entry is remote");
+    };
+    assert_eq!(url, "https://example.test/mcp");
+    assert!(auth.is_some(), "the completed move keeps its credential");
+    fixture.close().await;
+}

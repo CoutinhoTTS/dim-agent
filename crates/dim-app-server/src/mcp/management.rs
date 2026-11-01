@@ -415,6 +415,7 @@ pub(crate) fn error(error: McpError) -> RpcError {
         McpError::MoveConflict => "mcp_move_conflict",
         McpError::MovePartial { .. } => "mcp_move_partial",
         McpError::CredentialsAreUserScoped => "mcp_credentials_are_user_scoped",
+        McpError::StaleSecretRecord => "mcp_stale_secret_record",
         McpError::Closed | McpError::Settings(SettingsError::Closed) => {
             return RpcError::reloading();
         }
@@ -441,6 +442,7 @@ pub(crate) fn error(error: McpError) -> RpcError {
                 "MCP move is partial: remove the project source entry".into()
             }
             McpError::CredentialsAreUserScoped => "MCP secret fields are stored in user scope; call mcp.move {id, from: 'project', to: 'user', cwd, expectedFromVersion, expectedToVersion} to edit them".into(),
+            McpError::StaleSecretRecord => "MCP withheld record remains for this id without a project entry; call mcp.remove {source: 'project', id, cwd, expectedVersion} to delete it (it answers mcp_unknown_server after cleaning), then save again".into(),
             other => other.to_string(),
         },
     )
@@ -666,10 +668,11 @@ pub(super) fn provide(
                         let source = writable(mcp_source)?;
                         if matches!(mcp_source, McpSource::Project(_)) {
                             // A save replaces the whole entry, so an overlay is
-                            // refused while its entry exists and a record whose
-                            // entry an external edit deleted is deleted, not
-                            // merged into the new entry. An unreadable overlay
-                            // fails the save instead of passing the guard.
+                            // refused while its entry exists, and a record whose
+                            // entry an external edit deleted is refused rather
+                            // than merged into the new entry. The save deletes
+                            // nothing: a concurrent move may own that record.
+                            // An unreadable overlay fails the save.
                             match directory
                                 .editable(mcp_source, p.id.clone(), &stopping)
                                 .await
@@ -679,10 +682,14 @@ pub(super) fn provide(
                                 }
                                 Ok(_) => {}
                                 Err(McpError::UnknownServer) => {
-                                    directory
-                                        .clear_secret(source, p.id.clone(), &stopping)
+                                    if directory
+                                        .overlay(source, p.id.clone(), &stopping)
                                         .await
-                                        .map_err(error)?;
+                                        .map_err(error)?
+                                        .is_some()
+                                    {
+                                        return Err(error(McpError::StaleSecretRecord));
+                                    }
                                 }
                                 Err(failure) => return Err(error(failure)),
                             }

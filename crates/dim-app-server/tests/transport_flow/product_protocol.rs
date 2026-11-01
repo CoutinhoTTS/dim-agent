@@ -2679,7 +2679,7 @@ async fn model_progress_follows_a_reloaded_provider() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_save_discards_an_overlay_whose_entry_was_deleted_externally() {
+async fn mcp_save_refuses_a_leftover_overlay_and_remove_cleans_it() {
     let home = std::path::PathBuf::from("/tmp").join(format!("dm-save-{}", uuid::Uuid::new_v4()));
     let project = home.join("project");
     std::fs::create_dir_all(&project).unwrap();
@@ -2720,6 +2720,23 @@ async fn mcp_save_discards_an_overlay_whose_entry_was_deleted_externally() {
         "the externally deleted entry leaves only its overlay behind"
     );
 
+    let refused = client.rpc("mcp.save", json!({"source":"project","id":"gh","cwd":project,"expectedVersion":catalog["result"]["projectRevision"],"configuration":{"command":"newcmd","args":["new-arg"],"enabled":false}})).await;
+    assert_eq!(
+        refused["error"]["data"]["appError"], "mcp_stale_secret_record",
+        "a save over a leftover overlay is refused instead of deleting it"
+    );
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    assert!(
+        catalog["result"]["servers"].as_array().unwrap().is_empty(),
+        "the refused save writes no entry"
+    );
+
+    let removed = client.rpc("mcp.remove", json!({"source":"project","id":"gh","cwd":project,"expectedVersion":catalog["result"]["projectRevision"]})).await;
+    assert_eq!(
+        removed["error"]["data"]["appError"], "mcp_unknown_server",
+        "removing an entry that is already absent deletes the leftover record"
+    );
     assert_ok(&client.rpc("mcp.save", json!({"source":"project","id":"gh","cwd":project,"expectedVersion":catalog["result"]["projectRevision"],"configuration":{"command":"newcmd","args":["new-arg"],"enabled":false}})).await);
     let saved = client
         .rpc(
@@ -2744,10 +2761,19 @@ async fn mcp_save_discards_an_overlay_whose_entry_was_deleted_externally() {
     .unwrap();
     let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
     assert_ok(&catalog);
+    assert!(catalog["result"]["servers"].as_array().unwrap().is_empty());
 
+    let refused = client.rpc("mcp.save", json!({"source":"project","id":"gh","cwd":project,"expectedVersion":catalog["result"]["projectRevision"],"configuration":{"type":"http","url":"https://example.test/mcp","enabled":false}})).await;
+    assert_eq!(
+        refused["error"]["data"]["appError"],
+        "mcp_stale_secret_record"
+    );
+    let removed = client.rpc("mcp.remove", json!({"source":"project","id":"gh","cwd":project,"expectedVersion":catalog["result"]["projectRevision"]})).await;
+    assert_eq!(removed["error"]["data"]["appError"], "mcp_unknown_server");
     assert_ok(&client.rpc("mcp.save", json!({"source":"project","id":"gh","cwd":project,"expectedVersion":catalog["result"]["projectRevision"],"configuration":{"type":"http","url":"https://example.test/mcp","enabled":false}})).await);
     let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
     assert_ok(&catalog);
+    assert_eq!(catalog["result"]["servers"].as_array().unwrap().len(), 1);
     let saved = client
         .rpc(
             "mcp.configuration",

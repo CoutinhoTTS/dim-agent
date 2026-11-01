@@ -47,6 +47,8 @@ pub enum McpError {
     MovePartial { into_project: bool },
     #[error("MCP secret fields are stored in user scope")]
     CredentialsAreUserScoped,
+    #[error("MCP withheld record has no project entry")]
+    StaleSecretRecord,
     #[error("MCP server is disabled")]
     Disabled,
     #[error("MCP server Plugin could not be loaded")]
@@ -639,20 +641,19 @@ impl McpService {
         .await
     }
 
-    /// Deletes a project entry's withheld record, including a record whose
-    /// project entry no longer exists.
-    pub async fn clear_secret(
+    /// One project entry's withheld record, including a record whose project
+    /// entry no longer exists.
+    pub async fn overlay(
         &self,
         source: SettingsScope,
         id: String,
         cancel: &CancellationToken,
-    ) -> Result<()> {
+    ) -> Result<Option<McpSecretEntry>> {
         if id.trim().is_empty() {
             return Err(McpError::InvalidId);
         }
         self.run(cancel, move |settings, cancel| async move {
-            let workspace = config::workspace(&settings, source)?;
-            remove_secret(&settings, &workspace, &id, &cancel).await
+            secret(&settings, source, &id, &cancel).await
         })
         .await
     }
@@ -964,7 +965,6 @@ async fn declared(
 /// A probe gives one disposable connection this long to initialize and list
 /// every tool page.
 const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
-
 
 /// Writes one change to its source and returns the source's revision.
 async fn write(
