@@ -487,23 +487,23 @@ async fn run_mcp(
             )
         }
         Ok(mcp::Answer::Area { note, .. }) => match (&request.action, note) {
-            (_, Some(note)) => print_report(vec![safe(&note)], Vec::new()),
-            (ManagementAction::Remove { id }, None) => {
-                print_report(vec![format!("Removed {}.", safe(id))], Vec::new())
+            // The owner's own answer, made safe: the entry a create made.
+            (_, Some(note)) => print_report(vec![safe_line(&note)], Vec::new()),
+            // A read reports what it read; an action reports its line.
+            (ManagementAction::List | ManagementAction::Reload, None) => {
+                print_report(Vec::new(), Vec::new())
             }
-            _ => print_report(Vec::new(), Vec::new()),
+            (_, None) => print_report(
+                vec![safe_line(&management::applied_line(request))],
+                Vec::new(),
+            ),
         },
-        // The action was applied; only the report after it failed. The
-        // owner's answer stands, made safe, and the read error goes to
-        // stderr with the exit still 0.
+        // The action was applied; the report after it failed. The action's own
+        // line stands, made safe, and the read error goes to stderr with the
+        // exit still 0.
         Err(mcp::Failure::ReadFailed { note, error }) => {
-            let mut lines: Vec<String> = note.iter().map(|note| safe(note)).collect();
-            if lines.is_empty()
-                && let ManagementAction::Remove { id } = &request.action
-            {
-                lines.push(format!("Removed {}.", safe(id)));
-            }
-            print_report(lines, vec![error])
+            let line = note.unwrap_or_else(|| management::applied_line(request));
+            print_report(vec![safe_line(&line)], vec![error])
         }
         Err(error) => return Err(error.to_string().into()),
     }

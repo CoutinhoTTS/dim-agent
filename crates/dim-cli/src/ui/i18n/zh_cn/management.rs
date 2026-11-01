@@ -113,11 +113,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This entry's settings changed since they were read; nothing was written." => {
             "该条目的设置已在读取后发生变化；本次没有写入。"
         }
-        "The MCP entry changed since it was read; nothing was written. Your next edit opens the current entry." => {
-            "MCP 条目已在读取后发生变化；本次没有写入。下次编辑会打开当前条目。"
+        "The MCP entry changed since it was read; nothing was written." => {
+            "MCP 条目已在读取后发生变化；本次没有写入。"
         }
-        "The MCP entries changed since they were read; nothing was written. Your next add opens your text again." => {
-            "MCP 条目已在读取后发生变化；本次没有写入。下次新建会重新打开你的文本。"
+        "The MCP entries changed since they were read; nothing was written." => {
+            "MCP 条目已在读取后发生变化；本次没有写入。"
         }
         "The MCP entry changed since it was read; nothing was removed." => {
             "MCP 条目已在读取后发生变化；本次没有删除。"

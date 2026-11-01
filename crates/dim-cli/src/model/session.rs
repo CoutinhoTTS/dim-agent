@@ -307,7 +307,7 @@ impl Area {
     /// Whether the area's documents are per entry, so `edit` and `set` name
     /// one, rather than one document for the area.
     pub fn per_entry(self) -> bool {
-        matches!(self, Self::Scheduled)
+        matches!(self, Self::Scheduled | Self::Mcp)
     }
 }
 

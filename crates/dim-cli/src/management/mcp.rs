@@ -23,7 +23,7 @@ use crate::model::session::{
     ActionKind, EntryDocument, EntryState, ManagementAction, ManagementDetail, ManagementEntry,
     ManagementView,
 };
-use crate::sanitize::safe;
+use crate::sanitize::{safe, safe_line};
 use crate::ui::i18n::{t, tf};
 
 /// The owner's sentence for a write against a plugin entry: the client
@@ -107,14 +107,14 @@ impl Configuration {
                 cwd,
                 env_names,
             } => vec![
-                tf("Executable: {command}", &[("command", &one_line(command))]),
+                tf("Executable: {command}", &[("command", &safe_line(command))]),
                 tf(
                     "Stored arguments (hidden): {count}",
                     &[("count", &args_count.to_string())],
                 ),
                 tf(
                     "Working directory: {cwd}",
-                    &[("cwd", &cwd.as_deref().map_or("—".to_owned(), one_line))],
+                    &[("cwd", &cwd.as_deref().map_or("—".to_owned(), safe_line))],
                 ),
                 tf(
                     "Environment names: {names}",
@@ -127,7 +127,7 @@ impl Configuration {
                         "OAuth: configured (client ID {id})",
                         &[(
                             "id",
-                            &one_line(oauth.client_id.as_deref().unwrap_or_default()),
+                            &safe_line(oauth.client_id.as_deref().unwrap_or_default()),
                         )],
                     ),
                     Some(_) => t("OAuth: configured").to_owned(),
@@ -141,7 +141,7 @@ impl Configuration {
                 vec![
                     tf(
                         "Endpoint: {endpoint}",
-                        &[("endpoint", &one_line(&remote.endpoint))],
+                        &[("endpoint", &safe_line(&remote.endpoint))],
                     ),
                     tf(
                         "Header names: {names}",
@@ -527,12 +527,8 @@ async fn refused(client: &mut Client, cwd: &str, error: &crate::Error, kind: Con
         Conflict::Toggle => {
             t("This entry's settings changed since they were read; nothing was written.")
         }
-        Conflict::Edit => t(
-            "The MCP entry changed since it was read; nothing was written. Your next edit opens the current entry.",
-        ),
-        Conflict::Add => t(
-            "The MCP entries changed since they were read; nothing was written. Your next add opens your text again.",
-        ),
+        Conflict::Edit => t("The MCP entry changed since it was read; nothing was written."),
+        Conflict::Add => t("The MCP entries changed since they were read; nothing was written."),
         Conflict::Remove => t("The MCP entry changed since it was read; nothing was removed."),
     };
     match catalog(client, cwd).await {
@@ -629,7 +625,7 @@ pub async fn apply(
             if catalog.servers.iter().any(|server| server.id == entry.id) {
                 return Err(Failure::Refused(tf(
                     "{id} is already in mcp list; remove it first or choose another id.",
-                    &[("id", &one_line(&entry.id))],
+                    &[("id", &safe_line(&entry.id))],
                 )));
             }
             let expected = if entry.source == "project" {
@@ -654,7 +650,7 @@ pub async fn apply(
             if let Err(error) = written {
                 return Err(refused(client, &cwd, &error, Conflict::Add).await);
             }
-            note = Some(tf("Added {id}.", &[("id", &one_line(&entry.id))]));
+            note = Some(tf("Added {id}.", &[("id", &safe_line(&entry.id))]));
         }
         ManagementAction::Remove { id } => {
             let catalog = catalog(client, &cwd).await.map_err(Failure::Refused)?;
@@ -729,8 +725,8 @@ pub struct Tool {
 /// One tool as a detail line: its name, then its description when it has
 /// one.
 fn tool_line(tool: &Tool) -> String {
-    let name = one_line(&tool.name);
-    match tool.description.as_deref().map(one_line) {
+    let name = safe_line(&tool.name);
+    match tool.description.as_deref().map(safe_line) {
         Some(description) if !description.is_empty() => format!("{name} — {description}"),
         _ => name,
     }
@@ -745,7 +741,7 @@ pub fn tools_detail(id: &str, tools: &[Tool]) -> ManagementDetail {
         tools.iter().map(tool_line).collect()
     };
     ManagementDetail {
-        title: tf("Tools of {id}", &[("id", &one_line(id))]),
+        title: tf("Tools of {id}", &[("id", &safe_line(id))]),
         lines,
     }
 }
@@ -753,8 +749,8 @@ pub fn tools_detail(id: &str, tools: &[Tool]) -> ManagementDetail {
 /// One tool as the CLI's report row: `name\tdescription` when it has one,
 /// its name alone otherwise.
 pub fn tool_row(tool: &Tool) -> String {
-    let name = one_line(&tool.name);
-    match tool.description.as_deref().map(one_line) {
+    let name = safe_line(&tool.name);
+    match tool.description.as_deref().map(safe_line) {
         Some(description) if !description.is_empty() => format!("{name}\t{description}"),
         _ => name,
     }
@@ -763,7 +759,7 @@ pub fn tool_row(tool: &Tool) -> String {
 /// Why a probe did not connect, in the owner's words when it has them.
 fn probe_failure(probe: &Probe) -> String {
     if let Some(message) = &probe.message {
-        return one_line(message);
+        return safe_line(message);
     }
     match probe.status.as_str() {
         "authRequired" if probe.expired == Some(true) => {
@@ -778,7 +774,7 @@ fn probe_failure(probe: &Probe) -> String {
         },
         status => tf(
             "The probe ended: {status}.",
-            &[("status", &one_line(status))],
+            &[("status", &safe_line(status))],
         ),
     }
 }
@@ -857,7 +853,7 @@ async fn inspect(client: &mut Client, cwd: &str, id: &str) -> Result<Answer, Fai
             "Connection {number} · {status}",
             &[
                 ("number", &(index + 1).to_string()),
-                ("status", &one_line(&connection.state.status)),
+                ("status", &safe_line(&connection.state.status)),
             ],
         );
         if connection.state.expired == Some(true) {
@@ -873,7 +869,7 @@ async fn inspect(client: &mut Client, cwd: &str, id: &str) -> Result<Answer, Fai
         }
     }
     Ok(Answer::Detail(ManagementDetail {
-        title: tf("MCP entry {id}", &[("id", &one_line(&server.id))]),
+        title: tf("MCP entry {id}", &[("id", &safe_line(&server.id))]),
         lines,
     }))
 }
@@ -1003,7 +999,7 @@ fn offers(server: &Server, has_document: bool, available: &[ActionKind]) -> Vec<
 /// One entry's first line: its source, transport and authorization, with
 /// the enablement an inspect runs it with when that differs from the list.
 fn header(source: &str, transport: &str, auth: Option<&Auth>, enabled: Option<bool>) -> String {
-    let mut line = format!("{} · {}", one_line(source), one_line(transport));
+    let mut line = format!("{} · {}", safe_line(source), safe_line(transport));
     if let Some(enabled) = enabled {
         line.push_str(&format!(
             " · {}",
@@ -1017,7 +1013,7 @@ fn header(source: &str, transport: &str, auth: Option<&Auth>, enabled: Option<bo
             "expired" => t("sign-in expired"),
             other => other,
         };
-        line.push_str(&format!(" · {}", one_line(status)));
+        line.push_str(&format!(" · {}", safe_line(status)));
         if let Some(scopes) = &auth.missing_scopes
             && !scopes.is_empty()
         {
@@ -1051,7 +1047,10 @@ fn issues(catalog: &Catalog) -> Vec<String> {
         {
             issues.push(format!(
                 "{source} {}",
-                tf("MCP configuration: {error}", &[("error", &one_line(error))])
+                tf(
+                    "MCP configuration: {error}",
+                    &[("error", &safe_line(error))]
+                )
             ));
         }
     }
@@ -1075,12 +1074,6 @@ fn create() -> Value {
     })
 }
 
-/// A value the owner reports on one line: escapes removed and runs of
-/// whitespace collapsed, so it cannot move the cursor or break a border.
-fn one_line(text: &str) -> String {
-    safe(text).split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 /// Names the owner reports, joined; `—` when it reports none.
 fn names(values: &[String]) -> String {
     if values.is_empty() {
@@ -1088,7 +1081,7 @@ fn names(values: &[String]) -> String {
     } else {
         values
             .iter()
-            .map(|value| one_line(value))
+            .map(|value| safe_line(value))
             .collect::<Vec<_>>()
             .join(", ")
     }

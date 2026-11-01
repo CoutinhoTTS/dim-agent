@@ -125,11 +125,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This entry's settings changed since they were read; nothing was written." => {
             "このエントリの設定は読み取り後に変更されました。何も書き込まれていません。"
         }
-        "The MCP entry changed since it was read; nothing was written. Your next edit opens the current entry." => {
-            "MCP エントリは読み取り後に変更されました。何も書き込まれていません。次回の編集では現在のエントリが開きます。"
+        "The MCP entry changed since it was read; nothing was written." => {
+            "MCP エントリは読み取り後に変更されました。何も書き込まれていません。"
         }
-        "The MCP entries changed since they were read; nothing was written. Your next add opens your text again." => {
-            "MCP エントリは読み取り後に変更されました。何も書き込まれていません。次回の追加では入力したテキストが再度開きます。"
+        "The MCP entries changed since they were read; nothing was written." => {
+            "MCP エントリは読み取り後に変更されました。何も書き込まれていません。"
         }
         "The MCP entry changed since it was read; nothing was removed." => {
             "MCP エントリは読み取り後に変更されました。何も削除されていません。"

@@ -127,11 +127,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This entry's settings changed since they were read; nothing was written." => {
             "La configuración de esta entrada cambió desde que se leyó; no se escribió nada."
         }
-        "The MCP entry changed since it was read; nothing was written. Your next edit opens the current entry." => {
-            "La entrada MCP cambió desde que se leyó; no se escribió nada. La próxima edición abrirá la entrada actual."
+        "The MCP entry changed since it was read; nothing was written." => {
+            "La entrada MCP cambió desde que se leyó; no se escribió nada."
         }
-        "The MCP entries changed since they were read; nothing was written. Your next add opens your text again." => {
-            "Las entradas MCP cambiaron desde que se leyeron; no se escribió nada. La próxima alta abrirá tu texto de nuevo."
+        "The MCP entries changed since they were read; nothing was written." => {
+            "Las entradas MCP cambiaron desde que se leyeron; no se escribió nada."
         }
         "The MCP entry changed since it was read; nothing was removed." => {
             "La entrada MCP cambió desde que se leyó; no se eliminó nada."

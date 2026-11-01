@@ -692,7 +692,7 @@ fn mcp_edit_opens_the_patch_without_stored_values() {
     daemon.join().unwrap();
     assert!(status.success(), "{}", terminal.transcript);
     assert!(
-        terminal.transcript.contains("Saved the MCP entry."),
+        terminal.transcript.contains("Saved docs."),
         "{}",
         terminal.transcript
     );
@@ -734,10 +734,7 @@ fn mcp_set_reads_the_revision_immediately_before_the_write() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap(),
-        "Saved the MCP entry.\n"
-    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "Saved docs.\n");
 
     // The seed's own text is no change, and no write.
     let home = Home::new();
@@ -1430,7 +1427,7 @@ fn mcp_entries_round_trip_through_the_real_app_server() {
     );
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        "Saved the MCP entry.\n"
+        "Saved round-trip.\n"
     );
     let output = run(&["mcp", "inspect", "round-trip"], None);
     assert!(

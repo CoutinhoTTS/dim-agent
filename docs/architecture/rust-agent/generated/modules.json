@@ -25584,7 +25584,9 @@
       "to": "dim_cli::sanitize",
       "references": [
         "path safe",
-        "use crate::sanitize::safe"
+        "path safe_line",
+        "use crate::sanitize::safe",
+        "use crate::sanitize::safe_line"
       ]
     },
     {
@@ -25838,7 +25840,6 @@
         "path ManagementAction::Add",
         "path ManagementAction::List",
         "path ManagementAction::Reload",
-        "path ManagementAction::Remove",
         "path ManagementAction::Save",
         "path ManagementAction::Toggle",
         "path ManagementRequest",

@@ -121,11 +121,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This entry's settings changed since they were read; nothing was written." => {
             "이 항목의 설정이 읽은 후 변경되었습니다. 아무것도 기록되지 않았습니다."
         }
-        "The MCP entry changed since it was read; nothing was written. Your next edit opens the current entry." => {
-            "MCP 항목이 읽은 후 변경되었습니다. 아무것도 기록되지 않았습니다. 다음 편집은 현재 항목을 엽니다."
+        "The MCP entry changed since it was read; nothing was written." => {
+            "MCP 항목이 읽은 후 변경되었습니다. 아무것도 기록되지 않았습니다."
         }
-        "The MCP entries changed since they were read; nothing was written. Your next add opens your text again." => {
-            "MCP 항목이 읽은 후 변경되었습니다. 아무것도 기록되지 않았습니다. 다음 추가는 작성한 텍스트를 다시 엽니다."
+        "The MCP entries changed since they were read; nothing was written." => {
+            "MCP 항목이 읽은 후 변경되었습니다. 아무것도 기록되지 않았습니다."
         }
         "The MCP entry changed since it was read; nothing was removed." => {
             "MCP 항목이 읽은 후 변경되었습니다. 아무것도 제거되지 않았습니다."

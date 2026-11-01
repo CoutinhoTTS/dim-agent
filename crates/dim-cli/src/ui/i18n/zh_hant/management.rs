@@ -113,11 +113,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This entry's settings changed since they were read; nothing was written." => {
             "此項目的設定已在讀取後變更；本次沒有寫入。"
         }
-        "The MCP entry changed since it was read; nothing was written. Your next edit opens the current entry." => {
-            "MCP 項目已在讀取後變更；本次沒有寫入。下次編輯會開啟目前項目。"
+        "The MCP entry changed since it was read; nothing was written." => {
+            "MCP 項目已在讀取後變更；本次沒有寫入。"
         }
-        "The MCP entries changed since they were read; nothing was written. Your next add opens your text again." => {
-            "MCP 項目已在讀取後變更；本次沒有寫入。下次新建會重新開啟你的文字。"
+        "The MCP entries changed since they were read; nothing was written." => {
+            "MCP 項目已在讀取後變更；本次沒有寫入。"
         }
         "The MCP entry changed since it was read; nothing was removed." => {
             "MCP 項目已在讀取後變更；本次沒有移除。"

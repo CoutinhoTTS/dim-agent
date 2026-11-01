@@ -125,11 +125,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This entry's settings changed since they were read; nothing was written." => {
             "Die Einstellungen dieses Eintrags haben sich seit dem Lesen geändert; nichts wurde geschrieben."
         }
-        "The MCP entry changed since it was read; nothing was written. Your next edit opens the current entry." => {
-            "Der MCP-Eintrag hat sich seit dem Lesen geändert; nichts wurde geschrieben. Die nächste Bearbeitung öffnet den aktuellen Eintrag."
+        "The MCP entry changed since it was read; nothing was written." => {
+            "Der MCP-Eintrag hat sich seit dem Lesen geändert; nichts wurde geschrieben."
         }
-        "The MCP entries changed since they were read; nothing was written. Your next add opens your text again." => {
-            "Die MCP-Einträge haben sich seit dem Lesen geändert; nichts wurde geschrieben. Das nächste Hinzufügen öffnet Ihren Text erneut."
+        "The MCP entries changed since they were read; nothing was written." => {
+            "Die MCP-Einträge haben sich seit dem Lesen geändert; nichts wurde geschrieben."
         }
         "The MCP entry changed since it was read; nothing was removed." => {
             "Der MCP-Eintrag hat sich seit dem Lesen geändert; nichts wurde entfernt."

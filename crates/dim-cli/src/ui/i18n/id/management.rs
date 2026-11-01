@@ -119,11 +119,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This entry's settings changed since they were read; nothing was written." => {
             "Pengaturan entri ini berubah sejak dibaca; tidak ada yang ditulis."
         }
-        "The MCP entry changed since it was read; nothing was written. Your next edit opens the current entry." => {
-            "Entri MCP berubah sejak dibaca; tidak ada yang ditulis. Edit berikutnya membuka entri saat ini."
+        "The MCP entry changed since it was read; nothing was written." => {
+            "Entri MCP berubah sejak dibaca; tidak ada yang ditulis."
         }
-        "The MCP entries changed since they were read; nothing was written. Your next add opens your text again." => {
-            "Entri MCP berubah sejak dibaca; tidak ada yang ditulis. Tambah berikutnya membuka teks Anda lagi."
+        "The MCP entries changed since they were read; nothing was written." => {
+            "Entri MCP berubah sejak dibaca; tidak ada yang ditulis."
         }
         "The MCP entry changed since it was read; nothing was removed." => {
             "Entri MCP berubah sejak dibaca; tidak ada yang dihapus."
