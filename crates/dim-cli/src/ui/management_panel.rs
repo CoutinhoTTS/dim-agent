@@ -100,6 +100,7 @@ pub const STRINGS: &[&str] = &[
     "The job changed since it was read; nothing was removed.",
     "The Scheduler has no area document.",
     "No scheduled job has that id.",
+    "A scheduled job's run takes no input document.",
     "This workspace's hook settings changed since they were read; nothing was written.",
     "Workflow",
     "Saved {name}.",

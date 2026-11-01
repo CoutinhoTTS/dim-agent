@@ -15,8 +15,8 @@ use serde_json::{Map, Value, json};
 use super::Groups;
 use crate::client::Client;
 use crate::model::session::{
-    ActionKind, Area, EntryDocument, EntryState, ManagementAction, ManagementDetail,
-    ManagementEntry, ManagementView,
+    ActionKind, EntryDocument, EntryState, ManagementAction, ManagementDetail, ManagementEntry,
+    ManagementView,
 };
 use crate::ui::i18n::{t, tf};
 
@@ -245,10 +245,11 @@ pub async fn apply(client: &mut Client, action: &ManagementAction) -> Result<Ans
             Answered::Nothing
         }
         ManagementAction::Run { id, document } => {
-            // No job carries a run document and neither client sends one;
-            // a document here is a kind this area does not offer.
+            // No job carries a run document and neither client sends one.
             if document.is_some() {
-                return Err(Failure::Refused(super::unsupported(Area::Scheduled)));
+                return Err(Failure::Refused(
+                    t("A scheduled job's run takes no input document.").to_owned(),
+                ));
             }
             let run = client
                 .rpc("schedule.run_now", json!({"job_id": id}))

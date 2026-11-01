@@ -25520,7 +25520,6 @@
         "path Groups::default",
         "path super::area_kinds",
         "path super::entry_kinds",
-        "path super::unsupported",
         "use super::Groups"
       ]
     },
@@ -25529,7 +25528,6 @@
       "to": "dim_cli::model::session",
       "references": [
         "path ActionKind",
-        "path Area::Scheduled",
         "path EntryDocument",
         "path EntryState::Invalid",
         "path ManagementAction",
@@ -25545,7 +25543,6 @@
         "path ManagementEntry",
         "path ManagementView",
         "use crate::model::session::ActionKind",
-        "use crate::model::session::Area",
         "use crate::model::session::EntryDocument",
         "use crate::model::session::EntryState",
         "use crate::model::session::ManagementAction",

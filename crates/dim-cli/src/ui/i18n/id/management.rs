@@ -71,6 +71,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The Scheduler has no area document." => "Penjadwal tidak memiliki dokumen area.",
         "No scheduled job has that id." => "Tidak ada tugas terjadwal dengan id itu.",
+        "A scheduled job's run takes no input document." => {
+            "Eksekusi job terjadwal tidak menerima dokumen masukan."
+        }
         "This daemon cannot manage {area}." => "Tidak dapat mengelola {area}.",
         "The document deleted {field}, which the owner cannot clear; nothing was written." => {
             "Dokumen menghapus {field}, yang tidak dapat dibersihkan pemilik; tidak ada yang ditulis."

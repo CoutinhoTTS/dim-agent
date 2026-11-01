@@ -75,6 +75,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The Scheduler has no area document." => "O Agendador não tem documento de área.",
         "No scheduled job has that id." => "Nenhuma tarefa agendada tem esse id.",
+        "A scheduled job's run takes no input document." => {
+            "A execução de uma tarefa agendada não recebe documento de entrada."
+        }
         "This daemon cannot manage {area}." => "Não é possível gerir {area}.",
         "The document deleted {field}, which the owner cannot clear; nothing was written." => {
             "O documento removeu {field}, que o proprietário não pode limpar; nada foi escrito."

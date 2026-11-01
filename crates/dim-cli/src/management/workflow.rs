@@ -172,6 +172,8 @@ pub struct Run {
     pub run_id: String,
     pub name: String,
     pub source: String,
+    /// The workspace the run started in.
+    pub cwd: String,
     pub state: String,
     pub created_at: String,
     #[serde(default)]
@@ -525,9 +527,14 @@ async fn inspect(client: &mut Client, id: &str, cwd: &str) -> Result<Answer, Fai
         .typed("workflow.status", json!({}))
         .await
         .map_err(|error| Failure::Refused(error.to_string()))?;
+    // A project definition belongs to one workspace, so only its runs
+    // started there are its history. A user or package definition is the
+    // same everywhere, so every run of it is, and each line names the
+    // workspace it started in.
     let mut runs: Vec<Run> = runs
         .into_iter()
         .filter(|run| run.name == entry.name && run.source == entry.source)
+        .filter(|run| entry.source != "project" || run.cwd == cwd)
         .collect();
     runs.sort_by(|a, b| b.instant().cmp(a.instant()));
     runs.truncate(10);
@@ -536,10 +543,13 @@ async fn inspect(client: &mut Client, id: &str, cwd: &str) -> Result<Answer, Fai
     if runs.is_empty() {
         lines.push(t("No run yet.").to_owned());
     } else {
-        lines.extend(
-            runs.iter()
-                .map(|run| format!("{}  {}  {}", run.instant(), run.state, run.run_id)),
-        );
+        lines.extend(runs.iter().map(|run| {
+            let mut line = format!("{}  {}  {}", run.instant(), run.state, run.run_id);
+            if entry.source != "project" {
+                line.push_str(&format!("  {}", run.cwd));
+            }
+            line
+        }));
     }
     Ok(Answer::Detail(ManagementDetail {
         title: entry.name.clone(),

@@ -75,6 +75,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The Scheduler has no area document." => "Le planificateur n'a pas de document de domaine.",
         "No scheduled job has that id." => "Aucune tâche planifiée n'a cet id.",
+        "A scheduled job's run takes no input document." => {
+            "L'exécution d'une tâche planifiée ne prend aucun document d'entrée."
+        }
         "This daemon cannot manage {area}." => "Impossible de gérer {area}.",
         "The document deleted {field}, which the owner cannot clear; nothing was written." => {
             "Le document supprime {field}, que le propriétaire ne peut pas effacer ; rien n'a été écrit."

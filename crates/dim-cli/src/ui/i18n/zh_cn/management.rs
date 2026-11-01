@@ -67,6 +67,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The Scheduler has no area document." => "调度器没有领域文档。",
         "No scheduled job has that id." => "没有该 id 的定时任务。",
+        "A scheduled job's run takes no input document." => "定时任务的运行不接受输入文档。",
         "This daemon cannot manage {area}." => "无法管理{area}。",
         "The document deleted {field}, which the owner cannot clear; nothing was written." => {
             "文档删除了 {field}，所有者无法清除它；本次没有写入。"

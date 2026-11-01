@@ -638,10 +638,13 @@ before the first message, starts a run that reports nowhere. The command line ha
 `dimcode workflow start` sends no `report_to` and its runs are outside `/tasks`. The note is
 `Started <name>: <run_id>.`.
 
-Inspect reads `workflow.status {}` and filters the retained runs to the entry's name and source;
-the detail is the definition's lines, a `Recent runs` line and up to ten runs, newest first. The
-area has no remove: the owner has no delete method, so a user definition leaves only by editing
-the Settings document, and a project definition by deleting its file.
+Inspect reads `workflow.status {}` and filters the retained runs to the entry's name and source.
+A project definition belongs to one workspace, so its runs are filtered to this workspace's `cwd`
+as well: another workspace's definition of the same name is a different definition. A user or
+package definition is the same everywhere, so its runs come from every workspace and each line
+names the run's `cwd`. The detail is the definition's lines, a `Recent runs` line and up to ten
+runs, newest first. The area has no remove: the owner has no delete method, so a user definition
+leaves only by editing the Settings document, and a project definition by deleting its file.
 
 ```text
 ╭─ Workflow ────────────────────────────────────────────────────────────────────────────────────╮

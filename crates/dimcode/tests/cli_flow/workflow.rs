@@ -400,6 +400,86 @@ fn workflow_edit_set_and_history_find_a_disabled_project_definition() {
     assert!(stdout.contains("No run yet."), "{stdout}");
 }
 
+/// One retained run as `workflow.status` reports it.
+fn run(run_id: &str, name: &str, source: &str, cwd: &str) -> Value {
+    json!({
+        "run_id": run_id, "name": name, "source": source, "cwd": cwd,
+        "state": "completed",
+        "created_at": "2026-11-01T09:00:00.000Z",
+        "ended_at": "2026-11-01T09:01:00.000Z",
+    })
+}
+
+/// A project definition's history is this workspace's runs: another
+/// workspace's definition of the same name is a different definition. A user
+/// definition is the same everywhere, so all its runs are listed, each with
+/// the workspace it started in.
+#[test]
+fn workflow_history_scopes_a_project_definition_to_this_workspace() {
+    // The project definition: this workspace's run, not another's.
+    let home = Home::new();
+    let (project, cwd) = workspace(&home);
+    let runs = json!([
+        run("wf-2", "nightly-check", "project", &cwd),
+        run("wf-1", "nightly-check", "project", "/other"),
+    ]);
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("workflow.list");
+        wire.reply(&request, definitions());
+        let request = wire.read("workflow.status");
+        wire.reply(&request, runs);
+        drains(wire);
+    });
+    let output = home
+        .command()
+        .arg("--cwd")
+        .arg(&project)
+        .args(["workflow", "history", "nightly-check"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("wf-2"), "{stdout}");
+    assert!(!stdout.contains("wf-1"), "{stdout}");
+
+    // The user definition: another workspace's run is listed with its cwd.
+    let home = Home::new();
+    let (project, _) = workspace(&home);
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("workflow.list");
+        wire.reply(&request, definitions());
+        let request = wire.read("workflow.status");
+        wire.reply(
+            &request,
+            json!([run("wf-3", "review-and-fix", "user", "/other")]),
+        );
+        drains(wire);
+    });
+    let output = home
+        .command()
+        .arg("--cwd")
+        .arg(&project)
+        .args(["workflow", "history", "review-and-fix"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("wf-3"), "{stdout}");
+    assert!(stdout.contains("/other"), "{stdout}");
+}
+
 /// A save may not rename its definition: the owner keys by the document's
 /// name, and the area has no remove. Nothing is written and the text stays.
 #[test]
