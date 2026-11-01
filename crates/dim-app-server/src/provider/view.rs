@@ -172,7 +172,14 @@ impl ProviderService {
                     .model_config_overrides
                     .iter()
                     .any(|entry| entry.model_id == model.model_id);
-                let mut actions = vec!["set_enabled", "edit"];
+                // The set governs the entries the provider can use: an
+                // unavailable entry keeps the enablement it has, so the
+                // owner offers no toggle for it.
+                let mut actions = if effective.unavailable_reason.is_none() {
+                    vec!["set_enabled", "edit"]
+                } else {
+                    vec!["edit"]
+                };
                 if user {
                     actions.push("delete");
                 } else if overridden {

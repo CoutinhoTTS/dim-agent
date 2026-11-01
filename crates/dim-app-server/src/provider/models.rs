@@ -526,6 +526,8 @@ impl ProviderService {
         if !self.oauth.contains(&provider_id, cancel).await? {
             let available = self.account_available(&provider_id, cancel).await?;
             let id = provider_id.clone();
+            let bundled = self.bundled.clone();
+            let scoped = provider_id.clone();
             let record = self
                 .mutate_static(
                     provider_id,
@@ -542,21 +544,21 @@ impl ProviderService {
                                 "Model is unavailable".into(),
                             ));
                         }
-                        record.disabled_model_ids.retain(|id| {
-                            !record
-                                .models
-                                .iter()
-                                .chain(&record.user_models)
-                                .any(|model| &model.model_id == id)
-                        });
-                        record.disabled_model_ids.extend(
-                            record
-                                .models
-                                .iter()
-                                .chain(&record.user_models)
-                                .filter(|model| !ids.contains(&model.model_id))
-                                .map(|model| model.model_id.clone()),
-                        );
+                        // A whole-set write governs the entries the provider
+                        // can use: an unavailable entry keeps the enablement
+                        // it has, whether the set names it or omits it.
+                        let governed: Vec<String> =
+                            static_models(&bundled, &scoped, record, available)
+                                .into_iter()
+                                .filter(|model| model.unavailable_reason.is_none())
+                                .map(|model| model.id)
+                                .collect();
+                        record
+                            .disabled_model_ids
+                            .retain(|id| !governed.contains(id));
+                        record
+                            .disabled_model_ids
+                            .extend(governed.iter().filter(|id| !ids.contains(id)).cloned());
                         Ok(())
                     },
                     cancel,

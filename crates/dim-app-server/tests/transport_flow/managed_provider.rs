@@ -28,12 +28,22 @@ use rutis::Ctx;
 use rutis::host::BoxFuture;
 use std::sync::{Mutex as StdMutex, Weak};
 
+/// What the account's catalog reports for its second model.
+#[derive(Clone, Copy, PartialEq)]
+enum Limited {
+    /// The catalog holds the one fixture model.
+    Absent,
+    /// A second model the account can use.
+    Available,
+    /// A second model whose limits are undeclared, so it cannot be used.
+    Unavailable,
+}
+
 /// A signed-in managed account whose first credential the relay rejects.
 struct Fixture {
     base_url: String,
     account: StdMutex<AccountSnapshot>,
-    /// Whether the account's catalog offers a second, unavailable model.
-    mixed: StdMutex<bool>,
+    limited: StdMutex<Limited>,
     recovered: AtomicUsize,
     released: StdMutex<Vec<String>>,
 }
@@ -152,17 +162,32 @@ impl ManagedProvider for Provider {
             unavailable_reason: None,
             zdr: false,
         }];
-        if *self.0.mixed.lock().unwrap() {
-            let entry: ModelEntry = serde_json::from_value(json!({"modelId":"limited-model",
-                "displayName":"Limited model","status":"active",
-                "capabilities":dim_agent_types::CatalogCapabilities::default()}))
-            .unwrap();
-            models.push(ManagedModel {
-                entry,
-                protocol: ModelProtocol::OpenaiCompatible,
-                unavailable_reason: Some("limits_undeclared".into()),
-                zdr: false,
-            });
+        match *self.0.limited.lock().unwrap() {
+            Limited::Absent => {}
+            Limited::Available => {
+                let entry: ModelEntry = serde_json::from_value(json!({"modelId":"limited-model",
+                    "displayName":"Limited model","status":"active",
+                    "capabilities":dim_agent_types::CatalogCapabilities::with_limits(64_000, 256)}))
+                .unwrap();
+                models.push(ManagedModel {
+                    entry,
+                    protocol: ModelProtocol::OpenaiCompatible,
+                    unavailable_reason: None,
+                    zdr: false,
+                });
+            }
+            Limited::Unavailable => {
+                let entry: ModelEntry = serde_json::from_value(json!({"modelId":"limited-model",
+                    "displayName":"Limited model","status":"active",
+                    "capabilities":dim_agent_types::CatalogCapabilities::default()}))
+                .unwrap();
+                models.push(ManagedModel {
+                    entry,
+                    protocol: ModelProtocol::OpenaiCompatible,
+                    unavailable_reason: Some("limits_undeclared".into()),
+                    zdr: false,
+                });
+            }
         }
         ready(Ok(ManagedCatalog {
             account: self.0.account.lock().unwrap().clone(),
@@ -239,7 +264,7 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
                 granted_scopes: vec!["model".into()],
             }),
         }),
-        mixed: StdMutex::new(false),
+        limited: StdMutex::new(Limited::Absent),
         recovered: AtomicUsize::new(0),
         released: StdMutex::new(vec![]),
     });
@@ -474,7 +499,7 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
     // A catalog that holds one unavailable model still toggles the rest. The
     // client's toggle sends the whole enabled set, the unavailable model
     // included, and a set that omits the model leaves its state alone.
-    *fixture.mixed.lock().unwrap() = true;
+    *fixture.limited.lock().unwrap() = Limited::Unavailable;
     let mixed = client
         .rpc("provider.refresh", json!({"providerId":"managed-fixture"}))
         .await;
@@ -521,6 +546,48 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
         .await;
     assert_ok(&omitted);
     assert_eq!(omitted["result"]["disabledModelIds"], json!([]));
+    // An entry that was disabled while it was usable and is unavailable now
+    // keeps that disable when a set names it: the set governs only the
+    // entries the account can use.
+    *fixture.limited.lock().unwrap() = Limited::Available;
+    let usable = client
+        .rpc("provider.refresh", json!({"providerId":"managed-fixture"}))
+        .await;
+    assert_ok(&usable);
+    assert_eq!(usable["result"]["disabledModelIds"], json!([]));
+    let disabled = client
+        .rpc(
+            "provider.models.set_enabled",
+            json!({"providerId":"managed-fixture","expectedVersion":10,
+                "modelIds":["fixture-model"]}),
+        )
+        .await;
+    assert_ok(&disabled);
+    assert_eq!(
+        disabled["result"]["disabledModelIds"],
+        json!(["limited-model"])
+    );
+    *fixture.limited.lock().unwrap() = Limited::Unavailable;
+    let frozen = client
+        .rpc("provider.refresh", json!({"providerId":"managed-fixture"}))
+        .await;
+    assert_ok(&frozen);
+    assert_eq!(
+        frozen["result"]["disabledModelIds"],
+        json!(["limited-model"])
+    );
+    let named = client
+        .rpc(
+            "provider.models.set_enabled",
+            json!({"providerId":"managed-fixture","expectedVersion":12,
+                "modelIds":["fixture-model","limited-model"]}),
+        )
+        .await;
+    assert_ok(&named);
+    assert_eq!(
+        named["result"]["disabledModelIds"],
+        json!(["limited-model"])
+    );
     let created = client
         .rpc(
             "session.create",
@@ -575,7 +642,7 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
         )
         .await;
     assert_ok(&stale);
-    assert_eq!(stale["result"]["providers"][0]["version"], 9);
+    assert_eq!(stale["result"]["providers"][0]["version"], 13);
     assert_eq!(
         stale["result"]["providers"][0]["models"][0]["unavailableReason"],
         "account_changed"
@@ -611,7 +678,7 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
         )
         .await;
     assert_ok(&signed_out);
-    assert_eq!(signed_out["result"]["providers"][0]["version"], 10);
+    assert_eq!(signed_out["result"]["providers"][0]["version"], 14);
     assert_eq!(
         signed_out["result"]["providers"][0]["models"][0]["unavailableReason"],
         "account_required"

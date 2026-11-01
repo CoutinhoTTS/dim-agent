@@ -1339,10 +1339,33 @@ async fn selectable_models_match_execution_and_hide_unavailable_models() {
         requests.try_recv().is_err(),
         "the read made a provider request"
     );
-    provider
+    // The view offers a toggle only where the set governs the entry.
+    let view = provider
+        .management(Some(MINE.into()), &cancel)
+        .await
+        .unwrap();
+    let actions = |id: &str| {
+        view.providers[0]
+            .models
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|entry| entry.model.model_id == id)
+            .unwrap()
+            .actions
+            .clone()
+    };
+    assert!(!actions("unavailable").contains(&"set_enabled"));
+    assert!(actions("unavailable").contains(&"edit"));
+    assert!(actions("text").contains(&"set_enabled"));
+    let enabled_text = provider
         .set_enabled_models(MINE.into(), updated.version, vec!["text".into()], &cancel)
         .await
         .unwrap();
+    // The set governs only the entries the provider can use: the unavailable
+    // entries it omits keep the enablement they have, so naming `text` alone
+    // disables the served model and nothing else.
+    assert_eq!(enabled_text.disabled_model_ids, ["served"]);
     let second = selectable.0.selectable(cancel.clone()).await.unwrap();
     let second_ids: Vec<&str> = second
         .iter()
