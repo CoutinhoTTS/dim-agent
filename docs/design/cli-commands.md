@@ -433,7 +433,8 @@ attached yet: with no Session shown, `/rename` reports that and sends nothing.
 
 `dimcode session rename SESSION TITLE` prints the title the server returns and
 `--clear` prints that the Session is untitled. Exactly one of TITLE and `--clear`
-is required, so a forgotten argument is a usage error and never clears a title.
+is required, so a forgotten argument is a usage error and never clears a title; a
+blank or whitespace-only TITLE is missing, and is refused the same way.
 
 `/rename TITLE` and `/rename --clear` do the same for the shown Session and report
 which happened in one status line. The palette row declares the title argument, so
@@ -441,8 +442,9 @@ choosing `/rename` from the palette fills `/rename ` and waits for it; Enter on 
 bare `/rename` is refused with a `needs <title>` notice and sends nothing, and
 `--clear` is the only form that clears without one. Every form is a command the
 client handles: the text is never queued and never submitted, including while a turn
-runs. The `/resume` list reads `session.summaries` each time it opens, so it shows
-the new title; the header shows the first message's topic and is unaffected. The
+runs. The `/resume` list reads `session.catalog` each time it opens, and falls back to
+`session.summaries` on a daemon before the catalog, so it shows the new title; the header
+shows the first message's topic and is unaffected. The
 idle line client reads the same two forms and prints
 `Use /rename TITLE or /rename --clear` for a bare `/rename`.
 

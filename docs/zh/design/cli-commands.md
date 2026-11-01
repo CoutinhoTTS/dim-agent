@@ -351,16 +351,18 @@ Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
 `title: null` 清除它。标题文本不属于任何线，也不产生 Timeline 事件，所以重命名不增添模型读到的内容。
 
 `session.rename` 是 Session 方法：客户端直接调用它，`hello.features` 并不列出它。不提供它的
-Session 回答 `unknown_method`，客户端将其报告为不支持的守护进程错误，输入的文字绝
+Session 回答 `unknown_method`，客户端将其报告为不支持的守护进程错误，输入的文字绝不会
 作为替代被提交。尚未附加 Session 时同理：没有显示中的 Session，`/rename` 直接说明并不发送任何内容。
 
 `dimcode session rename SESSION TITLE` 打印服务端返回的标题，`--clear` 打印该 Session 已无标题。
-TITLE 与 `--clear` 必须恰好给出一个，所以漏写参数是用法错误，绝不因此清除标题。
+TITLE 与 `--clear` 必须恰好给出一个，所以漏写参数是用法错误，绝不因此清除标题；空白或只含空格的
+TITLE 视为缺失，也按同样方式拒绝。
 `/rename TITLE` 与 `/rename --clear` 对所显示的 Session 做同样的事，并用一行状态说明发生了
 哪一种。命令面板的这一行声明了标题参数，所以从面板选中 `/rename` 只是填入 `/rename ` 并等待
 输入；对空的 `/rename` 回车会得到 `needs <title>` 提示且不发送任何内容，`--clear` 是唯一
 无需标题即可清除的形式。两种形式都是客户端处理的命令：文本从不入队、从不提交，模型回合进行
-中也是如此。`/resume` 列表每次打开都读取 `session.summaries`，因此显示新标题；页头显示的是首条消息的主题，不受影响。空闲的行式客户端
+中也是如此。`/resume` 列表每次打开都读取 `session.catalog`，在没有该目录的守护进程上退回
+`session.summaries`，因此显示新标题；页头显示的是首条消息的主题，不受影响。空闲的行式客户端
 读取同样的两种形式，对空的 `/rename` 打印 `Use /rename TITLE or /rename --clear`。
 
 ### 会话删除与清理
