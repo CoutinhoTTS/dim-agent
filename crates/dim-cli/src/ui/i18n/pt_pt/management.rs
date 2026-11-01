@@ -17,6 +17,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Hooks" => "Hooks",
         "invalid" => "inválido",
         "Saved." => "Guardado.",
+        "Saved {name}." => "{name} guardado.",
         "No change." => "Nenhuma alteração.",
         "Your text is kept in {path}." => "O seu texto está guardado em {path}.",
         "The user's own document; always in effect." => {
@@ -43,10 +44,21 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Added." => "Adicionado.",
         "Removed {name}." => "{name} removido.",
         "Ran {name}." => "{name} executado.",
-        "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
-            "O documento do utilizador mudou desde que foi lido; nada foi escrito. A sua próxima edição abre o documento atual."
+        "The user document changed since it was read; nothing was written." => {
+            "O documento do utilizador mudou desde que foi lido; nada foi escrito."
         }
+        "The job changed since it was read; nothing was written." => {
+            "A tarefa mudou desde que foi lida; nada foi escrito."
+        }
+        "The jobs changed since they were read; nothing was written." => {
+            "As tarefas mudaram desde que foram lidas; nada foi escrito."
+        }
+        "Your next edit opens the current document." => {
+            "A sua próxima edição abre o documento atual."
+        }
+        "Your next add reopens your text." => "A sua próxima adição abre novamente o seu texto.",
         "Scheduler" => "Agendador",
+        "jobs" => "tarefas",
         "Added {name}." => "{name} adicionado.",
         "Run {name}: {outcome}." => "{name} executado: {outcome}.",
         "Recent runs of {name}" => "Execuções recentes de {name}",
@@ -58,17 +70,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "at {instant}" => "em {instant}",
         "cron {expression}" => "cron {expression}",
         "cron {expression} in {zone}" => "cron {expression} em {zone}",
-        "The job changed since it was read; nothing was written. Your next edit opens the current job." => {
-            "A tarefa mudou desde que foi lida; nada foi escrito. A sua próxima edição abre a tarefa atual."
-        }
-        "The jobs changed since they were read; nothing was written. Your next add opens your text again." => {
-            "As tarefas mudaram desde que foram lidas; nada foi escrito. A sua próxima adição abre novamente o seu texto."
-        }
         "The job changed since it was read; nothing was removed." => {
             "A tarefa mudou desde que foi lida; nada foi removido."
         }
         "The Scheduler has no area document." => "O Agendador não tem documento de área.",
         "No scheduled job has that id." => "Nenhuma tarefa agendada tem esse id.",
+        "This daemon cannot manage {area}." => "Não é possível gerir {area}.",
+        "The document deleted {field}, which the owner cannot clear; nothing was written." => {
+            "O documento removeu {field}, que o proprietário não pode limpar; nada foi escrito."
+        }
+        "The document changes no field; nothing was written." => {
+            "O documento não altera nenhum campo; nada foi escrito."
+        }
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "As definições de hooks deste espaço de trabalho mudaram desde que foram lidas; nada foi escrito."
         }

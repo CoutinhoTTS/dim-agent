@@ -1418,7 +1418,7 @@ fn permissions_needs_the_rule_methods() {
     assert_eq!(output.stdout, b"");
     assert!(
         String::from_utf8_lossy(&output.stderr)
-            .contains("This daemon does not provide command rules."),
+            .contains("This daemon cannot manage Command rules."),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
