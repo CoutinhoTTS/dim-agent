@@ -4,14 +4,28 @@ use rutis::host::ErrorKind;
 use rutis::{Ctx, Plugin};
 use std::{
     fs::File,
+    io::Write,
     panic::{AssertUnwindSafe, catch_unwind},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 /// The native store format this daemon creates and opens.
-pub const FORMAT: u32 = 29;
+pub const FORMAT: u32 = 30;
+/// The oldest schema the startup transaction upgrades: the first step of
+/// `UPGRADES`, which is ordered oldest first.
+const MIN_FORMAT: u32 = UPGRADES[0].0;
+/// WAL bytes after which the writer checkpoints, outside its commit. This is
+/// SQLite's own automatic threshold (1000 pages of 4 KiB) moved off the
+/// commit path.
+const CHECKPOINT_BYTES: u64 = 4 * 1024 * 1024;
+/// The WAL file is truncated to this size when a checkpoint restarts it.
+const WAL_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
+/// The process connection's page cache in KiB. A measurement over a 650 MB
+/// store with 2,300 Sessions put their hot tail pages (about 20 MB) in cache
+/// from 32 MiB on; larger caches read no fewer bytes.
+const PAGE_CACHE_KIB: i64 = 32 * 1024;
 const LEGACY_BY_END: (&str, &str) = (
     "timeline_events_by_end",
     "CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence)",
@@ -19,7 +33,7 @@ const LEGACY_BY_END: (&str, &str) = (
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 29))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 30))",
     ),
     (
         "settings_documents",
@@ -39,7 +53,7 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
     ),
     (
         "agent_sessions",
-        "CREATE TABLE agent_sessions (session_id TEXT NOT NULL PRIMARY KEY, config TEXT NOT NULL, created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0), leader_session_id TEXT REFERENCES agent_sessions(session_id))",
+        "CREATE TABLE agent_sessions (session_id TEXT NOT NULL PRIMARY KEY, config TEXT NOT NULL, created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0), leader_session_id TEXT REFERENCES agent_sessions(session_id), origin TEXT NOT NULL DEFAULT 'unknown' CHECK (origin IN ('client', 'acp', 'internal', 'unknown')))",
     ),
     (
         "agent_sessions_by_leader",
@@ -134,14 +148,23 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
 /// to recognize a store older than v27.
 const AGENT_SESSIONS_BEFORE_V27: &str = "CREATE TABLE agent_sessions (session_id TEXT NOT NULL PRIMARY KEY, config TEXT NOT NULL, created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0))";
 const AGENTS_BEFORE_V27: &str = "CREATE TABLE agents(agent_id TEXT PRIMARY KEY, profile TEXT NOT NULL, is_default INTEGER NOT NULL CHECK(is_default IN (0, 1)))";
+/// The text of `agent_sessions` from v27 through v29; `schema_of` uses it to
+/// recognize a store older than v30.
+const AGENT_SESSIONS_BEFORE_V30: &str = "CREATE TABLE agent_sessions (session_id TEXT NOT NULL PRIMARY KEY, config TEXT NOT NULL, created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0), leader_session_id TEXT REFERENCES agent_sessions(session_id))";
 /// v27 adds a column to two tables, which `SCHEMA` cannot express as a new
 /// entry: the upgrade alters them before it creates the indexes on them.
 const V27_COLUMNS: &str = "ALTER TABLE agent_sessions ADD COLUMN leader_session_id TEXT REFERENCES agent_sessions(session_id);
 ALTER TABLE agents ADD COLUMN owner_session_id TEXT REFERENCES agent_sessions(session_id);";
+/// v30 adds one column to `agent_sessions` and backfills the rows whose leader
+/// link already records an internal Session. The `ALTER` text must reproduce
+/// `SCHEMA`'s column definition exactly: the startup gate compares the stored
+/// statement character by character.
+const V30_COLUMNS: &str = "ALTER TABLE agent_sessions ADD COLUMN origin TEXT NOT NULL DEFAULT 'unknown' CHECK (origin IN ('client', 'acp', 'internal', 'unknown'));
+UPDATE agent_sessions SET origin='internal' WHERE leader_session_id IS NOT NULL;";
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 15] = [
+const UPGRADES: [(u32, &[&str]); 16] = [
     (
         13,
         &[
@@ -191,6 +214,9 @@ const UPGRADES: [(u32, &[&str]); 15] = [
         28,
         &["session_output_owners", "session_output_owners_by_path"],
     ),
+    // #557: a Session's creation origin; the column only, and the step fills
+    // in the rows whose leader link already records one.
+    (29, &[]),
 ];
 
 fn format_table(version: u32) -> String {
@@ -213,6 +239,7 @@ fn schema_of(version: u32) -> Vec<(&'static str, String)> {
             let sql = match name {
                 "agent_store_format" => format_table(version),
                 "agent_sessions" if version < 27 => AGENT_SESSIONS_BEFORE_V27.to_owned(),
+                "agent_sessions" if version < 30 => AGENT_SESSIONS_BEFORE_V30.to_owned(),
                 "agents" if version < 27 => AGENTS_BEFORE_V27.to_owned(),
                 _ => sql.to_owned(),
             };
@@ -232,13 +259,26 @@ fn same_schema(actual: &[(String, String)], mut expected: Vec<(&str, String)>) -
                 name == expected_name && *sql == expected_sql
             })
 }
-/// The schema objects of `connection`'s database, sorted by name.
+/// The read index the daemon creates at open (session-history-window §5.1).
+/// It carries no data and no decode rule, so it is not part of the format:
+/// `schema` and the format gate ignore it, and every open recreates it.
+const DERIVED_INDEX: (&str, &str) = (
+    "timeline_history_anchors",
+    "CREATE INDEX IF NOT EXISTS timeline_history_anchors ON timeline_events(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'input/message')",
+);
+/// The schema objects of `connection`'s database that belong to the format,
+/// sorted by name.
 fn schema(connection: &Connection) -> Result<Vec<(String, String)>> {
     let mut query = connection
-        .prepare("SELECT name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name")
+        .prepare(
+            "SELECT name, sql FROM sqlite_master \
+             WHERE name NOT LIKE 'sqlite_%' AND name != ?1 ORDER BY name",
+        )
         .map_err(storage)?;
     query
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .query_map(rusqlite::params![DERIVED_INDEX.0], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
         .map_err(storage)?
         .collect::<rusqlite::Result<_>>()
         .map_err(storage)
@@ -263,6 +303,90 @@ fn markers(connection: &Connection) -> Result<Vec<i64>> {
 
 fn storage(error: impl std::fmt::Display) -> AgentError {
     AgentError::Storage(error.to_string())
+}
+
+enum StartupFailure {
+    Newer { marker: i64 },
+    Mismatched { schema: u32, marker: Option<i64> },
+    Unrecognized { marker: Option<i64> },
+    TooOld { marker: i64 },
+}
+impl StartupFailure {
+    /// The note a CLI-started daemon leaves for its client; the first line
+    /// binds it to the process that wrote it.
+    fn note(&self, path: &std::path::Path) -> String {
+        let path = path.display();
+        let body = match self {
+            Self::Newer { marker } => format!(
+                "Cannot open native store {path}.\n  Store format: v{marker}\n  Daemon format: v{FORMAT}\n  This daemon cannot read the store. Existing data was preserved.\n  Run a build supporting v{marker}, or use --home PATH for a separate environment."
+            ),
+            Self::Mismatched { schema, marker } => {
+                let store = match marker {
+                    Some(marker) => format!("v{marker} (schema is v{schema})"),
+                    None => format!("v{schema} (format marker is missing or ambiguous)"),
+                };
+                format!(
+                    "Cannot open native store {path}.\n  Store format: {store}\n  Daemon format: v{FORMAT}\n  The store's format marker and schema disagree. Existing data was preserved.\n  Use the build that wrote this store, or use --home PATH for a separate environment."
+                )
+            }
+            Self::Unrecognized { marker } => {
+                let store = match marker {
+                    Some(marker) => format!("v{marker} (unrecognized schema)"),
+                    None => "unrecognized".to_owned(),
+                };
+                format!(
+                    "Cannot open native store {path}.\n  Store format: {store}\n  Daemon format: v{FORMAT}\n  The store is not a format this daemon recognizes. Existing data was preserved.\n  Use the build that wrote this store, or use --home PATH for a separate environment."
+                )
+            }
+            Self::TooOld { marker } => format!(
+                "Cannot open native store {path}.\n  Store format: v{marker} (no longer read by this daemon)\n  Daemon format: v{FORMAT}\n  This daemon cannot read the store. Existing data was preserved.\n  Use a build that reads v{marker}, or use --home PATH for a separate environment."
+            ),
+        };
+        format!(
+            "dimcode-startup-failure v1 pid={}\n{body}",
+            std::process::id()
+        )
+    }
+}
+
+fn startup_note_path(path: &std::path::Path) -> PathBuf {
+    let mut note = path.as_os_str().to_os_string();
+    note.push(".startup");
+    PathBuf::from(note)
+}
+
+fn single_marker(markers: &[i64]) -> Option<i64> {
+    (markers.len() == 1).then(|| markers[0])
+}
+
+/// Best effort: the rejection and its error text do not depend on the note.
+fn write_startup_failure(path: &std::path::Path, failure: StartupFailure) {
+    let note = failure.note(path);
+    let target = startup_note_path(path);
+    let temp = target.with_file_name(format!(
+        "{}.{}.tmp",
+        target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("dimcode.sqlite.startup"),
+        uuid::Uuid::new_v4()
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let written = options.open(&temp).and_then(|mut file| {
+        file.write_all(note.as_bytes())?;
+        drop(file);
+        let _ = std::fs::remove_file(&target);
+        std::fs::rename(&temp, &target)
+    });
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
 }
 
 /// The process connection and maintenance admission. Business modules never
@@ -362,7 +486,15 @@ impl SqliteStorage {
             tx.execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
                 .map_err(storage)?;
         } else if let Some(version) = known_format(&actual) {
-            if markers(&tx)? != [i64::from(version)] {
+            let markers = markers(&tx)?;
+            if markers != [i64::from(version)] {
+                write_startup_failure(
+                    &path,
+                    StartupFailure::Mismatched {
+                        schema: version,
+                        marker: single_marker(&markers),
+                    },
+                );
                 return Err(unsupported_version());
             }
             if version != FORMAT {
@@ -372,6 +504,9 @@ impl SqliteStorage {
                 for (from, added) in UPGRADES.iter().filter(|(from, _)| *from >= version) {
                     if *from == 26 {
                         tx.execute_batch(V27_COLUMNS).map_err(storage)?;
+                    }
+                    if *from == 29 {
+                        tx.execute_batch(V30_COLUMNS).map_err(storage)?;
                     }
                     for (_, sql) in SCHEMA.iter().filter(|(name, _)| added.contains(name)) {
                         tx.execute_batch(sql).map_err(storage)?;
@@ -392,11 +527,26 @@ impl SqliteStorage {
                 upgraded_from = Some(version);
             }
         } else {
+            let marker = markers(&tx)
+                .ok()
+                .and_then(|markers| single_marker(&markers));
+            let failure = match marker {
+                Some(marker) if marker > i64::from(FORMAT) => StartupFailure::Newer { marker },
+                Some(marker) if marker == 14 || marker < i64::from(MIN_FORMAT) => {
+                    StartupFailure::TooOld { marker }
+                }
+                Some(marker) => StartupFailure::Unrecognized {
+                    marker: Some(marker),
+                },
+                None => StartupFailure::Unrecognized { marker: None },
+            };
+            write_startup_failure(&path, failure);
             return Err(storage(format!(
                 "unsupported SQLite schema at {}; the database was preserved. Use a compatible daemon to access it, or choose a new database path for a fresh start.",
                 path.display()
             )));
         }
+        tx.execute_batch(DERIVED_INDEX.1).map_err(storage)?;
         tx.commit().map_err(storage)?;
         connection
             .pragma_update(None, "journal_mode", "WAL")
@@ -405,12 +555,22 @@ impl SqliteStorage {
             .pragma_update(None, "synchronous", "FULL")
             .map_err(storage)?;
         connection
+            .pragma_update(None, "wal_autocheckpoint", 0)
+            .map_err(storage)?;
+        connection
+            .pragma_update(None, "journal_size_limit", WAL_LIMIT_BYTES)
+            .map_err(storage)?;
+        connection
+            .pragma_update(None, "cache_size", -PAGE_CACHE_KIB)
+            .map_err(storage)?;
+        connection
             .pragma_update(None, "foreign_keys", true)
             .map_err(storage)?;
         #[cfg(target_os = "macos")]
         connection
             .pragma_update(None, "fullfsync", true)
             .map_err(storage)?;
+        let _ = std::fs::remove_file(startup_note_path(&path));
         Ok(Arc::new(Self {
             connection: Mutex::new(Some(connection)),
             admission: Mutex::new(Admission {
@@ -542,6 +702,32 @@ impl SqliteStorage {
         .await
     }
 
+    /// Checkpoints the WAL once it passes `CHECKPOINT_BYTES`. The writer
+    /// calls this after a round committed and published, so the copy runs
+    /// outside the commit path (#600). A passive checkpoint leaves readers
+    /// alone: a read snapshot, such as an export's, keeps the WAL growing
+    /// until it ends, and the next call then copies and restarts it.
+    pub(super) fn checkpoint(&self) {
+        if self.wal_bytes() < CHECKPOINT_BYTES {
+            return;
+        }
+        let mut guard = self
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(connection) = guard.as_mut() else {
+            return;
+        };
+        if let Err(error) = connection.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(())) {
+            tracing::error!(db_path = %self.path.display(), phase = "checkpoint", pid = std::process::id(), %error, "storage.transaction");
+        }
+    }
+    fn wal_bytes(&self) -> u64 {
+        let mut path = self.path.as_os_str().to_os_string();
+        path.push("-wal");
+        std::fs::metadata(path).map_or(0, |meta| meta.len())
+    }
+
     pub async fn close(self: &Arc<Self>) -> Result<()> {
         self.admission.lock().unwrap().closed = true;
         let db = self.clone();
@@ -560,11 +746,17 @@ impl SqliteStorage {
                     .connection
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(connection) = guard.take()
-                    && let Err((connection, failure)) = connection.close()
-                {
-                    *guard = Some(connection);
-                    return Err(storage(failure));
+                if let Some(connection) = guard.take() {
+                    if let Ok(false) = connection.is_readonly("main")
+                        && let Err(error) =
+                            connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+                    {
+                        tracing::error!(db_path = %db.path.display(), phase = "close", pid = std::process::id(), %error, "storage.transaction");
+                    }
+                    if let Err((connection, failure)) = connection.close() {
+                        *guard = Some(connection);
+                        return Err(storage(failure));
+                    }
                 }
                 let mut admission = db.admission.lock().unwrap();
                 if let Some(lease) = &admission.lease {
@@ -579,6 +771,84 @@ impl SqliteStorage {
         .await
         .map_err(storage)?
     }
+}
+
+/// What `vacuum_store` reclaimed, as bytes on disk before and after.
+pub struct Vacuumed {
+    pub before: u64,
+    pub after: u64,
+}
+
+/// Reclaims free pages in an existing store by rewriting it with `VACUUM`
+/// (#600). It takes the same lease as `open`, so a running daemon makes it
+/// fail, and it requires the current format's exact schema: it never creates
+/// a store, upgrades one or touches an unsupported format. `VACUUM` rewrites
+/// the whole database, so it needs free space about the store's size.
+pub fn vacuum_store(path: PathBuf) -> Result<Vacuumed> {
+    if !path.is_file() {
+        return Err(storage(format!(
+            "No dimcode database at {}",
+            path.display()
+        )));
+    }
+    let path = path.canonicalize().map_err(storage)?;
+    let mut lock_path = path.as_os_str().to_os_string();
+    lock_path.push(".lock");
+    let admission = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(storage)?;
+    admission.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => storage(format!(
+            "another process owns the SQLite database: {}",
+            path.display()
+        )),
+        std::fs::TryLockError::Error(error) => storage(error),
+    })?;
+    let _lease = DatabaseLease(admission);
+    let connection = Connection::open(&path).map_err(storage)?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(storage)?;
+    let unsupported = || {
+        storage(format!(
+            "unsupported Timeline storage format at {}; the database was not changed",
+            path.display()
+        ))
+    };
+    if known_format(&schema(&connection)?) != Some(FORMAT)
+        || markers(&connection)? != [i64::from(FORMAT)]
+    {
+        return Err(unsupported());
+    }
+    let before = store_bytes(&path);
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .map_err(storage)?;
+    connection.execute_batch("VACUUM").map_err(storage)?;
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .map_err(storage)?;
+    connection
+        .close()
+        .map_err(|(_, failure)| storage(failure))?;
+    Ok(Vacuumed {
+        before,
+        after: store_bytes(&path),
+    })
+}
+
+fn store_bytes(path: &Path) -> u64 {
+    let mut wal = path.as_os_str().to_os_string();
+    wal.push("-wal");
+    [path, Path::new(&wal)]
+        .into_iter()
+        .filter_map(|path| std::fs::metadata(path).ok())
+        .map(|meta| meta.len())
+        .sum()
 }
 
 pub struct SqliteStoragePlugin {

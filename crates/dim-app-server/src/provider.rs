@@ -1835,11 +1835,12 @@ impl ProviderService {
         }))
     }
 
-    /// Applies supplied preferences to the adopted model without reselecting defaults.
+    /// Applies a preference patch to the adopted model without reselecting
+    /// defaults. A cleared field takes the model's declared configuration.
     pub async fn apply_preferences(
         self: &Arc<Self>,
         current: &dim_agent_types::ModelConfiguration,
-        preferences: ModelPreferences,
+        update: &crate::protocol::ModelPreferenceUpdate,
         cancel: &CancellationToken,
     ) -> Result<ModelSelection, HostError> {
         self.check(cancel)?;
@@ -1864,7 +1865,13 @@ impl ProviderService {
                 "Model route changed; select the model again",
             ));
         }
-        let base = current.config.clone().unwrap_or_default();
+        let mut base = current.config.clone().unwrap_or_default();
+        if update.clears_reasoning() {
+            preferences::restore_reasoning(&mut base, &model.config, protocol);
+        }
+        if update.clears_service_tier() {
+            preferences::restore_service_tier(&mut base, &model.config, protocol);
+        }
         let snapshot = capability_snapshot(
             model,
             ModelId {
@@ -1873,13 +1880,19 @@ impl ProviderService {
             },
         )
         .map_err(|error| failure(error.to_string()))?;
-        let config =
-            preferences::configure(&preferences, &snapshot, protocol, &base).map_err(failure)?;
+        let config = preferences::configure(&update.values(), &snapshot, protocol, &base)
+            .map_err(failure)?;
+        let unchanged = current
+            .config
+            .as_ref()
+            .map_or(config == ModelConfig::default(), |current| {
+                current == &config
+            });
         Ok(ModelSelection {
             provider_id: current.provider_id.clone(),
             model_id: current.model_id.clone(),
             capability_snapshot: current.capability_snapshot.clone(),
-            config: if config == base {
+            config: if unchanged {
                 current.config.clone()
             } else {
                 Some(config)

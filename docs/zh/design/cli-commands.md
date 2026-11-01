@@ -15,9 +15,8 @@ scrollback 与 fullscreen TUI 都按分类分组，分类及分类内的命令�
 退出和挂起必须完整匹配命令名或别名才执行：选择不完整匹配时只补全命令名并保留输入框。
 完整输入的命令（包括隐藏命令）仍走各自的处理流程。
 菜单中的权限入口为 `/permissions`；`/approvals` 和 `/approval` 是完整输入时仍可使用的兼容别名。
-菜单只列出斜杠命令，移除中断、steer、选择较早消息、滚动到顶部或底部等仅由按键触发的操作。
-`/keys` 仍列出这些快捷键：两种模式均支持 `Esc` 和 `Ctrl+S`；fullscreen 还支持
-`Tab`、`Home`、`End`，其中 `Home/End` 仅在草稿为空时滚动历史。
+菜单不列出运行、排队和 steer 的按键，它们只由按键触发。菜单只列出斜杠命令：选择较早消息、滚动到顶部或底部等视图操作也不列出；
+`Tab`、`Home`、`End` 保留各自的绑定。
 
 ```text
 Commands
@@ -28,27 +27,43 @@ Commands
 / + Enter          -> /exit (completion only)
 /exit + Enter      -> exit
 /permissions + Enter -> permission controls
-
-Esc     interrupt the run
-Ctrl+S  steer with the next queued message
-Tab     pick an earlier message to edit or quote (fullscreen)
-Home    scroll to the top (fullscreen, empty draft)
-End     scroll to the bottom (fullscreen, empty draft)
 ```
+
+## 运行按键与排队
+
+排队与引导和 Codex CLI 不同：运行中 `Enter` 排队，`Ctrl+S` 引导。其余运行按键与 Codex CLI 的交互一致（已在其 TUI v0.166.0 中核对）。没有运行时，`Enter` 提交。
+
+```text
+按键                 空闲                         运行中
+Enter               提交                         排队草稿；草稿为空：steer 最早的排队消息
+Tab                 选择较早消息                 选择较早消息
+                    （fullscreen）               （fullscreen）
+Shift+Left          —                            草稿为空：把最新一条排队消息取回草稿
+Esc                 保留草稿                     中断；所有排队消息按先后顺序回到草稿
+Ctrl+S              —                            草稿非空：steer 草稿；为空：steer 最早的排队消息
+Up / Down           输入历史                     输入历史
+Home / End          滚动（fullscreen，草稿为空） 滚动（fullscreen，草稿为空）
+```
+
+- 排队消息在当前运行结束后运行，每次运行一条。被 steer 的消息在当前运行的下一个轮次边界并入该运行。
+- 取回消息和中断都通过 `session.input.withdraw` 撤回消息。文字只在撤回被删除后才进入草稿。
+  已离开队列的消息不会放回，其文字也不会再次发送。
+- 中断产生的撤回先于 stop 发出，因此运行不会开始下一条排队消息。
+- `Ctrl+C` 清空草稿。`Esc` 从不清空草稿。
 
 ### 队列条
 
-有消息排队时，输入框上方的队列条在带标题的边框里画出队列：按排队顺序排列，最先运行的一条在最上面，最后一行提示作用于队列的按键。草稿为空时，`↑` 把最新排队的消息取回输入框编辑；`Ctrl+S` 以下一条消息 steer。提示只在命令表里有对应命令时才写出命令名，因此它写出的 `/name` 都在本地执行，不会作为用户消息发给模型。目前没有查看队列的命令，所以提示只列按键。
+有消息排队时，输入框上方的队列条在带标题的边框里画出队列：按排队顺序排列，最先运行的一条在最上面，最后一行提示作用于队列的按键。运行中，草稿为空时，`Shift+Left` 把最新排队的消息取回输入框编辑。`Ctrl+S` steer 当前草稿；草稿为空时，`Ctrl+S` 或 `Enter` steer 最早的排队消息。Up/Down 仍用于输入历史。提示只在命令表里有对应命令时才写出命令名，因此它写出的 `/name` 都在本地执行，不会作为用户消息发给模型。目前没有查看队列的命令，所以提示只列按键。
 
 ```text
-╭─ Queue (2) ─────────────────────────────────────╮
+┌─ Queue (2) ─────────────────────────────────────┐
 │ › fix the failing test in session_host          │
 │ › then update the design note                   │
-│ ↑ edit · ctrl+s steer now                       │
-╰─────────────────────────────────────────────────╯
+│ shift+← edit last · ctrl+s steer now            │
+└────────────────────────────────────────────────┘
 ```
 
-队列条没有显示的消息把数量加进提示：`+3 more · ↑ edit · ctrl+s steer now`。队列条最多显示五条消息，并在队列排空时保持已达到的高度。
+队列条没有显示的消息把数量加进提示：`+3 more · shift+← edit last · ctrl+s steer now`。队列条最多显示五条消息，并在队列排空时保持已达到的高度。
 
 ## 用量报告
 
@@ -260,6 +275,7 @@ Reset 要求确认后把两个布尔值都写为 false。Off 可保留无效的�
 | `dimcode session export SESSION_ID --format markdown\|json [--output PATH]` | 导出主分支；未给输出路径时写到 stdout。 |
 | `/export markdown PATH` 或 `/export json PATH` | 交互客户端空闲时把当前主分支导出到文件。 |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | 不经守护进程，把 Session 的完整 Timeline 写成带版本的 JSONL（[Timeline 导出](appserver/timeline-export.md)）；未给输出路径时写到 stdout。 |
+| `dimcode daemon vacuum [--database PATH]` | 用 SQLite `VACUUM` 重写离线原生库，回收已删除 Session 留下的页，并打印操作前后的大小（[存储格式](appserver/native-storage-format.md#sqlite-运行参数与空间回收)）；守护进程持库时失败，也不创建或升级库。 |
 | `dimcode hooks list [--cwd DIR]` | 经 `hooks.catalog` 列出生效的 Hook 目录（[Hooks](plugins/Hooks.md#a7-管理方法)）：每个来源的路径、启用状态与状态，以及每个处理器的事件、匹配器、命令与状态。 |
 | `dimcode hooks enable\|disable [--cwd DIR]` | 经 `hooks.set_enabled` 启用或停用 `DIR`（默认当前目录）所在工作区的项目 Hook，记录在 Settings 为其授权的项目根上。 |
 | `dimcode login [PROVIDER] [--directory URL] [--device] [--redirect-uri URI]` | 启动被描述账号的浏览器或设备签到（[提供方账号](#提供方账号)）；不给 PROVIDER 时列出被描述的账号。 |
@@ -282,10 +298,40 @@ Reset 要求确认后把两个布尔值都写为 false。Off 可保留无效的�
 全局的 home、工作区、server 和模型配置选项保持现有含义，放在命令前后都可以。`--server PATH`
 指向独立的 `dim-app-server` 二进制，CLI 按它自己的名字直接运行；默认则运行本可执行文件的
 `app-server` 子命令，因此指向本可执行文件是参数错误。指向不存在的路径、程序在开始服务前
-退出，或未及时开始服务时，也按同一要求报错。现有的
+退出，或未及时开始服务时，也按同一要求报错，除非它留下了[启动说明](#守护进程启动失败)。现有的
 login/account/logout、models、MCP 和 daemon 命令仍然可用。现有的 `--prompt`、管道 stdin 和
 `--resume` 调用行为不变；`exec resume` 也接受同样的全局选项。重复给出 Session 或提示词是参数错误。
 `--json` 是 `exec` 的选项，`tui` 需要终端。help/version 与参数错误不会启动守护进程。
+
+### 守护进程启动失败
+
+所有启动守护进程的入口共用 `connect_inner` 里的客户端启动。守护进程是 detached 的，
+stderr 追加到 `daemon.log`，所以每次启动的一份说明是唯一既不解析历史、也不依赖客户端
+可能关闭的管道的通道。启动前 CLI 删除 `<native home>/dimcode.sqlite.startup`；原生 home
+是守护进程自己的 home，即 `<home>/rust`。子进程在客户端连上之前退出时，CLI 读取这份
+说明（最多 16 KiB，且只接受普通文件；Unix 上还要求属于当前用户、组和其他用户都没有
+权限）。Unix 上这套权限就是说明的保护，因为守护进程以 0600 写它；Windows 上 CLI 只
+检查普通文件、大小和首行，边界是 home 目录继承的 ACL。CLI 要求首行是
+`dimcode-startup-failure v1 pid=<child pid>`，去掉正文中除换行和制表符以外的控制字符，
+把正文作为命令的错误返回，并在后面加上 `Details: <native home>/daemon.log`。存储门禁在
+诊断出不兼容时写这份说明，写明库、标记、守护进程支持的格式、库是更新、标记与结构
+不符、无法识别还是过旧，以及恢复办法（[原生存储格式 §
+启动不兼容诊断](../../design/appserver/native-storage-format.md#启动不兼容诊断)）。
+没有匹配的说明时，内嵌守护进程保留现有的 `App Server exited (<status>); see ...`，
+`--server` 指定的程序则报出该选项必须指向独立的 `dim-app-server` 二进制。失败的启动读完后
+删除说明；连接成功也删除任何说明。CLI 从不打印 `daemon.log`，从不删除、重建、降级或
+改写库，并以 1 退出。开发说明继续使用 `./dev` 和它的隔离 home；终端说明本身只给兼容
+构建或 `--home PATH` 两条路。
+
+```text
+$ dima
+Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
+  Store format: v30
+  Daemon format: v29
+  This daemon cannot read the store. Existing data was preserved.
+  Run a build supporting v30, or use --home PATH for a separate environment.
+  Details: /Users/me/.dimcode-alpha/rust/daemon.log
+```
 
 交互式导出解析器读取格式词，把行的其余部分当作字面路径（包括空格），不做 shell 求值或引号展开。
 缺少路径或格式不支持时打印用法并回到提示符，不提交输入。`/exit` 不带参数。只拦截这些确切的命令名；

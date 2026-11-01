@@ -1,18 +1,19 @@
 # Rust 会话存储格式
 
-The current native format is **v29**, with source-owned `settings_documents`,
+The current native format is **v30**, with source-owned `settings_documents`,
 SessionStore's Session-file rows, its title metadata, request messages stored
 as lists of content-addressed nodes, extension event rows, Session
 configurations and Agent profiles that may omit their mount list, the two
 branch end events, the tool-effect and digest fields, and tool schemas that may
 omit `type`, the Session catalog projection, a configuration's System source,
 a model limit that only a declaration writes, a delegation's Agent owner and
-member leader, Session file grants and command output ownership. Startup
-requires the exact v29 SQL schema and a single
-format marker of 29 before writable PRAGMAs, or the exact v28, v27, v26, v25, v24, v23,
+member leader, a Session's creation origin, Session file grants and command output
+ownership. Startup
+requires the exact v30 SQL schema and a single
+format marker of 30 before writable PRAGMAs, or the exact v29, v28, v27, v26, v25, v24, v23,
 v22, v21, v20, v19, v18, v17, v16, v15 or v13 schema with its own marker,
-which the same startup transaction upgrades in place to v29 one step after
-another ([ADR 013 v29 decision](#adr-013-v29-格式决定), [#717 v28 decision](#717-v28-格式决定), [#593 v27 decision](#593-v27-格式决定),
+which the same startup transaction upgrades in place to v30 one step after
+another ([#557 v30 decision](#557-v30-格式决定), [ADR 013 v29 decision](#adr-013-v29-格式决定), [#717 v28 decision](#717-v28-格式决定), [#593 v27 decision](#593-v27-格式决定),
 [S5a v15 decision](#s5a-v15-格式决定),
 [S5b v16 decision](#s5b-v16-格式决定), [#193 v17 decision](#193-v17-格式决定),
 [#2 v18 decision](#2-v18-格式决定), [#364 v19 decision](#364-v19-格式决定),
@@ -25,17 +26,126 @@ branch-only v14 `user_configuration` format are unsupported and preserved, never
 migrated, downgraded or interpreted as an admitted format.
 No migration API or startup option is provided. S5c (Session deletion and fork)
 kept v15 unchanged ([S5c decision](#s5c-格式决定)). v13 document bytes remain
-valid in v29, and v16 request rows stay readable as written.
+valid in v30, and v16 request rows stay readable as written.
+除格式自身的 SQL 外，每次打开都接受派生索引 `timeline_history_anchors`
+（`(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'input/message')`，
+[latest-turn 窗口 §5.1](session-history-window.md#51-the-derived-index)）：读写打开在启动事务内用
+`CREATE INDEX IF NOT EXISTS` 创建或补建，只读导出只接受它。它不含数据，可从
+`timeline_events` 重新推导，读同一份事件不因它有无而不同，因此不属于格式：启动门禁的
+精确结构比较忽略这一个名字，标记保持 30；其余任何多余对象仍按原规则拒绝。代价是早于
+该变更的二进制不认识这个名字，会以 "unsupported SQLite schema … preserved" 拒绝已有该
+索引的库（行不变，新二进制可再次打开）。
 Storage versions are independent of RPC versions. Private MCP/Skill business documents do not belong
 in loader rows, events, diagnostics, Sessions or Timelines.
 
-## Current v29 tables
+## 启动不兼容诊断
+
+启动门禁仍然只做拒绝：库被保留，返回的错误文本不变，标记和业务行都不改。为了让
+用户不必打开追加式 `daemon.log` 才知道原因，拒绝时在库旁原子写一份供人阅读的
+启动说明 `<database>.startup`（Unix 上以 0600 创建；Windows 不自定义权限，沿用
+home 目录继承的 ACL；正常打开不写）。说明只描述本次启动看到的路径、标记、当前
+构建支持的格式和恢复办法，不复制历史日志，也不含业务内容或凭据。第一行是
+`dimcode-startup-failure v1 pid=<pid>`，后面是正文。
+
+**为什么是旁路文件，而不是子进程 stderr。** CLI 以 detached 方式启动守护进程：
+`setsid`，stdin/stdout 为 null，stderr 直接追加到 `daemon.log`。守护进程比客户端
+活得久，用管道捕获本次 stderr 会在客户端退出后让守护进程写向已关闭的管道；而
+`daemon.log` 跨多次启动追加，不能可靠地取出“本次启动”的错误。旁路说明是本次启动
+的最小通道：一个私有文件、首行带 PID，CLI 只校验并打印它，不解析日志，也不复制
+业务内容。
+
+“本构建认识的形状”指当前格式的表和索引集合，或某个升级步骤起点的集合：结构完全相符时
+先看标记是否等于该版本，再看是否需要升级。结构不相符时按可读的单一标记分类，下表四行
+互斥。
+
+| 情形 | 判据 | 说明的结论 |
+| --- | --- | --- |
+| 更新格式 | 结构不是本构建认识的形状，`agent_store_format` 可读且恰有一行 `version > FORMAT`（当前 29） | 本构建读不了这个更新格式的库 |
+| 标记与结构不符 | 结构是本构建认识的形状（当前格式或某个升级起点），但标记行不是该版本的唯一值 | 标记和结构不一致；不诊断为“降级” |
+| 无法识别 | 结构不是本构建认识的形状，且可读的单一标记在本构建接受的范围内（`MIN_FORMAT ≤ version ≤ FORMAT`，已移除的 v14 除外），或没有可读的单一标记 | 结构无法识别；读出标记时一并给出 |
+| 过旧或不再准入 | 结构不是本构建认识的形状，且可读的单一标记低于 `MIN_FORMAT`，或为已移除的 v14 | 该格式不再被这个构建读取 |
+
+正文模板（`<path>`、`<marker>`、`<schema>` 由存储填写；`<format>` 取 `FORMAT` 常量（当前 29），不写字面量）。
+更新格式：
+
+```text
+Cannot open native store <path>.
+  Store format: v<marker>
+  Daemon format: v<format>
+  This daemon cannot read the store. Existing data was preserved.
+  Run a build supporting v<marker>, or use --home PATH for a separate environment.
+```
+
+标记与结构不符：
+
+```text
+Cannot open native store <path>.
+  Store format: v<marker> (schema is v<schema>)
+  Daemon format: v<format>
+  The store's format marker and schema disagree. Existing data was preserved.
+  Use the build that wrote this store, or use --home PATH for a separate environment.
+```
+
+无法识别（结构不相符，但读出了单一标记）：
+
+```text
+Cannot open native store <path>.
+  Store format: v<marker> (unrecognized schema)
+  Daemon format: v<format>
+  The store is not a format this daemon recognizes. Existing data was preserved.
+  Use the build that wrote this store, or use --home PATH for a separate environment.
+```
+
+无法识别（没有可读的单一标记）：
+
+```text
+Cannot open native store <path>.
+  Store format: unrecognized
+  Daemon format: v<format>
+  The store is not a format this daemon recognizes. Existing data was preserved.
+  Use the build that wrote this store, or use --home PATH for a separate environment.
+```
+
+过旧：
+
+```text
+Cannot open native store <path>.
+  Store format: v<marker> (no longer read by this daemon)
+  Daemon format: v<format>
+  This daemon cannot read the store. Existing data was preserved.
+  Use a build that reads v<marker>, or use --home PATH for a separate environment.
+```
+
+`Store format` 行按分支取值的全部情况：标记与结构不符且读出单一标记时写
+`v<marker> (schema is v<schema>)`，否则写 `v<schema> (format marker is missing or ambiguous)`；
+结构不相符时，读出单一标记写 `v<marker>`，读不出则只写 `unrecognized`。
+
+- **写入与清理**：拒绝前用同目录临时文件写入并原子替换；写入失败不改变返回值，原错误照常返回。正常打开、升级成功和其他启动失败不写说明。成功打开（含升级成功）时，存储 owner 删除遗留说明；删除失败不影响启动，下一次成功打开再清理。说明的读取、打印和其余清理属于 CLI 启动，见 [CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)；说明不进入日志历史。
+- **位置**：说明是库的同级文件，不是新数据库格式，也不是 `daemon.log` 的一部分。CLI 启动的守护进程使用 `<native home>/dimcode.sqlite`，所以 CLI 读取 `<native home>/dimcode.sqlite.startup`。直接以 `--database` 启动的守护进程把说明写在它的库旁，CLI 的启动路径不读取。
+- **不自动恢复**：不删除、重建、降级、重置标记或复制库；`--home PATH` 只建立另一个环境。终端说明只给兼容构建和 `--home` 两条路；开发说明继续使用 `./dev` 的隔离 home。
+- **验证**：`storage_flow` 用一次性库覆盖全部分支：v31 标记的未知结构被拒绝、库字节不变，说明为“更新格式”；当前格式的库把标记改成 v29，以及 v13 结构配 v31 标记，都得到“标记与结构不符”而不是“更新格式”；当前格式的空标记表得到 `v30 (format marker is missing or ambiguous)`；未知结构配可读标记 v20 得到 `v20 (unrecognized schema)`，没有可读标记得到 `unrecognized`；v12 和已移除的 v14 得到“过旧”；正常打开和升级成功删除遗留说明，失败替换上一次留下的说明。CLI 启动流程另覆盖终端打印、PID、权限和控制字符，见 [CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)。
+
+## SQLite 运行参数与空间回收
+
+进程用一个连接打开本库；格式门禁及其准入事务提交后，才设置连接级 PRAGMA：`journal_mode=WAL`、`synchronous=FULL`（macOS 另加 `fullfsync`）、`foreign_keys=ON`、`wal_autocheckpoint=0`、`journal_size_limit=64 MiB`、`cache_size=-32768`（32 MiB）。
+
+| 参数 | 值 | 作用 |
+| --- | --- | --- |
+| `wal_autocheckpoint` | `0` | 关闭提交事务内的自动检查点。writer 在每轮提交并发布后、WAL 达到 4 MiB（SQLite 默认的 1000 页）时执行 `PRAGMA wal_checkpoint(PASSIVE)`；检查点因此不占提交路径。 |
+| `journal_size_limit` | 64 MiB | 检查点重启 WAL 后，文件截到不超过该值；单轮写入本身更大时保留该轮的大小。导出等读者持长读事务时 WAL 仍会在导出期间增长，导出结束后下一次检查点照常复制并重启。被动检查点不等待读者。 |
+| `cache_size` | 32 MiB | 在 650 MB、2,300 个 Session 的一次性库上重复读取每个 Session 的尾部事件：缓存为 2–16 MiB 时十次读取共从分页器读约 205 MB，32 MiB 起降到约 20 MB，64 MiB 与 128 MiB 不再减少。32 MiB 是容纳该热点工作集的最小值。 |
+
+关闭时执行 `PRAGMA wal_checkpoint(TRUNCATE)`，把 WAL 折回数据库并截为零；另一个连接（如运行中的导出）仍持读事务时这一步可能失败，下次打开继续。
+
+删除 Session 只释放库内页，数据库文件本身不缩小。维护入口是 `dimcode daemon vacuum [--database PATH]`：守护进程未运行时它取同一把维护锁，校验当前格式的精确结构后执行 `VACUUM`，打印操作前后数据库与 WAL 的字节数之和。`VACUUM` 重写整个库，需要约等于库大小的临时空间；守护进程持锁时该命令拒绝执行，也不升级或创建库。
+
+## Current v30 tables
 
 下表逐列对应 `SqliteStorage::SCHEMA`。新表按业务实体命名，其中 `agent_sessions` 与旧 TypeScript 的 `sessions` 区分；当前启动门禁仍只接受本格式，不因此支持旧表同库存取。`—` 表示 SQL 中没有显式 `DEFAULT`；可空列若省略会得到 SQLite 的隐式 `NULL`。SQLite rowid 表中的 `TEXT PRIMARY KEY` 不自动保证非空，因此下表如实标出 v1 的两个缺口；正常写入仍必须给出 ID。
 
 | 表.列 | SQLite 类型 | 可空 | 默认 | 约束与含义 |
 | --- | --- | --- | --- | --- |
-| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 29)`; exactly one row |
+| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 30)`; exactly one row |
 | `settings_documents.source` | `TEXT` | No | — | Primary key; `user/mcp`, `user/skills`, `user/mcp-projects` or `user/mcp-plugins`; workspace files are not mirrored |
 | `settings_documents.version` | `INTEGER` | No | — | Positive per-source CAS revision; token `native:<source>:<version>` |
 | `settings_documents.document` | `TEXT` | No | — | Plain business payload JSON, without a `{kind, document}` envelope; unknown business fields are preserved |
@@ -64,6 +174,7 @@ in loader rows, events, diagnostics, Sessions or Timelines.
 | `agent_sessions.created_at_ms` | `INTEGER` | 否 | — | `CHECK(created_at_ms >= 0)`；创建事务写入真实 Unix 毫秒 |
 | `agent_sessions.config` | `TEXT` | 否 | — | `SessionConfig` JSON，创建时的配置 |
 | `agent_sessions.leader_session_id` | `TEXT` | 是 | — | 外键到 `agent_sessions(session_id)`；非空表示这个 Session 是那个 leader Session 的委派成员，NULL 表示不是成员 |
+| `agent_sessions.origin` | `TEXT` | 否 | `'unknown'` | `CHECK (origin IN ('client', 'acp', 'internal', 'unknown'))`；创建来源，创建事务写入一次；默认值只为让 `ALTER TABLE` 能加非空列，写入方一律显式给出（v30，[#557](https://github.com/arcships/dim/issues/557)） |
 | `session_owners.session_id` | `TEXT` | **SQL 允许** | — | 主键，外键到 `agent_sessions(session_id)`；业务要求每个 Session 恰有一条非空 owner |
 | `session_owners.agent_id` | `TEXT` | 否 | — | 外键到 `agents(agent_id)` |
 | `session_owners.protocol_version` | `INTEGER` | 否 | — | `CHECK(protocol_version IN (1, 2, 3))`；Session 所属协议版本 |
@@ -254,7 +365,7 @@ ProjectionCheckpoint = {
 
 ### 读取校验
 
-读取时先解析 `Row` 和运行时事件，再按 `(session_id, hash)` 查请求引用的内容、复核 hash 与 kind，并重建 `Arc<ModelRequest>`；同一次读取或恢复校验中，内容行在加载时复核一次，此后复用解码结果，被缓存上限清出后重新加载并复核。`ListReferences` 从 `list` 向首个节点遍历：每个节点须是 `kind=node`、hash 匹配、正文可解析为 `{parent,message}`，遍历恰好经过 `length` 个节点，最后一个的 `parent` 为 `null`，其余都有父节点。同一次读取保留上一个由列表重建的事件请求及其各消息的节点地址，遍历遇到与它同位置的同一节点即停止，其余前缀取自该请求；共用节点已在重建该请求时复核。遍历每加载至多 256 个节点释放一次连接，下一次持有从中断处继续。随后校验序号、行 kind、批次、before 的 `event_id`、分支关系和所有 completed 事实的 through 边界。可选 snapshot state 不参与 Session 恢复校验。坏行保留原字节并归属该 Session；缺失或损坏的节点以 "missing request content"、"request content hash mismatch" 或 "request list length mismatch" 明确失败，不得通过默认值把损坏请求还原为空请求或部分请求。
+读取时先解析 `Row` 和运行时事件，再按 `(session_id, hash)` 查请求引用的内容、复核 hash 与 kind，并重建 `Arc<ModelRequest>`；同一次读取或恢复校验中，内容行在加载时复核一次，此后复用解码结果，被缓存上限清出后重新加载并复核。`ListReferences` 从 `list` 向首个节点遍历：每个节点须是 `kind=node`、hash 匹配、正文可解析为 `{parent,message}`，遍历恰好经过 `length` 个节点，最后一个的 `parent` 为 `null`，其余都有父节点。同一次读取保留上一个由列表重建的事件请求及其各消息的节点地址，遍历遇到与它同位置的同一节点即停止，其余前缀取自该请求；共用节点已在重建该请求时复核。遍历每加载至多 256 个节点释放一次连接，下一次持有从中断处继续。随后校验序号、行 kind、批次、before 的 `event_id`、分支关系和所有 completed 事实的 through 边界。可选 snapshot state 不参与 Session 恢复校验。坏行保留原字节并归属该 Session；缺失或损坏的节点以 "missing request content"、"request content hash mismatch" 或 "request list length mismatch" 明确失败，不得通过默认值把损坏请求还原为空请求或部分请求。不使用请求正文的读取（历史分页、摘要、上下文投影、协作）不还原这两类记录中的请求，也不加载或校验其内容行，只校验记录种类与引用形状相符（[请求增量存储 §7.5](request-delta-storage.md#75-不使用请求正文的读取)）；因此损坏的节点不会让这些读取失败，而恢复、导出与每个使用请求的读取仍会失败。
 
 ## 格式版本
 
@@ -447,6 +558,30 @@ ProjectionCheckpoint = {
 - **单向**：v21 daemon 按现有精确 SQL 结构检查拒绝 `CHECK (version = 22)`，不会尝试解码新值；不做降级或备份。升级提交后沿用一次性 stderr 日志：`Upgraded native store <path> from format v21 to v22; earlier dimcode versions cannot open it.`
 - **验证**：`storage_flow.rs` 的 `a_v21_store_upgrades_in_place_once_and_restores_typeless_tool_schemas` 使用一次性 v21 库，核对所有原有业务行不变、新结构和标记、再次打开不再升级，并在采用工具配置和模型请求两条路径写入无 `type` 的组合 schema，关闭后恢复 Session，逐值核对。既有各版本升级与非法结构保留测试覆盖准入路径；冻结 wire fixtures 不变。
 
+### #557 v30 格式决定
+
+[Session 分类](session-classification.md)（#557）的格式决定：升级到 **v30**，从 v29 原地升级。若在实现之前另有格式变更先合入，实现取当时的下一个编号，本节其余内容不随编号改变。
+
+- **只加一列**：`agent_sessions.origin TEXT NOT NULL DEFAULT 'unknown' CHECK (origin IN ('client', 'acp', 'internal', 'unknown'))`。其他表、列、持久化 JSON、内容寻址与既有索引不变，不新增索引。
+  - 它是 Session 的创建来源，创建事务写入一次后不再改变，取值与写入方见 [Session 分类 §3.1–§3.2](session-classification.md#32-which-creation-entry-writes-which-value)。默认值只为让 `ALTER TABLE` 能加非空列；每个写入方都显式列出该列，读到 `unknown` 是"本库没有记录来源"这一事实，不是占位。
+  - `CHECK` 使新增取值成为一次格式变更：旧读取器不会遇到读不懂的值，拒绝发生在启动而不在读某一行时。
+  - 子 Session 的父仍是 v27 的 `agent_sessions.leader_session_id`，本步不重复记录。
+- **为什么必须落盘**：ACP 与 Dim 自己创建的 Session 目前没有任何持久来源标记。`clientKind` 是连接属性，不是 Session 的属性；`interactive` 是运行语义，客户端也可以创建非交互 Session；`collaboration_role` 是成员的运行语义，把导入的子 Session 设成 Member 会凭空造出一个协作关系。三者都不能当分类标签。迁移还需要写入映射后的来源与父，因此这个值必须在库里。
+- **为什么不放别处**：放 `SessionConfig` 会让一个插件可读的运行类型携带目录显示数据，而 fork 原样复制它的文本、ACP 来源会被分叉继承；放 `session_catalog` 则与该表"每列都从事件推导"的性质冲突，创建来源不是事件，回填或重建都取不回来。理由见 [Session 分类 D1](session-classification.md#9-decisions)。
+- **升级**：沿用 `IMMEDIATE` 启动准入事务。
+  - 空库直接建 v30，该列连同上面的约束与默认值写入 `agent_sessions` 的建表语句。
+  - 精确匹配且标记相符的 v29 库在同一事务内 `ALTER TABLE agent_sessions ADD COLUMN origin ...`（ALTER 生成的表文本须与空库的完全一致，启动门禁逐字比较），随后 `UPDATE agent_sessions SET origin='internal' WHERE leader_session_id IS NOT NULL`；标记表改为 30。
+  - 标记相符的 v28 及更早受支持格式先执行已有各步，再执行本步。
+  - 其余旧行保持 `unknown`：升级不根据 `interactive`、Agent 归属或消息文本猜来源。
+- **写入方**：`session.create` 写 `client`，或用请求里的 `acp`；Collaboration 成员创建写 `internal` 并同时写 leader；`sessions.launch` 写 `internal`；`session.fork` 写 `client`，不复制来源；迁移写 `unknown`，映射后的值由迁移自己的设计写入（可能把 `unknown` 替换一次，之后再不改）。这些写入都使用显式列名，包括迁移与分叉的插入语句。
+- **不能留在 v29**：启动要求精确 SQL 结构，v29 守护进程会拒绝多出该列的库；这正是"旧读取器无法解释新值"时的既有行为。
+- **单向**：不做备份、降级或迁移选项，与之前各步相同。升级日志沿用 S5a 的那一行：`Upgraded native store <path> from format v29 to v30; earlier dimcode versions cannot open it.`
+- **验证**：
+  - 用 v29 结构构建一次性库，其中一个成员 Session（`leader_session_id` 非空）与一个普通 Session；升级后核对结构与标记恰为 v30、成员行 `origin='internal'`、普通行 `origin='unknown'`、其他列逐行不变，重复打开不再升级。
+  - v28、v27、v26、v25、v24、v23、v22、v21、v20、v19、v18、v17、v16、v15、v13 库一次升级到 v30。
+  - 标记不符或升级到一半的结构被拒绝并保留，旧二进制拒绝升级后的库。
+  - 每条创建路径写入自己的值，且分叉不继承来源；由 `session-classification` 的流程测试与 `storage_flow.rs` 本步的 `a_v29_store_upgrades_in_place_once` 覆盖。
+
 ### ADR 013 v29 格式决定
 
 [Command output ownership](../../adr/013-command-output-ownership.md)（ADR 013）的原生存储格式为 **v29**，从 v28 原地升级。
@@ -580,6 +715,7 @@ ProjectionCheckpoint = {
 | v1 唯一 `agents_default_unique` | `(is_default) WHERE is_default = 1` | 至多一个默认 Agent；不保证其存在 |
 | v27 `agents_by_owner` | `(owner_session_id)` | 删除 owner 时定位它拥有的 Agent；启动时找出无成员或失去 owner 的私有 Agent |
 | v27 `agent_sessions_by_leader` | `(leader_session_id)` | 装载时重建 Team 关系 |
+| 派生（不占格式号）`timeline_history_anchors` | `(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'input/message')` | 最新回合边界与回合提示输入的查找（[latest-turn 窗口](session-history-window.md)） |
 | v12 主键 `timeline_snapshots` | `(session_id, branch_id, interpreter, sequence)` | 兼容 interpreter，`sequence<=through ORDER BY sequence DESC LIMIT 1`；连接事件锚点 |
 | v15 主键 `session_files` | `(file_id)` | put 的两次事务与放弃、清扫按文件定点更新和删除 |
 | v15 主键 `session_file_owners` | `(session_id, file_id)` | put 写入 owner；fork 复制、删除和创建回滚按 Session 读取和删除 |
@@ -605,7 +741,7 @@ ProjectionCheckpoint = {
 
 `session_owners.session_id` 与 `agents.agent_id` 两个 ID 列的 SQL 可空缺口见表结构。永久关闭字段与旧记录回填尚未设计。
 
-## 完整记录示例（v26；v27 未改动这些行，v28 追加 grants 行，v29 追加输出行）
+## 完整记录示例（v26；v27 未改动这些行，v28 追加 grants 行，v29 追加输出行，v30 为 `agent_sessions` 追加 `origin` 列）
 
 下例是一条 Session `s1`、主分支 `main` 和子分支 `child` 的全部原生表记录，用于核对存储关系，不代表完整的对话执行序列。为便于阅读，`profile`、`config`、`info` 和事件 `body` 这几个实际为 `TEXT` 的列在展示时解析为 JSON；写入时各自是完整 JSON 字符串，类型规定省略的可选字段照常省略。ID/时间是示例值。`timeline_content.body` 保留实际写入的字符串形式，因此下面各 hash 可以按上文算法复核。`main` 第 4 条 `model/call` 是升级前 v16 写入的行，`child` 第 3 条是升级后 v17 写入的行，示例同时展示两种行混存。
 
@@ -618,7 +754,7 @@ current manual title.
 
 ```json
 {
-  "agent_store_format": [{"version": 29}],
+  "agent_store_format": [{"version": 30}],
   "session_catalog": [{"session_id":"s1","updated_at_ms":1008,"preview":"Hi","cwd":"/work"}],
   "settings_documents": [],
   "providers": [],
@@ -628,7 +764,7 @@ current manual title.
     "name": "Example", "description": "Example agent", "systemPrompt": "You are helpful.",
     "tools": [], "model": {"providerId": "mock", "modelId": "deterministic"}
   }}],
-  "agent_sessions": [{"session_id": "s1", "created_at_ms": 1000, "config": {
+  "agent_sessions": [{"session_id": "s1", "created_at_ms": 1000, "origin": "client", "config": {
     "permissionPolicy": {"preset": "read-only", "allowedTools": [], "disallowedTools": []},
     "cwd": "/work", "model": {"providerId": "mock", "modelId": "deterministic"},
     "systemPrompt": "You are helpful.", "tools": [], "collaborationRole": "leader"
