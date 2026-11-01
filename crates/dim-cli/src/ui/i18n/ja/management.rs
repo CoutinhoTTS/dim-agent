@@ -70,6 +70,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The Scheduler has no area document." => "スケジューラーには領域ドキュメントがありません。",
         "No scheduled job has that id." => "その id のスケジュールジョブはありません。",
+        "The document deleted {field}, which the owner cannot clear; nothing was written." => {
+            "ドキュメントから {field} が削除されましたが、所有者は消去できません。何も書き込みませんでした。"
+        }
+        "The document changes no field; nothing was written." => {
+            "ドキュメントはどのフィールドも変更していません。何も書き込みませんでした。"
+        }
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "このワークスペースのフック設定は読み取り後に変更されています。今回は何も書き込んでいません。"
         }

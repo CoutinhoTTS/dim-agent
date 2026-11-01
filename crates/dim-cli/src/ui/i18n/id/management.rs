@@ -68,6 +68,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The Scheduler has no area document." => "Penjadwal tidak memiliki dokumen area.",
         "No scheduled job has that id." => "Tidak ada tugas terjadwal dengan id itu.",
+        "The document deleted {field}, which the owner cannot clear; nothing was written." => {
+            "Dokumen menghapus {field}, yang tidak dapat dibersihkan pemilik; tidak ada yang ditulis."
+        }
+        "The document changes no field; nothing was written." => {
+            "Dokumen tidak mengubah bidang apa pun; tidak ada yang ditulis."
+        }
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "Pengaturan hook ruang kerja ini berubah sejak dibaca; tidak ada yang ditulis."
         }

@@ -70,6 +70,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The Scheduler has no area document." => "O Agendador não tem documento de área.",
         "No scheduled job has that id." => "Nenhuma tarefa agendada tem esse id.",
+        "The document deleted {field}, which the owner cannot clear; nothing was written." => {
+            "O documento removeu {field}, que o proprietário não pode limpar; nada foi escrito."
+        }
+        "The document changes no field; nothing was written." => {
+            "O documento não altera nenhum campo; nada foi escrito."
+        }
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "As configurações de hooks deste espaço de trabalho mudaram desde que foram lidas; nada foi escrito."
         }

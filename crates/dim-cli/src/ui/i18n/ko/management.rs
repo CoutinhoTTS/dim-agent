@@ -68,6 +68,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The Scheduler has no area document." => "스케줄러에는 영역 문서가 없습니다.",
         "No scheduled job has that id." => "해당 id의 예약 작업이 없습니다.",
+        "The document deleted {field}, which the owner cannot clear; nothing was written." => {
+            "{field}이(가) 문서에서 삭제되었지만 소유자가 지울 수 없습니다. 아무것도 쓰지 않았습니다."
+        }
+        "The document changes no field; nothing was written." => {
+            "문서가 어떤 필드도 바꾸지 않았습니다. 아무것도 쓰지 않았습니다."
+        }
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "이 작업 공간의 훅 설정이 읽은 뒤에 변경되었습니다. 아무것도 쓰지 않았습니다."
         }

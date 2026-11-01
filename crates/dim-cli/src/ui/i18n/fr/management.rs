@@ -70,6 +70,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The Scheduler has no area document." => "Le planificateur n'a pas de document de domaine.",
         "No scheduled job has that id." => "Aucune tâche planifiée n'a cet id.",
+        "The document deleted {field}, which the owner cannot clear; nothing was written." => {
+            "Le document supprime {field}, que le propriétaire ne peut pas effacer ; rien n'a été écrit."
+        }
+        "The document changes no field; nothing was written." => {
+            "Le document ne modifie aucun champ ; rien n'a été écrit."
+        }
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "Les réglages des hooks de cet espace de travail ont changé depuis leur lecture ; rien n'a été écrit."
         }

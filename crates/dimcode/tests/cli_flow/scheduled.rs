@@ -55,6 +55,14 @@ fn jobs(enabled: bool) -> Value {
     ]})
 }
 
+/// The jobs after another writer saved job-1: its revision moved on.
+fn newer_jobs() -> Value {
+    json!({"jobs": [
+        job("job-1", "nightly", 4, true, run("completed", "", "2026-11-01T09:00:12.000Z")),
+        job("job-2", "release", 7, false, Value::Null),
+    ]})
+}
+
 #[test]
 fn scheduled_list_prints_the_jobs_and_their_runs() {
     let home = Home::new();
@@ -537,10 +545,6 @@ fn scheduled_prints_owner_text_without_escape_sequences() {
 
 /// The document `set` writes for a job: the fields `schedule.save` takes, as
 /// the job reported them.
-fn edited(document: Value) -> Value {
-    json!({"job": document, "revision": 3})
-}
-
 fn edited_document() -> Value {
     json!({
         "cwd": "/workspace",
@@ -558,15 +562,120 @@ fn scheduled_set_writes_a_job_with_the_revision_read_before_it() {
     let home = Home::new();
     let path = home.0.join("job.json");
     fs::write(&path, serde_json::to_string(&edited_document()).unwrap()).unwrap();
-    let mut document = edited_document();
-    document["id"] = json!("job-1");
-    let expected = edited(document);
+    // Only the member the draft changed travels, with the id and the
+    // revision.
+    let expected = json!({
+        "job": {"id": "job-1", "prompt": "Summarize the day in one line."},
+        "revision": 3,
+    });
     let daemon = home.daemon(move |wire| {
         hello(wire);
         let request = wire.read("schedule.list");
         wire.reply(&request, jobs(true));
+        // The adapter reads the job again before it diffs the draft.
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
         let request = wire.read("schedule.save");
         assert_eq!(request["params"], expected);
+        wire.reply(
+            &request,
+            json!({"job": job("job-1", "nightly", 4, true, Value::Null)}),
+        );
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
+    });
+    let output = home
+        .command()
+        .args(["scheduled", "set", "job-1"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "Saved job-1.\n");
+}
+
+/// A job's editable members as `schedule.list` reports them: the base of a
+/// draft that changes one of them.
+fn job_document() -> Value {
+    json!({
+        "cwd": "/workspace",
+        "enabled": true,
+        "max_run_minutes": 60,
+        "mode": "create",
+        "name": "nightly",
+        "prompt": "Summarize the day.",
+        "schedule": {"every_minutes": 60},
+    })
+}
+
+/// A member the draft deleted cannot be cleared through the owner's patch:
+/// the write is refused before it is sent, and the refusal names the member.
+#[test]
+fn scheduled_set_refuses_a_deleted_member_the_owner_cannot_clear() {
+    let home = Home::new();
+    let path = home.0.join("job.json");
+    // The stored job has a policy; the draft leaves it out.
+    let listed = || {
+        let mut job = job("job-1", "nightly", 3, true, Value::Null);
+        job["policy"] = json!("read-only");
+        json!({"jobs": [job]})
+    };
+    fs::write(&path, serde_json::to_string(&job_document()).unwrap()).unwrap();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("schedule.list");
+        wire.reply(&request, listed());
+        // The adapter reads the job again and refuses: no save is sent.
+        let request = wire.read("schedule.list");
+        wire.reply(&request, listed());
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let output = home
+        .command()
+        .args(["scheduled", "set", "job-1"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("The document deleted policy"), "{stderr}");
+    assert!(stderr.contains("Your text is kept in"), "{stderr}");
+}
+
+/// Setting a reuse job's mode to create clears its Session: the draft
+/// deleted it, the owner clears it itself, and the patch carries no
+/// session_id.
+#[test]
+fn scheduled_set_sends_no_session_id_when_the_mode_becomes_create() {
+    let home = Home::new();
+    let path = home.0.join("job.json");
+    let listed = || {
+        let mut job = job("job-1", "nightly", 3, true, Value::Null);
+        job["mode"] = json!("reuse");
+        job["session_id"] = json!("session-1");
+        json!({"jobs": [job]})
+    };
+    fs::write(&path, serde_json::to_string(&job_document()).unwrap()).unwrap();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("schedule.list");
+        wire.reply(&request, listed());
+        let request = wire.read("schedule.list");
+        wire.reply(&request, listed());
+        let request = wire.read("schedule.save");
+        assert_eq!(
+            request["params"],
+            json!({"job": {"id": "job-1", "mode": "create"}, "revision": 3})
+        );
         wire.reply(
             &request,
             json!({"job": job("job-1", "nightly", 4, true, Value::Null)}),
@@ -601,6 +710,9 @@ fn scheduled_edit_writes_what_the_editor_leaves() {
     );
     let daemon = home.daemon(|wire| {
         hello(wire);
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
+        // The adapter reads the job again before it diffs the draft.
         let request = wire.read("schedule.list");
         wire.reply(&request, jobs(true));
         let request = wire.read("schedule.save");
@@ -937,7 +1049,10 @@ fn tui_scheduled_panel_edits_and_creates_jobs() {
             wait_shown.recv_timeout(PATIENCE).unwrap();
             let request = wire.read("schedule.list");
             wire.reply(&request, jobs(true));
-            // Ctrl+E writes the job's own document at its revision.
+            // Ctrl+E writes the job's own document at its revision; the
+            // adapter reads the job again before it diffs the draft.
+            let request = wire.read("schedule.list");
+            wire.reply(&request, jobs(true));
             let request = wire.read("schedule.save");
             assert_eq!(request["params"]["revision"], 3);
             assert_eq!(request["params"]["job"]["id"], "job-1");
@@ -1031,6 +1146,9 @@ fn tui_scheduled_panel_keeps_the_users_text_when_the_revision_is_stale() {
             wait_shown.recv_timeout(PATIENCE).unwrap();
             let request = wire.read("schedule.list");
             wire.reply(&request, jobs(true));
+            // The adapter reads the job again before it diffs the draft.
+            let request = wire.read("schedule.list");
+            wire.reply(&request, jobs(true));
             let request = wire.read("schedule.save");
             assert_eq!(request["params"]["revision"], 3);
             wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
@@ -1040,12 +1158,11 @@ fn tui_scheduled_panel_keeps_the_users_text_when_the_revision_is_stale() {
             // The conflict writes nothing, so the adapter reads the area
             // again, and the panel moves to the newer revision.
             let request = wire.read("schedule.list");
-            wire.reply(&request, json!({"jobs": [
-                job("job-1", "nightly", 4, true, run("completed", "", "2026-11-01T09:00:12.000Z")),
-                job("job-2", "release", 7, false, Value::Null),
-            ]}));
+            wire.reply(&request, newer_jobs());
             // The next edit opens the stored job at that revision, not the
-            // rejected text.
+            // rejected text, and the adapter reads the job again to diff it.
+            let request = wire.read("schedule.list");
+            wire.reply(&request, newer_jobs());
             let request = wire.read("schedule.save");
             assert_eq!(request["params"]["revision"], 4);
             assert_eq!(request["params"]["job"]["prompt"], "Edited.");
@@ -1340,7 +1457,10 @@ fn tui_scheduled_panel_keeps_a_refused_edit_for_its_own_job() {
         wait_shown.recv_timeout(PATIENCE).unwrap();
         let request = wire.read("schedule.list");
         wire.reply(&request, jobs(true));
-        // Ctrl+E on the first job: the owner refuses the invalid cron.
+        // Ctrl+E on the first job: the owner refuses the invalid cron. The
+        // adapter reads the job again before it diffs the draft.
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
         let request = wire.read("schedule.save");
         assert_eq!(request["params"]["revision"], 3);
         assert_eq!(request["params"]["job"]["id"], "job-1");
@@ -1354,6 +1474,8 @@ fn tui_scheduled_panel_keeps_a_refused_edit_for_its_own_job() {
             "data":{"appError":"schedule_invalid"}}}));
         // Ctrl+E on the second job: a fresh document for that job, written
         // with its own id and revision.
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
         let request = wire.read("schedule.save");
         assert_eq!(request["params"]["job"]["id"], "job-2");
         assert_eq!(request["params"]["revision"], 7);
@@ -1362,6 +1484,8 @@ fn tui_scheduled_panel_keeps_a_refused_edit_for_its_own_job() {
         let request = wire.read("schedule.list");
         wire.reply(&request, jobs(true));
         // Back on the first job: its kept text reopens at its own revision.
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
         let request = wire.read("schedule.save");
         assert_eq!(request["params"]["job"]["id"], "job-1");
         assert_eq!(request["params"]["revision"], 3);

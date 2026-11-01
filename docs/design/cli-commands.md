@@ -544,7 +544,13 @@ owner reports no grouping, so the jobs share one heading, `jobs`.
 A job's document is the record the owner wrote; the client changes only the fields `schedule.save`
 takes — `name`, `schedule`, `prompt`, `cwd`, `model`, `mode`, `policy`, `max_run_minutes`,
 `enabled`, `session_id` and `agent_id` — and carries the id on the Save action and the job's
-revision as the revision the draft was read at. A stale revision is `schedule_conflict`, the
+revision as the revision the draft was read at. `schedule.save` is a patch merged over the stored
+job, so an edit writes only the members the draft changed: the adapter reads the job again,
+refuses a draft whose revision is no longer the job's, and sends the changed members with the id
+and the revision. A draft that changes no editable member writes nothing, and a member the draft
+deletes cannot be cleared because the patch has no null: the write is refused before it is sent
+and names the member. The exception is a `session_id` whose `mode` becomes `create`, which the
+owner clears itself. A stale revision is `schedule_conflict`, the
 typed conflict: nothing is written, the jobs are read again, and the next edit opens the current
 record. `created_by`, `policy_cap` and `enabled_at` are the owner's to derive and are never sent.
 A new entry starts from the owner's create shape — a name, an example `every` schedule, a prompt

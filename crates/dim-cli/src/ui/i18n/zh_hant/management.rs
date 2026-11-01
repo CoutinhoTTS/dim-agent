@@ -64,6 +64,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The Scheduler has no area document." => "排程器沒有領域文件。",
         "No scheduled job has that id." => "沒有該 id 的排程工作。",
+        "The document deleted {field}, which the owner cannot clear; nothing was written." => {
+            "文件刪除了 {field}，擁有者無法清除它；本次沒有寫入。"
+        }
+        "The document changes no field; nothing was written." => {
+            "文件沒有變更任何欄位；本次沒有寫入。"
+        }
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "此工作區的鉤子設定已在讀取後變更；這次沒有寫入。"
         }
