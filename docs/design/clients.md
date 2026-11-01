@@ -151,7 +151,7 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 | `/settings`: ACP Session display | unsupported: no native persisted client-origin field | — | [AcpGateway](plugins/AcpGateway.md#a5-client-labels) |
 | `/usage` | context usage and, for active Dim OAuth models, account usage | — | [CLI usage report](cli-commands.md#usage-report) |
 | `/stats` | out | — | [overview](overview.md) App. A |
-| `/debug`, debug-log configuration | none (only the daemon's `daemon.log`) | — | |
+| `/debug`, debug-log configuration | none (only the daemon's `daemon.log`) | — | [Web workspace §4.3](web-workspace.md#diagnostics-the-legacy-logging-controls) |
 | `/tui` mode switch | done | — | [Tui](plugins/Tui.md) |
 | Version and upgrade | done (upgrade dialog); `dimcode upgrade` subcommand: none | — | |
 | Web access (`/web`, `dimcode web`) | done | — | [Web workspace](web-workspace.md) |

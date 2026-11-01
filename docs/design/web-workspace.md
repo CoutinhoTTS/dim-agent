@@ -350,11 +350,92 @@ optional account feature must not prevent identity or usage from loading.
 | Skills | List, enable/disable, source installation, update and confirmed removal |
 | Permissions | Default execution/network settings and command-rule management, with confirmation for privilege increases. The Execution card reads `host.execution.backend` and shows the owner's sandbox-backend reason when the host has none; the browser never infers the platform |
 | Archived sessions | Search, restore/open and confirmed permanent deletion |
-| Diagnostics | Safe version, protocol, connection and logging information with refresh and supported logging controls |
+| Diagnostics | Safe version, protocol, connection and metadata with refresh, the model-request recording switch, and the start-up rule for process logs instead of a log-mode control ([logging controls](#diagnostics-the-legacy-logging-controls)) |
 
 Use the current owner's semantics when old terminology no longer describes the
 system, and document the mapping. Reuse existing Settings, MCP, PluginManager,
 Skills and Session owners rather than adding parallel browser-only state.
+
+#### Diagnostics: the legacy logging controls
+
+The legacy CLI Web's Diagnostics page carried a daemon log mode
+(`web.debug_logging`, `off`/`on`/`auto`), a trace archive location and the
+diagnostics metadata cards. This repository has no equivalent for the mode, the
+trace location or trace-archive creation and keeps the metadata cards, so this
+section fixes what replaces each legacy surface. The metadata cards stay a
+read-only projection: server version, protocol version, instance, connection
+phase, `daemon.ping` Session and connection counts, round-trip latency and the
+advertised methods. No read returns a credential, token, header, request body or
+host file path.
+
+| Legacy surface | Current contract | On this page |
+| --- | --- | --- |
+| Diagnostics metadata | `hello` and `daemon.ping` fields listed above | Kept |
+| `off` | No `RUST_LOG`: the daemon keeps errors only ([ADR 005](../../adr/005-observability.md) D1) | The default; nothing to set |
+| `on` | A `RUST_LOG` directive string read when the daemon starts; not run-time state (D1) | The start-up rule and its steps; no control |
+| `auto` | None: no daemon-side rule raises its own logging | Deliberately absent, below |
+| Trace archive location | Removed with the diagnostics channel ([ADR 005](../../adr/005-observability.md) D2, D5) | `dimcode export` and `daemon.log` named as the read paths |
+| Component and subscription records | Not restored (D2, D4); a failed assembly is `session_build_failed`, and `xtask graph` shows the assembled services | Not shown |
+| Effective log filter | The daemon does not report it | Not shown |
+
+**User-visible change.** Compared with the legacy page, the Diagnostics page
+keeps the metadata cards and the recording switch, has no log-mode control and
+no trace location, and its process-log card states the rule and the two
+commands. Nothing outside this page changes.
+
+**No process-log mode control.** Process logging is the host's output layer
+(ADR 005 D1): the App Server installs one `tracing` subscriber from `RUST_LOG`
+when it starts, and D4 keeps one subscriber for the process rather than one per
+Session. A mode control would add a process owner that reconfigures that
+subscriber, a stored document, a management namespace, an admission row in the
+settings allowlist, and a precedence rule against `RUST_LOG`, to produce output
+that stays process-wide and describes work after it happened. The Web entry also
+cannot stop or restart the daemon
+([admission](#admission-and-sensitive-data)), so a stored mode could not take
+effect from this page.
+
+| Alternative | Why it is not chosen |
+| --- | --- |
+| Run-time mode: management method, reloadable filter, stored setting | A new observation control outside ADR 005 D1/D4; needs its own authority, admission, failure and persistence rules, and still cannot attribute process-wide output to the Session being diagnosed |
+| Stored preference applied at the next start | Under native storage the document lives in the store, so the mode would have to be read before a subscriber exists, and store startup could not be logged at the mode's level; `RUST_LOG` would also need a precedence rule, and the effect still waits for a restart |
+| `--log LEVEL` forwarded to the spawned daemon | Duplicates `RUST_LOG`, which the spawned daemon already inherits from the CLI's environment, and needs its own grammar and precedence |
+| Restore the trace archive or show a trace location | ADR 005 removed the channel and the archive; a direction change is a new ADR, and the Timeline export already reads complete runs |
+
+**What a user loses.** No process-log switch in any client, no `auto` rule (the
+legacy rule is not in this repository, so it is dropped rather than
+reconstructed), and no archive to point at. Raising process logging takes
+`dimcode daemon stop` and a new start from a terminal with the filter set
+(`RUST_LOG=debug dimcode`); `daemon.log` appends across starts, so a diagnosis
+keeps the earlier evidence in one file. The complete record of what a run
+committed is `dimcode export SESSION_ID`
+([Timeline export](../appserver/timeline-export.md)), and the model-request
+recording switch on the same page is the record of model wire exchanges
+([ADR 016](../../adr/016-model-request-log.md)); that switch stays user scope,
+so project content cannot enable it. The page keeps the three as separate cards:
+the recording switch is not a process-log mode, and no card presents one as the
+other.
+
+**Compatibility.** Existing configuration needs no migration: this server serves
+no `web` namespace, so any caller of `web.debug_logging.set` gets
+`unknown_method` and changes nothing, and a legacy CLI `config.json` key
+without a target field is reported as unsupported by the migration with its
+source kept ([Migration](../../crates/dim-migration/src/settings.rs)).
+`RUST_LOG` and `daemon.log` keep their behavior, and this decision stores
+nothing: no format, revision or protocol change and no new error. The page adds
+no read or write beyond the ones above, so its only write remains the recording
+switch's `settings.update` with the read revision and its existing conflict
+error.
+
+**Verification.** No automated test: the decision changes no method, stored
+document or emitted behavior. The page verifies by rendering with a disposable
+home that the metadata, the recording switch and the start-up note appear and
+that no mode control or trace location is offered. A later proposal that does
+add a run-time control must first name its owner, levels, persistence,
+authority and failure behavior, and then add disposable-home flows for the
+emitted log lines, the off/on boundary, restart persistence, rejection of
+project-origin input and safe reads, plus rendered Web verification. This adds
+no part, event, service, configuration or stored document; §7 applies unchanged
+and no requirement is raised to a mechanism owner.
 
 #### Admission and sensitive data
 
