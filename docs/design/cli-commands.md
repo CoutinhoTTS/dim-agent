@@ -21,10 +21,10 @@ Exit and suspend require their exact name or alias before dispatch: choosing an
 incomplete match fills the command name and keeps the composer open. Exact typed
 commands, including hidden commands, retain their own dispatch behavior.
 The command menu lists `/permissions` as the permission entry. `/approvals` and `/approval`
-remain compatibility aliases when typed directly. Interrupt and steer are reached through
-`Esc` and `Ctrl+S` and are omitted from the menu. The menu only lists slash
-commands: the view actions for picking an earlier message and scrolling to the
-top or bottom are also omitted; `Tab`, `Home` and `End` retain their bindings.
+remain compatibility aliases when typed directly. Run, queue and steer keys are
+omitted from the menu. The menu only lists slash commands: the view actions for
+picking an earlier message and scrolling to the top or bottom are also omitted;
+`Tab`, `Home` and `End` retain their bindings.
 
 ```text
 Commands
@@ -35,12 +35,48 @@ Commands
 / + Enter          -> /exit (completion only)
 /exit + Enter      -> exit
 /permissions + Enter -> permission controls
+```
 
-Esc     interrupt the run
-Ctrl+S  steer with the next queued message
-Tab     pick an earlier message to edit or quote
-Home    scroll to the top (fullscreen, empty draft)
-End     scroll to the bottom (fullscreen, empty draft)
+## Run keys and queue
+
+Queue and steer differ from Codex CLI: `Enter` queues while a run is in progress, and
+`Ctrl+S` steers. The other run keys follow the Codex CLI interaction (checked in its TUI,
+v0.166.0). `Enter` submits when no run is in progress.
+
+```text
+key                 run idle                     run in progress
+Enter               submit                       queue the draft; empty draft:
+                                                 steer the oldest queued message
+Tab                 pick an earlier message      pick an earlier message
+                    (fullscreen)                 (fullscreen)
+Shift+Left          —                            empty draft: take the newest queued
+                                                 message back into the draft
+Esc                 keep the draft               interrupt; every queued message
+                                                 returns to the draft, oldest first
+Ctrl+S              —                            draft not empty: steer the draft;
+                                                 empty: steer the oldest queued message
+Up / Down           input history                input history
+Home / End          scroll (fullscreen, empty)   scroll (fullscreen, empty)
+```
+
+- A queued message runs after the current run ends, one message per run. A
+  steered message joins the current run at its next turn boundary.
+- Taking a message back, and interrupting, withdraw the message through
+  `session.input.withdraw`. The text
+  enters the draft only after the withdrawal is deleted. A message that already left
+  the queue is not put back, and its text is not sent again.
+- Withdrawals of an interrupt are sent before the stop, so the run does not start the
+  next queued message.
+- `Ctrl+C` clears the draft. `Esc` never clears it.
+
+The queue strip sits above the composer. Its hint names only keys that exist:
+
+```text
+┌ Queue (3) ─────────────────────────────────────┐
+│ › first queued message                         │
+│ › second queued message                        │
+│ +1 more · shift+← edit last · ctrl+s steer now │
+└────────────────────────────────────────────────┘
 ```
 
 ## Usage report

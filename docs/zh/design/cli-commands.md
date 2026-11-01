@@ -15,9 +15,8 @@ scrollback 与 fullscreen TUI 都按分类分组，分类及分类内的命令�
 退出和挂起必须完整匹配命令名或别名才执行：选择不完整匹配时只补全命令名并保留输入框。
 完整输入的命令（包括隐藏命令）仍走各自的处理流程。
 菜单中的权限入口为 `/permissions`；`/approvals` 和 `/approval` 是完整输入时仍可使用的兼容别名。
-菜单只列出斜杠命令，移除中断、steer、选择较早消息、滚动到顶部或底部等仅由按键触发的操作。
-`/keys` 仍列出这些快捷键：两种模式均支持 `Esc` 和 `Ctrl+S`；fullscreen 还支持
-`Tab`、`Home`、`End`，其中 `Home/End` 仅在草稿为空时滚动历史。
+菜单不列出运行、排队和 steer 的按键，它们只由按键触发。菜单只列出斜杠命令：选择较早消息、滚动到顶部或底部等视图操作也不列出；
+`Tab`、`Home`、`End` 保留各自的绑定。
 
 ```text
 Commands
@@ -28,13 +27,40 @@ Commands
 / + Enter          -> /exit (completion only)
 /exit + Enter      -> exit
 /permissions + Enter -> permission controls
-
-Esc     interrupt the run
-Ctrl+S  steer with the next queued message
-Tab     pick an earlier message to edit or quote (fullscreen)
-Home    scroll to the top (fullscreen, empty draft)
-End     scroll to the bottom (fullscreen, empty draft)
 ```
+
+## 运行按键与排队
+
+排队与引导和 Codex CLI 不同：运行中 `Enter` 排队，`Ctrl+S` 引导。其余运行按键与 Codex CLI 的交互一致（已在其 TUI v0.166.0 中核对）。没有运行时，`Enter` 提交。
+
+```text
+按键                 空闲                         运行中
+Enter               提交                         排队草稿；草稿为空：steer 最早的排队消息
+Tab                 选择较早消息                 选择较早消息
+                    （fullscreen）               （fullscreen）
+Shift+Left          —                            草稿为空：把最新一条排队消息取回草稿
+Esc                 保留草稿                     中断；所有排队消息按先后顺序回到草稿
+Ctrl+S              —                            草稿非空：steer 草稿；为空：steer 最早的排队消息
+Up / Down           输入历史                     输入历史
+Home / End          滚动（fullscreen，草稿为空） 滚动（fullscreen，草稿为空）
+```
+
+- 排队消息在当前运行结束后运行，每次运行一条。被 steer 的消息在当前运行的下一个轮次边界并入该运行。
+- 取回消息和中断都通过 `session.input.withdraw` 撤回消息。文字只在撤回被删除后才进入草稿。
+  已离开队列的消息不会放回，其文字也不会再次发送。
+- 中断产生的撤回先于 stop 发出，因此运行不会开始下一条排队消息。
+- `Ctrl+C` 清空草稿。`Esc` 从不清空草稿。
+
+排队区位于输入框上方，提示只列出存在的按键：
+
+```text
+┌ Queue (3) ─────────────────────────────────────┐
+│ › first queued message                         │
+│ › second queued message                        │
+│ +1 more · shift+← edit last · ctrl+s steer now │
+└────────────────────────────────────────────────┘
+```
+
 
 ## 用量报告
 

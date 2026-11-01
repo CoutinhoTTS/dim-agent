@@ -740,7 +740,7 @@ Pickers (`/resume`, `/models`, `/connect`, `/login`, `/approvals`, `/theme`, `/l
                       ╰────────────────────────────────────╯
 ```
 
-Both scrollback and fullscreen palettes list slash commands, grouped by category and sorted alphabetically by canonical English category and command name. Each row shows its category, `/command`, description and any command shortcut. Commands requiring a session are faint and marked `(unavailable)` until one exists. Keyboard-only actions are omitted from both menus; `/keys` lists `Esc` interrupt, `Ctrl+S` steer, and the fullscreen `Home` / `End` scroll and `Tab` message picker bindings.
+Both scrollback and fullscreen palettes list slash commands, grouped by category and sorted alphabetically by canonical English category and command name. Each row shows its category, `/command`, description and any command shortcut. Commands requiring a session are faint and marked `(unavailable)` until one exists. Keyboard-only actions are omitted from both menus; `/keys` lists `Enter` queue and `Ctrl+S` steer while a run is in progress (`Enter` on an empty draft steers too), `Esc` interrupt, and the fullscreen `Home` / `End` scroll and `Tab` message picker bindings.
 
 `/permissions` is the single visible permission entry; `/approvals` and `/approval` are compatibility aliases for the same unified flow. Selecting an incomplete `exit` or `suspend` match only fills the command name; its exact name or alias is required before dispatch. Thus `/` + Enter completes `/exit` without quitting, and another Enter executes the completed command.
 

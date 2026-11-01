@@ -246,9 +246,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "answer required" => "要回答",
         "permission required" => "要許可",
         "esc interrupt" => "esc 中断",
-        "↑ edit · ctrl+s steer now · /queue" => "↑ 編集 · ctrl+s 今すぐ steer · /queue",
-        "+{count} more · ↑ edit · ctrl+s steer now · /queue" => {
-            "+{count} 件 · ↑ 編集 · ctrl+s 今すぐ steer · /queue"
+        "shift+← edit last · ctrl+s steer now" => "shift+← 最後をedit · ctrl+s 今すぐ steer",
+        "+{count} more · shift+← edit last · ctrl+s steer now" => {
+            "+{count} 件 · shift+← 最後をedit · ctrl+s 今すぐ steer"
         }
         "Queue ({count})" => "キュー（{count}）",
         "Thinking…" => "思考中…",
@@ -456,11 +456,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // keys.rs
         "show the key bindings" => "キーバインドを表示",
         "Application keys" => "アプリキー",
-        "Enter submit · Shift+Enter or Ctrl+J newline · ↑↓ history" => {
-            "Enter 送信 · Shift+Enter/Ctrl+J 改行 · ↑↓ 履歴"
+        "Enter submit or queue · empty draft: steer first queued · Shift+Enter or Ctrl+J newline · ↑↓ history" => {
+            "Enter 送信またはキュー · 空の下書き: 最初のキューを steer · Shift+Enter/Ctrl+J 改行 · ↑↓ 履歴"
         }
-        "Ctrl+O or Ctrl+P commands · Esc interrupt or clear · Ctrl+S steer queued · ↑ edit queued" => {
-            "Ctrl+O/Ctrl+P コマンド · Esc 中断/クリア · Ctrl+S キューを steer · ↑ キューを編集"
+        "Ctrl+O or Ctrl+P commands · Esc interrupt, queued messages return · Ctrl+S steer draft or first queued · Shift+← edit last queued" => {
+            "Ctrl+O/Ctrl+P コマンド · Esc 中断、キューのメッセージは入力欄へ戻る · Ctrl+S 下書きまたは最初のキューを steer · Shift+← 最後のキューを編集"
         }
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C クリア、2 回で終了 · 空なら Ctrl+D で終了"

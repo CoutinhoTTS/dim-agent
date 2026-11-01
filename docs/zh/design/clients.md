@@ -90,7 +90,7 @@ CLI 要求协议 v3，以及 `session.create` 和 `session.history` 两项功能
 
 | 能力 | CLI | Web | 来源 |
 | --- | --- | --- | --- |
-| 发送、排队、自动发送、引导（`Ctrl+S`）、中断 | 已实现 | 发送和停止：已实现；排队：后续阶段 | InputQueue（S1） |
+| 发送、排队（运行中按 `Enter`）、自动发送、引导（`Ctrl+S`，或草稿为空时按 `Enter`）、中断 | 已实现 | 发送和停止：已实现；排队：后续阶段 | InputQueue（S1） |
 | 线：树、切换、新建、发送、停止、审批、结束 | 已实现 | 已实现（右侧 Lines 面板） | [Timeline 线](../../design/timeline-branches.md) §14、[Web 工作区](../../design/web-workspace.md#41-lines-and-branch) |
 | `/queue` 面板与删除排队消息 | 无（只能按 Up 取回） | — | 服务端契约已实现（S1） |
 | 取回排队消息重新编辑 | 已实现；带附件的消息会丢失附件（§4 第 4 条） | — | |
