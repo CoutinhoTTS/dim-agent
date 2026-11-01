@@ -616,10 +616,7 @@ impl Options {
                             let id = value(&mut args)?;
                             let action = match command {
                                 "remove" => ManagementAction::Remove { id },
-                                "run" => ManagementAction::Run {
-                                    id,
-                                    document: None,
-                                },
+                                "run" => ManagementAction::Run { id, document: None },
                                 _ => ManagementAction::Inspect { id },
                             };
                             Action::Management(ManagementRequest {
@@ -629,6 +626,48 @@ impl Options {
                         }
                         _ => {
                             return Err("Use scheduled list, enable ID, disable ID, edit ID, set ID PATH, add PATH, remove ID, run ID or history ID".into());
+                        }
+                    };
+                }
+                "workflow" if matches!(options.action, Action::Chat) => {
+                    use crate::model::session::{Area, ManagementAction, ManagementRequest};
+                    let verb = value(&mut args)?;
+                    options.action = match verb.as_str() {
+                        "list" => Action::Management(ManagementRequest {
+                            area: Area::Workflow,
+                            action: ManagementAction::List,
+                        }),
+                        command @ ("enable" | "disable") => Action::Management(ManagementRequest {
+                            area: Area::Workflow,
+                            action: ManagementAction::Toggle {
+                                id: value(&mut args)?,
+                                enabled: command == "enable",
+                            },
+                        }),
+                        "edit" => Action::ManagementEdit {
+                            area: Area::Workflow,
+                            id: Some(value(&mut args)?),
+                        },
+                        "set" => Action::ManagementSet {
+                            area: Area::Workflow,
+                            id: Some(value(&mut args)?),
+                            path: value(&mut args)?.into(),
+                        },
+                        "add" => Action::ManagementAdd {
+                            area: Area::Workflow,
+                            path: value(&mut args)?.into(),
+                        },
+                        "history" => Action::Management(ManagementRequest {
+                            area: Area::Workflow,
+                            action: ManagementAction::Inspect {
+                                id: value(&mut args)?,
+                            },
+                        }),
+                        _ => {
+                            return Err(
+                                "Use workflow list, enable NAME, disable NAME, edit NAME, set NAME PATH, add PATH or history NAME"
+                                    .into(),
+                            );
                         }
                     };
                 }

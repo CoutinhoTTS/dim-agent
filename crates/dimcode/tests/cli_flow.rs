@@ -36,6 +36,9 @@ mod skills;
 #[path = "cli_flow/tasks.rs"]
 mod tasks;
 
+#[path = "cli_flow/workflow.rs"]
+mod workflow;
+
 use dim_agent_capabilities::images::{MAX_BASE64_BYTES, MAX_EDGE, base64_len};
 use serde_json::{Value, json};
 use std::{

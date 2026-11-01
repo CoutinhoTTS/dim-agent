@@ -72,6 +72,42 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "このワークスペースのフック設定は読み取り後に変更されています。今回は何も書き込んでいません。"
         }
+        "Workflow" => "ワークフロー",
+        "Saved {name}." => "{name} を保存しました。",
+        "Saved {name}. It stays disabled until you enable it." => {
+            "{name} を保存しました。有効にするまで無効のままです。"
+        }
+        "The definitions changed since they were read; nothing was written." => {
+            "定義は読み取り後に変更されました。何も書き込まれていません。"
+        }
+        "The definition changed since it was read; nothing was written. Your next edit opens the current definition." => {
+            "定義は読み取り後に変更されました。何も書き込まれていません。次回の編集では現在の定義が開きます。"
+        }
+        "The definitions changed since they were read; nothing was written. Your next add opens your text again." => {
+            "定義は読み取り後に変更されました。何も書き込まれていません。次回の追加ではあなたのテキストが再び開きます。"
+        }
+        "A definition's name is its key; add it to save it under another name." => {
+            "定義の名前はそのキーです。別の名前で保存するには追加してください。"
+        }
+        "No project definition is named {name}." => "{name} というプロジェクト定義はありません。",
+        "No workflow definition is named {name}." => "{name} というワークフロー定義はありません。",
+        "Saved in the user workflow source; always enabled." => {
+            "ユーザーのワークフローソースに保存されています。常に有効です。"
+        }
+        "Starts only after you enable it." => "有効にした後にのみ開始します。",
+        "Defined by package {package}." => "パッケージ {package} によって定義されています。",
+        "{name} — {description} (required)" => "{name} — {description}（必須）",
+        "{name} — {description}" => "{name} — {description}",
+        "{name} — required" => "{name} — 必須",
+        "{name} — default: {default}" => "{name} — 既定: {default}",
+        "and {count} more" => "ほか {count} 件",
+        "Recent runs" => "最近の実行",
+        "A workflow definition is saved as an object with a source and a document." => {
+            "ワークフロー定義は、ソースとドキュメントを持つオブジェクトとして保存します。"
+        }
+        "A definition is saved to the user source or the project source." => {
+            "定義はユーザーソースまたはプロジェクトソースに保存します。"
+        }
         _ => return None,
     })
 }

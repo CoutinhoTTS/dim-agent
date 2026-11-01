@@ -72,6 +72,46 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "La configuración de hooks de este espacio de trabajo cambió desde que se leyó; no se escribió nada."
         }
+        "Workflow" => "Flujo de trabajo",
+        "Saved {name}." => "{name} guardado.",
+        "Saved {name}. It stays disabled until you enable it." => {
+            "{name} guardado. Permanece desactivado hasta que lo actives."
+        }
+        "The definitions changed since they were read; nothing was written." => {
+            "Las definiciones cambiaron desde que se leyeron; no se escribió nada."
+        }
+        "The definition changed since it was read; nothing was written. Your next edit opens the current definition." => {
+            "La definición cambió desde que se leyó; no se escribió nada. Tu próxima edición abre la definición actual."
+        }
+        "The definitions changed since they were read; nothing was written. Your next add opens your text again." => {
+            "Las definiciones cambiaron desde que se leyeron; no se escribió nada. Tu próxima adición reabre tu texto."
+        }
+        "A definition's name is its key; add it to save it under another name." => {
+            "El nombre de una definición es su clave; añádela para guardarla con otro nombre."
+        }
+        "No project definition is named {name}." => {
+            "Ninguna definición de proyecto se llama {name}."
+        }
+        "No workflow definition is named {name}." => {
+            "Ninguna definición de flujo de trabajo se llama {name}."
+        }
+        "Saved in the user workflow source; always enabled." => {
+            "Guardado en la fuente de flujos de trabajo del usuario; siempre activado."
+        }
+        "Starts only after you enable it." => "Solo se inicia después de que lo actives.",
+        "Defined by package {package}." => "Definido por el paquete {package}.",
+        "{name} — {description} (required)" => "{name} — {description} (obligatorio)",
+        "{name} — {description}" => "{name} — {description}",
+        "{name} — required" => "{name} — obligatorio",
+        "{name} — default: {default}" => "{name} — predeterminado: {default}",
+        "and {count} more" => "y {count} más",
+        "Recent runs" => "Ejecuciones recientes",
+        "A workflow definition is saved as an object with a source and a document." => {
+            "Una definición de flujo de trabajo se guarda como un objeto con una fuente y un documento."
+        }
+        "A definition is saved to the user source or the project source." => {
+            "Una definición se guarda en la fuente del usuario o en la del proyecto."
+        }
         _ => return None,
     })
 }

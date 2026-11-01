@@ -70,6 +70,44 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "Pengaturan hook ruang kerja ini berubah sejak dibaca; tidak ada yang ditulis."
         }
+        "Workflow" => "Alur kerja",
+        "Saved {name}." => "{name} disimpan.",
+        "Saved {name}. It stays disabled until you enable it." => {
+            "{name} disimpan. Tetap nonaktif sampai Anda mengaktifkannya."
+        }
+        "The definitions changed since they were read; nothing was written." => {
+            "Definisi berubah sejak dibaca; tidak ada yang ditulis."
+        }
+        "The definition changed since it was read; nothing was written. Your next edit opens the current definition." => {
+            "Definisi berubah sejak dibaca; tidak ada yang ditulis. Edit berikutnya membuka definisi saat ini."
+        }
+        "The definitions changed since they were read; nothing was written. Your next add opens your text again." => {
+            "Definisi berubah sejak dibaca; tidak ada yang ditulis. Penambahan berikutnya membuka teks Anda lagi."
+        }
+        "A definition's name is its key; add it to save it under another name." => {
+            "Nama definisi adalah kuncinya; tambahkan untuk menyimpannya dengan nama lain."
+        }
+        "No project definition is named {name}." => "Tidak ada definisi proyek bernama {name}.",
+        "No workflow definition is named {name}." => {
+            "Tidak ada definisi alur kerja bernama {name}."
+        }
+        "Saved in the user workflow source; always enabled." => {
+            "Disimpan di sumber alur kerja pengguna; selalu aktif."
+        }
+        "Starts only after you enable it." => "Hanya berjalan setelah Anda mengaktifkannya.",
+        "Defined by package {package}." => "Didefinisikan oleh paket {package}.",
+        "{name} — {description} (required)" => "{name} — {description} (wajib)",
+        "{name} — {description}" => "{name} — {description}",
+        "{name} — required" => "{name} — wajib",
+        "{name} — default: {default}" => "{name} — default: {default}",
+        "and {count} more" => "dan {count} lainnya",
+        "Recent runs" => "Jalan terbaru",
+        "A workflow definition is saved as an object with a source and a document." => {
+            "Definisi alur kerja disimpan sebagai objek dengan sumber dan dokumen."
+        }
+        "A definition is saved to the user source or the project source." => {
+            "Definisi disimpan ke sumber pengguna atau sumber proyek."
+        }
         _ => return None,
     })
 }

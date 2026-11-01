@@ -72,6 +72,46 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "Les réglages des hooks de cet espace de travail ont changé depuis leur lecture ; rien n'a été écrit."
         }
+        "Workflow" => "Flux de travail",
+        "Saved {name}." => "{name} enregistré.",
+        "Saved {name}. It stays disabled until you enable it." => {
+            "{name} enregistré. Il reste désactivé jusqu'à ce que vous l'activiez."
+        }
+        "The definitions changed since they were read; nothing was written." => {
+            "Les définitions ont changé depuis leur lecture ; rien n'a été écrit."
+        }
+        "The definition changed since it was read; nothing was written. Your next edit opens the current definition." => {
+            "La définition a changé depuis sa lecture ; rien n'a été écrit. Votre prochaine modification ouvrira la définition actuelle."
+        }
+        "The definitions changed since they were read; nothing was written. Your next add opens your text again." => {
+            "Les définitions ont changé depuis leur lecture ; rien n'a été écrit. Votre prochain ajout rouvrira votre texte."
+        }
+        "A definition's name is its key; add it to save it under another name." => {
+            "Le nom d'une définition est sa clé ; ajoutez-la pour l'enregistrer sous un autre nom."
+        }
+        "No project definition is named {name}." => {
+            "Aucune définition de projet ne s'appelle {name}."
+        }
+        "No workflow definition is named {name}." => {
+            "Aucune définition de flux de travail ne s'appelle {name}."
+        }
+        "Saved in the user workflow source; always enabled." => {
+            "Enregistré dans la source de flux de travail de l'utilisateur ; toujours activé."
+        }
+        "Starts only after you enable it." => "Ne démarre qu'après que vous l'avez activé.",
+        "Defined by package {package}." => "Défini par le paquet {package}.",
+        "{name} — {description} (required)" => "{name} — {description} (requis)",
+        "{name} — {description}" => "{name} — {description}",
+        "{name} — required" => "{name} — requis",
+        "{name} — default: {default}" => "{name} — par défaut : {default}",
+        "and {count} more" => "et {count} de plus",
+        "Recent runs" => "Exécutions récentes",
+        "A workflow definition is saved as an object with a source and a document." => {
+            "Une définition de flux de travail est enregistrée comme un objet avec une source et un document."
+        }
+        "A definition is saved to the user source or the project source." => {
+            "Une définition est enregistrée dans la source utilisateur ou la source du projet."
+        }
         _ => return None,
     })
 }

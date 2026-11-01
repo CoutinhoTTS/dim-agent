@@ -3133,6 +3133,17 @@
       ]
     },
     {
+      "id": "dim_cli::management::workflow",
+      "crate": "dim_cli",
+      "parent": "dim_cli::management",
+      "file": "crates/dim-cli/src/management/workflow.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches"
+      ]
+    },
+    {
       "id": "dim_cli::management_command",
       "crate": "dim_cli",
       "parent": "dim_cli",
@@ -25365,6 +25376,20 @@
     },
     {
       "from": "dim_cli::management",
+      "to": "dim_cli::management::workflow",
+      "references": [
+        "mod workflow",
+        "path workflow::Answer::Definitions",
+        "path workflow::Answer::Detail",
+        "path workflow::Failure::Conflict",
+        "path workflow::Failure::ReadFailed",
+        "path workflow::Failure::Refused",
+        "path workflow::apply",
+        "path workflow::view"
+      ]
+    },
+    {
+      "from": "dim_cli::management",
       "to": "dim_cli::model::session",
       "references": [
         "path ActionKind",
@@ -25379,6 +25404,7 @@
         "path Area::Hooks",
         "path Area::Scheduled",
         "path Area::Skills",
+        "path Area::Workflow",
         "path ManagementAction",
         "path ManagementAction::Add",
         "path ManagementAction::Inspect",
@@ -25604,6 +25630,65 @@
       ]
     },
     {
+      "from": "dim_cli::management::workflow",
+      "to": "dim_cli::management",
+      "references": [
+        "path Groups::default",
+        "path super::area_kinds",
+        "use super::Groups"
+      ]
+    },
+    {
+      "from": "dim_cli::management::workflow",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path ActionKind",
+        "path ActionKind::Edit",
+        "path ActionKind::Inspect",
+        "path ActionKind::Toggle",
+        "path EntryDocument",
+        "path EntryState::Invalid",
+        "path ManagementAction",
+        "path ManagementAction::Add",
+        "path ManagementAction::Inspect",
+        "path ManagementAction::List",
+        "path ManagementAction::Reload",
+        "path ManagementAction::Remove",
+        "path ManagementAction::Run",
+        "path ManagementAction::Save",
+        "path ManagementAction::Toggle",
+        "path ManagementDetail",
+        "path ManagementEntry",
+        "path ManagementView",
+        "use crate::model::session::ActionKind",
+        "use crate::model::session::EntryDocument",
+        "use crate::model::session::EntryState",
+        "use crate::model::session::ManagementAction",
+        "use crate::model::session::ManagementDetail",
+        "use crate::model::session::ManagementEntry",
+        "use crate::model::session::ManagementView"
+      ]
+    },
+    {
+      "from": "dim_cli::management::workflow",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path t",
+        "path tf",
+        "use crate::ui::i18n::t",
+        "use crate::ui::i18n::tf"
+      ]
+    },
+    {
+      "from": "dim_cli::management::workflow",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "path crate::client::app_error",
+        "use crate::client::Client"
+      ]
+    },
+    {
       "from": "dim_cli::management_command",
       "to": "dim_cli",
       "references": [
@@ -25676,6 +25761,19 @@
     },
     {
       "from": "dim_cli::management_command",
+      "to": "dim_cli::management::workflow",
+      "references": [
+        "path workflow::Answer::Definitions",
+        "path workflow::Answer::Detail",
+        "path workflow::Failure::ReadFailed",
+        "path workflow::Listing",
+        "path workflow::apply",
+        "path workflow::read",
+        "use crate::management::workflow"
+      ]
+    },
+    {
+      "from": "dim_cli::management_command",
       "to": "dim_cli::mcp_command",
       "references": [
         "path print_report",
@@ -25692,6 +25790,7 @@
         "path Area::Hooks",
         "path Area::Scheduled",
         "path Area::Skills",
+        "path Area::Workflow",
         "path ManagementAction::Add",
         "path ManagementAction::List",
         "path ManagementAction::Remove",
@@ -29769,6 +29868,13 @@
     },
     {
       "from": "dim_cli::ui::management_panel",
+      "to": "dim_cli::management",
+      "references": [
+        "path crate::management::unsupported"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::management_panel",
       "to": "dim_cli::model::session",
       "references": [
         "path ActionKind",
@@ -29783,6 +29889,7 @@
         "path Area::Hooks",
         "path Area::Scheduled",
         "path Area::Skills",
+        "path Area::Workflow",
         "path EntryState::Invalid",
         "path EntryState::ReadOnly",
         "path EntryState::Shadowed",
@@ -33375,10 +33482,13 @@
       "from": "dim_cli::ui::tui",
       "to": "dim_cli::model::session",
       "references": [
+        "path ActionKind",
+        "path ActionKind::Add",
         "path Area",
         "path Area::Hooks",
         "path Area::Scheduled",
         "path Area::Skills",
+        "path Area::Workflow",
         "path Command::Approval",
         "path Command::AskAnswers",
         "path Command::AskCancel",
@@ -33497,6 +33607,7 @@
         "path Update::Web",
         "path Update::Withdrawn",
         "path crate::model::session::PluginAction::Install",
+        "use crate::model::session::ActionKind",
         "use crate::model::session::Area",
         "use crate::model::session::Command",
         "use crate::model::session::CompactReply",
@@ -33707,7 +33818,7 @@
       "to": "dim_cli::ui::management_panel",
       "references": [
         "path ManagementPanel",
-        "path ManagementPanel::new",
+        "path ManagementPanel::opening",
         "path crate::ui::management_panel::reloaded",
         "use crate::ui::management_panel::ManagementPanel"
       ]
@@ -33968,6 +34079,7 @@
       "from": "dim_cli::ui::tui",
       "to": "dim_cli::ui::terminal",
       "references": [
+        "path Terminal",
         "path Terminal::enter",
         "path TerminalError::NotATerminal",
         "path Wait::Event",
@@ -36536,6 +36648,10 @@
     {
       "module": "dim_cli::args",
       "path": "Area::Skills"
+    },
+    {
+      "module": "dim_cli::args",
+      "path": "Area::Workflow"
     },
     {
       "module": "dim_cli::args",

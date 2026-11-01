@@ -15,7 +15,7 @@ use serde_json::Value;
 use crate::Result;
 use crate::args::Options;
 use crate::client::Client;
-use crate::management::{self, editor, hooks, scheduler, skills};
+use crate::management::{self, editor, hooks, scheduler, skills, workflow};
 use crate::mcp_command::print_report;
 use crate::model::session::{
     ActionKind, Area, ManagementAction, ManagementRequest, ManagementResult,
@@ -32,6 +32,7 @@ pub async fn run(
         Area::Skills => run_skills(client, options, request).await,
         Area::Hooks => run_hooks(client, options, request).await,
         Area::Scheduled => run_scheduled(client, request).await,
+        Area::Workflow => run_workflow(client, options, request).await,
     }
 }
 
@@ -217,6 +218,36 @@ async fn read(
                 .ok_or_else(|| format!("No scheduled job has that id: {id}"))?;
             Ok((job.revision.to_string(), job.document()))
         }
+        Area::Workflow => {
+            let Some(id) = id else {
+                return Err("workflow edit and set take a definition name."
+                    .to_owned()
+                    .into());
+            };
+            let listing = workflow::read(client, &options.cwd).await?;
+            let entry = listing
+                .find(id)
+                .ok_or_else(|| format!("No workflow definition is named {id}."))?;
+            match entry.source.as_str() {
+                "project" => {
+                    return Err(format!(
+                        "A project definition is a file; edit {}.",
+                        workflow::project_path(&options.cwd, &entry.name).display()
+                    )
+                    .into());
+                }
+                "user" => {}
+                _ => {
+                    return Err("A package definition is installed by its package."
+                        .to_owned()
+                        .into());
+                }
+            }
+            let (revision, document) = listing
+                .document(entry)
+                .ok_or("The user workflow source has no such definition.")?;
+            Ok((revision.to_owned(), document.clone()))
+        }
     }
 }
 
@@ -314,6 +345,7 @@ async fn create(
 fn saved(area: Area) -> String {
     match area {
         Area::Scheduled => "Saved the job.".to_owned(),
+        Area::Workflow => "Saved the definition.".to_owned(),
         Area::Skills | Area::Hooks => format!("Saved the {} document.", area.name()),
     }
 }
@@ -454,6 +486,85 @@ async fn run_scheduled(client: &mut Client, request: &ManagementRequest) -> Resu
         Err(error) => return Err(error.to_string().into()),
     }
     Ok(0)
+}
+
+/// `workflow ...`: the definitions as its owner reports them, and the kinds
+/// this twin performs.
+async fn run_workflow(
+    client: &mut Client,
+    options: &Options,
+    request: &ManagementRequest,
+) -> Result<i32> {
+    management::supported(client, request)?;
+    match workflow::apply(client, &request.action, &options.cwd).await {
+        Ok(workflow::Answer::Detail(detail)) => {
+            // The owner names definitions and states reasons: what it wrote
+            // is made safe before it reaches the terminal.
+            let lines = detail.lines.iter().map(|line| safe(line)).collect();
+            print_report(lines, Vec::new())
+        }
+        Ok(workflow::Answer::Definitions { listing, note }) => match (&request.action, note) {
+            (_, Some(note)) => print_report(vec![safe(&note)], Vec::new()),
+            (ManagementAction::Toggle { id, enabled }, None) => {
+                let name = id.strip_prefix("project:").unwrap_or(id);
+                print_report(
+                    vec![format!(
+                        "{} {}.",
+                        if *enabled { "Enabled" } else { "Disabled" },
+                        safe(name)
+                    )],
+                    Vec::new(),
+                );
+            }
+            _ => print_report(workflow_rows(&listing), workflow_notes(&listing)),
+        },
+        // The action was applied; only the report after it failed. The
+        // owner's answer, when there is one, is the outcome, and the read
+        // error goes to stderr with the exit still 0.
+        Err(workflow::Failure::ReadFailed { note, error }) => {
+            let lines = note.iter().map(|note| safe(note)).collect();
+            print_report(lines, vec![error])
+        }
+        Err(error) => return Err(error.to_string().into()),
+    }
+    Ok(0)
+}
+
+/// One definition: its name, source, state and description.
+fn workflow_rows(listing: &workflow::Listing) -> Vec<String> {
+    listing
+        .entries
+        .iter()
+        .map(|entry| {
+            let state = match (entry.enabled, entry.valid) {
+                (true, true) => "enabled",
+                (false, true) => "disabled",
+                (true, false) => "invalid",
+                (false, false) => "disabled, invalid",
+            };
+            format!(
+                "{}\t{}\t{}\t{}",
+                safe(&entry.name),
+                safe(&entry.source),
+                state,
+                safe(entry.description.as_deref().unwrap_or("—")),
+            )
+        })
+        .collect()
+}
+
+fn workflow_notes(listing: &workflow::Listing) -> Vec<String> {
+    let mut notes = if listing.entries.is_empty() {
+        vec!["No workflow definition is configured.".to_owned()]
+    } else {
+        vec!["Columns: name, source, state, description.".to_owned()]
+    };
+    for entry in listing.entries.iter().filter(|entry| !entry.valid) {
+        for issue in &entry.issues {
+            notes.push(format!("{}: {}", safe(&entry.name), safe(issue)));
+        }
+    }
+    notes
 }
 
 /// One job: its id, name, schedule, state, next window and last outcome.

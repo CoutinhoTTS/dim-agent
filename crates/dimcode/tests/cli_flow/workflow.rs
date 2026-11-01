@@ -1,0 +1,960 @@
+//! `dimcode workflow ...` and the `/workflow` panel: the Workflow area
+//! through its adapter, over the public wire.
+use super::*;
+use std::sync::mpsc;
+
+/// A workspace directory the commands run in, and the string the commands
+/// send as its cwd.
+fn workspace(home: &Home) -> (PathBuf, String) {
+    let path = home.0.join("work");
+    fs::create_dir(&path).unwrap();
+    let cwd = fs::canonicalize(&path)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    (path, cwd)
+}
+
+fn hello(wire: &mut Wire) {
+    wire.hello(&[
+        "workflow.list",
+        "workflow.save",
+        "workflow.status",
+        "settings.read",
+        "settings.update",
+    ]);
+}
+
+/// The user Settings snapshot: one saved definition, one disabled project
+/// definition and the limit fields the owner declares.
+fn settings() -> Value {
+    json!({
+        "revision": "settings:1",
+        "document": {
+            "definitions": {
+                "review-and-fix": {
+                    "schema": "dim.workflow/v1",
+                    "name": "review-and-fix",
+                    "description": "Analyze, fix in parallel, summarize",
+                    "parameters": [
+                        {"name": "target", "description": "Path to review", "required": true}
+                    ],
+                    "steps": [{"stage": {"id": "review", "prompt": "Review {{params.target}}"}}]
+                }
+            },
+            "projectEnabled": {"/workspace": {"nightly-check": false}},
+            "max_concurrent_runs": 4,
+            "max_concurrent_stages": 4
+        }
+    })
+}
+
+/// What `workflow.list` reports: a valid user definition, an invalid
+/// disabled project one and a package one.
+fn definitions() -> Value {
+    json!([
+        {
+            "name": "review-and-fix", "source": "user", "enabled": true,
+            "description": "Analyze, fix in parallel, summarize",
+            "parameters": [
+                {"name": "target", "description": "Path to review", "required": true}
+            ],
+            "valid": true, "issues": [], "issue_count": 0
+        },
+        {
+            "name": "nightly-check", "source": "project", "enabled": false,
+            "description": "Nightly checks", "parameters": [],
+            "valid": false,
+            "issues": ["Stage build: invalid reference {{params.branch}}"],
+            "issue_count": 12
+        },
+        {
+            "name": "release-notes", "source": "plugin", "package_id": "kit",
+            "enabled": true, "description": "Release notes", "parameters": [],
+            "valid": true, "issues": [], "issue_count": 0
+        }
+    ])
+}
+
+/// The interface's opening exchange, and the two requests it makes on its
+/// own before a command. `features` are the management methods the daemon
+/// advertises besides the Session basics.
+fn opened_with(wire: &mut Wire, features: &[&str]) {
+    wire.hello(features);
+    wire.created();
+    let attach = wire.read("session.attach");
+    wire.reply(&attach, attach_record(&attach));
+    let history = wire.read("session.history");
+    wire.reply(
+        &history,
+        json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+    );
+    for _ in 0..2 {
+        let request = wire.read_any();
+        match request["method"].as_str() {
+            Some("account.providers") => wire.reply(&request, json!([])),
+            Some("session.context.usage") => wire
+                .send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+            method => panic!("unexpected request {method:?}"),
+        }
+    }
+}
+
+fn opened(wire: &mut Wire) {
+    opened_with(
+        wire,
+        &[
+            "workflow.list",
+            "workflow.save",
+            "workflow.status",
+            "settings.read",
+            "settings.update",
+        ],
+    );
+}
+
+/// An editor that writes `script` as its body over the draft file.
+fn editor(home: &Home, script: &str) -> PathBuf {
+    let path = home.0.join("editor.sh");
+    fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+fn edit_command(home: &Home, program: &std::path::Path, fullscreen: bool) -> Command {
+    let mut command = home.command();
+    command.env_remove("VISUAL").env("EDITOR", program);
+    if fullscreen {
+        command.arg("--fullscreen");
+    }
+    command
+}
+
+fn drains(wire: &mut Wire) {
+    let mut line = String::new();
+    while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+        line.clear();
+    }
+}
+
+/// Reads requests until the client leaves, and fails on a definition write.
+fn drains_without_saving(wire: &mut Wire) {
+    let mut line = String::new();
+    while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+        assert!(
+            !line.contains("\"workflow.save\""),
+            "unexpected write: {line}"
+        );
+        line.clear();
+    }
+}
+
+#[test]
+fn workflow_list_prints_the_definitions_and_their_issues() {
+    let home = Home::new();
+    let (project, cwd) = workspace(&home);
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("workflow.list");
+        assert_eq!(request["params"], json!({"cwd": cwd}));
+        wire.reply(&request, definitions());
+        let request = wire.read("settings.read");
+        wire.reply(&request, settings());
+        drains(wire);
+    });
+    let output = home
+        .command()
+        .arg("--cwd")
+        .arg(&project)
+        .args(["workflow", "list"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "review-and-fix\tuser\tenabled\tAnalyze, fix in parallel, summarize\n\
+         nightly-check\tproject\tdisabled, invalid\tNightly checks\n\
+         release-notes\tplugin\tenabled\tRelease notes\n"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("Columns: name, source, state, description."),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("nightly-check: Stage build: invalid reference {{params.branch}}"),
+        "{stderr}"
+    );
+}
+
+/// Enabling a project definition is a client write of the user document: the
+/// document is copied as read, so an unknown member and another workspace's
+/// map survive, and the write CASes the revision the read reported.
+#[test]
+fn workflow_enable_writes_the_enablement_and_keeps_the_document_as_read() {
+    let home = Home::new();
+    let (project, cwd) = workspace(&home);
+    let stored = json!({
+        "revision": "settings:1",
+        "document": {
+            "definitions": settings()["document"]["definitions"].clone(),
+            "projectEnabled": {"/workspace": {"nightly-check": false}, "/other": {"keep": true}},
+            "laterMember": {"kept": [1, 2, 3]},
+        }
+    });
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        // The name is checked against the owner's list before any write.
+        let request = wire.read("workflow.list");
+        wire.reply(&request, definitions());
+        let request = wire.read("settings.read");
+        wire.reply(&request, stored.clone());
+        let request = wire.read("settings.update");
+        assert_eq!(request["params"]["source"], "workflow");
+        assert_eq!(request["params"]["scope"], "user");
+        assert_eq!(request["params"]["expectedRevision"], "settings:1");
+        let document = &request["params"]["document"];
+        assert_eq!(document["projectEnabled"][&cwd]["nightly-check"], true);
+        assert_eq!(
+            document["projectEnabled"]["/workspace"],
+            json!({"nightly-check": false})
+        );
+        assert_eq!(document["projectEnabled"]["/other"], json!({"keep": true}));
+        assert_eq!(document["laterMember"], json!({"kept": [1, 2, 3]}));
+        assert_eq!(document["definitions"], stored["document"]["definitions"]);
+        wire.reply(
+            &request,
+            json!({"revision": "settings:2", "document": request["params"]["document"]}),
+        );
+        let request = wire.read("workflow.list");
+        wire.reply(&request, definitions());
+        let request = wire.read("settings.read");
+        wire.reply(&request, settings());
+        drains(wire);
+    });
+    let output = home
+        .command()
+        .arg("--cwd")
+        .arg(&project)
+        .args(["workflow", "enable", "nightly-check"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Enabled nightly-check.\n"
+    );
+}
+
+#[test]
+fn workflow_enable_refuses_a_name_the_owner_does_not_list_as_a_project() {
+    let home = Home::new();
+    let (project, _) = workspace(&home);
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("workflow.list");
+        wire.reply(&request, definitions());
+        // Nothing was written: no settings.read follows.
+        drains_without_saving(wire);
+    });
+    let output = home
+        .command()
+        .arg("--cwd")
+        .arg(&project)
+        .args(["workflow", "enable", "review-and-fix"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("No project definition is named review-and-fix."),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A save may not rename its definition: the owner keys by the document's
+/// name, and the area has no remove. Nothing is written and the text stays.
+#[test]
+fn workflow_set_refuses_a_rename_before_the_save() {
+    let home = Home::new();
+    let (project, _) = workspace(&home);
+    let text = home.0.join("renamed.json");
+    fs::write(
+        &text,
+        json!({
+            "schema": "dim.workflow/v1",
+            "name": "renamed",
+            "description": "Changed.",
+            "steps": [{"stage": {"id": "review", "prompt": "Review."}}]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("workflow.list");
+        wire.reply(&request, definitions());
+        let request = wire.read("settings.read");
+        wire.reply(&request, settings());
+        drains_without_saving(wire);
+    });
+    let output = home
+        .command()
+        .arg("--cwd")
+        .arg(&project)
+        .arg("workflow")
+        .arg("set")
+        .arg("review-and-fix")
+        .arg(&text)
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("A definition's name is its key; add it to save it under another name."),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Your text is kept in"), "{stderr}");
+}
+
+#[test]
+fn workflow_add_is_refused_before_stdin_is_read() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["workflow.list"]);
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut child = home
+        .command()
+        .args(["workflow", "add", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // The write end stays open and nothing is written: a read would wait.
+    let _stdin = child.stdin.take();
+    let output = wait(child);
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("This daemon cannot manage workflow definitions."),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Without `settings.read` and `settings.update` the toggle is not offered,
+/// so the command is refused before it reads anything.
+#[test]
+fn workflow_enable_is_refused_without_the_settings_methods() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["workflow.list", "workflow.save", "workflow.status"]);
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let output = home
+        .command()
+        .args(["workflow", "enable", "nightly-check"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("This daemon cannot manage workflow definitions."),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+const WRITES_THE_PROJECT: &str = "printf '%s' '{\"source\":\"project\",\"document\":{\"schema\":\"dim.workflow/v1\",\"name\":\"nightly-check\",\"description\":\"Night checks.\",\"steps\":[{\"stage\":{\"id\":\"check\",\"prompt\":\"Check.\"}}]}}' > \"$1\"";
+
+const WRITES_THE_USER_EDIT: &str = "printf '%s' '{\"schema\":\"dim.workflow/v1\",\"name\":\"review-and-fix\",\"description\":\"Changed.\",\"parameters\":[{\"name\":\"target\",\"description\":\"Path to review\",\"required\":true}],\"steps\":[{\"stage\":{\"id\":\"review\",\"prompt\":\"Review {{params.target}}\"}}]}' > \"$1\"";
+
+const WRITES_A_RENAME: &str = "printf '%s' '{\"schema\":\"dim.workflow/v1\",\"name\":\"renamed\",\"description\":\"Changed.\",\"steps\":[{\"stage\":{\"id\":\"review\",\"prompt\":\"Review.\"}}]}' > \"$1\"";
+
+const WRITES_A_NEW_DEFINITION: &str = "printf '%s' '{\"source\":\"user\",\"document\":{\"schema\":\"dim.workflow/v1\",\"name\":\"example\",\"description\":\"Mine.\",\"steps\":[{\"stage\":{\"id\":\"one\",\"prompt\":\"One.\"}}]}}' > \"$1\"";
+
+/// `/workflow` lists the definitions by source, and the selected entry's
+/// detail and kinds, in both terminal modes.
+#[test]
+fn tui_workflow_panel_lists_definitions() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (shown, wait_shown) = mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            opened(wire);
+            wait_shown.recv_timeout(PATIENCE).unwrap();
+            let request = wire.read("workflow.list");
+            assert_eq!(request["params"], json!({"cwd": "/workspace"}));
+            wire.reply(&request, definitions());
+            let request = wire.read("settings.read");
+            assert_eq!(
+                request["params"],
+                json!({"source": "workflow", "scope": "user"})
+            );
+            wire.reply(&request, settings());
+            drains(wire);
+        });
+        let mut command = home.command();
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("test / model");
+        shown.send(()).unwrap();
+        terminal.write(b"/workflow\r");
+        terminal.until("review-and-fix");
+        terminal.until("plugin:kit");
+        terminal.until("Analyze, fix in parallel, summarize");
+        terminal.until("target — Path to review (required)");
+        terminal.until("Saved in the user workflow source; always enabled.");
+        terminal.until("Ctrl+E");
+        terminal.raw(b"\x1b[B");
+        terminal.until("Nightly checks");
+        terminal.until("/workspace/.dimcode/workflows/nightly-check.yaml");
+        terminal.until("Starts only after you enable it.");
+        terminal.until("Stage build: invalid reference");
+        terminal.until("and 11 more");
+        terminal.until("toggle");
+        terminal.raw(b"\x1b");
+        thread::sleep(Duration::from_millis(200));
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+    }
+}
+
+/// `/workflow:save` opens the create editor; the project document it writes
+/// carries the workspace and no revision, and the note says it stays
+/// disabled.
+#[test]
+fn tui_workflow_save_command_writes_a_definition() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let script = editor(&home, WRITES_THE_PROJECT);
+        let (shown, wait_shown) = mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            opened(wire);
+            wait_shown.recv_timeout(PATIENCE).unwrap();
+            let request = wire.read("workflow.list");
+            wire.reply(&request, definitions());
+            let request = wire.read("settings.read");
+            wire.reply(&request, settings());
+            let request = wire.read("workflow.save");
+            assert_eq!(request["params"]["source"], "project");
+            assert_eq!(request["params"]["cwd"], "/workspace");
+            assert_eq!(request["params"].get("expectedRevision"), None);
+            assert_eq!(request["params"]["document"]["name"], "nightly-check");
+            assert_eq!(
+                request["params"]["document"]["description"],
+                "Night checks."
+            );
+            wire.reply(&request, json!({"name": "nightly-check"}));
+            let request = wire.read("workflow.list");
+            wire.reply(&request, definitions());
+            let request = wire.read("settings.read");
+            wire.reply(&request, settings());
+            drains(wire);
+        });
+        let mut terminal = Terminal::launch_tui(edit_command(&home, &script, fullscreen));
+        terminal.until("test / model");
+        shown.send(()).unwrap();
+        terminal.write(b"/workflow:save\r");
+        terminal.until("Saved nightly-check. It stays disabled until you enable it.");
+        terminal.raw(b"\x1b");
+        thread::sleep(Duration::from_millis(200));
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+    }
+}
+
+/// A stale revision writes nothing: the toggle and the edit both read the
+/// area again and say so, and the edit keeps the user's text.
+#[test]
+fn tui_workflow_panel_reports_a_conflict_and_rereads() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let script = editor(&home, WRITES_THE_USER_EDIT);
+        let (shown, wait_shown) = mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            opened(wire);
+            wait_shown.recv_timeout(PATIENCE).unwrap();
+            let request = wire.read("workflow.list");
+            wire.reply(&request, definitions());
+            let request = wire.read("settings.read");
+            wire.reply(&request, settings());
+            // Enter on the project entry: the name is checked against the
+            // list, then the document is read immediately before the write.
+            let request = wire.read("workflow.list");
+            wire.reply(&request, definitions());
+            let request = wire.read("settings.read");
+            wire.reply(&request, settings());
+            let request = wire.read("settings.update");
+            assert_eq!(request["params"]["expectedRevision"], "settings:1");
+            wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                "code":-32000,"message":"settings changed","data":{"appError":"settings_conflict"}}}));
+            let request = wire.read("workflow.list");
+            wire.reply(&request, definitions());
+            let request = wire.read("settings.read");
+            wire.reply(&request, settings());
+            // Ctrl+E on the user definition: the save carries the revision
+            // the panel read, and a conflict reads the area again.
+            let request = wire.read("workflow.save");
+            assert_eq!(request["params"]["source"], "user");
+            assert_eq!(request["params"]["expectedRevision"], "settings:1");
+            assert_eq!(request["params"]["document"]["description"], "Changed.");
+            wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                "code":-32000,"message":"conflict","data":{"appError":"conflict"}}}));
+            let request = wire.read("workflow.list");
+            wire.reply(&request, definitions());
+            let request = wire.read("settings.read");
+            wire.reply(&request, settings());
+            drains(wire);
+        });
+        let mut terminal = Terminal::launch_tui(edit_command(&home, &script, fullscreen));
+        terminal.until("test / model");
+        shown.send(()).unwrap();
+        terminal.write(b"/workflow\r");
+        terminal.until("review-and-fix");
+        terminal.raw(b"\x1b[B");
+        terminal.until("Nightly checks");
+        terminal.raw(b"\r");
+        terminal.until("The definitions changed since they were read; nothing was written.");
+        terminal.raw(b"\x1b[A");
+        terminal.until("Analyze, fix in parallel, summarize");
+        terminal.raw(b"\x05");
+        terminal.until("The definition changed since it was read; nothing was written.");
+        terminal.until("Your text is kept in");
+        terminal.raw(b"\x1b");
+        thread::sleep(Duration::from_millis(200));
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+    }
+}
+
+/// The panel refuses a rename before it writes: the owner keys by the
+/// document's name, so nothing is sent and the text stays.
+#[test]
+fn tui_workflow_panel_refuses_a_rename_and_keeps_the_draft() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let script = editor(&home, WRITES_A_RENAME);
+        let (shown, wait_shown) = mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            opened(wire);
+            wait_shown.recv_timeout(PATIENCE).unwrap();
+            let request = wire.read("workflow.list");
+            wire.reply(&request, definitions());
+            let request = wire.read("settings.read");
+            wire.reply(&request, settings());
+            drains_without_saving(wire);
+        });
+        let mut terminal = Terminal::launch_tui(edit_command(&home, &script, fullscreen));
+        terminal.until("test / model");
+        shown.send(()).unwrap();
+        terminal.write(b"/workflow\r");
+        terminal.until("review-and-fix");
+        terminal.raw(b"\x05");
+        terminal.until("A definition's name is its key");
+        terminal.until("Your text is kept in");
+        terminal.raw(b"\x1b");
+        thread::sleep(Duration::from_millis(200));
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+    }
+}
+
+/// A daemon without `workflow.save` cannot serve `/workflow:save`: the
+/// panel stays on its list with the support check's sentence.
+#[test]
+fn tui_workflow_save_is_refused_when_the_daemon_cannot_write() {
+    let home = Home::new();
+    let (shown, wait_shown) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        opened_with(
+            wire,
+            &[
+                "workflow.list",
+                "workflow.status",
+                "settings.read",
+                "settings.update",
+            ],
+        );
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        let request = wire.read("workflow.list");
+        wire.reply(&request, definitions());
+        let request = wire.read("settings.read");
+        wire.reply(&request, settings());
+        drains_without_saving(wire);
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/workflow:save\r");
+    terminal.until("This daemon cannot manage workflow definitions.");
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+/// A save the owner refuses shows its issues and keeps the draft, which the
+/// next Ctrl+N reopens as the user's text, not the create template.
+#[test]
+fn tui_workflow_save_reports_an_invalid_definition_and_keeps_the_draft() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let script = editor(&home, WRITES_A_NEW_DEFINITION);
+        let (shown, wait_shown) = mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            opened(wire);
+            wait_shown.recv_timeout(PATIENCE).unwrap();
+            let request = wire.read("workflow.list");
+            wire.reply(&request, definitions());
+            let request = wire.read("settings.read");
+            wire.reply(&request, settings());
+            let first = wire.read("workflow.save");
+            assert_eq!(first["params"]["source"], "user");
+            assert_eq!(first["params"]["document"]["description"], "Mine.");
+            wire.send(json!({"jsonrpc":"2.0","id":first["id"],"error":{
+                "code":-32000,"message":"Stage build: invalid reference {{params.branch}}","data":{"appError":"invalid_definition"}}}));
+            // Ctrl+N reopens the user's text, so the next save carries it
+            // again rather than the create template.
+            let second = wire.read("workflow.save");
+            assert_eq!(second["params"]["document"], first["params"]["document"]);
+            wire.send(json!({"jsonrpc":"2.0","id":second["id"],"error":{
+                "code":-32000,"message":"Stage build: invalid reference {{params.branch}}","data":{"appError":"invalid_definition"}}}));
+            drains_without_saving(wire);
+        });
+        let mut terminal = Terminal::launch_tui(edit_command(&home, &script, fullscreen));
+        terminal.until("test / model");
+        shown.send(()).unwrap();
+        terminal.write(b"/workflow:save\r");
+        terminal.until("Stage build: invalid reference");
+        terminal.until("Your text is kept in");
+        terminal.raw(b"\x0e");
+        terminal.until("Stage build: invalid reference");
+        terminal.raw(b"\x1b");
+        thread::sleep(Duration::from_millis(200));
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+    }
+}
+
+/// Without `settings.read` and `settings.update` the panel offers no toggle
+/// and no edit: the view carries neither kind, and the hint says so.
+#[test]
+fn tui_workflow_panel_offers_no_write_without_the_settings_methods() {
+    let home = Home::new();
+    let (shown, wait_shown) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        opened_with(wire, &["workflow.list", "workflow.save", "workflow.status"]);
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        let request = wire.read("workflow.list");
+        wire.reply(&request, definitions());
+        // No settings.read: the daemon does not advertise one.
+        drains(wire);
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/workflow\r");
+    terminal.until("review-and-fix");
+    terminal.until("Ctrl+N");
+    assert!(
+        !terminal.transcript.contains("toggle"),
+        "no toggle without settings.update: {}",
+        terminal.transcript
+    );
+    assert!(
+        !terminal.transcript.contains("Ctrl+E"),
+        "no edit without settings.read: {}",
+        terminal.transcript
+    );
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+/// The real owner: the client's `projectEnabled` write, an add into each
+/// source, an edit at the revision the read reported, and `history` against
+/// the runs the owner keeps. Listing the workspace's MCP entries authorizes
+/// it with Settings, as the product's management paths do; no model is used.
+#[test]
+#[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
+fn workflow_commands_write_and_enable_against_the_real_owner() {
+    let binary = std::env::var("DIM_TEST_APP_SERVER").unwrap();
+    let home = Home::new();
+    let project = home.0.join("work");
+    fs::create_dir(&project).unwrap();
+    let socket = home.0.join("rust/daemon.sock");
+    // The installed layout, from the checkout: the product home holds the
+    // plugin files, the defaults name the shipped plugins, and the runtimes
+    // are the system Node and the checkout's runtime packages
+    // (`crates/dim-app-server/README.md`, Plugins). `runtime/node_modules`
+    // holds the packages.
+    let runtime = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../runtime");
+    let node = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|directory| directory.join("node"))
+        .find(|path| path.is_file())
+        .expect("node on PATH");
+    let log = fs::File::create(home.0.join("daemon.log")).unwrap();
+    let mut daemon = Command::new(&binary)
+        .arg("--unix")
+        .arg(&socket)
+        .arg("--no-ws")
+        .arg("--home")
+        .arg(home.0.join("rust"))
+        .arg("--product-home")
+        .arg(&home.0)
+        .arg("--defaults")
+        .arg(runtime.join("default-plugins.json"))
+        .arg("--node")
+        .arg(node)
+        .arg("--js-runtime")
+        .arg(runtime.join("node_modules/@arcships/rutis-runtime"))
+        .current_dir(&project)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(log)
+        .spawn()
+        .unwrap();
+    let _daemon = OwnedDaemon(socket.clone());
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !socket.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the daemon did not listen:\n{}",
+            fs::read_to_string(home.0.join("daemon.log")).unwrap_or_default()
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    // Default plugins start after the daemon does; Workflow's methods are
+    // advertised once it runs.
+    let advertised = || -> Option<bool> {
+        let stream = UnixStream::connect(&socket).ok()?;
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+        let mut stream = BufReader::new(stream);
+        writeln!(
+            stream.get_mut(),
+            "{}",
+            json!({"jsonrpc":"2.0","id":1,"method":"hello",
+                   "params":{"protocolVersion":3,"clientKind":"cli"}})
+        )
+        .ok()?;
+        let mut line = String::new();
+        stream.read_line(&mut line).ok()?;
+        let reply: Value = serde_json::from_str(&line).ok()?;
+        Some(
+            reply["result"]["features"]
+                .as_array()
+                .is_some_and(|features| features.iter().any(|feature| feature == "workflow.list")),
+        )
+    };
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        if advertised() == Some(true) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Workflow's methods were not advertised:\n{}",
+            fs::read_to_string(home.0.join("daemon.log")).unwrap_or_default()
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+    let run = |args: &[&str], stdin: Option<&str>| {
+        let mut command = home.command();
+        command
+            .arg("--server")
+            .arg(&binary)
+            .arg("--cwd")
+            .arg(&project)
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if stdin.is_some() {
+            command.stdin(Stdio::piped());
+        }
+        let mut child = command.spawn().unwrap();
+        if let Some(text) = stdin {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(text.as_bytes())
+                .unwrap();
+        }
+        wait(child)
+    };
+    let list = || {
+        let output = run(&["workflow", "list"], None);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    // The workspace is not registered yet, so the first read fails with the
+    // owner's message.
+    let unregistered = run(&["workflow", "list"], None);
+    assert_eq!(unregistered.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&unregistered.stderr).contains("not registered with Settings"),
+        "{}",
+        String::from_utf8_lossy(&unregistered.stderr)
+    );
+    // Registration goes through a product path, not one added for this
+    // test: `mcp.catalog` authorizes the workspace it reads and registers
+    // it with Settings (`mcp/management.rs::project`). `session.create`
+    // cannot be used: it needs a model catalog, the product-home mode that
+    // provides the plugin files refuses `--model-config`, and the OSS
+    // binary injects no managed provider.
+    let registered = run(&["mcp", "list"], None);
+    assert!(
+        registered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&registered.stderr)
+    );
+    // A project definition is written to the repository and stays disabled.
+    let project_document = json!({
+        "source": "project",
+        "document": {
+            "schema": "dim.workflow/v1",
+            "name": "nightly-check",
+            "description": "Nightly checks.",
+            "steps": [{"stage": {"id": "check", "prompt": "Check the workspace."}}]
+        }
+    })
+    .to_string();
+    let added = run(&["workflow", "add", "-"], Some(&project_document));
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(added.stdout).unwrap(),
+        "Saved nightly-check. It stays disabled until you enable it.\n"
+    );
+    assert!(
+        list().contains("nightly-check\tproject\tdisabled\tNightly checks."),
+        "{}",
+        list()
+    );
+    let enabled = run(&["workflow", "enable", "nightly-check"], None);
+    assert!(
+        enabled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&enabled.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(enabled.stdout).unwrap(),
+        "Enabled nightly-check.\n"
+    );
+    assert!(
+        list().contains("nightly-check\tproject\tenabled\tNightly checks."),
+        "{}",
+        list()
+    );
+    // A user definition is saved to the user source and edited at the
+    // revision the read reported.
+    let user_document = json!({
+        "document": {
+            "schema": "dim.workflow/v1",
+            "name": "review-and-fix",
+            "description": "First description.",
+            "steps": [{"stage": {"id": "review", "prompt": "Review."}}]
+        }
+    })
+    .to_string();
+    let added = run(&["workflow", "add", "-"], Some(&user_document));
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(added.stdout).unwrap(),
+        "Saved review-and-fix.\n"
+    );
+    let edited = json!({
+        "schema": "dim.workflow/v1",
+        "name": "review-and-fix",
+        "description": "Second description.",
+        "steps": [{"stage": {"id": "review", "prompt": "Review."}}]
+    })
+    .to_string();
+    let set = run(&["workflow", "set", "review-and-fix", "-"], Some(&edited));
+    assert!(
+        set.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(set.stdout).unwrap(),
+        "Saved the definition.\n"
+    );
+    let listed = list();
+    assert!(
+        listed.contains("review-and-fix\tuser\tenabled\tSecond description."),
+        "{listed}"
+    );
+    // The user save kept the enablement the toggle wrote.
+    assert!(
+        listed.contains("nightly-check\tproject\tenabled\tNightly checks."),
+        "{listed}"
+    );
+    // `history` resolves the name by the precedence `start` uses and reads
+    // the owner's retained runs.
+    let history = run(&["workflow", "history", "nightly-check"], None);
+    assert!(
+        history.status.success(),
+        "{}",
+        String::from_utf8_lossy(&history.stderr)
+    );
+    let history = String::from_utf8(history.stdout).unwrap();
+    assert!(history.contains("Nightly checks."), "{history}");
+    assert!(history.contains("Recent runs"), "{history}");
+    assert!(history.contains("No run yet."), "{history}");
+    drop(_daemon);
+    let _ = daemon.wait();
+}

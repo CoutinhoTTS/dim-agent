@@ -99,6 +99,26 @@ pub const STRINGS: &[&str] = &[
     "The Scheduler has no area document.",
     "No scheduled job has that id.",
     "This workspace's hook settings changed since they were read; nothing was written.",
+    "Workflow",
+    "Saved {name}.",
+    "Saved {name}. It stays disabled until you enable it.",
+    "The definitions changed since they were read; nothing was written.",
+    "The definition changed since it was read; nothing was written. Your next edit opens the current definition.",
+    "The definitions changed since they were read; nothing was written. Your next add opens your text again.",
+    "A definition's name is its key; add it to save it under another name.",
+    "No project definition is named {name}.",
+    "No workflow definition is named {name}.",
+    "Saved in the user workflow source; always enabled.",
+    "Starts only after you enable it.",
+    "Defined by package {package}.",
+    "{name} — {description} (required)",
+    "{name} — {description}",
+    "{name} — required",
+    "{name} — default: {default}",
+    "and {count} more",
+    "Recent runs",
+    "A workflow definition is saved as an object with a source and a document.",
+    "A definition is saved to the user source or the project source.",
 ];
 
 pub struct ManagementPanel {
@@ -116,6 +136,11 @@ pub struct ManagementPanel {
     /// Why the read that follows an applied action failed: the action was
     /// done, and the area is not reported.
     read_error: Option<String>,
+    /// The kind a command opened the panel with, run when its first view
+    /// arrives and spent there.
+    pending: Option<ActionKind>,
+    /// The editor the panel asked for without a key, for the event loop.
+    effect: Option<Effect>,
 }
 
 /// A detail in place of the list, with the rows it starts at.
@@ -157,7 +182,17 @@ impl ManagementPanel {
             busy: true,
             message: None,
             read_error: None,
+            pending: None,
+            effect: None,
         }
+    }
+
+    /// A panel a command opened with one kind to run when its first view
+    /// arrives, as `/workflow:save` opens the add step.
+    pub fn opening(area: Area, pending: Option<ActionKind>) -> Self {
+        let mut panel = Self::new(area);
+        panel.pending = pending;
+        panel
     }
 
     /// The reply to this panel's request.
@@ -168,6 +203,10 @@ impl ManagementPanel {
         self.busy = false;
         self.confirming = None;
         self.read_error = None;
+        // The kind a command opened the panel with is spent on the first
+        // view, and any other reply drops it.
+        let opening = self.view.is_none();
+        let pending = self.pending.take();
         match &reply.result {
             ManagementResult::View { view, note } => {
                 let view = &**view;
@@ -182,6 +221,11 @@ impl ManagementPanel {
                     })),
                 };
                 self.set_view(view.clone());
+                if let Some(kind) = pending
+                    && opening
+                {
+                    self.run_pending(kind);
+                }
             }
             ManagementResult::Detail(detail) => {
                 self.detail = Some(ShownDetail::new(detail.clone()));
@@ -215,6 +259,30 @@ impl ManagementPanel {
             }
         }
         self.refresh_hint();
+    }
+
+    /// Runs the kind a command opened the panel with, now that its first
+    /// view is here: what the kind's key produces, or the sentence the
+    /// support check gives when the view does not offer it.
+    fn run_pending(&mut self, kind: ActionKind) {
+        if !self.offers(kind) {
+            self.message = Some(Err(crate::management::unsupported(self.area)));
+            return;
+        }
+        let effect = match kind {
+            ActionKind::Add => self.add(),
+            // A command opens an area with a kind a key could produce.
+            _ => Effect::None,
+        };
+        if matches!(effect, Effect::EditManagement { .. }) {
+            self.effect = Some(effect);
+        }
+    }
+
+    /// The editor the panel asked for without a key, for the event loop to
+    /// run now that the reply which asked is applied.
+    pub fn take_effect(&mut self) -> Option<Effect> {
+        self.effect.take()
     }
 
     fn set_view(&mut self, view: ManagementView) {
@@ -462,10 +530,7 @@ impl ManagementPanel {
                 self.busy = true;
                 Effect::Management(ManagementRequest {
                     area: self.area,
-                    action: ManagementAction::Run {
-                        id,
-                        document: None,
-                    },
+                    action: ManagementAction::Run { id, document: None },
                 })
             }
         }
@@ -650,6 +715,7 @@ fn title(area: Area) -> &'static str {
         Area::Skills => "Skills",
         Area::Hooks => "Hooks",
         Area::Scheduled => "Scheduler",
+        Area::Workflow => "Workflow",
     }
 }
 
@@ -1510,8 +1576,7 @@ mod tests {
     #[test]
     fn run_opens_the_editor_on_an_entrys_input_document() {
         let mut view = catalogue();
-        view.groups[0].entries[0].run =
-            Some(serde_json::json!({"target": "", "style": "concise"}));
+        view.groups[0].entries[0].run = Some(serde_json::json!({"target": "", "style": "concise"}));
         let mut panel = ManagementPanel::new(Area::Skills);
         panel.set_result(&view_reply(Area::Skills, ManagementAction::List, view));
         match panel.handle_key(ctrl('t')) {

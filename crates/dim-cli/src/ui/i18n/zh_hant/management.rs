@@ -66,6 +66,42 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "此工作區的鉤子設定已在讀取後變更；這次沒有寫入。"
         }
+        "Workflow" => "工作流程",
+        "Saved {name}." => "已儲存 {name}。",
+        "Saved {name}. It stays disabled until you enable it." => {
+            "已儲存 {name}。在你啟用它之前，它保持停用。"
+        }
+        "The definitions changed since they were read; nothing was written." => {
+            "定義在讀取後已被修改；本次沒有寫入。"
+        }
+        "The definition changed since it was read; nothing was written. Your next edit opens the current definition." => {
+            "定義在讀取後已被修改；本次沒有寫入。下次編輯會開啟目前定義。"
+        }
+        "The definitions changed since they were read; nothing was written. Your next add opens your text again." => {
+            "定義在讀取後已被修改；本次沒有寫入。下次新增會重新開啟你的文字。"
+        }
+        "A definition's name is its key; add it to save it under another name." => {
+            "定義的名稱就是它的鍵；要用另一個名稱儲存，請新增它。"
+        }
+        "No project definition is named {name}." => "沒有名為 {name} 的專案定義。",
+        "No workflow definition is named {name}." => "沒有名為 {name} 的工作流程定義。",
+        "Saved in the user workflow source; always enabled." => {
+            "儲存在使用者工作流程來源中；始終啟用。"
+        }
+        "Starts only after you enable it." => "只有在你啟用它之後才會啟動。",
+        "Defined by package {package}." => "由套件 {package} 定義。",
+        "{name} — {description} (required)" => "{name} — {description}（必填）",
+        "{name} — {description}" => "{name} — {description}",
+        "{name} — required" => "{name} — 必填",
+        "{name} — default: {default}" => "{name} — 預設：{default}",
+        "and {count} more" => "另有 {count} 項",
+        "Recent runs" => "最近的執行",
+        "A workflow definition is saved as an object with a source and a document." => {
+            "工作流程定義以包含來源和文件的物件儲存。"
+        }
+        "A definition is saved to the user source or the project source." => {
+            "定義儲存到使用者來源或專案來源。"
+        }
         _ => return None,
     })
 }

@@ -70,6 +70,42 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "이 작업 공간의 훅 설정이 읽은 뒤에 변경되었습니다. 아무것도 쓰지 않았습니다."
         }
+        "Workflow" => "워크플로",
+        "Saved {name}." => "{name}을(를) 저장했습니다.",
+        "Saved {name}. It stays disabled until you enable it." => {
+            "{name}을(를) 저장했습니다. 활성화할 때까지 비활성 상태로 유지됩니다."
+        }
+        "The definitions changed since they were read; nothing was written." => {
+            "정의가 읽은 후 변경되었습니다. 아무것도 쓰지 않았습니다."
+        }
+        "The definition changed since it was read; nothing was written. Your next edit opens the current definition." => {
+            "정의가 읽은 후 변경되었습니다. 아무것도 쓰지 않았습니다. 다음 편집은 현재 정의를 엽니다."
+        }
+        "The definitions changed since they were read; nothing was written. Your next add opens your text again." => {
+            "정의가 읽은 후 변경되었습니다. 아무것도 쓰지 않았습니다. 다음 추가는 당신의 텍스트를 다시 엽니다."
+        }
+        "A definition's name is its key; add it to save it under another name." => {
+            "정의의 이름은 그 키입니다. 다른 이름으로 저장하려면 추가하세요."
+        }
+        "No project definition is named {name}." => "{name}이라는 프로젝트 정의가 없습니다.",
+        "No workflow definition is named {name}." => "{name}이라는 워크플로 정의가 없습니다.",
+        "Saved in the user workflow source; always enabled." => {
+            "사용자 워크플로 소스에 저장됩니다. 항상 활성화됩니다."
+        }
+        "Starts only after you enable it." => "활성화한 후에만 시작됩니다.",
+        "Defined by package {package}." => "패키지 {package}에서 정의합니다.",
+        "{name} — {description} (required)" => "{name} — {description} (필수)",
+        "{name} — {description}" => "{name} — {description}",
+        "{name} — required" => "{name} — 필수",
+        "{name} — default: {default}" => "{name} — 기본값: {default}",
+        "and {count} more" => "외 {count}개",
+        "Recent runs" => "최근 실행",
+        "A workflow definition is saved as an object with a source and a document." => {
+            "워크플로 정의는 소스와 문서를 가진 객체로 저장합니다."
+        }
+        "A definition is saved to the user source or the project source." => {
+            "정의는 사용자 소스 또는 프로젝트 소스에 저장합니다."
+        }
         _ => return None,
     })
 }

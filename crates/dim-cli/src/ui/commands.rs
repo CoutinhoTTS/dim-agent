@@ -321,6 +321,20 @@ pub const COMMANDS: &[Command] = &[
         Needs::Nothing,
     ),
     slash(
+        "workflow",
+        "model",
+        "list workflow definitions, enable one, add or edit a definition",
+        &[],
+        Needs::Nothing,
+    ),
+    slash(
+        "workflow:save",
+        "model",
+        "save a workflow definition for reuse",
+        &[],
+        Needs::Nothing,
+    ),
+    slash(
         "permissions",
         "model",
         "configure file access, tool approval and process isolation",

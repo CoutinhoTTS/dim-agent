@@ -16,6 +16,7 @@ pub mod editor;
 pub mod hooks;
 pub mod scheduler;
 pub mod skills;
+pub mod workflow;
 
 use std::path::Path;
 
@@ -61,6 +62,17 @@ const HOOKS: Methods = Methods {
     ],
 };
 
+const WORKFLOW: Methods = Methods {
+    catalog: "workflow.list",
+    kinds: &[
+        (ActionKind::Toggle, &["settings.read", "settings.update"]),
+        (ActionKind::Edit, &["settings.read", "workflow.save"]),
+        (ActionKind::Reload, &["workflow.list"]),
+        (ActionKind::Add, &["workflow.save"]),
+        (ActionKind::Inspect, &["workflow.status"]),
+    ],
+};
+
 const SCHEDULED: Methods = Methods {
     catalog: "schedule.list",
     kinds: &[
@@ -80,6 +92,7 @@ fn methods_of(area: Area) -> &'static Methods {
         Area::Skills => &SKILLS,
         Area::Hooks => &HOOKS,
         Area::Scheduled => &SCHEDULED,
+        Area::Workflow => &WORKFLOW,
     }
 }
 
@@ -165,10 +178,11 @@ pub fn supports_kind(client: &Client, area: Area, kind: ActionKind) -> Result<()
     }
 }
 
-fn unsupported(area: Area) -> String {
+pub(crate) fn unsupported(area: Area) -> String {
     match area {
         // The Scheduler is one owner by name, not a plural noun.
         Area::Scheduled => "This daemon cannot manage the Scheduler.".to_owned(),
+        Area::Workflow => "This daemon cannot manage workflow definitions.".to_owned(),
         Area::Skills | Area::Hooks => format!("This daemon cannot manage {}.", area.name()),
     }
 }
@@ -213,6 +227,26 @@ pub async fn apply(
                 ManagementResult::Refused(ManagementRefusal::Conflict {
                     message,
                     view: Box::new(hooks::view(&catalog, &actions)),
+                })
+            }
+        },
+        Area::Workflow => match workflow::apply(client, &request.action, cwd).await {
+            Ok(workflow::Answer::Definitions { listing, note }) => ManagementResult::View {
+                view: Box::new(workflow::view(&listing, &actions, cwd)),
+                note,
+            },
+            Ok(workflow::Answer::Detail(detail)) => ManagementResult::Detail(detail),
+            Err(workflow::Failure::ReadFailed { note, error }) => ManagementResult::Applied {
+                note,
+                read_error: error,
+            },
+            Err(workflow::Failure::Refused(message)) => {
+                ManagementResult::Refused(ManagementRefusal::Refused(message))
+            }
+            Err(workflow::Failure::Conflict { message, listing }) => {
+                ManagementResult::Refused(ManagementRefusal::Conflict {
+                    message,
+                    view: Box::new(workflow::view(&listing, &actions, cwd)),
                 })
             }
         },

@@ -66,6 +66,42 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "此工作区的钩子设置已在读取后发生变化；本次没有写入。"
         }
+        "Workflow" => "工作流",
+        "Saved {name}." => "已保存 {name}。",
+        "Saved {name}. It stays disabled until you enable it." => {
+            "已保存 {name}。在你启用它之前，它保持禁用。"
+        }
+        "The definitions changed since they were read; nothing was written." => {
+            "定义在读取后已被修改；本次没有写入。"
+        }
+        "The definition changed since it was read; nothing was written. Your next edit opens the current definition." => {
+            "定义在读取后已被修改；本次没有写入。下次编辑会打开当前定义。"
+        }
+        "The definitions changed since they were read; nothing was written. Your next add opens your text again." => {
+            "定义在读取后已被修改；本次没有写入。下次新建会重新打开你的文本。"
+        }
+        "A definition's name is its key; add it to save it under another name." => {
+            "定义的名称就是它的键；要用另一个名称保存，请新建它。"
+        }
+        "No project definition is named {name}." => "没有名为 {name} 的项目定义。",
+        "No workflow definition is named {name}." => "没有名为 {name} 的工作流定义。",
+        "Saved in the user workflow source; always enabled." => {
+            "保存在用户工作流来源中；始终启用。"
+        }
+        "Starts only after you enable it." => "只有在你启用它之后才会启动。",
+        "Defined by package {package}." => "由包 {package} 定义。",
+        "{name} — {description} (required)" => "{name} — {description}（必填）",
+        "{name} — {description}" => "{name} — {description}",
+        "{name} — required" => "{name} — 必填",
+        "{name} — default: {default}" => "{name} — 默认：{default}",
+        "and {count} more" => "另有 {count} 项",
+        "Recent runs" => "最近的运行",
+        "A workflow definition is saved as an object with a source and a document." => {
+            "工作流定义以包含来源和文档的对象保存。"
+        }
+        "A definition is saved to the user source or the project source." => {
+            "定义保存到用户来源或项目来源。"
+        }
         _ => return None,
     })
 }

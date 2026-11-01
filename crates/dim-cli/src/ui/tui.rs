@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 
 use crate::management::editor;
 use crate::model::session::{
-    Area, Command, CompactReply, ContextReading, DIM_OAUTH_ID, DraftPart, ManagementAction,
-    ManagementRefusal, ManagementRequest, ManagementResult, SessionPort, SubmitMode, SwitchKind,
-    Update,
+    ActionKind, Area, Command, CompactReply, ContextReading, DIM_OAUTH_ID, DraftPart,
+    ManagementAction, ManagementRefusal, ManagementRequest, ManagementResult, SessionPort,
+    SubmitMode, SwitchKind, Update,
 };
 #[cfg(test)]
 use crate::model::shell::Outcome as ShellOutcome;
@@ -275,6 +275,19 @@ fn run_terminal(
     let code = loop {
         for update in app.host.drain() {
             app.apply(update);
+            dirty = true;
+        }
+        // A management panel may ask for the editor with its first view, as
+        // `/workflow:save` opens the add step: the reply arrives here, and
+        // the editor runs through the step the edit key uses.
+        if let Some(Effect::EditManagement { area, target, text }) = app.take_management_effect() {
+            if let Err(code) = edit_management(&mut app, &mut terminal, area, target, text) {
+                app.host.shutdown();
+                return code;
+            }
+            status.forget();
+            progress.forget();
+            title.forget();
             dirty = true;
         }
         if app.shutdown.is_some() && !dirty {
@@ -628,36 +641,11 @@ fn run_terminal(
                     dirty = true;
                 }
                 Outcome::Edit { area, target, text } => {
-                    // A draft a refused edit kept continues in its own file;
-                    // anything else starts from the document the panel read.
-                    let (target, draft, reopened) = match app.kept_draft(area, &target) {
-                        Some((target, draft)) => (target, draft, true),
-                        None => {
-                            let draft = match editor::Draft::open(&app.home, area, &text) {
-                                Ok(draft) => draft,
-                                Err(error) => {
-                                    if let Some(Prompt::Management(panel)) = &mut app.prompt {
-                                        panel.failed(error);
-                                    }
-                                    dirty = true;
-                                    continue;
-                                }
-                            };
-                            (target, draft, false)
-                        }
-                    };
-                    let mut command = editor::command(draft.path());
-                    let program = command.get_program().to_string_lossy().into_owned();
-                    let ran = match terminal.run_external(&mut command) {
-                        Ok(ran) => ran,
-                        Err(_) => {
-                            let code = terminal.lost();
-                            app.host.shutdown();
-                            return code;
-                        }
-                    };
-                    app.write_draft(area, target, draft, reopened, program, ran);
-                    app.request_reflow();
+                    if let Err(code) = edit_management(&mut app, &mut terminal, area, target, text)
+                    {
+                        app.host.shutdown();
+                        return code;
+                    }
                     status.forget();
                     progress.forget();
                     title.forget();
@@ -731,6 +719,43 @@ enum Outcome {
     /// Start the updated CLI from this path on the session.
     Restart(PathBuf),
     Exit(i32),
+}
+
+/// Opens the external editor on a management draft and writes what it
+/// leaves. `Err` is the code the terminal lost.
+fn edit_management(
+    app: &mut App,
+    terminal: &mut Terminal,
+    area: Area,
+    target: WriteTarget,
+    text: String,
+) -> std::result::Result<(), i32> {
+    // A draft a refused write kept continues in its own file; anything else
+    // starts from the document the panel read.
+    let (target, draft, reopened) = match app.kept_draft(area, &target) {
+        Some((target, draft)) => (target, draft, true),
+        None => {
+            let draft = match editor::Draft::open(&app.home, area, &text) {
+                Ok(draft) => draft,
+                Err(error) => {
+                    if let Some(Prompt::Management(panel)) = &mut app.prompt {
+                        panel.failed(error);
+                    }
+                    return Ok(());
+                }
+            };
+            (target, draft, false)
+        }
+    };
+    let mut command = editor::command(draft.path());
+    let program = command.get_program().to_string_lossy().into_owned();
+    let ran = match terminal.run_external(&mut command) {
+        Ok(ran) => ran,
+        Err(_) => return Err(terminal.lost()),
+    };
+    app.write_draft(area, target, draft, reopened, program, ran);
+    app.request_reflow();
+    Ok(())
 }
 
 /// The adopted model as the label draws it: `provider / model`, and the
@@ -3291,13 +3316,24 @@ impl App {
         }
     }
 
-    /// `/<area>` opens the management panel of `area`, which reads it.
-    fn open_management(&mut self, area: Area) {
-        self.open_prompt(Prompt::Management(ManagementPanel::new(area)));
+    /// `/<area>` opens the management panel of `area`, which reads it. A
+    /// command may open it with one kind to run when the first view arrives,
+    /// as `/workflow:save` opens the add step.
+    fn open_management(&mut self, area: Area, pending: Option<ActionKind>) {
+        self.open_prompt(Prompt::Management(ManagementPanel::opening(area, pending)));
         self.host.send(Command::Management(ManagementRequest {
             area,
             action: ManagementAction::List,
         }));
+    }
+
+    /// The editor a management panel asked for without a key, for the event
+    /// loop to run once the reply that asked is applied.
+    fn take_management_effect(&mut self) -> Option<Effect> {
+        match &mut self.prompt {
+            Some(Prompt::Management(panel)) => panel.take_effect(),
+            _ => None,
+        }
     }
 
     /// `/plugins` opens the list; `/plugins install PATH` installs the
@@ -3468,7 +3504,7 @@ impl App {
                 Outcome::Continue
             }
             "skills" => {
-                self.open_management(Area::Skills);
+                self.open_management(Area::Skills, None);
                 Outcome::Continue
             }
             "reload-skills" => {
@@ -3479,11 +3515,19 @@ impl App {
                 Outcome::Continue
             }
             "hooks" => {
-                self.open_management(Area::Hooks);
+                self.open_management(Area::Hooks, None);
                 Outcome::Continue
             }
             "scheduled" => {
-                self.open_management(Area::Scheduled);
+                self.open_management(Area::Scheduled, None);
+                Outcome::Continue
+            }
+            "workflow" => {
+                self.open_management(Area::Workflow, None);
+                Outcome::Continue
+            }
+            "workflow:save" => {
+                self.open_management(Area::Workflow, Some(ActionKind::Add));
                 Outcome::Continue
             }
             "connect" => {
@@ -8958,15 +9002,14 @@ mod tests {
             root.path().join("home"),
             "/w".into(),
         );
-        let draft = || editor::Draft::open(root.path(), Area::Skills, "{\"target\":\"src\"}").unwrap();
+        let draft =
+            || editor::Draft::open(root.path(), Area::Skills, "{\"target\":\"src\"}").unwrap();
         let written = |app: &mut App, draft: editor::Draft| {
             let path = draft.path().to_path_buf();
             app.prompt = Some(Prompt::Management(ManagementPanel::new(Area::Skills)));
             app.write_draft(
                 Area::Skills,
-                WriteTarget::Run {
-                    id: "job-1".into(),
-                },
+                WriteTarget::Run { id: "job-1".into() },
                 draft,
                 false,
                 "vi".into(),
@@ -9017,19 +9060,9 @@ mod tests {
             "an edit never reopens a run's draft"
         );
         let (target, kept) = app
-            .kept_draft(
-                Area::Skills,
-                &WriteTarget::Run {
-                    id: "job-1".into(),
-                },
-            )
+            .kept_draft(Area::Skills, &WriteTarget::Run { id: "job-1".into() })
             .expect("the run key reopens the draft");
-        assert_eq!(
-            target,
-            WriteTarget::Run {
-                id: "job-1".into()
-            }
-        );
+        assert_eq!(target, WriteTarget::Run { id: "job-1".into() });
         assert_eq!(kept.path(), path.as_path());
     }
 }
