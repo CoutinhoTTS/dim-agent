@@ -14,14 +14,16 @@ use crate::client::Client;
 use crate::model::session::{
     ActionKind, EntryState, ManagementAction, ManagementEntry, ManagementView,
 };
+use crate::ui::i18n::t;
 
 /// One entry of `skills.catalog`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Entry {
     pub id: String,
-    /// `user`, `project` or `plugin:<plugin id>`.
-    pub source: String,
+    /// `user`, `project` or `plugin:<plugin id>`. A daemon older than this
+    /// fact reports none, and the client never derives one.
+    pub source: Option<String>,
     pub name: String,
     #[serde(default)]
     pub description: String,
@@ -44,42 +46,63 @@ pub struct Catalog {
     pub issues: Vec<Issue>,
 }
 
+/// What a Skills action came to.
+pub enum Outcome {
+    /// The area as its owner reports it after the action.
+    Catalog(Catalog),
+    /// The action was applied and the read that follows failed.
+    ReadFailed(String),
+    /// Nothing was applied, and this is why.
+    Refused(String),
+}
+
 /// Performs `action`, then reads the area back as its owner reports it.
-pub async fn apply(
-    client: &mut Client,
-    action: &ManagementAction,
-    cwd: &Path,
-) -> Result<Catalog, String> {
+///
+/// The action is applied once the method behind it returns: the owner
+/// declares every Skills method except `skills.catalog` mutating, so a
+/// `skills.refresh` that succeeded rescanned the roots even when the read
+/// after it fails.
+pub async fn apply(client: &mut Client, action: &ManagementAction, cwd: &Path) -> Outcome {
     let params = json!({"cwd": cwd.to_string_lossy()});
-    match action {
-        ManagementAction::List => {}
+    let applied = match action {
         ManagementAction::Reload => {
-            client
-                .rpc("skills.refresh", params.clone())
-                .await
-                .map_err(|error| error.to_string())?;
+            if let Err(error) = client.rpc("skills.refresh", params.clone()).await {
+                return Outcome::Refused(error.to_string());
+            }
+            true
         }
         ManagementAction::Toggle { id, enabled } => {
             let mut params = params;
             params["id"] = json!(id);
             params["enabled"] = json!(enabled);
-            client
-                .rpc("skills.set_enabled", params)
-                .await
-                .map_err(|error| error.to_string())?;
+            if let Err(error) = client.rpc("skills.set_enabled", params).await {
+                return Outcome::Refused(error.to_string());
+            }
+            true
         }
-        ManagementAction::Save { .. } => {
-            return Err("A Skill has no document to edit.".into());
+        // A read applies nothing, and a Skill has no document, so
+        // `management::supported` refuses a save before the adapter runs.
+        ManagementAction::List | ManagementAction::Save { .. } => false,
+        // `supported` refuses a kind this area does not have before `apply`;
+        // the adapter refuses it too, naming the kind, and reads nothing.
+        ManagementAction::Add { .. } => {
+            return Outcome::Refused("A Skill has no add action.".to_owned());
         }
-        // `supported` refuses a kind this area does not have before `apply`.
-        ManagementAction::Add { .. }
-        | ManagementAction::Remove { .. }
-        | ManagementAction::Run { .. }
-        | ManagementAction::Inspect { .. } => {
-            return Err("A Skill has no such action.".into());
+        ManagementAction::Remove { .. } => {
+            return Outcome::Refused("A Skill has no remove action.".to_owned());
         }
+        ManagementAction::Run { .. } => {
+            return Outcome::Refused("A Skill has no run action.".to_owned());
+        }
+        ManagementAction::Inspect { .. } => {
+            return Outcome::Refused("A Skill has no inspect action.".to_owned());
+        }
+    };
+    match catalog(client, &cwd.to_string_lossy()).await {
+        Ok(catalog) => Outcome::Catalog(catalog),
+        Err(error) if applied => Outcome::ReadFailed(error),
+        Err(error) => Outcome::Refused(error),
     }
-    catalog(client, &cwd.to_string_lossy()).await
 }
 
 /// The catalog as its owner reports it.
@@ -91,7 +114,8 @@ pub async fn catalog(client: &mut Client, cwd: &str) -> Result<Catalog, String> 
 }
 
 /// One source's entries under its heading, in the order the owner reports
-/// them; `actions` are the kinds the daemon advertises for this area.
+/// them; `actions` are the kinds the daemon advertises for this area. An
+/// entry whose owner reports no source goes under the area's own heading.
 pub(super) fn view(catalog: &Catalog, actions: &[ActionKind]) -> ManagementView {
     let mut groups = Groups::default();
     for entry in &catalog.entries {
@@ -100,7 +124,7 @@ pub(super) fn view(catalog: &Catalog, actions: &[ActionKind]) -> ManagementView 
             states.push(EntryState::Shadowed { by: by.clone() });
         }
         groups.push(
-            &entry.source,
+            entry.source.as_deref().unwrap_or(t("skills")),
             ManagementEntry {
                 id: entry.id.clone(),
                 label: entry.name.clone(),

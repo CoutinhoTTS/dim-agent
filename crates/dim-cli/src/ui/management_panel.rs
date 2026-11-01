@@ -26,7 +26,7 @@ use std::cell::Cell;
 
 use crate::model::session::{
     ActionKind, Area, EntryState, ManagementAction, ManagementDetail, ManagementEntry,
-    ManagementRefusal, ManagementReply, ManagementReport, ManagementRequest, ManagementView,
+    ManagementRefusal, ManagementReply, ManagementRequest, ManagementResult, ManagementView,
 };
 use crate::sanitize::safe;
 use crate::ui::i18n::{t, tf};
@@ -59,6 +59,8 @@ pub const STRINGS: &[&str] = &[
     "No entries.",
     "No matching entry.",
     "Issues",
+    "sources",
+    "skills",
     "enabled",
     "disabled",
     "invalid",
@@ -96,6 +98,7 @@ pub const STRINGS: &[&str] = &[
     "The job changed since it was read; nothing was removed.",
     "The Scheduler has no area document.",
     "No scheduled job has that id.",
+    "This workspace's hook settings changed since they were read; nothing was written.",
 ];
 
 pub struct ManagementPanel {
@@ -110,6 +113,9 @@ pub struct ManagementPanel {
     busy: bool,
     /// What the last request came to.
     message: Option<Result<String, String>>,
+    /// Why the read that follows an applied action failed: the action was
+    /// done, and the area is not reported.
+    read_error: Option<String>,
 }
 
 /// A detail in place of the list, with the rows it starts at.
@@ -150,6 +156,7 @@ impl ManagementPanel {
             detail: None,
             busy: true,
             message: None,
+            read_error: None,
         }
     }
 
@@ -160,9 +167,9 @@ impl ManagementPanel {
         }
         self.busy = false;
         self.confirming = None;
+        self.read_error = None;
         match &reply.result {
-            Ok(ManagementReport::View { view, note }) => {
-                let view = &**view;
+            ManagementResult::View { view, note } => {
                 // The read that opens a panel says nothing; every later
                 // answer names what it did.
                 self.message = match (&reply.request.action, self.view.is_some()) {
@@ -175,11 +182,24 @@ impl ManagementPanel {
                 };
                 self.set_view(view.clone());
             }
-            Ok(ManagementReport::Detail(detail)) => {
+            ManagementResult::Detail(detail) => {
                 self.detail = Some(ShownDetail::new(detail.clone()));
                 self.message = None;
             }
-            Err(ManagementRefusal::Refused(error)) => {
+            ManagementResult::Applied { note, read_error } => {
+                // The action was done, so its own message stands; what failed
+                // is the read, which the footer reports once, wrapped. The
+                // view before the failed read still names what was removed.
+                let previous = self.view.take().unwrap_or_default();
+                let message = match note {
+                    Some(note) => note.clone(),
+                    None => outcome(&reply.request.action, &previous, None),
+                };
+                self.message = Some(Ok(message));
+                self.read_error = Some(read_error.clone());
+                self.list.loading();
+            }
+            ManagementResult::Refused(ManagementRefusal::Refused(error)) => {
                 self.message = Some(Err(error.clone()));
                 if self.view.is_none() {
                     // Nothing was shown yet: the list says why instead of
@@ -187,7 +207,7 @@ impl ManagementPanel {
                     self.list.set_items(Err(error.clone()), None);
                 }
             }
-            Err(ManagementRefusal::Conflict { message, view }) => {
+            ManagementResult::Refused(ManagementRefusal::Conflict { message, view }) => {
                 // The owner wrote nothing; this is the document as it now is.
                 self.message = Some(Err(message.clone()));
                 self.set_view((**view).clone());
@@ -270,6 +290,7 @@ impl ManagementPanel {
     pub fn saving(&mut self) {
         self.busy = true;
         self.message = Some(Ok(t("Working...").to_owned()));
+        self.read_error = None;
     }
 
     /// The edit could not go on: say why, and let the keys through again.
@@ -530,6 +551,11 @@ impl ManagementPanel {
                 footer.push(fg(&row, color));
             }
         }
+        if let Some(error) = &self.read_error {
+            for row in wrap_words(&safe(error), inner) {
+                footer.push(fg(&row, &p.danger));
+            }
+        }
         if !footer.is_empty() {
             footer.insert(0, String::new());
         }
@@ -705,7 +731,7 @@ fn outcome(
 mod tests {
     use super::*;
     use crate::model::session::{
-        EntryDocument, ManagementGroup, ManagementReply, ManagementReport,
+        EntryDocument, ManagementGroup, ManagementReply, ManagementResult,
     };
     use crate::ui::render::panel::{strip_escapes, visible_width};
     use crate::ui::theme::{Appearance, ColorMode, palette::terminal_palette};
@@ -779,11 +805,7 @@ mod tests {
         }
     }
 
-    fn reply(
-        area: Area,
-        action: ManagementAction,
-        result: Result<ManagementReport, ManagementRefusal>,
-    ) -> ManagementReply {
+    fn reply(area: Area, action: ManagementAction, result: ManagementResult) -> ManagementReply {
         ManagementReply {
             request: ManagementRequest { area, action },
             result,
@@ -791,14 +813,7 @@ mod tests {
     }
 
     fn view_reply(area: Area, action: ManagementAction, view: ManagementView) -> ManagementReply {
-        reply(
-            area,
-            action,
-            Ok(ManagementReport::View {
-                view: Box::new(view),
-                note: None,
-            }),
-        )
+        reply(area, action, ManagementResult::View { view, note: None })
     }
 
     fn opened() -> ManagementPanel {
@@ -938,7 +953,7 @@ mod tests {
         panel.set_result(&reply(
             Area::Skills,
             ManagementAction::List,
-            Err(ManagementRefusal::Refused(
+            ManagementResult::Refused(ManagementRefusal::Refused(
                 "This daemon cannot manage skills.".into(),
             )),
         ));
@@ -1088,7 +1103,7 @@ mod tests {
         panel.set_result(&reply(
             Area::Skills,
             ManagementAction::List,
-            Err(ManagementRefusal::Refused(
+            ManagementResult::Refused(ManagementRefusal::Refused(
                 "This daemon cannot manage skills.".into(),
             )),
         ));
@@ -1113,7 +1128,7 @@ mod tests {
                 expected_revision: "user:1".into(),
                 document: serde_json::json!({"hooks": {}}),
             },
-            Err(ManagementRefusal::Conflict {
+            ManagementResult::Refused(ManagementRefusal::Conflict {
                 message: "The user document changed since it was read.".into(),
                 view: Box::new(ManagementView {
                     revision: Some("user:2".into()),
@@ -1284,10 +1299,10 @@ mod tests {
         panel.set_result(&reply(
             Area::Skills,
             ManagementAction::Inspect { id: "job-1".into() },
-            Ok(ManagementReport::Detail(ManagementDetail {
+            ManagementResult::Detail(ManagementDetail {
                 title: "Recent runs of nightly".into(),
                 lines: vec!["2026-11-01T09:00:12.000Z  completed".into()],
-            })),
+            }),
         ));
         let text = shown(&panel, 60, 12).join("\n");
         assert!(text.contains("Recent runs of nightly"), "{text}");
@@ -1317,10 +1332,10 @@ mod tests {
         panel.set_result(&reply(
             Area::Skills,
             ManagementAction::Inspect { id: "job-1".into() },
-            Ok(ManagementReport::Detail(ManagementDetail {
+            ManagementResult::Detail(ManagementDetail {
                 title: "Recent runs of nightly".into(),
                 lines: (0..30).map(|index| format!("run {index}")).collect(),
-            })),
+            }),
         ));
         let first = shown(&panel, 40, 8);
         assert!(first.join("\n").contains("run 0"));
@@ -1429,10 +1444,10 @@ mod tests {
         panel.set_result(&reply(
             Area::Skills,
             ManagementAction::Run { id: "job-1".into() },
-            Ok(ManagementReport::View {
-                view: Box::new(catalogue()),
+            ManagementResult::View {
+                view: catalogue(),
                 note: Some("Run nightly: skipped (overlap).".into()),
-            }),
+            },
         ));
         let text = shown(&panel, 100, 20).join(" ");
         assert!(text.contains("Run nightly: skipped (overlap)."), "{text}");
@@ -1470,10 +1485,10 @@ mod tests {
         panel.set_result(&reply(
             Area::Skills,
             ManagementAction::Run { id: "job-1".into() },
-            Ok(ManagementReport::View {
-                view: Box::new(view),
+            ManagementResult::View {
+                view,
                 note: Some("Run nightly\u{1b}[2J.".into()),
-            }),
+            },
         ));
         let text = panel.render(100, 20, &palette()).join("\n");
         assert!(!text.contains("[2J"), "{text}");
@@ -1482,10 +1497,10 @@ mod tests {
         panel.set_result(&reply(
             Area::Skills,
             ManagementAction::Inspect { id: "job-1".into() },
-            Ok(ManagementReport::Detail(ManagementDetail {
+            ManagementResult::Detail(ManagementDetail {
                 title: "Recent runs of nightly\u{1b}[2J".into(),
                 lines: vec!["2026-11-01T09:00:12.000Z  completed\u{1b}[2J".into()],
-            })),
+            }),
         ));
         let text = panel.render(60, 12, &palette()).join("\n");
         assert!(!text.contains("[2J"), "{text}");

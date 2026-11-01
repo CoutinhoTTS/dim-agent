@@ -15,9 +15,8 @@ scrollback 与 fullscreen TUI 都按分类分组，分类及分类内的命令�
 退出和挂起必须完整匹配命令名或别名才执行：选择不完整匹配时只补全命令名并保留输入框。
 完整输入的命令（包括隐藏命令）仍走各自的处理流程。
 菜单中的权限入口为 `/permissions`；`/approvals` 和 `/approval` 是完整输入时仍可使用的兼容别名。
-菜单只列出斜杠命令，移除中断、steer、选择较早消息、滚动到顶部或底部等仅由按键触发的操作。
-`/keys` 仍列出这些快捷键：两种模式均支持 `Esc` 和 `Ctrl+S`；fullscreen 还支持
-`Tab`、`Home`、`End`，其中 `Home/End` 仅在草稿为空时滚动历史。
+菜单不列出运行、排队和 steer 的按键，它们只由按键触发。菜单只列出斜杠命令：选择较早消息、滚动到顶部或底部等视图操作也不列出；
+`Tab`、`Home`、`End` 保留各自的绑定。
 
 ```text
 Commands
@@ -28,13 +27,43 @@ Commands
 / + Enter          -> /exit (completion only)
 /exit + Enter      -> exit
 /permissions + Enter -> permission controls
-
-Esc     interrupt the run
-Ctrl+S  steer with the next queued message
-Tab     pick an earlier message to edit or quote (fullscreen)
-Home    scroll to the top (fullscreen, empty draft)
-End     scroll to the bottom (fullscreen, empty draft)
 ```
+
+## 运行按键与排队
+
+排队与引导和 Codex CLI 不同：运行中 `Enter` 排队，`Ctrl+S` 引导。其余运行按键与 Codex CLI 的交互一致（已在其 TUI v0.166.0 中核对）。没有运行时，`Enter` 提交。
+
+```text
+按键                 空闲                         运行中
+Enter               提交                         排队草稿；草稿为空：steer 最早的排队消息
+Tab                 选择较早消息                 选择较早消息
+                    （fullscreen）               （fullscreen）
+Shift+Left          —                            草稿为空：把最新一条排队消息取回草稿
+Esc                 保留草稿                     中断；所有排队消息按先后顺序回到草稿
+Ctrl+S              —                            草稿非空：steer 草稿；为空：steer 最早的排队消息
+Up / Down           输入历史                     输入历史
+Home / End          滚动（fullscreen，草稿为空） 滚动（fullscreen，草稿为空）
+```
+
+- 排队消息在当前运行结束后运行，每次运行一条。被 steer 的消息在当前运行的下一个轮次边界并入该运行。
+- 取回消息和中断都通过 `session.input.withdraw` 撤回消息。文字只在撤回被删除后才进入草稿。
+  已离开队列的消息不会放回，其文字也不会再次发送。
+- 中断产生的撤回先于 stop 发出，因此运行不会开始下一条排队消息。
+- `Ctrl+C` 清空草稿。`Esc` 从不清空草稿。
+
+### 队列条
+
+有消息排队时，输入框上方的队列条在带标题的边框里画出队列：按排队顺序排列，最先运行的一条在最上面，最后一行提示作用于队列的按键。运行中，草稿为空时，`Shift+Left` 把最新排队的消息取回输入框编辑。`Ctrl+S` steer 当前草稿；草稿为空时，`Ctrl+S` 或 `Enter` steer 最早的排队消息。Up/Down 仍用于输入历史。提示只在命令表里有对应命令时才写出命令名，因此它写出的 `/name` 都在本地执行，不会作为用户消息发给模型。目前没有查看队列的命令，所以提示只列按键。
+
+```text
+┌─ Queue (2) ─────────────────────────────────────┐
+│ › fix the failing test in session_host          │
+│ › then update the design note                   │
+│ shift+← edit last · ctrl+s steer now            │
+└────────────────────────────────────────────────┘
+```
+
+队列条没有显示的消息把数量加进提示：`+3 more · shift+← edit last · ctrl+s steer now`。队列条最多显示五条消息，并在队列排空时保持已达到的高度。
 
 ## 用量报告
 
@@ -61,6 +90,100 @@ End     scroll to the bottom (fullscreen, empty draft)
 
   Web search  211 / 1,500  14%
   [######----------------------------------]
+```
+
+## 目标
+
+`/goal` 读取当前显示线的目标，并通过 Goal 注册的方法写入它。方法、标记块和读取目标的规则属于
+[Goal](plugins/Goal.md#a2-session-方法)（A.2、A.3）和 [Pursuit](plugins/Pursuit.md#3-对-goal-的修改)；
+本节规定原生客户端用它们做什么。该命令作为 `session` 分类列在命令菜单里，与 `/compact` 相同。
+
+| 形式 | 调用 |
+| --- | --- |
+| `/goal` | 无调用：当前显示线上的目标，或它没有目标 |
+| `/goal OBJECTIVE` | 目标处于进行中或暂停时 `session.goal.edit`，否则 `session.goal.set` |
+| `/goal set OBJECTIVE` | `session.goal.set` |
+| `/goal edit OBJECTIVE` | `session.goal.edit` |
+| `/goal pause` | `session.goal.pause` |
+| `/goal resume` | `session.goal.resume` |
+| `/goal clear` | `session.goal.clear` |
+
+每次调用都把当前显示线写进 `branchId`，并以该输入的 `sequence` 回复。不写其他内容的形式
+（`/goal`、`pause`、`resume`、`clear`）不再接受别的词；否则行内其余内容就是目标文本，含空格。
+`set` 和 `edit` 也显式给出目标，因此恰好是这些形式词之一的目标写成 `/goal set pause`（目标为 "pause"），
+目标为 "set" 时写成 `/goal set set`。
+
+`/goal OBJECTIVE` 只在目标处于进行中或暂停时写 `edit`：状态、裁判和续跑计数保持不变，暂停中的目标仍为暂停。
+没有目标、目标没有状态、或目标已完成/受阻时，它写 `set`：完成的目标不会被编辑回工作状态，完成之后再输入
+新目标就是开始下一个目标——状态为进行中、计数从第一次续跑重新开始，该线会朝它工作。
+
+`judge` 属于 Pursuit，任何形式都不发送它：从终端设置的目标由模型判定；由评审者判定的目标经
+`/goal edit` 保持其裁判不变，因为 `edit` 只写目标文本。`/pursue` 是 Pursuit 的后续选项（§10），
+不属于本契约。
+
+**读取目标。** 客户端按 Goal A.3 的规则，从它本来就在读的分支事件中折叠目标：最新存活的
+`goal:objective` 块是目标文本，最新存活的 `goal:status` 块是状态，`clear` 退役两者，`edit` 保留裁判，
+被 InputQueue 删除的输入会使折叠跳过它的块。它不新增查询方法，也不向 Goal 询问任何东西。不带参数的 `/goal`
+打印这个折叠结果。在 `set` 与 `edit` 之间选择之前，客户端先把该线读到已发布的头部，写入之后再读一次才打印：
+显示的状态与选择的方法都来自事件，而不是从回复猜出来的状态。折叠在该线自己的开场事件处重新开始——它的 `branch/start`，
+或分叉在复制完事实之后写入的 `session/forked`——所以新开的线没有目标，分叉 Session 的 `main` 也从不显示
+复制来的目标（Goal §2、A11）。v3 客户端会收到这个开场事件，因此分叉在客户端与 Goal 里的读法一致。
+
+**Goal 未装载时。** Session 会列出它提供的方法（`session.methods`）。其中没有 `session.goal.set` 时，
+`/goal` 打印 `Goal is not available on this daemon.` 并且不做任何调用。不提供 `session.methods` 的守护进程
+按它的话处理，直到某次调用回复 `unknown_method`，那时打印同一行。任何形式都不把输入行当作消息提交：
+会写入的 `/goal` 发送的是 Goal 自己的变更输入，之后由 Goal 决定。
+
+**客户端显示什么。**
+
+```text
+> /goal
+No goal on main.
+
+> /goal Make the CLI tests pass
+Goal set on main · active
+  Make the CLI tests pass
+
+> /goal Keep the CLI tests green
+Goal edited on main · active
+  Keep the CLI tests green
+
+> /goal pause
+Goal paused on main · paused (user)
+  Keep the CLI tests green
+
+> /goal
+Goal on main · paused (user)
+  Keep the CLI tests green
+
+> /goal resume
+Goal resumed on main · active
+  Keep the CLI tests green
+
+> /goal clear
+Goal cleared on main.
+```
+
+第一行给出实际调用的方法、目标所属的线和当前状态；`edited` 表示找到已有目标、只改了目标文本的那种形式。
+目标由 Pursuit 的裁判判定时，状态后跟 `evaluator judge`。暂停状态给出原因：`user`、`interrupted`、
+`limit`、`turn failed` 或 `evaluation failed`。目标文本另起一行，按它自身的换行输出。目标已清除或该线没有目标时只打印一行。
+
+行客户端和两种终端 UI 模式都打印这些行；在终端 UI 里它们是一段报告，因此更早的报告仍能在上方读到。
+当前显示线跟随目标（进行中或暂停）时，状态区带一个短元素，完成、受阻或已清除的目标没有：
+
+```text
+ ╭──────────────────────────────────────────────────────────────────────────────╮
+ │ › _                                                                          │
+ ╰────────────────────────────── ⑂ main ▸ child work · after message 0 ─────────╯
+  AGENT  ⏵⏵ Ask (legacy)  ◎ goal active  1.8K / 256K              provider/model
+```
+
+fullscreen 把同一元素画在输入框的下边框，位于运行状态旁：
+
+```text
+ ╭──────────────────────────────────────────────────────────────────────────────╮
+ │ › _                                                                          │
+ ╰──── ◎ goal paused   ⏵⏵ Bypass   1.8K / 256K ───── ● main · after message 4 ─╯
 ```
 
 ## 提供方账号
@@ -159,6 +282,8 @@ Reset 要求确认后把两个布尔值都写为 false。Off 可保留无效的�
 
 客户端不推断方法没有报告的东西。视图需要回复里没有的事实时，由生产者报告：`skills.catalog` 报告每个条目的 `source`，`hooks.catalog` 报告用户文档及其 revision。
 
+比这些事实更旧的守护进程得到的领域缺少该事实：没有报告 `source` 的 Skill 列在领域自己的标题 `skills` 下，没有报告 `userDocument` 的 Hooks 不提供编辑。客户端从不从 id、路径或别的东西推导这类事实，所以也不需要靠特性串识别更新的契约。
+
 ### 视图
 
 条目按所有者报告的分组归类——user、project、`plugin:<id>`、内置——顺序与所有者的报告顺序一致；一个 Hook 来源本身就是一个条目，归在 `sources` 分组下。每个条目有标签、详情、它的状态（已启用、已禁用、无效、被覆盖、只读）以及它提供的动作。所有者不允许客户端写入的条目（插件所有、已锁定）不提供写入动作，详情说明原因。所有者无法使用的东西作为 issue 列在条目之后。
@@ -211,6 +336,9 @@ Esc 关闭面板。动作键要么是 Ctrl 组合键，要么是筛选从不接�
 - 重新加载丢弃草稿并重新读取；
 - 因冲突而未写入的编辑不会静默丢失：消息说明用户文本所在的文件；
 - 与更新文档无关的拒绝——文本解析失败，或所有者拒绝该文本——保留草稿的 revision，所以编辑键会带着用户的文本再次打开并再次写入；
+- 与草稿无关的回复——toggle、读取、其他领域的回复——同样保留草稿及其 revision；只有草稿自身的保存发生冲突、它所属领域重新加载，或草稿自身结算时才丢弃这一关联；
+- 一个动作算不算写入，由它背后的方法决定：toggle、save 与 Skills 的 reload（`skills.refresh`），这些方法所有者都声明为 mutating；Hooks 的 reload 是读取，因为它在 `hooks.catalog` 之前不调用任何方法；
+- 守护进程已接受的写入按已完成报告：其后的读取失败在动作之后作为读取失败报告，绝不算拒绝或冲突。CLI 先打印动作那一行，再在标准错误上打印读取错误并以 0 退出；toggle 那一行写 id，因为名字来自读取，而单独的读取失败仍然是失败。面板显示动作的消息和读取错误，在下一次读取前不保留视图，并按成功结算草稿：删除其文件并丢弃其关联；
 - 读取和写入期间禁止修改。
 
 ### 外部编辑器
@@ -294,6 +422,7 @@ Ctrl+T 立即运行所选任务，并报告所有者的答复——`launching`�
 | `dimcode session export SESSION_ID --format markdown\|json [--output PATH]` | 导出主分支；未给输出路径时写到 stdout。 |
 | `/export markdown PATH` 或 `/export json PATH` | 交互客户端空闲时把当前主分支导出到文件。 |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | 不经守护进程，把 Session 的完整 Timeline 写成带版本的 JSONL（[Timeline 导出](appserver/timeline-export.md)）；未给输出路径时写到 stdout。 |
+| `dimcode daemon vacuum [--database PATH]` | 用 SQLite `VACUUM` 重写离线原生库，回收已删除 Session 留下的页，并打印操作前后的大小（[存储格式](appserver/native-storage-format.md#sqlite-运行参数与空间回收)）；守护进程持库时失败，也不创建或升级库。 |
 | `dimcode skills list` | 经 `skills.catalog` 列出工作区的 Skills：每个条目的名称、来源、状态、文件与描述，然后是目录的 issues。 |
 | `dimcode skills enable\|disable ID` | 经 `skills.set_enabled` 启用或停用单个 Skill，然后再次报告目录。 |
 | `dimcode skills reload` | 经 `skills.refresh` 重新扫描用户与项目根，并通过 [Skills 管理界面](#管理界面)报告结果。 |
@@ -320,6 +449,7 @@ Ctrl+T 立即运行所选任务，并报告所有者的答复——`launching`�
 | `/exit` | 在空闲的交互提示符处断开并退出。 |
 | `!command` / `!!command` | 以 record/private 模式调用 Session 现有的 `shell.run`，模型回合进行中也可用。 |
 | `--permission read-only\|workspace-write\|full-access` | 为 `dimcode`、`tui`、`exec` 和 `exec resume` 选择新建或恢复的 Session 的预设（[权限控制](#权限控制)）。 |
+| `/goal [OBJECTIVE \| set OBJECTIVE \| edit OBJECTIVE \| pause \| resume \| clear]` | 在行客户端和两种终端 UI 模式下读取并写入当前显示线的目标（[目标](#目标)）。 |
 | `/permissions` | 打开独立的 File access、Tool approval 和 Process isolation 控件；空闲时管理命令规则（[权限控制](#权限控制)）。 |
 | `/approvals`、`/approval` | `/permissions` 的兼容别名，仍支持旧预设参数。 |
 
@@ -330,10 +460,43 @@ Ctrl+T 立即运行所选任务，并报告所有者的答复——`launching`�
 把该工作区记录在用户本地的 `hooks-projects` 中，所以项目文件不能启用自己
 （[Hooks](plugins/Hooks.md#a7-管理方法)）。
 
-全局的 home、工作区、server 和模型配置选项保持现有含义，放在命令前后都可以。现有的
+全局的 home、工作区、server 和模型配置选项保持现有含义，放在命令前后都可以。`--server PATH`
+指向独立的 `dim-app-server` 二进制，CLI 按它自己的名字直接运行；默认则运行本可执行文件的
+`app-server` 子命令，因此指向本可执行文件是参数错误。指向不存在的路径、程序在开始服务前
+退出，或未及时开始服务时，也按同一要求报错，除非它留下了[启动说明](#守护进程启动失败)。现有的
 login/account/logout、models、MCP 和 daemon 命令仍然可用。现有的 `--prompt`、管道 stdin 和
 `--resume` 调用行为不变；`exec resume` 也接受同样的全局选项。重复给出 Session 或提示词是参数错误。
 `--json` 是 `exec` 的选项，`tui` 需要终端。help/version 与参数错误不会启动守护进程。
+
+### 守护进程启动失败
+
+所有启动守护进程的入口共用 `connect_inner` 里的客户端启动。守护进程是 detached 的，
+stderr 追加到 `daemon.log`，所以每次启动的一份说明是唯一既不解析历史、也不依赖客户端
+可能关闭的管道的通道。启动前 CLI 删除 `<native home>/dimcode.sqlite.startup`；原生 home
+是守护进程自己的 home，即 `<home>/rust`。子进程在客户端连上之前退出时，CLI 读取这份
+说明（最多 16 KiB，且只接受普通文件；Unix 上还要求属于当前用户、组和其他用户都没有
+权限）。Unix 上这套权限就是说明的保护，因为守护进程以 0600 写它；Windows 上 CLI 只
+检查普通文件、大小和首行，边界是 home 目录继承的 ACL。CLI 要求首行是
+`dimcode-startup-failure v1 pid=<child pid>`，去掉正文中除换行和制表符以外的控制字符，
+把正文作为命令的错误返回，并在后面加上 `Details: <native home>/daemon.log`。存储门禁在
+诊断出不兼容时写这份说明，写明库、标记、守护进程支持的格式、库是更新、标记与结构
+不符、无法识别还是过旧，以及恢复办法（[原生存储格式 §
+启动不兼容诊断](../../design/appserver/native-storage-format.md#启动不兼容诊断)）。
+没有匹配的说明时，内嵌守护进程保留现有的 `App Server exited (<status>); see ...`，
+`--server` 指定的程序则报出该选项必须指向独立的 `dim-app-server` 二进制。失败的启动读完后
+删除说明；连接成功也删除任何说明。CLI 从不打印 `daemon.log`，从不删除、重建、降级或
+改写库，并以 1 退出。开发说明继续使用 `./dev` 和它的隔离 home；终端说明本身只给兼容
+构建或 `--home PATH` 两条路。
+
+```text
+$ dima
+Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
+  Store format: v30
+  Daemon format: v29
+  This daemon cannot read the store. Existing data was preserved.
+  Run a build supporting v30, or use --home PATH for a separate environment.
+  Details: /Users/me/.dimcode-alpha/rust/daemon.log
+```
 
 交互式导出解析器读取格式词，把行的其余部分当作字面路径（包括空格），不做 shell 求值或引号展开。
 缺少路径或格式不支持时打印用法并回到提示符，不提交输入。`/exit` 不带参数。只拦截这些确切的命令名；
@@ -564,7 +727,9 @@ Assistant: ...
 [permission] main: File access = Workspace read/write  <- 由其他客户端修改
 ```
 
-没有状态行：滚动回显客户端没有常驻区域，编辑器的提示行是按终端宽度截断的固定帮助文本。
+滚动回显客户端在编辑器下方画一行状态行：代理标记与工具审批方式（旧策略下为 `Ask (legacy)`）、目标标记、
+上下文对窗口的占用，以及一个显示当前状态的槽位——通知、需要回答或审批、`esc interrupt` 或后台任务数。
+模型（放得下时连同推理强度）靠右对齐；整行按终端宽度截断。
 
 ### 无头执行
 

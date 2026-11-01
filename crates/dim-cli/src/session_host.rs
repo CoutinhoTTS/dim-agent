@@ -915,7 +915,7 @@ impl Worker {
 
     /// Stores the draft's pastes as attachments, then submits its text
     /// and blocks in order.
-    async fn submit_draft(&mut self, parts: Vec<DraftPart>) {
+    async fn submit_draft(&mut self, parts: Vec<DraftPart>, mode: &str) {
         use dim_agent_types::ContentBlock;
         let mut content = Vec::new();
         let mut text = String::new();
@@ -963,7 +963,7 @@ impl Worker {
             "sessionId": self.session_id,
             "branchId": self.focus,
             "submissionId": uuid::Uuid::new_v4().to_string(),
-            "mode": "queue",
+            "mode": mode,
         });
         match content.as_slice() {
             [ContentBlock::Text { text }] => params["text"] = json!(text),
@@ -975,15 +975,15 @@ impl Worker {
 
     async fn command(&mut self, command: Command) -> crate::Result<()> {
         if self.session_id.is_empty()
-            && matches!(command, Command::Submit(_) | Command::SubmitDraft(_))
+            && matches!(command, Command::Submit(..) | Command::SubmitDraft(..))
             && let Err(error) = self.start_session().await
         {
             self.send(Update::Notice(no_session(&error)));
             return Ok(());
         }
         match command {
-            Command::Submit(text) => self.submit(text, "queue").await,
-            Command::SubmitDraft(parts) => self.submit_draft(parts).await,
+            Command::Submit(text, mode) => self.submit(text, mode.as_str()).await,
+            Command::SubmitDraft(parts, mode) => self.submit_draft(parts, mode.as_str()).await,
             Command::FocusLine(line) => self.focus_line(line).await,
             Command::CloseSide => {
                 self.side = None;
@@ -1193,11 +1193,19 @@ impl Worker {
             Command::Resume(session_id) => {
                 self.attach(session_id, SwitchKind::Resumed).await?;
             }
-            Command::ListSessions { id, query, cursor } => {
+            Command::ListSessions {
+                id,
+                query,
+                cursor,
+                show_acp,
+            } => {
                 self.cancel_catalog().await?;
                 let paged = self.client.offers("session.catalog");
                 let (method, params) = if paged {
                     let mut params = json!({"limit":50,"query":query,"withPreview":true});
+                    if show_acp && self.client.offers("session.catalog.origins") {
+                        params["withAcpSessions"] = json!(true);
+                    }
                     if let Some(cursor) = cursor {
                         params["cursor"] = cursor.into();
                     }
@@ -1249,6 +1257,7 @@ impl Worker {
                 }
             }
             Command::Compact => self.compact().await,
+            Command::Goal(request) => self.goal(request).await,
             Command::ToggleWeb => {
                 let result: crate::Result<WebToggled> =
                     self.client.typed("web.toggle", json!({})).await;
@@ -1708,6 +1717,10 @@ impl Worker {
                     Ok(withdrawn) if withdrawn.status == "notHeld" => {
                         self.send(Update::Notice(QUEUE_LEFT.into()))
                     }
+                    Ok(withdrawn) if withdrawn.status == "deleted" && action == "withdraw" => self
+                        .send(Update::Withdrawn {
+                            input_id: input_id.clone(),
+                        }),
                     Ok(_) => {}
                     Err(error) => self.send(Update::Notice(error.to_string())),
                 }
@@ -1774,6 +1787,70 @@ impl Worker {
         match self.client.send("session.context.compact", params).await {
             Ok(request) => self.compact_requests.push(request),
             Err(error) => self.send(Update::Compacted(CompactReply::Failed(error.to_string()))),
+        }
+    }
+
+    /// `/goal`: the shown line's goal, written by the method the request
+    /// names. The line is read before the call is chosen, so a fold the
+    /// interface has not caught up with cannot pick the wrong method; a
+    /// write is followed by the events it produced, so the report shows the
+    /// state after it.
+    async fn goal(&mut self, request: crate::goal::Request) {
+        let branch = self.focus.clone();
+        if !crate::goal::available(&mut self.client, &self.session_id).await {
+            self.report(crate::goal::NOT_AVAILABLE.into(), true);
+            return;
+        }
+        if let Err(error) = self.read_branch(&branch).await {
+            self.report(format!("Goal: {error}"), true);
+            return;
+        }
+        let call = crate::goal::call(&request, self.shown().goal().as_ref());
+        if let Some(call) = call {
+            let mut params = json!({"sessionId": self.session_id, "branchId": branch});
+            if let Some(objective) = crate::goal::objective(&request) {
+                params["objective"] = json!(objective);
+            }
+            if let Err(error) = self.client.rpc(call.method(), params).await {
+                let text = match crate::client::app_error(&error) {
+                    Some("unknown_method") => crate::goal::NOT_AVAILABLE.to_owned(),
+                    _ => format!("Goal: {error}"),
+                };
+                self.report(text, true);
+                return;
+            }
+            if let Err(error) = self.read_branch(&branch).await {
+                self.report(format!("Goal: {error}"), true);
+                return;
+            }
+        }
+        let text = crate::goal::report(&branch, call, self.shown().goal().as_ref()).join("\n");
+        self.report(text, false);
+    }
+
+    /// Applies the portion of `branch` the interface has not folded yet, from
+    /// its applied sequence to the published head.
+    async fn read_branch(&mut self, branch: &str) -> crate::Result<()> {
+        let mut after = self.cursors.get(branch).copied().unwrap_or(0);
+        let mut through = None;
+        loop {
+            let mut params = json!({
+                "sessionId": self.session_id, "branchId": branch,
+                "after": after, "limit": HISTORY_PAGE,
+            });
+            if let Some(through) = through {
+                params["through"] = json!(through);
+            }
+            let page: crate::wire::History = self.client.typed("session.history", params).await?;
+            through = Some(page.through);
+            let next = page.next(after, through)?;
+            for value in page.events {
+                self.apply(branch, serde_json::from_value(value)?);
+            }
+            match next {
+                Some(next) => after = next,
+                None => return Ok(()),
+            }
         }
     }
 
@@ -3346,6 +3423,7 @@ impl Worker {
                             cwd: session.cwd,
                             updated_at: session.updated_at,
                             model: session.model.model_id,
+                            origin: session.origin,
                         })
                         .collect(),
                     next_cursor,
@@ -3967,6 +4045,9 @@ struct SessionSummary {
     #[serde(default)]
     preview: Option<String>,
     title: Option<String>,
+    /// The creation origin, from a daemon that reports one (#557).
+    #[serde(default)]
+    origin: Option<String>,
 }
 
 fn execution_snapshot(value: serde_json::Value) -> Result<ExecutionSnapshot, String> {

@@ -74,10 +74,27 @@ impl<'de> serde::Deserialize<'de> for SandboxBackend {
     }
 }
 
+/// Whether a submitted message starts after the current run (`Queue`) or
+/// joins the run at its next turn boundary (`Steer`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmitMode {
+    Queue,
+    Steer,
+}
+
+impl SubmitMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queue => "queue",
+            Self::Steer => "steer",
+        }
+    }
+}
+
 pub enum Command {
-    Submit(String),
+    Submit(String, SubmitMode),
     /// A draft with pastes to store or content blocks to send.
-    SubmitDraft(Vec<DraftPart>),
+    SubmitDraft(Vec<DraftPart>, SubmitMode),
     Stop,
     /// Answer an approval request.
     Approval {
@@ -182,6 +199,8 @@ pub enum Command {
         id: String,
         query: String,
         cursor: Option<String>,
+        /// The "Show ACP sessions" preference the picker was opened with.
+        show_acp: bool,
     },
     CloseSessions,
     /// List the models that can be chosen.
@@ -202,6 +221,8 @@ pub enum Command {
     Usage,
     /// `/compact`: ask the shown line to compact its context.
     Compact,
+    /// `/goal`: show, set, edit, pause, resume or clear the shown line's goal.
+    Goal(crate::goal::Request),
     SetPermission(crate::permission::Change),
     /// List the providers of the `/connect` panel.
     ListProviders,
@@ -396,26 +417,34 @@ pub enum ActionKind {
     Inspect,
 }
 
-/// What a management request came to: the area after it, what an inspect
-/// found, or why the area could not be read or the action refused.
+/// A management request and what it came to.
 #[derive(Debug, Clone)]
 pub struct ManagementReply {
     pub request: ManagementRequest,
-    pub result: Result<ManagementReport, ManagementRefusal>,
+    pub result: ManagementResult,
 }
 
 /// What a management request came to.
 #[derive(Debug, Clone, PartialEq)]
-pub enum ManagementReport {
-    /// The area as its owner now reports it, and what the owner answered
-    /// when that is more than the view: a run's state, or the entry an add
-    /// created.
+pub enum ManagementResult {
+    /// The area as its owner reports it after the request, and what the
+    /// owner answered beyond the view: a run's state, or the entry an add
+    /// created. A read has no note.
     View {
-        view: Box<ManagementView>,
+        view: ManagementView,
         note: Option<String>,
     },
-    /// What an inspect found: a title and its lines, not a view.
+    /// The action was applied and the read that reports the area failed:
+    /// the change was made, the owner's answer is kept, and `read_error`
+    /// says why the area is not shown.
+    Applied {
+        note: Option<String>,
+        read_error: String,
+    },
+    /// What an inspect found, in place of the list.
     Detail(ManagementDetail),
+    /// Nothing was applied, and this is why.
+    Refused(ManagementRefusal),
 }
 
 /// One entry's read-only detail, in place of the list.
@@ -428,7 +457,7 @@ pub struct ManagementDetail {
 }
 
 /// Why a management request did not produce a view.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ManagementRefusal {
     /// The owner kept the stored document because it changed since the client
     /// read it. Nothing was written, the area was read again, and this is what
@@ -754,6 +783,9 @@ pub struct SessionItem {
     pub cwd: String,
     pub updated_at: u64,
     pub model: String,
+    /// The creation origin the daemon reports (`client`, `acp`, `internal`,
+    /// `unknown`); absent from a daemon that does not report one.
+    pub origin: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -788,6 +820,11 @@ pub enum CompactReply {
 
 #[allow(dead_code)]
 pub enum Update {
+    /// A queued input the TUI withdrew (`Command::InputControl` with action
+    /// `withdraw`) is deleted: its text goes back into the draft.
+    Withdrawn {
+        input_id: String,
+    },
     /// The session's adopted configuration: `provider / model`, and the
     /// reasoning effort it sends when it carries one, label the status line.
     Ready(Configuration),
@@ -934,8 +971,8 @@ pub trait SessionPort {
     fn drain(&self) -> Vec<Update>;
     /// Closes the connection and gives the worker a moment to wind down.
     fn shutdown(self: Box<Self>);
-    fn submit(&self, text: String) {
-        self.send(Command::Submit(text));
+    fn submit(&self, text: String, mode: SubmitMode) {
+        self.send(Command::Submit(text, mode));
     }
     fn stop(&self) {
         self.send(Command::Stop);

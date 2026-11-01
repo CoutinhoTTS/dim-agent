@@ -58,7 +58,7 @@ pub struct Hook {
     pub state: String,
 }
 
-/// Why a Hooks action did not happen.
+/// Why a Hooks action did not produce a catalog.
 pub enum Failure {
     /// The stored document changed since it was read: nothing was written,
     /// and this is the catalog as it now is.
@@ -66,6 +66,8 @@ pub enum Failure {
         message: String,
         catalog: Box<Catalog>,
     },
+    /// The action was applied and the read that follows failed.
+    ReadFailed(String),
     /// The daemon or the owner refused it: nothing was written.
     Refused(String),
 }
@@ -73,15 +75,24 @@ pub enum Failure {
 impl std::fmt::Display for Failure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Conflict { message, .. } | Self::Refused(message) => formatter.write_str(message),
+            Self::Conflict { message, .. } | Self::ReadFailed(message) | Self::Refused(message) => {
+                formatter.write_str(message)
+            }
         }
     }
 }
 
-/// The owner refused the text for a reason a newer read does not fix; the
-/// client keeps its draft at that revision.
-fn refusal(error: &crate::Error) -> Failure {
-    Failure::Refused(error.to_string())
+/// What a write the owner refused over a newer document leaves: nothing was
+/// written, and the area is read again so the next write starts from what is
+/// stored now.
+async fn conflict(client: &mut Client, cwd: &str, message: &'static str) -> Failure {
+    match catalog(client, cwd).await {
+        Ok(catalog) => Failure::Conflict {
+            message: t(message).to_owned(),
+            catalog: Box::new(catalog),
+        },
+        Err(error) => Failure::Refused(error),
+    }
 }
 
 /// Performs `action`, then reads the area back as its owner reports it.
@@ -91,6 +102,7 @@ pub async fn apply(
     cwd: &Path,
 ) -> Result<Catalog, Failure> {
     let cwd = cwd.to_string_lossy().into_owned();
+    let mut applied = false;
     match action {
         ManagementAction::List | ManagementAction::Reload => {}
         ManagementAction::Toggle { id, enabled } => {
@@ -100,7 +112,7 @@ pub async fn apply(
                 )));
             }
             let current = catalog(client, &cwd).await.map_err(Failure::Refused)?;
-            client
+            let toggled = client
                 .rpc(
                     "hooks.set_enabled",
                     json!({
@@ -109,8 +121,23 @@ pub async fn apply(
                         "expectedRevision": current.projects_revision,
                     }),
                 )
-                .await
-                .map_err(|error| refusal(&error))?;
+                .await;
+            if let Err(error) = toggled {
+                // A conflict is its own case, as for a save: nothing was
+                // written, and the area is read again.
+                if crate::client::app_error(&error) != Some("hooks_conflict") {
+                    return Err(Failure::Refused(error.to_string()));
+                }
+                return Err(
+                    conflict(
+                        client,
+                        &cwd,
+                        "This workspace's hook settings changed since they were read; nothing was written.",
+                    )
+                    .await,
+                );
+            }
+            applied = true;
         }
         ManagementAction::Save {
             expected_revision,
@@ -128,17 +155,18 @@ pub async fn apply(
                 // the stale revision, and the area is read again so the next
                 // edit starts from the stored document.
                 if crate::client::app_error(&error) != Some("hooks_conflict") {
-                    return Err(refusal(&error));
+                    return Err(Failure::Refused(error.to_string()));
                 }
-                let catalog = catalog(client, &cwd).await.map_err(Failure::Refused)?;
-                return Err(Failure::Conflict {
-                    message: t(
+                return Err(
+                    conflict(
+                        client,
+                        &cwd,
                         "The user document changed since it was read; nothing was written. Your next edit opens the current document.",
                     )
-                    .to_owned(),
-                    catalog: Box::new(catalog),
-                });
+                    .await,
+                );
             }
+            applied = true;
         }
         // `supported` refuses a kind this area does not have before `apply`.
         ManagementAction::Add { .. }
@@ -148,7 +176,13 @@ pub async fn apply(
             return Err(Failure::Refused("Hooks has no such action.".into()));
         }
     }
-    catalog(client, &cwd).await.map_err(Failure::Refused)
+    catalog(client, &cwd).await.map_err(|error| {
+        if applied {
+            Failure::ReadFailed(error)
+        } else {
+            Failure::Refused(error)
+        }
+    })
 }
 
 /// The catalog as its owner reports it.
@@ -169,14 +203,16 @@ pub(super) fn view(catalog: &Catalog, available: &[ActionKind]) -> ManagementVie
             _ => &[],
         };
         let mut states = Vec::new();
-        if source.state != "ok" {
+        // A source its owner reports as missing has no document to use, which
+        // the detail says; only one it reports as invalid could not be used.
+        if source.state == "invalid" {
             states.push(EntryState::Invalid);
         }
         if !matches!(source.source.as_str(), "user" | PROJECT) {
             states.push(EntryState::ReadOnly);
         }
         groups.push(
-            "sources",
+            t("sources"),
             ManagementEntry {
                 id: source.source.clone(),
                 label: source.source.clone(),

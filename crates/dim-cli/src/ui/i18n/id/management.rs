@@ -4,6 +4,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "No entries." => "Tidak ada entri.",
         "No matching entry." => "Tidak ada entri yang cocok.",
         "Issues" => "Masalah",
+        "sources" => "Sumber",
+        "skills" => "Skill",
         "enabled" => "aktif",
         "shadowed by {name}" => "tertutup oleh {name}",
         "Reloaded." => "Dimuat ulang.",
@@ -65,6 +67,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The Scheduler has no area document." => "Penjadwal tidak memiliki dokumen area.",
         "No scheduled job has that id." => "Tidak ada tugas terjadwal dengan id itu.",
+        "This workspace's hook settings changed since they were read; nothing was written." => {
+            "Pengaturan hook ruang kerja ini berubah sejak dibaca; tidak ada yang ditulis."
+        }
         _ => return None,
     })
 }

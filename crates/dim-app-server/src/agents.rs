@@ -1,7 +1,7 @@
 use crate::{
     ServerConfig,
     agent_records::AgentRecords,
-    protocol::AgentInfo,
+    protocol::{AgentInfo, SessionOrigin},
     settings::SettingsService,
     storage::{SessionStore, SqliteStorage},
 };
@@ -633,7 +633,12 @@ impl AgentIndex {
             if through > head {
                 return Err(AgentError::InvalidInput("future Timeline sequence".into()));
             }
-            return Ok((through, store.read_page(id, after, limit, through).await?));
+            return Ok((
+                through,
+                store
+                    .read_page_without_request_bodies(id, after, limit, through)
+                    .await?,
+            ));
         }
         let (_, session) = self
             .session(id)
@@ -690,6 +695,45 @@ impl AgentIndex {
             }
         }
         Ok(starts)
+    }
+    /// The error a history window answers without the native Session store.
+    fn no_history_store() -> AgentError {
+        AgentError::InvalidInput("history windows require the native Session store".into())
+    }
+    /// Whether this index has the native Session store the history window
+    /// reads (session-history-window §5.3).
+    pub(crate) fn has_session_store(&self) -> bool {
+        self.session_store.is_some()
+    }
+    /// The newest turn at `through` and the window's first sequence.
+    pub(crate) async fn turn_window(
+        &self,
+        id: &str,
+        branch: &str,
+        through: u64,
+    ) -> dim_agent_runtime::Result<crate::storage::TurnWindow> {
+        self.session_store
+            .as_ref()
+            .ok_or_else(Self::no_history_store)?
+            .turn_window(id, branch, through)
+            .await
+    }
+    /// The newest events below `before` in `window_start..=through`, whole
+    /// batches at both ends.
+    pub(crate) async fn read_page_before(
+        &self,
+        id: &str,
+        branch: &str,
+        before: u64,
+        limit: usize,
+        through: u64,
+        window_start: u64,
+    ) -> dim_agent_runtime::Result<Vec<dim_agent_runtime::StoredEvent>> {
+        self.session_store
+            .as_ref()
+            .ok_or_else(Self::no_history_store)?
+            .read_page_before(id, branch, before, limit, through, window_start)
+            .await
     }
     fn slot(&self, id: &str) -> Arc<SessionSlot> {
         self.directory
@@ -932,6 +976,13 @@ impl AgentIndex {
             }),
             (None, true) => Some(crate::storage::TitleFields::default()),
         };
+        let (origin, parent_session_id) = match (&self.session_store, version >= 3) {
+            (Some(store), true) => match store.creation_record(session.id()).await {
+                Ok((origin, parent)) => (Some(origin), parent),
+                Err(_) => (None, None),
+            },
+            _ => (None, None),
+        };
         Ok(crate::protocol::SessionInfo {
             session_id: session.id().to_owned(),
             cwd: session.config().cwd.clone(),
@@ -944,6 +995,8 @@ impl AgentIndex {
             sequence: session.sequence("main")?,
             attached_clients: 0,
             agent_id: (version >= 3).then(|| host.agent_id.clone()),
+            origin,
+            parent_session_id,
             title,
         })
     }
@@ -980,7 +1033,7 @@ impl AgentIndex {
                 .as_ref()
                 .ok_or_else(|| AgentError::Closed(id.into()))?;
             let events = store
-                .read_page(id, 0, Self::SUMMARY_SCAN_LIMIT, through)
+                .read_page_without_request_bodies(id, 0, Self::SUMMARY_SCAN_LIMIT, through)
                 .await?;
             let last = store
                 .timeline_store()
@@ -1030,6 +1083,7 @@ impl AgentIndex {
         config: &SessionConfig,
         version: u32,
         leader: Option<&str>,
+        origin: SessionOrigin,
     ) -> Option<(String, BoxFuture<'static, dim_agent_runtime::Result<()>>)> {
         let store = self.session_store.clone()?;
         let stored = config.clone();
@@ -1038,7 +1092,14 @@ impl AgentIndex {
         Some(self.prepared(config.cwd.clone(), move |id| {
             Box::pin(async move {
                 store
-                    .create_owned_session(&id, &stored, &agent_id, version, leader.as_deref())
+                    .create_owned_session(
+                        &id,
+                        &stored,
+                        &agent_id,
+                        version,
+                        leader.as_deref(),
+                        origin,
+                    )
                     .await
             })
         }))
@@ -1078,8 +1139,12 @@ impl AgentIndex {
         config: SessionConfig,
         version: u32,
         leader: Option<&str>,
+        origin: SessionOrigin,
     ) -> dim_agent_runtime::Result<Session> {
-        match self.prepare_session(host, &config, version, leader).await {
+        match self
+            .prepare_session(host, &config, version, leader, origin)
+            .await
+        {
             Some((id, prepare)) => {
                 let creation = host
                     .agent

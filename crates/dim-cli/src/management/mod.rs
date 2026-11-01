@@ -22,7 +22,7 @@ use std::path::Path;
 use crate::client::Client;
 use crate::model::session::{
     ActionKind, Area, ManagementAction, ManagementEntry, ManagementGroup, ManagementRefusal,
-    ManagementReport, ManagementRequest,
+    ManagementRequest, ManagementResult,
 };
 
 /// One area's management methods: the read that reports the area, and the
@@ -176,41 +176,55 @@ pub async fn apply(
     client: &mut Client,
     request: &ManagementRequest,
     cwd: &Path,
-) -> Result<ManagementReport, ManagementRefusal> {
-    supported(client, request).map_err(ManagementRefusal::Refused)?;
+) -> ManagementResult {
+    if let Err(error) = supported(client, request) {
+        return ManagementResult::Refused(ManagementRefusal::Refused(error));
+    }
     let actions = actions(client, request.area);
     match request.area {
-        Area::Skills => {
-            let catalog = skills::apply(client, &request.action, cwd)
-                .await
-                .map_err(ManagementRefusal::Refused)?;
-            Ok(ManagementReport::View {
-                view: Box::new(skills::view(&catalog, &actions)),
+        Area::Skills => match skills::apply(client, &request.action, cwd).await {
+            skills::Outcome::Catalog(catalog) => ManagementResult::View {
+                view: skills::view(&catalog, &actions),
                 note: None,
-            })
-        }
+            },
+            skills::Outcome::ReadFailed(error) => ManagementResult::Applied {
+                note: None,
+                read_error: error,
+            },
+            skills::Outcome::Refused(message) => {
+                ManagementResult::Refused(ManagementRefusal::Refused(message))
+            }
+        },
         Area::Hooks => match hooks::apply(client, &request.action, cwd).await {
-            Ok(catalog) => Ok(ManagementReport::View {
-                view: Box::new(hooks::view(&catalog, &actions)),
+            Ok(catalog) => ManagementResult::View {
+                view: hooks::view(&catalog, &actions),
                 note: None,
-            }),
-            Err(hooks::Failure::Refused(message)) => Err(ManagementRefusal::Refused(message)),
+            },
+            Err(hooks::Failure::ReadFailed(error)) => ManagementResult::Applied {
+                note: None,
+                read_error: error,
+            },
+            Err(hooks::Failure::Refused(message)) => {
+                ManagementResult::Refused(ManagementRefusal::Refused(message))
+            }
             Err(hooks::Failure::Conflict { message, catalog }) => {
-                Err(ManagementRefusal::Conflict {
+                ManagementResult::Refused(ManagementRefusal::Conflict {
                     message,
                     view: Box::new(hooks::view(&catalog, &actions)),
                 })
             }
         },
         Area::Scheduled => match scheduler::apply(client, &request.action).await {
-            Ok(scheduler::Answer::Jobs { catalog, note }) => Ok(ManagementReport::View {
-                view: Box::new(scheduler::view(&catalog, &actions, cwd)),
+            Ok(scheduler::Answer::Jobs { catalog, note }) => ManagementResult::View {
+                view: scheduler::view(&catalog, &actions, cwd),
                 note,
-            }),
-            Ok(scheduler::Answer::Detail(detail)) => Ok(ManagementReport::Detail(detail)),
-            Err(scheduler::Failure::Refused(message)) => Err(ManagementRefusal::Refused(message)),
+            },
+            Ok(scheduler::Answer::Detail(detail)) => ManagementResult::Detail(detail),
+            Err(scheduler::Failure::Refused(message)) => {
+                ManagementResult::Refused(ManagementRefusal::Refused(message))
+            }
             Err(scheduler::Failure::Conflict { message, catalog }) => {
-                Err(ManagementRefusal::Conflict {
+                ManagementResult::Refused(ManagementRefusal::Conflict {
                     message,
                     view: Box::new(scheduler::view(&catalog, &actions, cwd)),
                 })

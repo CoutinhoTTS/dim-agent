@@ -4,6 +4,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "No entries." => "No hay entradas.",
         "No matching entry." => "Ninguna entrada coincide.",
         "Issues" => "Problemas",
+        "sources" => "Fuentes",
+        "skills" => "Skills",
         "enabled" => "activado",
         "shadowed by {name}" => "ocultado por {name}",
         "Reloaded." => "Recargado.",
@@ -67,6 +69,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The Scheduler has no area document." => "El Programador no tiene documento de área.",
         "No scheduled job has that id." => "Ninguna tarea programada tiene ese id.",
+        "This workspace's hook settings changed since they were read; nothing was written." => {
+            "La configuración de hooks de este espacio de trabajo cambió desde que se leyó; no se escribió nada."
+        }
         _ => return None,
     })
 }

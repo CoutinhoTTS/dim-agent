@@ -4,6 +4,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "No entries." => "Aucune entrée.",
         "No matching entry." => "Aucune entrée correspondante.",
         "Issues" => "Problèmes",
+        "sources" => "Sources",
+        "skills" => "Skills",
         "enabled" => "activé",
         "shadowed by {name}" => "masqué par {name}",
         "Reloaded." => "Rechargé.",
@@ -67,6 +69,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The Scheduler has no area document." => "Le planificateur n'a pas de document de domaine.",
         "No scheduled job has that id." => "Aucune tâche planifiée n'a cet id.",
+        "This workspace's hook settings changed since they were read; nothing was written." => {
+            "Les réglages des hooks de cet espace de travail ont changé depuis leur lecture ; rien n'a été écrit."
+        }
         _ => return None,
     })
 }

@@ -4,6 +4,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "No entries." => "항목이 없습니다.",
         "No matching entry." => "일치하는 항목이 없습니다.",
         "Issues" => "문제",
+        "sources" => "소스",
+        "skills" => "스킬",
         "enabled" => "활성",
         "shadowed by {name}" => "{name}에 의해 가려짐",
         "Reloaded." => "다시 로드했습니다.",
@@ -65,6 +67,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The Scheduler has no area document." => "스케줄러에는 영역 문서가 없습니다.",
         "No scheduled job has that id." => "해당 id의 예약 작업이 없습니다.",
+        "This workspace's hook settings changed since they were read; nothing was written." => {
+            "이 작업 공간의 훅 설정이 읽은 뒤에 변경되었습니다. 아무것도 쓰지 않았습니다."
+        }
         _ => return None,
     })
 }

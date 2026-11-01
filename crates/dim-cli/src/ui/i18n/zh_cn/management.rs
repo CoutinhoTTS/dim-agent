@@ -4,6 +4,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "No entries." => "没有条目。",
         "No matching entry." => "没有匹配的条目。",
         "Issues" => "问题",
+        "sources" => "来源",
+        "skills" => "技能",
         "enabled" => "已启用",
         "shadowed by {name}" => "被 {name} 覆盖",
         "Reloaded." => "已重新加载。",
@@ -61,6 +63,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The Scheduler has no area document." => "调度器没有领域文档。",
         "No scheduled job has that id." => "没有该 id 的定时任务。",
+        "This workspace's hook settings changed since they were read; nothing was written." => {
+            "此工作区的钩子设置已在读取后发生变化；本次没有写入。"
+        }
         _ => return None,
     })
 }

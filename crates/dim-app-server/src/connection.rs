@@ -748,7 +748,11 @@ impl Connection {
                         match rpc
                             .index
                             .session_catalog(
-                                Catalog::default(),
+                                Catalog {
+                                    with_internal: true,
+                                    with_acp_sessions: true,
+                                    ..Catalog::default()
+                                },
                                 filter,
                                 self.protocol_version(),
                                 cancel,
@@ -815,6 +819,8 @@ impl Connection {
                                 attached_clients: self.hub.attached_clients(s.id()),
                                 agent_id: (self.protocol_version() >= 3)
                                     .then(|| host.agent_id.clone()),
+                                origin: None,
+                                parent_session_id: None,
                                 title: (self.protocol_version() >= 3)
                                     .then(crate::storage::TitleFields::default),
                             })
@@ -1118,12 +1124,12 @@ impl Connection {
                                 model_id,
                             }),
                             Some(PathBuf::from(&session.config().cwd)),
-                            p.model_preferences,
+                            p.model_preferences.values(),
                         )
                         .await?
                     }
                     (None, None) => {
-                        if p.model_preferences == crate::provider::ModelPreferences::default() {
+                        if p.model_preferences.is_empty() {
                             return Err(RpcError::invalid("Supply at least one model preference"));
                         }
                         if rpc.config.product_home.is_none() {
@@ -1148,7 +1154,7 @@ impl Connection {
                             .get::<crate::provider::ProviderService>()
                             .ok_or_else(RpcError::reloading)?;
                         provider
-                            .apply_preferences(&current, p.model_preferences, &rpc.unloading)
+                            .apply_preferences(&current, &p.model_preferences, &rpc.unloading)
                             .await
                             .map_err(provider_error)?
                     }
@@ -1285,9 +1291,18 @@ impl Connection {
         if let Some(interactive) = params.interactive {
             config.interactive = interactive;
         }
+        let origin = match params.origin {
+            None | Some(SessionOrigin::Client) => SessionOrigin::Client,
+            Some(SessionOrigin::Acp) => SessionOrigin::Acp,
+            Some(_) => {
+                return Err(RpcError::invalid(
+                    "a client may declare client or acp as a Session origin",
+                ));
+            }
+        };
         let session = rpc
             .index
-            .create_session(&host, config, self.protocol_version(), None)
+            .create_session(&host, config, self.protocol_version(), None, origin)
             .await
             .map_err(RpcError::from)?;
         rpc.index.retain_versions();

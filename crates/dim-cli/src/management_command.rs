@@ -18,7 +18,7 @@ use crate::client::Client;
 use crate::management::{self, editor, hooks, scheduler, skills};
 use crate::mcp_command::print_report;
 use crate::model::session::{
-    ActionKind, Area, ManagementAction, ManagementReport, ManagementRequest,
+    ActionKind, Area, ManagementAction, ManagementRequest, ManagementResult,
 };
 use crate::sanitize::safe;
 
@@ -52,12 +52,12 @@ pub async fn edit(
         .into());
     }
     // Refuse a write the daemon cannot serve before the user edits.
-    management::supports_kind(client, area, ActionKind::Edit).map_err(failed)?;
+    management::supports_kind(client, area, ActionKind::Edit)?;
     let (revision, document) = read(client, options, area, id.as_deref()).await?;
     let text = serde_json::to_string_pretty(&document)
         .map(|text| format!("{text}\n"))
         .map_err(|error| error.to_string())?;
-    let draft = editor::Draft::open(&options.home, area, &text).map_err(failed)?;
+    let draft = editor::Draft::open(&options.home, area, &text)?;
     let kept = draft.path().display().to_string();
     let mut command = editor::command(draft.path());
     let program = command.get_program().to_string_lossy().into_owned();
@@ -110,13 +110,13 @@ pub async fn set(
 ) -> Result<i32> {
     // Refuse a write the daemon cannot serve before the input can hold the
     // call: the same check `edit` makes before it opens the editor.
-    management::supports_kind(client, area, ActionKind::Edit).map_err(failed)?;
+    management::supports_kind(client, area, ActionKind::Edit)?;
     // The input first and the revision second, so the revision is read
     // immediately before the write however long the input takes.
     let text = read_text(path)?;
     let (revision, stored) = read(client, options, area, id.as_deref()).await?;
     if path == Path::new("-") {
-        let draft = editor::Draft::open(&options.home, area, &text).map_err(failed)?;
+        let draft = editor::Draft::open(&options.home, area, &text)?;
         let kept = draft.path().display().to_string();
         let outcome = write(
             client,
@@ -156,10 +156,10 @@ pub async fn set(
 pub async fn add(client: &mut Client, options: &Options, area: Area, path: &Path) -> Result<i32> {
     // Refuse a create the daemon cannot serve before the input can hold the
     // call, as `set` does.
-    management::supports_kind(client, area, ActionKind::Add).map_err(failed)?;
+    management::supports_kind(client, area, ActionKind::Add)?;
     let text = read_text(path)?;
     if path == Path::new("-") {
-        let draft = editor::Draft::open(&options.home, area, &text).map_err(failed)?;
+        let draft = editor::Draft::open(&options.home, area, &text)?;
         let kept = draft.path().display().to_string();
         let outcome = create(client, options, area, &text, &kept).await;
         if outcome.is_ok() {
@@ -194,28 +194,27 @@ async fn read(
             area,
             action: ManagementAction::List,
         },
-    )
-    .map_err(failed)?;
+    )?;
     let cwd = options.cwd.to_string_lossy();
     match area {
         Area::Skills => Err("A Skill has no document to edit.".to_owned().into()),
         Area::Hooks => {
-            let catalog = hooks::catalog(client, &cwd).await.map_err(failed)?;
+            let catalog = hooks::catalog(client, &cwd).await?;
             let document = catalog
                 .user_document
-                .ok_or_else(|| failed("The daemon reports no hook document to edit.".to_owned()))?;
+                .ok_or("The daemon reports no hook document to edit.")?;
             Ok((catalog.user_revision, document))
         }
         Area::Scheduled => {
             let Some(id) = id else {
                 return Err("scheduled edit and set take a job id.".to_owned().into());
             };
-            let catalog = scheduler::catalog(client).await.map_err(failed)?;
+            let catalog = scheduler::catalog(client).await?;
             let job = catalog
                 .jobs
                 .iter()
                 .find(|job| job.id == id)
-                .ok_or_else(|| failed(format!("No scheduled job has that id: {id}")))?;
+                .ok_or_else(|| format!("No scheduled job has that id: {id}"))?;
             Ok((job.revision.to_string(), job.document()))
         }
     }
@@ -252,11 +251,22 @@ async fn write(client: &mut Client, options: &Options, draft: &Draft) -> Result<
             document,
         },
     };
-    if let Err(error) = management::apply(client, &request, &options.cwd).await {
-        return Err(format!("{error} Your text is kept in {}.", draft.kept).into());
+    match management::apply(client, &request, &options.cwd).await {
+        ManagementResult::Refused(error) => {
+            Err(format!("{error} Your text is kept in {}.", draft.kept).into())
+        }
+        // The document was replaced; only the report after it failed, so the
+        // command did what it was asked and says why it cannot show the area.
+        ManagementResult::Applied { read_error, .. } => {
+            print_report(vec![saved(draft.area)], vec![read_error]);
+            Ok(0)
+        }
+        // A save reports the area after it; a detail belongs to an inspect.
+        ManagementResult::View { .. } | ManagementResult::Detail(_) => {
+            print_report(vec![saved(draft.area)], Vec::new());
+            Ok(0)
+        }
     }
-    print_report(vec![saved(draft.area)], Vec::new());
-    Ok(0)
 }
 
 /// What a create writes, with the message the owner's answer gives.
@@ -274,19 +284,29 @@ async fn create(
         action: ManagementAction::Add { document },
     };
     match management::apply(client, &request, &options.cwd).await {
-        Ok(ManagementReport::View { note, .. }) => {
+        ManagementResult::View { note, .. } => {
             // The note names the entry the owner saved: made safe, as every
             // line the Scheduler prints is.
             let note = note.iter().map(|note| safe(note)).collect();
             print_report(note, Vec::new());
             Ok(0)
         }
-        Ok(ManagementReport::Detail(detail)) => {
+        // The entry was created; only the read after it failed. The owner's
+        // answer still names it, made safe, and the exit stays 0.
+        ManagementResult::Applied { note, read_error } => {
+            let note = note.iter().map(|note| safe(note)).collect();
+            print_report(note, vec![read_error]);
+            Ok(0)
+        }
+        // An add reports the entry it created; a detail belongs to an inspect.
+        ManagementResult::Detail(detail) => {
             let lines = detail.lines.iter().map(|line| safe(line)).collect();
             print_report(lines, Vec::new());
             Ok(0)
         }
-        Err(error) => Err(format!("{error} Your text is kept in {kept}.").into()),
+        ManagementResult::Refused(error) => {
+            Err(format!("{error} Your text is kept in {kept}.").into())
+        }
     }
 }
 
@@ -298,19 +318,32 @@ fn saved(area: Area) -> String {
     }
 }
 
-fn failed(message: String) -> crate::Error {
-    message.into()
-}
-
 async fn run_skills(
     client: &mut Client,
     options: &Options,
     request: &ManagementRequest,
 ) -> Result<i32> {
-    management::supported(client, request).map_err(failed)?;
-    let catalog = skills::apply(client, &request.action, &options.cwd)
-        .await
-        .map_err(failed)?;
+    management::supported(client, request)?;
+    let catalog = match skills::apply(client, &request.action, &options.cwd).await {
+        skills::Outcome::Catalog(catalog) => catalog,
+        // A toggle or a rescan was applied, so the command did what it was
+        // asked; only the report after it failed. The toggle's line names the
+        // id the user gave, since the read is what supplies the name; every
+        // other write here is the rescan.
+        skills::Outcome::ReadFailed(error) => {
+            let line = match &request.action {
+                ManagementAction::Toggle { id, enabled } => format!(
+                    "{} {}.",
+                    if *enabled { "Enabled" } else { "Disabled" },
+                    safe(id)
+                ),
+                _ => "Reloaded.".to_owned(),
+            };
+            print_report(vec![line], vec![error]);
+            return Ok(0);
+        }
+        skills::Outcome::Refused(error) => return Err(error.into()),
+    };
     match &request.action {
         ManagementAction::Toggle { id, enabled } => {
             let name = catalog
@@ -338,25 +371,38 @@ async fn run_hooks(
     options: &Options,
     request: &ManagementRequest,
 ) -> Result<i32> {
-    management::supported(client, request).map_err(failed)?;
-    let catalog = hooks::apply(client, &request.action, &options.cwd)
-        .await
-        .map_err(|error| error.to_string())?;
-    match &request.action {
-        ManagementAction::Toggle { enabled, .. } => {
-            let cwd = options.cwd.to_string_lossy();
-            let note = if *enabled {
-                "It runs this workspace's .dimcode/hooks.json, including later edits to it, in active and new sessions."
-            } else {
-                "The file is kept; it runs again after hooks enable."
+    management::supported(client, request)?;
+    let catalog = match hooks::apply(client, &request.action, &options.cwd).await {
+        Ok(catalog) => catalog,
+        // A toggle was applied; only the report after it failed. Its line
+        // names the workspace, not anything the missing read would carry.
+        Err(hooks::Failure::ReadFailed(error)) => {
+            let ManagementAction::Toggle { enabled, .. } = &request.action else {
+                return Err(error.into());
             };
+            let cwd = options.cwd.to_string_lossy();
             print_report(
                 vec![format!(
                     "{} project hooks for {}.",
                     if *enabled { "Enabled" } else { "Disabled" },
                     safe(&cwd)
                 )],
-                vec![note.to_owned()],
+                vec![toggle_note(*enabled).to_owned(), error],
+            );
+            return Ok(0);
+        }
+        Err(error) => return Err(error.to_string().into()),
+    };
+    match &request.action {
+        ManagementAction::Toggle { enabled, .. } => {
+            let cwd = options.cwd.to_string_lossy();
+            print_report(
+                vec![format!(
+                    "{} project hooks for {}.",
+                    if *enabled { "Enabled" } else { "Disabled" },
+                    safe(&cwd)
+                )],
+                vec![toggle_note(*enabled).to_owned()],
             );
         }
         _ => print_report(hook_rows(&catalog), hook_notes(&catalog)),
@@ -367,7 +413,7 @@ async fn run_hooks(
 /// `scheduled ...`: the jobs the Scheduler holds, printed as its owner
 /// reports them.
 async fn run_scheduled(client: &mut Client, request: &ManagementRequest) -> Result<i32> {
-    management::supported(client, request).map_err(failed)?;
+    management::supported(client, request)?;
     match scheduler::apply(client, &request.action).await {
         Ok(scheduler::Answer::Detail(detail)) => {
             // The owner names jobs and states reasons: what it wrote is
@@ -398,7 +444,7 @@ async fn run_scheduled(client: &mut Client, request: &ManagementRequest) -> Resu
             }
             _ => print_report(job_rows(&catalog), job_notes(&catalog)),
         },
-        Err(error) => return Err(failed(error.to_string())),
+        Err(error) => return Err(error.to_string().into()),
     }
     Ok(0)
 }
@@ -441,6 +487,15 @@ fn job_notes(catalog: &scheduler::Catalog) -> Vec<String> {
     notes
 }
 
+/// What turning this workspace's project hooks on or off does to the file.
+fn toggle_note(enabled: bool) -> &'static str {
+    if enabled {
+        "It runs this workspace's .dimcode/hooks.json, including later edits to it, in active and new sessions."
+    } else {
+        "The file is kept; it runs again after hooks enable."
+    }
+}
+
 /// One Skill: its name, source, state, file and description.
 fn rows(catalog: &skills::Catalog) -> Vec<String> {
     catalog
@@ -454,7 +509,7 @@ fn rows(catalog: &skills::Catalog) -> Vec<String> {
             format!(
                 "{}\t{}\t{}\t{}\t{}",
                 safe(&entry.name),
-                safe(&entry.source),
+                safe(entry.source.as_deref().unwrap_or("-")),
                 state,
                 safe(&entry.file_path),
                 safe(&entry.description),

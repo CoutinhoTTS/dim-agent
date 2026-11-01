@@ -4,6 +4,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "No entries." => "項目がありません。",
         "No matching entry." => "一致する項目がありません。",
         "Issues" => "問題",
+        "sources" => "ソース",
+        "skills" => "スキル",
         "enabled" => "有効",
         "shadowed by {name}" => "{name} が優先",
         "Reloaded." => "再読み込みしました。",
@@ -67,6 +69,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The Scheduler has no area document." => "スケジューラーには領域ドキュメントがありません。",
         "No scheduled job has that id." => "その id のスケジュールジョブはありません。",
+        "This workspace's hook settings changed since they were read; nothing was written." => {
+            "このワークスペースのフック設定は読み取り後に変更されています。今回は何も書き込んでいません。"
+        }
         _ => return None,
     })
 }

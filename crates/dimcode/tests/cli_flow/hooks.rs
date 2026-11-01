@@ -6,6 +6,8 @@ fn hello(wire: &mut Wire) {
     wire.hello(&["hooks.catalog", "hooks.set_enabled", "hooks.save"]);
 }
 
+/// The catalog a daemon serves before it reports the user document: the
+/// reply of a daemon that has the methods but none of the newer facts.
 fn catalog() -> Value {
     json!({
         "userRevision": "user:1",
@@ -160,6 +162,111 @@ fn hooks_enable_and_disable_send_the_workspace_and_the_revision() {
         assert!(stdout.contains(&expected), "{stdout}");
         fs::remove_file(home.0.join("rust/daemon.sock")).unwrap();
     }
+}
+
+/// A toggle the owner refuses over a newer document writes nothing and reads
+/// the area again, as a save's conflict does: the subcommand exits 1 with the
+/// conflict, and the panel shows it over the view it reads again.
+#[test]
+fn hooks_toggle_conflict_reads_the_area_again() {
+    let home = Home::new();
+    let project = home.0.join("work");
+    fs::create_dir(&project).unwrap();
+    let workspace = fs::canonicalize(&project)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("hooks.catalog");
+        wire.reply(&request, document_catalog("user:1", json!({"hooks": {}})));
+        let request = wire.read("hooks.set_enabled");
+        assert_eq!(request["params"]["cwd"], workspace);
+        assert_eq!(request["params"]["enabled"], true);
+        assert_eq!(request["params"]["expectedRevision"], "projects:1");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"settings changed; read the current version before updating",
+            "data":{"appError":"hooks_conflict"}}}));
+        // Nothing was written, so the adapter reads the area again.
+        let request = wire.read("hooks.catalog");
+        wire.reply(&request, document_catalog("user:1", json!({"hooks": {}})));
+        drains(wire);
+    });
+    let output = home
+        .command()
+        .arg("--cwd")
+        .arg(&project)
+        .args(["hooks", "enable"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "This workspace's hook settings changed since they were read; nothing was written."
+        ),
+        "{stderr}"
+    );
+    daemon.join().unwrap();
+    fs::remove_file(home.0.join("rust/daemon.sock")).unwrap();
+    // The panel reads the area again and shows the same conflict, keeping
+    // the project off because the owner wrote nothing.
+    let (shown, wait_shown) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        for _ in 0..2 {
+            let request = wire.read_any();
+            match request["method"].as_str() {
+                Some("account.providers") => wire.reply(&request, json!([])),
+                Some("session.context.usage") => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                    "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+                method => panic!("unexpected request {method:?}"),
+            }
+        }
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        let request = wire.read("hooks.catalog");
+        wire.reply(&request, document_catalog("user:1", json!({"hooks": {}})));
+        let request = wire.read("hooks.catalog");
+        wire.reply(&request, document_catalog("user:1", json!({"hooks": {}})));
+        let request = wire.read("hooks.set_enabled");
+        assert_eq!(request["params"]["expectedRevision"], "projects:1");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"settings changed; read the current version before updating",
+            "data":{"appError":"hooks_conflict"}}}));
+        let request = wire.read("hooks.catalog");
+        wire.reply(&request, document_catalog("user:1", json!({"hooks": {}})));
+        drains(wire);
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/hooks\r");
+    terminal.until("The user's own document; always in effect.");
+    terminal.raw(b"\x1b[B");
+    terminal.until("/work/.dimcode/hooks.json");
+    terminal.raw(b"\r");
+    terminal.until("This workspace's hook settings");
+    assert!(
+        !terminal.transcript.contains("Enabled project."),
+        "the refused toggle writes nothing: {}",
+        terminal.transcript
+    );
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
 }
 
 #[test]
@@ -442,6 +549,16 @@ fn drafts(home: &Home) -> Vec<PathBuf> {
 fn drains(wire: &mut Wire) {
     let mut line = String::new();
     while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+        line.clear();
+    }
+}
+
+/// Reads requests until the client leaves, and fails on a write: a flow that
+/// refuses before writing sends none.
+fn drains_without_saving(wire: &mut Wire) {
+    let mut line = String::new();
+    while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+        assert!(!line.contains("\"hooks.save\""), "unexpected write: {line}");
         line.clear();
     }
 }
@@ -855,6 +972,71 @@ fn tui_hooks_panel_lists_the_sources_and_toggles_the_project() {
     daemon.join().unwrap();
 }
 
+/// A source its owner reports as `missing` has no document yet, which is not
+/// an invalid one: the panel names neither the user's nor the project's row
+/// invalid, and the project's detail says the workspace has no hook file.
+#[test]
+fn tui_hooks_panel_does_not_call_a_missing_source_invalid() {
+    let home = Home::new();
+    let (shown, wait_shown) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        for _ in 0..2 {
+            let request = wire.read_any();
+            match request["method"].as_str() {
+                Some("account.providers") => wire.reply(&request, json!([])),
+                Some("session.context.usage") => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                    "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+                method => panic!("unexpected request {method:?}"),
+            }
+        }
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        let request = wire.read("hooks.catalog");
+        wire.reply(
+            &request,
+            json!({
+                "userRevision": "missing",
+                "projectsRevision": "missing",
+                "disableAllHooks": false,
+                "sources": [
+                    {"source": "user", "enabled": true, "state": "missing"},
+                    {"source": "project", "enabled": false, "state": "missing"},
+                ],
+                "hooks": [],
+            }),
+        );
+        drains(wire);
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/hooks\r");
+    terminal.until("The user's own document; always in effect.");
+    // Rows are drawn before the footer, so both rows are on screen once the
+    // project's detail is.
+    terminal.raw(b"\x1b[B");
+    terminal.until("No .dimcode/hooks.json in this workspace.");
+    assert!(
+        !terminal.transcript.contains("invalid"),
+        "a missing source is not invalid: {}",
+        terminal.transcript
+    );
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
 /// Ctrl+E hands the user document to `$EDITOR` and writes what it leaves
 /// with the revision the panel read, in both terminal modes.
 #[test]
@@ -917,6 +1099,284 @@ fn tui_hooks_panel_edits_the_user_document() {
         terminal.until("Bye!");
         assert!(terminal.wait().success());
         daemon.join().unwrap();
+    }
+}
+
+/// A daemon that reports no user document offers no edit: the user source
+/// has no Ctrl+E, and the key does nothing, in both terminal modes.
+#[test]
+fn tui_hooks_panel_offers_no_edit_without_a_user_document() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (shown, wait_shown) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            hello(wire);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history");
+            wire.reply(
+                &history,
+                json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+            );
+            for _ in 0..2 {
+                let request = wire.read_any();
+                match request["method"].as_str() {
+                    Some("account.providers") => wire.reply(&request, json!([])),
+                    Some("session.context.usage") => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                        "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+                    method => panic!("unexpected request {method:?}"),
+                }
+            }
+            wait_shown.recv_timeout(PATIENCE).unwrap();
+            let request = wire.read("hooks.catalog");
+            wire.reply(&request, catalog());
+            drains_without_saving(wire);
+        });
+        let mut command = home.command();
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("test / model");
+        shown.send(()).unwrap();
+        terminal.write(b"/hooks\r");
+        terminal.until("The user's own document; always in effect.");
+        let opened = terminal.transcript.clone();
+        assert!(opened.contains("Ctrl+R"), "{opened}");
+        assert!(!opened.contains("Ctrl+E"), "no edit is offered: {opened}");
+        terminal.raw(b"\x05");
+        thread::sleep(Duration::from_millis(200));
+        terminal.raw(b"\x1b");
+        thread::sleep(Duration::from_millis(200));
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+    }
+}
+
+/// `hooks edit` refuses a daemon that reports no user document before the
+/// editor opens: no draft is made and nothing is written.
+#[test]
+fn hooks_edit_refuses_a_daemon_without_a_user_document() {
+    let home = Home::new();
+    let script = editor(
+        &home,
+        "editor.sh",
+        "printf '%s' '{\"hooks\":{\"Stop\":[]}}' > \"$1\"",
+    );
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("hooks.catalog");
+        wire.reply(&request, catalog());
+        drains_without_saving(wire);
+    });
+    let mut terminal = Terminal::launch_tui(edit_command(&home, &script, &["hooks", "edit"]));
+    let status = terminal.wait();
+    daemon.join().unwrap();
+    assert_eq!(status.code(), Some(1), "{}", terminal.transcript);
+    assert!(
+        terminal
+            .transcript
+            .contains("The daemon reports no hook document to edit."),
+        "{}",
+        terminal.transcript
+    );
+    assert!(drafts(&home).is_empty(), "the editor never opened");
+}
+
+/// `hooks set -` refuses a daemon that reports no user document: nothing is
+/// written and the text it read leaves no draft behind.
+#[test]
+fn hooks_set_refuses_a_daemon_without_a_user_document() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("hooks.catalog");
+        wire.reply(&request, catalog());
+        drains_without_saving(wire);
+    });
+    let mut child = home
+        .command()
+        .args(["hooks", "set", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(json!({"hooks": {"Stop": []}}).to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("The daemon reports no hook document to edit."),
+        "{stderr}"
+    );
+    assert!(drafts(&home).is_empty(), "no draft for a refused write");
+}
+
+/// A save the daemon accepted is done even when the read after it fails: the
+/// saved line, then the read error, and the draft is removed.
+#[test]
+fn hooks_set_reports_the_save_when_the_read_after_it_fails() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("hooks.catalog");
+        wire.reply(&request, document_catalog("user:1", json!({"hooks": {}})));
+        let request = wire.read("hooks.save");
+        assert_eq!(request["params"]["expectedRevision"], "user:1");
+        wire.reply(&request, json!({"revision": "user:2"}));
+        let request = wire.read("hooks.catalog");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"hooks catalog unavailable",
+            "data":{"appError":"hooks_failed"}}}));
+        drains(wire);
+    });
+    let mut child = home
+        .command()
+        .args(["hooks", "set", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(json!({"hooks": {"Stop": []}}).to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    daemon.join().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "Saved the hooks document.\n"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("hooks catalog unavailable"), "{stderr}");
+    assert!(drafts(&home).is_empty(), "the written draft is removed");
+}
+
+/// An editor that writes a different document for a draft holding the
+/// stored one: the next edit is told which document it was opened on.
+const ANSWERS_STORED: &str = "case \"$(cat \"$1\")\" in\n\
+    *stored*) printf '%s' '{\"hooks\":{\"Stop\":[\"kept\"]}}' > \"$1\";;\n\
+    *) printf '%s' '{\"hooks\":{\"Stop\":[\"old\"]}}' > \"$1\";;\n\
+    esac";
+
+/// Ctrl+E saves, and only the read after the save fails: the panel reports
+/// the save and the read error, keeps no draft, and Ctrl+R reads the area
+/// again so the next edit opens the document that read returned, in both
+/// terminal modes.
+#[test]
+fn tui_hooks_panel_settles_a_save_whose_read_fails() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let script = editor(&home, "editor.sh", ANSWERS_STORED);
+        let (shown, wait_shown) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            hello(wire);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history");
+            wire.reply(
+                &history,
+                json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+            );
+            for _ in 0..2 {
+                let request = wire.read_any();
+                match request["method"].as_str() {
+                    Some("account.providers") => wire.reply(&request, json!([])),
+                    Some("session.context.usage") => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                        "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+                    method => panic!("unexpected request {method:?}"),
+                }
+            }
+            wait_shown.recv_timeout(PATIENCE).unwrap();
+            let request = wire.read("hooks.catalog");
+            wire.reply(&request, document_catalog("user:1", json!({"hooks": {}})));
+            let request = wire.read("hooks.save");
+            assert_eq!(request["params"]["expectedRevision"], "user:1");
+            wire.reply(&request, json!({"revision": "user:2"}));
+            // The save is committed; the report after it is what fails.
+            let request = wire.read("hooks.catalog");
+            wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                "code":-32000,
+                "message":"hooks catalog unavailable",
+                "data":{"appError":"hooks_failed"}}}));
+            // Ctrl+R reads the area again.
+            let request = wire.read("hooks.catalog");
+            wire.reply(
+                &request,
+                document_catalog("user:9", json!({"hooks": {"Stop": ["stored"]}})),
+            );
+            // The next edit opens that document at the revision it was read
+            // at, not the draft the save removed.
+            let request = wire.read("hooks.save");
+            assert_eq!(request["params"]["expectedRevision"], "user:9");
+            assert_eq!(
+                request["params"]["document"]["hooks"]["Stop"][0],
+                json!("kept")
+            );
+            wire.reply(&request, json!({"revision": "user:10"}));
+            let request = wire.read("hooks.catalog");
+            wire.reply(&request, document_catalog("user:10", json!({"hooks": {}})));
+            drains(wire);
+        });
+        let mut command = edit_command(&home, &script, &[]);
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("test / model");
+        shown.send(()).unwrap();
+        terminal.write(b"/hooks\r");
+        terminal.until("The user's own document; always in effect.");
+        terminal.raw(b"\x05");
+        terminal.until("hooks catalog unavailable");
+        let settled = terminal.transcript.clone();
+        assert!(settled.contains("Saved."), "{settled}");
+        assert!(
+            !settled.contains("Your text is kept"),
+            "the written draft is not named as kept: {settled}"
+        );
+        assert!(drafts(&home).is_empty(), "the written draft is removed");
+        terminal.raw(b"\x12");
+        terminal.until("Reloaded.");
+        terminal.raw(b"\x05");
+        terminal.until("Saved.");
+        terminal.raw(b"\x1b");
+        thread::sleep(Duration::from_millis(200));
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+        assert!(drafts(&home).is_empty(), "the written draft is removed");
+        assert_eq!(
+            terminal
+                .transcript
+                .matches("hooks catalog unavailable")
+                .count(),
+            1,
+            "the read error is drawn once: {}",
+            terminal.transcript
+        );
     }
 }
 
@@ -1017,7 +1477,8 @@ fn tui_hooks_panel_keeps_the_users_text_when_the_write_is_refused() {
 }
 
 /// A text the owner refuses without a newer document keeps the panel's
-/// revision, so the next Ctrl+E reopens the user's text and writes it again.
+/// revision through a toggle on another entry, so the next Ctrl+E reopens
+/// the user's text and writes it again.
 #[test]
 fn tui_hooks_panel_reopens_the_users_text_after_a_refusal() {
     let home = Home::new();
@@ -1051,6 +1512,16 @@ fn tui_hooks_panel_reopens_the_users_text_after_a_refusal() {
             "code":-32000,
             "message":"hooks document is invalid",
             "data":{"appError":"hooks_invalid"}}}));
+        // A toggle on another entry goes through: it is no draft of its own,
+        // so it leaves the kept text linked to its revision.
+        let request = wire.read("hooks.catalog");
+        wire.reply(&request, document_catalog("user:1", json!({"hooks": {}})));
+        let request = wire.read("hooks.set_enabled");
+        assert_eq!(request["params"]["enabled"], true);
+        assert_eq!(request["params"]["expectedRevision"], "projects:1");
+        wire.reply(&request, json!({"revision": "projects:2"}));
+        let request = wire.read("hooks.catalog");
+        wire.reply(&request, document_catalog("user:1", json!({"hooks": {}})));
         // No newer document: the revision stays, and the reopened draft is
         // written with it.
         let request = wire.read("hooks.save");
@@ -1074,6 +1545,11 @@ fn tui_hooks_panel_reopens_the_users_text_after_a_refusal() {
     terminal.raw(b"\x05");
     terminal.until("hooks document is invalid");
     terminal.until("Your text is kept");
+    terminal.raw(b"\x1b[B");
+    terminal.until("/work/.dimcode/hooks.json");
+    terminal.raw(b"\r");
+    terminal.until("Enabled project.");
+    terminal.raw(b"\x1b[A");
     terminal.raw(b"\x05");
     terminal.until("Saved.");
     terminal.raw(b"\x1b");
