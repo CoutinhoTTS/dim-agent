@@ -204,15 +204,26 @@ editable in user scope, and moving it back re-applies the split. The error messa
 move and the Web page offers it as an action. The read still shows the merged names, counts and
 `authConfigured`/`oauthConfigured`.
 
+The same refusal covers OAuth as a whole: while the overlay holds `auth` or an `authorization`
+header, `mcp.update` refuses every OAuth patch — `set` and `remove`, public and hidden fields —
+with `mcp_credentials_are_user_scoped`, because the skeleton would carry OAuth while the overlay
+keeps the static credential and the merged entry may not combine the two. Nothing else can
+produce that combination: a user entry with both is rejected by the document validation. The
+recovery is the same move to user scope, where the static credential is visible and removable;
+the Web page hides the OAuth control while the overlay holds the static credential.
+
 ### D13. Overlay life cycle follows the project entry
 
 A move into project writes the project skeleton first and the overlay second, then removes the
 source. A move back to user writes the user entry first, clears the project enablement, deletes
-the overlay and removes the project skeleton last. `mcp.remove` of a project entry deletes its
-overlay before removing the skeleton. The normal order therefore leaves a disabled destination
-without an overlay, never an overlay without a destination entry; a leftover overlay record is
-inert and the next move into project replaces it. `mcp.update` of an existing project entry
-preserves its overlay; `mcp.save` is refused (D12), and `mcp.remove` deletes the overlay.
+the overlay and removes the project skeleton last. `mcp.remove` of a project entry removes the
+skeleton first and deletes the overlay only once that write commits: a remove that loses its
+revision to a concurrent edit leaves the entry and its overlay intact, never a live entry without
+its withheld values. A record whose project entry is already absent is still deleted, so the
+leftover cleanup keeps working. `mcp.update` of an existing project entry preserves its overlay;
+`mcp.save` is refused while the overlay exists (D12) and deletes a record whose project entry is
+gone (D15). A leftover record is not inert — the read and publication paths merge it into any
+later entry of the same id — so no reachable path leaves one behind.
 
 ### D14. OAuth identity is unchanged
 
@@ -221,6 +232,18 @@ the MCP OAuth credential record (`mcp-oauth.json`). That record is keyed by id a
 independent of the source ([MCP OAuth §4.1](mcp-oauth.md#41-credential-record-persisted)), so an
 existing grant and client identity continue to apply. OAuth tokens stay in that record;
 `.mcp.json` and `mcp-secrets` never hold them.
+
+### D15. A record without a project entry is cleaned, not merged
+
+A project entry can disappear through an external `.mcp.json` edit while its overlay record stays.
+The record is keyed by workspace and id and every read merges it into the entry of that id, so a
+later save of the same id would run the deleted entry's withheld values, or fail the transport
+merge when the new entry is of another transport. `mcp.save` therefore reads the record for the
+canonical workspace and id before it writes: with the entry present, the overlay refuses the save
+(D12); with the entry absent, the save deletes the record first, because the save is the complete
+replacement of that id and its withheld values described an entry that no longer exists. An
+unreadable overlay or project document fails the save instead of passing the guard. `mcp.remove`
+deletes the record of an entry that is already absent as well (D13).
 
 ## 4. Contract
 
@@ -428,8 +451,11 @@ offers it as an action. There is no resume flag and no skip-a-step mode.
 The source and destination revisions are checked once before the first write, and every write is
 CAS. A concurrent write to either source, the overlay or the enablement record makes that write
 fail (`mcp_settings_conflict`, or `mcp_move_partial` if a destination write already committed).
-The move holds Mcp's operation gate, so calls through this daemon do not interleave; another
-daemon on the same home is ordered only by the per-document CAS.
+No lock spans a move: two calls through the same daemon may interleave, and a second daemon on
+the same home is ordered only by the per-document CAS. The order in §4.5 makes every
+interleaving recoverable — a destination write that loses its CAS commits nothing, a source
+removal that loses its CAS leaves both entries with the source still effective, and a removal of
+one entry never deletes withheld values that a concurrent write has just committed (D13).
 
 The overlay is a user-scope Settings document `mcp-secrets` (`mcp-secrets.json`), keyed by
 canonical workspace and id. Its record is the withheld part of one project entry:
@@ -459,21 +485,22 @@ skeleton contains the safe members: `type`, `command`, declared `cwd`, `url` red
 `oauth.clientId`/`callbackPort`/`scopes`. The owner merges the overlay into the declared
 configuration before `config::effective`; the merge replaces `args` and `url`, merges `env`,
 `headers`, `auth`, `extra` and the hidden `oauth` members, and is validated as a whole. A record
-for a workspace and id with no project entry is inert; the move into project may replace it when
-the destination has no entry, because it can only be the same entry's leftover. The move never
-creates an overlay without a destination entry.
+for a workspace and id with no project entry is not inert: every read merges it into the entry of
+that id, so `mcp.save` deletes it before writing that id (D15) and `mcp.remove` deletes it as
+part of the leftover cleanup (D13). The move never creates an overlay without a destination entry.
 
 The overlay is never read by a client method. `mcp.configuration`, `mcp.catalog`, `mcp.inspect`,
 `mcp.test` and every error show only the redacted projection (D3); `secretsInUserScope` is the
 only new fact. It is a user-scope Settings document under the storage and access rules of that
 service.
 
-`mcp.remove` of a project entry that has an overlay withdraws enablement, deletes the overlay,
-then removes the project entry. A failure leaves the entry disabled and the overlay present or
-absent, never an enabled entry without its secrets; the caller retries. `mcp.save` on a project
-entry with an overlay is refused with `mcp_credentials_are_user_scoped`; use `mcp.update` for its
-non-secret fields or move it back to user scope. Moving back to user deletes the overlay in the
-same operation.
+`mcp.remove` of a project entry that has an overlay withdraws enablement, removes the project
+entry, and deletes the overlay once that write commits. A failure at the removal leaves the entry
+disabled with its overlay intact; a failure at the overlay deletion leaves the entry gone and an
+overlay that `mcp.save` or a repeated `mcp.remove` cleans (D13, D15). Neither leaves an enabled
+entry without its secrets. `mcp.save` on a project entry with an overlay is refused with
+`mcp_credentials_are_user_scoped`; use `mcp.update` for its non-secret fields or move it back to
+user scope. Moving back to user deletes the overlay in the same operation.
 
 ### 4.6 The `mcp-secrets` document
 
@@ -542,7 +569,10 @@ name or adds a version rather than silently reusing this one.
   replacement would replace.
 - When `secretsInUserScope` is true, the client shows that the withheld fields are stored in the
   user's local configuration and disables their editors; the owner refuses those patch fields.
-  Moving the entry back to user scope restores full editing.
+  Moving the entry back to user scope restores full editing. When the read reports both
+  `secretsInUserScope` and `authConfigured`, the static credential is withheld, so the client
+  hides the OAuth control too (D12); a withheld `authorization` header is not visible to the
+  client, and the owner refuses that OAuth patch with the move-to-user recovery.
 - The move flow takes both revisions from `mcp.catalog`, asks for confirmation, and calls
   `mcp.move`. The client explains that into project the entry starts disabled and its withheld
   values stay in the user's local configuration; into user the entry keeps its current enabled
@@ -607,9 +637,10 @@ Flow level, reusing the existing MCP flows:
 
 | File | What it protects |
 | --- | --- |
-| `crates/dim-app-server/tests/transport_flow/product_protocol.rs` | The wire contract on local v3: the read returns the revision the catalog reports for the same source; creating an entry with the catalog's source revision succeeds and a stale revision is `mcp_settings_conflict`; a plugin entry's read has no revision and a write to it is `invalid_params`; a project entry patched on one unrelated field leaves `.mcp.json` without a resolved `cwd` and without an `enabled` key; no withheld value appears in the read, including after an edit; `mcp.move` checks both revisions, refuses a destination id and admits no secret into its reply. The Web entry admits `mcp.move` and still refuses an unauthenticated or bare connection |
-| `crates/dim-app-server/tests/mcp_flow.rs` | The service level: a source's read returns its declared entry with the source revision, and a project entry's enablement comes from the user's record, while the effective entry a Session runs resolves the workspace `cwd`; a user entry's read carries its declared configuration and revision; a move in each direction preserves args, env, header, bearer, URL and unknown fields and leaves `.mcp.json` without a withheld value; into project the destination starts disabled and into user it keeps its effective enablement; a destination id is `mcp_move_conflict`; a moved project entry refuses withheld patches with `mcp_credentials_are_user_scoped`; `mcp.remove` cleans the overlay; a partial move after an injected write failure and a restart leaves the documented safe state and is finished by the direction's recovery |
-| `crates/dim-app-server/tests/mcp_oauth_flow.rs` | An OAuth entry moved in each direction keeps its `mcp-oauth.json` record and sign-in state; no token appears in `.mcp.json` or `mcp-secrets`; `mcp.inspect` and `mcp.update` keep their replies for the moved entry |
+| `crates/dim-app-server/tests/transport_flow/product_protocol.rs` | The wire contract on local v3: the read returns the revision the catalog reports for the same source; creating an entry with the catalog's source revision succeeds and a stale revision is `mcp_settings_conflict`; a plugin entry's read has no revision and a write to it is `invalid_params`; a project entry patched on one unrelated field leaves `.mcp.json` without a resolved `cwd` and without an `enabled` key (`project_entry_edits_keep_the_declared_configuration`); no withheld value appears in the read, including after an edit (`mcp_editor_preserves_redacts_and_removes_credentials_with_source_cas`); `mcp_scope_move_preserves_withheld_values_and_enablement` moves one entry in each direction, keeps its withheld values out of `.mcp.json`, refuses `mcp.save` and withheld patches with `mcp_credentials_are_user_scoped`, and leaves a removed entry saved clean; `mcp_save_discards_an_overlay_whose_entry_was_deleted_externally` proves the stale record neither overrides the saved entry nor breaks the workspace catalog across transports; `mcp_update_refuses_oauth_over_an_overlay_static_credential` refuses both OAuth actions while the overlay holds the token and completes the move-to-user recovery |
+| `crates/dim-app-server/tests/transport_flow/web_entry.rs` | The authenticated Web entry advertises and reaches the MCP namespace including `mcp.move`, and a bare connection is refused |
+| `crates/dim-app-server/tests/mcp_flow.rs` | The service level: a source's read returns its declared entry with the source revision, and a project entry's enablement comes from the user's record, while the effective entry a Session runs resolves the workspace `cwd` (`editing_reads_the_declared_entry_while_running_resolves_it`); `scope_move_partial_is_recoverable_and_remove_cleans_the_overlay` and `scope_move_back_to_user_keeps_the_merged_entry_and_its_enablement` cover a move in each direction, the withheld part, the destination's enablement, the overlay deletion and the cleared record; `scope_move_checks_the_destination_id_and_both_revisions` covers `mcp_move_conflict` and a stale revision on either side; `a_conflicting_remove_keeps_the_project_entry_and_its_overlay` covers the same-revision race and the removal order; `an_into_project_partial_is_finished_after_a_restart` restarts on the same home after an injected overlay write failure and finishes the move by the documented recovery without credential loss |
+| `crates/dim-app-server/tests/mcp_oauth_flow.rs` | `scope_moves_keep_the_oauth_record_and_the_sign_in_state` moves a signed-in OAuth entry in each direction: the `mcp-oauth.json` record and the `authorized` state survive, no token appears in `.mcp.json`, and `mcp.configuration`, `mcp.inspect` and `mcp.update` keep their replies for the moved entry |
 
 The redaction assertions of
 `mcp_editor_preserves_redacts_and_removes_credentials_with_source_cas` extend to the new reply
@@ -617,10 +648,10 @@ shape rather than moving to a new test: the same fixture writes argument, enviro
 bearer and URL secrets and reads the entry back. The move tests assert the same fixture's
 secrets never appear in the reply, `.mcp.json`, a Web page response or a log.
 
-The failure test uses a disposable home and fails one source write at the documented step (an
-unwritable target or a test Settings wrapper), then restarts the App Server on the same home. It
-asserts the partial state, the `mcp_move_partial` answer, and the direction's documented recovery
-without credential loss or duplicate execution.
+The failure test uses a disposable home and makes the overlay write fail (`mcp-secrets.json`
+replaced by a directory), asserts the `mcp_move_partial` answer, and restarts the App Server on
+the same home. It then asserts the partial state and finishes it by the direction's documented
+recovery without credential loss or duplicate execution.
 
 ## 11. Rule check
 
