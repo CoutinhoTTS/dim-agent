@@ -8,7 +8,10 @@ use dim_agent_types::{
     grant::{GrantKind, GrantMode, SessionGrant},
     *,
 };
-use dim_app_server::storage::{NodeLoads, STORE_FORMAT, SqliteStorage, SqliteTimelineStore};
+use dim_app_server::protocol::SessionOrigin;
+use dim_app_server::storage::{
+    NodeLoads, STORE_FORMAT, SqliteStorage, SqliteTimelineStore, vacuum_store,
+};
 use rusqlite::{Connection, params};
 use rutis::host::CtxHost;
 use std::{
@@ -219,6 +222,18 @@ const V15_TABLES: [&str; 2] = ["session_files", "session_file_owners"];
 const V16_TABLES: [&str; 1] = ["session_metadata"];
 const V28_TABLES: [&str; 1] = ["session_grants"];
 const V29_TABLES: [&str; 1] = ["session_output_owners"];
+/// The columns `table` has, so a record example written for a later format
+/// contributes only the cells an older table can hold.
+fn table_columns(connection: &Connection, table: &str) -> Vec<String> {
+    connection
+        .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
 /// Inserts the rows of `tables` from the complete record example in
 /// native-storage-format.md.
 fn insert_documented_records(connection: &Connection, tables: &[&str]) {
@@ -238,6 +253,12 @@ fn insert_documented_records(connection: &Connection, tables: &[&str]) {
     for table in tables {
         for row in example[table].as_array().unwrap() {
             let row = row.as_object().unwrap();
+            let present = table_columns(connection, table);
+            let row: serde_json::Map<String, serde_json::Value> = row
+                .iter()
+                .filter(|(column, _)| present.iter().any(|name| name == *column))
+                .map(|(column, value)| (column.clone(), value.clone()))
+                .collect();
             let columns = row.keys().cloned().collect::<Vec<_>>();
             let values = row
                 .values()
@@ -297,6 +318,7 @@ const V16_ADDITIONS: &[&str] = &[
 /// them besides the marker.
 const AGENT_SESSIONS_V25: &str = "CREATE TABLE agent_sessions (session_id TEXT NOT NULL PRIMARY KEY, config TEXT NOT NULL, created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0))";
 const AGENT_SESSIONS_V27: &str = "CREATE TABLE agent_sessions (session_id TEXT NOT NULL PRIMARY KEY, config TEXT NOT NULL, created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0), leader_session_id TEXT REFERENCES agent_sessions(session_id))";
+const AGENT_SESSIONS_V30: &str = "CREATE TABLE agent_sessions (session_id TEXT NOT NULL PRIMARY KEY, config TEXT NOT NULL, created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0), leader_session_id TEXT REFERENCES agent_sessions(session_id), origin TEXT NOT NULL DEFAULT 'unknown' CHECK (origin IN ('client', 'acp', 'internal', 'unknown')))";
 const AGENTS_V25: &str = "CREATE TABLE agents(agent_id TEXT PRIMARY KEY, profile TEXT NOT NULL, is_default INTEGER NOT NULL CHECK(is_default IN (0, 1)))";
 const AGENTS_V27: &str = "CREATE TABLE agents(agent_id TEXT PRIMARY KEY, profile TEXT NOT NULL, is_default INTEGER NOT NULL CHECK(is_default IN (0, 1)), owner_session_id TEXT REFERENCES agent_sessions(session_id))";
 const V27_ADDITIONS: &[&str] = &[
@@ -332,6 +354,13 @@ fn schema_of(version: u32) -> Vec<String> {
             } else {
                 sql.replace(AGENT_SESSIONS_V25, AGENT_SESSIONS_V27)
                     .replace(AGENTS_V25, AGENTS_V27)
+            }
+        })
+        .map(|sql| {
+            if version < 30 {
+                sql
+            } else {
+                sql.replace(AGENT_SESSIONS_V27, AGENT_SESSIONS_V30)
             }
         })
         .collect();
@@ -523,7 +552,7 @@ async fn documented_native_records_restore_with_legacy_snapshot_bypassed() {
         .execute("DELETE FROM agent_store_format", [])
         .unwrap();
     connection
-        .execute("INSERT INTO agent_store_format VALUES (29)", [])
+        .execute("INSERT INTO agent_store_format VALUES (30)", [])
         .unwrap();
     insert_documented_records(&connection, BUSINESS_TABLES);
     drop(connection);
@@ -852,6 +881,119 @@ async fn committed_history_round_trips_requests_outputs_traces_and_branch_direct
     assert_eq!(store.head(&key("session", "main")).await.unwrap(), 11);
     store.close().await.unwrap();
     db.close().await.unwrap();
+}
+
+/// A held read snapshot keeps the WAL from checkpointing; once it ends, the
+/// writer's checkpoint copies the frames and the size limit truncates the
+/// file, so the WAL stays bounded instead of at its high-water mark (#600).
+#[tokio::test]
+async fn the_wal_file_is_bounded_when_a_read_snapshot_ends() {
+    const WAL_LIMIT: u64 = 64 * 1024 * 1024;
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let mut wal = database.0.as_os_str().to_os_string();
+    wal.push("-wal");
+    let wal_bytes = || std::fs::metadata(&wal).map_or(0, |meta| meta.len());
+    let reader = Connection::open(&database.0).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    let _: i64 = reader
+        .query_row("SELECT count(*) FROM timeline_events", [], |row| row.get(0))
+        .unwrap();
+    let payload = "x".repeat(8_000_000);
+    let mut sequence = 0;
+    while wal_bytes() <= WAL_LIMIT && sequence < 20 {
+        sequence += 1;
+        append(
+            &store,
+            key("session", "main"),
+            vec![record(
+                sequence,
+                EventKind::InputMessage(InputMessageData::text(payload.clone(), None)),
+            )],
+        )
+        .await
+        .unwrap();
+    }
+    assert!(
+        wal_bytes() > WAL_LIMIT,
+        "a held read snapshot keeps the WAL growing: {} bytes",
+        wal_bytes()
+    );
+    reader.execute_batch("COMMIT").unwrap();
+    drop(reader);
+    for _ in 0..2 {
+        sequence += 1;
+        append(
+            &store,
+            key("session", "main"),
+            vec![record(
+                sequence,
+                EventKind::InputMessage(InputMessageData::text(payload.clone(), None)),
+            )],
+        )
+        .await
+        .unwrap();
+    }
+    assert!(
+        wal_bytes() <= WAL_LIMIT,
+        "the WAL is truncated to its limit after the snapshot ends: {} bytes",
+        wal_bytes()
+    );
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// Deleting a Session leaves free pages; `dimcode daemon vacuum` rewrites the
+/// offline store to reclaim them and refuses a store another process owns.
+#[tokio::test]
+async fn vacuum_reclaims_a_deleted_session_and_refuses_a_running_store() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    for sequence in 1..=50u64 {
+        append(
+            &store,
+            key("session", "main"),
+            vec![record(
+                sequence,
+                EventKind::InputMessage(InputMessageData::text("x".repeat(40_000), None)),
+            )],
+        )
+        .await
+        .unwrap();
+    }
+    assert!(
+        vacuum_store(database.0.clone()).is_err(),
+        "a running store owns the database"
+    );
+    store.rollback_session("session").await.unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+    let before = std::fs::metadata(&database.0).unwrap().len();
+    let vacuumed = vacuum_store(database.0.clone()).unwrap();
+    assert!(
+        vacuumed.after < before,
+        "vacuum reclaims free pages: {} >= {}",
+        vacuumed.after,
+        before
+    );
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    db.close().await.unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    let events: i64 = connection
+        .query_row("SELECT count(*) FROM timeline_events", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(events, 0, "vacuum keeps the deleted rows deleted");
+    drop(connection);
 }
 
 /// A text block's identity is the first delta's event id, so the output-row
@@ -1846,6 +1988,104 @@ async fn reads_rebuild_lists_from_where_they_start_in_bounded_holds() {
     assert_eq!(after, before);
     assert!(store.take_node_loads().max_per_hold <= 256);
     drop(connection);
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// A paging read uses none of the requests its records hold, so it rebuilds
+/// none: `context/prepare` and `model/call` carry an empty request, no
+/// content row is loaded, and a page still returns when one of those nodes
+/// is damaged. A read that uses the requests fails on the same row (#598).
+#[tokio::test]
+async fn paging_reads_do_not_rebuild_request_bodies() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("paging", &SessionConfig::default())
+        .await
+        .unwrap();
+    let main = key("paging", "main");
+    let messages: Vec<Message> = (1..=6)
+        .map(|index| Message::text(Role::User, format!("message-{index}")))
+        .collect();
+    append(
+        &store,
+        main.clone(),
+        vec![
+            record(
+                1,
+                EventKind::InputMessage(InputMessageData::text("go", Some(InputMode::Queue))),
+            ),
+            model_call(2, messages.clone()),
+            text(3, "done"),
+        ],
+    )
+    .await
+    .unwrap();
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    dim_agent_capabilities::defaults::mock_hosts(&mut builder);
+    dim_agent_capabilities::defaults::install(&mut builder);
+    builder.timeline_store(store.clone());
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = agent.restore_session("paging".into()).await.unwrap();
+    session.idle("main").await.unwrap();
+    store.take_node_loads();
+
+    let page = session.local_page("main", 0, 8, 3).await.unwrap();
+    assert_eq!(page.len(), 3);
+    assert_eq!(
+        store.take_node_loads(),
+        NodeLoads::default(),
+        "a paging read loaded request content"
+    );
+    assert!(
+        matches!(&page[1].kind, EventKind::ModelCall(data) if data.request.messages.is_empty()),
+        "a paging read left a stored request as its record holds it"
+    );
+
+    let rebuilt = store.read_page(&main, 0, 8, 3).await.unwrap();
+    assert_eq!(rebuilt[1].event, model_call(2, messages).event);
+    assert_eq!(store.take_node_loads().loads, 6);
+
+    let connection = Connection::open(&database.0).unwrap();
+    let damaged = connection
+        .execute(
+            "UPDATE timeline_content SET body = replace(body, 'message-1', 'message-X') \
+             WHERE session_id = 'paging' AND kind = 'node'",
+            [],
+        )
+        .unwrap();
+    assert!(damaged > 0, "the request's nodes are stored");
+    assert!(
+        matches!(
+            store.read_page(&main, 0, 8, 3).await,
+            Err(AgentError::Storage(message)) if message.contains("request content hash mismatch")
+        ),
+        "a read that uses the requests checks their content"
+    );
+    let page = session.local_page("main", 0, 8, 3).await.unwrap();
+    assert_eq!(
+        page.iter().map(|event| event.sequence).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(store.take_node_loads(), NodeLoads::default());
+    let sessions =
+        dim_app_server::storage::SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
+    let page = sessions
+        .read_page_before("paging", "main", 4, 8, 3, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.iter()
+            .map(|record| record.event.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3],
+        "the reverse history page does not rebuild the damaged request"
+    );
+    drop(sessions);
+    drop(connection);
+    agent.close().await.unwrap();
     store.close().await.unwrap();
     db.close().await.unwrap();
 }
@@ -2856,8 +3096,8 @@ fn a_newer_store_leaves_an_actionable_startup_note() {
     Connection::open(&database.0)
         .unwrap()
         .execute_batch(
-            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 30));
-             INSERT INTO agent_store_format VALUES (30);",
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 31));
+             INSERT INTO agent_store_format VALUES (31);",
         )
         .unwrap();
     let original = std::fs::read(&database.0).unwrap();
@@ -2867,10 +3107,10 @@ fn a_newer_store_leaves_an_actionable_startup_note() {
     assert!(message.contains("unsupported SQLite schema"), "{message}");
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
-    assert!(note.contains("Store format: v30"), "{note}");
-    assert!(note.contains("Daemon format: v29"), "{note}");
+    assert!(note.contains("Store format: v31"), "{note}");
+    assert!(note.contains("Daemon format: v30"), "{note}");
     assert!(note.contains("Existing data was preserved"), "{note}");
-    assert!(note.contains("Run a build supporting v30"), "{note}");
+    assert!(note.contains("Run a build supporting v31"), "{note}");
     assert!(note.contains("--home PATH"), "{note}");
 }
 
@@ -2881,14 +3121,14 @@ fn a_mismatched_store_note_does_not_claim_a_downgrade() {
     Connection::open(&database.0)
         .unwrap()
         .execute_batch(
-            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=28",
+            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=29",
         )
         .unwrap();
     let original = std::fs::read(&database.0).unwrap();
     assert!(SqliteStorage::open(database.0.clone()).is_err());
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
-    assert!(note.contains("Store format: v28 (schema is v29)"), "{note}");
+    assert!(note.contains("Store format: v29 (schema is v30)"), "{note}");
     assert!(note.contains("marker and schema disagree"), "{note}");
     assert!(
         note.contains("Use the build that wrote this store"),
@@ -2903,7 +3143,7 @@ fn an_older_known_schema_with_a_newer_marker_is_a_mismatch() {
     let connection = v13_store(&database.0);
     connection
         .execute_batch(
-            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=30",
+            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=31",
         )
         .unwrap();
     drop(connection);
@@ -2911,7 +3151,7 @@ fn an_older_known_schema_with_a_newer_marker_is_a_mismatch() {
     assert!(SqliteStorage::open(database.0.clone()).is_err());
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
-    assert!(note.contains("Store format: v30 (schema is v13)"), "{note}");
+    assert!(note.contains("Store format: v31 (schema is v13)"), "{note}");
     assert!(
         note.contains("Use the build that wrote this store"),
         "{note}"
@@ -2932,7 +3172,7 @@ fn an_empty_marker_table_is_reported_as_missing_or_ambiguous() {
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
     assert!(
-        note.contains("Store format: v29 (format marker is missing or ambiguous)"),
+        note.contains("Store format: v30 (format marker is missing or ambiguous)"),
         "{note}"
     );
     assert!(!note.contains("Run a build supporting"), "{note}");
@@ -3057,7 +3297,7 @@ fn a_successful_upgrade_removes_a_stale_startup_note() {
     std::fs::write(startup_note(&database.0), "stale").unwrap();
     drop(SqliteStorage::open(database.0.clone()).unwrap());
     assert!(!startup_note(&database.0).exists());
-    assert_eq!(marker(&Connection::open(&database.0).unwrap()), vec![29]);
+    assert_eq!(marker(&Connection::open(&database.0).unwrap()), vec![30]);
 }
 
 fn marker(connection: &Connection) -> Vec<i64> {
@@ -3089,6 +3329,15 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
         .copied()
         .collect();
     insert_documented_records(&connection, &kept);
+    if from >= 27 {
+        connection
+            .execute(
+                "INSERT INTO agent_sessions (session_id, config, created_at_ms, leader_session_id) \
+                 SELECT 'member', config, created_at_ms, 's1' FROM agent_sessions WHERE session_id='s1'",
+                [],
+            )
+            .unwrap();
+    }
     let before: Vec<_> = kept.iter().map(|table| rows(&connection, table)).collect();
     assert!(before.iter().filter(|rows| !rows.is_empty()).count() >= 7);
     drop(connection);
@@ -3100,10 +3349,32 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
     store.close().await.unwrap();
     db.close().await.unwrap();
     let connection = Connection::open(&database.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(29));
-    assert_eq!(marker(&connection), [29]);
+    assert_eq!(schema(&connection), schema_of(30));
+    assert_eq!(marker(&connection), [30]);
     let after: Vec<_> = kept.iter().map(|table| rows(&connection, table)).collect();
     assert_eq!(after, before);
+    if from >= 27 {
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT origin FROM agent_sessions WHERE session_id='member'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "internal"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT origin FROM agent_sessions WHERE session_id='s1'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "unknown"
+        );
+    }
     for table in added {
         if table != "session_catalog" {
             assert!(rows(&connection, table).is_empty());
@@ -3180,8 +3451,8 @@ async fn a_v13_store_upgrades_in_place_once() {
     assert_eq!(db.upgraded_from(), None);
     db.close().await.unwrap();
     let connection = Connection::open(&fresh.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(29));
-    assert_eq!(marker(&connection), [29]);
+    assert_eq!(schema(&connection), schema_of(30));
+    assert_eq!(marker(&connection), [30]);
     drop(connection);
 
     let database = Database::new();
@@ -3301,7 +3572,7 @@ async fn a_v21_store_upgrades_in_place_once_and_restores_typeless_tool_schemas()
 
     let connection = Connection::open(&database.0).unwrap();
     assert_ne!(schema(&connection), schema_of(21));
-    assert_eq!(marker(&connection), [29]);
+    assert_eq!(marker(&connection), [30]);
     let body: String = connection
         .query_row(
             "SELECT body FROM timeline_content WHERE session_id = 'schema' AND kind = 'tools'",
@@ -3547,7 +3818,7 @@ async fn the_daemon_reports_a_v13_upgrade_on_stderr_once() {
         reports.push(stderr);
     }
     let line = format!(
-        "Upgraded native store {} from format v13 to v29; earlier dimcode versions cannot open it.",
+        "Upgraded native store {} from format v13 to v30; earlier dimcode versions cannot open it.",
         path.display()
     );
     assert!(
@@ -3594,14 +3865,22 @@ async fn owned_session_creation_and_plugin_shutdown_keep_one_resource_owner() {
                 &SessionConfig::default(),
                 "unknown",
                 2,
-                None
+                None,
+                SessionOrigin::Client,
             )
             .await
             .is_err()
     );
     assert!(directory.sessions().await.unwrap().is_empty());
     directory
-        .create_owned_session("owned", &SessionConfig::default(), "owner", 2, None)
+        .create_owned_session(
+            "owned",
+            &SessionConfig::default(),
+            "owner",
+            2,
+            None,
+            SessionOrigin::Client,
+        )
         .await
         .unwrap();
     assert_eq!(directory.sessions().await.unwrap(), ["owned"]);
@@ -5803,8 +6082,8 @@ async fn a_v25_provider_record_keeps_supplied_limits_and_drops_assumed_ones() {
             .unwrap()
     };
     let connection = Connection::open(&database.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(29));
-    assert_eq!(marker(&connection), [29]);
+    assert_eq!(schema(&connection), schema_of(30));
+    assert_eq!(marker(&connection), [30]);
     drop(connection);
 
     let listed_expected = json!({
@@ -6297,6 +6576,25 @@ async fn a_v28_store_upgrades_in_place_once() {
     upgrades_in_place_once(&database, connection, 28).await;
     let connection = Connection::open(&database.0).unwrap();
     assert!(rows(&connection, "session_output_owners").is_empty());
+}
+
+/// #557: the step that adds `agent_sessions.origin` alters the table, keeps
+/// every business row, marks the rows whose leader link it already has and
+/// leaves the rest unknown.
+#[tokio::test]
+async fn a_v29_store_upgrades_in_place_once() {
+    let database = Database::new();
+    let connection = Connection::open(&database.0).unwrap();
+    let mut statements = schema_of(29);
+    statements.sort_by_key(|sql| !sql.starts_with("CREATE TABLE"));
+    for sql in statements {
+        connection.execute_batch(&sql).unwrap();
+    }
+    connection
+        .execute("INSERT INTO agent_store_format VALUES (29)", [])
+        .unwrap();
+    assert_eq!(schema(&connection), schema_of(29));
+    upgrades_in_place_once(&database, connection, 29).await;
 }
 
 /// Grants upsert without downgrading write, survive a restart, are absent

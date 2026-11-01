@@ -2604,7 +2604,8 @@
         "eprintln",
         "format",
         "rusqlite::params",
-        "tokio::pin"
+        "tokio::pin",
+        "tracing::error"
       ]
     },
     {
@@ -2828,6 +2829,15 @@
       ]
     },
     {
+      "id": "dim_cli::client::same_file_tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::client",
+      "file": "crates/dim-cli/src/client.rs",
+      "unexpandedMacros": [
+        "assert"
+      ]
+    },
+    {
       "id": "dim_cli::client::web_assets_tests",
       "crate": "dim_cli",
       "parent": "dim_cli::client",
@@ -3025,6 +3035,15 @@
         "println",
         "tokio::pin",
         "tokio::select"
+      ]
+    },
+    {
+      "id": "dim_cli::maintenance",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/maintenance.rs",
+      "unexpandedMacros": [
+        "format"
       ]
     },
     {
@@ -4233,7 +4252,9 @@
       "crate": "dim_cli",
       "parent": "dim_cli::ui",
       "file": "crates/dim-cli/src/ui/sessions_panel.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "format"
+      ]
     },
     {
       "id": "dim_cli::ui::sessions_panel::tests",
@@ -4711,6 +4732,7 @@
         "matches",
         "print",
         "println",
+        "unreachable",
         "vec"
       ]
     },
@@ -15728,10 +15750,12 @@
       "to": "dim_app_server::protocol",
       "references": [
         "path AgentInfo",
+        "path SessionOrigin",
         "path crate::protocol::Catalog",
         "path crate::protocol::CatalogResult",
         "path crate::protocol::SessionInfo",
-        "use crate::protocol::AgentInfo"
+        "use crate::protocol::AgentInfo",
+        "use crate::protocol::SessionOrigin"
       ]
     },
     {
@@ -15989,10 +16013,12 @@
         "path Empty",
         "path PROTOCOL_VERSION",
         "path SessionId",
+        "path SessionOrigin::Internal",
         "path session_cwd",
         "use crate::protocol::Empty",
         "use crate::protocol::PROTOCOL_VERSION",
         "use crate::protocol::SessionId",
+        "use crate::protocol::SessionOrigin",
         "use crate::protocol::session_cwd"
       ]
     },
@@ -16589,6 +16615,13 @@
       ]
     },
     {
+      "from": "dim_app_server::cli",
+      "to": "dim_app_server::storage::sqlite",
+      "references": [
+        "path crate::storage::vacuum_store"
+      ]
+    },
+    {
       "from": "dim_app_server::codex_oauth",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
@@ -17043,6 +17076,14 @@
         "path ModelPolicy::Fixed",
         "path ModelPolicy::Inherit",
         "use crate::collaboration_model_policy::ModelPolicy"
+      ]
+    },
+    {
+      "from": "dim_app_server::collaboration",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path SessionOrigin::Internal",
+        "use crate::protocol::SessionOrigin"
       ]
     },
     {
@@ -17600,6 +17641,7 @@
         "path Call::WebOpen",
         "path Call::WebStatus",
         "path Call::WebToggle",
+        "path Catalog",
         "path Catalog::default",
         "path ConfigurationResult",
         "path Create",
@@ -17642,6 +17684,8 @@
         "path SERVER_VERSION",
         "path SessionInfo",
         "path SessionMethodsResult",
+        "path SessionOrigin::Acp",
+        "path SessionOrigin::Client",
         "path SessionSkillsResult",
         "path SessionSummary",
         "path WEB_MANAGEMENT_METHODS",
@@ -22479,7 +22523,9 @@
         "mod sqlite",
         "use sqlite::FORMAT",
         "use sqlite::SqliteStorage",
-        "use sqlite::SqliteStoragePlugin"
+        "use sqlite::SqliteStoragePlugin",
+        "use sqlite::Vacuumed",
+        "use sqlite::vacuum_store"
       ]
     },
     {
@@ -22572,9 +22618,11 @@
         "path Row::Event",
         "path SessionStore",
         "path read_sequence",
+        "path stored_origin",
         "use super::SessionStore",
         "use super::timeline::Row",
-        "use super::timeline::read_sequence"
+        "use super::timeline::read_sequence",
+        "use super::timeline::stored_origin"
       ]
     },
     {
@@ -23161,7 +23209,11 @@
       "from": "dim_app_server::storage::timeline",
       "to": "dim_app_server::protocol",
       "references": [
-        "path crate::protocol::SessionInfo"
+        "path SessionOrigin",
+        "path SessionOrigin::Unknown",
+        "path SessionOrigin::from_stored",
+        "path crate::protocol::SessionInfo",
+        "use crate::protocol::SessionOrigin"
       ]
     },
     {
@@ -23183,6 +23235,10 @@
         "path Previous",
         "path Reader",
         "path Reader::new",
+        "path Reader::without_request_bodies",
+        "path RequestBodies",
+        "path RequestBodies::Rebuild",
+        "path RequestBodies::Unused",
         "path Values::Written",
         "path WireEvent",
         "path codec::NodeLoads",
@@ -23197,6 +23253,7 @@
         "use super::codec::ListReferences",
         "use super::codec::Previous",
         "use super::codec::Reader",
+        "use super::codec::RequestBodies",
         "use super::codec::Values",
         "use super::codec::WireEvent"
       ]
@@ -23800,6 +23857,7 @@
         "path Action::Acp",
         "path Action::Chat",
         "path Action::DaemonStop",
+        "path Action::DaemonVacuum",
         "path Action::DefaultTerminalMode",
         "path Action::Exec",
         "path Action::Export",
@@ -23941,6 +23999,14 @@
         "path login::account_directory",
         "path login::login",
         "path login::logout"
+      ]
+    },
+    {
+      "from": "dim_cli",
+      "to": "dim_cli::maintenance",
+      "references": [
+        "mod maintenance",
+        "path maintenance::vacuum"
       ]
     },
     {
@@ -24258,7 +24324,15 @@
       "to": "dim_cli::args",
       "references": [
         "path Options",
-        "use crate::args::Options"
+        "use crate::args::Options",
+        "use crate::args::SERVER_REQUIREMENT"
+      ]
+    },
+    {
+      "from": "dim_cli::client",
+      "to": "dim_cli::client::same_file_tests",
+      "references": [
+        "mod same_file_tests"
       ]
     },
     {
@@ -24294,6 +24368,13 @@
         "use dim_client::RpcError",
         "use dim_client::Server",
         "use dim_client::app_error"
+      ]
+    },
+    {
+      "from": "dim_cli::client::same_file_tests",
+      "to": "dim_cli::client",
+      "references": [
+        "use super::same_file"
       ]
     },
     {
@@ -24676,7 +24757,8 @@
       "to": "dim_cli::args",
       "references": [
         "path Options",
-        "use crate::args::Options"
+        "use crate::args::Options",
+        "use crate::args::SERVER_REQUIREMENT"
       ]
     },
     {
@@ -24917,6 +24999,30 @@
       "references": [
         "path Client",
         "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::maintenance",
+      "to": "dim_cli",
+      "references": [
+        "path Result",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::maintenance",
+      "to": "dim_cli::args",
+      "references": [
+        "path Options",
+        "use crate::args::Options"
+      ]
+    },
+    {
+      "from": "dim_cli::maintenance",
+      "to": "dim_cli::client",
+      "references": [
+        "path client::server",
+        "use crate::client"
       ]
     },
     {
@@ -27261,7 +27367,7 @@
       "to": "dim_cli::ui::atomic",
       "references": [
         "path sibling",
-        "path update_within"
+        "path update"
       ]
     },
     {
@@ -27462,8 +27568,10 @@
         "path FILE",
         "path Store",
         "path append",
+        "path flush",
         "path load",
-        "path path"
+        "path path",
+        "path writer"
       ]
     },
     {
@@ -32352,6 +32460,7 @@
       "to": "dim_cli::ui::composer::history",
       "references": [
         "path history::append",
+        "path history::flush",
         "path history::load",
         "use crate::ui::composer::history"
       ]
@@ -32363,7 +32472,9 @@
         "path crate::ui::config::read",
         "path crate::ui::config::remove",
         "path crate::ui::config::save_fullscreen",
+        "path crate::ui::config::save_show_acp",
         "path crate::ui::config::saved_fullscreen",
+        "path crate::ui::config::saved_show_acp",
         "path crate::ui::config::write"
       ]
     },
@@ -32612,6 +32723,7 @@
       "to": "dim_cli::ui::settings_panel",
       "references": [
         "path Setting",
+        "path Setting::AcpSessions",
         "path Setting::Approvals",
         "path Setting::FileAccess",
         "path Setting::Isolation",
@@ -33029,6 +33141,16 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path i18n::LOCALES",
+        "path i18n::active",
+        "path i18n::set",
+        "path t"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::oauth_view",
       "references": [
         "path OauthView::dim"
@@ -33164,6 +33286,8 @@
         "path LOAD_MORE",
         "path Prompt::Ask",
         "path Prompt::Login",
+        "path QUEUE_HINT",
+        "path QUEUE_HINT_MORE",
         "path ThemeContext",
         "path WebOpened",
         "path banner",
@@ -33997,6 +34121,13 @@
       "to": "dim_app_server::mcp::config",
       "references": [
         "path dim_app_server::mcp::config::McpSettings"
+      ]
+    },
+    {
+      "from": "dim_migration::native",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "use dim_app_server::protocol::SessionOrigin"
       ]
     },
     {

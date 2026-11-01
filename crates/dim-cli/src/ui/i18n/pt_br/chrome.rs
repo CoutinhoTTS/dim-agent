@@ -255,7 +255,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Nothing is running" => "Nada em execução",
         "No queued message" => "Fila vazia",
         "Only in fullscreen (/tui)" => "Só em tela cheia (/tui)",
-        "/{name} is not yet available" => "/{name} ainda indisponível",
         "new session" => "nova sessão",
         "resumed {id} · {count} messages" => "{id} retomada · {count} mensagens",
         " · earlier history: /timeline" => " · histórico anterior: /timeline",
@@ -270,9 +269,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "answer required" => "resposta necessária",
         "permission required" => "permissão necessária",
         "esc interrupt" => "esc interromper",
-        "↑ edit · ctrl+s steer now · /queue" => "↑ editar · ctrl+s steer agora · /queue",
-        "+{count} more · ↑ edit · ctrl+s steer now · /queue" => {
-            "+{count} mais · ↑ editar · ctrl+s steer agora · /queue"
+        "↑ edit · ctrl+s steer now" => "↑ editar · ctrl+s steer agora",
+        "+{count} more · ↑ edit · ctrl+s steer now" => {
+            "+{count} mais · ↑ editar · ctrl+s steer agora"
         }
         "Queue ({count})" => "Fila ({count})",
         "Thinking…" => "Pensando…",
@@ -481,6 +480,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Permission needed: {tool}" => "Permissão necessária: {tool}",
         "Question waiting for your answer" => "Pergunta aguardando sua resposta",
         "Notify when agent needs you" => "Avisar quando o agente precisar",
+        "Show ACP sessions" => "Mostrar sessões ACP",
         // keys.rs
         "show the key bindings" => "mostrar atalhos de teclado",
         "Application keys" => "Atalhos do app",

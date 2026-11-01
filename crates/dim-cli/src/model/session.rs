@@ -182,6 +182,8 @@ pub enum Command {
         id: String,
         query: String,
         cursor: Option<String>,
+        /// The "Show ACP sessions" preference the picker was opened with.
+        show_acp: bool,
     },
     CloseSessions,
     /// List the models that can be chosen.
@@ -564,6 +566,9 @@ pub struct SessionItem {
     pub cwd: String,
     pub updated_at: u64,
     pub model: String,
+    /// The creation origin the daemon reports (`client`, `acp`, `internal`,
+    /// `unknown`); absent from a daemon that does not report one.
+    pub origin: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

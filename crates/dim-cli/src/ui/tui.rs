@@ -159,6 +159,7 @@ pub struct Restart {
 pub fn run(host: Box<dyn SessionPort>, surroundings: Env) -> Leave {
     let mut restart = None;
     let code = run_terminal(host, surroundings, &mut restart);
+    history::flush();
     match restart {
         Some(restart) => Leave::Restart(restart),
         None => Leave::Exit(code),
@@ -1968,7 +1969,7 @@ impl App {
             }
             ComposerOutcome::Submit(text) => {
                 let text = text.trim().to_owned();
-                let _ = history::append(&self.home, &self.cwd_key, &text);
+                history::append(&self.home, &self.cwd_key, &text);
                 self.composer.push_history(&text);
                 self.jump = Some(Jump::Bottom);
                 if self.running() {
@@ -1978,7 +1979,7 @@ impl App {
             }
             ComposerOutcome::SubmitDraft { text, parts } => {
                 let text = text.trim().to_owned();
-                let _ = history::append(&self.home, &self.cwd_key, &text);
+                history::append(&self.home, &self.cwd_key, &text);
                 self.composer.push_history(&text);
                 self.jump = Some(Jump::Bottom);
                 if self.running() {
@@ -1988,7 +1989,7 @@ impl App {
             }
             ComposerOutcome::Shell { command, shell } => {
                 let entry = format!("{}{command}", shell.prefix());
-                let _ = history::append(&self.home, &self.cwd_key, &entry);
+                history::append(&self.home, &self.cwd_key, &entry);
                 self.composer.push_history(&entry);
                 self.jump = Some(Jump::Bottom);
                 let running = crate::ui::shell::Running::new(command, shell == Shell::Private);
@@ -2270,7 +2271,7 @@ impl App {
             return;
         };
         let text = text.trim().to_owned();
-        let _ = history::append(&self.home, &self.cwd_key, &text);
+        history::append(&self.home, &self.cwd_key, &text);
         self.composer.push_history(&text);
         self.host.send(Command::OpenLine {
             session_id: draft.session_id,
@@ -2770,6 +2771,7 @@ impl App {
             tools_expanded: self.tool_detail == Detail::Expanded,
             mouse: self.mouse,
             notify: self.notify,
+            acp_sessions: crate::ui::config::saved_show_acp(&self.home),
             file_access: file_label(self.permission_policy.file_access()).to_owned(),
             approvals: tool_policy_label(&self.permission_policy).to_owned(),
         };
@@ -2815,6 +2817,14 @@ impl App {
                 self.notify = !self.notify;
                 let key = crate::ui::notify::NOTIFY_KEY;
                 if let Some(error) = crate::ui::config::write(&self.home, key, self.notify.into()) {
+                    self.set_notice(error);
+                }
+                self.settings_return = None;
+                self.open_settings(setting);
+            }
+            Setting::AcpSessions => {
+                let show = !crate::ui::config::saved_show_acp(&self.home);
+                if let Some(error) = crate::ui::config::save_show_acp(&self.home, show) {
                     self.set_notice(error);
                 }
                 self.settings_return = None;
@@ -2952,7 +2962,9 @@ impl App {
             }
             "web" => Outcome::Web,
             "resume" => {
-                self.open_prompt(Prompt::Sessions(SessionsPanel::new()));
+                self.open_prompt(Prompt::Sessions(SessionsPanel::new(
+                    crate::ui::config::saved_show_acp(&self.home),
+                )));
                 self.sync_sessions();
                 Outcome::Continue
             }
@@ -3057,11 +3069,7 @@ impl App {
                 ))));
                 Outcome::Continue
             }
-            other => {
-                self.notices
-                    .push(tf("/{name} is not yet available", &[("name", other)]));
-                Outcome::Continue
-            }
+            other => unreachable!("{other} is not in the command table"),
         }
     }
 
@@ -4612,6 +4620,11 @@ fn format_elapsed(elapsed: Duration) -> String {
 /// Message rows the queue strip shows at most.
 const QUEUE_ROWS: usize = 5;
 
+/// The queue strip's hint, and its form when messages are not shown. Every
+/// `/name` it can draw is a command in the table.
+const QUEUE_HINT: &str = "↑ edit · ctrl+s steer now";
+const QUEUE_HINT_MORE: &str = "+{count} more · ↑ edit · ctrl+s steer now";
+
 /// The queue, drawn in a titled border above the composer: the next message
 /// to run reads at the top. `height` message rows are drawn (at least the
 /// queue's, at most [`QUEUE_ROWS`]), blank past the queue's end, so the
@@ -4633,12 +4646,9 @@ fn queue_strip(items: &[(String, String)], height: usize, cols: usize, p: &Palet
         .collect();
     rows.resize_with(height, String::new);
     let hint = if hidden == 0 {
-        t("↑ edit · ctrl+s steer now · /queue").to_owned()
+        t(QUEUE_HINT).to_owned()
     } else {
-        tf(
-            "+{count} more · ↑ edit · ctrl+s steer now · /queue",
-            &[("count", &hidden.to_string())],
-        )
+        tf(QUEUE_HINT_MORE, &[("count", &hidden.to_string())])
     };
     rows.push(fg(&truncate_cells(&hint, inner), &p.muted));
     let title = paint(
@@ -5658,7 +5668,7 @@ mod tests {
         );
         let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
         app.run_command("settings", "");
-        for _ in 0..8 {
+        for _ in 0..9 {
             app.handle_input(key(KeyCode::Down));
         }
         app.handle_input(key(KeyCode::Enter));
@@ -7342,6 +7352,33 @@ mod tests {
         let three: Vec<_> = (1..=3).map(item).collect();
         let full = queue_strip(&three, 3, 80, p);
         assert_eq!(queue_strip(&three[..1], 3, 80, p).len(), full.len());
+    }
+
+    /// The queue strip names only commands the table has, in every locale.
+    #[test]
+    fn the_queue_strip_names_only_commands_that_exist() {
+        let previous = i18n::active();
+        for (locale, code, _) in i18n::LOCALES {
+            i18n::set(locale);
+            for hint in [QUEUE_HINT, QUEUE_HINT_MORE] {
+                let text = t(hint);
+                for (at, _) in text.match_indices('/') {
+                    let name: String = text[at + 1..]
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                        .collect();
+                    if name.is_empty() {
+                        continue;
+                    }
+                    assert!(
+                        COMMANDS.iter().any(|command| command.slash
+                            && (command.name == name || command.aliases.contains(&name.as_str()))),
+                        "{code}: {text:?} names /{name}, which is not a command"
+                    );
+                }
+            }
+        }
+        i18n::set(previous);
     }
 
     /// A finished command keeps the status row its running block had.
