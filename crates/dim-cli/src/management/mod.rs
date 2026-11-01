@@ -69,6 +69,7 @@ const WORKFLOW: Methods = Methods {
         (ActionKind::Edit, &["settings.read", "workflow.save"]),
         (ActionKind::Reload, &["workflow.list"]),
         (ActionKind::Add, &["workflow.save"]),
+        (ActionKind::Run, &["workflow.start"]),
         (ActionKind::Inspect, &["workflow.status"]),
     ],
 };
@@ -187,11 +188,20 @@ pub(crate) fn unsupported(area: Area) -> String {
     }
 }
 
+/// The Session and the line whose panel issued a request: what a run started
+/// from the panel reports to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionLine {
+    pub session_id: String,
+    pub branch_id: String,
+}
+
 /// Applies `request` to its area and reports what it came to.
 pub async fn apply(
     client: &mut Client,
     request: &ManagementRequest,
     cwd: &Path,
+    line: Option<&SessionLine>,
 ) -> ManagementResult {
     if let Err(error) = supported(client, request) {
         return ManagementResult::Refused(ManagementRefusal::Refused(error));
@@ -230,7 +240,7 @@ pub async fn apply(
                 })
             }
         },
-        Area::Workflow => match workflow::apply(client, &request.action, cwd).await {
+        Area::Workflow => match workflow::apply(client, &request.action, cwd, line).await {
             Ok(workflow::Answer::Definitions { listing, note }) => ManagementResult::View {
                 view: Box::new(workflow::view(&listing, &actions, cwd)),
                 note,

@@ -1032,7 +1032,7 @@ enum Prompt {
     Models(ModelsPanel),
     Providers(Box<ProvidersPanel>),
     Plugins(PluginsPanel),
-    Management(ManagementPanel),
+    Management(Box<ManagementPanel>),
     Login(Box<OauthView>),
     Approvals(ApprovalsPanel),
     Theme(ThemePanel),
@@ -3320,7 +3320,9 @@ impl App {
     /// command may open it with one kind to run when the first view arrives,
     /// as `/workflow:save` opens the add step.
     fn open_management(&mut self, area: Area, pending: Option<ActionKind>) {
-        self.open_prompt(Prompt::Management(ManagementPanel::opening(area, pending)));
+        self.open_prompt(Prompt::Management(Box::new(ManagementPanel::opening(
+            area, pending,
+        ))));
         self.host.send(Command::Management(ManagementRequest {
             area,
             action: ManagementAction::List,
@@ -8963,7 +8965,9 @@ mod tests {
         }
         // The panel is open: the file and the link stay for the next Ctrl+N.
         for result in [refused(), conflict()] {
-            app.prompt = Some(Prompt::Management(ManagementPanel::new(Area::Scheduled)));
+            app.prompt = Some(Prompt::Management(Box::new(ManagementPanel::new(
+                Area::Scheduled,
+            ))));
             let path = draft(&mut app);
             app.apply(create_reply(result));
             assert!(path.exists(), "a create keeps its file: {path:?}");
@@ -9006,7 +9010,9 @@ mod tests {
             || editor::Draft::open(root.path(), Area::Skills, "{\"target\":\"src\"}").unwrap();
         let written = |app: &mut App, draft: editor::Draft| {
             let path = draft.path().to_path_buf();
-            app.prompt = Some(Prompt::Management(ManagementPanel::new(Area::Skills)));
+            app.prompt = Some(Prompt::Management(Box::new(ManagementPanel::new(
+                Area::Skills,
+            ))));
             app.write_draft(
                 Area::Skills,
                 WriteTarget::Run { id: "job-1".into() },

@@ -110,6 +110,10 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "A definition is saved to the user source or the project source." => {
             "Uma definição é guardada na fonte do utilizador ou na fonte do projeto."
         }
+        "Started {name}: {run_id}." => "{name} iniciado: {run_id}.",
+        "Parameters are a JSON object of strings." => {
+            "Os parâmetros são um objeto JSON de cadeias de caracteres."
+        }
         _ => return None,
     })
 }

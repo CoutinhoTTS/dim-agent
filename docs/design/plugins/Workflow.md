@@ -370,7 +370,7 @@ It follows the collaboration report's entry (`<dim-agent-report>`, order 20, [Co
 | --- | --- | --- |
 | `workflow` (`list`, `start`, `status`, `stop`) | Tool registered with `toolRegistry` (Session), risk category of Collaboration's `agent` tool | Model runs workflows |
 | `workflow.list/save/start/status/stop` | `managementMethods` (process, namespace `workflow`) | Operators manage definitions and runs |
-| CLI entry | [Management surfaces](../cli-commands.md#the-workflow-area) | The client lists, enables and saves definitions over A.3; it adds no method |
+| CLI entry | [Management surfaces](../cli-commands.md#the-workflow-area) | The client lists, enables, saves and starts definitions over A.3; it adds no method |
 | `sessions` | Depended on | Stage Sessions: launch, input, history, lookup, stop, withdraw, delete |
 | `dim.workflow/v1` | Defined here | Definition format (Appendix A) |
 

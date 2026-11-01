@@ -323,7 +323,7 @@ pub const COMMANDS: &[Command] = &[
     slash(
         "workflow",
         "model",
-        "list workflow definitions, enable one, add or edit a definition",
+        "list workflow definitions, start one or save a definition",
         &[],
         Needs::Nothing,
     ),

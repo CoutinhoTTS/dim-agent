@@ -181,6 +181,13 @@ pub enum Action {
         area: crate::model::session::Area,
         path: std::path::PathBuf,
     },
+    /// `<area> start ID [PATH]`: run one entry, with its input from a file or
+    /// from stdin for `-`.
+    ManagementStart {
+        area: crate::model::session::Area,
+        id: String,
+        path: Option<std::path::PathBuf>,
+    },
     /// `recording [on|off]`: the daemon's model request record.
     Recording {
         enabled: Option<bool>,
@@ -657,6 +664,11 @@ impl Options {
                             area: Area::Workflow,
                             path: value(&mut args)?.into(),
                         },
+                        "start" => Action::ManagementStart {
+                            area: Area::Workflow,
+                            id: value(&mut args)?,
+                            path: args.next().map(Into::into),
+                        },
                         "history" => Action::Management(ManagementRequest {
                             area: Area::Workflow,
                             action: ManagementAction::Inspect {
@@ -665,7 +677,7 @@ impl Options {
                         }),
                         _ => {
                             return Err(
-                                "Use workflow list, enable NAME, disable NAME, edit NAME, set NAME PATH, add PATH or history NAME"
+                                "Use workflow list, enable NAME, disable NAME, edit NAME, set NAME PATH, add PATH, start NAME [PATH] or history NAME"
                                     .into(),
                             );
                         }

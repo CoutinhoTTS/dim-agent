@@ -140,11 +140,20 @@ fn drains(wire: &mut Wire) {
 
 /// Reads requests until the client leaves, and fails on a definition write.
 fn drains_without_saving(wire: &mut Wire) {
+    drains_without(wire, "workflow.save");
+}
+
+/// Reads requests until the client leaves, and fails on a start.
+fn drains_without_starting(wire: &mut Wire) {
+    drains_without(wire, "workflow.start");
+}
+
+fn drains_without(wire: &mut Wire, method: &str) {
     let mut line = String::new();
     while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
         assert!(
-            !line.contains("\"workflow.save\""),
-            "unexpected write: {line}"
+            !line.contains(&format!("\"{method}\"")),
+            "unexpected call: {line}"
         );
         line.clear();
     }
@@ -362,6 +371,166 @@ fn workflow_add_is_refused_before_stdin_is_read() {
     );
 }
 
+/// `start NAME -` sends the stdin parameters, resolved to the entry's source,
+/// and prints the run the owner started.
+#[test]
+fn workflow_start_sends_the_parameters_from_stdin() {
+    let home = Home::new();
+    let (project, cwd) = workspace(&home);
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["workflow.list", "workflow.start", "settings.read"]);
+        let request = wire.read("workflow.list");
+        wire.reply(&request, definitions());
+        let request = wire.read("workflow.start");
+        assert_eq!(
+            request["params"],
+            json!({
+                "name": "review-and-fix",
+                "source": "user",
+                "cwd": cwd,
+                "params": {"target": "src"},
+            })
+        );
+        wire.reply(&request, json!({"run_id": "wf-1"}));
+        let request = wire.read("workflow.list");
+        wire.reply(&request, definitions());
+        let request = wire.read("settings.read");
+        wire.reply(&request, settings());
+        drains(wire);
+    });
+    let mut child = home
+        .command()
+        .arg("--cwd")
+        .arg(&project)
+        .args(["workflow", "start", "review-and-fix", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"{\"target\":\"src\"}")
+        .unwrap();
+    let output = wait(child);
+    assert!(
+        output.status.success(),
+        "exit {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Started review-and-fix: wf-1.\n"
+    );
+    daemon.join().unwrap();
+}
+
+/// An unknown name is refused before the start, and a parameter document the
+/// definition does not describe is refused before it too.
+#[test]
+fn workflow_start_refuses_an_unknown_name_or_parameters() {
+    // The unknown name: the list is read, and nothing is started.
+    let home = Home::new();
+    let (project, _) = workspace(&home);
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["workflow.list", "workflow.start"]);
+        let request = wire.read("workflow.list");
+        wire.reply(&request, definitions());
+        drains_without_starting(wire);
+    });
+    let output = home
+        .command()
+        .arg("--cwd")
+        .arg(&project)
+        .args(["workflow", "start", "missing"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("No workflow definition is named missing."),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // An unknown parameter key is the client's own document shape, refused
+    // with the editor's shape sentence and no start.
+    let home = Home::new();
+    let (project, _) = workspace(&home);
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["workflow.list", "workflow.start"]);
+        let request = wire.read("workflow.list");
+        wire.reply(&request, definitions());
+        drains_without_starting(wire);
+    });
+    let mut child = home
+        .command()
+        .arg("--cwd")
+        .arg(&project)
+        .args(["workflow", "start", "review-and-fix", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"{\"target\":\"src\",\"extra\":\"x\"}")
+        .unwrap();
+    let output = wait(child);
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Parameters are a JSON object of strings."),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // A name the area lists only disabled reaches the owner, whose refusal
+    // names the state; the client does not claim the name is unknown.
+    let home = Home::new();
+    let (project, cwd) = workspace(&home);
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["workflow.list", "workflow.start"]);
+        let request = wire.read("workflow.list");
+        wire.reply(&request, definitions());
+        let request = wire.read("workflow.start");
+        assert_eq!(
+            request["params"],
+            json!({
+                "name": "nightly-check",
+                "source": "project",
+                "cwd": cwd,
+                "params": {},
+            })
+        );
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,"message":"No enabled definition is named nightly-check.",
+            "data":{"appError":"definition_not_found"}}}));
+        drains(wire);
+    });
+    let output = home
+        .command()
+        .arg("--cwd")
+        .arg(&project)
+        .args(["workflow", "start", "nightly-check"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("No enabled definition is named nightly-check."),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// Without `settings.read` and `settings.update` the toggle is not offered,
 /// so the command is refused before it reads anything.
 #[test]
@@ -492,6 +661,269 @@ fn tui_workflow_save_command_writes_a_definition() {
         assert!(terminal.wait().success());
         daemon.join().unwrap();
     }
+}
+
+/// A completed management run as `workflow.status {}` reports it, addressed
+/// to the Session whose panel started it.
+fn started_run() -> Value {
+    json!({
+        "run_id": "wf-1",
+        "name": "review-and-fix",
+        "source": "user",
+        "definition": {"version": "dim.workflow/v1"},
+        "params": {"target": "src"},
+        "cwd": "/workspace",
+        "started_by": "management",
+        "created_at": "2026-11-02T10:00:00.000Z",
+        "ended_at": "2026-11-02T10:01:00.000Z",
+        "state": "completed",
+        "stages": [],
+        "log": [],
+        "report": {"state": "none"},
+        "report_to": {"session_id": "session", "branch_id": "main"},
+    })
+}
+
+/// Ctrl+T on a definition with parameters opens the editor on the template
+/// and starts the run addressed to the Session's line; `/tasks` finds it
+/// through the discovery read.
+#[test]
+fn tui_workflow_panel_starts_a_run_with_parameters() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        // The editor keeps the template it was opened on, then fills it.
+        let template = home.0.join("template.json");
+        let script = editor(
+            &home,
+            &format!(
+                "cp \"$1\" {}\nprintf '%s' '{{\"target\":\"src\"}}' > \"$1\"",
+                template.display()
+            ),
+        );
+        let (shown, wait_shown) = mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            opened_with(
+                wire,
+                &[
+                    "workflow.list",
+                    "workflow.save",
+                    "workflow.start",
+                    "workflow.status",
+                    "settings.read",
+                    "settings.update",
+                ],
+            );
+            wait_shown.recv_timeout(PATIENCE).unwrap();
+            let request = wire.read("workflow.list");
+            wire.reply(&request, definitions());
+            let request = wire.read("settings.read");
+            wire.reply(&request, settings());
+            // Ctrl+T: the adapter resolves the entry, then starts it with the
+            // parameters the editor left and the line the panel drew over.
+            let request = wire.read("workflow.list");
+            wire.reply(&request, definitions());
+            let request = wire.read("workflow.start");
+            assert_eq!(
+                request["params"],
+                json!({
+                    "name": "review-and-fix",
+                    "source": "user",
+                    "cwd": "/workspace",
+                    "params": {"target": "src"},
+                    "report_to": {"session_id": "session", "branch_id": "main"},
+                })
+            );
+            wire.reply(&request, json!({"run_id": "wf-1"}));
+            let request = wire.read("workflow.list");
+            wire.reply(&request, definitions());
+            let request = wire.read("settings.read");
+            wire.reply(&request, settings());
+            // `/tasks` discovers the management-started run.
+            let request = wire.read("workflow.status");
+            assert_eq!(request["params"], json!({}));
+            wire.reply(&request, json!([started_run()]));
+            drains(wire);
+        });
+        let mut terminal = Terminal::launch_tui(edit_command(&home, &script, fullscreen));
+        terminal.until("test / model");
+        shown.send(()).unwrap();
+        terminal.write(b"/workflow\r");
+        terminal.until("review-and-fix");
+        terminal.raw(b"\x14");
+        terminal.until("Started review-and-fix: wf-1.");
+        assert_eq!(
+            fs::read_to_string(&template).unwrap(),
+            "{\n  \"target\": \"\"\n}\n"
+        );
+        terminal.raw(b"\x1b");
+        thread::sleep(Duration::from_millis(200));
+        terminal.write(b"/tasks\r");
+        terminal.until("review-and-fix");
+        terminal.write(b"\r");
+        terminal.until("Run: wf-1");
+        // Back to the list, then out of the panel.
+        terminal.raw(b"\x1b");
+        thread::sleep(Duration::from_millis(200));
+        terminal.raw(b"\x1b");
+        thread::sleep(Duration::from_millis(200));
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+    }
+}
+
+/// A run started from the panel reports to the line the panel shows: the
+/// user focused `line-1` before they opened `/workflow`, so the start is
+/// addressed to it, not to `main`.
+#[test]
+fn tui_workflow_panel_starts_a_run_on_the_shown_line() {
+    let home = Home::new();
+    let (shown, wait_shown) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        opened_with(
+            wire,
+            &[
+                "workflow.list",
+                "workflow.save",
+                "workflow.start",
+                "workflow.status",
+                "settings.read",
+                "settings.update",
+            ],
+        );
+        // A line opens from main; focusing it reads the line's own history.
+        wire.notice(
+            "session.event",
+            json!({"sessionId":"session","branchId":"main","event":{
+                "id":"branch-9","sequence":9,"create_at":1,"type":"branch","name":"create",
+                "data":{"branch":"line-1","at":{"kind":"create"},
+                        "source":{"kind":"host","operation_id":"op-1"},
+                        "prompt":"child work"}}}),
+        );
+        let history = wire.read("session.history");
+        assert_eq!(history["params"]["branchId"], "line-1");
+        wire.reply(
+            &history,
+            json!({"events":[{"id":"start-line-1","sequence":10,"create_at":1,
+                    "type":"branch","name":"start","data":{"parent":"main"}}],
+                "through":10,"nextAfter":10,"done":true}),
+        );
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        let request = wire.read("workflow.list");
+        wire.reply(&request, definitions());
+        let request = wire.read("settings.read");
+        wire.reply(&request, settings());
+        // Ctrl+T on release-notes, which declares no parameters, starts at
+        // once, addressed to the line the transcript shows.
+        let request = wire.read("workflow.list");
+        wire.reply(&request, definitions());
+        let request = wire.read("workflow.start");
+        assert_eq!(
+            request["params"],
+            json!({
+                "name": "release-notes",
+                "source": "plugin",
+                "cwd": "/workspace",
+                "params": {},
+                "report_to": {"session_id": "session", "branch_id": "line-1"},
+            })
+        );
+        wire.reply(&request, json!({"run_id": "wf-2"}));
+        let request = wire.read("workflow.list");
+        wire.reply(&request, definitions());
+        let request = wire.read("settings.read");
+        wire.reply(&request, settings());
+        drains(wire);
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    // The branch row may be painted before the frame that `test / model`
+    // matched, so the row is looked for anywhere in the transcript.
+    terminal.until_anywhere("line-1");
+    terminal.write(b"/lines\r");
+    terminal.until("the session itself");
+    terminal.write(b"\x1b[B");
+    terminal.write(b"\r");
+    terminal.until("⑂ main ▸ child work");
+    terminal.write(b"/workflow\r");
+    terminal.until("review-and-fix");
+    terminal.raw(b"\x1b[B");
+    terminal.until("Nightly checks");
+    terminal.raw(b"\x1b[B");
+    terminal.until("Release notes");
+    terminal.raw(b"\x14");
+    terminal.until("Started release-notes: wf-2.");
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+/// `/workflow` after `/new`, before the first message, has no Session and
+/// so no line to report to: the start carries no `report_to`.
+#[test]
+fn tui_workflow_starts_without_a_session_and_reports_nowhere() {
+    let home = Home::new();
+    let (shown, wait_shown) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        opened_with(
+            wire,
+            &[
+                "workflow.list",
+                "workflow.save",
+                "workflow.start",
+                "workflow.status",
+                "settings.read",
+                "settings.update",
+            ],
+        );
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        let request = wire.read("workflow.list");
+        wire.reply(&request, definitions());
+        let request = wire.read("settings.read");
+        wire.reply(&request, settings());
+        let request = wire.read("workflow.list");
+        wire.reply(&request, definitions());
+        let request = wire.read("workflow.start");
+        assert_eq!(
+            request["params"],
+            json!({
+                "name": "release-notes",
+                "source": "plugin",
+                "cwd": "/workspace",
+                "params": {},
+            })
+        );
+        wire.reply(&request, json!({"run_id": "wf-3"}));
+        let request = wire.read("workflow.list");
+        wire.reply(&request, definitions());
+        let request = wire.read("settings.read");
+        wire.reply(&request, settings());
+        drains(wire);
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/new\r");
+    terminal.until("new session");
+    terminal.write(b"/workflow\r");
+    terminal.until("review-and-fix");
+    terminal.raw(b"\x1b[B");
+    terminal.until("Nightly checks");
+    terminal.raw(b"\x1b[B");
+    terminal.until("Release notes");
+    terminal.raw(b"\x14");
+    terminal.until("Started release-notes: wf-3.");
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
 }
 
 /// A stale revision writes nothing: the toggle and the edit both read the

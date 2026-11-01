@@ -102,6 +102,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "A definition is saved to the user source or the project source." => {
             "定義儲存到使用者來源或專案來源。"
         }
+        "Started {name}: {run_id}." => "已啟動 {name}：{run_id}。",
+        "Parameters are a JSON object of strings." => "參數是由字串組成的 JSON 物件。",
         _ => return None,
     })
 }

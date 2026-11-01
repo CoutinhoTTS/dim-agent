@@ -106,6 +106,10 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "A definition is saved to the user source or the project source." => {
             "정의는 사용자 소스 또는 프로젝트 소스에 저장합니다."
         }
+        "Started {name}: {run_id}." => "{name} 시작됨: {run_id}.",
+        "Parameters are a JSON object of strings." => {
+            "매개변수는 문자열로 이루어진 JSON 객체입니다."
+        }
         _ => return None,
     })
 }

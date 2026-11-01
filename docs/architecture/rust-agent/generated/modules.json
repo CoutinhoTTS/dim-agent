@@ -24056,6 +24056,7 @@
         "path Action::ManagementAdd",
         "path Action::ManagementEdit",
         "path Action::ManagementSet",
+        "path Action::ManagementStart",
         "path Action::McpEnable",
         "path Action::McpList",
         "path Action::McpLogin",
@@ -24219,7 +24220,8 @@
         "path management_command::add",
         "path management_command::edit",
         "path management_command::run",
-        "path management_command::set"
+        "path management_command::set",
+        "path management_command::start"
       ]
     },
     {
@@ -25634,6 +25636,7 @@
       "to": "dim_cli::management",
       "references": [
         "path Groups::default",
+        "path super::SessionLine",
         "path super::area_kinds",
         "use super::Groups"
       ]
@@ -25645,6 +25648,7 @@
         "path ActionKind",
         "path ActionKind::Edit",
         "path ActionKind::Inspect",
+        "path ActionKind::Run",
         "path ActionKind::Toggle",
         "path EntryDocument",
         "path EntryState::Invalid",
@@ -25786,6 +25790,7 @@
       "references": [
         "path ActionKind::Add",
         "path ActionKind::Edit",
+        "path ActionKind::Run",
         "path Area",
         "path Area::Hooks",
         "path Area::Scheduled",
@@ -25794,6 +25799,7 @@
         "path ManagementAction::Add",
         "path ManagementAction::List",
         "path ManagementAction::Remove",
+        "path ManagementAction::Run",
         "path ManagementAction::Save",
         "path ManagementAction::Toggle",
         "path ManagementRequest",
@@ -27273,6 +27279,7 @@
       "from": "dim_cli::session_host",
       "to": "dim_cli::management",
       "references": [
+        "path crate::management::SessionLine",
         "path crate::management::apply"
       ]
     },

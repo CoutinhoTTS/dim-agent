@@ -579,8 +579,8 @@ the panel's confirmation.
 ### The Workflow area
 
 Workflow (#816): the `/workflow` panel, `/workflow:save` its add step in both modes, and `dimcode
-workflow list|enable NAME|disable NAME|edit NAME|set NAME PATH|add PATH|history NAME` over
-`workflow.list`, `workflow.save` and `workflow.status`
+workflow list|enable NAME|disable NAME|edit NAME|set NAME PATH|add PATH|start NAME [PATH]|history
+NAME` over `workflow.list`, `workflow.save`, `workflow.start` and `workflow.status`
 ([Workflow](plugins/Workflow.md#a3-management-methods)), plus the Settings client methods the
 enablement needs. Every definition is an entry, grouped under the source the owner reports:
 `user`, `project` and `plugin:<package id>`. A user definition is always enabled and its document
@@ -607,6 +607,19 @@ second definition and leave the old one, and the area has no remove; the write i
 the call and the draft is kept. A project definition is edited wherever it lives, like a project
 hook document, and the entry's detail names its path.
 
+Run is offered for enabled, valid definitions of any source. A definition that declares parameters
+opens the editor on one JSON object, one key per parameter: its `default` where the definition
+gives one and an empty string where it does not. The document is read back as an object of strings
+whose keys the definition declares; anything else is refused with `Parameters are a JSON object of
+strings.` and nothing starts. An empty string is a supplied value, not an omission. A definition
+with no parameters starts at once. The start carries the entry's name and source and the
+workspace; from the panel it also carries `report_to {session_id, branch_id}` for the Session and
+the line the transcript shows, the line a submitted message goes to, which is how `/tasks` finds a
+management-started run when it is next opened. A panel with no Session yet, as after `/new`
+before the first message, starts a run that reports nowhere. The command line has no Session, so
+`dimcode workflow start` sends no `report_to` and its runs are outside `/tasks`. The note is
+`Started <name>: <run_id>.`.
+
 Inspect reads `workflow.status {}` and filters the retained runs to the entry's name and source;
 the detail is the definition's lines, a `Recent runs` line and up to ten runs, newest first. The
 area has no remove: the owner has no delete method, so a user definition leaves only by editing
@@ -624,13 +637,14 @@ the Settings document, and a project definition by deleting its file.
 │                                                                                               │
 │   Analyze, fix in parallel, summarize                                                         │
 │   Saved in the user workflow source; always enabled.                                          │
-╰─ Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Tab inspect · Esc close ──────────────────────────╯
+╰─ Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+T run · Tab inspect · Esc close ─────────────╯
 ```
 
 `dimcode workflow list` prints one row per definition (name, source, state, description) and the
 issues of the invalid ones; `enable` and `disable` address the project definition of that name;
 `edit` and `set` address the user definition and refuse a project name with the file to edit;
-`add` is the create without an editor; `history NAME` resolves the name by the precedence
+`add` is the create without an editor; `start NAME [PATH]` takes the parameters from PATH, or from
+stdin for `-`, or starts with none; `history NAME` resolves the name by the precedence
 `workflow.start` uses (project, then user, then package) and prints the detail's lines. A command
 run in a workspace that Settings does not know prints the owner's `definition_source_failed`
 message and exits 1.
@@ -674,8 +688,9 @@ message and exits 1.
 | `dimcode workflow edit NAME` | Open the user definition's document in `$VISUAL`, `$EDITOR` or the platform default, and save it over `workflow.save` with the revision the user document was read at; a project name names the file to edit instead. |
 | `dimcode workflow set NAME PATH` | Write the user definition from `PATH`, or from stdin for `-`, with the revision read immediately before the write; unchanged text writes nothing. |
 | `dimcode workflow add PATH` | Create or replace a definition from `PATH`, or from stdin for `-`, over `workflow.save`: the document names `source` (`user` by default) and `document`. |
+| `dimcode workflow start NAME [PATH]` | Start the definition over `workflow.start` with the parameters from `PATH`, or from stdin for `-`, or with none; report `Started NAME: RUN_ID`, without a `report_to`. |
 | `dimcode workflow history NAME` | Print the definition's lines and its recent runs over `workflow.status`, resolving the name by `workflow.start`'s precedence. |
-| `/workflow` | Open the Workflow panel of the Session's workspace ([management surfaces](#management-surfaces)): a definition per entry with its source, state, parameters and issues, and the toggle, edit, add and inspect kinds. |
+| `/workflow` | Open the Workflow panel of the Session's workspace ([management surfaces](#management-surfaces)): a definition per entry with its source, state, parameters and issues, and the toggle, edit, add, run and inspect kinds. |
 | `/workflow:save` | Open the Workflow panel and its create editor: the add kind at the command surface. |
 | `dimcode login [PROVIDER] [--directory URL] [--device] [--redirect-uri URI]` | Start the described account's browser or device sign-in ([Provider accounts](#provider-accounts)); without PROVIDER, list the described accounts. |
 | `dimcode account PROVIDER` | Print the described account's non-secret state. |

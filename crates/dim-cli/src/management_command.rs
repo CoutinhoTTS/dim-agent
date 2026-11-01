@@ -172,6 +172,36 @@ pub async fn add(client: &mut Client, options: &Options, area: Area, path: &Path
     create(client, options, area, &text, &kept).await
 }
 
+/// `workflow start NAME [PATH]`: the definition's parameters from a file, or
+/// from stdin for `-`, and no reporter, since the command line has no
+/// Session.
+pub async fn start(
+    client: &mut Client,
+    options: &Options,
+    area: Area,
+    id: String,
+    path: Option<&Path>,
+) -> Result<i32> {
+    // Refuse a start the daemon cannot serve before the input can hold the
+    // call, as `add` does.
+    management::supports_kind(client, area, ActionKind::Run)?;
+    let document = match path {
+        Some(path) => {
+            let text = read_text(path)?;
+            Some(
+                serde_json::from_str::<Value>(&text)
+                    .map_err(|error| format!("{}: {error}", path.display()))?,
+            )
+        }
+        None => None,
+    };
+    let request = ManagementRequest {
+        area,
+        action: ManagementAction::Run { id, document },
+    };
+    run(client, options, &request).await
+}
+
 /// The document a command reads, from a file or from stdin for `-`.
 fn read_text(path: &Path) -> Result<String> {
     if path == Path::new("-") {
@@ -282,7 +312,7 @@ async fn write(client: &mut Client, options: &Options, draft: &Draft) -> Result<
             document,
         },
     };
-    match management::apply(client, &request, &options.cwd).await {
+    match management::apply(client, &request, &options.cwd, None).await {
         ManagementResult::Refused(error) => {
             Err(format!("{error} Your text is kept in {}.", draft.kept).into())
         }
@@ -314,7 +344,7 @@ async fn create(
         area,
         action: ManagementAction::Add { document },
     };
-    match management::apply(client, &request, &options.cwd).await {
+    match management::apply(client, &request, &options.cwd, None).await {
         ManagementResult::View { note, .. } => {
             // The note names the entry the owner saved: made safe, as every
             // line the Scheduler prints is.
@@ -496,7 +526,7 @@ async fn run_workflow(
     request: &ManagementRequest,
 ) -> Result<i32> {
     management::supported(client, request)?;
-    match workflow::apply(client, &request.action, &options.cwd).await {
+    match workflow::apply(client, &request.action, &options.cwd, None).await {
         Ok(workflow::Answer::Detail(detail)) => {
             // The owner names definitions and states reasons: what it wrote
             // is made safe before it reaches the terminal.

@@ -345,7 +345,7 @@ policy 文本是出厂配置成员：`code.config.report_guidance` 替换报告�
 | --- | --- | --- |
 | `workflow`（`list`、`start`、`status`、`stop`） | 注册到 `toolRegistry` 的工具（Session），风险类别同 Collaboration 的 `agent` 工具 | 模型运行工作流 |
 | `workflow.list/save/start/status/stop` | `managementMethods`（进程，命名空间 `workflow`） | 运维方管理定义和运行 |
-| CLI 入口 | [管理界面](../cli-commands.md#workflow-领域) | 客户端经 A.3 列出、启用并保存定义；它不新增方法 |
+| CLI 入口 | [管理界面](../cli-commands.md#workflow-领域) | 客户端经 A.3 列出、启用、保存并启动定义；它不新增方法 |
 | `sessions` | 依赖 | 阶段 Session：launch、input、history、lookup、stop、withdraw、delete |
 | `dim.workflow/v1` | 此处定义 | 定义格式（附录 A） |
 

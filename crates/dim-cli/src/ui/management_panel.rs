@@ -119,6 +119,8 @@ pub const STRINGS: &[&str] = &[
     "Recent runs",
     "A workflow definition is saved as an object with a source and a document.",
     "A definition is saved to the user source or the project source.",
+    "Started {name}: {run_id}.",
+    "Parameters are a JSON object of strings.",
 ];
 
 pub struct ManagementPanel {

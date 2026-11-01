@@ -108,6 +108,10 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "A definition is saved to the user source or the project source." => {
             "定義はユーザーソースまたはプロジェクトソースに保存します。"
         }
+        "Started {name}: {run_id}." => "{name} を開始しました: {run_id}。",
+        "Parameters are a JSON object of strings." => {
+            "パラメータは文字列の JSON オブジェクトです。"
+        }
         _ => return None,
     })
 }

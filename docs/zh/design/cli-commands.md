@@ -416,11 +416,13 @@ Ctrl+T 立即运行所选任务，并报告所有者的答复——`launching`�
 
 ### Workflow 领域
 
-Workflow（#816）：`/workflow` 面板，`/workflow:save` 在两种模式下打开它的新建步骤，以及 `dimcode workflow list|enable NAME|disable NAME|edit NAME|set NAME PATH|add PATH|history NAME`，经 `workflow.list`、`workflow.save` 与 `workflow.status`（[Workflow](plugins/Workflow.md#a3-管理方法)），再加上启用所需的 Settings 客户端方法。每个定义都是一个条目，按所有者报告的分组归类：`user`、`project` 与 `plugin:<包 id>`。用户定义始终启用，其文档就是条目的文档；项目定义默认停用，是仓库中的文件；包定义由安装提供，不提供写入。所有者无法使用的条目标记为无效，详情带上所有者的问题。
+Workflow（#816）：`/workflow` 面板，`/workflow:save` 在两种模式下打开它的新建步骤，以及 `dimcode workflow list|enable NAME|disable NAME|edit NAME|set NAME PATH|add PATH|start NAME [PATH]|history NAME`，经 `workflow.list`、`workflow.save`、`workflow.start` 与 `workflow.status`（[Workflow](plugins/Workflow.md#a3-管理方法)），再加上启用所需的 Settings 客户端方法。每个定义都是一个条目，按所有者报告的分组归类：`user`、`project` 与 `plugin:<包 id>`。用户定义始终启用，其文档就是条目的文档；项目定义默认停用，是仓库中的文件；包定义由安装提供，不提供写入。所有者无法使用的条目标记为无效，详情带上所有者的问题。
 
 项目定义的启用状态是用户 Settings 文档中的 `projectEnabled[cwd][name]` 成员。所有者自己的服务拒绝修改它（`userOnly`），所以 toggle 是一次客户端写入：`settings.read`，在按读取原样复制的文档上设置该成员，再以读取报告的 revision 调 `settings.update`。文档按读取原样复制，因此定义、限额或另一个工作区的映射都不会丢失。`settings_conflict` 走冲突路径：什么都没有写入，重新读取定义，消息说明这一点。
 
 add 用一个文档 `{source, document}` 写入任一来源，`source` 默认 `user`；项目保存创建或替换 `.dimcode/workflows/<name>.yaml`，并且保持停用，消息会说明。edit 只为用户定义提供：列表的 Settings 读取带上文档，保存带上面板读到的 revision，`conflict` 答复意味着编辑期间定义已变：什么都不写，重新读取领域，草稿保留用户的文本。CAS 单位是整个用户文档，所以编辑期间另一个定义或某个启用状态变了，保存同样返回 `conflict`。保存不得重命名定义：所有者以文档的 name 为键，重命名的编辑会保存第二个定义并留下旧的，而本领域没有 remove；写入在调用前被拒绝，草稿保留。项目定义在它所在的地方编辑，与项目 Hook 文档一样，条目的详情给出其路径。
+
+run 为任何来源中已启用且有效的定义提供。声明了参数的定义会用编辑器打开一个 JSON 对象，每个参数一个键：定义给出 `default` 时用默认值，否则用空字符串。读回的文档必须是键都在定义声明之内的字符串对象；其他情况以 `Parameters are a JSON object of strings.` 拒绝，什么都不启动。空字符串是一个给定值，不是省略。没有参数的定义立即启动。启动带上条目的名称、来源与工作区；从面板发起时还带上 `report_to {session_id, branch_id}`，指向会话与转录所显示的那一条线，也就是提交消息所去的那条线，`/tasks` 下次打开时据此找到管理启动的运行。尚无会话的面板（例如 `/new` 之后、第一条消息之前）所启动的运行不向任何地方报告。命令行没有会话，所以 `dimcode workflow start` 不发送 `report_to`，其运行不在 `/tasks` 中。消息是 `Started <name>: <run_id>.`。
 
 inspect 读取 `workflow.status {}`，把保留的运行过滤到该条目的名称与来源；详情是定义的行、一行 `Recent runs`，以及最多十条运行，最新的在前。本领域没有 remove：所有者没有删除方法，用户定义只能通过编辑 Settings 文档移除，项目定义通过删除其文件移除。
 
@@ -436,10 +438,10 @@ inspect 读取 `workflow.status {}`，把保留的运行过滤到该条目的名
 │                                                                                               │
 │   Analyze, fix in parallel, summarize                                                         │
 │   Saved in the user workflow source; always enabled.                                          │
-╰─ Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Tab inspect · Esc close ──────────────────────────╯
+╰─ Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+T run · Tab inspect · Esc close ─────────────╯
 ```
 
-`dimcode workflow list` 每个定义打印一行（名称、来源、状态、描述）以及无效定义的问题；`enable` 与 `disable` 作用于该名称的项目定义；`edit` 与 `set` 作用于用户定义，遇到项目名称时给出要编辑的文件并拒绝；`add` 是不经编辑器的新建；`history NAME` 按 `workflow.start` 的优先级（project，然后 user，然后 package）解析名称并打印详情的行。在 Settings 不认识的工作区运行命令时，打印所有者的 `definition_source_failed` 消息并以 1 退出。
+`dimcode workflow list` 每个定义打印一行（名称、来源、状态、描述）以及无效定义的问题；`enable` 与 `disable` 作用于该名称的项目定义；`edit` 与 `set` 作用于用户定义，遇到项目名称时给出要编辑的文件并拒绝；`add` 是不经编辑器的新建；`start NAME [PATH]` 从 PATH（`-` 表示 stdin）读取参数，没有 PATH 时不带参数启动；`history NAME` 按 `workflow.start` 的优先级（project，然后 user，然后 package）解析名称并打印详情的行。在 Settings 不认识的工作区运行命令时，打印所有者的 `definition_source_failed` 消息并以 1 退出。
 
 ## 命令
 
@@ -476,8 +478,9 @@ inspect 读取 `workflow.status {}`，把保留的运行过滤到该条目的名
 | `dimcode workflow edit NAME` | 用 `$VISUAL`、`$EDITOR` 或平台默认编辑器打开用户定义的文档，并以用户文档读取时的 revision 经 `workflow.save` 写回；给出项目名称时改为给出要编辑的文件。 |
 | `dimcode workflow set NAME PATH` | 从 `PATH`（`-` 表示 stdin）读取用户定义并写入，用写入前紧邻读到的 revision；内容没有变化时不写入。 |
 | `dimcode workflow add PATH` | 从 `PATH`（`-` 表示 stdin）读取定义，经 `workflow.save` 创建或替换：文档给出 `source`（默认 `user`）与 `document`。 |
+| `dimcode workflow start NAME [PATH]` | 经 `workflow.start` 启动定义，参数取自 `PATH`（`-` 表示 stdin），没有 PATH 时不带参数；报告 `Started NAME: RUN_ID`，不带 `report_to`。 |
 | `dimcode workflow history NAME` | 经 `workflow.status` 打印定义的行与最近的运行，并按 `workflow.start` 的优先级解析名称。 |
-| `/workflow` | 打开会话所在工作区的 Workflow 面板（[管理界面](#管理界面)）：每个定义一个条目，带来源、状态、参数与问题，以及 toggle、edit、add 与 inspect 种类。 |
+| `/workflow` | 打开会话所在工作区的 Workflow 面板（[管理界面](#管理界面)）：每个定义一个条目，带来源、状态、参数与问题，以及 toggle、edit、add、run 与 inspect 种类。 |
 | `/workflow:save` | 打开 Workflow 面板及其新建编辑器：命令行上的 add 种类。 |
 | `dimcode login [PROVIDER] [--directory URL] [--device] [--redirect-uri URI]` | 启动被描述账号的浏览器或设备签到（[提供方账号](#提供方账号)）；不给 PROVIDER 时列出被描述的账号。 |
 | `dimcode account PROVIDER` | 打印被描述账号的非机密状态。 |

@@ -1,13 +1,13 @@
 //! The Workflow area: its definitions and the kinds the client can do on
-//! them (`workflow.list`, `workflow.save`, plus the Settings client methods
-//! the toggle and a user definition's edit use).
+//! them (`workflow.list`, `workflow.save` and `workflow.start`, plus the
+//! Settings client methods the toggle and a user definition's edit use).
 //!
 //! A definition's enabled state lives in the user Settings document, keyed
 //! by workspace and name, so it is a client write of that document; the
 //! owner's own service refuses the member. A user definition's write reads
 //! the same document for its revision. Project definitions are files in the
-//! repository: the owner serves no per-file document, so the area lists and
-//! enables them, and they are edited where they live.
+//! repository: the owner serves no per-file document, so the area lists,
+//! enables and starts them, and they are edited where they live.
 
 use std::path::Path;
 
@@ -182,6 +182,7 @@ pub async fn apply(
     client: &mut Client,
     action: &ManagementAction,
     cwd: &Path,
+    line: Option<&super::SessionLine>,
 ) -> Result<Answer, Failure> {
     let cwd = cwd.to_string_lossy().into_owned();
     let mut note = None;
@@ -214,10 +215,17 @@ pub async fn apply(
             let name = save(client, id, expected_revision, document, &cwd).await?;
             note = Some(tf("Saved {name}.", &[("name", &name)]));
         }
+        ManagementAction::Run { id, document } => {
+            let (name, run_id) = start(client, id, document.as_ref(), &cwd, line).await?;
+            note = Some(tf(
+                "Started {name}: {run_id}.",
+                &[("name", &name), ("run_id", &run_id)],
+            ));
+        }
         ManagementAction::Inspect { id } => return inspect(client, id, &cwd).await,
         // `management::supported` refuses a kind this area does not offer
         // before the adapter runs.
-        ManagementAction::Remove { .. } | ManagementAction::Run { .. } => {
+        ManagementAction::Remove { .. } => {
             return Err(Failure::Refused(
                 "The Workflow area has no such action.".to_owned(),
             ));
@@ -393,6 +401,86 @@ async fn add(client: &mut Client, input: &Value, cwd: &str) -> Result<(String, S
     Ok((source.to_owned(), saved.name))
 }
 
+/// What `workflow.start` answers.
+#[derive(Debug, Deserialize)]
+struct Started {
+    run_id: String,
+}
+
+/// Starts the definition `id` names with its parameters, and answers the
+/// name and the run the owner started.
+async fn start(
+    client: &mut Client,
+    id: &str,
+    document: Option<&Value>,
+    cwd: &str,
+    line: Option<&super::SessionLine>,
+) -> Result<(String, String), Failure> {
+    let listing = Listing {
+        entries: catalog(client, cwd).await.map_err(Failure::Refused)?,
+        settings: None,
+    };
+    // The same resolution `workflow.start` makes: the entry under the id the
+    // panel built, or the enabled definition a typed name selects by the
+    // owner's precedence. A typed name the area lists only disabled still
+    // reaches the owner, whose `definition_not_found` names its state; only
+    // a name the area does not know is refused here.
+    let entry = match id.split_once(':') {
+        Some(_) => listing.find(id),
+        None => listing
+            .find(id)
+            .or_else(|| listing.entries.iter().find(|entry| entry.name == id)),
+    }
+    .ok_or_else(|| {
+        Failure::Refused(tf(
+            "No workflow definition is named {name}.",
+            &[("name", name_of(id))],
+        ))
+    })?;
+    // The editor's document is the user's parameter input, checked at the
+    // client boundary: an object whose keys the definition declares and
+    // whose values are strings. An empty string is a supplied value.
+    let params = match document {
+        None => json!({}),
+        Some(document) => {
+            let well_formed = document.as_object().is_some_and(|object| {
+                object.values().all(Value::is_string)
+                    && object.keys().all(|key| {
+                        entry
+                            .parameters
+                            .iter()
+                            .any(|parameter| parameter.name == *key)
+                    })
+            });
+            if !well_formed {
+                return Err(Failure::Refused(
+                    t("Parameters are a JSON object of strings.").to_owned(),
+                ));
+            }
+            document.clone()
+        }
+    };
+    let mut request = json!({
+        "name": entry.name,
+        "source": entry.source,
+        "cwd": cwd,
+        "params": params,
+    });
+    // A panel start reports to the Session's line, which is how `/tasks`
+    // finds the run; the command line has no Session and reports nowhere.
+    if let Some(line) = line {
+        request["report_to"] = json!({
+            "session_id": line.session_id,
+            "branch_id": line.branch_id,
+        });
+    }
+    let started: Started = client
+        .typed("workflow.start", request)
+        .await
+        .map_err(|error| Failure::Refused(error.to_string()))?;
+    Ok((entry.name.clone(), started.run_id))
+}
+
 /// The area after a conflict, when the owner kept the stored document.
 async fn conflict(client: &mut Client, cwd: &str, message: &str) -> Failure {
     match read(client, Path::new(cwd)).await {
@@ -504,7 +592,7 @@ pub(super) fn view(listing: &Listing, available: &[ActionKind], cwd: &Path) -> M
                     .copied()
                     .collect(),
                 document,
-                run: None,
+                run: run_template(entry),
             },
         );
     }
@@ -528,13 +616,39 @@ fn id_of(entry: &Entry) -> String {
     }
 }
 
-/// The kinds one entry offers before the daemon's advertisement is applied.
+/// The kinds one entry offers before the daemon's advertisement is applied:
+/// a disabled or invalid entry never starts, and a user entry is always
+/// enabled.
 fn kinds(entry: &Entry) -> &'static [ActionKind] {
-    match entry.source.as_str() {
-        "user" => &[ActionKind::Edit, ActionKind::Inspect],
-        "project" => &[ActionKind::Toggle, ActionKind::Inspect],
+    match (entry.source.as_str(), entry.valid, entry.enabled) {
+        ("user", true, _) => &[ActionKind::Edit, ActionKind::Run, ActionKind::Inspect],
+        ("user", false, _) => &[ActionKind::Edit, ActionKind::Inspect],
+        ("project", true, true) => &[ActionKind::Toggle, ActionKind::Run, ActionKind::Inspect],
+        ("project", _, _) => &[ActionKind::Toggle, ActionKind::Inspect],
+        ("plugin", true, _) => &[ActionKind::Run, ActionKind::Inspect],
         _ => &[ActionKind::Inspect],
     }
+}
+
+/// The operation's input document: one key per declared parameter, its
+/// default where the definition gives one and an empty string where it does
+/// not. A definition with no parameters starts at once, so it carries none.
+fn run_template(entry: &Entry) -> Option<Value> {
+    if !kinds(entry).contains(&ActionKind::Run) || entry.parameters.is_empty() {
+        return None;
+    }
+    Some(Value::Object(
+        entry
+            .parameters
+            .iter()
+            .map(|parameter| {
+                (
+                    parameter.name.clone(),
+                    json!(parameter.default.clone().unwrap_or_default()),
+                )
+            })
+            .collect(),
+    ))
 }
 
 /// What a definition says about itself: its description, its parameters, the
