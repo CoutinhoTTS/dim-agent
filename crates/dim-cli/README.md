@@ -836,23 +836,15 @@ An explicit provider error presentation keeps its message and suggested action.
  ■ turn failed: <reason>
 ```
 
-The row shows what the record holds:
+The expanded row shows only the summary body:
 
 ```text
  › try the RwLock for the cache lock
  … reply …
  · Compacting context…
  ✓ Context compacted ▾
- ▎ <dim-summary>
  ▎ The cache lock moved into a RwLock; the parser race is next.
  ▎ …
- ▎ Tool effects
- ▎ <dim-digest>
- ▎ …
- ▎ wrote src/cache.rs
- ▎ ran exit 0: cargo test -p cache
- ▎ Kept verbatim
- ▎ Try the RwLock before touching the parser.
  › carry on
  ✗ Context compaction failed · the summarizer returned nothing
  ◦ Context compaction skipped · nothing to cut
@@ -860,7 +852,7 @@ The row shows what the record holds:
  ✓ Context compacted · insufficient space: summary 3.2K, pinned inputs 1.1K ▸
 ```
 
-`✓` is a completed compaction, `✗` a failed one, `◦` one that did not apply, and the skipped, failed and cancelled rows carry the reason or error of their record. The text a completed compaction wrote in place of the cut history is the row's detail, opened and closed the way a tool group's body is: a click on the row, or `/tools` with the other details (`▸` closed, `▾` open). The detail is split where the record says it is: with `replacement_parts`, the strategy's messages are the summary, the digest the runtime recorded from the effects tools declared follows under `Tool effects`, and the inputs the compaction pinned follow under `Kept verbatim`; a record without the field shows the whole replacement as the summary, with no digest and nothing pinned. A record whose parts cannot meet the bound carries `insufficientSpace`, and the completed row's header names its parts largest first, with the token counts the gauge's formatter gives them — `insufficient space: summary 3.2K, pinned inputs 1.1K`. The part names are localized labels and the mark is read from the record; the client never decides it. The transcript keeps every earlier row and the compaction adds no boundary of its own; a resume rebuilds the rows from history as they were drawn live. [Compaction requirements](../../docs/design/compaction-quality.md#4-what-users-see-and-control) say what a compaction row must show.
+`✓` is a completed compaction, `✗` a failed one, `◦` one that did not apply, and the skipped, failed and cancelled rows carry the reason or error of their record. A completed compaction's summary is the row's detail, opened and closed the way a tool group's body is: a click on the row, or `/tools` with the other details (`▸` closed, `▾` open). With `replacement_parts`, the strategy's messages supply the summary; a record without the field uses the whole replacement. A summary wrapped in `<dim-summary>` … `</dim-summary>` displays only its body, without the runtime's fixed opening background notice and closing sentence. Unwrapped text and such wording quoted within the summary are preserved. The markers, digest and pinned inputs are not shown; the stored record and model context are unchanged. A record whose parts cannot meet the bound carries `insufficientSpace`, and the completed row's header names its parts largest first, with the token counts the gauge's formatter gives them — `insufficient space: summary 3.2K, pinned inputs 1.1K`. The part names are localized labels and the mark is read from the record; the client never decides it. The transcript keeps every earlier row and the compaction adds no boundary of its own; a resume rebuilds the rows from history as they were drawn live. [Compaction requirements](../../docs/design/compaction-quality.md#4-what-users-see-and-control) say what a compaction row must show.
 
 `/models` uses Ctrl+X to clear the highlighted model's saved reasoning/tier preferences with the displayed record version; Enter adopts it separately. For noninteractive recovery, run `dimcode models PROVIDER --clear-preferences MODEL`. A concurrent change fails and requires a reread/retry, and the reread lands before that notice, so a retry uses the record's current version; preferences are never silently discarded.
 
@@ -885,7 +877,7 @@ Both scrollback and fullscreen palettes list slash commands, grouped by category
 
 Typing ranks the matches: the exact name, a name prefix, an alias prefix, a prefix of a name part (`reload-skills` for `sk`), a name containing the query, a description word starting with it, then three or more letters in order through the name (`stg` for `settings`); a match inside a description word does not count. Equally ranked matches use the category/name order. See the [command menu design](../../docs/design/cli-commands.md#command-menu).
 
-`/settings` gathers the interface settings: theme and language (each opens its picker and comes back), the startup form (`tuiMode`), tool details (`tuiToolDetailsExpanded`), thinking details (`tuiThinkingDetailsExpanded`), the fullscreen mouse (`tuiMouseMode`: off hands selection and the wheel to the terminal), notifications (`tuiNotifyOnComplete`, on by default), ACP Sessions in `/resume` (`showAcpSessions`, off by default), tool approvals and execution settings. Tool and thinking details are independent and both default to collapsed in both modes; saved preferences are preserved. With tool details collapsed, each tool group shows only its header, and each compaction row hides its summary, digest and kept input. `/tools` flips tool and compaction details without changing thinking. Model selection stays in `/model` (`/models`). Switches flip with `Enter`, `←`/`→` or `Space` and are saved to `config.json` at once. See the [transcript detail settings contract](../../docs/design/cli-commands.md#transcript-detail-settings).
+`/settings` gathers the interface settings: theme and language (each opens its picker and comes back), the startup form (`tuiMode`), tool details (`tuiToolDetailsExpanded`), thinking details (`tuiThinkingDetailsExpanded`), the fullscreen mouse (`tuiMouseMode`: off hands selection and the wheel to the terminal), notifications (`tuiNotifyOnComplete`, on by default), ACP Sessions in `/resume` (`showAcpSessions`, off by default), tool approvals and execution settings. Tool and thinking details are independent and both default to collapsed in both modes; saved preferences are preserved. With tool details collapsed, each tool group shows only its header, and each compaction row hides its summary. `/tools` flips tool and compaction details without changing thinking. Model selection stays in `/model` (`/models`). Switches flip with `Enter`, `←`/`→` or `Space` and are saved to `config.json` at once. See the [transcript detail settings contract](../../docs/design/cli-commands.md#transcript-detail-settings).
 
 Notifications reach a user who switched windows when the run finishes or waits on a permission or a question (each request once): iTerm2 gets `OSC 9`, kitty `OSC 99`, Ghostty, WezTerm and foot `OSC 777`; tmux and any other terminal get a bell, which tmux forwards and terminals turn into a Dock bounce, a taskbar flash or a tab badge.
 

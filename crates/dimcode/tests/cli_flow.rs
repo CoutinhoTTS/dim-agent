@@ -8235,22 +8235,21 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
             {"id":"dim-compaction","sequence":13,"create_at":1,"type":"context","name":"compaction",
              "data":{"through":11,"start":12,"status":"completed","retain_from":"dim-2","strategy":"summary",
-                     "replacement":[{"role":"user","content":"<dim-summary>\nThe parser is half done.\n</dim-summary>"}],
+                     "replacement":[dim_agent_capabilities::history::summary_message("The parser is half done.")],
                      "diagnostics":{"reason":"auto","trigger":"provider_output_budget_exhausted","estimatedInputTokens":300.0,
                                     "entriesReplaced":3,"modelCallCount":1,"durationMs":10,"strategy":{"kind":"summary"}}}}}));
         wire.no_context();
         wait_more.recv().unwrap();
-        // A record that locates its parts: the summary is the strategy's
-        // message, and the pinned input follows it, shown apart.
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
             {"id":"dim-compaction-start-2","sequence":14,"create_at":1,"type":"context","name":"compaction-start",
              "data":{"through":11,"trigger":"manual","strategy":"summary"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
             {"id":"dim-compaction-2","sequence":15,"create_at":1,"type":"context","name":"compaction",
              "data":{"through":11,"start":14,"status":"completed","retain_from":"dim-2","strategy":"summary",
-                     "replacement":[{"role":"user","content":"<dim-summary>\nThe cache lock moved into a RwLock."},
+                     "replacement":[dim_agent_capabilities::history::summary_message("The cache lock moved into a RwLock."),
+                                    {"role":"user","content":"<dim-digest>\nwrote src/cache.rs\n</dim-digest>"},
                                     {"role":"user","content":"Keep the parser race in mind."}],
-                     "replacement_parts":{"strategy":1,"digest":0},
+                     "replacement_parts":{"strategy":1,"digest":1},
                      "diagnostics":{"reason":"manual","trigger":"manual","estimatedInputTokens":300.0,
                                     "entriesReplaced":3,"modelCallCount":1,"durationMs":10,"strategy":{"kind":"summary"}}}}}));
         wire.no_context();
@@ -8292,22 +8291,7 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
     terminal.write(b"/tools\r");
     terminal.until("The parser is half done.");
     more.send(()).unwrap();
-    terminal.until("Kept verbatim");
-    terminal.until("Keep the parser race in mind.");
-    let transcript = terminal.transcript.clone();
-    let at = |needle: &str| {
-        transcript
-            .find(needle)
-            .unwrap_or_else(|| panic!("no {needle:?}: {transcript}"))
-    };
-    assert!(
-        at("The cache lock moved into a RwLock.") < at("Kept verbatim"),
-        "the summary comes before the kept input: {transcript}"
-    );
-    assert!(
-        at("Kept verbatim") < at("Keep the parser race in mind."),
-        "the kept input follows its label: {transcript}"
-    );
+    terminal.until("The cache lock moved into a RwLock.");
     terminal.until("insufficient space: summary 3.2K, pinned inputs 1.1K");
     fail.send(()).unwrap();
     terminal.until("turn failed: Context recovery could not fit the request.");
@@ -8327,6 +8311,19 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
         terminal.transcript
     );
     daemon.join().unwrap();
+    for hidden in [
+        "<dim-summary>",
+        "</dim-summary>",
+        "Background from earlier parts",
+        "End of recorded background.",
+        "<dim-digest>",
+        "Tool effects",
+        "wrote src/cache.rs",
+        "Kept verbatim",
+        "Keep the parser race in mind.",
+    ] {
+        assert!(!terminal.transcript.contains(hidden), "{hidden}");
+    }
 }
 
 #[test]
@@ -8596,7 +8593,7 @@ fn tui_rebuilds_compaction_rows_from_history_on_resume() {
                  "data":{"through":2,"trigger":"threshold","strategy":"summary"}},
                 {"id":"dim-compaction","sequence":4,"create_at":1,"type":"context","name":"compaction",
                  "data":{"through":2,"start":3,"status":"completed","retain_from":"dim-1","strategy":"summary",
-                         "replacement":[{"role":"user","content":"<dim-summary>\nRestored summary text.\n</dim-summary>"}],
+                         "replacement":[dim_agent_capabilities::history::summary_message("Restored summary text.")],
                          "diagnostics":{"reason":"auto","trigger":"threshold","estimatedInputTokens":300.0,
                                         "entriesReplaced":3,"modelCallCount":1,"durationMs":10,"strategy":{"kind":"summary"}}}}],
                 "through":8,"nextAfter":8,"done":true}),
@@ -8619,6 +8616,14 @@ fn tui_rebuilds_compaction_rows_from_history_on_resume() {
     terminal.until("Bye!");
     assert!(terminal.wait().success());
     daemon.join().unwrap();
+    assert!(!terminal.transcript.contains("<dim-summary>"));
+    assert!(!terminal.transcript.contains("</dim-summary>"));
+    assert!(
+        !terminal
+            .transcript
+            .contains("Background from earlier parts")
+    );
+    assert!(!terminal.transcript.contains("End of recorded background."));
 }
 
 /// `dimcode export` (Timeline export design §7, §13 item 6): the sibling
