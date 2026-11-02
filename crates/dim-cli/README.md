@@ -820,7 +820,23 @@ composer:  ... (main)  --------------------------------+->  ... (feature/fix)
 
 The context reading is the estimate the next request sends against its window, and a compaction threshold the server returned with it. It is read when a session is entered, after a model switch, after each model request on `main` ends, when a run on `main` ends, and when a compaction result arrives on `main`, so the reading follows a long turn and a compaction outside a run does not leave it stale. At or above 90% of that threshold — the interface's `CONTEXT_WARNING_PERCENT`, applied to the returned `thresholdTokens` — the reading is drawn as a warning and says `near the compaction threshold`. The client never computes the threshold itself; the formula belongs to compaction.
 
-A context compaction has a row of its own in the transcript. `context/compaction-start` opens it in the running state, and the `context/compaction` whose `start` names it settles that row; a result without a start, a manual compaction that failed before a strategy ran, gets its own row. The row shows what the record holds:
+A context compaction has a row of its own in the transcript. `context/compaction-start` opens it in the running state, and the `context/compaction` whose `start` names it settles that row; a result without a start, a manual compaction that failed before a strategy ran, gets its own row.
+
+Local budget exhaustion starts automatic compaction as normal progress. A model
+result carrying a recoverable budget signal does not add a model-error row; if
+recovery fails, the turn's terminal failure still adds an error row.
+An explicit provider error presentation keeps its message and suggested action.
+
+```text
+ · Compacting context…
+ ✓ Context compacted
+ <assistant continues>
+
+ Context compaction failed · <reason>
+ ■ turn failed: <reason>
+```
+
+The row shows what the record holds:
 
 ```text
  › try the RwLock for the cache lock
