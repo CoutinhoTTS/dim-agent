@@ -3294,6 +3294,7 @@
       "file": "crates/dim-cli/src/migration_command.rs",
       "unexpandedMacros": [
         "cfg",
+        "env",
         "eprint",
         "eprintln",
         "json",
@@ -27041,6 +27042,13 @@
       "to": "dim_cli::ui::theme::themes",
       "references": [
         "path crate::ui::theme::themes::THEMES"
+      ]
+    },
+    {
+      "from": "dim_cli::migration_command",
+      "to": "dim_cli::update",
+      "references": [
+        "path crate::update::channel"
       ]
     },
     {

@@ -1386,32 +1386,35 @@ Sessions are all active prints the sentence above instead.
 ### Migration interaction
 
 `dim` and the alpha package's `dima` invoke these same native commands. Bare
-`migration` imports each existing distribution independently:
+`migration` selects its source and target by the build's release channel:
 
-| Distribution | Legacy source | Native target home |
-| --- | --- | --- |
-| Global | `~/.dim/v2` containing `dimglobal.sqlite` | `~/.dim` |
-| CN | `~/.dimcode/v2` containing `dimcode.sqlite` | `~/.dimcode` |
+| Build | Distribution | Legacy source | Native target home |
+| --- | --- | --- | --- |
+| Alpha | CN | `~/.dimcode/v2` containing `dimcode.sqlite` | `~/.dimcode-alpha` |
+| Non-alpha | Global | `~/.dim/v2` containing `dimglobal.sqlite` | `~/.dim` |
+| Non-alpha | CN | `~/.dimcode/v2` containing `dimcode.sqlite` | `~/.dimcode` |
 
-When both exist, both are imported. Sessions, Providers, Settings and task ledgers
-remain in their own target home. The default migration command uses these paths
-independently of the chat client's alpha/development home or `DIMCODE_HOME`.
-`./dev migration` invokes the same routing without injecting its development home
-or restarting a daemon. Development verification uses disposable user homes.
+Alpha imports only the CN source and keeps its Sessions, Providers, Settings and
+task ledgers separate from non-alpha data. Non-alpha imports both distributions
+when both sources exist, keeping each in its own target home. These paths do not
+follow `DIMCODE_HOME`. `./dev migration` follows the built version's channel
+without injecting its development home or restarting a daemon. Development
+verification uses disposable user homes.
 
 An explicit `--home TARGET` scopes the command to that one home, reading
-`TARGET/v2` when `--source` is absent. `--source OLD_HOME` selects just that
-source; when it names a `v2` directory its parent is the target. Other custom
-source layouts require `--home TARGET` to make the destination explicit.
+`TARGET/v2` when `--source` is absent. On import or inspection, `--source OLD_HOME`
+selects just that source; without `--home`, it must name a `v2` directory. Alpha keeps
+`~/.dimcode-alpha` as the target; non-alpha uses the source's parent. Other
+custom source layouts require `--home TARGET` to make the destination explicit.
 The shared Migration plugin still receives one resolved source/target pair per
 invocation and knows no distribution directory convention.
 
-Default `list` reads both target homes. Default `show`, `retry` and `cancel`
-locate the task through the owners' task lists, including when its old source
-has been removed. JSON output is one object keyed by `global` and `cn`;
+Default `list` reads the target homes selected by the build's channel. Default
+`show`, `retry` and `cancel` locate the task through the owners' task lists,
+including when its old source has been removed. JSON output is one object keyed by `global` and `cn`;
 each entry contains `home` and `result`, or `home` and `error`. An absent
 distribution is omitted. No matching source is an error; a task query with no
-matching task is an error; listing with neither target home present returns `{}`.
+matching task is an error; listing with no selected target home present returns `{}`.
 A failure in one
 distribution is reported while the other is attempted. Cancellation stops the
 remaining imports. Overall exit is 1 for any failed distribution, otherwise 2
@@ -1430,11 +1433,11 @@ exit. There is no persistent Migration selection or automatic trigger. Imported
 business configuration takes effect through normal feature loading.
 
 Open imported Global data with `dim --home ~/.dim`; the ordinary default home
-does not switch to Global. `dima` uses the same migration destinations, so pass
-`--home ~/.dimcode-alpha` explicitly to import into the alpha home instead.
+does not switch to Global. `dima` opens its imported CN data in its ordinary
+alpha home.
 
 ```text
-$ ./dev migration
+$ dim migration
 Source: /Users/me/.dim/v2
 Target: /Users/me/.dim
 Source: /Users/me/.dimcode/v2
@@ -1444,6 +1447,12 @@ Close legacy and native clients using these homes. Continue? [y/N] y
 Migration completed
 Task: <task-id>
 Full report: dim migration show <task-id> --home /Users/me/.dim
+
+$ dima migration
+Source: /Users/me/.dimcode/v2
+Target: /Users/me/.dimcode-alpha
+Close legacy and native clients using these homes. Continue? [y/N] y
+<fixed progress panel; see Migration terminal presentation>
 
 $ dim migration inspect --home /tmp/dim-new --source /tmp/dim-old --source-stopped
 { "database": "dimcode.sqlite", "tables": { ... }, "issues": [] }

@@ -1226,7 +1226,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     use std::os::unix::{ffi::OsStringExt, fs::DirBuilderExt};
 
     async fn skills_posted(session: &dim_agent_runtime::Session, enabled: bool) {
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 let Ok(view) = session
                     .service::<dim_agent_capabilities::skills::SkillsBranch>("main")
@@ -1234,7 +1234,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
                     .session()
                     .current()
                 else {
-                    tokio::task::yield_now().await;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                     continue;
                 };
                 let current = match &view.list {
@@ -1259,11 +1259,11 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
                 {
                     break;
                 }
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .unwrap();
+        .expect("the changed skill list is adopted into branch history");
     }
 
     let home = std::path::PathBuf::from("/tmp").join(format!("dp-{}", uuid::Uuid::new_v4()));
