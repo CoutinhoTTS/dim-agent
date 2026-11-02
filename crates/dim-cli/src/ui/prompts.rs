@@ -165,6 +165,10 @@ pub enum Effect {
     },
     /// Change a plugin (`/plugins`).
     Plugin(crate::model::session::PluginAction),
+    /// Change a plugin runtime (`/runtime`).
+    Runtime(crate::model::session::RuntimeAction),
+    /// Open `/runtime` on the runtime the plugin row waits for.
+    OpenRuntime(String),
     /// One request to a management area (`/skills`, `/hooks`).
     Management(crate::model::session::ManagementRequest),
     /// Open a management document in the external editor: the area's, one

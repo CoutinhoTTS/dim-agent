@@ -351,6 +351,13 @@ pub const COMMANDS: &[Command] = &[
         &["approvals", "approval"],
         Needs::Nothing,
     ),
+    slash(
+        "runtime",
+        "app",
+        "show, install or configure the plugin runtimes",
+        &[],
+        Needs::Nothing,
+    ),
     slash("settings", "app", "open settings", &[], Needs::Nothing),
     slash("keys", "app", "show the key bindings", &[], Needs::Nothing),
     Command {
