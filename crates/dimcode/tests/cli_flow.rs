@@ -4052,6 +4052,133 @@ fn the_model_label_shows_a_configured_profile_effort() {
     }
 }
 
+/// `/new` returns home: the status line keeps the provider and model it
+/// showed and drops the effort, because nothing has been adopted there yet.
+#[test]
+fn home_after_new_drops_the_previous_sessions_effort() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[
+            "ui.open",
+            "ui.close",
+            "ui.attach",
+            "ui.status",
+            "ui.shutdown",
+            "ui.replace",
+        ]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let register = wire.read("ui.attach");
+        wire.reply(&register, json!({"uiId":"ui-1"}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[configured_event(4, "model", json!({"reasoningEffort":"high"}))],
+                "through":8,"nextAfter":8,"done":true}),
+        );
+        wire.no_context();
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+
+        // `/effort high` adopts the value on the first Session.
+        let catalog = wire.read("provider.catalog");
+        assert_eq!(catalog["params"], json!({"providerId":"test"}));
+        let mut capabilities = serde_json::to_value(
+            dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384),
+        )
+        .unwrap();
+        capabilities["reasoning"] = json!(true);
+        wire.reply(
+            &catalog,
+            json!({"catalog":{"models":[{"id":"model","capabilities":capabilities,
+                "metadata":{"reasoning":{"supported":true,"effortOptions":["high","low"]}}}]}}),
+        );
+        let effort = wire.read("session.model.update");
+        assert_eq!(
+            effort["params"],
+            json!({"sessionId":"session","branchId":"main",
+                "modelPreferences":{"reasoningEffort":"high"}})
+        );
+        wire.reply(&effort, json!({"outcome":"adopted"}));
+
+        // `/new` and its first message create the next Session, which has
+        // adopted no preference yet.
+        let create = wire.read("session.create");
+        assert!(
+            create["params"].get("modelPreferences").is_none(),
+            "{create}"
+        );
+        wire.reply(
+            &create,
+            json!({"sessionId":"next","sequence":8,"model":{"providerId":"test","modelId":"model"}}),
+        );
+        let detach = wire.read("session.detach");
+        assert_eq!(detach["params"], json!({"sessionId":"session"}));
+        wire.reply(&detach, json!({}));
+        let attach = wire.read("session.attach");
+        assert_eq!(attach["params"], json!({"sessionId":"next"}));
+        wire.reply(&attach, attach_record(&attach));
+        let register = wire.read("ui.attach");
+        assert_eq!(register["params"], json!({"sessionId":"next","kind":"tui"}));
+        wire.reply(&register, json!({"uiId":"ui-2"}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["sessionId"], "next");
+        wire.reply(&submit, json!({"event":{}}));
+        wire.no_context();
+        wire.notice("session.event", json!({"sessionId":"next","branchId":"main",
+            "event":{"id":"next-text","sequence":9,"create_at":1,"type":"step","name":"text",
+                "data":{"turn_id":"next-turn","request_id":"next-request","delta":"next reply"}}}));
+        wire.hold();
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model · high");
+    terminal.write(b"/effort high\r");
+    terminal.until("Reasoning effort configuration adopted: high");
+    terminal.write(b"/new\r");
+    terminal.until("new session");
+    // Widen the terminal so the whole label fits and every row is repainted:
+    // the status line at home must carry the model alone.
+    let after_new = terminal.transcript.len();
+    let size = libc::winsize {
+        ws_row: 24,
+        ws_col: 200,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    assert_eq!(
+        unsafe {
+            libc::ioctl(
+                terminal.master.as_ref().unwrap().as_raw_fd(),
+                libc::TIOCSWINSZ,
+                &size,
+            )
+        },
+        0
+    );
+    terminal.signal(libc::SIGWINCH);
+    // The status line at home must carry the model alone while nothing is
+    // adopted, even once the terminal is wide enough for the whole label.
+    terminal.consumed = terminal.transcript.len();
+    terminal.until("AGENT");
+    let home = &terminal.transcript[after_new..];
+    assert!(home.contains("test / model"), "home drew no label: {home}");
+    assert!(
+        !home.contains("· high"),
+        "home kept the previous Session's effort: {home}"
+    );
+    terminal.write(b"hello\r");
+    terminal.until("next reply");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
 /// Re-picking the model the label already shows keeps its effort: an
 /// `unchanged` adoption publishes no `context/configured` fact to redraw it.
 #[test]
