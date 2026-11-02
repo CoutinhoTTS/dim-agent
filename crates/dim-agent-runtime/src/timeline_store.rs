@@ -315,6 +315,31 @@ pub trait TimelineStore: Send + Sync + 'static {
             Ok(records)
         })
     }
+    /// The `retain_from` of the latest completed compaction at or below
+    /// `through`: the cut a read may start at instead of the branch's segment
+    /// start. Stores may answer without decoding the branch. The default reads
+    /// the context rows and keeps the last completed fact.
+    fn last_compaction_cut<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        through: u64,
+    ) -> BoxFuture<'a, Result<Option<String>>> {
+        Box::pin(async move {
+            let records = self.read_context(key, 1, through).await?;
+            Ok(records
+                .into_iter()
+                .rev()
+                .find_map(|record| match &record.event.kind {
+                    EventKind::ContextCompaction(data) => match &data.outcome {
+                        ContextCompactionResult::Completed { retain_from, .. } => {
+                            Some(retain_from.clone())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                }))
+        })
+    }
     /// Reads complete batches after a batch-boundary cursor at a fixed head
     /// for a caller that does not use stored requests: a `context/prepare`
     /// or `model/call` record holds its request without its messages,

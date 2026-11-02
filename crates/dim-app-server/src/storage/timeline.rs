@@ -3265,6 +3265,33 @@ impl TimelineStore for SqliteTimelineStore {
             Ok(records)
         })
     }
+    fn last_compaction_cut<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        through: u64,
+    ) -> BoxFuture<'a, Result<Option<String>>> {
+        Box::pin(async move {
+            let key = key.clone();
+            self.db
+                .run(move |connection| {
+                    connection
+                        .query_row(
+                            "SELECT json_extract(body, '$.record.event.data.retain_from') \
+                             FROM timeline_events \
+                             WHERE session_id=?1 AND branch_id=?2 AND kind='context/compaction' \
+                             AND sequence<=?3 \
+                             AND json_extract(body, '$.record.event.data.status')='completed' \
+                             AND json_extract(body, '$.record.event.data.retain_from') IS NOT NULL \
+                             ORDER BY sequence DESC LIMIT 1",
+                            params![key.session_id, key.branch_id, sql_sequence(through)?],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .optional()
+                        .map_err(error)
+                })
+                .await
+        })
+    }
     fn read_segments<'a>(
         &'a self,
         session_id: &'a str,

@@ -8674,6 +8674,14 @@
     },
     {
       "from": "dim_agent_capabilities::history",
+      "to": "dim_agent_runtime::agent",
+      "references": [
+        "path Session",
+        "use dim_agent_runtime::Session"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::history",
       "to": "dim_agent_runtime::core::timeline",
       "references": [
         "path ContextHistory",
@@ -12046,8 +12054,7 @@
       "from": "dim_agent_capabilities::timeline_tree",
       "to": "dim_agent_capabilities::history",
       "references": [
-        "path crate::history::read_context",
-        "path crate::history::validate_context_boundary"
+        "path crate::history::validate_context_boundary_at"
       ]
     },
     {
@@ -16098,7 +16105,7 @@
       "from": "dim_app_server::agents",
       "to": "dim_agent_capabilities::history",
       "references": [
-        "path dim_agent_capabilities::history::validate_context_boundary"
+        "path dim_agent_capabilities::history::validate_context_boundary_in"
       ]
     },
     {
@@ -18550,7 +18557,7 @@
       "from": "dim_app_server::connection::tree",
       "to": "dim_agent_capabilities::history",
       "references": [
-        "path dim_agent_capabilities::history::validate_context_boundary"
+        "path dim_agent_capabilities::history::validate_context_boundary_in"
       ]
     },
     {

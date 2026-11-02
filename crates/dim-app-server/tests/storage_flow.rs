@@ -1141,6 +1141,153 @@ async fn a_cut_after_the_read_window_fails_the_stream() {
     db.close().await.unwrap();
 }
 
+/// The cut check starts at the branch's last completed compaction: the store
+/// finds its `retain_from` without decoding the prefix, and the fold keeps the
+/// verdict of the whole prefix.
+#[tokio::test]
+async fn a_cut_check_starts_at_the_last_completed_compaction() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let step = |sequence| {
+        record(
+            sequence,
+            EventKind::TurnStart(TurnStartData {
+                turn_id: format!("turn-{sequence}"),
+            }),
+        )
+    };
+    let events = vec![
+        record(
+            1,
+            EventKind::InputMessage(InputMessageData::text("first", None)),
+        ),
+        record(
+            2,
+            EventKind::InputConsumed(InputConsumedData {
+                input_id: "event-1".into(),
+            }),
+        ),
+        step(3),
+        record(
+            4,
+            EventKind::ModelStart(ModelStartData {
+                turn_id: "turn-3".into(),
+                request_id: "request".into(),
+            }),
+        ),
+        text(5, "hello"),
+        record(
+            6,
+            EventKind::ModelOutputEnd(ModelOutputEndData {
+                turn_id: "turn-3".into(),
+                request_id: "request".into(),
+                outcome: ModelOutputOutcome::Completed {
+                    finish_reason: FinishReason::EndTurn,
+                },
+            }),
+        ),
+        record(
+            7,
+            EventKind::TurnEnd(TurnEndData {
+                turn_id: "turn-3".into(),
+                outcome: TurnOutcome::Completed {
+                    reason: "end_turn".into(),
+                },
+            }),
+        ),
+        step(8),
+        record(
+            9,
+            EventKind::ContextCompaction(completed("event-8", "short", 8)),
+        ),
+        record(
+            10,
+            EventKind::ContextCompaction(ContextCompactionData {
+                turn_id: Some("turn-8".into()),
+                request_id: None,
+                command: None,
+                start: None,
+                through: 9,
+                outcome: ContextCompactionResult::Cancelled {
+                    reason: "stopped".into(),
+                },
+            }),
+        ),
+        record(
+            11,
+            EventKind::ModelStart(ModelStartData {
+                turn_id: "turn-8".into(),
+                request_id: "request".into(),
+            }),
+        ),
+        text(12, "after"),
+        record(
+            13,
+            EventKind::ModelOutputEnd(ModelOutputEndData {
+                turn_id: "turn-8".into(),
+                request_id: "request".into(),
+                outcome: ModelOutputOutcome::Completed {
+                    finish_reason: FinishReason::EndTurn,
+                },
+            }),
+        ),
+        record(
+            14,
+            EventKind::TurnEnd(TurnEndData {
+                turn_id: "turn-8".into(),
+                outcome: TurnOutcome::Completed {
+                    reason: "end_turn".into(),
+                },
+            }),
+        ),
+    ];
+    append(&store, key("session", "main"), events)
+        .await
+        .unwrap();
+    let timeline = Timeline::restore(
+        rutis::Ctx::root().unwrap(),
+        key("session", "main"),
+        vec![],
+        store.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        store
+            .last_compaction_cut(&key("session", "main"), 14)
+            .await
+            .unwrap(),
+        Some("event-8".into()),
+        "a cancelled compaction after the completed one is not a cut"
+    );
+    assert_eq!(
+        store
+            .last_compaction_cut(&key("session", "main"), 8)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(timeline.compaction_cut(14).await.unwrap(), Some(8));
+    for at in [4, 8, 12, 14] {
+        let expected = dim_agent_capabilities::history::validate_context_boundary(
+            &timeline.context(at).await.unwrap(),
+        );
+        assert_eq!(
+            dim_agent_capabilities::history::validate_context_boundary_at(&timeline, at)
+                .await
+                .unwrap(),
+            expected,
+            "cut {at}"
+        );
+    }
+    db.close().await.unwrap();
+}
+
 /// A cut on an ancestor event after that ancestor's fork cut is outside the
 /// stream too.
 #[tokio::test]
