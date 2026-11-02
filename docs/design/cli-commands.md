@@ -682,7 +682,8 @@ stdin for `-`, or starts with none; `history NAME` prints the detail's lines. A 
 the way `workflow.start` resolves it: an enabled definition first, then any definition, and within
 each pass project, then user, then package. Project definitions start disabled, so a bare name still
 names one. A command run in a workspace that Settings does not know prints the owner's
-`definition_source_failed` message and exits 1.
+`definition_source_failed` message and exits 1. A listing the owner cut at one payload prints the
+definitions it holds and says the later ones are omitted.
 ### The command rules area
 
 Command rules (#819): the Permissions panel's Command rules row and `dimcode permissions

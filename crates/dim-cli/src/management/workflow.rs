@@ -59,6 +59,15 @@ pub struct Parameter {
     pub default: Option<String>,
 }
 
+/// The `workflow.list` reply: the definitions, and whether the owner cut the
+/// listing at one frame's payload.
+#[derive(Debug, Deserialize)]
+struct Catalog {
+    definitions: Vec<Entry>,
+    #[serde(default)]
+    truncated: bool,
+}
+
 /// The user Settings document and its revision, read as the owner stores it.
 #[derive(Debug, Deserialize)]
 struct Snapshot {
@@ -71,6 +80,8 @@ struct Snapshot {
 pub struct Listing {
     pub entries: Vec<Entry>,
     settings: Option<Snapshot>,
+    /// The owner stopped at one payload: later definitions are not listed.
+    pub truncated: bool,
 }
 
 impl Listing {
@@ -257,7 +268,7 @@ pub async fn apply(
 /// The definitions as their owner reports them, with the user document when
 /// the daemon serves its read.
 pub async fn read(client: &mut Client, cwd: &Path) -> Result<Listing, String> {
-    let entries = catalog(client, &cwd.to_string_lossy()).await?;
+    let catalog = catalog(client, &cwd.to_string_lossy()).await?;
     let settings = if client.supports(&["settings.read"]) {
         Some(
             client
@@ -268,11 +279,15 @@ pub async fn read(client: &mut Client, cwd: &Path) -> Result<Listing, String> {
     } else {
         None
     };
-    Ok(Listing { entries, settings })
+    Ok(Listing {
+        entries: catalog.definitions,
+        settings,
+        truncated: catalog.truncated,
+    })
 }
 
 /// `workflow.list` alone, for a read that needs no user document.
-async fn catalog(client: &mut Client, cwd: &str) -> Result<Vec<Entry>, String> {
+async fn catalog(client: &mut Client, cwd: &str) -> Result<Catalog, String> {
     client
         .typed("workflow.list", json!({"cwd": cwd}))
         .await
@@ -284,7 +299,10 @@ async fn toggle(client: &mut Client, id: &str, enabled: bool, cwd: &str) -> Resu
     let name = id.strip_prefix("project:").unwrap_or(id);
     // The panel lists project entries only; the CLI twin's name is typed, so
     // it is checked against the owner's list rather than trusted.
-    let entries = catalog(client, cwd).await.map_err(Failure::Refused)?;
+    let entries = catalog(client, cwd)
+        .await
+        .map_err(Failure::Refused)?
+        .definitions;
     if !entries
         .iter()
         .any(|entry| entry.source == "project" && entry.name == name)
@@ -418,6 +436,22 @@ struct Started {
     run_id: String,
 }
 
+/// Why `id` names no definition: when the listing was cut at its size limit,
+/// the definition may be past the cut, and the message says so.
+fn not_found(listing: &Listing, id: &str) -> Failure {
+    if listing.truncated {
+        Failure::Refused(tf(
+            "No workflow definition named {name} is in the list, which reached its size limit.",
+            &[("name", name_of(id))],
+        ))
+    } else {
+        Failure::Refused(tf(
+            "No workflow definition is named {name}.",
+            &[("name", name_of(id))],
+        ))
+    }
+}
+
 /// Starts the definition `id` names with its parameters, and answers the
 /// name and the run the owner started.
 async fn start(
@@ -427,16 +461,13 @@ async fn start(
     cwd: &str,
     line: Option<&super::SessionLine>,
 ) -> Result<(String, String), Failure> {
+    let catalog = catalog(client, cwd).await.map_err(Failure::Refused)?;
     let listing = Listing {
-        entries: catalog(client, cwd).await.map_err(Failure::Refused)?,
+        entries: catalog.definitions,
         settings: None,
+        truncated: catalog.truncated,
     };
-    let entry = listing.find(id).ok_or_else(|| {
-        Failure::Refused(tf(
-            "No workflow definition is named {name}.",
-            &[("name", name_of(id))],
-        ))
-    })?;
+    let entry = listing.find(id).ok_or_else(|| not_found(&listing, id))?;
     // The editor's document is the user's parameter input, checked at the
     // client boundary: an object whose keys the definition declares and
     // whose values are strings. An empty string is a supplied value.
@@ -517,16 +548,13 @@ fn enabled_document(document: &Value, cwd: &str, name: &str, enabled: bool) -> O
 
 /// One definition's recent runs, or its detail when no run store is read.
 async fn inspect(client: &mut Client, id: &str, cwd: &str) -> Result<Answer, Failure> {
+    let catalog = catalog(client, cwd).await.map_err(Failure::Refused)?;
     let listing = Listing {
-        entries: catalog(client, cwd).await.map_err(Failure::Refused)?,
+        entries: catalog.definitions,
         settings: None,
+        truncated: catalog.truncated,
     };
-    let entry = listing.find(id).ok_or_else(|| {
-        Failure::Refused(tf(
-            "No workflow definition is named {name}.",
-            &[("name", name_of(id))],
-        ))
-    })?;
+    let entry = listing.find(id).ok_or_else(|| not_found(&listing, id))?;
     let runs: Vec<Run> = client
         .typed("workflow.status", json!({}))
         .await
@@ -603,13 +631,19 @@ pub(super) fn view(listing: &Listing, available: &[ActionKind], cwd: &Path) -> M
             },
         );
     }
+    let mut issues = Vec::new();
+    if listing.truncated {
+        issues.push(
+            t("The list reached its size limit; later definitions are not shown.").to_owned(),
+        );
+    }
     ManagementView {
         revision: None,
         document: None,
         create: Some(create()),
         actions: super::area_kinds(available),
         groups: groups.into_vec(),
-        issues: Vec::new(),
+        issues,
     }
 }
 

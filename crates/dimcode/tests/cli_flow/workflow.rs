@@ -76,6 +76,12 @@ fn definitions() -> Value {
     ])
 }
 
+/// The `workflow.list` reply around `definitions()`: the entries and whether
+/// the owner cut the listing at one payload.
+fn listing(truncated: bool) -> Value {
+    json!({"definitions": definitions(), "truncated": truncated})
+}
+
 /// The interface's opening exchange, and the two requests it makes on its
 /// own before a command. `features` are the management methods the daemon
 /// advertises besides the Session basics.
@@ -167,7 +173,7 @@ fn workflow_list_prints_the_definitions_and_their_issues() {
         hello(wire);
         let request = wire.read("workflow.list");
         assert_eq!(request["params"], json!({"cwd": cwd}));
-        wire.reply(&request, definitions());
+        wire.reply(&request, listing(false));
         let request = wire.read("settings.read");
         wire.reply(&request, settings());
         drains(wire);
@@ -200,6 +206,93 @@ fn workflow_list_prints_the_definitions_and_their_issues() {
         stderr.contains("nightly-check: Stage build: invalid reference {{params.branch}}"),
         "{stderr}"
     );
+}
+
+/// A listing the owner cut at its size limit still prints the definitions it
+/// holds, and says the rest are omitted.
+#[test]
+fn workflow_list_reports_a_listing_the_owner_cut() {
+    let home = Home::new();
+    let (project, cwd) = workspace(&home);
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("workflow.list");
+        assert_eq!(request["params"], json!({"cwd": cwd}));
+        wire.reply(&request, listing(true));
+        let request = wire.read("settings.read");
+        wire.reply(&request, settings());
+        drains(wire);
+    });
+    let output = home
+        .command()
+        .arg("--cwd")
+        .arg(&project)
+        .args(["workflow", "list"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "review-and-fix\tuser\tenabled\tAnalyze, fix in parallel, summarize\n\
+         nightly-check\tproject\tdisabled, invalid\tNightly checks\n\
+         release-notes\tplugin\tenabled\tRelease notes\n"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("The list reached its size limit; later definitions are not shown."),
+        "{stderr}"
+    );
+    // A name such a listing does not hold may be past the cut: the refusal
+    // says so, for a history and a start alike.
+    for args in [
+        ["workflow", "history", "past-the-cut"],
+        ["workflow", "start", "past-the-cut"],
+    ] {
+        let home = Home::new();
+        let (project, cwd) = workspace(&home);
+        let daemon = home.daemon(move |wire| {
+            // A start is refused for a missing kind before any read when the
+            // daemon does not advertise `workflow.start`.
+            wire.hello(&[
+                "workflow.list",
+                "workflow.save",
+                "workflow.start",
+                "workflow.status",
+                "settings.read",
+                "settings.update",
+            ]);
+            let request = wire.read("workflow.list");
+            assert_eq!(request["params"], json!({"cwd": cwd}));
+            wire.reply(&request, listing(true));
+            drains(wire);
+        });
+        let output = home
+            .command()
+            .arg("--cwd")
+            .arg(&project)
+            .args(args)
+            .output()
+            .unwrap();
+        daemon.join().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains(
+                "No workflow definition named past-the-cut is in the list, which reached its size limit."
+            ),
+            "{stderr}"
+        );
+    }
 }
 
 /// `--help` lists the Workflow area with the other management areas.
@@ -241,7 +334,7 @@ fn workflow_enable_writes_the_enablement_and_keeps_the_document_as_read() {
         hello(wire);
         // The name is checked against the owner's list before any write.
         let request = wire.read("workflow.list");
-        wire.reply(&request, definitions());
+        wire.reply(&request, listing(false));
         let request = wire.read("settings.read");
         wire.reply(&request, stored.clone());
         let request = wire.read("settings.update");
@@ -262,7 +355,7 @@ fn workflow_enable_writes_the_enablement_and_keeps_the_document_as_read() {
             json!({"revision": "settings:2", "document": request["params"]["document"]}),
         );
         let request = wire.read("workflow.list");
-        wire.reply(&request, definitions());
+        wire.reply(&request, listing(false));
         let request = wire.read("settings.read");
         wire.reply(&request, settings());
         drains(wire);
@@ -296,7 +389,7 @@ fn workflow_enable_reports_its_line_when_the_read_after_it_fails() {
     let daemon = home.daemon(|wire| {
         hello(wire);
         let request = wire.read("workflow.list");
-        wire.reply(&request, definitions());
+        wire.reply(&request, listing(false));
         let request = wire.read("settings.read");
         wire.reply(&request, settings());
         let request = wire.read("settings.update");
@@ -339,7 +432,7 @@ fn workflow_a_conflict_whose_reread_fails_is_still_a_conflict() {
     let daemon = home.daemon(|wire| {
         hello(wire);
         let request = wire.read("workflow.list");
-        wire.reply(&request, definitions());
+        wire.reply(&request, listing(false));
         let request = wire.read("settings.read");
         wire.reply(&request, settings());
         let request = wire.read("settings.update");
@@ -378,7 +471,7 @@ fn workflow_enable_refuses_a_name_the_owner_does_not_list_as_a_project() {
     let daemon = home.daemon(|wire| {
         hello(wire);
         let request = wire.read("workflow.list");
-        wire.reply(&request, definitions());
+        wire.reply(&request, listing(false));
         // Nothing was written: no settings.read follows.
         drains_without_saving(wire);
     });
@@ -412,7 +505,7 @@ fn workflow_edit_set_and_history_find_a_disabled_project_definition() {
     let daemon = home.daemon(|wire| {
         hello(wire);
         let request = wire.read("workflow.list");
-        wire.reply(&request, definitions());
+        wire.reply(&request, listing(false));
         let request = wire.read("settings.read");
         wire.reply(&request, settings());
         drains(wire);
@@ -449,7 +542,7 @@ fn workflow_edit_set_and_history_find_a_disabled_project_definition() {
     let daemon = home.daemon(|wire| {
         hello(wire);
         let request = wire.read("workflow.list");
-        wire.reply(&request, definitions());
+        wire.reply(&request, listing(false));
         let request = wire.read("settings.read");
         wire.reply(&request, settings());
         drains_without_saving(wire);
@@ -476,7 +569,7 @@ fn workflow_edit_set_and_history_find_a_disabled_project_definition() {
     let daemon = home.daemon(|wire| {
         hello(wire);
         let request = wire.read("workflow.list");
-        wire.reply(&request, definitions());
+        wire.reply(&request, listing(false));
         let request = wire.read("workflow.status");
         assert_eq!(request["params"], json!({}));
         wire.reply(&request, json!([]));
@@ -531,7 +624,7 @@ fn workflow_history_scopes_a_project_definition_to_this_workspace() {
     let daemon = home.daemon(move |wire| {
         hello(wire);
         let request = wire.read("workflow.list");
-        wire.reply(&request, definitions());
+        wire.reply(&request, listing(false));
         let request = wire.read("workflow.status");
         wire.reply(&request, runs);
         drains(wire);
@@ -559,7 +652,7 @@ fn workflow_history_scopes_a_project_definition_to_this_workspace() {
     let daemon = home.daemon(|wire| {
         hello(wire);
         let request = wire.read("workflow.list");
-        wire.reply(&request, definitions());
+        wire.reply(&request, listing(false));
         let request = wire.read("workflow.status");
         wire.reply(
             &request,
@@ -606,7 +699,7 @@ fn workflow_set_refuses_a_rename_before_the_save() {
     let daemon = home.daemon(|wire| {
         hello(wire);
         let request = wire.read("workflow.list");
-        wire.reply(&request, definitions());
+        wire.reply(&request, listing(false));
         let request = wire.read("settings.read");
         wire.reply(&request, settings());
         drains_without_saving(wire);
@@ -671,7 +764,7 @@ fn workflow_start_sends_the_parameters_from_stdin() {
     let daemon = home.daemon(move |wire| {
         wire.hello(&["workflow.list", "workflow.start", "settings.read"]);
         let request = wire.read("workflow.list");
-        wire.reply(&request, definitions());
+        wire.reply(&request, listing(false));
         let request = wire.read("workflow.start");
         assert_eq!(
             request["params"],
@@ -684,7 +777,7 @@ fn workflow_start_sends_the_parameters_from_stdin() {
         );
         wire.reply(&request, json!({"run_id": "wf-1"}));
         let request = wire.read("workflow.list");
-        wire.reply(&request, definitions());
+        wire.reply(&request, listing(false));
         let request = wire.read("settings.read");
         wire.reply(&request, settings());
         drains(wire);
@@ -729,7 +822,7 @@ fn workflow_start_refuses_an_unknown_name_or_parameters() {
     let daemon = home.daemon(|wire| {
         wire.hello(&["workflow.list", "workflow.start"]);
         let request = wire.read("workflow.list");
-        wire.reply(&request, definitions());
+        wire.reply(&request, listing(false));
         drains_without_starting(wire);
     });
     let output = home
@@ -754,7 +847,7 @@ fn workflow_start_refuses_an_unknown_name_or_parameters() {
     let daemon = home.daemon(|wire| {
         wire.hello(&["workflow.list", "workflow.start"]);
         let request = wire.read("workflow.list");
-        wire.reply(&request, definitions());
+        wire.reply(&request, listing(false));
         drains_without_starting(wire);
     });
     let mut child = home
@@ -789,7 +882,7 @@ fn workflow_start_refuses_an_unknown_name_or_parameters() {
     let daemon = home.daemon(move |wire| {
         wire.hello(&["workflow.list", "workflow.start"]);
         let request = wire.read("workflow.list");
-        wire.reply(&request, definitions());
+        wire.reply(&request, listing(false));
         let request = wire.read("workflow.start");
         assert_eq!(
             request["params"],
@@ -869,7 +962,7 @@ fn tui_workflow_panel_lists_definitions() {
             wait_shown.recv_timeout(PATIENCE).unwrap();
             let request = wire.read("workflow.list");
             assert_eq!(request["params"], json!({"cwd": "/workspace"}));
-            wire.reply(&request, definitions());
+            wire.reply(&request, listing(false));
             let request = wire.read("settings.read");
             assert_eq!(
                 request["params"],
@@ -921,7 +1014,7 @@ fn tui_workflow_save_command_writes_a_definition() {
             opened(wire);
             wait_shown.recv_timeout(PATIENCE).unwrap();
             let request = wire.read("workflow.list");
-            wire.reply(&request, definitions());
+            wire.reply(&request, listing(false));
             let request = wire.read("settings.read");
             wire.reply(&request, settings());
             let request = wire.read("workflow.save");
@@ -935,7 +1028,7 @@ fn tui_workflow_save_command_writes_a_definition() {
             );
             wire.reply(&request, json!({"name": "nightly-check"}));
             let request = wire.read("workflow.list");
-            wire.reply(&request, definitions());
+            wire.reply(&request, listing(false));
             let request = wire.read("settings.read");
             wire.reply(&request, settings());
             drains(wire);
@@ -1006,13 +1099,13 @@ fn tui_workflow_panel_starts_a_run_with_parameters() {
             );
             wait_shown.recv_timeout(PATIENCE).unwrap();
             let request = wire.read("workflow.list");
-            wire.reply(&request, definitions());
+            wire.reply(&request, listing(false));
             let request = wire.read("settings.read");
             wire.reply(&request, settings());
             // Ctrl+T: the adapter resolves the entry, then starts it with the
             // parameters the editor left and the line the panel drew over.
             let request = wire.read("workflow.list");
-            wire.reply(&request, definitions());
+            wire.reply(&request, listing(false));
             let request = wire.read("workflow.start");
             assert_eq!(
                 request["params"],
@@ -1026,7 +1119,7 @@ fn tui_workflow_panel_starts_a_run_with_parameters() {
             );
             wire.reply(&request, json!({"run_id": "wf-1"}));
             let request = wire.read("workflow.list");
-            wire.reply(&request, definitions());
+            wire.reply(&request, listing(false));
             let request = wire.read("settings.read");
             wire.reply(&request, settings());
             // `/tasks` discovers the management-started run.
@@ -1118,13 +1211,19 @@ fn tui_workflow_panel_keeps_a_runs_parameters_for_its_own_definition() {
             );
             wait_shown.recv_timeout(PATIENCE).unwrap();
             let request = wire.read("workflow.list");
-            wire.reply(&request, two_parameterized());
+            wire.reply(
+                &request,
+                json!({"definitions": two_parameterized(), "truncated": false}),
+            );
             let request = wire.read("settings.read");
             wire.reply(&request, settings());
             // Ctrl+T on review-and-fix: its parameters go out, and the owner
             // refuses the run, so the text stays.
             let request = wire.read("workflow.list");
-            wire.reply(&request, two_parameterized());
+            wire.reply(
+                &request,
+                json!({"definitions": two_parameterized(), "truncated": false}),
+            );
             let request = wire.read("workflow.start");
             assert_eq!(request["params"]["name"], "review-and-fix");
             assert_eq!(request["params"]["params"], json!({"target": "kept"}));
@@ -1134,24 +1233,36 @@ fn tui_workflow_panel_keeps_a_runs_parameters_for_its_own_definition() {
             // Ctrl+T on digest opens digest's own template and starts digest
             // with its own parameters, not the kept draft.
             let request = wire.read("workflow.list");
-            wire.reply(&request, two_parameterized());
+            wire.reply(
+                &request,
+                json!({"definitions": two_parameterized(), "truncated": false}),
+            );
             let request = wire.read("workflow.start");
             assert_eq!(request["params"]["name"], "digest");
             assert_eq!(request["params"]["params"], json!({"path": "docs"}));
             wire.reply(&request, json!({"run_id": "wf-2"}));
             let request = wire.read("workflow.list");
-            wire.reply(&request, two_parameterized());
+            wire.reply(
+                &request,
+                json!({"definitions": two_parameterized(), "truncated": false}),
+            );
             let request = wire.read("settings.read");
             wire.reply(&request, settings());
             // Back on review-and-fix, Ctrl+T reopens the text it kept.
             let request = wire.read("workflow.list");
-            wire.reply(&request, two_parameterized());
+            wire.reply(
+                &request,
+                json!({"definitions": two_parameterized(), "truncated": false}),
+            );
             let request = wire.read("workflow.start");
             assert_eq!(request["params"]["name"], "review-and-fix");
             assert_eq!(request["params"]["params"], json!({"target": "kept"}));
             wire.reply(&request, json!({"run_id": "wf-3"}));
             let request = wire.read("workflow.list");
-            wire.reply(&request, two_parameterized());
+            wire.reply(
+                &request,
+                json!({"definitions": two_parameterized(), "truncated": false}),
+            );
             let request = wire.read("settings.read");
             wire.reply(&request, settings());
             drains(wire);
@@ -1229,13 +1340,13 @@ fn tui_workflow_panel_starts_a_run_on_the_shown_line() {
         );
         wait_shown.recv_timeout(PATIENCE).unwrap();
         let request = wire.read("workflow.list");
-        wire.reply(&request, definitions());
+        wire.reply(&request, listing(false));
         let request = wire.read("settings.read");
         wire.reply(&request, settings());
         // Ctrl+T on release-notes, which declares no parameters, starts at
         // once, addressed to the line the transcript shows.
         let request = wire.read("workflow.list");
-        wire.reply(&request, definitions());
+        wire.reply(&request, listing(false));
         let request = wire.read("workflow.start");
         assert_eq!(
             request["params"],
@@ -1249,7 +1360,7 @@ fn tui_workflow_panel_starts_a_run_on_the_shown_line() {
         );
         wire.reply(&request, json!({"run_id": "wf-2"}));
         let request = wire.read("workflow.list");
-        wire.reply(&request, definitions());
+        wire.reply(&request, listing(false));
         let request = wire.read("settings.read");
         wire.reply(&request, settings());
         drains(wire);
@@ -1301,11 +1412,11 @@ fn tui_workflow_starts_without_a_session_and_reports_nowhere() {
         );
         wait_shown.recv_timeout(PATIENCE).unwrap();
         let request = wire.read("workflow.list");
-        wire.reply(&request, definitions());
+        wire.reply(&request, listing(false));
         let request = wire.read("settings.read");
         wire.reply(&request, settings());
         let request = wire.read("workflow.list");
-        wire.reply(&request, definitions());
+        wire.reply(&request, listing(false));
         let request = wire.read("workflow.start");
         assert_eq!(
             request["params"],
@@ -1318,7 +1429,7 @@ fn tui_workflow_starts_without_a_session_and_reports_nowhere() {
         );
         wire.reply(&request, json!({"run_id": "wf-3"}));
         let request = wire.read("workflow.list");
-        wire.reply(&request, definitions());
+        wire.reply(&request, listing(false));
         let request = wire.read("settings.read");
         wire.reply(&request, settings());
         drains(wire);
@@ -1356,13 +1467,13 @@ fn tui_workflow_panel_reports_a_conflict_and_rereads() {
             opened(wire);
             wait_shown.recv_timeout(PATIENCE).unwrap();
             let request = wire.read("workflow.list");
-            wire.reply(&request, definitions());
+            wire.reply(&request, listing(false));
             let request = wire.read("settings.read");
             wire.reply(&request, settings());
             // Enter on the project entry: the name is checked against the
             // list, then the document is read immediately before the write.
             let request = wire.read("workflow.list");
-            wire.reply(&request, definitions());
+            wire.reply(&request, listing(false));
             let request = wire.read("settings.read");
             wire.reply(&request, settings());
             let request = wire.read("settings.update");
@@ -1370,7 +1481,7 @@ fn tui_workflow_panel_reports_a_conflict_and_rereads() {
             wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
                 "code":-32000,"message":"settings changed","data":{"appError":"settings_conflict"}}}));
             let request = wire.read("workflow.list");
-            wire.reply(&request, definitions());
+            wire.reply(&request, listing(false));
             let request = wire.read("settings.read");
             wire.reply(&request, settings());
             // Ctrl+E on the user definition: the save carries the revision
@@ -1382,7 +1493,7 @@ fn tui_workflow_panel_reports_a_conflict_and_rereads() {
             wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
                 "code":-32000,"message":"conflict","data":{"appError":"conflict"}}}));
             let request = wire.read("workflow.list");
-            wire.reply(&request, definitions());
+            wire.reply(&request, listing(false));
             let request = wire.read("settings.read");
             wire.reply(&request, settings());
             drains(wire);
@@ -1422,7 +1533,7 @@ fn tui_workflow_panel_refuses_a_rename_and_keeps_the_draft() {
             opened(wire);
             wait_shown.recv_timeout(PATIENCE).unwrap();
             let request = wire.read("workflow.list");
-            wire.reply(&request, definitions());
+            wire.reply(&request, listing(false));
             let request = wire.read("settings.read");
             wire.reply(&request, settings());
             drains_without_saving(wire);
@@ -1462,7 +1573,7 @@ fn tui_workflow_save_is_refused_when_the_daemon_cannot_write() {
         );
         wait_shown.recv_timeout(PATIENCE).unwrap();
         let request = wire.read("workflow.list");
-        wire.reply(&request, definitions());
+        wire.reply(&request, listing(false));
         let request = wire.read("settings.read");
         wire.reply(&request, settings());
         drains_without_saving(wire);
@@ -1492,7 +1603,7 @@ fn tui_workflow_save_reports_an_invalid_definition_and_keeps_the_draft() {
             opened(wire);
             wait_shown.recv_timeout(PATIENCE).unwrap();
             let request = wire.read("workflow.list");
-            wire.reply(&request, definitions());
+            wire.reply(&request, listing(false));
             let request = wire.read("settings.read");
             wire.reply(&request, settings());
             let first = wire.read("workflow.save");
@@ -1535,7 +1646,7 @@ fn tui_workflow_panel_offers_no_write_without_the_settings_methods() {
         opened_with(wire, &["workflow.list", "workflow.save", "workflow.status"]);
         wait_shown.recv_timeout(PATIENCE).unwrap();
         let request = wire.read("workflow.list");
-        wire.reply(&request, definitions());
+        wire.reply(&request, listing(false));
         // No settings.read: the daemon does not advertise one.
         drains(wire);
     });

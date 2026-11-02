@@ -141,6 +141,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Started {name}: {run_id}." => "{name} dimulai: {run_id}.",
         "Parameters are a JSON object of strings." => "Parameter adalah objek JSON berisi string.",
+        "The list reached its size limit; later definitions are not shown." => {
+            "Daftar mencapai batas ukurannya; definisi berikutnya tidak ditampilkan."
+        }
+        "No workflow definition named {name} is in the list, which reached its size limit." => {
+            "Tidak ada definisi workflow bernama {name} dalam daftar, yang mencapai batas ukurannya."
+        }
         "Command rules" => "Aturan perintah",
         "user" => "pengguna",
         "Matches only this command." => "Hanya cocok dengan perintah ini.",

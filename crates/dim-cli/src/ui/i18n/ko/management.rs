@@ -141,6 +141,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Parameters are a JSON object of strings." => {
             "매개변수는 문자열로 이루어진 JSON 객체입니다."
         }
+        "The list reached its size limit; later definitions are not shown." => {
+            "목록이 크기 제한에 도달하여 이후 정의는 표시되지 않습니다."
+        }
+        "No workflow definition named {name} is in the list, which reached its size limit." => {
+            "크기 제한에 도달한 목록에 {name} 이름의 워크플로 정의가 없습니다."
+        }
         "Command rules" => "명령 규칙",
         "user" => "사용자",
         "Matches only this command." => "이 명령만 일치합니다.",

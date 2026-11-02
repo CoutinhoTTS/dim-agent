@@ -3471,7 +3471,9 @@ impl App {
 
     /// `/<area>` opens the management panel of `area`, which reads it.
     fn open_management(&mut self, area: Area, note: Option<String>) {
-        self.open_prompt(Prompt::Management(Box::new(ManagementPanel::new(area, note))));
+        self.open_prompt(Prompt::Management(Box::new(ManagementPanel::new(
+            area, note,
+        ))));
         self.host.send(Command::Management(ManagementRequest {
             area,
             action: ManagementAction::List,

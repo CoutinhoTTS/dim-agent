@@ -22,6 +22,7 @@ use crate::model::session::{
 };
 use crate::permission;
 use crate::sanitize::{safe, safe_line};
+use crate::ui::i18n::t;
 
 /// Runs `request` and prints its area's report.
 pub async fn run(
@@ -627,6 +628,11 @@ fn workflow_notes(listing: &workflow::Listing) -> Vec<String> {
     } else {
         vec!["Columns: name, source, state, description.".to_owned()]
     };
+    if listing.truncated {
+        notes.push(
+            t("The list reached its size limit; later definitions are not shown.").to_owned(),
+        );
+    }
     for entry in listing.entries.iter().filter(|entry| !entry.valid) {
         for issue in &entry.issues {
             notes.push(format!("{}: {}", safe(&entry.name), safe(issue)));

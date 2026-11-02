@@ -26373,6 +26373,14 @@
     },
     {
       "from": "dim_cli::management_command",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path t",
+        "use crate::ui::i18n::t"
+      ]
+    },
+    {
+      "from": "dim_cli::management_command",
       "to": "dim_client",
       "references": [
         "path Client",

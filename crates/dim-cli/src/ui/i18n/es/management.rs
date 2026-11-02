@@ -151,6 +151,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Parameters are a JSON object of strings." => {
             "Los parámetros son un objeto JSON de cadenas."
         }
+        "The list reached its size limit; later definitions are not shown." => {
+            "La lista alcanzó su límite de tamaño; las definiciones posteriores no se muestran."
+        }
+        "No workflow definition named {name} is in the list, which reached its size limit." => {
+            "Ninguna definición de workflow llamada {name} está en la lista, que alcanzó su límite de tamaño."
+        }
         "Command rules" => "Reglas de comandos",
         "user" => "usuario",
         "Matches only this command." => "Solo coincide con este comando.",

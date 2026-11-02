@@ -125,6 +125,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Started {name}: {run_id}." => "已启动 {name}：{run_id}。",
         "Parameters are a JSON object of strings." => "参数是字符串组成的 JSON 对象。",
+        "The list reached its size limit; later definitions are not shown." => {
+            "列表已达到大小上限，之后的定义不会显示。"
+        }
+        "No workflow definition named {name} is in the list, which reached its size limit." => {
+            "达到大小上限的列表中没有名为 {name} 的工作流定义。"
+        }
         "Command rules" => "命令规则",
         "user" => "用户",
         "Matches only this command." => "仅匹配此命令。",

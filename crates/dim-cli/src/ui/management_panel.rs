@@ -140,6 +140,8 @@ pub const STRINGS: &[&str] = &[
     "A definition is saved to the user source or the project source.",
     "Started {name}: {run_id}.",
     "Parameters are a JSON object of strings.",
+    "The list reached its size limit; later definitions are not shown.",
+    "No workflow definition named {name} is in the list, which reached its size limit.",
     "Command rules",
     "user",
     "Matches only this command.",
