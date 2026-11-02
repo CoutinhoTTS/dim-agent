@@ -4000,6 +4000,58 @@ fn a_new_session_shows_the_effort_its_creation_adopted() {
     }
 }
 
+/// A model-config profile records the protocol its selection adopts, so the
+/// configured effort reaches the status line; a profile with no effort shows
+/// no suffix.
+#[test]
+#[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
+fn the_model_label_shows_a_configured_profile_effort() {
+    let binary = std::env::var("DIM_TEST_APP_SERVER")
+        .expect("Set DIM_TEST_APP_SERVER to the dim-app-server binary");
+    for (suffix, label) in [
+        ("effortful", "fixture / fixture-model · low"),
+        ("plain", "fixture / fixture-model"),
+    ] {
+        let home = Home::new();
+        let config = home.0.join("model.json");
+        let mut model = json!({"id":"fixture-model","contextWindow":32_000,
+            "maxOutputTokens":4_096,"config":{"maxTokens":4096}});
+        if suffix == "effortful" {
+            model["config"]["reasoning"] = json!({"effort":"low"});
+        }
+        fs::write(
+            &config,
+            serde_json::to_vec(&json!({
+                "defaultModel":{"providerId":"fixture","modelId":"fixture-model"},
+                "providers":[{"id":"fixture","kind":"anthropic",
+                    "baseUrl":"http://127.0.0.1:9","models":[model]}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut command = home.command();
+        command.args([
+            "--server",
+            &binary,
+            "--model-config",
+            config.to_str().unwrap(),
+            "--cwd",
+            home.0.to_str().unwrap(),
+        ]);
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until(label);
+        if suffix == "plain" {
+            assert!(
+                !terminal.transcript.contains("· low"),
+                "a profile without an effort drew a suffix: {}",
+                terminal.transcript
+            );
+        }
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
+    }
+}
+
 /// Re-picking the model the label already shows keeps its effort: an
 /// `unchanged` adoption publishes no `context/configured` fact to redraw it.
 #[test]

@@ -88,6 +88,13 @@ async fn launch_product(directory: &std::path::Path) -> Server {
     )
     .await
 }
+async fn launch_configured(directory: &std::path::Path, configuration: &std::path::Path) -> Server {
+    launch(
+        directory,
+        &["--model-config", configuration.to_str().unwrap()],
+    )
+    .await
+}
 async fn connect(server: &Server) -> Client {
     let mut client = Client {
         transport: Transport::Unix(BufReader::new(
@@ -573,6 +580,95 @@ async fn a_stored_effortless_configuration_is_unchanged_on_reopen() {
             "{attached}"
         );
         turn(&mut reopened, &session_id, "hello").await;
+        assert_eq!(sent_effort(&capture), None);
+
+        server.child.kill().await.unwrap();
+        http.abort();
+        std::fs::remove_dir_all(directory).unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// #897: a model-config profile records the protocol it adopts, so the
+/// configured effort reaches every read and the request, and a profile with
+/// no effort shows nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_configured_profile_shows_the_effort_it_sends() {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let capture = Arc::new(Capture::default());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/v1/messages", post(messages))
+            .with_state(capture.clone());
+        let http = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let directory = directory("configured-effort");
+        let configuration = directory.join("model.json");
+        std::fs::write(
+            &configuration,
+            serde_json::to_vec(&json!({
+                "defaultModel":{"providerId":"local","modelId":"effortful"},
+                "providers":[{"id":"local","kind":"anthropic",
+                    "baseUrl":format!("http://{endpoint}"),
+                    "models":[
+                        {"id":"effortful","contextWindow":32_000,"maxOutputTokens":4_096,
+                            "config":{"maxTokens":4096,"reasoning":{"effort":"low"}}},
+                        {"id":"plain","contextWindow":32_000,"maxOutputTokens":4_096,
+                            "config":{"maxTokens":4096}}
+                    ]}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut server = launch_configured(&directory, &configuration).await;
+        let mut client = connect(&server).await;
+
+        let created = client
+            .rpc(
+                "session.create",
+                json!({"cwd":directory,"tools":[],
+                    "model":{"provider":"local","modelId":"effortful"}}),
+            )
+            .await;
+        assert_ok(&created);
+        assert_eq!(
+            created["result"]["modelPreferences"],
+            json!({"reasoningEffort":"low"}),
+            "{created}"
+        );
+        let session_id = created["result"]["sessionId"].clone();
+        let attached = client
+            .rpc("session.attach", json!({"sessionId":session_id}))
+            .await;
+        assert_eq!(
+            attached["result"]["modelPreferences"],
+            json!({"reasoningEffort":"low"}),
+            "{attached}"
+        );
+        turn(&mut client, &session_id, "hello").await;
+        assert_eq!(
+            configured(&mut client, &session_id).await["model_preferences"],
+            json!({"reasoningEffort":"low"})
+        );
+        assert_eq!(sent_effort(&capture).as_deref(), Some("low"));
+
+        let created = client
+            .rpc(
+                "session.create",
+                json!({"cwd":directory,"tools":[],
+                    "model":{"provider":"local","modelId":"plain"}}),
+            )
+            .await;
+        assert_ok(&created);
+        assert!(
+            created["result"].get("modelPreferences").is_none(),
+            "{created}"
+        );
+        let plain = created["result"]["sessionId"].clone();
+        turn(&mut client, &plain, "hello").await;
+        let data = configured(&mut client, &plain).await;
+        assert!(data.get("model_preferences").is_none(), "{data}");
         assert_eq!(sent_effort(&capture), None);
 
         server.child.kill().await.unwrap();

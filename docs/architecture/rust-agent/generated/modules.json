@@ -189,6 +189,7 @@
       "unexpandedMacros": [
         "format",
         "matches",
+        "serde_json::json",
         "vec"
       ]
     },
@@ -6244,6 +6245,7 @@
         "path SystemPrompt::Text",
         "path dim_agent_types::ModelConfig",
         "path dim_agent_types::ModelRequest",
+        "path dim_agent_types::RequestMetadata",
         "path model",
         "use dim_agent_types::SystemPrompt"
       ]
