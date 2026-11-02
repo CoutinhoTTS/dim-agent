@@ -35,7 +35,8 @@ Usage: ./dev [CLI arguments]
 With DIM_OAUTH_CLIENT_ID_CN and DIM_OAUTH_CLIENT_ID_GLOBAL set, dimcode is
 built as the account build; otherwise as the API-key build.
 Use --model-config PATH for independent API-key development.
-Migration imports Global .dim/v2 into .dim and CN .dimcode/v2 into .dimcode.
+Migration follows the built version's channel; alpha imports .dimcode/v2
+into .dimcode-alpha. See docs/design/cli-commands.md for migration routing.
 Other commands use the isolated development home.
 Optional local configuration: .env.dev (see .env.example).
 A new development home runs commands without OS isolation: the Sandbox

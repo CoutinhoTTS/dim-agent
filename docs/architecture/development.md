@@ -8,7 +8,7 @@ The repository root `./dev` builds the native CLI and App Server with locked Car
 | --- | --- |
 | `./dev --model-config PATH [CLI arguments]` | Incrementally build both Rust binaries, normally stop the development daemon, then run the new CLI with the configured provider |
 | `./dev [CLI arguments]` | Use the model configuration selected in `.env.dev` or the inherited environment |
-| `./dev migration` | Import Global `.dim/v2` into `.dim` and CN `.dimcode/v2` into `.dimcode` separately, showing progress and results; do not inject the chat development home or restart a daemon |
+| `./dev migration` | Follow the built version's [migration routing](../design/cli-commands.md#migration-interaction), showing progress and results; do not inject the chat development home or restart a daemon |
 | `./dev restart [CLI arguments]` | Perform the same build and restart flow explicitly |
 | `./dev stop` | Stop an existing development daemon without building or starting one |
 | `./dev check` | Run explicit formatting and compilation checks; tests do not run on startup |
