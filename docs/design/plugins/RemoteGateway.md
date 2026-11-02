@@ -94,7 +94,7 @@ sequenceDiagram
   T->>RG: authenticate upgrade
   RG-->>T: allow, device_id
   T->>R: connection with ConnectionEntry deviceId
-  D->>R: hello v3, session.list, session.attach
+  D->>R: hello v3, session.summaries, session.attach
 ```
 
 The offer is single use and consumed before the record is written; tokens are stored only as hashes.

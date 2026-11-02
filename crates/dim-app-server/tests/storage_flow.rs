@@ -4201,7 +4201,13 @@ async fn owned_session_creation_and_plugin_shutdown_keep_one_resource_owner() {
             .await
             .is_err()
     );
-    assert!(directory.sessions().await.unwrap().is_empty());
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM agent_sessions", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
     directory
         .create_owned_session(
             "owned",
@@ -4213,7 +4219,13 @@ async fn owned_session_creation_and_plugin_shutdown_keep_one_resource_owner() {
         )
         .await
         .unwrap();
-    assert_eq!(directory.sessions().await.unwrap(), ["owned"]);
+    assert_eq!(
+        connection
+            .query_row("SELECT session_id FROM agent_sessions", [], |row| row
+                .get::<_, String>(0))
+            .unwrap(),
+        "owned"
+    );
     assert_eq!(
         connection
             .query_row(
@@ -4248,7 +4260,7 @@ async fn owned_session_creation_and_plugin_shutdown_keep_one_resource_owner() {
         1
     );
     assert!(matches!(
-        directory.sessions().await,
+        directory.creation_record("owned").await,
         Err(AgentError::Storage(_))
     ));
     drop(connection);

@@ -871,7 +871,7 @@ Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
 
 ### 会话标题
 
-手动标题是 Session 自己的状态：`session.list` 与 `session.summaries` 以 `manual` 来源报告它，
+手动标题是 Session 自己的状态：`session.summaries` 以 `manual` 来源报告它，
 之后的自动生成永不替换它（[标题元数据](appserver/session-title-metadata.md)、
 [SessionTitle](plugins/SessionTitle.md)）。`session.rename {sessionId, title}` 设置它，
 `title: null` 清除它。标题文本不属于任何线，也不产生 Timeline 事件，所以重命名不增添模型读到的内容。

@@ -1203,7 +1203,7 @@ async fn local_product_management_starts_without_configuration_and_isolates_inva
     }
     assert_ok(&local.rpc("daemon.ping", json!({})).await);
     assert_eq!(
-        local.rpc("session.list", json!({})).await["result"],
+        local.rpc("session.summaries", json!({})).await["result"],
         json!([])
     );
     for file in ["auth.json", "mcp.json", "skills.json"] {
@@ -1381,7 +1381,6 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     assert_eq!(remote.features, json!([]));
     for (method, params) in [
         ("session.create", json!({"cwd":work})),
-        ("session.list", json!({})),
         ("skills.catalog", json!({})),
         ("mcp.catalog", json!({})),
         ("session.mcp", json!({"sessionId":"remote"})),
@@ -2295,7 +2294,7 @@ async fn the_creation_replies_name_the_adopted_model_preferences() {
 
     // The same live Session lists without the field: only the create and
     // attach replies name the preferences.
-    let listed = client.rpc("session.list", json!({})).await;
+    let listed = client.rpc("session.summaries", json!({})).await;
     assert_ok(&listed);
     let item = listed["result"]
         .as_array()

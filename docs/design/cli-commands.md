@@ -1263,8 +1263,8 @@ Subcommands do not create a plugin command registry.
 
 ### Session titles
 
-The manual title is the Session's own state: `session.list` and
-`session.summaries` report it with its `manual` source, and later automatic
+The manual title is the Session's own state: `session.summaries`
+reports it with its `manual` source, and later automatic
 generation never replaces it ([title metadata](appserver/session-title-metadata.md),
 [SessionTitle](plugins/SessionTitle.md)). `session.rename {sessionId, title}` sets
 it and `title: null` clears it. Title text belongs to no branch and to no Timeline

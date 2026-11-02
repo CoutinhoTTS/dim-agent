@@ -17,8 +17,8 @@ delegation prompt as their preview, so `/resume` reads as one repeated conversat
 The Session record gains one creation-only field, `origin`, with four values: `client`, `acp`, `internal` and
 `unknown`. The entry that creates a Session writes it in the creation transaction; nothing else writes it except an
 import that replaces `unknown` with what the source recorded. The parent of a child Session is the leader link the
-store already keeps. Four reads report both — `session.list`, `session.attach`, `session.summaries`,
-`session.catalog` — and only `session.catalog` can drop whole classes: `withInternal` and `withAcpSessions`, both off by
+store already keeps. Three reads report both — `session.attach`, `session.summaries`, `session.catalog` — and
+only `session.catalog` can drop whole classes: `withInternal` and `withAcpSessions`, both off by
 default, applied before the page boundary. A picker that turns neither on lists conversations, which is what the legacy
 picker did.
 
@@ -104,7 +104,6 @@ does not carry over, and an ACP-origin Session's fork is not itself an ACP Sessi
 
 | Reply | Effect |
 | --- | --- |
-| `session.list` | Reports both; applies no visibility filter |
 | `session.attach` | Reports both, from one indexed row read of `agent_sessions` for protocol v3 (the title read it already does is on another table); applies no visibility filter |
 | `session.summaries` | Reports both; applies no visibility filter, so its contents do not change |
 | `session.catalog` | Reports both; applies the two filters of §3.5 |
@@ -199,7 +198,7 @@ Parent: Update cache      shown where a client lists internal rows
 | Subject | Effect |
 | --- | --- |
 | Protocol version | No bump. Both filters and both fields are optional additions; a client that sends neither gets the top-level view, which is the change this issue asks for |
-| Protocol v1 and v2 | `session.list` items carry neither field, as they carry no title or `agentId`; the catalog is not served at all |
+| Protocol v1 and v2 | No Session listing is served: `session.summaries` and the catalog are v3 methods |
 | Older daemons | A client sends `origin` and the two filters only when the marker is advertised, so its request stays valid against a daemon that rejects unknown parameters |
 | Older clients | A v3 client that predates the filters lists conversations from a new daemon, and labels nothing; it sees fewer rows than before and no wrong ones |
 | `session.summaries` | Lists every Session as before, now with the two fields on each item; ACP's `session/list` is unchanged |
@@ -251,7 +250,7 @@ Format of [design rules §4 rule 8](../architecture/rust-agent/principles.md).
 | §4 rule 4 (no business meaning in core) | No core change. The column belongs to SessionStore's own Session record, as the leader link does |
 | §4 rule 5 (batch) | The origin is written in the existing creation transaction; no batch and no event is added |
 | §4 rule 6 (model context) | Unchanged: no event, so no context path, and the origin is never rendered into a request |
-| §4 rule 7 (public events and services) | Agents answers from SessionStore's stored row, as `session.list` does; no plugin reads another's state |
+| §4 rule 7 (public events and services) | Agents answers from SessionStore's stored row, as `session.summaries` does; no plugin reads another's state |
 | §4 rule 8 (infrastructure unchanged) | The Timeline, Dispatcher, envelope, assembly and the Session facade are unchanged. The store gains a column and no event, by the storage page's own format decision |
 | §4 rule 9 (only facts later decisions use enter the Timeline) | The class is picker display data and a process-level record, so it is written through SessionStore's typed creation write and stays out of the Timeline |
 | §1 (a feature is split by its state's owner) | The state is process-level and SessionStore's; no part is added to any scope |
@@ -281,7 +280,7 @@ Format of [design rules §4 rule 8](../architecture/rust-agent/principles.md).
 | D4 | The default list is `client` and `unknown`; `acp` and `internal` are opt-in | Defaulting to `client` alone; keeping today's unfiltered default | Filtering `unknown` out would hide a user's imported history from the only list they have; keeping the unfiltered default would keep the crowding this issue is about |
 | D5 | A fork's origin is `client` | Copying the source's origin | A fork is a new Session of the client that forked it; the legacy catalog excluded forks from its ACP fallback for the same reason |
 | D6 | The origin is written once, and an import may replace `unknown` once | Letting any later read or attachment update it | A Session's later attachments must not change its creation provenance, and a re-run of an import must be able to name what the source recorded without overwriting a value that is already known |
-| D7 | `session.list` and `session.summaries` report the fields but filter nothing | Applying the same filters there | They are not the picker: `session.summaries` is the fallback list of older clients and the source of ACP's `session/list`, and `session.list` has no page boundary to keep |
+| D7 | `session.summaries` reports the fields but filters nothing | Applying the same filters there | It is not the picker: `session.summaries` is the fallback list of older clients and the source of ACP's `session/list`, and it has no page boundary to keep |
 | D8 | No parent filter and no children listing | A `parent` filter on the catalog | A live team comes from Collaboration's Team status, and a historical child is reachable by id and by `withInternal`; a parent filter would be an unused method surface until a client asks for it |
 | D9 | No new index | A partial index per hidden class | Two independent switches need two indexes, each maintained by every commit that moves `updated_at_ms`; the filtered page is bounded by the page plus the rows it skips ([#596](https://github.com/arcships/dim/issues/596)) |
 
@@ -302,7 +301,7 @@ Format of [design rules §4 rule 8](../architecture/rust-agent/principles.md).
 - A cursor taken under `withAcpSessions: true` and replayed with `false` is `invalid_params`; the same for
   `withInternal`. A cursor taken with both flags takes its page correctly.
 - `session.summaries` still returns every stored Session, including internal and ACP ones, with the two new fields.
-- Protocol v2 `session.list` items carry neither field; v3 items carry them.
+- Protocol v2 has no Session listing; v3 `session.summaries` items carry both fields.
 - A v29 store with one member Session and one ordinary Session upgrades to v30 with the member reading `internal` and
   the ordinary Session `unknown`; the upgraded structure, marker and business rows are as the storage step states, and
   re-opening does not upgrade again.
