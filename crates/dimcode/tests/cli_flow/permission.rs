@@ -1540,6 +1540,87 @@ fn permissions_needs_the_rule_methods() {
     );
 }
 
+/// A daemon that serves the rules but not the write method: the two writes
+/// name the kind they lack before reading input, and the list still works.
+#[test]
+fn permissions_refuse_a_read_only_daemon_but_still_list() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["permission.rules"]);
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            assert!(!line.contains("permission."), "unexpected request: {line}");
+            line.clear();
+        }
+    });
+    let output = home
+        .command()
+        .args(["permissions", "remove", "deny prefix git push"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.stdout, b"");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("This daemon lists command rules but cannot remove them."),
+        "{stderr}"
+    );
+
+    // A path that does not exist: reading it first would be the error.
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["permission.rules"]);
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            assert!(!line.contains("permission."), "unexpected request: {line}");
+            line.clear();
+        }
+    });
+    let missing = home.0.join("missing-rule.json");
+    let output = home
+        .command()
+        .args(["permissions", "add"])
+        .arg(&missing)
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.stdout, b"");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("This daemon lists command rules but cannot add them."),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("missing-rule.json"), "{stderr}");
+
+    // The catalog read is served, so the list still prints.
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["permission.rules"]);
+        let request = wire.read("permission.rules");
+        wire.reply(
+            &request,
+            rules_reply("r1", json!([command_rule("deny", "prefix", "git push")])),
+        );
+    });
+    let output = home
+        .command()
+        .args(["permissions", "list"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "deny\tprefix\tgit push\n"
+    );
+}
+
 /// The requests a terminal UI makes before its management panel opens: the
 /// Session attach, then the readings the interface asks for when it enters.
 fn rules_start(wire: &mut Wire) {
