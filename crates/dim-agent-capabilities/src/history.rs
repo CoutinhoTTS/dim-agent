@@ -1043,14 +1043,17 @@ async fn boundary_at(
 ///
 /// A completed compaction replaces the entries before its `retain_from` from a
 /// validated boundary, so the projection's open calls and output are empty at
-/// that cut and the tail alone gives the state at `through`. A cut outside this
-/// branch's own events, such as one on an ancestor, is not a resume point here:
-/// the branch's own `branch/start` resets that state, so the fold starts at the
-/// branch's segment start instead. A cut on this branch is used only when the
-/// pages after it fold on their own; a cut that replaced the input a later
-/// `input/consumed` names cannot start the state fold, and the check falls back
-/// to the segment start, which always replays. Read errors are returned as they
-/// are; the verdict is the one a replay of the whole prefix gives.
+/// that cut and the tail alone gives the state at `through`.
+///
+/// A cut outside this branch's own events (such as one on an ancestor), a cut
+/// at or after the compaction fact that names it, and a cut whose pages cannot
+/// fold on their own (it replaced the input a later `input/consumed` names) are
+/// not resume points here: the fold starts at the branch's segment start
+/// instead, which always replays because the branch's `branch/start` resets
+/// that state. A malformed reference therefore never leaves the tail unread, so
+/// the check cannot accept the empty state of an unfolded prefix. Read errors
+/// are returned as they are; the verdict is the one a replay of the whole prefix
+/// gives.
 pub async fn validate_context_boundary_at(
     timeline: &Timeline,
     through: u64,

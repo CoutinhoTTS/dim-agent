@@ -1262,7 +1262,10 @@ async fn a_cut_check_starts_at_the_last_completed_compaction() {
             .last_compaction_cut(&key("session", "main"), 14)
             .await
             .unwrap(),
-        Some("event-8".into()),
+        Some(dim_agent_runtime::CompactionCut {
+            retain_from: "event-8".into(),
+            sequence: 9,
+        }),
         "a cancelled compaction after the completed one is not a cut"
     );
     assert_eq!(
@@ -1277,6 +1280,101 @@ async fn a_cut_check_starts_at_the_last_completed_compaction() {
         let expected = dim_agent_capabilities::history::validate_context_boundary(
             &timeline.context(at).await.unwrap(),
         );
+        assert_eq!(
+            dim_agent_capabilities::history::validate_context_boundary_at(&timeline, at)
+                .await
+                .unwrap(),
+            expected,
+            "cut {at}"
+        );
+    }
+    db.close().await.unwrap();
+}
+
+/// A completed compaction on a branch whose cut names an ancestor's event is
+/// not a resume point for that branch: the check replays the branch's segment
+/// and keeps the whole-prefix verdict.
+#[tokio::test]
+async fn a_cut_on_another_branch_replays_the_segment() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    append(
+        &store,
+        key("session", "main"),
+        vec![
+            record(
+                1,
+                EventKind::TurnStart(TurnStartData {
+                    turn_id: "turn-main".into(),
+                }),
+            ),
+            record(
+                2,
+                EventKind::ModelStart(ModelStartData {
+                    turn_id: "turn-main".into(),
+                    request_id: "request-main".into(),
+                }),
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    connection
+        .execute_batch("INSERT INTO timeline_branches VALUES ('session', 'child', '{}', 0);")
+        .unwrap();
+    drop(connection);
+    append(
+        &store,
+        key("session", "child"),
+        vec![
+            record(
+                1,
+                EventKind::BranchStart(BranchStartData {
+                    parent: Some("main".into()),
+                    create_event: None,
+                }),
+            ),
+            record(
+                2,
+                EventKind::TurnStart(TurnStartData {
+                    turn_id: "turn-child".into(),
+                }),
+            ),
+            record(
+                3,
+                EventKind::ModelStart(ModelStartData {
+                    turn_id: "turn-child".into(),
+                    request_id: "request-child".into(),
+                }),
+            ),
+            record(
+                4,
+                EventKind::ContextCompaction(completed("event-1", "short", 4)),
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+    let timeline = Timeline::restore(
+        rutis::Ctx::root().unwrap(),
+        key("session", "child"),
+        vec![("main".into(), 2)],
+        store.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(timeline.compaction_cut(4).await.unwrap(), None);
+    for at in [3, 4] {
+        let expected = dim_agent_capabilities::history::validate_context_boundary(
+            &timeline.context(at).await.unwrap(),
+        );
+        assert!(expected.is_err(), "the output is open at {at}");
         assert_eq!(
             dim_agent_capabilities::history::validate_context_boundary_at(&timeline, at)
                 .await

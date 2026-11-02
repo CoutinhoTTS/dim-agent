@@ -48,6 +48,15 @@ impl PolicyFacts {
     }
 }
 
+/// A completed compaction's cut and the sequence of the fact that names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionCut {
+    /// The first event the compaction keeps verbatim.
+    pub retain_from: String,
+    /// The compaction fact's own sequence on its branch.
+    pub sequence: u64,
+}
+
 /// The events a compaction cut needs for pinning: its anchor plus the turn's
 /// input window. The caller supplies the cut, so no full history is decoded.
 #[derive(Debug, Clone, Default)]
@@ -315,15 +324,16 @@ pub trait TimelineStore: Send + Sync + 'static {
             Ok(records)
         })
     }
-    /// The `retain_from` of the latest completed compaction at or below
-    /// `through`: the cut a read may start at instead of the branch's segment
-    /// start. Stores may answer without decoding the branch. The default reads
-    /// the context rows and keeps the last completed fact.
+    /// The latest completed compaction at or below `through` on one branch:
+    /// its cut and its own sequence. A read may start at that cut instead of
+    /// the branch's segment start. Stores may answer without decoding the
+    /// branch. The default reads the context rows and keeps the last completed
+    /// fact.
     fn last_compaction_cut<'a>(
         &'a self,
         key: &'a TimelineKey,
         through: u64,
-    ) -> BoxFuture<'a, Result<Option<String>>> {
+    ) -> BoxFuture<'a, Result<Option<CompactionCut>>> {
         Box::pin(async move {
             let records = self.read_context(key, 1, through).await?;
             Ok(records
@@ -332,7 +342,10 @@ pub trait TimelineStore: Send + Sync + 'static {
                 .find_map(|record| match &record.event.kind {
                     EventKind::ContextCompaction(data) => match &data.outcome {
                         ContextCompactionResult::Completed { retain_from, .. } => {
-                            Some(retain_from.clone())
+                            Some(CompactionCut {
+                                retain_from: retain_from.clone(),
+                                sequence: record.event.sequence,
+                            })
                         }
                         _ => None,
                     },

@@ -1746,3 +1746,73 @@ async fn a_cut_after_a_compaction_reads_only_its_tail_and_keeps_the_verdict() {
         Err(AgentError::InvalidInput(message)) if message.contains("inside an atomic batch")
     ));
 }
+
+/// A stored cut that names a later event, or lies beyond `through`, is ignored:
+/// the check replays the segment instead of accepting the empty state of a tail
+/// it never read.
+#[tokio::test]
+async fn a_malformed_compaction_cut_replays_the_segment_and_keeps_the_verdict() {
+    use super::checkpoint_projection::completed;
+
+    let store = Arc::new(CountContextReads::default());
+    store
+        .create_session("reads", &SessionConfig::default())
+        .await
+        .unwrap();
+    let timeline = Timeline::new(
+        Ctx::root().unwrap(),
+        TimelineKey {
+            session_id: "reads".into(),
+            branch_id: "main".into(),
+        },
+        vec![],
+        store.clone(),
+    );
+    timeline
+        .append(
+            EventKind::TurnStart(TurnStartData {
+                turn_id: "turn-1".into(),
+            })
+            .into(),
+        )
+        .unwrap();
+    let open = timeline
+        .append(
+            EventKind::ModelStart(ModelStartData {
+                turn_id: "turn-1".into(),
+                request_id: "request".into(),
+            })
+            .into(),
+        )
+        .unwrap();
+    let later = "later-turn";
+    timeline
+        .append(completed(later, "short", open.sequence, vec![]).into())
+        .unwrap();
+    let turn = timeline
+        .append(
+            EventDraft::new(EventKind::TurnStart(TurnStartData {
+                turn_id: "turn-2".into(),
+            }))
+            .with_id(later),
+        )
+        .unwrap();
+
+    for at in [open.sequence + 1, turn.sequence] {
+        let expected = dim_agent_capabilities::history::validate_context_boundary(
+            &timeline.context(at).await.unwrap(),
+        );
+        assert!(
+            expected.is_err(),
+            "the full prefix leaves the model output open at {at}"
+        );
+        assert_eq!(timeline.compaction_cut(at).await.unwrap(), None, "{at}");
+        assert_eq!(
+            dim_agent_capabilities::history::validate_context_boundary_at(&timeline, at)
+                .await
+                .unwrap(),
+            expected,
+            "cut {at}"
+        );
+    }
+}
