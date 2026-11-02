@@ -14,6 +14,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Reloaded {area}: {entries} entries, {disabled} disabled." => {
             "{area} 다시 로드됨: 항목 {entries}개, 비활성 {disabled}개."
         }
+        "Reloaded {area}: {entries} entries." => "{area} 다시 로드됨: 항목 {entries}개.",
         "Hooks" => "훅",
         "invalid" => "유효하지 않음",
         "Saved." => "저장했습니다.",

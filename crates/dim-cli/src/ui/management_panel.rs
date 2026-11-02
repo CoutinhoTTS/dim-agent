@@ -77,6 +77,7 @@ pub const STRINGS: &[&str] = &[
     "Enabled {name}.",
     "Disabled {name}.",
     "Reloaded {area}: {entries} entries, {disabled} disabled.",
+    "Reloaded {area}: {entries} entries.",
     "The user's own document; always in effect.",
     "No .dimcode/hooks.json in this workspace.",
     "Owned by plugin {plugin}.",
@@ -654,18 +655,30 @@ pub fn reloaded(area: Area, view: &ManagementView) -> String {
         .iter()
         .flat_map(|group| &group.entries)
         .collect();
-    let disabled = entries
-        .iter()
-        .filter(|entry| entry.enabled == Some(false))
-        .count();
-    let mut lines = vec![tf(
-        "Reloaded {area}: {entries} entries, {disabled} disabled.",
-        &[
-            ("area", t(title(area))),
-            ("entries", &entries.len().to_string()),
-            ("disabled", &disabled.to_string()),
-        ],
-    )];
+    // The disabled count says what an on/off state is, so only an area whose
+    // entries report one has it: an area of values, or an empty one, does
+    // not claim every entry is enabled.
+    let count = entries.len().to_string();
+    let size = if entries.iter().any(|entry| entry.enabled.is_some()) {
+        let disabled = entries
+            .iter()
+            .filter(|entry| entry.enabled == Some(false))
+            .count();
+        tf(
+            "Reloaded {area}: {entries} entries, {disabled} disabled.",
+            &[
+                ("area", t(title(area))),
+                ("entries", &count),
+                ("disabled", &disabled.to_string()),
+            ],
+        )
+    } else {
+        tf(
+            "Reloaded {area}: {entries} entries.",
+            &[("area", t(title(area))), ("entries", &count)],
+        )
+    };
+    let mut lines = vec![size];
     lines.extend(view.issues.iter().map(|issue| format!("  {issue}")));
     lines.join("\n")
 }
@@ -1254,6 +1267,35 @@ mod tests {
         assert!(
             text.starts_with("Reloaded Hooks: 2 entries, 0 disabled."),
             "{text}"
+        );
+    }
+
+    /// The reload summary counts disabled entries only for an area whose
+    /// entries report a state, and names the area as its panel does.
+    #[test]
+    fn a_reload_summary_fits_the_area() {
+        // A rule has a decision, not a state: nothing is off.
+        let rules = ManagementView {
+            groups: vec![ManagementGroup {
+                heading: "user".into(),
+                entries: vec![entry(
+                    "deny prefix git push",
+                    "deny prefix git push",
+                    None,
+                    Vec::new(),
+                    vec![ActionKind::Remove],
+                )],
+            }],
+            ..ManagementView::default()
+        };
+        assert_eq!(
+            reloaded(Area::Permissions, &rules),
+            "Reloaded Command rules: 1 entries."
+        );
+        // An empty area has no entry that could be on or off either.
+        assert_eq!(
+            reloaded(Area::Skills, &ManagementView::default()),
+            "Reloaded Skills: 0 entries."
         );
     }
 

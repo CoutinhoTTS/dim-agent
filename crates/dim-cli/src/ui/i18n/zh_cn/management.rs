@@ -14,6 +14,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Reloaded {area}: {entries} entries, {disabled} disabled." => {
             "已重新加载{area}：共 {entries} 项，{disabled} 项已禁用。"
         }
+        "Reloaded {area}: {entries} entries." => "已重新加载{area}：共 {entries} 项。",
         "Hooks" => "钩子",
         "invalid" => "无效",
         "Saved." => "已保存。",

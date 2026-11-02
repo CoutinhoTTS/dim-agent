@@ -14,6 +14,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Reloaded {area}: {entries} entries, {disabled} disabled." => {
             "{area} neu geladen: {entries} Einträge, {disabled} deaktiviert."
         }
+        "Reloaded {area}: {entries} entries." => "{area} neu geladen: {entries} Einträge.",
         "Hooks" => "Hooks",
         "invalid" => "ungültig",
         "Saved." => "Gespeichert.",

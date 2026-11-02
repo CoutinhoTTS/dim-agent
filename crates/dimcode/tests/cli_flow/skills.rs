@@ -484,7 +484,7 @@ fn tui_skills_panel_lists_toggles_and_reloads() {
     // as its modifier.
     thread::sleep(Duration::from_millis(200));
     terminal.write(b"/reload-skills\r");
-    terminal.until("Reloaded Skills: 0 entries, 0 disabled.");
+    terminal.until("Reloaded Skills: 0 entries.");
     terminal.until("/w/old: unreadable");
     terminal.write(b"/exit\r");
     terminal.until("Bye!");

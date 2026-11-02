@@ -14,6 +14,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Reloaded {area}: {entries} entries, {disabled} disabled." => {
             "{area} を再読み込みしました：{entries} 件、{disabled} 件が無効。"
         }
+        "Reloaded {area}: {entries} entries." => "{area} を再読み込みしました：{entries} 件。",
         "Hooks" => "フック",
         "invalid" => "無効",
         "Saved." => "保存しました。",
