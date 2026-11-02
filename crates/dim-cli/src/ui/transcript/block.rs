@@ -46,12 +46,10 @@ pub enum Block {
     /// The calls of one model request.
     ToolGroup(ToolGroup),
     /// A context compaction: running, then its outcome; a completed one's
-    /// summary, digest and kept inputs sit behind the disclosure.
+    /// summary sits behind the disclosure.
     Compaction {
         state: CompactionState,
         text: String,
-        digest: Option<String>,
-        kept: Option<String>,
         insufficient: Vec<CompactionPartSize>,
         expanded: bool,
     },
@@ -116,8 +114,6 @@ pub fn project_row(rows: &[Arc<ViewRow>], index: usize, detail: Detail) -> Block
             Some(compaction) => Block::Compaction {
                 state: compaction.state,
                 text: compaction.text.clone(),
-                digest: compaction.digest.clone(),
-                kept: compaction.kept.clone(),
                 insufficient: compaction.insufficient.clone(),
                 expanded: detail == Detail::Expanded,
             },
@@ -532,36 +528,35 @@ mod tests {
         assert!(expanded.contains("cargo test"), "{expanded}");
     }
 
-    /// A completed compaction's detail draws its summary, then the digest
-    /// under its own label, then the kept input, in the replacement's order;
-    /// collapsed, all three stay behind the disclosure.
     #[test]
-    fn a_completed_compaction_draws_its_summary_digest_and_kept_input_in_order() {
-        let mut completed = row(RowKind::Compaction, "");
-        completed.compaction = Some(CompactionView {
-            state: CompactionState::Completed,
-            text: "The cache lock moved into a RwLock.".into(),
-            digest: Some("<dim-digest>\nwrote src/cache.rs".into()),
-            kept: Some("Try the RwLock before touching the parser.".into()),
-            insufficient: Vec::new(),
-        });
-        let rows = shared(&[completed]);
-        assert_eq!(
-            compaction_rows(&rows, Detail::Expanded),
-            [
-                "✓ Context compacted ▾",
-                "▎ The cache lock moved into a RwLock.",
-                "▎ Tool effects",
-                "▎ <dim-digest>",
-                "▎ wrote src/cache.rs",
-                "▎ Kept verbatim",
-                "▎ Try the RwLock before touching the parser.",
-            ]
-        );
-        assert_eq!(
-            compaction_rows(&rows, Detail::Collapsed),
-            ["✓ Context compacted ▸"]
-        );
+    fn a_completed_compaction_draws_only_its_summary_body() {
+        for text in [
+            "The cache lock moved into a RwLock.",
+            "<dim-summary>\nThe cache lock moved into a RwLock.\n</dim-summary>",
+            "<dim-summary>\nThe cache lock moved into a RwLock.",
+            "<dim-summary>\nThe cache lock moved into a RwLock.\n</dim-summary>\n<dim-digest>\nwrote src/cache.rs\n</dim-digest>",
+        ] {
+            let mut completed = row(RowKind::Compaction, "");
+            completed.compaction = Some(CompactionView {
+                state: CompactionState::Completed,
+                text: text.into(),
+                digest: Some("<dim-digest>\nwrote src/cache.rs".into()),
+                kept: Some("Try the RwLock before touching the parser.".into()),
+                insufficient: Vec::new(),
+            });
+            let rows = shared(&[completed]);
+            assert_eq!(
+                compaction_rows(&rows, Detail::Expanded),
+                [
+                    "✓ Context compacted ▾",
+                    "▎ The cache lock moved into a RwLock.",
+                ]
+            );
+            assert_eq!(
+                compaction_rows(&rows, Detail::Collapsed),
+                ["✓ Context compacted ▸"]
+            );
+        }
     }
 
     /// The rows a compaction row draws at `detail`, without escape sequences.

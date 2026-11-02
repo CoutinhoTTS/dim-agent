@@ -818,23 +818,15 @@ composer:  ... (main)  --------------------------------+->  ... (feature/fix)
 
 The context reading is the estimate the next request sends against its window, and a compaction threshold the server returned with it. It is read when a session is entered, after a model switch, after each model request on `main` ends, when a run on `main` ends, and when a compaction result arrives on `main`, so the reading follows a long turn and a compaction outside a run does not leave it stale. At or above 90% of that threshold — the interface's `CONTEXT_WARNING_PERCENT`, applied to the returned `thresholdTokens` — the reading is drawn as a warning and says `near the compaction threshold`. The client never computes the threshold itself; the formula belongs to compaction.
 
-A context compaction has a row of its own in the transcript. `context/compaction-start` opens it in the running state, and the `context/compaction` whose `start` names it settles that row; a result without a start, a manual compaction that failed before a strategy ran, gets its own row. The row shows what the record holds:
+A context compaction has a row of its own in the transcript. `context/compaction-start` opens it in the running state, and the `context/compaction` whose `start` names it settles that row; a result without a start, a manual compaction that failed before a strategy ran, gets its own row. The expanded row shows only the summary body:
 
 ```text
  › try the RwLock for the cache lock
  … reply …
  · Compacting context…
  ✓ Context compacted ▾
- ▎ <dim-summary>
  ▎ The cache lock moved into a RwLock; the parser race is next.
  ▎ …
- ▎ Tool effects
- ▎ <dim-digest>
- ▎ …
- ▎ wrote src/cache.rs
- ▎ ran exit 0: cargo test -p cache
- ▎ Kept verbatim
- ▎ Try the RwLock before touching the parser.
  › carry on
  ✗ Context compaction failed · the summarizer returned nothing
  ◦ Context compaction skipped · nothing to cut
@@ -842,7 +834,7 @@ A context compaction has a row of its own in the transcript. `context/compaction
  ✓ Context compacted · insufficient space: summary 3.2K, pinned inputs 1.1K ▸
 ```
 
-`✓` is a completed compaction, `✗` a failed one, `◦` one that did not apply, and the skipped, failed and cancelled rows carry the reason or error of their record. The text a completed compaction wrote in place of the cut history is the row's detail, opened and closed the way a tool group's body is: a click on the row, or `/tools` with the other details (`▸` closed, `▾` open). The detail is split where the record says it is: with `replacement_parts`, the strategy's messages are the summary, the digest the runtime recorded from the effects tools declared follows under `Tool effects`, and the inputs the compaction pinned follow under `Kept verbatim`; a record without the field shows the whole replacement as the summary, with no digest and nothing pinned. A record whose parts cannot meet the bound carries `insufficientSpace`, and the completed row's header names its parts largest first, with the token counts the gauge's formatter gives them — `insufficient space: summary 3.2K, pinned inputs 1.1K`. The part names are localized labels and the mark is read from the record; the client never decides it. The transcript keeps every earlier row and the compaction adds no boundary of its own; a resume rebuilds the rows from history as they were drawn live. [Compaction requirements](../../docs/design/compaction-quality.md#4-what-users-see-and-control) say what a compaction row must show.
+`✓` is a completed compaction, `✗` a failed one, `◦` one that did not apply, and the skipped, failed and cancelled rows carry the reason or error of their record. A completed compaction's summary is the row's detail, opened and closed the way a tool group's body is: a click on the row, or `/tools` with the other details (`▸` closed, `▾` open). With `replacement_parts`, the strategy's messages supply the summary; a record without the field uses the whole replacement. If the text contains `<dim-summary>` … `</dim-summary>`, only its inner content is displayed. The markers, digest and pinned inputs are not shown; the stored record and model context are unchanged. A record whose parts cannot meet the bound carries `insufficientSpace`, and the completed row's header names its parts largest first, with the token counts the gauge's formatter gives them — `insufficient space: summary 3.2K, pinned inputs 1.1K`. The part names are localized labels and the mark is read from the record; the client never decides it. The transcript keeps every earlier row and the compaction adds no boundary of its own; a resume rebuilds the rows from history as they were drawn live. [Compaction requirements](../../docs/design/compaction-quality.md#4-what-users-see-and-control) say what a compaction row must show.
 
 `/models` uses Ctrl+X to clear the highlighted model's saved reasoning/tier preferences with the displayed record version; Enter adopts it separately. For noninteractive recovery, run `dimcode models PROVIDER --clear-preferences MODEL`. A concurrent change fails and requires a reread/retry, and the reread lands before that notice, so a retry uses the record's current version; preferences are never silently discarded.
 
