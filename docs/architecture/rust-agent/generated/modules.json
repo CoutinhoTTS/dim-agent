@@ -22314,8 +22314,7 @@
       "references": [
         "path BundledCatalog",
         "path ModelEntry",
-        "path NewApiEndpoint",
-        "path inherit_limits"
+        "path NewApiEndpoint"
       ]
     },
     {
@@ -22339,8 +22338,6 @@
         "path StaticProviderRecord",
         "path StaticRecordKind::Builtin",
         "path bundled_seeds",
-        "path fill_bundled_limits",
-        "path limits_reason",
         "path parse_provider_row",
         "path reseed_candidate",
         "path same_account",

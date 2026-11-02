@@ -280,22 +280,15 @@ impl ProviderService {
         let (models, preferences) = match record {
             Some(record) => {
                 let models = record
-                    .models
+                    .effective_models(bundled)
                     .into_iter()
-                    .map(|source| {
-                        let replacement = record
-                            .model_config_overrides
-                            .iter()
-                            .find(|entry| entry.model_id == source.entry.model_id);
-                        let mut model = match replacement {
-                            Some(replacement) => inherit_limits(replacement.clone(), &source.entry),
-                            None => source.entry.clone(),
-                        };
-                        fill_bundled_limits(bundled, &mut model);
-                        let missing_limits = model.capabilities.missing_limits();
-                        let unavailable_reason = unavailable.map(str::to_owned).or_else(|| {
-                            limits_reason(source.unavailable_reason.clone(), &missing_limits)
-                        });
+                    .map(|effective| {
+                        // The account itself can be unavailable, a fact the
+                        // record does not hold; that reason stands on top of
+                        // the one the effective limits derive.
+                        let unavailable_reason = unavailable
+                            .map(str::to_owned)
+                            .or(effective.unavailable_reason);
                         // The set governs the entries the account can use: an
                         // unavailable entry keeps the enablement it has, so the
                         // owner offers no toggle for it.
@@ -306,19 +299,22 @@ impl ProviderService {
                         } else {
                             vec!["edit"]
                         };
-                        if replacement.is_some() && unavailable.is_none() {
+                        if effective.overridden && unavailable.is_none() {
                             actions.push("reset");
                         }
+                        let enabled = !record
+                            .disabled_model_ids
+                            .contains(&effective.entry.model_id);
                         ManagementModel {
-                            enabled: !record.disabled_model_ids.contains(&model.model_id),
-                            model,
-                            source: if replacement.is_some() {
+                            enabled,
+                            model: effective.entry,
+                            source: if effective.overridden {
                                 "override"
                             } else {
                                 "default"
                             },
-                            endpoint: Some(source.protocol),
-                            missing_limits: missing_limits.clone(),
+                            endpoint: Some(effective.source.protocol),
+                            missing_limits: effective.missing_limits,
                             unavailable_reason,
                             actions,
                             endpoint_override: None,

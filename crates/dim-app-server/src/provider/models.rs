@@ -595,24 +595,23 @@ impl ProviderService {
                                     "Model is unavailable".into(),
                                 ));
                             }
-                            // An unavailable entry keeps the enablement it has:
-                            // the set governs the entries this account can use.
-                            record.disabled_model_ids.retain(|id| {
-                                !record.models.iter().any(|model| {
-                                    &model.entry.model_id == id
-                                        && model.unavailable_reason.is_none()
-                                })
-                            });
-                            record.disabled_model_ids.extend(
-                                record
-                                    .models
-                                    .iter()
-                                    .filter(|model| {
-                                        model.unavailable_reason.is_none()
-                                            && !ids.contains(&model.entry.model_id)
-                                    })
-                                    .map(|model| model.entry.model_id.clone()),
-                            );
+                            // The set governs the entries this account can use,
+                            // as the effective limits make them: a model this
+                            // area's own edit made usable is governed even
+                            // while the stored reason still records the base
+                            // entry.
+                            let governed: Vec<String> = record
+                                .effective_models(&bundled)
+                                .into_iter()
+                                .filter(|model| model.unavailable_reason.is_none())
+                                .map(|model| model.entry.model_id)
+                                .collect();
+                            record
+                                .disabled_model_ids
+                                .retain(|id| !governed.contains(id));
+                            record
+                                .disabled_model_ids
+                                .extend(governed.iter().filter(|id| !ids.contains(id)).cloned());
                             record.version =
                                 record.version.checked_add(1).ok_or(ProviderError::Failed)?;
                             save_catalog(&tx, &provider_id, &record)?;
