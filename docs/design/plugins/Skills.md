@@ -229,7 +229,7 @@ Plugin packages that carry Skills stay visible in the same settings page and kee
 | `skills_source_invalid` | the source is not an absolute directory, is not an `https://`/`ssh://` URL, or a link in the tree leaves it | correct the source |
 | `skills_acquire_failed` | the clone or the staging directory failed | retry; check access to the repository |
 | `skills_preview_stale` | a selected Skill's files changed since the preview, bundled files included | preview again and reselect |
-| `skills_selection_invalid` | empty or repeated selection, a path the scan did not find, a repeated name in the selection, a link inside a selected Skill, or a Skill file larger than the digest limit | correct the selection |
+| `skills_selection_invalid` | an install id that is not `[a-z0-9_-]{1,64}`, an empty or repeated selection, a path the scan did not find, a repeated name in the selection, a link inside a selected Skill, or a Skill file larger than the digest limit | correct the request |
 | `skills_install_exists` | the id is recorded and `overwrite` is false | confirm overwrite or choose another id |
 | `skills_install_unknown` | update or remove of an id the record does not hold, or an update whose record was removed or replaced while its source was acquired | refresh `skills.installations` and retry |
 | `skills_install_unmanaged` | `<user skills root>/<id>` exists but no record owns it; the reply names the Skills found there | choose another id, or move that directory |
