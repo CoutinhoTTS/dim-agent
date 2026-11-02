@@ -522,17 +522,27 @@ async fn run_mcp(
                 vec!["Inspection does not connect or contact the server.".to_owned()],
             )
         }
-        Ok(mcp::Answer::Area { note, .. }) => match (&request.action, note) {
+        Ok(mcp::Answer::Area { note, catalog }) => match (&request.action, note) {
             // The owner's own answer, made safe: the entry a create made.
             (_, Some(note)) => print_report(vec![safe_line(&note)], Vec::new()),
             // A read reports what it read; an action reports its line.
             (ManagementAction::List | ManagementAction::Reload, None) => {
                 print_report(Vec::new(), Vec::new())
             }
-            (_, None) => print_report(
-                vec![safe_line(&management::applied_line(&request.action, None))],
-                Vec::new(),
-            ),
+            (_, None) => {
+                // The catalog the adapter just re-read names the entry, as
+                // the panel's view does; a remove took its entry out of the
+                // read, so the id the action was sent with names it then.
+                let name = management::named_id(&request.action).and_then(|id| {
+                    catalog
+                        .servers
+                        .iter()
+                        .find(|server| server.id == id)
+                        .map(|server| server.id.as_str())
+                });
+                let line = management::applied_line(&request.action, name);
+                print_report(vec![safe_line(&line)], Vec::new())
+            }
         },
         // The action was applied; the report after it failed. The action's own
         // line stands, made safe, and the read error goes to stderr with the
