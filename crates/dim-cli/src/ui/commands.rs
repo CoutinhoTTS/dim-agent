@@ -176,6 +176,16 @@ pub const COMMANDS: &[Command] = &[
         &[],
         Needs::Session,
     ),
+    Command {
+        argument: Some("<title>"),
+        ..slash(
+            "rename",
+            "session",
+            "rename this session",
+            &[],
+            Needs::Session,
+        )
+    },
     slash(
         "usage",
         "session",
@@ -281,7 +291,7 @@ pub const COMMANDS: &[Command] = &[
     slash(
         "mcp",
         "model",
-        "list MCP servers, sign in or out (login|logout ID)",
+        "manage MCP servers, sign in or out (/mcp login ID)",
         &[],
         Needs::Nothing,
     ),
@@ -307,6 +317,13 @@ pub const COMMANDS: &[Command] = &[
         Needs::Nothing,
     ),
     slash(
+        "scheduled",
+        "model",
+        "list scheduled jobs, pause, resume, run or remove one",
+        &["schedule"],
+        Needs::Nothing,
+    ),
+    slash(
         "reload-skills",
         "model",
         "rescan the Skills of this workspace",
@@ -316,8 +333,15 @@ pub const COMMANDS: &[Command] = &[
     slash(
         "permissions",
         "model",
-        "configure file access, tool approval and process isolation",
+        "configure file access, tool approval and process isolation, and manage command rules",
         &["approvals", "approval"],
+        Needs::Nothing,
+    ),
+    slash(
+        "runtime",
+        "app",
+        "show, install or configure the plugin runtimes",
+        &[],
         Needs::Nothing,
     ),
     slash("settings", "app", "open settings", &[], Needs::Nothing),

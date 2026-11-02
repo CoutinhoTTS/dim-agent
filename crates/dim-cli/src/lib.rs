@@ -30,6 +30,7 @@ mod question;
 mod recording;
 mod sanitize;
 mod session;
+mod session_command;
 mod session_host;
 mod ui;
 mod update;
@@ -568,6 +569,8 @@ async fn run_acp(root: &rutis::Ctx, options: &Options, agent_id: Option<String>)
 }
 
 async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
+    // `block_on` polls `act` on this thread, so the thread-local language holds.
+    crate::ui::i18n::set(crate::ui::i18n::interface_locale(&options.home));
     if let Action::Migration(command) = &options.action {
         return migration_command::run(root, &options, command).await;
     }
@@ -657,14 +660,28 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             export::write(&mut client, session_id, *format, output.as_deref()).await?;
             Ok(0)
         }
+        Action::SessionRename {
+            session_id,
+            title,
+            clear,
+        } => {
+            let title = if *clear { None } else { title.as_deref() };
+            session_command::rename(&mut client, session_id, title).await?;
+            Ok(0)
+        }
+        Action::SessionDelete { session_id } => {
+            session_command::delete(&mut client, session_id).await?;
+            Ok(0)
+        }
+        Action::SessionCleanup {
+            older_than,
+            keep,
+            yes,
+        } => session_command::cleanup(&mut client, *older_than, *keep, *yes).await,
         Action::Login(provider) => login::login(&mut client, &options, provider.as_deref()).await,
         Action::Account(provider) => login::account(&mut client, provider).await,
         Action::Logout(provider) => login::logout(&mut client, provider).await,
         Action::Models(provider) => {
-            crate::ui::i18n::set(
-                crate::ui::i18n::saved_locale(&options.home)
-                    .unwrap_or_else(crate::ui::i18n::system_locale),
-            );
             if let Some(model) = &options.clear_preferences {
                 session_host::clear_saved_model_preferences(&mut client, provider, model).await?;
                 println!("{}", crate::ui::i18n::t("Saved model preferences cleared"));
@@ -795,6 +812,18 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             println!("{}", runtime_line(&status));
             Ok(0)
         }
+        Action::RuntimeConfig { name, source, auto } => {
+            let mut params = serde_json::json!({ "name": name });
+            if let Some(source) = source {
+                params["source"] = serde_json::json!(source);
+            }
+            if let Some(auto) = auto {
+                params["auto"] = serde_json::json!(auto);
+            }
+            let status: serde_json::Value = client.typed("runtime.configure", params).await?;
+            println!("{}", runtime_line(&status));
+            Ok(0)
+        }
         Action::McpList => {
             mcp_command::list(&mut client, &options).await?;
             Ok(0)
@@ -812,20 +841,24 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             .await
         }
         Action::McpLogout(id) => mcp_command::sign_out(&mut client, &options, id).await,
+        Action::McpDisconnect(id) => mcp_command::disconnect(&mut client, &options, id).await,
         Action::McpEnable { id, enabled } => {
-            let (rows, notes) =
-                mcp_command::set_enabled(&mut client, &options, id, *enabled).await?;
-            mcp_command::print_report(rows, notes);
+            let state =
+                management::mcp::set_enabled(&mut client, &options.cwd, id, *enabled).await?;
+            mcp_command::print_report(vec![state.sentence()], state.notes);
             Ok(0)
         }
         Action::Management(request) => {
             management_command::run(&mut client, &options, request).await
         }
-        Action::ManagementEdit(area) => {
-            management_command::edit(&mut client, &options, *area).await
+        Action::ManagementEdit { area, id } => {
+            management_command::edit(&mut client, &options, *area, id.clone()).await
         }
-        Action::ManagementSet { area, path } => {
-            management_command::set(&mut client, &options, *area, path).await
+        Action::ManagementSet { area, id, path } => {
+            management_command::set(&mut client, &options, *area, id.clone(), path).await
+        }
+        Action::ManagementAdd { area, path } => {
+            management_command::add(&mut client, &options, *area, path).await
         }
         Action::Recording { enabled } => recording::run(&mut client, &options, *enabled).await,
         Action::Chat | Action::Tui | Action::Exec => {
@@ -846,9 +879,18 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
 
 /// One `runtime.list` entry as a tab-separated line.
 fn runtime_line(status: &serde_json::Value) -> String {
-    ["name", "source", "version", "status", "reason"]
+    let auto = status["auto"]
+        .as_bool()
+        .map(|on| if on { "on" } else { "off" });
+    ["name", "source"]
         .iter()
         .filter_map(|field| status[field].as_str())
+        .chain(auto)
+        .chain(
+            ["version", "status", "reason"]
+                .iter()
+                .filter_map(|field| status[field].as_str()),
+        )
         .map(|value| crate::sanitize::safe(value).replace(['\n', '\t'], " "))
         .collect::<Vec<_>>()
         .join("\t")

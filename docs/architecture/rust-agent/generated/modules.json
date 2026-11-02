@@ -906,6 +906,7 @@
       "parent": "dim_agent_capabilities::skills",
       "file": "crates/dim-agent-capabilities/src/skills/catalog.rs",
       "unexpandedMacros": [
+        "format",
         "matches",
         "tokio::select",
         "tracing::warn",
@@ -930,6 +931,16 @@
       "unexpandedMacros": [
         "format",
         "matches",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_agent_capabilities::skills::install",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::skills",
+      "file": "crates/dim-agent-capabilities/src/skills/install.rs",
+      "unexpandedMacros": [
+        "format",
         "vec"
       ]
     },
@@ -1687,6 +1698,7 @@
         "assert_eq",
         "format",
         "json",
+        "matches",
         "panic",
         "vec"
       ]
@@ -1704,6 +1716,7 @@
       "parent": "dim_app_server",
       "file": "crates/dim-app-server/src/cli.rs",
       "unexpandedMacros": [
+        "eprintln",
         "format",
         "println",
         "tokio::pin",
@@ -2105,6 +2118,17 @@
       ]
     },
     {
+      "id": "dim_app_server::modality",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/modality.rs",
+      "unexpandedMacros": [
+        "format",
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_app_server::model_catalog",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -2201,9 +2225,7 @@
       "crate": "dim_app_server",
       "parent": "dim_app_server::plugin_manager",
       "file": "crates/dim-app-server/src/plugin_manager/management.rs",
-      "unexpandedMacros": [
-        "matches"
-      ]
+      "unexpandedMacros": []
     },
     {
       "id": "dim_app_server::plugin_manager::record",
@@ -2496,7 +2518,20 @@
       "parent": "dim_app_server",
       "file": "crates/dim-app-server/src/skills_management.rs",
       "unexpandedMacros": [
+        "format",
+        "matches",
         "unreachable",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_app_server::skills_management::tests",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::skills_management",
+      "file": "crates/dim-app-server/src/skills_management.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
         "vec"
       ]
     },
@@ -3078,8 +3113,8 @@
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/management/mod.rs",
       "unexpandedMacros": [
-        "format",
         "matches",
+        "unreachable",
         "vec"
       ]
     },
@@ -3106,6 +3141,43 @@
       ]
     },
     {
+      "id": "dim_cli::management::mcp",
+      "crate": "dim_cli",
+      "parent": "dim_cli::management",
+      "file": "crates/dim-cli/src/management/mcp.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches",
+        "vec",
+        "write"
+      ]
+    },
+    {
+      "id": "dim_cli::management::permissions",
+      "crate": "dim_cli",
+      "parent": "dim_cli::management",
+      "file": "crates/dim-cli/src/management/permissions.rs",
+      "unexpandedMacros": [
+        "format",
+        "serde_json::json",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_cli::management::scheduler",
+      "crate": "dim_cli",
+      "parent": "dim_cli::management",
+      "file": "crates/dim-cli/src/management/scheduler.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches",
+        "vec",
+        "write"
+      ]
+    },
+    {
       "id": "dim_cli::management::skills",
       "crate": "dim_cli",
       "parent": "dim_cli::management",
@@ -3122,6 +3194,7 @@
       "file": "crates/dim-cli/src/management_command.rs",
       "unexpandedMacros": [
         "format",
+        "matches",
         "vec"
       ]
     },
@@ -3188,6 +3261,7 @@
       "parent": "dim_cli::model",
       "file": "crates/dim-cli/src/model/session.rs",
       "unexpandedMacros": [
+        "matches",
         "write"
       ]
     },
@@ -3358,6 +3432,20 @@
       ]
     },
     {
+      "id": "dim_cli::session_command",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/session_command.rs",
+      "unexpandedMacros": [
+        "eprint",
+        "eprintln",
+        "format",
+        "json",
+        "matches",
+        "println"
+      ]
+    },
+    {
       "id": "dim_cli::session_host",
       "crate": "dim_cli",
       "parent": "dim_cli",
@@ -3400,7 +3488,9 @@
       "parent": "dim_cli::session_host",
       "file": "crates/dim-cli/src/session_host.rs",
       "unexpandedMacros": [
-        "assert"
+        "assert",
+        "assert_eq",
+        "vec"
       ]
     },
     {
@@ -3620,6 +3710,13 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_cli::ui::i18n::de::runtime",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::de",
+      "file": "crates/dim-cli/src/ui/i18n/de/runtime.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_cli::ui::i18n::es",
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n",
@@ -3659,6 +3756,13 @@
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n::es",
       "file": "crates/dim-cli/src/ui/i18n/es/providers.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::es::runtime",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::es",
+      "file": "crates/dim-cli/src/ui/i18n/es/runtime.rs",
       "unexpandedMacros": []
     },
     {
@@ -3704,6 +3808,13 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_cli::ui::i18n::fr::runtime",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::fr",
+      "file": "crates/dim-cli/src/ui/i18n/fr/runtime.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_cli::ui::i18n::id",
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n",
@@ -3743,6 +3854,13 @@
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n::id",
       "file": "crates/dim-cli/src/ui/i18n/id/providers.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::id::runtime",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::id",
+      "file": "crates/dim-cli/src/ui/i18n/id/runtime.rs",
       "unexpandedMacros": []
     },
     {
@@ -3788,6 +3906,13 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_cli::ui::i18n::ja::runtime",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::ja",
+      "file": "crates/dim-cli/src/ui/i18n/ja/runtime.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_cli::ui::i18n::ko",
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n",
@@ -3827,6 +3952,13 @@
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n::ko",
       "file": "crates/dim-cli/src/ui/i18n/ko/providers.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::ko::runtime",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::ko",
+      "file": "crates/dim-cli/src/ui/i18n/ko/runtime.rs",
       "unexpandedMacros": []
     },
     {
@@ -3872,6 +4004,13 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_cli::ui::i18n::pt_br::runtime",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::pt_br",
+      "file": "crates/dim-cli/src/ui/i18n/pt_br/runtime.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_cli::ui::i18n::pt_pt",
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n",
@@ -3911,6 +4050,13 @@
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n::pt_pt",
       "file": "crates/dim-cli/src/ui/i18n/pt_pt/providers.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::pt_pt::runtime",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::pt_pt",
+      "file": "crates/dim-cli/src/ui/i18n/pt_pt/runtime.rs",
       "unexpandedMacros": []
     },
     {
@@ -3967,6 +4113,13 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_cli::ui::i18n::zh_cn::runtime",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::zh_cn",
+      "file": "crates/dim-cli/src/ui/i18n/zh_cn/runtime.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_cli::ui::i18n::zh_hant",
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n",
@@ -4006,6 +4159,13 @@
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n::zh_hant",
       "file": "crates/dim-cli/src/ui/i18n/zh_hant/providers.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::zh_hant::runtime",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::zh_hant",
+      "file": "crates/dim-cli/src/ui/i18n/zh_hant/runtime.rs",
       "unexpandedMacros": []
     },
     {
@@ -4107,6 +4267,7 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
+        "format",
         "vec"
       ]
     },
@@ -4129,6 +4290,7 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
+        "format",
         "panic",
         "serde_json::json",
         "vec"
@@ -4419,6 +4581,27 @@
       "unexpandedMacros": [
         "format",
         "matches"
+      ]
+    },
+    {
+      "id": "dim_cli::ui::runtime_panel",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui",
+      "file": "crates/dim-cli/src/ui/runtime_panel.rs",
+      "unexpandedMacros": [
+        "format"
+      ]
+    },
+    {
+      "id": "dim_cli::ui::runtime_panel::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::runtime_panel",
+      "file": "crates/dim-cli/src/ui/runtime_panel.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "panic",
+        "vec"
       ]
     },
     {
@@ -7513,8 +7696,10 @@
         "path context_compaction",
         "path context_configuration",
         "path crate::history::StreamedContext",
+        "path crate::history::projected_message_refs",
+        "path crate::history::projected_messages",
+        "path crate::history::projected_messages_len",
         "path digest_message",
-        "path projection_checkpoint",
         "path truncate_middle",
         "path user_message",
         "use crate::history::HistoryEntry",
@@ -7522,7 +7707,6 @@
         "use crate::history::context_compaction",
         "use crate::history::context_configuration",
         "use crate::history::digest_message",
-        "use crate::history::projection_checkpoint",
         "use crate::history::truncate_middle",
         "use crate::history::user_message"
       ]
@@ -7579,7 +7763,7 @@
       "from": "dim_agent_capabilities::context_policy",
       "to": "dim_agent_types::checkpoint",
       "references": [
-        "path ProjectionCheckpoint"
+        "path TimelinePosition"
       ]
     },
     {
@@ -8748,6 +8932,14 @@
     },
     {
       "from": "dim_agent_capabilities::hooks::runner",
+      "to": "dim_agent_capabilities::tool_registry",
+      "references": [
+        "path ToolRegistry",
+        "use crate::tool_registry::ToolRegistry"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner",
       "to": "dim_agent_runtime::config",
       "references": [
         "path BranchLifecycle",
@@ -8869,9 +9061,7 @@
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolDefinition",
-        "path ToolMetadata",
-        "use dim_agent_types::ToolDefinition",
-        "use dim_agent_types::ToolMetadata"
+        "use dim_agent_types::ToolDefinition"
       ]
     },
     {
@@ -11215,6 +11405,14 @@
     },
     {
       "from": "dim_agent_capabilities::skills",
+      "to": "dim_agent_capabilities::skill_settings",
+      "references": [
+        "path SkillInstallation",
+        "use crate::skill_settings::SkillInstallation"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::skills",
       "to": "dim_agent_capabilities::skills::catalog",
       "references": [
         "mod catalog",
@@ -11240,6 +11438,13 @@
       "to": "dim_agent_capabilities::skills::discovery",
       "references": [
         "mod discovery"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::skills",
+      "to": "dim_agent_capabilities::skills::install",
+      "references": [
+        "mod install"
       ]
     },
     {
@@ -11306,6 +11511,8 @@
       "references": [
         "path SOURCE",
         "path SettingsVersion",
+        "path SkillInstallSource",
+        "path SkillInstallation",
         "path SkillSettings",
         "path SkillSettingsError",
         "path SkillSettingsError::Cancelled",
@@ -11315,6 +11522,8 @@
         "path SkillSettingsSnapshot",
         "use crate::skill_settings::SOURCE",
         "use crate::skill_settings::SettingsVersion",
+        "use crate::skill_settings::SkillInstallSource",
+        "use crate::skill_settings::SkillInstallation",
         "use crate::skill_settings::SkillSettings",
         "use crate::skill_settings::SkillSettingsError",
         "use crate::skill_settings::SkillSettingsHost",
@@ -11328,9 +11537,19 @@
         "path CatalogEntry",
         "path CatalogVersion",
         "path CatalogView",
+        "path InstallOutcome",
+        "path PreviewConflict",
+        "path PreviewShadow",
+        "path PreviewSkill",
         "path RefreshTarget",
+        "path Replace",
+        "path Replace::Create",
+        "path Replace::Expected",
+        "path SelectedSkill",
         "path SkillIssue",
         "path SkillIssue::RootUnreadable",
+        "path SkillIssue::Unreadable",
+        "path SkillPreview",
         "path SkillSource::Plugin",
         "path SkillSource::Project",
         "path SkillSource::User",
@@ -11338,21 +11557,43 @@
         "path SkillStatus::Shadowed",
         "path SkillsError",
         "path SkillsError::Closed",
+        "path SkillsError::InstallConflict",
+        "path SkillsError::InstallationExists",
         "path SkillsError::RootUnreadable",
+        "path SkillsError::SelectionInvalid",
         "path SkillsError::SettingsConflict",
         "path SkillsError::SettingsRead",
         "path SkillsError::SettingsSync",
         "path SkillsError::SettingsWrite",
+        "path SkillsError::StalePreview",
+        "path SkillsError::UnknownInstallation",
         "path SkillsError::UnknownSkill",
+        "path SkillsError::UnmanagedDirectory",
+        "path install::occupied",
+        "path install::place",
+        "path install::remove",
+        "path install::revision",
+        "path install::selection_path",
+        "path install::selection_revision",
+        "path install::valid_id",
+        "path super::SkillDefinition",
         "path super::register_parts",
         "use super::CatalogEntry",
         "use super::CatalogVersion",
         "use super::CatalogView",
+        "use super::InstallOutcome",
+        "use super::PreviewConflict",
+        "use super::PreviewShadow",
+        "use super::PreviewSkill",
         "use super::RefreshTarget",
+        "use super::Replace",
+        "use super::SelectedSkill",
         "use super::SkillIssue",
+        "use super::SkillPreview",
         "use super::SkillSource",
         "use super::SkillStatus",
-        "use super::SkillsError"
+        "use super::SkillsError",
+        "use super::install"
       ]
     },
     {
@@ -11361,6 +11602,7 @@
       "references": [
         "path RootKind",
         "path RootKind::Plugin",
+        "path RootKind::Preview",
         "path RootKind::Project",
         "path RootKind::User",
         "path RootSnapshot",
@@ -11424,6 +11666,18 @@
         "path SkillIssue::Unreadable",
         "use super::SkillDefinition",
         "use super::SkillIssue"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::skills::install",
+      "to": "dim_agent_capabilities::skills",
+      "references": [
+        "path SkillsError",
+        "path SkillsError::InstallConflict",
+        "path SkillsError::InstallIo",
+        "path SkillsError::RemoveFailed",
+        "path SkillsError::SelectionInvalid",
+        "use super::SkillsError"
       ]
     },
     {
@@ -15501,6 +15755,15 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::modality",
+      "references": [
+        "mod modality",
+        "path modality::ModalityAdapterService",
+        "path modality::ModalityPlugin::new"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::model_catalog",
       "references": [
         "mod model_catalog"
@@ -15710,7 +15973,7 @@
       "from": "dim_app_server::@bin:dim-app-server",
       "to": "dim_app_server::cli",
       "references": [
-        "path dim_app_server::cli::run"
+        "path dim_app_server::cli::process_entry"
       ]
     },
     {
@@ -15760,8 +16023,11 @@
       "to": "dim_agent_runtime::agent",
       "references": [
         "path Agent",
+        "path InUse::Held",
+        "path InUse::Running",
         "path Session",
         "use dim_agent_runtime::Agent",
+        "use dim_agent_runtime::InUse",
         "use dim_agent_runtime::Session"
       ]
     },
@@ -16406,6 +16672,13 @@
     },
     {
       "from": "dim_app_server::agents::tests::slots",
+      "to": "dim_agent_runtime::agent",
+      "references": [
+        "path dim_agent_runtime::Agent"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests::slots",
       "to": "dim_agent_runtime::assembly",
       "references": [
         "path AgentBuilder",
@@ -16438,6 +16711,21 @@
     },
     {
       "from": "dim_app_server::agents::tests::slots",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path dim_agent_types::ToolContent::Text"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests::slots",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path EventKind::ToolResult",
+        "use dim_agent_types::EventKind"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests::slots",
       "to": "dim_app_server",
       "references": [
         "path RunningServer",
@@ -16465,6 +16753,13 @@
         "path config",
         "use super::builder",
         "use super::config"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests::slots",
+      "to": "dim_app_server::collaboration",
+      "references": [
+        "path crate::collaboration::install"
       ]
     },
     {
@@ -17555,21 +17850,6 @@
     },
     {
       "from": "dim_app_server::connection",
-      "to": "dim_agent_capabilities::skills",
-      "references": [
-        "path SkillsError",
-        "path SkillsError::Closed",
-        "path SkillsError::RootUnreadable",
-        "path SkillsError::SettingsConflict",
-        "path SkillsError::SettingsRead",
-        "path SkillsError::SettingsSync",
-        "path SkillsError::SettingsWrite",
-        "path SkillsError::UnknownSkill",
-        "use dim_agent_capabilities::skills::SkillsError"
-      ]
-    },
-    {
-      "from": "dim_app_server::connection",
       "to": "dim_agent_capabilities::skills::session",
       "references": [
         "path SkillsBranch",
@@ -17674,11 +17954,14 @@
       "to": "dim_app_server::agents",
       "references": [
         "path AgentIndex",
+        "path DeleteOutcome::InUse",
+        "path DeleteOutcome::Removed",
         "path SessionUse",
         "path crate::agents::AgentOpError::Settle",
         "path crate::agents::AgentOpError::Unload",
         "path crate::agents::session_config",
         "use crate::agents::AgentIndex",
+        "use crate::agents::DeleteOutcome",
         "use crate::agents::SessionUse"
       ]
     },
@@ -17822,6 +18105,7 @@
         "path ConfigurationResult",
         "path Create",
         "path CreateResult",
+        "path DeleteResult",
         "path ForkResult",
         "path ModelUpdateResult",
         "path Notification::Progress",
@@ -17838,6 +18122,7 @@
         "path Reply::Configuration",
         "path Reply::Contributed",
         "path Reply::Create",
+        "path Reply::Deleted",
         "path Reply::ExecEnded",
         "path Reply::Fork",
         "path Reply::List",
@@ -17861,11 +18146,13 @@
         "path RequestId",
         "path SERVER_VERSION",
         "path SessionInfo",
+        "path SessionList",
         "path SessionMethodsResult",
         "path SessionOrigin::Acp",
         "path SessionOrigin::Client",
         "path SessionSkillsResult",
         "path SessionSummary",
+        "path Summaries",
         "path WEB_MANAGEMENT_METHODS",
         "path WEB_SETTINGS_SOURCES",
         "path agent_unknown",
@@ -17879,6 +18166,14 @@
       "references": [
         "path crate::provider::ProviderService",
         "path crate::provider::adopted_selection_preferences"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection",
+      "to": "dim_app_server::skills_management",
+      "references": [
+        "path skills_error",
+        "use crate::skills_management::skills_error"
       ]
     },
     {
@@ -20198,6 +20493,105 @@
       ]
     },
     {
+      "from": "dim_app_server::modality",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostError",
+        "path HostError::Cancelled",
+        "path HostError::Failed",
+        "path HostErrorKind::OwnerClosed",
+        "path ModelSelectionHost",
+        "path SelectableModelsHost",
+        "use dim_agent_capabilities::host::HostError",
+        "use dim_agent_capabilities::host::HostErrorKind",
+        "use dim_agent_capabilities::host::ModelSelectionHost",
+        "use dim_agent_capabilities::host::SelectableModelsHost"
+      ]
+    },
+    {
+      "from": "dim_app_server::modality",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path RpcError",
+        "path RpcError::app",
+        "path RpcError::interrupted",
+        "path RpcError::invalid",
+        "path RpcError::reloading",
+        "path params",
+        "path reply",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::params",
+        "use dim_agent_capabilities::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_app_server::modality",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path SettingsScope::User",
+        "use crate::settings::SettingsScope"
+      ]
+    },
+    {
+      "from": "dim_app_server::modality",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::modality",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path ModelCapabilitySnapshot",
+        "use dim_agent_types::ModelCapabilitySnapshot"
+      ]
+    },
+    {
+      "from": "dim_app_server::modality",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path ModelId",
+        "use dim_agent_types::ModelId"
+      ]
+    },
+    {
+      "from": "dim_app_server::modality",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path ManagementMethods",
+        "use crate::methods::ManagementMethods"
+      ]
+    },
+    {
+      "from": "dim_app_server::modality",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path Empty",
+        "use crate::protocol::Empty"
+      ]
+    },
+    {
+      "from": "dim_app_server::modality",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path BusinessDocument",
+        "path SettingsError",
+        "path SettingsError::Cancelled",
+        "path SettingsError::Closed",
+        "path SettingsError::Conflict",
+        "path SettingsError::Invalid",
+        "path SettingsService",
+        "path crate::settings::Result",
+        "use crate::settings::BusinessDocument",
+        "use crate::settings::SettingsError",
+        "use crate::settings::SettingsService"
+      ]
+    },
+    {
       "from": "dim_app_server::model_catalog",
       "to": "dim_agent_types",
       "references": [
@@ -20626,6 +21020,13 @@
       "references": [
         "path PluginError",
         "use super::PluginError"
+      ]
+    },
+    {
+      "from": "dim_app_server::plugin_manager::management",
+      "to": "dim_app_server::plugin_manager::acquire",
+      "references": [
+        "path super::acquire::git_url_safe"
       ]
     },
     {
@@ -21936,6 +22337,7 @@
       "from": "dim_app_server::runtime_manager",
       "to": "dim_agent_capabilities::methods",
       "references": [
+        "path RpcError::app",
         "path RpcError::invalid",
         "path params",
         "path reply",
@@ -21974,6 +22376,8 @@
       "to": "dim_app_server::session_typescript",
       "references": [
         "path ForeignRuntime",
+        "path ForeignRuntime::node",
+        "path ForeignRuntime::python",
         "path RuntimeState",
         "path RuntimeState::Down",
         "path RuntimeState::Ready",
@@ -22593,6 +22997,10 @@
       "references": [
         "path SOURCE",
         "path SettingsVersion",
+        "path SkillInstallSource",
+        "path SkillInstallSource::Git",
+        "path SkillInstallSource::Path",
+        "path SkillInstallation",
         "path SkillSettings",
         "path SkillSettingsError",
         "path SkillSettingsError::Conflict",
@@ -22601,6 +23009,8 @@
         "path SkillSettingsSnapshot",
         "use dim_agent_capabilities::skill_settings::SOURCE",
         "use dim_agent_capabilities::skill_settings::SettingsVersion",
+        "use dim_agent_capabilities::skill_settings::SkillInstallSource",
+        "use dim_agent_capabilities::skill_settings::SkillInstallation",
         "use dim_agent_capabilities::skill_settings::SkillSettings",
         "use dim_agent_capabilities::skill_settings::SkillSettingsError",
         "use dim_agent_capabilities::skill_settings::SkillSettingsHost",
@@ -22611,22 +23021,44 @@
       "from": "dim_app_server::skills_management",
       "to": "dim_agent_capabilities::skills",
       "references": [
+        "path InstallOutcome",
         "path RefreshTarget",
+        "path Replace::Create",
+        "path Replace::Expected",
+        "path Replace::Recorded",
+        "path SelectedSkill",
+        "path SkillPreview",
         "path SkillStatus::Active",
         "path SkillStatus::Shadowed",
         "path SkillsError",
         "path SkillsError::Closed",
+        "path SkillsError::InstallConflict",
+        "path SkillsError::InstallIo",
+        "path SkillsError::InstallationExists",
+        "path SkillsError::RemoveFailed",
         "path SkillsError::RootUnreadable",
+        "path SkillsError::SelectionInvalid",
         "path SkillsError::SettingsConflict",
         "path SkillsError::SettingsRead",
         "path SkillsError::SettingsSync",
         "path SkillsError::SettingsWrite",
+        "path SkillsError::StalePreview",
+        "path SkillsError::UnknownInstallation",
         "path SkillsError::UnknownSkill",
+        "path SkillsError::UnmanagedDirectory",
         "path dim_agent_capabilities::skills::SkillIssue",
         "path dim_agent_capabilities::skills::register_parts",
+        "path selection_path",
+        "path valid_installation_id",
+        "use dim_agent_capabilities::skills::InstallOutcome",
         "use dim_agent_capabilities::skills::RefreshTarget",
+        "use dim_agent_capabilities::skills::Replace",
+        "use dim_agent_capabilities::skills::SelectedSkill",
+        "use dim_agent_capabilities::skills::SkillPreview",
         "use dim_agent_capabilities::skills::SkillStatus",
-        "use dim_agent_capabilities::skills::SkillsError"
+        "use dim_agent_capabilities::skills::SkillsError",
+        "use dim_agent_capabilities::skills::selection_path",
+        "use dim_agent_capabilities::skills::valid_installation_id"
       ]
     },
     {
@@ -22665,6 +23097,31 @@
     },
     {
       "from": "dim_app_server::skills_management",
+      "to": "dim_app_server::plugin_manager",
+      "references": [
+        "path PluginError",
+        "use crate::plugin_manager::PluginError"
+      ]
+    },
+    {
+      "from": "dim_app_server::skills_management",
+      "to": "dim_app_server::plugin_manager::acquire",
+      "references": [
+        "path Staging",
+        "path Staging::in_root",
+        "path acquire",
+        "path acquire::check_git_url",
+        "path acquire::check_links",
+        "path acquire::check_ref",
+        "path acquire::clone",
+        "path acquire::git_url_safe",
+        "path acquire::work_dir",
+        "use crate::plugin_manager::acquire",
+        "use crate::plugin_manager::acquire::Staging"
+      ]
+    },
+    {
+      "from": "dim_app_server::skills_management",
       "to": "dim_app_server::protocol",
       "references": [
         "path canonical_cwd",
@@ -22687,6 +23144,28 @@
         "use crate::settings::BusinessDocument",
         "use crate::settings::SettingsError",
         "use crate::settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_app_server::skills_management",
+      "to": "dim_app_server::skills_management::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_app_server::skills_management::tests",
+      "to": "dim_agent_capabilities::skill_settings",
+      "references": [
+        "path SkillInstallSource::Path",
+        "path SkillInstallation"
+      ]
+    },
+    {
+      "from": "dim_app_server::skills_management::tests",
+      "to": "dim_app_server::skills_management",
+      "references": [
+        "path SkillDocument"
       ]
     },
     {
@@ -23057,8 +23536,10 @@
       "from": "dim_app_server::storage::export",
       "to": "dim_app_server::storage::timeline",
       "references": [
+        "path read_directory",
         "path read_range",
         "path validate_session",
+        "use super::timeline::read_directory",
         "use super::timeline::read_range",
         "use super::timeline::validate_session"
       ]
@@ -24091,8 +24572,10 @@
         "path Action::Login",
         "path Action::Logout",
         "path Action::Management",
+        "path Action::ManagementAdd",
         "path Action::ManagementEdit",
         "path Action::ManagementSet",
+        "path Action::McpDisconnect",
         "path Action::McpEnable",
         "path Action::McpList",
         "path Action::McpLogin",
@@ -24101,8 +24584,12 @@
         "path Action::Models",
         "path Action::Plugin",
         "path Action::Recording",
+        "path Action::RuntimeConfig",
         "path Action::RuntimeInstall",
         "path Action::RuntimeList",
+        "path Action::SessionCleanup",
+        "path Action::SessionDelete",
+        "path Action::SessionRename",
         "path Action::Timeline",
         "path Action::Tui",
         "path Action::Version",
@@ -24250,9 +24737,17 @@
     },
     {
       "from": "dim_cli",
+      "to": "dim_cli::management::mcp",
+      "references": [
+        "path management::mcp::set_enabled"
+      ]
+    },
+    {
+      "from": "dim_cli",
       "to": "dim_cli::management_command",
       "references": [
         "mod management_command",
+        "path management_command::add",
         "path management_command::edit",
         "path management_command::run",
         "path management_command::set"
@@ -24270,9 +24765,9 @@
       "to": "dim_cli::mcp_command",
       "references": [
         "mod mcp_command",
+        "path mcp_command::disconnect",
         "path mcp_command::list",
         "path mcp_command::print_report",
-        "path mcp_command::set_enabled",
         "path mcp_command::sign_in",
         "path mcp_command::sign_out"
       ]
@@ -24377,6 +24872,16 @@
     },
     {
       "from": "dim_cli",
+      "to": "dim_cli::session_command",
+      "references": [
+        "mod session_command",
+        "path session_command::cleanup",
+        "path session_command::delete",
+        "path session_command::rename"
+      ]
+    },
+    {
+      "from": "dim_cli",
       "to": "dim_cli::session_host",
       "references": [
         "mod session_host",
@@ -24409,9 +24914,8 @@
       "from": "dim_cli",
       "to": "dim_cli::ui::i18n",
       "references": [
-        "path crate::ui::i18n::saved_locale",
+        "path crate::ui::i18n::interface_locale",
         "path crate::ui::i18n::set",
-        "path crate::ui::i18n::system_locale",
         "path crate::ui::i18n::t",
         "path crate::ui::i18n::tf"
       ]
@@ -25386,6 +25890,48 @@
     },
     {
       "from": "dim_cli::management",
+      "to": "dim_cli::management::mcp",
+      "references": [
+        "mod mcp",
+        "path mcp::Answer::Area",
+        "path mcp::Answer::Detail",
+        "path mcp::Answer::Tools",
+        "path mcp::Failure::Conflict",
+        "path mcp::Failure::ReadFailed",
+        "path mcp::Failure::Refused",
+        "path mcp::apply",
+        "path mcp::tools_detail",
+        "path mcp::view"
+      ]
+    },
+    {
+      "from": "dim_cli::management",
+      "to": "dim_cli::management::permissions",
+      "references": [
+        "mod permissions",
+        "path permissions::Answer::Rules",
+        "path permissions::Failure::Conflict",
+        "path permissions::Failure::Refused",
+        "path permissions::apply",
+        "path permissions::view"
+      ]
+    },
+    {
+      "from": "dim_cli::management",
+      "to": "dim_cli::management::scheduler",
+      "references": [
+        "mod scheduler",
+        "path scheduler::Answer::Detail",
+        "path scheduler::Answer::Jobs",
+        "path scheduler::Failure::Conflict",
+        "path scheduler::Failure::ReadFailed",
+        "path scheduler::Failure::Refused",
+        "path scheduler::apply",
+        "path scheduler::view"
+      ]
+    },
+    {
+      "from": "dim_cli::management",
       "to": "dim_cli::management::skills",
       "references": [
         "mod skills",
@@ -25401,15 +25947,26 @@
       "to": "dim_cli::model::session",
       "references": [
         "path ActionKind",
+        "path ActionKind::Add",
         "path ActionKind::Edit",
+        "path ActionKind::Inspect",
         "path ActionKind::Reload",
+        "path ActionKind::Remove",
+        "path ActionKind::Run",
         "path ActionKind::Toggle",
         "path Area",
         "path Area::Hooks",
+        "path Area::Mcp",
+        "path Area::Permissions",
+        "path Area::Scheduled",
         "path Area::Skills",
         "path ManagementAction",
+        "path ManagementAction::Add",
+        "path ManagementAction::Inspect",
         "path ManagementAction::List",
         "path ManagementAction::Reload",
+        "path ManagementAction::Remove",
+        "path ManagementAction::Run",
         "path ManagementAction::Save",
         "path ManagementAction::Toggle",
         "path ManagementEntry",
@@ -25419,8 +25976,10 @@
         "path ManagementRequest",
         "path ManagementResult",
         "path ManagementResult::Applied",
+        "path ManagementResult::Detail",
         "path ManagementResult::Refused",
         "path ManagementResult::View",
+        "path ManagementView",
         "use crate::model::session::ActionKind",
         "use crate::model::session::Area",
         "use crate::model::session::ManagementAction",
@@ -25428,7 +25987,21 @@
         "use crate::model::session::ManagementGroup",
         "use crate::model::session::ManagementRefusal",
         "use crate::model::session::ManagementRequest",
-        "use crate::model::session::ManagementResult"
+        "use crate::model::session::ManagementResult",
+        "use crate::model::session::ManagementView"
+      ]
+    },
+    {
+      "from": "dim_cli::management",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path i18n::Locale::from_code",
+        "path i18n::set",
+        "path t",
+        "path tf",
+        "use crate::ui::i18n",
+        "use crate::ui::i18n::t",
+        "use crate::ui::i18n::tf"
       ]
     },
     {
@@ -25499,6 +26072,254 @@
       ]
     },
     {
+      "from": "dim_cli::management::mcp",
+      "to": "dim_cli",
+      "references": [
+        "path crate::Error",
+        "path crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::management::mcp",
+      "to": "dim_cli::management",
+      "references": [
+        "path Groups::default",
+        "path super::area_kinds",
+        "use super::Groups"
+      ]
+    },
+    {
+      "from": "dim_cli::management::mcp",
+      "to": "dim_cli::mcp",
+      "references": [
+        "path Auth",
+        "path Catalog",
+        "path Server",
+        "use crate::mcp::Auth",
+        "use crate::mcp::Catalog",
+        "use crate::mcp::Server"
+      ]
+    },
+    {
+      "from": "dim_cli::management::mcp",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path ActionKind",
+        "path ActionKind::Edit",
+        "path ActionKind::Inspect",
+        "path ActionKind::Remove",
+        "path ActionKind::Run",
+        "path ActionKind::Toggle",
+        "path EntryDocument",
+        "path EntryState::Invalid",
+        "path EntryState::ReadOnly",
+        "path ManagementAction",
+        "path ManagementAction::Add",
+        "path ManagementAction::Inspect",
+        "path ManagementAction::List",
+        "path ManagementAction::Reload",
+        "path ManagementAction::Remove",
+        "path ManagementAction::Run",
+        "path ManagementAction::Save",
+        "path ManagementAction::Toggle",
+        "path ManagementDetail",
+        "path ManagementEntry",
+        "path ManagementView",
+        "use crate::model::session::ActionKind",
+        "use crate::model::session::EntryDocument",
+        "use crate::model::session::EntryState",
+        "use crate::model::session::ManagementAction",
+        "use crate::model::session::ManagementDetail",
+        "use crate::model::session::ManagementEntry",
+        "use crate::model::session::ManagementView"
+      ]
+    },
+    {
+      "from": "dim_cli::management::mcp",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "path safe_line",
+        "use crate::sanitize::safe_line"
+      ]
+    },
+    {
+      "from": "dim_cli::management::mcp",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path t",
+        "path tf",
+        "use crate::ui::i18n::t",
+        "use crate::ui::i18n::tf"
+      ]
+    },
+    {
+      "from": "dim_cli::management::mcp",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "path crate::client::RpcError",
+        "path crate::client::app_error",
+        "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::management::permissions",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path CommandMatch::Exact",
+        "path CommandMatch::Prefix",
+        "path CommandRule",
+        "path CommandRuleDecision::Allow",
+        "path CommandRuleDecision::Deny",
+        "use dim_agent_types::CommandMatch",
+        "use dim_agent_types::CommandRule",
+        "use dim_agent_types::CommandRuleDecision"
+      ]
+    },
+    {
+      "from": "dim_cli::management::permissions",
+      "to": "dim_cli",
+      "references": [
+        "path crate::Error"
+      ]
+    },
+    {
+      "from": "dim_cli::management::permissions",
+      "to": "dim_cli::management",
+      "references": [
+        "path Groups::default",
+        "path super::area_kinds",
+        "path super::entry_kinds",
+        "use super::Groups"
+      ]
+    },
+    {
+      "from": "dim_cli::management::permissions",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path ActionKind",
+        "path ManagementAction",
+        "path ManagementAction::Add",
+        "path ManagementAction::Inspect",
+        "path ManagementAction::List",
+        "path ManagementAction::Reload",
+        "path ManagementAction::Remove",
+        "path ManagementAction::Run",
+        "path ManagementAction::Save",
+        "path ManagementAction::Toggle",
+        "path ManagementEntry",
+        "path ManagementView",
+        "use crate::model::session::ActionKind",
+        "use crate::model::session::ManagementAction",
+        "use crate::model::session::ManagementEntry",
+        "use crate::model::session::ManagementView"
+      ]
+    },
+    {
+      "from": "dim_cli::management::permissions",
+      "to": "dim_cli::permission",
+      "references": [
+        "path Added::Added",
+        "path Added::Present",
+        "path Removed::Conflict",
+        "path Removed::Removed",
+        "path Rules",
+        "path permission::add_rule",
+        "path permission::describe",
+        "path permission::parse_rule_words",
+        "path permission::remove_rule",
+        "path permission::rule",
+        "path permission::rules",
+        "path permission::same_rule",
+        "use crate::permission",
+        "use crate::permission::Added",
+        "use crate::permission::Removed",
+        "use crate::permission::Rules"
+      ]
+    },
+    {
+      "from": "dim_cli::management::permissions",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path t",
+        "path tf",
+        "use crate::ui::i18n::t",
+        "use crate::ui::i18n::tf"
+      ]
+    },
+    {
+      "from": "dim_cli::management::permissions",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::management::scheduler",
+      "to": "dim_cli",
+      "references": [
+        "path crate::Error"
+      ]
+    },
+    {
+      "from": "dim_cli::management::scheduler",
+      "to": "dim_cli::management",
+      "references": [
+        "path Groups::default",
+        "path super::area_kinds",
+        "path super::entry_kinds",
+        "use super::Groups"
+      ]
+    },
+    {
+      "from": "dim_cli::management::scheduler",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path ActionKind",
+        "path EntryDocument",
+        "path EntryState::Invalid",
+        "path ManagementAction",
+        "path ManagementAction::Add",
+        "path ManagementAction::Inspect",
+        "path ManagementAction::List",
+        "path ManagementAction::Reload",
+        "path ManagementAction::Remove",
+        "path ManagementAction::Run",
+        "path ManagementAction::Save",
+        "path ManagementAction::Toggle",
+        "path ManagementDetail",
+        "path ManagementEntry",
+        "path ManagementView",
+        "use crate::model::session::ActionKind",
+        "use crate::model::session::EntryDocument",
+        "use crate::model::session::EntryState",
+        "use crate::model::session::ManagementAction",
+        "use crate::model::session::ManagementDetail",
+        "use crate::model::session::ManagementEntry",
+        "use crate::model::session::ManagementView"
+      ]
+    },
+    {
+      "from": "dim_cli::management::scheduler",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path t",
+        "path tf",
+        "use crate::ui::i18n::t",
+        "use crate::ui::i18n::tf"
+      ]
+    },
+    {
+      "from": "dim_cli::management::scheduler",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "path crate::client::app_error",
+        "use crate::client::Client"
+      ]
+    },
+    {
       "from": "dim_cli::management::skills",
       "to": "dim_cli::management",
       "references": [
@@ -25515,7 +26336,13 @@
         "path ActionKind",
         "path EntryState::Shadowed",
         "path ManagementAction",
+        "path ManagementAction::Add",
+        "path ManagementAction::Inspect",
+        "path ManagementAction::List",
         "path ManagementAction::Reload",
+        "path ManagementAction::Remove",
+        "path ManagementAction::Run",
+        "path ManagementAction::Save",
         "path ManagementAction::Toggle",
         "path ManagementEntry",
         "path ManagementView",
@@ -25562,7 +26389,10 @@
       "from": "dim_cli::management_command",
       "to": "dim_cli::management",
       "references": [
+        "path management::applied_line",
         "path management::apply",
+        "path management::entry_name",
+        "path management::named_id",
         "path management::supported",
         "path management::supports_kind",
         "use crate::management"
@@ -25591,6 +26421,46 @@
     },
     {
       "from": "dim_cli::management_command",
+      "to": "dim_cli::management::mcp",
+      "references": [
+        "path mcp::Answer::Area",
+        "path mcp::Answer::Detail",
+        "path mcp::Answer::Tools",
+        "path mcp::Failure::ReadFailed",
+        "path mcp::apply",
+        "path mcp::editable",
+        "path mcp::seed",
+        "path mcp::target",
+        "path mcp::tool_row",
+        "use crate::management::mcp"
+      ]
+    },
+    {
+      "from": "dim_cli::management_command",
+      "to": "dim_cli::management::permissions",
+      "references": [
+        "path permissions::Answer::Rules",
+        "path permissions::Failure::Conflict",
+        "path permissions::Failure::Refused",
+        "path permissions::apply",
+        "use crate::management::permissions"
+      ]
+    },
+    {
+      "from": "dim_cli::management_command",
+      "to": "dim_cli::management::scheduler",
+      "references": [
+        "path scheduler::Answer::Detail",
+        "path scheduler::Answer::Jobs",
+        "path scheduler::Catalog",
+        "path scheduler::Failure::ReadFailed",
+        "path scheduler::apply",
+        "path scheduler::catalog",
+        "use crate::management::scheduler"
+      ]
+    },
+    {
+      "from": "dim_cli::management_command",
       "to": "dim_cli::management::skills",
       "references": [
         "path skills::Catalog",
@@ -25599,6 +26469,13 @@
         "path skills::Outcome::Refused",
         "path skills::apply",
         "use crate::management::skills"
+      ]
+    },
+    {
+      "from": "dim_cli::management_command",
+      "to": "dim_cli::mcp",
+      "references": [
+        "path crate::mcp::catalog_report"
       ]
     },
     {
@@ -25613,15 +26490,22 @@
       "from": "dim_cli::management_command",
       "to": "dim_cli::model::session",
       "references": [
+        "path ActionKind::Add",
         "path ActionKind::Edit",
         "path Area",
         "path Area::Hooks",
+        "path Area::Mcp",
+        "path Area::Permissions",
+        "path Area::Scheduled",
         "path Area::Skills",
+        "path ManagementAction::Add",
         "path ManagementAction::List",
+        "path ManagementAction::Reload",
         "path ManagementAction::Save",
         "path ManagementAction::Toggle",
         "path ManagementRequest",
         "path ManagementResult::Applied",
+        "path ManagementResult::Detail",
         "path ManagementResult::Refused",
         "path ManagementResult::View",
         "use crate::model::session::ActionKind",
@@ -25633,9 +26517,20 @@
     },
     {
       "from": "dim_cli::management_command",
+      "to": "dim_cli::permission",
+      "references": [
+        "path permission::Rules",
+        "use crate::permission"
+      ]
+    },
+    {
+      "from": "dim_cli::management_command",
       "to": "dim_cli::sanitize",
       "references": [
-        "use crate::sanitize::safe"
+        "path safe",
+        "path safe_line",
+        "use crate::sanitize::safe",
+        "use crate::sanitize::safe_line"
       ]
     },
     {
@@ -25667,7 +26562,7 @@
       "from": "dim_cli::mcp",
       "to": "dim_cli::sanitize",
       "references": [
-        "use crate::sanitize::safe"
+        "use crate::sanitize::safe_line"
       ]
     },
     {
@@ -25719,16 +26614,21 @@
     },
     {
       "from": "dim_cli::mcp_command",
+      "to": "dim_cli::management::mcp",
+      "references": [
+        "path crate::management::mcp::set_enabled"
+      ]
+    },
+    {
+      "from": "dim_cli::mcp_command",
       "to": "dim_cli::mcp",
       "references": [
-        "path Catalog",
         "path Started",
         "path catalog_report",
         "path error",
         "path self::error",
         "path session_report",
         "path target",
-        "use crate::mcp::Catalog",
         "use crate::mcp::Started",
         "use crate::mcp::catalog_report",
         "use crate::mcp::error",
@@ -26091,14 +26991,8 @@
       "from": "dim_cli::permission_command",
       "to": "dim_agent_types::permission",
       "references": [
-        "path CommandMatch::Exact",
-        "path CommandMatch::Prefix",
-        "path CommandRuleDecision::Allow",
-        "path CommandRuleDecision::Deny",
         "path PermissionPreset",
         "path PermissionPreset::FullAccess",
-        "use dim_agent_types::CommandMatch",
-        "use dim_agent_types::CommandRuleDecision",
         "use dim_agent_types::PermissionPreset"
       ]
     },
@@ -26147,6 +27041,7 @@
         "path permission::describe",
         "path permission::name",
         "path permission::parse_preset",
+        "path permission::parse_rule_words",
         "path permission::read",
         "path permission::remove_rule",
         "path permission::rule",
@@ -26282,6 +27177,13 @@
       "references": [
         "path ui::Env",
         "use crate::ui"
+      ]
+    },
+    {
+      "from": "dim_cli::plugins",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path ui::i18n::interface_locale"
       ]
     },
     {
@@ -26897,6 +27799,17 @@
     },
     {
       "from": "dim_cli::session",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path RenameReply::Failed",
+        "path RenameReply::Titled",
+        "path RenameReply::Unsupported",
+        "path RenameReply::Untitled",
+        "use crate::model::session::RenameReply"
+      ]
+    },
+    {
+      "from": "dim_cli::session",
       "to": "dim_cli::permission",
       "references": [
         "path permission::AddRule",
@@ -26939,6 +27852,13 @@
     },
     {
       "from": "dim_cli::session",
+      "to": "dim_cli::session_command",
+      "references": [
+        "path crate::session_command::set_title"
+      ]
+    },
+    {
+      "from": "dim_cli::session",
       "to": "dim_cli::session_host",
       "references": [
         "path crate::session_host::saved_model_preferences"
@@ -26968,6 +27888,46 @@
         "use crate::wire::Event",
         "use crate::wire::Progress",
         "use dim_client::wire::History"
+      ]
+    },
+    {
+      "from": "dim_cli::session_command",
+      "to": "dim_cli",
+      "references": [
+        "path Result",
+        "path crate::Error",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::session_command",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path RenameReply",
+        "path RenameReply::Failed",
+        "path RenameReply::Titled",
+        "path RenameReply::Unsupported",
+        "path RenameReply::Untitled",
+        "use crate::model::session::RenameReply"
+      ]
+    },
+    {
+      "from": "dim_cli::session_command",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "path safe",
+        "use crate::sanitize::safe"
+      ]
+    },
+    {
+      "from": "dim_cli::session_command",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "path RpcError",
+        "path crate::client::app_error",
+        "use crate::client::Client",
+        "use crate::client::RpcError"
       ]
     },
     {
@@ -27064,6 +28024,7 @@
       "from": "dim_cli::session_host",
       "to": "dim_cli::configure",
       "references": [
+        "path configure",
         "path configure::needs_session",
         "path configure::run",
         "use crate::configure"
@@ -27095,7 +28056,15 @@
       "from": "dim_cli::session_host",
       "to": "dim_cli::management",
       "references": [
-        "path crate::management::apply"
+        "path crate::management::apply",
+        "path crate::management::use_language"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
+      "to": "dim_cli::management::mcp",
+      "references": [
+        "path crate::management::mcp::set_enabled"
       ]
     },
     {
@@ -27109,13 +28078,6 @@
         "path mcp::session_report",
         "path mcp::target",
         "use crate::mcp"
-      ]
-    },
-    {
-      "from": "dim_cli::session_host",
-      "to": "dim_cli::mcp_command",
-      "references": [
-        "path crate::mcp_command::set_enabled"
       ]
     },
     {
@@ -27150,6 +28112,7 @@
         "path Command::ListModels",
         "path Command::ListPlugins",
         "path Command::ListProviders",
+        "path Command::ListRuntimes",
         "path Command::ListSessions",
         "path Command::LoginStatus",
         "path Command::LoginUsage",
@@ -27166,11 +28129,14 @@
         "path Command::ReadIsolation",
         "path Command::ReadModelPolicy",
         "path Command::Recording",
+        "path Command::Rename",
         "path Command::ResetIsolation",
         "path Command::Resume",
         "path Command::RetryApproval",
+        "path Command::Runtime",
         "path Command::SaveIsolation",
         "path Command::SelectModel",
+        "path Command::SetLocale",
         "path Command::SetModelPolicy",
         "path Command::SetPermission",
         "path Command::ShellRun",
@@ -27190,10 +28156,7 @@
         "path Command::WatchMember",
         "path Command::WatchTaskOutput",
         "path CompactReply",
-        "path CompactReply::Cancelled",
-        "path CompactReply::Completed",
         "path CompactReply::Failed",
-        "path CompactReply::Skipped",
         "path CompactReply::Unsupported",
         "path ContextReading",
         "path DIM_OAUTH_ID",
@@ -27228,6 +28191,13 @@
         "path ProviderAction::Create",
         "path ProviderAction::Disconnect",
         "path ProviderEntry",
+        "path RuntimeAction",
+        "path RuntimeAction::Configure",
+        "path RuntimeAction::Install",
+        "path RuntimeItem",
+        "path RuntimesError",
+        "path RuntimesError::Failed",
+        "path RuntimesError::Unsupported",
         "path SandboxBackend",
         "path SessionItem",
         "path SessionPort",
@@ -27259,7 +28229,9 @@
         "path Update::Providers",
         "path Update::QuestionReply",
         "path Update::Ready",
+        "path Update::Renamed",
         "path Update::Report",
+        "path Update::Runtimes",
         "path Update::Sessions",
         "path Update::ShellDone",
         "path Update::ShellProgress",
@@ -27297,6 +28269,9 @@
         "use crate::model::session::PluginReply",
         "use crate::model::session::ProviderAction",
         "use crate::model::session::ProviderEntry",
+        "use crate::model::session::RuntimeAction",
+        "use crate::model::session::RuntimeItem",
+        "use crate::model::session::RuntimesError",
         "use crate::model::session::SandboxBackend",
         "use crate::model::session::SessionItem",
         "use crate::model::session::SessionPort",
@@ -27378,6 +28353,13 @@
       "to": "dim_cli::sanitize",
       "references": [
         "path crate::sanitize::safe"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
+      "to": "dim_cli::session_command",
+      "references": [
+        "path crate::session_command::set_title"
       ]
     },
     {
@@ -27635,6 +28617,14 @@
     },
     {
       "from": "dim_cli::session_host::tests",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path RuntimeAction::Configure",
+        "path RuntimeAction::Install"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::tests",
       "to": "dim_cli::projection",
       "references": [
         "path Projection::default"
@@ -27870,6 +28860,13 @@
     },
     {
       "from": "dim_cli::ui",
+      "to": "dim_cli::ui::runtime_panel",
+      "references": [
+        "mod runtime_panel"
+      ]
+    },
+    {
+      "from": "dim_cli::ui",
       "to": "dim_cli::ui::sessions_panel",
       "references": [
         "mod sessions_panel"
@@ -27987,6 +28984,14 @@
     },
     {
       "from": "dim_cli::ui::approvals_panel",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path Area::Permissions",
+        "use crate::model::session::Area"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::approvals_panel",
       "to": "dim_cli::permission",
       "references": [
         "path Change::FileAccess",
@@ -28020,6 +29025,7 @@
         "path Effect",
         "path Effect::Close",
         "path Effect::None",
+        "path Effect::OpenArea",
         "path Effect::SetPermission",
         "path Effect::Setting",
         "use crate::ui::prompts::Effect"
@@ -28734,6 +29740,14 @@
       ]
     },
     {
+      "from": "dim_cli::ui::i18n::de",
+      "to": "dim_cli::ui::i18n::de::runtime",
+      "references": [
+        "mod runtime",
+        "path runtime::lookup"
+      ]
+    },
+    {
       "from": "dim_cli::ui::i18n::es",
       "to": "dim_cli::ui::i18n::es::chrome",
       "references": [
@@ -28771,6 +29785,14 @@
       "references": [
         "mod providers",
         "path providers::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::es",
+      "to": "dim_cli::ui::i18n::es::runtime",
+      "references": [
+        "mod runtime",
+        "path runtime::lookup"
       ]
     },
     {
@@ -28814,6 +29836,14 @@
       ]
     },
     {
+      "from": "dim_cli::ui::i18n::fr",
+      "to": "dim_cli::ui::i18n::fr::runtime",
+      "references": [
+        "mod runtime",
+        "path runtime::lookup"
+      ]
+    },
+    {
       "from": "dim_cli::ui::i18n::id",
       "to": "dim_cli::ui::i18n::id::chrome",
       "references": [
@@ -28851,6 +29881,14 @@
       "references": [
         "mod providers",
         "path providers::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::id",
+      "to": "dim_cli::ui::i18n::id::runtime",
+      "references": [
+        "mod runtime",
+        "path runtime::lookup"
       ]
     },
     {
@@ -28894,6 +29932,14 @@
       ]
     },
     {
+      "from": "dim_cli::ui::i18n::ja",
+      "to": "dim_cli::ui::i18n::ja::runtime",
+      "references": [
+        "mod runtime",
+        "path runtime::lookup"
+      ]
+    },
+    {
       "from": "dim_cli::ui::i18n::ko",
       "to": "dim_cli::ui::i18n::ko::chrome",
       "references": [
@@ -28931,6 +29977,14 @@
       "references": [
         "mod providers",
         "path providers::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::ko",
+      "to": "dim_cli::ui::i18n::ko::runtime",
+      "references": [
+        "mod runtime",
+        "path runtime::lookup"
       ]
     },
     {
@@ -28974,6 +30028,14 @@
       ]
     },
     {
+      "from": "dim_cli::ui::i18n::pt_br",
+      "to": "dim_cli::ui::i18n::pt_br::runtime",
+      "references": [
+        "mod runtime",
+        "path runtime::lookup"
+      ]
+    },
+    {
       "from": "dim_cli::ui::i18n::pt_pt",
       "to": "dim_cli::ui::i18n::pt_pt::chrome",
       "references": [
@@ -29014,6 +30076,14 @@
       ]
     },
     {
+      "from": "dim_cli::ui::i18n::pt_pt",
+      "to": "dim_cli::ui::i18n::pt_pt::runtime",
+      "references": [
+        "mod runtime",
+        "path runtime::lookup"
+      ]
+    },
+    {
       "from": "dim_cli::ui::i18n::tests",
       "to": "dim_cli::ui::i18n",
       "references": [
@@ -29029,9 +30099,23 @@
     },
     {
       "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::de::management",
+      "references": [
+        "path de::management::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
       "to": "dim_cli::ui::i18n::es",
       "references": [
         "path es::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::es::management",
+      "references": [
+        "path es::management::lookup"
       ]
     },
     {
@@ -29043,9 +30127,23 @@
     },
     {
       "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::fr::management",
+      "references": [
+        "path fr::management::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
       "to": "dim_cli::ui::i18n::id",
       "references": [
         "path id::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::id::management",
+      "references": [
+        "path id::management::lookup"
       ]
     },
     {
@@ -29057,9 +30155,23 @@
     },
     {
       "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::ja::management",
+      "references": [
+        "path ja::management::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
       "to": "dim_cli::ui::i18n::ko",
       "references": [
         "path ko::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::ko::management",
+      "references": [
+        "path ko::management::lookup"
       ]
     },
     {
@@ -29071,9 +30183,23 @@
     },
     {
       "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::pt_br::management",
+      "references": [
+        "path pt_br::management::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
       "to": "dim_cli::ui::i18n::pt_pt",
       "references": [
         "path pt_pt::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::pt_pt::management",
+      "references": [
+        "path pt_pt::management::lookup"
       ]
     },
     {
@@ -29085,9 +30211,23 @@
     },
     {
       "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::zh_cn::management",
+      "references": [
+        "path zh_cn::management::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
       "to": "dim_cli::ui::i18n::zh_hant",
       "references": [
         "path zh_hant::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::zh_hant::management",
+      "references": [
+        "path zh_hant::management::lookup"
       ]
     },
     {
@@ -29102,6 +30242,13 @@
       "to": "dim_cli::ui::plugins_panel",
       "references": [
         "path crate::ui::plugins_panel::STRINGS"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::runtime_panel",
+      "references": [
+        "path crate::ui::runtime_panel::STRINGS"
       ]
     },
     {
@@ -29145,6 +30292,14 @@
       ]
     },
     {
+      "from": "dim_cli::ui::i18n::zh_cn",
+      "to": "dim_cli::ui::i18n::zh_cn::runtime",
+      "references": [
+        "mod runtime",
+        "path runtime::lookup"
+      ]
+    },
+    {
       "from": "dim_cli::ui::i18n::zh_hant",
       "to": "dim_cli::ui::i18n::zh_hant::chrome",
       "references": [
@@ -29182,6 +30337,14 @@
       "references": [
         "mod providers",
         "path providers::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::zh_hant",
+      "to": "dim_cli::ui::i18n::zh_hant::runtime",
+      "references": [
+        "mod runtime",
+        "path runtime::lookup"
       ]
     },
     {
@@ -29599,10 +30762,12 @@
         "path bordered",
         "path follow_window",
         "path key_hints",
+        "path visible_width",
         "path wrap_words",
         "use crate::ui::render::panel::bordered",
         "use crate::ui::render::panel::follow_window",
         "use crate::ui::render::panel::key_hints",
+        "use crate::ui::render::panel::visible_width",
         "use crate::ui::render::panel::wrap_words"
       ]
     },
@@ -29674,7 +30839,8 @@
       "to": "dim_cli::ui::list_panel",
       "references": [
         "path ListPanel",
-        "path ListPanel::new"
+        "path ListPanel::new",
+        "path hint_rows"
       ]
     },
     {
@@ -29690,29 +30856,49 @@
     },
     {
       "from": "dim_cli::ui::management_panel",
+      "to": "dim_cli::management",
+      "references": [
+        "path management::applied_line",
+        "path management::entry_name",
+        "use crate::management"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::management_panel",
       "to": "dim_cli::model::session",
       "references": [
         "path ActionKind",
+        "path ActionKind::Add",
         "path ActionKind::Edit",
+        "path ActionKind::Inspect",
         "path ActionKind::Reload",
+        "path ActionKind::Remove",
+        "path ActionKind::Run",
         "path ActionKind::Toggle",
         "path Area",
         "path Area::Hooks",
+        "path Area::Mcp",
+        "path Area::Permissions",
+        "path Area::Scheduled",
         "path Area::Skills",
         "path EntryState::Invalid",
         "path EntryState::ReadOnly",
         "path EntryState::Shadowed",
         "path ManagementAction",
+        "path ManagementAction::Inspect",
         "path ManagementAction::List",
         "path ManagementAction::Reload",
-        "path ManagementAction::Save",
+        "path ManagementAction::Remove",
+        "path ManagementAction::Run",
         "path ManagementAction::Toggle",
+        "path ManagementDetail",
         "path ManagementEntry",
         "path ManagementRefusal::Conflict",
         "path ManagementRefusal::Refused",
         "path ManagementReply",
         "path ManagementRequest",
         "path ManagementResult::Applied",
+        "path ManagementResult::Detail",
         "path ManagementResult::Refused",
         "path ManagementResult::View",
         "path ManagementView",
@@ -29720,12 +30906,23 @@
         "use crate::model::session::Area",
         "use crate::model::session::EntryState",
         "use crate::model::session::ManagementAction",
+        "use crate::model::session::ManagementDetail",
         "use crate::model::session::ManagementEntry",
         "use crate::model::session::ManagementRefusal",
         "use crate::model::session::ManagementReply",
         "use crate::model::session::ManagementRequest",
         "use crate::model::session::ManagementResult",
         "use crate::model::session::ManagementView"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::management_panel",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "path safe",
+        "path safe_line",
+        "use crate::sanitize::safe",
+        "use crate::sanitize::safe_line"
       ]
     },
     {
@@ -29770,15 +30967,32 @@
         "path Effect::EditManagement",
         "path Effect::Management",
         "path Effect::None",
-        "use crate::ui::prompts::Effect"
+        "path WriteTarget",
+        "path WriteTarget::Area",
+        "path WriteTarget::Create",
+        "path WriteTarget::Entry",
+        "use crate::ui::prompts::Effect",
+        "use crate::ui::prompts::WriteTarget"
       ]
     },
     {
       "from": "dim_cli::ui::management_panel",
       "to": "dim_cli::ui::render::panel",
       "references": [
+        "path bordered",
+        "path key_hints",
         "path wrap_words",
+        "use crate::ui::render::panel::bordered",
+        "use crate::ui::render::panel::key_hints",
         "use crate::ui::render::panel::wrap_words"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::management_panel",
+      "to": "dim_cli::ui::rows",
+      "references": [
+        "path title_plain",
+        "use crate::ui::rows::title_plain"
       ]
     },
     {
@@ -29786,8 +31000,13 @@
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path KeyCode::Char",
+        "path KeyCode::Down",
         "path KeyCode::Enter",
         "path KeyCode::Esc",
+        "path KeyCode::PageDown",
+        "path KeyCode::PageUp",
+        "path KeyCode::Tab",
+        "path KeyCode::Up",
         "path KeyEvent",
         "path KeyEvent::new",
         "path Modifiers::CTRL",
@@ -29817,24 +31036,37 @@
       "to": "dim_cli::model::session",
       "references": [
         "path ActionKind",
+        "path Area",
         "path Area::Hooks",
+        "path Area::Mcp",
+        "path Area::Permissions",
         "path Area::Skills",
         "path EntryState",
+        "path ManagementAction",
+        "path ManagementAction::Inspect",
         "path ManagementAction::List",
         "path ManagementAction::Reload",
+        "path ManagementAction::Remove",
+        "path ManagementAction::Run",
         "path ManagementAction::Save",
         "path ManagementAction::Toggle",
+        "path ManagementDetail",
         "path ManagementEntry",
         "path ManagementRefusal::Conflict",
         "path ManagementRefusal::Refused",
         "path ManagementReply",
         "path ManagementRequest",
+        "path ManagementResult",
+        "path ManagementResult::Applied",
+        "path ManagementResult::Detail",
         "path ManagementResult::Refused",
         "path ManagementResult::View",
         "path ManagementView",
         "path ManagementView::default",
+        "use crate::model::session::EntryDocument",
         "use crate::model::session::ManagementGroup",
-        "use crate::model::session::ManagementReply"
+        "use crate::model::session::ManagementReply",
+        "use crate::model::session::ManagementResult"
       ]
     },
     {
@@ -29875,6 +31107,8 @@
         "path KeyCode::End",
         "path KeyCode::Enter",
         "path KeyCode::Home",
+        "path KeyCode::PageDown",
+        "path KeyCode::Tab",
         "path KeyEvent",
         "path KeyEvent::new",
         "path Modifiers::CTRL",
@@ -30336,6 +31570,7 @@
         "path Effect",
         "path Effect::Close",
         "path Effect::None",
+        "path Effect::OpenRuntime",
         "path Effect::Plugin",
         "path Effect::Refresh",
         "use crate::ui::prompts::Effect"
@@ -30371,6 +31606,16 @@
         "use crate::ui::rows::Row",
         "use crate::ui::rows::panel_row",
         "use crate::ui::rows::title_plain"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::plugins_panel",
+      "to": "dim_cli::ui::runtime_panel",
+      "references": [
+        "path runtime_row",
+        "path waited_runtime",
+        "use crate::ui::runtime_panel::runtime_row",
+        "use crate::ui::runtime_panel::waited_runtime"
       ]
     },
     {
@@ -30447,6 +31692,8 @@
       "from": "dim_cli::ui::plugins_panel::tests",
       "to": "dim_cli::ui::prompts",
       "references": [
+        "path Effect::None",
+        "path Effect::OpenRuntime",
         "path Effect::Plugin"
       ]
     },
@@ -30468,6 +31715,7 @@
         "path KeyCode::Down",
         "path KeyCode::End",
         "path KeyCode::Enter",
+        "path KeyCode::Esc",
         "path KeyCode::Left",
         "path KeyEvent",
         "path KeyEvent::new",
@@ -30583,10 +31831,12 @@
         "path crate::model::session::AccountTarget",
         "path crate::model::session::Area",
         "path crate::model::session::GrantRequest",
+        "path crate::model::session::ManagementAction",
         "path crate::model::session::ManagementRequest",
         "path crate::model::session::OauthStart",
         "path crate::model::session::PluginAction",
         "path crate::model::session::ProviderAction",
+        "path crate::model::session::RuntimeAction",
         "path crate::model::session::SubagentModelPolicy"
       ]
     },
@@ -31470,6 +32720,186 @@
       "references": [
         "path Palette",
         "use crate::ui::theme::Palette"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::runtime_panel",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path PluginItem",
+        "path RuntimeAction",
+        "path RuntimeAction::Configure",
+        "path RuntimeAction::Install",
+        "path RuntimeItem",
+        "path RuntimesError",
+        "path RuntimesError::Failed",
+        "path RuntimesError::Unsupported",
+        "use crate::model::session::PluginItem",
+        "use crate::model::session::RuntimeAction",
+        "use crate::model::session::RuntimeItem",
+        "use crate::model::session::RuntimesError"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::runtime_panel",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path t",
+        "path tf",
+        "use crate::ui::i18n::t",
+        "use crate::ui::i18n::tf"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::runtime_panel",
+      "to": "dim_cli::ui::prompts",
+      "references": [
+        "path Effect",
+        "path Effect::Close",
+        "path Effect::None",
+        "path Effect::Runtime",
+        "use crate::ui::prompts::Effect"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::runtime_panel",
+      "to": "dim_cli::ui::render::panel",
+      "references": [
+        "path bordered",
+        "path key_hints",
+        "path wrap_words",
+        "use crate::ui::render::panel::bordered",
+        "use crate::ui::render::panel::key_hints",
+        "use crate::ui::render::panel::wrap_words"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::runtime_panel",
+      "to": "dim_cli::ui::rows",
+      "references": [
+        "path Columns::of",
+        "path Kind::Item",
+        "path Row",
+        "path panel_row",
+        "path title_plain",
+        "use crate::ui::rows::Columns",
+        "use crate::ui::rows::Kind",
+        "use crate::ui::rows::Row",
+        "use crate::ui::rows::panel_row",
+        "use crate::ui::rows::title_plain"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::runtime_panel",
+      "to": "dim_cli::ui::runtime_panel::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::runtime_panel",
+      "to": "dim_cli::ui::terminal::input",
+      "references": [
+        "path KeyCode::Char",
+        "path KeyCode::Down",
+        "path KeyCode::End",
+        "path KeyCode::Enter",
+        "path KeyCode::Esc",
+        "path KeyCode::Home",
+        "path KeyCode::Up",
+        "path KeyEvent",
+        "path Modifiers::SHIFT",
+        "use crate::ui::terminal::KeyCode",
+        "use crate::ui::terminal::KeyEvent",
+        "use crate::ui::terminal::Modifiers"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::runtime_panel",
+      "to": "dim_cli::ui::text",
+      "references": [
+        "path truncate_cells",
+        "use crate::ui::text::truncate_cells"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::runtime_panel",
+      "to": "dim_cli::ui::theme::ansi",
+      "references": [
+        "path fg",
+        "use crate::ui::theme::ansi::fg"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::runtime_panel",
+      "to": "dim_cli::ui::theme::palette",
+      "references": [
+        "path Palette",
+        "use crate::ui::theme::Palette"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::runtime_panel::tests",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path PluginItem",
+        "path RuntimeItem",
+        "path RuntimeSource",
+        "path RuntimeSource::Download",
+        "path RuntimeSource::System",
+        "path RuntimesError::Unsupported",
+        "use crate::model::session::RuntimeSource"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::runtime_panel::tests",
+      "to": "dim_cli::ui::prompts",
+      "references": [
+        "path Effect::Runtime"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::runtime_panel::tests",
+      "to": "dim_cli::ui::render::panel",
+      "references": [
+        "path strip_escapes",
+        "use crate::ui::render::panel::strip_escapes",
+        "use crate::ui::render::panel::visible_width"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::runtime_panel::tests",
+      "to": "dim_cli::ui::runtime_panel",
+      "references": [
+        "path RuntimePanel",
+        "path RuntimePanel::new",
+        "path RuntimePanel::on"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::runtime_panel::tests",
+      "to": "dim_cli::ui::terminal::input",
+      "references": [
+        "path KeyCode",
+        "path KeyCode::Char",
+        "path KeyCode::Enter",
+        "path KeyCode::Home",
+        "path KeyEvent",
+        "path KeyEvent::new",
+        "path Modifiers::NONE"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::runtime_panel::tests",
+      "to": "dim_cli::ui::theme::palette",
+      "references": [
+        "path Appearance::Dark",
+        "path ColorMode::TrueColor",
+        "path Palette",
+        "path terminal_palette",
+        "use crate::ui::theme::Appearance",
+        "use crate::ui::theme::ColorMode",
+        "use crate::ui::theme::palette::terminal_palette"
       ]
     },
     {
@@ -33228,6 +34658,14 @@
     },
     {
       "from": "dim_cli::ui::tui",
+      "to": "dim_cli::management",
+      "references": [
+        "path management::applied_line",
+        "use crate::management"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
       "to": "dim_cli::management::editor",
       "references": [
         "path editor::Draft",
@@ -33242,6 +34680,9 @@
       "references": [
         "path Area",
         "path Area::Hooks",
+        "path Area::Mcp",
+        "path Area::Permissions",
+        "path Area::Scheduled",
         "path Area::Skills",
         "path Command::Approval",
         "path Command::AskAnswers",
@@ -33259,6 +34700,7 @@
         "path Command::ListModels",
         "path Command::ListPlugins",
         "path Command::ListProviders",
+        "path Command::ListRuntimes",
         "path Command::LoginStatus",
         "path Command::LoginUsage",
         "path Command::Logout",
@@ -33274,11 +34716,14 @@
         "path Command::ReadIsolation",
         "path Command::ReadModelPolicy",
         "path Command::Recording",
+        "path Command::Rename",
         "path Command::ResetIsolation",
         "path Command::Resume",
         "path Command::RetryApproval",
+        "path Command::Runtime",
         "path Command::SaveIsolation",
         "path Command::SelectModel",
+        "path Command::SetLocale",
         "path Command::SetModelPolicy",
         "path Command::SetPermission",
         "path Command::ShellRun",
@@ -33295,22 +34740,26 @@
         "path Command::Usage",
         "path Command::WatchMember",
         "path Command::WatchTaskOutput",
-        "path CompactReply::Cancelled",
-        "path CompactReply::Completed",
         "path CompactReply::Failed",
-        "path CompactReply::Skipped",
         "path CompactReply::Unsupported",
         "path ContextReading",
         "path DIM_OAUTH_ID",
+        "path ManagementAction",
+        "path ManagementAction::Add",
         "path ManagementAction::List",
         "path ManagementAction::Reload",
         "path ManagementAction::Save",
         "path ManagementRefusal::Conflict",
-        "path ManagementRefusal::Refused",
         "path ManagementRequest",
+        "path ManagementResult",
         "path ManagementResult::Applied",
+        "path ManagementResult::Detail",
         "path ManagementResult::Refused",
         "path ManagementResult::View",
+        "path RenameReply::Failed",
+        "path RenameReply::Titled",
+        "path RenameReply::Unsupported",
+        "path RenameReply::Untitled",
         "path SessionPort",
         "path SubmitMode::Queue",
         "path SubmitMode::Steer",
@@ -33343,7 +34792,9 @@
         "path Update::Providers",
         "path Update::QuestionReply",
         "path Update::Ready",
+        "path Update::Renamed",
         "path Update::Report",
+        "path Update::Runtimes",
         "path Update::Sessions",
         "path Update::ShellDone",
         "path Update::ShellProgress",
@@ -33369,6 +34820,7 @@
         "use crate::model::session::ManagementRefusal",
         "use crate::model::session::ManagementRequest",
         "use crate::model::session::ManagementResult",
+        "use crate::model::session::RenameReply",
         "use crate::model::session::SessionPort",
         "use crate::model::session::SubmitMode",
         "use crate::model::session::SwitchKind",
@@ -33430,7 +34882,8 @@
       "from": "dim_cli::ui::tui",
       "to": "dim_cli::sanitize",
       "references": [
-        "path crate::sanitize::safe"
+        "path crate::sanitize::safe",
+        "path crate::sanitize::safe_line"
       ]
     },
     {
@@ -33518,6 +34971,7 @@
       "to": "dim_cli::ui::i18n",
       "references": [
         "path i18n::LOCALE_KEY",
+        "path i18n::interface_locale",
         "path i18n::saved_locale",
         "path i18n::set",
         "path i18n::system_locale",
@@ -33650,8 +35104,10 @@
         "path Effect::OauthCancel",
         "path Effect::OauthPaste",
         "path Effect::OauthStart",
+        "path Effect::OpenArea",
         "path Effect::OpenModels",
         "path Effect::OpenPermissions",
+        "path Effect::OpenRuntime",
         "path Effect::OpenUrl",
         "path Effect::Plugin",
         "path Effect::Provider",
@@ -33662,6 +35118,7 @@
         "path Effect::Restart",
         "path Effect::Resume",
         "path Effect::RetryApproval",
+        "path Effect::Runtime",
         "path Effect::SaveIsolation",
         "path Effect::SelectModel",
         "path Effect::SetModelPolicy",
@@ -33686,11 +35143,16 @@
         "path ExitReason::PermissionPending",
         "path PermissionPrompt",
         "path PermissionPrompt::new",
+        "path WriteTarget",
+        "path WriteTarget::Area",
+        "path WriteTarget::Create",
+        "path WriteTarget::Entry",
         "use crate::ui::prompts::AskUserPrompt",
         "use crate::ui::prompts::Effect",
         "use crate::ui::prompts::ExitConfirm",
         "use crate::ui::prompts::ExitReason",
-        "use crate::ui::prompts::PermissionPrompt"
+        "use crate::ui::prompts::PermissionPrompt",
+        "use crate::ui::prompts::WriteTarget"
       ]
     },
     {
@@ -33754,6 +35216,16 @@
         "use crate::ui::render::Frame",
         "use crate::ui::render::Overlay",
         "use crate::ui::render::Screen"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
+      "to": "dim_cli::ui::runtime_panel",
+      "references": [
+        "path RuntimePanel",
+        "path RuntimePanel::new",
+        "path RuntimePanel::on",
+        "use crate::ui::runtime_panel::RuntimePanel"
       ]
     },
     {
@@ -34142,16 +35614,24 @@
       "to": "dim_cli::model::session",
       "references": [
         "path Area::Hooks",
+        "path Area::Scheduled",
+        "path Area::Skills",
         "path Command",
         "path Command::AskAnswers",
         "path Command::InputControl",
         "path Command::ListPlugins",
+        "path Command::ListRuntimes",
         "path Command::OpenLine",
         "path Command::Plugin",
+        "path Command::Runtime",
         "path Command::Stop",
         "path Command::Submit",
         "path DIM_OAUTH_ID",
+        "path ManagementAction::Add",
+        "path ManagementAction::List",
+        "path ManagementAction::Run",
         "path ManagementAction::Save",
+        "path ManagementAction::Toggle",
         "path ManagementRefusal::Conflict",
         "path ManagementRefusal::Refused",
         "path ManagementRequest",
@@ -34169,6 +35649,7 @@
         "path Update::Permissions",
         "path Update::PluginResult",
         "path Update::Plugins",
+        "path Update::Runtimes",
         "path Update::Snapshot",
         "path Update::Switched",
         "path Update::UsageReport",
@@ -34228,6 +35709,13 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::management_panel",
+      "references": [
+        "path ManagementPanel::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::oauth_view",
       "references": [
         "path OauthView::dim"
@@ -34237,7 +35725,9 @@
       "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::prompts",
       "references": [
-        "path AskUserPrompt::new"
+        "path AskUserPrompt::new",
+        "path WriteTarget::Area",
+        "path WriteTarget::Create"
       ]
     },
     {
@@ -34366,6 +35856,8 @@
         "path ManagementDraft",
         "path Prompt::Ask",
         "path Prompt::Login",
+        "path Prompt::Management",
+        "path Prompt::Runtime",
         "path QUEUE_HINT",
         "path QUEUE_HINT_MORE",
         "path ThemeContext",
@@ -36098,6 +37590,10 @@
       "path": "T::Error"
     },
     {
+      "module": "dim_app_server::modality",
+      "path": "D::Error"
+    },
+    {
       "module": "dim_app_server::model_catalog",
       "path": "D::Error"
     },
@@ -36371,7 +37867,23 @@
     },
     {
       "module": "dim_cli::args",
+      "path": "Area::Mcp"
+    },
+    {
+      "module": "dim_cli::args",
+      "path": "Area::Permissions"
+    },
+    {
+      "module": "dim_cli::args",
+      "path": "Area::Scheduled"
+    },
+    {
+      "module": "dim_cli::args",
       "path": "Area::Skills"
+    },
+    {
+      "module": "dim_cli::args",
+      "path": "ManagementAction::Inspect"
     },
     {
       "module": "dim_cli::args",
@@ -36380,6 +37892,14 @@
     {
       "module": "dim_cli::args",
       "path": "ManagementAction::Reload"
+    },
+    {
+      "module": "dim_cli::args",
+      "path": "ManagementAction::Remove"
+    },
+    {
+      "module": "dim_cli::args",
+      "path": "ManagementAction::Run"
     },
     {
       "module": "dim_cli::args",
@@ -36470,6 +37990,14 @@
       "path": "INPUT_RECORD::default"
     },
     {
+      "module": "dim_cli::management::mcp",
+      "path": "D::Error"
+    },
+    {
+      "module": "dim_cli::management::mcp",
+      "path": "T::deserialize"
+    },
+    {
       "module": "dim_cli::mcp_command",
       "path": "char::is_whitespace"
     },
@@ -36546,6 +38074,10 @@
       "path": "char::is_whitespace"
     },
     {
+      "module": "dim_cli::session_host::tests",
+      "path": "RuntimeSource::System"
+    },
+    {
       "module": "dim_cli::ui::composer",
       "path": "char::is_whitespace"
     },
@@ -36576,6 +38108,14 @@
     {
       "module": "dim_cli::ui::progress",
       "path": "char::is_ascii_digit"
+    },
+    {
+      "module": "dim_cli::ui::prompts",
+      "path": "ManagementAction::Add"
+    },
+    {
+      "module": "dim_cli::ui::prompts",
+      "path": "ManagementAction::Save"
     },
     {
       "module": "dim_cli::ui::providers_panel",
@@ -36699,11 +38239,11 @@
     },
     {
       "module": "dim_cli::ui::tui",
-      "path": "Next::Save"
+      "path": "Next::Unchanged"
     },
     {
       "module": "dim_cli::ui::tui",
-      "path": "Next::Unchanged"
+      "path": "Next::Write"
     },
     {
       "module": "dim_cli::ui::tui",
@@ -36712,6 +38252,18 @@
     {
       "module": "dim_cli::ui::tui",
       "path": "Recorded::Written"
+    },
+    {
+      "module": "dim_cli::ui::tui",
+      "path": "RuntimeAction::Configure"
+    },
+    {
+      "module": "dim_cli::ui::tui",
+      "path": "RuntimeAction::Install"
+    },
+    {
+      "module": "dim_cli::ui::tui",
+      "path": "RuntimeSource::parse"
     },
     {
       "module": "dim_cli::ui::tui",
@@ -36783,6 +38335,10 @@
     },
     {
       "module": "dim_cli::ui::tui::tests",
+      "path": "ManagementView::default"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
       "path": "OauthEvent::Device"
     },
     {
@@ -36804,6 +38360,14 @@
     {
       "module": "dim_cli::ui::tui::tests",
       "path": "Projection::default"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "RuntimeSource::Download"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "RuntimeSource::System"
     },
     {
       "module": "dim_cli::ui::tui::tests",

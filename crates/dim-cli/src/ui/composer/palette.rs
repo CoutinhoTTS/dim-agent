@@ -462,17 +462,17 @@ mod tests {
             names("/se", SCROLLBACK),
             [
                 "settings", "resume", "agent", "effort", "fast", "mcp", "models", "fork", "lines",
-                "new", "web"
+                "new", "rename", "web"
             ]
         );
         assert_eq!(names("/stg", SCROLLBACK), ["settings"]);
         assert_eq!(
-            &names("/re", SCROLLBACK)[..3],
-            ["reload-skills", "resume", "effort"]
+            &names("/re", SCROLLBACK)[..4],
+            ["reload-skills", "rename", "resume", "effort"]
         );
         assert!(names("/ss", SCROLLBACK).contains(&"resume"));
         assert!(names("/quit", SCROLLBACK).contains(&"exit"));
-        assert_eq!(names("/tim", SCROLLBACK), ["timeline"]);
+        assert_eq!(names("/tim", SCROLLBACK), ["timeline", "runtime"]);
     }
 
     /// A non-ASCII description has no spaces between words, so a non-ASCII

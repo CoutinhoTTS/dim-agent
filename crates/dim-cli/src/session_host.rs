@@ -24,8 +24,9 @@ use crate::model::session::{
     ACCOUNT_NAMESPACE, Account, AccountDescriptor, Command, CompactReply, ContextReading,
     DIM_OAUTH_ID, DraftPart, EmptyProvider, EmptyReason, ExecutionSnapshot, ManagementReply,
     ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider, OauthEvent, OauthStart,
-    PluginItem, PluginReply, ProviderAction, ProviderEntry, SandboxBackend, SessionItem,
-    SessionPort, SubagentModelPolicy, SwitchKind, Update, Usage,
+    PluginItem, PluginReply, ProviderAction, ProviderEntry, RuntimeAction, RuntimeItem,
+    RuntimesError, SandboxBackend, SessionItem, SessionPort, SubagentModelPolicy, SwitchKind,
+    Update, Usage,
 };
 use crate::model::view::{
     LineState, LineView, SideLine, TaskOutputState, TaskTarget, WorkflowInventory,
@@ -146,13 +147,15 @@ impl SessionPort for SessionHost {
 
 impl SessionHost {
     /// Runs the session on `client`, the connection the composition root
-    /// took from the client tree.
-    pub fn start(options: Options, client: Client) -> Self {
+    /// took from the client tree, composing management text in `language`,
+    /// the interface's language code.
+    pub fn start(options: Options, client: Client, language: &'static str) -> Self {
         let (commands, command_rx) = unbounded_channel();
         let (update_tx, updates) = mpsc::channel();
         let thread = std::thread::Builder::new()
             .name("dim-session".into())
             .spawn(move || {
+                crate::management::use_language(language);
                 let runtime = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
@@ -1257,6 +1260,7 @@ impl Worker {
                 }
             }
             Command::Compact => self.compact().await,
+            Command::Rename(title) => self.rename(title).await,
             Command::Goal(request) => self.goal(request).await,
             Command::ToggleWeb => {
                 let result: crate::Result<WebToggled> =
@@ -1563,6 +1567,25 @@ impl Worker {
                     plugins,
                 });
             }
+            Command::ListRuntimes => {
+                let runtimes = self.runtimes().await;
+                let plugins = self.plugins().await;
+                self.send(Update::Runtimes {
+                    result: None,
+                    runtimes,
+                    plugins,
+                });
+            }
+            Command::Runtime(action) => {
+                let result = self.runtime_change(&action).await;
+                let runtimes = self.runtimes().await;
+                let plugins = self.plugins().await;
+                self.send(Update::Runtimes {
+                    result: Some(result),
+                    runtimes,
+                    plugins,
+                });
+            }
             Command::Management(request) => {
                 // The Session's workspace, not the directory the client
                 // started in: a resumed Session may live elsewhere.
@@ -1574,6 +1597,7 @@ impl Worker {
                 let result = crate::management::apply(&mut self.client, &request, &cwd).await;
                 self.send(Update::Management(ManagementReply { request, result }));
             }
+            Command::SetLocale(language) => crate::management::use_language(language),
             Command::Configure(text) => {
                 if self.session_id.is_empty() && configure::needs_session(&text) {
                     self.report(NO_SESSION.to_owned(), true);
@@ -1779,15 +1803,22 @@ impl Worker {
         self.send(Update::Context(reading));
     }
 
-    /// `/compact`: asks the shown line's context to compact. The reply is
-    /// reported; the transcript row comes from the events (compaction
-    /// requirements §4).
+    /// Asks the shown line to compact; committed outcomes reach its transcript.
     async fn compact(&mut self) {
         let params = json!({"sessionId": self.session_id, "branchId": self.focus});
         match self.client.send("session.context.compact", params).await {
             Ok(request) => self.compact_requests.push(request),
             Err(error) => self.send(Update::Compacted(CompactReply::Failed(error.to_string()))),
         }
+    }
+
+    /// `/rename`: sets the shown Session's manual title, or clears it when
+    /// `title` is `None`. The text is a command, never an input.
+    async fn rename(&mut self, title: Option<String>) {
+        let reply =
+            crate::session_command::set_title(&mut self.client, &self.session_id, title.as_deref())
+                .await;
+        self.send(Update::Renamed(reply));
     }
 
     /// `/goal`: the shown line's goal, written by the method the request
@@ -2206,9 +2237,10 @@ impl Worker {
     }
 
     /// `/mcp [list]`, `/mcp login [--no-browser] ID`, `/mcp callback URL`,
-    /// `/mcp logout ID`, `/mcp enable ID`, `/mcp disable ID`.
+    /// `/mcp logout ID`, `/mcp disconnect ID`, `/mcp enable ID`,
+    /// `/mcp disable ID`.
     async fn mcp(&mut self, args: &str) -> crate::Result<()> {
-        const USAGE: &str = "Usage: /mcp [list|login [--no-browser] ID|callback URL|logout ID|enable ID|disable ID]";
+        const USAGE: &str = "Usage: /mcp [list|login [--no-browser] ID|callback URL|logout ID|disconnect ID|enable ID|disable ID]";
         let words: Vec<&str> = args.split_whitespace().collect();
         match words.as_slice() {
             [] | ["list"] => {
@@ -2253,6 +2285,23 @@ impl Worker {
                 );
             }
             // The ID is the rest of the line, spaces included.
+            ["disconnect", ..] => {
+                let (_, id) = args
+                    .trim()
+                    .split_once(char::is_whitespace)
+                    .unwrap_or((args.trim(), ""));
+                let id = id.trim();
+                if id.is_empty() {
+                    return Err(USAGE.into());
+                }
+                let params = mcp::target(&mut self.client, &self.options, id).await?;
+                self.client.rpc("mcp.disconnect", params).await?;
+                self.report(
+                    format!("Disconnected {}.", crate::sanitize::safe(id)),
+                    false,
+                );
+            }
+            // The ID is the rest of the line, spaces included.
             ["enable", ..] | ["disable", ..] => {
                 let (command, id) = args
                     .trim()
@@ -2262,15 +2311,15 @@ impl Worker {
                 if id.is_empty() {
                     return Err(USAGE.into());
                 }
-                let (rows, notes) = crate::mcp_command::set_enabled(
+                let state = crate::management::mcp::set_enabled(
                     &mut self.client,
-                    &self.options,
+                    &self.options.cwd,
                     id,
                     command == "enable",
                 )
                 .await?;
-                let mut lines = rows;
-                lines.extend(notes);
+                let mut lines = vec![state.sentence()];
+                lines.extend(state.notes);
                 self.report(lines.join("\n"), false);
             }
             _ => return Err(USAGE.into()),
@@ -2453,6 +2502,30 @@ impl Worker {
             .typed("plugin.list", json!({}))
             .await
             .map_err(|error| error.to_string())
+    }
+
+    /// The `/runtime` rows: what `runtime.list` reports.
+    async fn runtimes(&mut self) -> Result<Vec<RuntimeItem>, RuntimesError> {
+        if !self.client.supports(&["runtime.list"]) {
+            return Err(RuntimesError::Unsupported {
+                version: self.client.server_version().to_owned(),
+            });
+        }
+        self.client
+            .typed("runtime.list", json!({}))
+            .await
+            .map_err(|error| RuntimesError::Failed(error.to_string()))
+    }
+
+    /// A `/runtime` change: the calls it makes, in order, are the change.
+    async fn runtime_change(&mut self, action: &RuntimeAction) -> Result<(), String> {
+        for (method, params) in runtime_calls(action) {
+            self.client
+                .rpc(method, params)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     /// The `/connect` list: every static provider the App Server knows (the
@@ -3530,7 +3603,9 @@ impl Worker {
             .position(|request| *request == id)
         {
             self.compact_requests.remove(index);
-            self.send(Update::Compacted(compact_reply(result)));
+            if let Some(reply) = compact_reply(result) {
+                self.send(Update::Compacted(reply));
+            }
             return Ok(());
         }
         if let Some(index) = self
@@ -4014,23 +4089,27 @@ fn app_error(error: &client::RpcError) -> Option<&str> {
 }
 
 /// What a `session.context.compact` reply came to.
-fn compact_reply(result: Result<serde_json::Value, client::RpcError>) -> CompactReply {
+fn compact_reply(result: Result<serde_json::Value, client::RpcError>) -> Option<CompactReply> {
     #[derive(Deserialize)]
     #[serde(tag = "status", rename_all = "snake_case")]
     enum Reply {
         Completed {},
-        Skipped { reason: String },
+        Skipped {
+            #[serde(rename = "reason")]
+            _reason: String,
+        },
     }
     match result {
         Ok(value) => match serde_json::from_value::<Reply>(value) {
-            Ok(Reply::Completed { .. }) => CompactReply::Completed,
-            Ok(Reply::Skipped { reason }) => CompactReply::Skipped(reason),
-            Err(_) => CompactReply::Failed("Invalid session.context.compact response".into()),
+            Ok(Reply::Completed { .. } | Reply::Skipped { .. }) => None,
+            Err(_) => Some(CompactReply::Failed(
+                "Invalid session.context.compact response".into(),
+            )),
         },
         Err(error) => match app_error(&error) {
-            Some("unknown_method") => CompactReply::Unsupported,
-            Some("compaction_cancelled") => CompactReply::Cancelled(error.message),
-            _ => CompactReply::Failed(error.message),
+            Some("unknown_method") => Some(CompactReply::Unsupported),
+            Some("compaction_failed" | "compaction_cancelled") => None,
+            _ => Some(CompactReply::Failed(error.message)),
         },
     }
 }
@@ -4070,6 +4149,26 @@ fn execution_snapshot(value: serde_json::Value) -> Result<ExecutionSnapshot, Str
     })
 }
 
+/// The `runtime.*` calls a change makes, in order: the configuration write
+/// first when it has one, then the apply (RuntimeManager §5).
+fn runtime_calls(action: &RuntimeAction) -> Vec<(&'static str, serde_json::Value)> {
+    match action {
+        RuntimeAction::Install(name) => vec![("runtime.install", json!({"name": name}))],
+        RuntimeAction::Configure { name, source, auto } => {
+            let mut configure = json!({"name": name});
+            if let Some(source) = source {
+                configure["source"] = json!(source.as_str());
+            }
+            if let Some(auto) = auto {
+                configure["auto"] = json!(auto);
+            }
+            // `runtime.configure` applies what it wrote; installing again
+            // would only re-read the same file.
+            vec![("runtime.configure", configure)]
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4092,5 +4191,43 @@ mod tests {
             transcript_mut(&mut main, &mut lines, "unknown").is_none(),
             "an unknown branch has no transcript"
         );
+    }
+
+    /// A `/runtime` change writes the configuration it carries and then
+    /// applies it; an apply alone calls only `runtime.install`.
+    #[test]
+    fn a_runtime_change_asks_the_owner_once() {
+        use crate::model::session::RuntimeSource;
+        let cases = [
+            (
+                RuntimeAction::Install("node".into()),
+                vec![("runtime.install", json!({"name": "node"}))],
+            ),
+            (
+                RuntimeAction::Configure {
+                    name: "node".into(),
+                    source: Some(RuntimeSource::System),
+                    auto: None,
+                },
+                vec![(
+                    "runtime.configure",
+                    json!({"name": "node", "source": "system"}),
+                )],
+            ),
+            (
+                RuntimeAction::Configure {
+                    name: "python".into(),
+                    source: None,
+                    auto: Some(false),
+                },
+                vec![(
+                    "runtime.configure",
+                    json!({"name": "python", "auto": false}),
+                )],
+            ),
+        ];
+        for (action, calls) in cases {
+            assert_eq!(runtime_calls(&action), calls, "{action:?}");
+        }
     }
 }

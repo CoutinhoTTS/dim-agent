@@ -15,6 +15,11 @@ Commands:\n\
                                    Run text and/or local images and exit\n\
   exec resume SESSION_ID [-p TEXT] [--image PATH ...] [--json]\n\
   session export SESSION_ID --format markdown|json [--output PATH]\n\
+  session rename SESSION TITLE     Set the manual title; --clear removes it\n\
+  session delete SESSION           Permanently delete a Session\n\
+  session cleanup (--older-than DURATION | --keep N) [--yes]\n\
+                                   Show the Sessions that will go, then\n\
+                                   delete them after confirmation\n\
   export SESSION_ID [--output PATH] [--database PATH]\n\
                                    Write a Session's whole Timeline as JSONL;\n\
                                    it holds prompts, code and tool output.\n\
@@ -35,6 +40,14 @@ Commands:\n\
   mcp enable ID                    Enable an MCP server shown by mcp list\n\
   mcp disable ID                   Disable it; an unlisted ID withdraws only\n\
                                    this workspace's stored enablement\n\
+  mcp add PATH                     Create an entry from PATH, or from stdin for -\n\
+  mcp edit ID                      Edit an entry's patch in the editor\n\
+  mcp set ID PATH                  Write an entry's patch from PATH,\n\
+                                   or from stdin for -\n\
+  mcp remove ID                    Delete an entry\n\
+  mcp test ID                      Probe a stored entry and list its tools\n\
+  mcp inspect ID                   Show an entry's effective configuration\n\
+  mcp disconnect ID                Close an entry's live connections\n\
   skills list                      List Skills, their sources and states\n\
   skills enable|disable ID         Turn one Skill on or off\n\
   skills reload                    Rescan this workspace's Skills\n\
@@ -44,6 +57,20 @@ Commands:\n\
   hooks edit                       Edit the user's hook document\n\
   hooks set PATH                   Write the user's hook document from PATH,\n\
                                    or from stdin for -\n\
+  scheduled list                   List scheduled jobs, their windows and\n\
+                                   last runs\n\
+  scheduled enable|disable ID      Pause or resume one job\n\
+  scheduled edit ID                Edit a job document in the editor\n\
+  scheduled set ID PATH            Write a job document from PATH,\n\
+                                   or from stdin for -\n\
+  scheduled add PATH               Create a job from PATH, or from stdin for -\n\
+  scheduled remove ID              Delete a job\n\
+  scheduled run ID                 Run a job now\n\
+  scheduled history ID             List a job's recent runs\n\
+  permissions list                 List the user's command rules\n\
+  permissions add PATH             Add one rule from PATH, or from stdin for -\n\
+  permissions remove RULE          Remove a rule, given as one quoted\n\
+                                   'DECISION MATCH COMMAND'\n\
   recording [on|off]               Record model requests to the home's\n\
                                    model-log/recordings.jsonl; prompts, code\n\
                                    and tool output are written there\n\
@@ -57,6 +84,7 @@ Commands:\n\
   plugin remove ID\n\
   runtime list                     List the plugin runtimes and their state\n\
   runtime install node|python      Turn a plugin runtime on and acquire it\n\
+  runtime config NAME              Set a runtime's --source or --auto and apply it\n\
   daemon stop                      Gracefully stop an existing daemon\n\
   daemon vacuum [--database PATH]  Rewrite an offline database to reclaim\n\
                                    space; --database defaults to the home's\n\
@@ -91,10 +119,11 @@ Options:\n\
   -V, --version                    Show version without starting a daemon\n\n\
 Ctrl+C stops a running turn and waits for settlement; idle Ctrl+C or EOF exits.\n\
 Without -p, exec reads redirected stdin through EOF, including with --image.\n\
-Idle commands: /export <markdown|json> PATH, /exit.\n\
+Idle commands: /export <markdown|json> PATH, /rename TITLE|--clear, /exit.\n\
 PATH is relative to the CLI current directory; ~ is literal.\n\
 /permissions (aliases /approvals, /approval) opens separate File access, Tool\n\
-  approval (Ask/Bypass), and Process isolation controls in the terminal UI.\n\
+  approval (Ask/Bypass) and Process isolation controls in the terminal UI, and\n\
+  a Command rules row that lists, adds and removes the user's command rules.\n\
 The line prompt accepts file-access read-only|workspace-read-write|unrestricted,\n\
   tool-approval ask|bypass, PRESET, allow|deny exact|prefix COMMAND, or remove N.\n\
 Approval accepts only y/yes; empty input denies. For a simple exec command, a/always\n\
@@ -111,8 +140,14 @@ Questions take option numbers (comma separated for several) or 0 to type your\n\
 Account commands sign in to every Provider the daemon describes with a login\n\
   method. A build without the Dim account provider says so and offers API-key\n\
   Providers instead.\n\
-Exit codes: 0 success, 1 configuration/transport error, 2 model/turn failure,\n\
-            3 interactive approval or answer required, 130 interrupted.\n";
+Exit codes: 0 success, 1 configuration/transport error, a delete that removed\n\
+            nothing or a cleanup in which a delete failed, 2 model/turn\n\
+            failure, 3 interactive approval or answer required, 130\n\
+            interrupted.\n";
+
+/// What `dimcode session` names besides `export`.
+const USAGE_SESSION: &str =
+    "Use session export, session rename, session delete or session cleanup; see --help";
 
 #[derive(Clone, Debug)]
 pub enum Action {
@@ -128,6 +163,25 @@ pub enum Action {
         session_id: String,
         format: Format,
         output: Option<PathBuf>,
+    },
+    /// `session rename`: `title` sets the manual title, `clear` sends `null`.
+    SessionRename {
+        session_id: String,
+        title: Option<String>,
+        clear: bool,
+    },
+    /// `session delete`: permanently delete the named Session.
+    SessionDelete {
+        session_id: String,
+    },
+    /// `session cleanup`: delete the Sessions one selector names.
+    SessionCleanup {
+        /// Sessions last active at least this long ago.
+        older_than: Option<std::time::Duration>,
+        /// The newest Sessions to keep, leaving the rest to delete.
+        keep: Option<usize>,
+        /// Delete without asking.
+        yes: bool,
     },
     /// `export`: the Session's whole Timeline (ADR 005 D3).
     Timeline {
@@ -151,13 +205,24 @@ pub enum Action {
         id: String,
         enabled: bool,
     },
+    McpDisconnect(String),
     /// `<area> ...`: one request to a management area's owner.
     Management(crate::model::session::ManagementRequest),
-    /// `<area> edit`: the area's document in the external editor.
-    ManagementEdit(crate::model::session::Area),
-    /// `<area> set PATH`: the area's document from a file, or from stdin for
+    /// `<area> edit [ID]`: the area's document in the external editor, or one
+    /// entry's for an area whose documents are per entry.
+    ManagementEdit {
+        area: crate::model::session::Area,
+        id: Option<String>,
+    },
+    /// `<area> set [ID] PATH`: the same write from a file, or from stdin for
     /// `-`.
     ManagementSet {
+        area: crate::model::session::Area,
+        id: Option<String>,
+        path: std::path::PathBuf,
+    },
+    /// `<area> add PATH`: a new entry from a file, or from stdin for `-`.
+    ManagementAdd {
         area: crate::model::session::Area,
         path: std::path::PathBuf,
     },
@@ -174,6 +239,13 @@ pub enum Action {
     RuntimeList,
     /// `runtime install NAME`: turn a plugin runtime on and acquire it.
     RuntimeInstall(String),
+    /// `runtime config NAME [--source download|system] [--auto on|off]`:
+    /// write the runtime's configuration and apply it.
+    RuntimeConfig {
+        name: String,
+        source: Option<String>,
+        auto: Option<bool>,
+    },
     DaemonStop,
     /// `web`: hold the daemon's local web entry open in the foreground.
     Web {
@@ -351,6 +423,36 @@ impl Options {
                         return Err("Supply the database path only once".into());
                     }
                 }
+                "--clear" => {
+                    let Action::SessionRename { clear, .. } = &mut options.action else {
+                        return Err("--clear requires session rename".into());
+                    };
+                    *clear = true;
+                }
+                "--older-than" => {
+                    let value = parse_age(&value(&mut args)?)?;
+                    let Action::SessionCleanup { older_than, .. } = &mut options.action else {
+                        return Err("--older-than requires session cleanup".into());
+                    };
+                    if older_than.replace(value).is_some() {
+                        return Err("Supply --older-than only once".into());
+                    }
+                }
+                "--keep" => {
+                    let count = parse_count("--keep", &value(&mut args)?)?;
+                    let Action::SessionCleanup { keep, .. } = &mut options.action else {
+                        return Err("--keep requires session cleanup".into());
+                    };
+                    if keep.replace(count).is_some() {
+                        return Err("Supply --keep only once".into());
+                    }
+                }
+                "--yes" => {
+                    let Action::SessionCleanup { yes, .. } = &mut options.action else {
+                        return Err("--yes requires session cleanup".into());
+                    };
+                    *yes = true;
+                }
                 "--home" => {
                     options.home = PathBuf::from(value(&mut args)?);
                     options.home_explicit = true;
@@ -445,17 +547,44 @@ impl Options {
                     }
                 }
                 "session" if matches!(options.action, Action::Chat) => {
-                    if value(&mut args)? != "export" {
-                        return Err(
-                            "Use session export SESSION_ID --format markdown|json [--output PATH]"
-                                .into(),
-                        );
+                    match value(&mut args)?.as_str() {
+                        "-h" | "--help" => {
+                            options.action = Action::Help;
+                            return Ok(options);
+                        }
+                        "export" => {
+                            options.action = Action::Export {
+                                session_id: value(&mut args)?,
+                                format: Format::Markdown,
+                                output: None,
+                            };
+                        }
+                        "rename" => {
+                            let session_id = value(&mut args)?;
+                            let title = match args.peek().map(String::as_str) {
+                                Some(next) if !next.starts_with("--") => Some(value(&mut args)?),
+                                _ => None,
+                            };
+                            options.action = Action::SessionRename {
+                                session_id,
+                                title,
+                                clear: false,
+                            };
+                        }
+                        "delete" => {
+                            options.action = Action::SessionDelete {
+                                session_id: value(&mut args)?,
+                            };
+                        }
+                        "cleanup" => {
+                            options.action = Action::SessionCleanup {
+                                older_than: None,
+                                keep: None,
+                                yes: false,
+                            };
+                        }
+                        _ => return Err(USAGE_SESSION.into()),
                     }
-                    options.action = Action::Export {
-                        session_id: value(&mut args)?,
-                        format: Format::Markdown,
-                        output: None,
-                    };
                 }
                 "export" if matches!(options.action, Action::Chat) => {
                     options.action = Action::Timeline {
@@ -478,10 +607,53 @@ impl Options {
                     options.action = match value(&mut args)?.as_str() {
                         "list" => Action::RuntimeList,
                         "install" => Action::RuntimeInstall(value(&mut args)?),
-                        _ => return Err("Use runtime list or runtime install node|python".into()),
+                        "config" => {
+                            let name = value(&mut args)?;
+                            let (mut source, mut auto) = (None, None);
+                            while let Some(flag) = args.next() {
+                                let given = args
+                                    .next()
+                                    .ok_or_else(|| format!("{flag} requires a value"))?;
+                                match flag.as_str() {
+                                    "--source" => match given.as_str() {
+                                        "download" | "system" => source = Some(given),
+                                        other => {
+                                            return Err(format!(
+                                                "--source is download or system, not {other}"
+                                            )
+                                            .into());
+                                        }
+                                    },
+                                    "--auto" => match given.as_str() {
+                                        "on" => auto = Some(true),
+                                        "off" => auto = Some(false),
+                                        other => {
+                                            return Err(format!(
+                                                "--auto is on or off, not {other}"
+                                            )
+                                            .into());
+                                        }
+                                    },
+                                    other => {
+                                        return Err(format!(
+                                            "Use runtime config NAME [--source download|system] \
+                                             [--auto on|off], not {other}"
+                                        )
+                                        .into());
+                                    }
+                                }
+                            }
+                            Action::RuntimeConfig { name, source, auto }
+                        }
+                        _ => {
+                            return Err(
+                                "Use runtime list, runtime install or runtime config".into()
+                            );
+                        }
                     };
                 }
                 "mcp" if matches!(options.action, Action::Chat) => {
+                    use crate::model::session::{Area, ManagementAction, ManagementRequest};
                     options.action = match value(&mut args)?.as_str() {
                         "list" => Action::McpList,
                         "login" => {
@@ -501,12 +673,44 @@ impl Options {
                             Action::McpLogin(id)
                         }
                         "logout" => Action::McpLogout(value(&mut args)?),
+                        "disconnect" => Action::McpDisconnect(value(&mut args)?),
                         command @ ("enable" | "disable") => Action::McpEnable {
                             id: value(&mut args)?,
                             enabled: command == "enable",
                         },
+                        "add" => Action::ManagementAdd {
+                            area: Area::Mcp,
+                            path: value(&mut args)?.into(),
+                        },
+                        "edit" => Action::ManagementEdit {
+                            area: Area::Mcp,
+                            id: Some(value(&mut args)?),
+                        },
+                        "set" => Action::ManagementSet {
+                            area: Area::Mcp,
+                            id: Some(value(&mut args)?),
+                            path: value(&mut args)?.into(),
+                        },
+                        "remove" => Action::Management(ManagementRequest {
+                            area: Area::Mcp,
+                            action: ManagementAction::Remove {
+                                id: value(&mut args)?,
+                            },
+                        }),
+                        "test" => Action::Management(ManagementRequest {
+                            area: Area::Mcp,
+                            action: ManagementAction::Run {
+                                id: value(&mut args)?,
+                            },
+                        }),
+                        "inspect" => Action::Management(ManagementRequest {
+                            area: Area::Mcp,
+                            action: ManagementAction::Inspect {
+                                id: value(&mut args)?,
+                            },
+                        }),
                         _ => {
-                            return Err("Use mcp list, mcp login ID, mcp logout ID, mcp enable ID or mcp disable ID".into());
+                            return Err("Use mcp list, mcp add PATH, mcp edit ID, mcp set ID PATH, mcp remove ID, mcp test ID, mcp inspect ID, mcp disconnect ID, mcp login ID, mcp logout ID, mcp enable ID or mcp disable ID".into());
                         }
                     };
                 }
@@ -547,9 +751,13 @@ impl Options {
                                 enabled: command == "enable",
                             },
                         }),
-                        "edit" => Action::ManagementEdit(Area::Hooks),
+                        "edit" => Action::ManagementEdit {
+                            area: Area::Hooks,
+                            id: None,
+                        },
                         "set" => Action::ManagementSet {
                             area: Area::Hooks,
+                            id: None,
                             path: value(&mut args)?.into(),
                         },
                         _ => {
@@ -557,6 +765,74 @@ impl Options {
                                 "Use hooks list, hooks enable, hooks disable, hooks edit or hooks set PATH"
                                     .into(),
                             );
+                        }
+                    };
+                }
+                "scheduled" if matches!(options.action, Action::Chat) => {
+                    use crate::model::session::{Area, ManagementAction, ManagementRequest};
+                    let verb = value(&mut args)?;
+                    options.action = match verb.as_str() {
+                        "list" => Action::Management(ManagementRequest {
+                            area: Area::Scheduled,
+                            action: ManagementAction::List,
+                        }),
+                        command @ ("enable" | "disable") => Action::Management(ManagementRequest {
+                            area: Area::Scheduled,
+                            action: ManagementAction::Toggle {
+                                id: value(&mut args)?,
+                                enabled: command == "enable",
+                            },
+                        }),
+                        "edit" => Action::ManagementEdit {
+                            area: Area::Scheduled,
+                            id: Some(value(&mut args)?),
+                        },
+                        "set" => Action::ManagementSet {
+                            area: Area::Scheduled,
+                            id: Some(value(&mut args)?),
+                            path: value(&mut args)?.into(),
+                        },
+                        "add" => Action::ManagementAdd {
+                            area: Area::Scheduled,
+                            path: value(&mut args)?.into(),
+                        },
+                        command @ ("remove" | "run" | "history") => {
+                            let id = value(&mut args)?;
+                            let action = match command {
+                                "remove" => ManagementAction::Remove { id },
+                                "run" => ManagementAction::Run { id },
+                                _ => ManagementAction::Inspect { id },
+                            };
+                            Action::Management(ManagementRequest {
+                                area: Area::Scheduled,
+                                action,
+                            })
+                        }
+                        _ => {
+                            return Err("Use scheduled list, enable ID, disable ID, edit ID, set ID PATH, add PATH, remove ID, run ID or history ID".into());
+                        }
+                    };
+                }
+                "permissions" if matches!(options.action, Action::Chat) => {
+                    use crate::model::session::{Area, ManagementAction, ManagementRequest};
+                    let verb = value(&mut args)?;
+                    options.action = match verb.as_str() {
+                        "list" => Action::Management(ManagementRequest {
+                            area: Area::Permissions,
+                            action: ManagementAction::List,
+                        }),
+                        "add" => Action::ManagementAdd {
+                            area: Area::Permissions,
+                            path: value(&mut args)?.into(),
+                        },
+                        "remove" => Action::Management(ManagementRequest {
+                            area: Area::Permissions,
+                            action: ManagementAction::Remove {
+                                id: value(&mut args)?,
+                            },
+                        }),
+                        _ => {
+                            return Err("Use permissions list, permissions add PATH or permissions remove 'DECISION MATCH COMMAND'".into());
                         }
                     };
                 }
@@ -696,6 +972,25 @@ impl Options {
         if matches!(options.action, Action::Export { .. }) && !export_format {
             return Err("session export requires --format markdown|json".into());
         }
+        if let Action::SessionRename { title, clear, .. } = &options.action
+            && (title.is_some() == *clear
+                || title
+                    .as_deref()
+                    .is_some_and(|title| title.trim().is_empty()))
+        {
+            return Err(
+                "Use session rename SESSION TITLE or session rename SESSION --clear".into(),
+            );
+        }
+        if let Action::SessionCleanup {
+            older_than, keep, ..
+        } = &options.action
+            && older_than.is_some() == keep.is_some()
+        {
+            return Err(
+                "Use session cleanup --older-than DURATION or session cleanup --keep N".into(),
+            );
+        }
         if options.clear_preferences.is_some()
             && (!matches!(options.action, Action::Models(_)) || options.refresh)
         {
@@ -780,6 +1075,30 @@ fn parse_limit(flag: &str, value: &str) -> Result<u64> {
         );
     }
     Ok(limit)
+}
+
+/// `--older-than` takes a count and a unit, such as `30d`, `12h` or `45m`.
+fn parse_age(value: &str) -> Result<std::time::Duration> {
+    const USAGE: &str = "--older-than takes a number and a unit d, h or m, such as 30d";
+    let mut chars = value.chars();
+    let unit = match chars.next_back() {
+        Some('d') => 86_400,
+        Some('h') => 3_600,
+        Some('m') => 60,
+        _ => return Err(USAGE.into()),
+    };
+    let count: u64 = chars.as_str().parse().map_err(|_| USAGE)?;
+    let seconds = count
+        .checked_mul(unit)
+        .ok_or("--older-than is too large to measure")?;
+    Ok(std::time::Duration::from_secs(seconds))
+}
+
+/// `--keep` takes the number of Sessions to keep.
+fn parse_count(flag: &str, value: &str) -> Result<usize> {
+    value
+        .parse()
+        .map_err(|_| format!("{flag} must be a whole number").into())
 }
 
 /// The product home: `DIMCODE_HOME`, else `~/.dimcode-alpha` for an alpha
