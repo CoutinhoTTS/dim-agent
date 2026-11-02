@@ -2245,9 +2245,10 @@ impl Worker {
     }
 
     /// `/mcp [list]`, `/mcp login [--no-browser] ID`, `/mcp callback URL`,
-    /// `/mcp logout ID`, `/mcp enable ID`, `/mcp disable ID`.
+    /// `/mcp logout ID`, `/mcp disconnect ID`, `/mcp enable ID`,
+    /// `/mcp disable ID`.
     async fn mcp(&mut self, args: &str) -> crate::Result<()> {
-        const USAGE: &str = "Usage: /mcp [list|login [--no-browser] ID|callback URL|logout ID|enable ID|disable ID]";
+        const USAGE: &str = "Usage: /mcp [list|login [--no-browser] ID|callback URL|logout ID|disconnect ID|enable ID|disable ID]";
         let words: Vec<&str> = args.split_whitespace().collect();
         match words.as_slice() {
             [] | ["list"] => {
@@ -2292,6 +2293,23 @@ impl Worker {
                 );
             }
             // The ID is the rest of the line, spaces included.
+            ["disconnect", ..] => {
+                let (_, id) = args
+                    .trim()
+                    .split_once(char::is_whitespace)
+                    .unwrap_or((args.trim(), ""));
+                let id = id.trim();
+                if id.is_empty() {
+                    return Err(USAGE.into());
+                }
+                let params = mcp::target(&mut self.client, &self.options, id).await?;
+                self.client.rpc("mcp.disconnect", params).await?;
+                self.report(
+                    format!("Disconnected {}.", crate::sanitize::safe(id)),
+                    false,
+                );
+            }
+            // The ID is the rest of the line, spaces included.
             ["enable", ..] | ["disable", ..] => {
                 let (command, id) = args
                     .trim()
@@ -2301,15 +2319,15 @@ impl Worker {
                 if id.is_empty() {
                     return Err(USAGE.into());
                 }
-                let (rows, notes) = crate::mcp_command::set_enabled(
+                let state = crate::management::mcp::set_enabled(
                     &mut self.client,
-                    &self.options,
+                    &self.options.cwd,
                     id,
                     command == "enable",
                 )
                 .await?;
-                let mut lines = rows;
-                lines.extend(notes);
+                let mut lines = vec![state.sentence()];
+                lines.extend(state.notes);
                 self.report(lines.join("\n"), false);
             }
             _ => return Err(USAGE.into()),

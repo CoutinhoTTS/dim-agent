@@ -302,6 +302,7 @@ pub enum Command {
 pub enum Area {
     Skills,
     Hooks,
+    Mcp,
     Scheduled,
     Workflow,
     Permissions,
@@ -313,6 +314,7 @@ impl Area {
         match self {
             Self::Skills => "skills",
             Self::Hooks => "hooks",
+            Self::Mcp => "mcp",
             Self::Scheduled => "scheduled",
             Self::Workflow => "workflow",
             Self::Permissions => "permissions",
@@ -322,7 +324,7 @@ impl Area {
     /// Whether the area's documents are per entry, so `edit` and `set` name
     /// one, rather than one document for the area.
     pub fn per_entry(self) -> bool {
-        matches!(self, Self::Scheduled | Self::Workflow)
+        matches!(self, Self::Scheduled | Self::Mcp | Self::Workflow)
     }
 }
 
