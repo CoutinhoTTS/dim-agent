@@ -906,6 +906,7 @@
       "parent": "dim_agent_capabilities::skills",
       "file": "crates/dim-agent-capabilities/src/skills/catalog.rs",
       "unexpandedMacros": [
+        "format",
         "matches",
         "tokio::select",
         "tracing::warn",
@@ -930,6 +931,16 @@
       "unexpandedMacros": [
         "format",
         "matches",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_agent_capabilities::skills::install",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::skills",
+      "file": "crates/dim-agent-capabilities/src/skills/install.rs",
+      "unexpandedMacros": [
+        "format",
         "vec"
       ]
     },
@@ -2214,9 +2225,7 @@
       "crate": "dim_app_server",
       "parent": "dim_app_server::plugin_manager",
       "file": "crates/dim-app-server/src/plugin_manager/management.rs",
-      "unexpandedMacros": [
-        "matches"
-      ]
+      "unexpandedMacros": []
     },
     {
       "id": "dim_app_server::plugin_manager::record",
@@ -2509,7 +2518,20 @@
       "parent": "dim_app_server",
       "file": "crates/dim-app-server/src/skills_management.rs",
       "unexpandedMacros": [
+        "format",
+        "matches",
         "unreachable",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_app_server::skills_management::tests",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::skills_management",
+      "file": "crates/dim-app-server/src/skills_management.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
         "vec"
       ]
     },
@@ -11249,6 +11271,14 @@
     },
     {
       "from": "dim_agent_capabilities::skills",
+      "to": "dim_agent_capabilities::skill_settings",
+      "references": [
+        "path SkillInstallation",
+        "use crate::skill_settings::SkillInstallation"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::skills",
       "to": "dim_agent_capabilities::skills::catalog",
       "references": [
         "mod catalog",
@@ -11274,6 +11304,13 @@
       "to": "dim_agent_capabilities::skills::discovery",
       "references": [
         "mod discovery"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::skills",
+      "to": "dim_agent_capabilities::skills::install",
+      "references": [
+        "mod install"
       ]
     },
     {
@@ -11340,6 +11377,8 @@
       "references": [
         "path SOURCE",
         "path SettingsVersion",
+        "path SkillInstallSource",
+        "path SkillInstallation",
         "path SkillSettings",
         "path SkillSettingsError",
         "path SkillSettingsError::Cancelled",
@@ -11349,6 +11388,8 @@
         "path SkillSettingsSnapshot",
         "use crate::skill_settings::SOURCE",
         "use crate::skill_settings::SettingsVersion",
+        "use crate::skill_settings::SkillInstallSource",
+        "use crate::skill_settings::SkillInstallation",
         "use crate::skill_settings::SkillSettings",
         "use crate::skill_settings::SkillSettingsError",
         "use crate::skill_settings::SkillSettingsHost",
@@ -11362,9 +11403,19 @@
         "path CatalogEntry",
         "path CatalogVersion",
         "path CatalogView",
+        "path InstallOutcome",
+        "path PreviewConflict",
+        "path PreviewShadow",
+        "path PreviewSkill",
         "path RefreshTarget",
+        "path Replace",
+        "path Replace::Create",
+        "path Replace::Expected",
+        "path SelectedSkill",
         "path SkillIssue",
         "path SkillIssue::RootUnreadable",
+        "path SkillIssue::Unreadable",
+        "path SkillPreview",
         "path SkillSource::Plugin",
         "path SkillSource::Project",
         "path SkillSource::User",
@@ -11372,21 +11423,43 @@
         "path SkillStatus::Shadowed",
         "path SkillsError",
         "path SkillsError::Closed",
+        "path SkillsError::InstallConflict",
+        "path SkillsError::InstallationExists",
         "path SkillsError::RootUnreadable",
+        "path SkillsError::SelectionInvalid",
         "path SkillsError::SettingsConflict",
         "path SkillsError::SettingsRead",
         "path SkillsError::SettingsSync",
         "path SkillsError::SettingsWrite",
+        "path SkillsError::StalePreview",
+        "path SkillsError::UnknownInstallation",
         "path SkillsError::UnknownSkill",
+        "path SkillsError::UnmanagedDirectory",
+        "path install::occupied",
+        "path install::place",
+        "path install::remove",
+        "path install::revision",
+        "path install::selection_path",
+        "path install::selection_revision",
+        "path install::valid_id",
+        "path super::SkillDefinition",
         "path super::register_parts",
         "use super::CatalogEntry",
         "use super::CatalogVersion",
         "use super::CatalogView",
+        "use super::InstallOutcome",
+        "use super::PreviewConflict",
+        "use super::PreviewShadow",
+        "use super::PreviewSkill",
         "use super::RefreshTarget",
+        "use super::Replace",
+        "use super::SelectedSkill",
         "use super::SkillIssue",
+        "use super::SkillPreview",
         "use super::SkillSource",
         "use super::SkillStatus",
-        "use super::SkillsError"
+        "use super::SkillsError",
+        "use super::install"
       ]
     },
     {
@@ -11395,6 +11468,7 @@
       "references": [
         "path RootKind",
         "path RootKind::Plugin",
+        "path RootKind::Preview",
         "path RootKind::Project",
         "path RootKind::User",
         "path RootSnapshot",
@@ -11458,6 +11532,18 @@
         "path SkillIssue::Unreadable",
         "use super::SkillDefinition",
         "use super::SkillIssue"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::skills::install",
+      "to": "dim_agent_capabilities::skills",
+      "references": [
+        "path SkillsError",
+        "path SkillsError::InstallConflict",
+        "path SkillsError::InstallIo",
+        "path SkillsError::RemoveFailed",
+        "path SkillsError::SelectionInvalid",
+        "use super::SkillsError"
       ]
     },
     {
@@ -17630,21 +17716,6 @@
     },
     {
       "from": "dim_app_server::connection",
-      "to": "dim_agent_capabilities::skills",
-      "references": [
-        "path SkillsError",
-        "path SkillsError::Closed",
-        "path SkillsError::RootUnreadable",
-        "path SkillsError::SettingsConflict",
-        "path SkillsError::SettingsRead",
-        "path SkillsError::SettingsSync",
-        "path SkillsError::SettingsWrite",
-        "path SkillsError::UnknownSkill",
-        "use dim_agent_capabilities::skills::SkillsError"
-      ]
-    },
-    {
-      "from": "dim_app_server::connection",
       "to": "dim_agent_capabilities::skills::session",
       "references": [
         "path SkillsBranch",
@@ -17961,6 +18032,14 @@
       "references": [
         "path crate::provider::ProviderService",
         "path crate::provider::adopted_selection_preferences"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection",
+      "to": "dim_app_server::skills_management",
+      "references": [
+        "path skills_error",
+        "use crate::skills_management::skills_error"
       ]
     },
     {
@@ -20790,6 +20869,13 @@
       ]
     },
     {
+      "from": "dim_app_server::plugin_manager::management",
+      "to": "dim_app_server::plugin_manager::acquire",
+      "references": [
+        "path super::acquire::git_url_safe"
+      ]
+    },
+    {
       "from": "dim_app_server::plugin_manager::record",
       "to": "dim_app_server::plugin_manager",
       "references": [
@@ -22754,6 +22840,10 @@
       "references": [
         "path SOURCE",
         "path SettingsVersion",
+        "path SkillInstallSource",
+        "path SkillInstallSource::Git",
+        "path SkillInstallSource::Path",
+        "path SkillInstallation",
         "path SkillSettings",
         "path SkillSettingsError",
         "path SkillSettingsError::Conflict",
@@ -22762,6 +22852,8 @@
         "path SkillSettingsSnapshot",
         "use dim_agent_capabilities::skill_settings::SOURCE",
         "use dim_agent_capabilities::skill_settings::SettingsVersion",
+        "use dim_agent_capabilities::skill_settings::SkillInstallSource",
+        "use dim_agent_capabilities::skill_settings::SkillInstallation",
         "use dim_agent_capabilities::skill_settings::SkillSettings",
         "use dim_agent_capabilities::skill_settings::SkillSettingsError",
         "use dim_agent_capabilities::skill_settings::SkillSettingsHost",
@@ -22772,22 +22864,44 @@
       "from": "dim_app_server::skills_management",
       "to": "dim_agent_capabilities::skills",
       "references": [
+        "path InstallOutcome",
         "path RefreshTarget",
+        "path Replace::Create",
+        "path Replace::Expected",
+        "path Replace::Recorded",
+        "path SelectedSkill",
+        "path SkillPreview",
         "path SkillStatus::Active",
         "path SkillStatus::Shadowed",
         "path SkillsError",
         "path SkillsError::Closed",
+        "path SkillsError::InstallConflict",
+        "path SkillsError::InstallIo",
+        "path SkillsError::InstallationExists",
+        "path SkillsError::RemoveFailed",
         "path SkillsError::RootUnreadable",
+        "path SkillsError::SelectionInvalid",
         "path SkillsError::SettingsConflict",
         "path SkillsError::SettingsRead",
         "path SkillsError::SettingsSync",
         "path SkillsError::SettingsWrite",
+        "path SkillsError::StalePreview",
+        "path SkillsError::UnknownInstallation",
         "path SkillsError::UnknownSkill",
+        "path SkillsError::UnmanagedDirectory",
         "path dim_agent_capabilities::skills::SkillIssue",
         "path dim_agent_capabilities::skills::register_parts",
+        "path selection_path",
+        "path valid_installation_id",
+        "use dim_agent_capabilities::skills::InstallOutcome",
         "use dim_agent_capabilities::skills::RefreshTarget",
+        "use dim_agent_capabilities::skills::Replace",
+        "use dim_agent_capabilities::skills::SelectedSkill",
+        "use dim_agent_capabilities::skills::SkillPreview",
         "use dim_agent_capabilities::skills::SkillStatus",
-        "use dim_agent_capabilities::skills::SkillsError"
+        "use dim_agent_capabilities::skills::SkillsError",
+        "use dim_agent_capabilities::skills::selection_path",
+        "use dim_agent_capabilities::skills::valid_installation_id"
       ]
     },
     {
@@ -22826,6 +22940,31 @@
     },
     {
       "from": "dim_app_server::skills_management",
+      "to": "dim_app_server::plugin_manager",
+      "references": [
+        "path PluginError",
+        "use crate::plugin_manager::PluginError"
+      ]
+    },
+    {
+      "from": "dim_app_server::skills_management",
+      "to": "dim_app_server::plugin_manager::acquire",
+      "references": [
+        "path Staging",
+        "path Staging::in_root",
+        "path acquire",
+        "path acquire::check_git_url",
+        "path acquire::check_links",
+        "path acquire::check_ref",
+        "path acquire::clone",
+        "path acquire::git_url_safe",
+        "path acquire::work_dir",
+        "use crate::plugin_manager::acquire",
+        "use crate::plugin_manager::acquire::Staging"
+      ]
+    },
+    {
+      "from": "dim_app_server::skills_management",
       "to": "dim_app_server::protocol",
       "references": [
         "path canonical_cwd",
@@ -22848,6 +22987,28 @@
         "use crate::settings::BusinessDocument",
         "use crate::settings::SettingsError",
         "use crate::settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_app_server::skills_management",
+      "to": "dim_app_server::skills_management::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_app_server::skills_management::tests",
+      "to": "dim_agent_capabilities::skill_settings",
+      "references": [
+        "path SkillInstallSource::Path",
+        "path SkillInstallation"
+      ]
+    },
+    {
+      "from": "dim_app_server::skills_management::tests",
+      "to": "dim_app_server::skills_management",
+      "references": [
+        "path SkillDocument"
       ]
     },
     {
