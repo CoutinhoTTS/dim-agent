@@ -179,6 +179,7 @@ fn usable(state: McpServerState) -> bool {
 pub struct McpSession {
     connections: super::McpOwner,
     entries: Mutex<BTreeMap<String, Published>>,
+    names: Mutex<BTreeMap<String, PublishedTool>>,
     state: StateCell<McpSessionState>,
     ctx: Ctx,
     /// The Session instance, which names its tool provider changes.
@@ -188,12 +189,23 @@ pub struct McpSession {
 }
 
 /// What the Session holds for one entry of its selection: the tools it
-/// published to the model and the connection generation they came from.
-/// `session.mcp.app` reads both, and reads the view's document from the same
-/// generation.
+/// published to the model and the connection generation they came from. A
+/// view's mount read and call use the same generation, so a replaced one
+/// cannot serve a view a tool list the entry no longer declares.
 struct Published {
     set: Arc<ToolSourceSet>,
     connection: Arc<McpConnection>,
+}
+
+/// A published tool name and what a mount read resolves it to. The Session
+/// keeps the names of an entry it stopped publishing — disabled, connecting,
+/// failed or awaiting sign-in — so a view mounted from an earlier `tool/call`
+/// fact learns that its entry is unusable (`mcp_unavailable`) instead of that
+/// the name is unknown (`mcp_app_absent`, MCP Apps §4.3).
+#[derive(Clone)]
+struct PublishedTool {
+    server: String,
+    name: String,
 }
 impl PublicService for McpSession {}
 impl McpSession {
@@ -220,11 +232,18 @@ impl McpSession {
         cancel: &CancellationToken,
     ) {
         let mut entries = self.entries.lock().unwrap();
+        let mut names = self.names.lock().unwrap();
         if cancel.is_cancelled() {
             return;
         }
         match published {
             Some((set, connection)) => {
+                names.retain(|_, tool| tool.server != id);
+                for tool in &set.tools {
+                    if let Some(origin) = published_tool(&tool.definition) {
+                        names.insert(tool.definition.name.clone(), origin);
+                    }
+                }
                 entries.insert(id.to_owned(), Published { set, connection });
             }
             None => {
@@ -234,6 +253,7 @@ impl McpSession {
         self.state.update(|state| {
             state.servers.insert(id.to_owned(), status);
         });
+        drop(names);
         drop(entries);
         self.tools_changed();
     }
@@ -264,24 +284,21 @@ impl McpSession {
         if self.stopped.is_cancelled() {
             return Err(McpAppError::Unavailable);
         }
-        let (server, connection, name) = {
+        let resolved = self
+            .names
+            .lock()
+            .unwrap()
+            .get(published)
+            .cloned()
+            .ok_or(McpAppError::Absent)?;
+        let server = resolved.server;
+        let name = resolved.name;
+        let connection = {
             let entries = self.entries.lock().unwrap();
             entries
-                .iter()
-                .find_map(|(id, entry)| {
-                    let tool = entry
-                        .set
-                        .tools
-                        .iter()
-                        .find(|tool| tool.definition.name == published)?;
-                    let name = tool
-                        .definition
-                        .metadata
-                        .as_ref()
-                        .and_then(|metadata| metadata.mcp_original_tool_name.clone())?;
-                    Some((id.clone(), entry.connection.clone(), name))
-                })
-                .ok_or(McpAppError::Absent)?
+                .get(&server)
+                .map(|entry| entry.connection.clone())
+                .ok_or(McpAppError::Unavailable)?
         };
         if !usable(connection.state()) {
             return Err(McpAppError::Unavailable);
@@ -442,6 +459,7 @@ impl DynPlugin for McpSessionPlugin {
                     (*session).clone(),
                 ),
                 entries: Mutex::default(),
+                names: Mutex::default(),
                 state: StateCell::new(McpSessionState::default()),
                 ctx: ctx.clone(),
                 session: self.session,
@@ -457,6 +475,7 @@ impl DynPlugin for McpSessionPlugin {
                 drain.close();
                 drain.wait().await;
                 cleanup.entries.lock().unwrap().clear();
+                cleanup.names.lock().unwrap().clear();
                 cleanup.state.set(McpSessionState {
                     closed: true,
                     ..Default::default()
@@ -675,6 +694,16 @@ async fn credential_change(
         .await
         .map_err(|_| McpError::Unavailable)?;
     Ok(*credential.borrow_and_update())
+}
+
+/// What a mount read resolves a published contribution to: its entry and the
+/// server's own tool name, as the producer recorded them.
+fn published_tool(definition: &ToolDefinition) -> Option<PublishedTool> {
+    let metadata = definition.metadata.as_ref()?;
+    Some(PublishedTool {
+        server: metadata.mcp_server_id.clone()?,
+        name: metadata.mcp_original_tool_name.clone()?,
+    })
 }
 
 /// A tool whose visibility excludes the model is published to no model: only

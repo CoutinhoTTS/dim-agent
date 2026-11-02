@@ -2115,12 +2115,21 @@ async fn a_mount_refuses_an_unsupported_document_and_an_unusable_entry() {
     env.update(SettingsScope::User, "docs", McpChange::SetEnabled(false))
         .await;
     adopted(&session, None).await;
-    assert_eq!(mcp.widget(&chart).await.unwrap_err(), McpAppError::Absent);
+    assert_eq!(
+        mcp.widget(&chart).await.unwrap_err(),
+        McpAppError::Unavailable,
+        "the view learns its entry is disabled, not that its tool name is unknown"
+    );
     assert_eq!(
         mcp.call("docs", "chart", arguments(json!({})))
             .await
             .unwrap_err(),
         McpAppError::Unavailable
+    );
+    assert_eq!(
+        mcp.widget("mcp_nowhere_absent").await.unwrap_err(),
+        McpAppError::Absent,
+        "a name the Session never held is absent"
     );
     assert!(
         env.remote.calls.lock().unwrap().is_empty(),
@@ -2143,7 +2152,10 @@ async fn a_replaced_connection_generation_re_reads_the_document() {
     env.update(SettingsScope::User, "docs", McpChange::SetEnabled(false))
         .await;
     adopted(&session, None).await;
-    assert_eq!(mcp.widget(&chart).await.unwrap_err(), McpAppError::Absent);
+    assert_eq!(
+        mcp.widget(&chart).await.unwrap_err(),
+        McpAppError::Unavailable
+    );
 
     env.update(SettingsScope::User, "docs", McpChange::SetEnabled(true))
         .await;
