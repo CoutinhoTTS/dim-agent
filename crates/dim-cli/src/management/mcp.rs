@@ -23,7 +23,7 @@ use crate::model::session::{
     ActionKind, EntryDocument, EntryState, ManagementAction, ManagementDetail, ManagementEntry,
     ManagementView,
 };
-use crate::sanitize::{safe, safe_line};
+use crate::sanitize::safe_line;
 use crate::ui::i18n::{t, tf};
 
 /// The owner's sentence for a write against a plugin entry: the client
@@ -319,7 +319,7 @@ impl Enabled {
             },
             &[
                 ("id", &format!("{:?}", self.id)),
-                ("source", &safe(&self.source)),
+                ("source", &safe_line(&self.source)),
             ],
         )
     }
@@ -364,7 +364,7 @@ pub async fn set_enabled(
                 notes: vec![tf(
                     "The MCP catalog could not be read ({error}); withdrew this workspace's enablement of {id}. A user entry with this ID is unchanged.",
                     &[
-                        ("error", &safe(&error.to_string())),
+                        ("error", &safe_line(&error.to_string())),
                         ("id", &format!("{id:?}")),
                     ],
                 )],

@@ -26024,9 +26024,7 @@
       "from": "dim_cli::management::mcp",
       "to": "dim_cli::sanitize",
       "references": [
-        "path safe",
         "path safe_line",
-        "use crate::sanitize::safe",
         "use crate::sanitize::safe_line"
       ]
     },
@@ -26450,7 +26448,7 @@
       "from": "dim_cli::mcp",
       "to": "dim_cli::sanitize",
       "references": [
-        "use crate::sanitize::safe"
+        "use crate::sanitize::safe_line"
       ]
     },
     {

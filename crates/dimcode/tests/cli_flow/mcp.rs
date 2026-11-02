@@ -1424,6 +1424,198 @@ fn mcp_list_prints_every_sources_errors() {
     );
 }
 
+/// A source, a transport, an auth status or a scope name that holds a
+/// break stays on its row, and a source's error stays on its note:
+/// `mcp list` prints each server as one line.
+#[test]
+fn mcp_list_keeps_a_fields_breaks_on_its_row() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["mcp.catalog"]);
+        let request = wire.read("mcp.catalog");
+        wire.reply(
+            &request,
+            json!({
+                "userRevision": "user:1",
+                "projectRevision": null,
+                "userApplication": {"error": "first\nsecond", "cleanupError": null},
+                "pluginApplication": null,
+                "projectApplication": null,
+                "servers": [
+                    {"id": "docs", "source": "user\nuser", "enabled": true,
+                     "transport": "stdio\nstdio",
+                     "auth": {"status": "custom\nstatus",
+                              "missingScopes": ["repo\nread"]}},
+                ],
+            }),
+        );
+        wire.hold();
+    });
+    let output = home.command().args(["mcp", "list"]).output().unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "{stdout:?}");
+    for field in ["user user", "stdio stdio", "custom status"] {
+        assert!(
+            lines[0].contains(field),
+            "{field:?} missing from {stdout:?}"
+        );
+    }
+    assert!(lines[1].contains("Missing scopes: repo read"), "{stdout:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("first second"), "{stderr:?}");
+    assert_eq!(
+        stderr
+            .lines()
+            .filter(|line| line.contains("MCP configuration:"))
+            .count(),
+        1,
+        "{stderr:?}"
+    );
+}
+
+/// The Session's report keeps each server's state, message and refusal on
+/// its own line, with the Session's catalog error after them.
+#[test]
+fn tui_mcp_list_keeps_a_session_state_on_one_line() {
+    let home = Home::new();
+    let (shown, wait_shown) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        started(wire);
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        let request = wire.read("mcp.catalog");
+        wire.reply(
+            &request,
+            json!({
+                "userRevision": "user:1", "projectRevision": null,
+                "userApplication": {}, "projectApplication": null,
+                "servers": [],
+            }),
+        );
+        let state = wire.read("session.mcp");
+        wire.reply(
+            &state,
+            json!({
+                "sessionId": "session",
+                "servers": [{"id": "docs", "state": "failed\nstate",
+                             "message": "message\nline",
+                             "rejection": {"version": "v1\nx", "reason": "reason\ny"}}],
+                "catalogError": "catalog\nerror",
+            }),
+        );
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/mcp list\r");
+    terminal.until("failed state");
+    terminal.until("message line");
+    terminal.until("Version v1 x rejected: reason y");
+    terminal.until("MCP catalog: catalog error");
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+/// A source that holds a break stays on the enablement sentence's line.
+#[test]
+fn mcp_enable_keeps_the_source_on_one_line() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(
+            &request,
+            json!({
+                "userRevision": "user:1", "projectRevision": null,
+                "userApplication": {}, "projectApplication": null,
+                "servers": [
+                    {"id": "docs", "source": "user\nsource", "enabled": false,
+                     "transport": "stdio"},
+                ],
+            }),
+        );
+        let request = wire.read("mcp.set_enabled");
+        assert_eq!(request["params"]["id"], "docs");
+        assert_eq!(request["params"]["source"], "user\nsource");
+        wire.reply(&request, json!({}));
+    });
+    let output = home
+        .command()
+        .args(["mcp", "enable", "docs"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Enabled \"docs\" (user source).\n"
+    );
+}
+
+/// A disable that withdraws the record without a readable catalog keeps
+/// the read's error on the note's line.
+#[test]
+fn mcp_disable_keeps_the_catalog_error_on_one_line() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"catalog\nunavailable",
+            "data":{"appError":"mcp_unavailable"}}}));
+        let request = wire.read("mcp.set_enabled");
+        assert_eq!(request["params"]["id"], "docs");
+        assert_eq!(request["params"]["source"], "project");
+        assert_eq!(request["params"]["expectedVersion"], "");
+        assert_eq!(request["params"]["enabled"], false);
+        wire.reply(&request, json!({}));
+    });
+    let output = home
+        .command()
+        .args(["mcp", "disable", "docs"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Disabled \"docs\" (project).\n"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("catalog unavailable"), "{stderr:?}");
+    assert_eq!(
+        stderr
+            .lines()
+            .filter(|line| line.contains("could not be read"))
+            .count(),
+        1,
+        "{stderr:?}"
+    );
+}
+
 /// `mcp enable` and `mcp disable` keep printing what they printed before
 /// the panel shared their implementation.
 #[test]
