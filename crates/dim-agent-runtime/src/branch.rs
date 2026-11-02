@@ -127,6 +127,22 @@ impl Branch {
         let through = self.published(through)?;
         self.0.timeline().history(Some(through)).await
     }
+    /// The first page of a backward, kind-filtered read of the whole branch
+    /// chain, pinned at the published head.
+    pub fn page_cursor(&self) -> Result<BranchCursor> {
+        self.0.timeline().page_cursor(self.sequence())
+    }
+    /// One page of that read: up to `limit` stored rows of `kinds`, oldest
+    /// first, from the cursor's segment at the pinned head. `kinds` is the
+    /// caller's selection; the store skips every other row before decoding.
+    pub async fn page(
+        &self,
+        cursor: BranchCursor,
+        limit: usize,
+        kinds: &[&str],
+    ) -> Result<BranchPage> {
+        self.0.timeline().page(cursor, limit, kinds).await
+    }
     pub async fn local<R: std::ops::RangeBounds<u64> + Send>(
         &self,
         range: R,

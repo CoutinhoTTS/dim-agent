@@ -10988,6 +10988,7 @@
       "references": [
         "path Fold",
         "path Fold::new",
+        "path super::Arguments::parse",
         "use super::Narrative"
       ]
     },
@@ -11012,6 +11013,7 @@
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolResult",
+        "path ToolResult::error",
         "use dim_agent_types::ToolResult"
       ]
     },
@@ -14418,6 +14420,14 @@
     },
     {
       "from": "dim_agent_runtime::branch",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path BranchCursor",
+        "path BranchPage"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::branch",
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
@@ -14620,6 +14630,8 @@
       "from": "dim_agent_runtime::core::timeline",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
+        "path BranchCursor",
+        "path BranchPage",
         "path PolicyFacts",
         "path PolicyOrder",
         "path PolicyOrderEvent",
@@ -14627,6 +14639,8 @@
         "path StoredEvent",
         "path TimelineKey",
         "path TimelineStore",
+        "use crate::BranchCursor",
+        "use crate::BranchPage",
         "use crate::PolicyFacts",
         "use crate::PolicyOrder",
         "use crate::PolicyOrderEvent",

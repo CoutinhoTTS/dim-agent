@@ -78,6 +78,7 @@
 | `Timeline::context(through).await` | 祖先链起点起截至 `through` 的完整事实重放，不需要解释器或快照 |
 | `Timeline::context_with_checkpoint(through, interpreter, decode).await` | 选取 sequence 不大于 `through`、解释器相同的最近恢复快照，校验锚点事实后从其 `resume` 起读取；无可用快照时等同 `context` |
 | `Timeline::history(through).await` | 祖先链加本分支截至 `through` 的完整固定历史 |
+| `Timeline::page_cursor(through)`、`Timeline::page(cursor, limit, kinds).await` | 从固定 head 起按 kind 过滤、按存储行向前分页的祖先链读取；页内按序号升序，游标为所取最旧命中行的序号 |
 | `Timeline::local(range).await` | 本分支已写入事件的区间（默认终点 `committed()`），可分页 |
 | `Timeline::trace(sequence).await` | 该事件的 before 轨迹 |
 
@@ -93,6 +94,7 @@
 | `context_with_checkpoint(through, ..)` | 最近有效快照的 `resume` 起的祖先链和本分支后缀 | 不扫描快照恢复位置之前的请求正文 |
 | `local(range)`、`trace(sequence)` | 指定区间或命中事件的物理行 | 合并行完整解码后按逻辑序号过滤；trace 只返回指定事件的轨迹 |
 | 分段读取 | 固定水位，按键 seek；内部读段可切开原子批次，`TimelineStore::read/read_segments` 的最终区间终点须为批次边界 | 每段结束释放连接锁；合并行完整解码后截取，不在锁内解码无限历史 |
+| 反向按种类分页 | `read_kind_page`：从固定水位向前取最近 `limit` 个命中行，页内按序号升序；游标为所取最旧命中行的序号减一 | 命中行在取出前按 kind 过滤；扫描沿 `(session_id, branch_id, sequence)` 主键反向 seek，不新增索引；合并行整行解码后返回；调用方以固定 head 分页，页尾即下一段的输入 |
 | 不读请求正文的分页 | `read_page_without_request_bodies`：历史分页、摘要、协作与流式投影；批次边界与 `read_page` 相同 | 不还原 `context/prepare`、`model/call` 的请求，也不加载其内容行，只校验记录种类与引用形状（[请求增量存储 §7.5](../../design/appserver/request-delta-storage.md#75-不使用请求正文的读取)）；使用请求的读取与首次恢复仍完整校验 |
 | 恢复 | 固定 Session 目录和所有分支头，逐页校验事件、引用、祖先截点及 completed 事实的 through 边界；可选快照 state 不参与恢复校验 | 每页结束释放连接锁；解码内容缓存跨页共用、有界（第 2 节），校验结束释放；跨页保留事件 ID 和目录校验信息；进程内首次恢复全量校验，之后目录与所有分支头不变时复用上次结果，记录只在存储的进程内存，校验失败或目录变化回退全量（[恢复校验复用](../../design/appserver/restore-validation.md)）；校验内容与不变量不变 |
 

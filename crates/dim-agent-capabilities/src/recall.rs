@@ -21,7 +21,6 @@ use dim_agent_types::*;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::{Value, json};
-#[cfg(feature = "testing")]
 use std::collections::HashSet;
 use std::{collections::HashMap, sync::Arc};
 use tokio_util::sync::CancellationToken;
@@ -35,6 +34,37 @@ const PAGE_CHARACTERS: usize = 8_000;
 const PART: usize = 120;
 /// Longest `about` the tool accepts (§5.2).
 const ABOUT: usize = 200;
+/// Stored rows one read asks for. The answer, not this page, ends the read.
+const PAGE_ROWS: usize = 128;
+/// The kinds the narrative folds (§3.2, §3.7). The read skips every other
+/// row before decoding it.
+const KINDS: &[&str] = &[
+    "input/message",
+    "input/consumed",
+    "turn/start",
+    "turn/end",
+    "step/model-start",
+    "step/text",
+    "step/model-content",
+    "step/model-output-end",
+    "step/tool-use-start",
+    "step/tool-use",
+    "step/tool-result",
+    "approval/request",
+    "approval/respond",
+    "approval/cancelled",
+    "exec/started",
+    "exec/ended",
+    "collaboration/request",
+    "collaboration/message",
+    "collaboration/result",
+    "branch/create",
+    "branch/start",
+    "stop/interrupt",
+    "permission/changed",
+    "context/compaction",
+    "session/forked",
+];
 
 /// The Recall plugin: the Session tool.
 pub fn feature() -> Feature {
@@ -137,13 +167,40 @@ impl RecallTool {
         cancel: CancellationToken,
     ) -> Result<ToolResult, HostError> {
         let branch = self.0.get(&context.branch_id).map_err(Self::facade_error)?;
-        let head = branch.sequence();
-        let events = branch
-            .history(Some(head))
-            .await
-            .map_err(Self::facade_error)?;
-        check_cancel(&cancel)?;
-        Ok(Narrative::new(&events).answer(&context.turn_id, &call.input))
+        let arguments = match Arguments::parse(&call.input) {
+            Ok(arguments) => arguments,
+            Err(message) => return Ok(ToolResult::error(message)),
+        };
+        let mut cursor = branch.page_cursor().map_err(Self::facade_error)?;
+        let mut events: Vec<Arc<AgentEvent>> = Vec::new();
+        loop {
+            let page = branch
+                .page(cursor, PAGE_ROWS, KINDS)
+                .await
+                .map_err(Self::facade_error)?;
+            let own_oldest = page.own;
+            let mut older = page.events;
+            older.append(&mut events);
+            events = older;
+            check_cancel(&cancel)?;
+            let complete = match page.next {
+                Some(next) => {
+                    cursor = next;
+                    false
+                }
+                None => true,
+            };
+            let Some(floor) = window_floor(&events, complete) else {
+                continue;
+            };
+            if !complete && !origins_closed(&events, floor) {
+                continue;
+            }
+            let narrative = Narrative::window(&events, floor, own_oldest);
+            if complete || narrative.reaches(&arguments) {
+                return Ok(narrative.answer(&context.turn_id, &arguments));
+            }
+        }
     }
 }
 
@@ -324,6 +381,14 @@ impl Arguments {
         }
         Ok(arguments)
     }
+
+    /// The `about` words, lowercased; every one must appear (§5.2).
+    fn words(&self) -> Vec<String> {
+        self.about
+            .as_deref()
+            .map(|about| about.split_whitespace().map(str::to_lowercase).collect())
+            .unwrap_or_default()
+    }
 }
 
 fn string(field: &str, value: &Value, limit: Option<usize>) -> Result<String, String> {
@@ -359,6 +424,10 @@ struct Narrative<'a> {
     /// Position of this branch's own `branch/start`; the end of the history
     /// when the pinned list holds none.
     own_start: usize,
+    /// The first event folded as the whole history folds it. Earlier events
+    /// are only the joins of a later one: a page read backwards cuts the
+    /// oldest turn, and nothing before its end is told.
+    floor: usize,
 }
 
 /// The events a narrative tells: each thing's origin and its joined events.
@@ -376,13 +445,55 @@ fn tell<'a>(told: &mut Told<'a>, id: &'a str) {
     let _ = (told, id);
 }
 
+/// Where the oldest page of a backward read stops folding as the whole
+/// history folds it: the end of the turn the page cuts, so nothing before it
+/// is told. A page that reaches the start of the chain folds whole.
+fn window_floor(events: &[Arc<AgentEvent>], complete: bool) -> Option<usize> {
+    if complete {
+        return Some(0);
+    }
+    events
+        .iter()
+        .position(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+}
+
+/// Whether every input consumed from `floor` on has its `input/message` in
+/// the page: the join and the keyed liveness rule both need it.
+fn origins_closed(events: &[Arc<AgentEvent>], floor: usize) -> bool {
+    let inputs: HashSet<&str> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::InputMessage(_) => Some(event.id.as_str()),
+            _ => None,
+        })
+        .collect();
+    events[floor..].iter().all(|event| match &event.kind {
+        EventKind::InputConsumed(data) => inputs.contains(data.input_id.as_str()),
+        _ => true,
+    })
+}
+
 impl<'a> Narrative<'a> {
     /// Folds a pinned branch history into things and turns.
+    #[cfg(feature = "testing")]
     fn new(events: &'a [Arc<AgentEvent>]) -> Self {
+        Self::fold(events, 0, events.len())
+    }
+
+    /// Folds a page read backwards from the head. Everything from `floor` on
+    /// folds as the whole history folds it; `own_start_before` says this
+    /// branch's own start lies before the page (a page inside the branch
+    /// itself rather than in its inherited prefix).
+    fn window(events: &'a [Arc<AgentEvent>], floor: usize, own_start_before: bool) -> Self {
+        let own_start = if own_start_before { 0 } else { events.len() };
+        Self::fold(events, floor, own_start)
+    }
+
+    fn fold(events: &'a [Arc<AgentEvent>], floor: usize, own_start: usize) -> Self {
         let own_start = events
             .iter()
             .rposition(|event| matches!(event.kind, EventKind::BranchStart(_)))
-            .unwrap_or(events.len());
+            .unwrap_or(own_start);
         let last_block = last_blocks(events);
         let mut things: Vec<Thing<'a>> = Vec::new();
         // The turn each thing is told inside, pushed beside it.
@@ -735,10 +846,14 @@ impl<'a> Narrative<'a> {
             .collect();
         let mut ids: HashMap<&'a str, Entry> = HashMap::new();
         for (index, turn) in turns.iter().enumerate() {
-            ids.insert(turn.id, Entry::Turn(index));
+            if turn.start >= floor {
+                ids.insert(turn.id, Entry::Turn(index));
+            }
         }
         for (index, thing) in things.iter().enumerate() {
-            ids.insert(events[thing.origin].id.as_str(), Entry::Thing(index));
+            if thing.anchor >= floor {
+                ids.insert(events[thing.origin].id.as_str(), Entry::Thing(index));
+            }
         }
         top.sort_by_key(|entry| entry_anchor(&turns, &things, *entry));
 
@@ -751,15 +866,12 @@ impl<'a> Narrative<'a> {
             ids,
             told,
             own_start,
+            floor,
         }
     }
 
-    /// The tool's answer for `input`, called from `calling_turn`.
-    fn answer(&self, calling_turn: &str, input: &JsonObject) -> ToolResult {
-        let arguments = match Arguments::parse(input) {
-            Ok(arguments) => arguments,
-            Err(message) => return ToolResult::error(message),
-        };
+    /// The tool's answer for the folded history.
+    fn answer(&self, calling_turn: &str, arguments: &Arguments) -> ToolResult {
         if let Some(open) = &arguments.open {
             let Some(entry) = self.ids.get(open.as_str()).copied() else {
                 return ToolResult::error(format!("No turn or line has id {}.", part(open)));
@@ -779,23 +891,77 @@ impl<'a> Narrative<'a> {
             None => None,
         };
         if arguments.about.is_some() || arguments.tool.is_some() {
-            self.search(&arguments, before)
+            self.search(arguments, before)
         } else {
             self.index(before, calling_turn)
         }
     }
 
-    /// The turn index, latest first (§3.6).
-    fn index(&self, before: Option<usize>, calling_turn: &str) -> ToolResult {
-        let entries: Vec<Entry> = self
-            .top
+    /// Whether everything (§3.6) back from the head is already folded: the
+    /// index, a search or an id needs no older entry than this page holds.
+    /// A read stops here instead of walking the rest of the branch.
+    fn reaches(&self, arguments: &Arguments) -> bool {
+        if let Some(open) = &arguments.open {
+            return self.ids.contains_key(open.as_str());
+        }
+        let before = match &arguments.before {
+            Some(before) => match self.ids.get(before.as_str()).copied() {
+                Some(entry) => Some(entry_anchor(&self.turns, &self.things, entry)),
+                None => return false,
+            },
+            None => None,
+        };
+        if arguments.about.is_some() || arguments.tool.is_some() {
+            let words = arguments.words();
+            self.matches(arguments.tool.as_deref(), &words, before)
+                .nth(PAGE_ENTRIES)
+                .is_some()
+        } else {
+            self.entries(before).nth(PAGE_ENTRIES).is_some()
+        }
+    }
+
+    /// The told entries older than `before`, latest first.
+    fn entries(&self, before: Option<usize>) -> impl Iterator<Item = Entry> + '_ {
+        self.top
             .iter()
             .rev()
             .copied()
-            .filter(|entry| {
+            .filter(|entry| entry_anchor(&self.turns, &self.things, *entry) >= self.floor)
+            .filter(move |entry| {
                 before.is_none_or(|before| entry_anchor(&self.turns, &self.things, *entry) < before)
             })
-            .collect();
+    }
+
+    /// The things of turns whose body matches `tool` and every `word`,
+    /// latest first.
+    fn matches<'s>(
+        &'s self,
+        tool: Option<&'s str>,
+        words: &'s [String],
+        before: Option<usize>,
+    ) -> impl Iterator<Item = usize> + 's {
+        (0..self.things.len())
+            .rev()
+            .filter(move |index| self.owners[*index].is_some())
+            .filter(move |index| self.things[*index].anchor >= self.floor)
+            .filter(move |index| before.is_none_or(|before| self.things[*index].anchor < before))
+            .filter(move |index| match tool {
+                Some(tool) => match &self.things[*index].kind {
+                    Kind::Call(call) => call.name == *tool,
+                    _ => false,
+                },
+                None => true,
+            })
+            .filter(move |index| {
+                let text = self.body(&self.things[*index]).to_lowercase();
+                words.iter().all(|word| text.contains(word))
+            })
+    }
+
+    /// The turn index, latest first (§3.6).
+    fn index(&self, before: Option<usize>, calling_turn: &str) -> ToolResult {
+        let entries: Vec<Entry> = self.entries(before).collect();
         let more = entries.len() > PAGE_ENTRIES;
         let lines: Vec<Line<'a>> = entries
             .iter()
@@ -818,26 +984,9 @@ impl<'a> Narrative<'a> {
 
     /// The matching lines of every turn, latest first (§3.6).
     fn search(&self, arguments: &Arguments, before: Option<usize>) -> ToolResult {
-        let about: Vec<String> = arguments
-            .about
-            .as_deref()
-            .map(|about| about.split_whitespace().map(str::to_lowercase).collect())
-            .unwrap_or_default();
-        let matching: Vec<usize> = (0..self.things.len())
-            .rev()
-            .filter(|index| self.owners[*index].is_some())
-            .filter(|index| before.is_none_or(|before| self.things[*index].anchor < before))
-            .filter(|index| match &arguments.tool {
-                Some(tool) => match &self.things[*index].kind {
-                    Kind::Call(call) => call.name == *tool,
-                    _ => false,
-                },
-                None => true,
-            })
-            .filter(|index| {
-                let text = self.body(&self.things[*index]).to_lowercase();
-                about.iter().all(|word| text.contains(word))
-            })
+        let words = arguments.words();
+        let matching: Vec<usize> = self
+            .matches(arguments.tool.as_deref(), &words, before)
             .collect();
         if matching.is_empty() {
             let last = if before.is_some() {
@@ -1748,7 +1897,10 @@ pub mod testing {
 
         /// The tool's answer for `input`, called from `calling_turn`.
         pub fn answer(&self, calling_turn: &str, input: &JsonObject) -> ToolResult {
-            self.0.answer(calling_turn, input)
+            match super::Arguments::parse(input) {
+                Ok(arguments) => self.0.answer(calling_turn, &arguments),
+                Err(message) => ToolResult::error(message),
+            }
         }
 
         /// Whether this narrative tells the event: the origin of a thing, or

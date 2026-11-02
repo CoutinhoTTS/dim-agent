@@ -9,8 +9,13 @@ the model the history of its own branch. Design:
 Owner: [recall.rs](../../../../crates/dim-agent-capabilities/src/recall.rs).
 Registers the Session `recall` tool. A call resolves the calling branch from
 `ToolExecutionContext.branch_id`, pins its published head with
-`Branch::sequence()`, reads `Branch::history(Some(head))` once, and answers
-from that list: the turn index, one turn, one thing in full, or a search.
+`Branch::sequence()`, and reads that history backwards in pages through
+`Branch::page_cursor` and `Branch::page`: the newest stored rows of the kinds
+the narrative folds, at or below the pinned head, continued until the answer is
+met. It answers from the collected suffix: the turn index, one turn, one thing
+in full, or a search. The turn a page cuts is not told; everything after it is
+folded as the whole history folds it, so a page boundary changes what was read,
+never the answer.
 
 ### Dependencies
 
@@ -30,10 +35,10 @@ follows context assembly: an input counts once it is consumed, a reply counts
 when its output completed or as the partial text an interruption left, and a
 tool result is told as its `content`.
 
-The pinned read is the whole call: a compaction during the call cannot move
-it. A facade read while the Session reloads returns
-`HostError::Cancelled("capability reloading")`, any other facade error is a
-failed call, and the call's cancellation token is checked after the read and
+The pinned head is the whole call: a compaction during the call cannot move
+it and the pages all read at that head. A facade read while the Session reloads
+returns `HostError::Cancelled("capability reloading")`, any other facade error
+is a failed call, and the call's cancellation token is checked between pages and
 before rendering, as `wait` does. Pages are 20 entries, or 8,000 characters of
 one thing in full; every variable part of a line is cut at 120 characters, so
 a line stays at most 600 characters. The tool returns text the model reads and
@@ -45,8 +50,10 @@ a line stays at most 600 characters. The tool returns text the model reads and
 holds the acceptance flows of the design's §14: the turn index and its pages,
 a turn, one thing in full with CJK paging, the allowlist against what context
 assembly places, search, compactions, call endings, branch and Session forks,
-line bounds, the read-only preset, a long turn, interrupted outputs and the
-argument errors.
+line bounds, the read-only preset, a long turn, interrupted outputs, the
+argument errors, a 120-turn history whose index, search and newest thing
+answer from bounded pages, and a child branch paging through its inherited
+prefix.
 [transport_flow/recall.rs](../../../../crates/dim-app-server/tests/transport_flow/recall.rs)
 finds `recall` in the tool table of both the product and the `--models`
 profile.
