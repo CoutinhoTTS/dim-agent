@@ -789,6 +789,19 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_agent_capabilities::prompt_suggestion",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities",
+      "file": "crates/dim-agent-capabilities/src/prompt_suggestion.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches",
+        "tokio::select",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::recall",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -2274,6 +2287,16 @@
         "format",
         "json",
         "matches",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_app_server::prompt_suggestion_settings",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/prompt_suggestion_settings.rs",
+      "unexpandedMacros": [
+        "json",
         "vec"
       ]
     },
@@ -6992,6 +7015,13 @@
     },
     {
       "from": "dim_agent_capabilities",
+      "to": "dim_agent_capabilities::prompt_suggestion",
+      "references": [
+        "mod prompt_suggestion"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::recall",
       "references": [
         "mod recall"
@@ -8757,6 +8787,7 @@
         "path AgentEvent",
         "path ContextCompactionData",
         "path ContextCompactionResult::Completed",
+        "path EventKind",
         "path EventKind::BranchStart",
         "path EventKind::ContextCompaction",
         "path EventKind::ContextConfigured",
@@ -8792,7 +8823,8 @@
       "references": [
         "path ToolEffect",
         "path ToolEffect::CommandRun",
-        "path ToolEffect::FileWritten"
+        "path ToolEffect::FileWritten",
+        "path kind"
       ]
     },
     {
@@ -10796,6 +10828,180 @@
         "path PromptScope::Branch",
         "path PromptScope::Task",
         "path PromptScope::Turn"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_suggestion",
+      "to": "dim_agent_capabilities::context_preparation",
+      "references": [
+        "path ContextPreparation",
+        "use crate::context_preparation::ContextPreparation"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_suggestion",
+      "to": "dim_agent_capabilities::history",
+      "references": [
+        "path fold_output_parts",
+        "use crate::history::fold_output_parts"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_suggestion",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostError",
+        "path ModelChunk::MessageStop",
+        "path ModelChunk::Text",
+        "path ModelChunk::ToolStart",
+        "path ModelChunk::ToolUse",
+        "path ModelConnection::Local",
+        "path ModelHost",
+        "path ModelStream",
+        "path ProviderConnectionResolver",
+        "path ResolvedModelConnection",
+        "use crate::host::HostError",
+        "use crate::host::ModelChunk",
+        "use crate::host::ModelConnection",
+        "use crate::host::ModelHost",
+        "use crate::host::ModelStream",
+        "use crate::host::ProviderConnectionResolver",
+        "use crate::host::ResolvedModelConnection"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_suggestion",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path RpcError",
+        "path RpcError::service",
+        "path SessionMethods",
+        "path params",
+        "path reply",
+        "use crate::methods::Interruption",
+        "use crate::methods::MethodDecl",
+        "use crate::methods::RpcError",
+        "use crate::methods::SessionMethods",
+        "use crate::methods::params",
+        "use crate::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_suggestion",
+      "to": "dim_agent_capabilities::session_broadcast",
+      "references": [
+        "path SessionBroadcast",
+        "path SessionBroadcastEvent",
+        "path SessionBroadcastEvent::Event",
+        "path SessionNotice",
+        "path notify",
+        "path session_channel",
+        "use crate::session_broadcast::SessionBroadcast",
+        "use crate::session_broadcast::SessionBroadcastEvent",
+        "use crate::session_broadcast::SessionNotice",
+        "use crate::session_broadcast::notify",
+        "use crate::session_broadcast::session_channel"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_suggestion",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path SettingsChanged",
+        "path settings_changes",
+        "use crate::settings::SettingsChanged",
+        "use crate::settings::settings_changes"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_suggestion",
+      "to": "dim_agent_capabilities::timeline_tree",
+      "references": [
+        "path TreeCommands",
+        "use crate::timeline_tree::TreeCommands"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_suggestion",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path AgentBuilder",
+        "use dim_agent_runtime::AgentBuilder"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_suggestion",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path CollaborationRole::Leader",
+        "path SessionConfig",
+        "path SessionIdentity",
+        "path SessionLifecycle",
+        "use dim_agent_runtime::CollaborationRole",
+        "use dim_agent_runtime::SessionConfig",
+        "use dim_agent_runtime::SessionIdentity",
+        "use dim_agent_runtime::SessionLifecycle"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_suggestion",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_suggestion",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path Feature::new",
+        "use dim_agent_runtime::Feature"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_suggestion",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path Message",
+        "path Message::text",
+        "path MessageContent::Parts",
+        "path MessageContent::Text",
+        "path MessagePart",
+        "path MessagePart::Text",
+        "path Role::Assistant",
+        "path Role::User",
+        "use dim_agent_types::Message",
+        "use dim_agent_types::MessageContent",
+        "use dim_agent_types::MessagePart",
+        "use dim_agent_types::Role"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_suggestion",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path EventKind",
+        "path EventKind::InputApplied",
+        "path EventKind::InputMessage",
+        "path EventKind::ModelCall",
+        "path EventKind::ModelContent",
+        "path EventKind::Text",
+        "path EventKind::Thinking",
+        "path EventKind::ToolUse",
+        "path EventKind::ToolUseStart",
+        "path EventKind::TurnEnd",
+        "path EventKind::TurnStart",
+        "use dim_agent_types::EventKind",
+        "use dim_agent_types::TurnOutcome"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_suggestion",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path ModelRequest",
+        "use dim_agent_types::ModelRequest"
       ]
     },
     {
@@ -15607,6 +15813,13 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_agent_capabilities::prompt_suggestion",
+      "references": [
+        "path dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettingsHost"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_agent_capabilities::session_broadcast",
       "references": [
         "path dim_agent_capabilities::session_broadcast::SessionNotice",
@@ -15918,6 +16131,14 @@
         "path plugin_manager::Owners::new",
         "path plugin_manager::PluginManagerPlugin::new",
         "path plugin_manager::State::read"
+      ]
+    },
+    {
+      "from": "dim_app_server",
+      "to": "dim_app_server::prompt_suggestion_settings",
+      "references": [
+        "mod prompt_suggestion_settings",
+        "path prompt_suggestion_settings::PromptSuggestionSettingsPlugin::new"
       ]
     },
     {
@@ -17007,6 +17228,13 @@
       "references": [
         "path ModelProviderPlugin::process",
         "use dim_agent_capabilities::model_provider::ModelProviderPlugin"
+      ]
+    },
+    {
+      "from": "dim_app_server::cli",
+      "to": "dim_agent_capabilities::prompt_suggestion",
+      "references": [
+        "path dim_agent_capabilities::prompt_suggestion::install"
       ]
     },
     {
@@ -21241,6 +21469,55 @@
         "use crate::settings::Writer",
         "use crate::settings::holds_write_only",
         "use crate::settings::without_write_only"
+      ]
+    },
+    {
+      "from": "dim_app_server::prompt_suggestion_settings",
+      "to": "dim_agent_capabilities::prompt_suggestion",
+      "references": [
+        "path PromptSuggestionSettings",
+        "path PromptSuggestionSettingsError",
+        "path PromptSuggestionSettingsError::Failed",
+        "path PromptSuggestionSettingsHost",
+        "path PromptSuggestionSettingsSource",
+        "path SOURCE",
+        "use dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettings",
+        "use dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettingsError",
+        "use dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettingsHost",
+        "use dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettingsSource",
+        "use dim_agent_capabilities::prompt_suggestion::SOURCE"
+      ]
+    },
+    {
+      "from": "dim_app_server::prompt_suggestion_settings",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path SettingsScope::User",
+        "use crate::settings::SettingsScope"
+      ]
+    },
+    {
+      "from": "dim_app_server::prompt_suggestion_settings",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::prompt_suggestion_settings",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path SettingsService",
+        "use crate::settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_app_server::prompt_suggestion_settings",
+      "to": "dim_app_server::settings::declared",
+      "references": [
+        "path SourceDeclaration",
+        "use crate::settings::SourceDeclaration"
       ]
     },
     {

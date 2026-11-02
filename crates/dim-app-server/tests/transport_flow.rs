@@ -152,6 +152,8 @@ mod ui_host;
 #[path = "transport_flow/web_entry.rs"]
 mod web_entry;
 
+#[path = "transport_flow/prompt_suggestion.rs"]
+mod prompt_suggestion;
 #[path = "transport_flow/session_title.rs"]
 mod session_title;
 #[path = "transport_flow/workflow.rs"]
