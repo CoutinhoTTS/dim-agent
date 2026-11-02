@@ -1,7 +1,8 @@
 use super::keys::KeyFilter;
 use crate::{
     AgentError, BoxFuture, BranchLifecycle, FaultReporter, PolicyFacts, PolicyOrder,
-    PolicyOrderEvent, PolicyWindow, Result, StoredEvent, TimelineKey, TimelineStore,
+    PolicyOrderEvent, PolicyWindow, Result, StoredEvent, TimelineCursor, TimelineKey,
+    TimelineQuery, TimelineQueryPosition, TimelineQueryReply, TimelineQueryScope, TimelineStore,
 };
 use dim_agent_types::{
     AgentEvent, EventDraft, EventKind, InputMessageData, ProjectionCheckpoint, RecoverySnapshot,
@@ -726,6 +727,108 @@ impl Timeline {
             .into_iter()
             .flatten()
             .collect())
+    }
+    /// One bounded read over this branch or over its chain ([ADR 019](../../../../docs/adr/019-event-query.md),
+    /// [plugin contract §5.4](../../../../docs/design/plugin-contract.md#54-the-event-query)):
+    /// the position, kinds, flags, predicate and limit select the facts, and
+    /// the reply is those facts in chain order and then sequence with the
+    /// cursor after them. A chain read is each ancestor up to its cut, root
+    /// first, then this branch to the position's through; a range's start
+    /// applies to this branch alone. The read never returns a fact above the
+    /// published head, and a cursor that names a branch the scope does not
+    /// cover is invalid input.
+    pub async fn query(&self, query: TimelineQuery) -> Result<TimelineQueryReply> {
+        query.validate()?;
+        let limit = usize::try_from(query.limit.get()).unwrap_or(usize::MAX);
+        let through = match &query.position {
+            TimelineQueryPosition::Range { end, .. } => *end,
+            TimelineQueryPosition::Cursor { through, .. } => *through,
+        };
+        if through > self.sequence() {
+            return Err(AgentError::InvalidInput(format!(
+                "future timeline sequence {through}"
+            )));
+        }
+        let cursor = match &query.position {
+            TimelineQueryPosition::Range { .. } => None,
+            TimelineQueryPosition::Cursor { cursor, .. } => Some(cursor),
+        };
+        let segments: Vec<(String, u64)> = match query.scope {
+            TimelineQueryScope::Branch => vec![(self.0.key.branch_id.clone(), through)],
+            TimelineQueryScope::Chain => self
+                .0
+                .ancestors
+                .iter()
+                .filter(|(_, cut)| *cut > 0)
+                .cloned()
+                .chain(std::iter::once((self.0.key.branch_id.clone(), through)))
+                .collect(),
+        };
+        let cursor_index = cursor
+            .map(|cursor| {
+                segments
+                    .iter()
+                    .position(|(branch, _)| branch == &cursor.branch_id)
+                    .ok_or_else(|| {
+                        AgentError::InvalidInput(format!(
+                            "query cursor names branch {}, outside the query's scope",
+                            cursor.branch_id
+                        ))
+                    })
+            })
+            .transpose()?;
+        let mut events = Vec::new();
+        for (index, (branch, cut)) in segments.iter().enumerate() {
+            if cursor_index.is_some_and(|cursor_index| index < cursor_index) {
+                continue;
+            }
+            let position = if cursor_index == Some(index) {
+                TimelineQueryPosition::Cursor {
+                    cursor: cursor.expect("the indexed cursor is present").clone(),
+                    through: *cut,
+                }
+            } else if index + 1 == segments.len() {
+                let start = match &query.position {
+                    TimelineQueryPosition::Range { start, .. } => *start,
+                    TimelineQueryPosition::Cursor { .. } => 1,
+                };
+                TimelineQueryPosition::Range { start, end: *cut }
+            } else {
+                TimelineQueryPosition::Range {
+                    start: 1,
+                    end: *cut,
+                }
+            };
+            let key = TimelineKey {
+                session_id: self.0.key.session_id.clone(),
+                branch_id: branch.clone(),
+            };
+            let branch_query = TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                position,
+                kinds: query.kinds.clone(),
+                context_render: query.context_render,
+                context_state: query.context_state,
+                predicate: query.predicate.clone(),
+                limit: std::num::NonZeroU64::new(query.limit.get() - events.len() as u64)
+                    .expect("a read keeps one event of its limit"),
+            };
+            let reply = self.0.store.query(&key, &branch_query).await?;
+            let reached = events.len() + reply.events.len() >= limit;
+            events.extend(reply.events);
+            if reached {
+                let next = match reply.next {
+                    Some(next) => Some(next),
+                    None if index + 1 < segments.len() => Some(TimelineCursor {
+                        branch_id: branch.clone(),
+                        sequence: *cut,
+                    }),
+                    None => None,
+                };
+                return Ok(TimelineQueryReply { events, next });
+            }
+        }
+        Ok(TimelineQueryReply { events, next: None })
     }
     #[service(skip)]
     pub async fn local<R: RangeBounds<u64> + Send>(

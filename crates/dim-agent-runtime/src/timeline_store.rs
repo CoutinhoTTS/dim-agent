@@ -1,4 +1,7 @@
-use crate::{BoxFuture, BranchRecord, Result, SessionConfig, TimelineTrace};
+use crate::{
+    BoxFuture, BranchRecord, Result, SessionConfig, TimelineQuery, TimelineQueryReply,
+    TimelineTrace,
+};
 use dim_agent_types::{
     AgentEvent, ContextCompactionResult, EventKind, RecoverySnapshot, TimelinePosition,
 };
@@ -332,6 +335,26 @@ pub trait TimelineStore: Send + Sync + 'static {
     ) -> BoxFuture<'a, Result<Vec<StoredEvent>>> {
         self.read_page(key, after, limit, through)
     }
+    /// One per-branch read for [`TimelineQuery`] (ADR 019, plugin contract
+    /// §5.4): applies the position, kinds, flags, predicate and limit to
+    /// `key`'s branch and returns the decoded facts in sequence order with the
+    /// cursor after them.
+    ///
+    /// `query.scope` must be [`TimelineQueryScope::Branch`]. The Timeline
+    /// service composes [`TimelineQueryScope::Chain`] by reading each
+    /// ancestor and then the queried branch with this method. A cursor must
+    /// name `key`'s branch and end an atomic batch; the position's through
+    /// must end one too. The limit is a target: a reply ends at an atomic
+    /// batch boundary, so its last batch may take it above the limit.
+    ///
+    /// A position past the branch head, a cursor inside a batch, a cursor on
+    /// another branch and any other scope are invalid input. A kind or a data
+    /// path the store does not know selects no rows; it is not an error.
+    fn query<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        query: &'a TimelineQuery,
+    ) -> BoxFuture<'a, Result<TimelineQueryReply>>;
     /// Decodes all segments in one read scope, sharing content across branches.
     fn read_segments<'a>(
         &'a self,

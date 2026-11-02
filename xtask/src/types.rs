@@ -35,6 +35,7 @@ fn declarations(root: &Path) -> Result<String> {
             "dim_agent_runtime::SessionConfig",
             "import('./plugin.js').SessionConfig",
         )
+        .declared("std::num::NonZeroU64", "number | bigint")
         .declarations(root.join("crates/dim-app-server"))
 }
 

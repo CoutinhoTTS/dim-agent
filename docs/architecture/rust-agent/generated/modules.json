@@ -1452,6 +1452,16 @@
       ]
     },
     {
+      "id": "dim_agent_runtime::timeline_query",
+      "crate": "dim_agent_runtime",
+      "parent": "dim_agent_runtime",
+      "file": "crates/dim-agent-runtime/src/timeline_query.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches"
+      ]
+    },
+    {
       "id": "dim_agent_runtime::timeline_store",
       "crate": "dim_agent_runtime",
       "parent": "dim_agent_runtime",
@@ -2669,9 +2679,9 @@
       "unexpandedMacros": [
         "eprintln",
         "format",
-        "rusqlite::params",
         "tokio::pin",
-        "tracing::error"
+        "tracing::error",
+        "vec"
       ]
     },
     {
@@ -14034,6 +14044,13 @@
     },
     {
       "from": "dim_agent_runtime",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "mod timeline_query"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
         "mod timeline_store",
@@ -14628,6 +14645,24 @@
     },
     {
       "from": "dim_agent_runtime::core::timeline",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineCursor",
+        "path TimelineQuery",
+        "path TimelineQueryPosition::Cursor",
+        "path TimelineQueryPosition::Range",
+        "path TimelineQueryReply",
+        "path TimelineQueryScope::Branch",
+        "path TimelineQueryScope::Chain",
+        "use crate::TimelineCursor",
+        "use crate::TimelineQuery",
+        "use crate::TimelineQueryPosition",
+        "use crate::TimelineQueryReply",
+        "use crate::TimelineQueryScope"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::core::timeline",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
         "path PolicyFacts",
@@ -14716,6 +14751,23 @@
         "path Result",
         "use crate::AgentError",
         "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::memory_timeline_store",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineCursor",
+        "path TimelineQuery",
+        "path TimelineQueryPosition::Cursor",
+        "path TimelineQueryPosition::Range",
+        "path TimelineQueryReply",
+        "path TimelineQueryScope::Branch",
+        "use crate::TimelineCursor",
+        "use crate::TimelineQuery",
+        "use crate::TimelineQueryPosition",
+        "use crate::TimelineQueryReply",
+        "use crate::TimelineQueryScope"
       ]
     },
     {
@@ -15087,6 +15139,24 @@
       ]
     },
     {
+      "from": "dim_agent_runtime::timeline_query",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path AgentError::InvalidInput",
+        "path Result",
+        "use crate::AgentError",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::timeline_query",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path AgentEvent",
+        "use dim_agent_types::AgentEvent"
+      ]
+    },
+    {
       "from": "dim_agent_runtime::timeline_store",
       "to": "dim_agent_runtime::config",
       "references": [
@@ -15118,6 +15188,16 @@
         "path Result",
         "path crate::AgentError::InvalidInput",
         "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::timeline_store",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQuery",
+        "path TimelineQueryReply",
+        "use crate::TimelineQuery",
+        "use crate::TimelineQueryReply"
       ]
     },
     {
@@ -16667,6 +16747,14 @@
       "to": "dim_agent_runtime::memory_timeline_store",
       "references": [
         "path dim_agent_runtime::MemoryTimelineStore"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions::tests::deferred_inputs",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path dim_agent_runtime::TimelineQuery",
+        "path dim_agent_runtime::TimelineQueryReply"
       ]
     },
     {
@@ -23923,6 +24011,23 @@
       "references": [
         "path Names",
         "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::timeline",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineCursor",
+        "path TimelineQuery",
+        "path TimelineQueryPosition::Cursor",
+        "path TimelineQueryPosition::Range",
+        "path TimelineQueryReply",
+        "path TimelineQueryScope::Branch",
+        "use dim_agent_runtime::TimelineCursor",
+        "use dim_agent_runtime::TimelineQuery",
+        "use dim_agent_runtime::TimelineQueryPosition",
+        "use dim_agent_runtime::TimelineQueryReply",
+        "use dim_agent_runtime::TimelineQueryScope"
       ]
     },
     {
@@ -38317,6 +38422,22 @@
     {
       "module": "dim_app_server::storage::timeline",
       "path": "Timeline::new"
+    },
+    {
+      "module": "dim_app_server::storage::timeline",
+      "path": "Value::Integer"
+    },
+    {
+      "module": "dim_app_server::storage::timeline",
+      "path": "Value::Null"
+    },
+    {
+      "module": "dim_app_server::storage::timeline",
+      "path": "Value::Real"
+    },
+    {
+      "module": "dim_app_server::storage::timeline",
+      "path": "Value::Text"
     },
     {
       "module": "dim_app_server::transport",

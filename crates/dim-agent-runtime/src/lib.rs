@@ -16,6 +16,7 @@ mod state;
 #[cfg(feature = "testing")]
 pub mod testing;
 mod timeline_context;
+mod timeline_query;
 mod timeline_store;
 
 pub use agent::*;
@@ -37,4 +38,5 @@ pub use timeline_store::{PolicyEvent, PolicyFacts, PolicyOrder, PolicyOrderEvent
 pub use scope::*;
 pub use state::*;
 pub use timeline_context::*;
+pub use timeline_query::*;
 pub use timeline_store::*;

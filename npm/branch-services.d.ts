@@ -228,6 +228,68 @@ export interface Dispatcher {
   changed(): Promise<void>
 }
 
+/** Which branches a query covers. */
+export type TimelineQueryScope =
+  | /** The queried branch alone. */ "branch"
+  | /** The branch chain: each ancestor up to its cut, root first, then the queried branch. */ "chain"
+
+/**
+ * An opaque position: the branch of the last event a query returned and the
+ * sequence through which the query read it. The same sequence on a parent and
+ * on its child are different positions.
+ */
+export interface TimelineCursor {
+  branch_id: string
+  sequence: number | bigint
+}
+
+/** Where a query starts. */
+export type TimelineQueryPosition =
+  | /** Sequences `start..=end`. `start` may be inside an atomic batch; `end` must end one. */ { kind: "range"; start: number | bigint; end: number | bigint }
+  | /** Sequences after `cursor`, through `through`. The cursor must end an atomic batch, and `through` must end one too. */ { kind: "cursor"; cursor: TimelineCursor; through: number | bigint }
+
+/** One equality against one JSON scalar of an event's data. */
+export interface TimelineQueryPredicate {
+  /**
+   * Field names inside the event's data joined by dots; no array indexing
+   * and no wildcards.
+   */
+  path: string
+  /** The JSON scalar the path must equal. */
+  value: unknown
+}
+
+/**
+ * One bounded read of a branch's facts: what it covers, where it starts, what
+ * it accepts and how many events it targets.
+ */
+export interface TimelineQuery {
+  scope: TimelineQueryScope
+  position: TimelineQueryPosition
+  /** Event kinds (`domain/name`) the read accepts; empty accepts every kind. */
+  kinds?: string[]
+  /** When named, only events whose envelope carries this render flag. */
+  context_render?: boolean | null
+  /** When named, only events whose envelope carries this state flag. */
+  context_state?: boolean | null
+  /** One equality the event's data must satisfy. */
+  predicate?: TimelineQueryPredicate | null
+  /**
+   * The target number of events. A reply ends at an atomic batch boundary,
+   * so its final batch may take it above the limit.
+   */
+  limit: number | bigint
+}
+
+/**
+ * The facts a query read, in chain order and then sequence, and the cursor
+ * after them. `next` is absent when the read reached its through.
+ */
+export interface TimelineQueryReply {
+  events: import('./plugin.js').BranchEvent[]
+  next?: TimelineCursor | null
+}
+
 export interface TraceStep {
   handler: string
   result?: { type: string; name: string; data: unknown; tags?: string[]; context_render?: boolean; context_state?: boolean } | null
@@ -262,6 +324,19 @@ export interface Timeline {
   hasPending(): Promise<boolean>
   /** @throws {AgentErrorThrown} */
   history(through?: number | bigint | null): Promise<import('./plugin.js').BranchEvent[]>
+  /**
+   * One bounded read over this branch or over its chain ([ADR 019](../../../../docs/adr/019-event-query.md),
+   * [plugin contract §5.4](../../../../docs/design/plugin-contract.md#54-the-event-query)):
+   * the position, kinds, flags, predicate and limit select the facts, and
+   * the reply is those facts in chain order and then sequence with the
+   * cursor after them. A chain read is each ancestor up to its cut, root
+   * first, then this branch to the position's through; a range's start
+   * applies to this branch alone. The read never returns a fact above the
+   * published head, and a cursor that names a branch the scope does not
+   * cover is invalid input.
+   * @throws {AgentErrorThrown}
+   */
+  query(query: TimelineQuery): Promise<TimelineQueryReply>
   /**
    * Reads the rows this projection consumes after an event cursor; a cursor
    * inside an atomic batch reads that row and filters by sequence. The event

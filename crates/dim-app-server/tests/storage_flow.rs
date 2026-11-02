@@ -435,10 +435,20 @@ fn v15_store(path: &std::path::Path) -> Connection {
         .unwrap();
     connection
 }
+/// Whether the store has the schema object `name`.
+fn indexed(connection: &Connection, name: &str) -> bool {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name=?1)",
+            [name],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
 /// The schema statements of a store, sorted.
 fn schema(connection: &Connection) -> Vec<String> {
     let mut statements: Vec<String> = connection
-        .prepare("SELECT sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name != 'timeline_history_anchors'")
+        .prepare("SELECT sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name NOT IN ('timeline_history_anchors', 'timeline_events_by_kind')")
         .unwrap()
         .query_map([], |row| row.get(0))
         .unwrap()
@@ -7131,38 +7141,28 @@ async fn output_ownership_survives_a_fork_and_a_source_delete() {
 }
 
 #[tokio::test]
-async fn the_history_window_index_is_created_at_open_without_a_format_step() {
+async fn the_derived_indexes_are_created_at_open_without_a_format_step() {
     let database = Database::new();
     let db = SqliteStorage::open(database.0.clone()).unwrap();
     assert_eq!(db.upgraded_from(), None);
     db.close().await.unwrap();
     let connection = Connection::open(&database.0).unwrap();
-    let indexed: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='timeline_history_anchors')",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(indexed);
+    for name in ["timeline_history_anchors", "timeline_events_by_kind"] {
+        assert!(indexed(&connection, name), "{name} is created at open");
+    }
     assert_eq!(marker(&connection), [i64::from(STORE_FORMAT)]);
     connection
-        .execute_batch("DROP INDEX timeline_history_anchors")
+        .execute_batch("DROP INDEX timeline_history_anchors; DROP INDEX timeline_events_by_kind")
         .unwrap();
     drop(connection);
 
     let db = SqliteStorage::open(database.0.clone()).unwrap();
-    assert_eq!(db.upgraded_from(), None, "the index is not a format step");
+    assert_eq!(db.upgraded_from(), None, "an index is not a format step");
     db.close().await.unwrap();
     let connection = Connection::open(&database.0).unwrap();
-    let indexed: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='timeline_history_anchors')",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(indexed, "a later open recreates the index");
+    for name in ["timeline_history_anchors", "timeline_events_by_kind"] {
+        assert!(indexed(&connection, name), "a later open recreates {name}");
+    }
     assert_eq!(marker(&connection), [i64::from(STORE_FORMAT)]);
     drop(connection);
 
@@ -7221,5 +7221,551 @@ async fn a_history_window_read_rejects_a_through_inside_a_batch() {
 
     drop(store);
     drop(sessions);
+    db.close().await.unwrap();
+}
+
+/// One stored fact for the query flows, with its atomic batch's last
+/// sequence.
+fn query_record(sequence: u64, batch_end: u64, id: &str, kind: EventKind) -> StoredEvent {
+    StoredEvent {
+        event: Arc::new(AgentEvent {
+            id: id.into(),
+            sequence,
+            create_at: 1000 + sequence,
+            tags: None,
+            kind,
+        }),
+        trace: None,
+        batch_end,
+    }
+}
+
+/// Queues one batch and waits until the store publishes it.
+async fn publish_records(
+    store: &Arc<dyn TimelineStore>,
+    key: TimelineKey,
+    records: Vec<StoredEvent>,
+) {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    store
+        .append(
+            key,
+            records,
+            Box::new(move |result| {
+                let _ = sender.send(result);
+            }),
+        )
+        .unwrap();
+    tokio::time::timeout(PUBLISHED, receiver)
+        .await
+        .expect("the writer did not publish the write")
+        .unwrap()
+        .unwrap();
+}
+
+fn marked(data: serde_json::Value) -> EventKind {
+    EventKind::Extension(ExtensionEvent::new("test", "marked", data).unwrap())
+}
+
+fn delta(text: &str) -> EventKind {
+    EventKind::Text(DeltaData {
+        turn_id: "turn".into(),
+        request_id: "request".into(),
+        delta: text.into(),
+    })
+}
+
+/// The same facts in `store`: `main` with two singles, a branch create, one
+/// atomic batch of two text deltas and a closing single, and `child` cut at
+/// `main`'s second fact.
+async fn query_histories(store: Arc<dyn TimelineStore>) -> (Timeline, Timeline) {
+    store
+        .create_session("query", &SessionConfig::default())
+        .await
+        .unwrap();
+    let main = key("query", "main");
+    publish_records(
+        &store,
+        main.clone(),
+        vec![query_record(
+            1,
+            1,
+            "main-1",
+            EventKind::InputMessage(InputMessageData::text("one", None)),
+        )],
+    )
+    .await;
+    publish_records(
+        &store,
+        main.clone(),
+        vec![query_record(
+            2,
+            2,
+            "main-2",
+            marked(serde_json::json!({"tool": "search", "nested": {"level": 3}})),
+        )],
+    )
+    .await;
+    publish_records(
+        &store,
+        main.clone(),
+        vec![query_record(
+            3,
+            3,
+            "main-3",
+            EventKind::BranchCreate(BranchCreateData {
+                at: BranchCreateAt::Sequence { sequence: 2 },
+                source: BranchSource::Host {
+                    operation_id: "query".into(),
+                },
+                branch: "child".into(),
+                prompt: "continue".into(),
+            }),
+        )],
+    )
+    .await;
+    publish_records(
+        &store,
+        main.clone(),
+        vec![
+            query_record(4, 5, "main-4", delta("a")),
+            query_record(5, 5, "main-5", delta("b")),
+        ],
+    )
+    .await;
+    publish_records(
+        &store,
+        main,
+        vec![query_record(
+            6,
+            6,
+            "main-6",
+            EventKind::StopInterrupt(StopInterruptData {
+                reason: "stop".into(),
+                scope: InterruptScope::Turn,
+            }),
+        )],
+    )
+    .await;
+    let child = key("query", "child");
+    publish_records(
+        &store,
+        child.clone(),
+        vec![query_record(
+            1,
+            1,
+            "child-1",
+            marked(serde_json::json!({"tool": "search"})),
+        )],
+    )
+    .await;
+    publish_records(
+        &store,
+        child,
+        vec![
+            query_record(
+                2,
+                3,
+                "child-2",
+                EventKind::InputMessage(InputMessageData::text("two", None)),
+            ),
+            query_record(
+                3,
+                3,
+                "child-3",
+                EventKind::InputMessage(InputMessageData::text("three", None)),
+            ),
+        ],
+    )
+    .await;
+    let ctx = rutis::Ctx::root().unwrap();
+    let child = Timeline::restore(
+        ctx.clone(),
+        key("query", "child"),
+        vec![("main".into(), 2)],
+        store.clone(),
+    )
+    .await
+    .unwrap();
+    let main = Timeline::restore(ctx, key("query", "main"), vec![], store)
+        .await
+        .unwrap();
+    (main, child)
+}
+
+fn query_ids(reply: &dim_agent_runtime::TimelineQueryReply) -> Vec<String> {
+    reply.events.iter().map(|event| event.id.clone()).collect()
+}
+
+fn query(
+    scope: dim_agent_runtime::TimelineQueryScope,
+    position: dim_agent_runtime::TimelineQueryPosition,
+    limit: u64,
+) -> dim_agent_runtime::TimelineQuery {
+    dim_agent_runtime::TimelineQuery {
+        scope,
+        position,
+        kinds: vec![],
+        context_render: None,
+        context_state: None,
+        predicate: None,
+        limit: std::num::NonZeroU64::new(limit).unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn a_query_selects_and_pages_facts_from_sqlite() {
+    use dim_agent_runtime::TimelineQueryPosition::{Cursor, Range};
+    use dim_agent_runtime::TimelineQueryScope::{Branch, Chain};
+    use dim_agent_runtime::{TimelineCursor, TimelineQueryPredicate};
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let (main, child) = query_histories(store.clone()).await;
+
+    let all = main
+        .query(query(Branch, Range { start: 1, end: 6 }, 16))
+        .await
+        .unwrap();
+    assert_eq!(
+        query_ids(&all),
+        ["main-1", "main-2", "main-3", "main-4", "main-5", "main-6"]
+    );
+    assert_eq!(all.next, None);
+
+    let first = main
+        .query(query(Branch, Range { start: 1, end: 6 }, 2))
+        .await
+        .unwrap();
+    assert_eq!(query_ids(&first), ["main-1", "main-2"]);
+    assert_eq!(
+        first.next,
+        Some(TimelineCursor {
+            branch_id: "main".into(),
+            sequence: 2
+        })
+    );
+    let rest = main
+        .query(query(
+            Branch,
+            Cursor {
+                cursor: first.next.unwrap(),
+                through: 6,
+            },
+            16,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(query_ids(&rest), ["main-3", "main-4", "main-5", "main-6"]);
+    assert_eq!(rest.next, None);
+
+    let mut kinded = query(Branch, Range { start: 1, end: 6 }, 16);
+    kinded.kinds = vec!["step/text".into()];
+    assert_eq!(
+        query_ids(&main.query(kinded).await.unwrap()),
+        ["main-4", "main-5"]
+    );
+
+    let render = main
+        .query(dim_agent_runtime::TimelineQuery {
+            context_render: Some(true),
+            ..query(Branch, Range { start: 1, end: 6 }, 16)
+        })
+        .await
+        .unwrap();
+    assert_eq!(query_ids(&render), ["main-4", "main-5"]);
+
+    let unmarked = main
+        .query(dim_agent_runtime::TimelineQuery {
+            context_state: Some(false),
+            ..query(Branch, Range { start: 1, end: 6 }, 16)
+        })
+        .await
+        .unwrap();
+    assert_eq!(query_ids(&unmarked), ["main-2", "main-3", "main-6"]);
+
+    let tool = main
+        .query(dim_agent_runtime::TimelineQuery {
+            predicate: Some(TimelineQueryPredicate {
+                path: "tool".into(),
+                value: serde_json::json!("search"),
+            }),
+            ..query(Branch, Range { start: 1, end: 6 }, 16)
+        })
+        .await
+        .unwrap();
+    assert_eq!(query_ids(&tool), ["main-2"]);
+
+    let merged = main
+        .query(dim_agent_runtime::TimelineQuery {
+            predicate: Some(TimelineQueryPredicate {
+                path: "delta".into(),
+                value: serde_json::json!("b"),
+            }),
+            ..query(Branch, Range { start: 1, end: 6 }, 16)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        query_ids(&merged),
+        ["main-5"],
+        "a predicate selects one record of a merged output row"
+    );
+
+    let unknown = main
+        .query(dim_agent_runtime::TimelineQuery {
+            predicate: Some(TimelineQueryPredicate {
+                path: "nested.absent".into(),
+                value: serde_json::json!(3),
+            }),
+            ..query(Branch, Range { start: 1, end: 6 }, 16)
+        })
+        .await
+        .unwrap();
+    assert!(unknown.events.is_empty(), "an unknown path selects no rows");
+
+    let chain = child
+        .query(query(Chain, Range { start: 1, end: 3 }, 16))
+        .await
+        .unwrap();
+    assert_eq!(
+        query_ids(&chain),
+        ["main-1", "main-2", "child-1", "child-2", "child-3"]
+    );
+    assert_eq!(chain.next, None);
+
+    let boundary = child
+        .query(query(Chain, Range { start: 1, end: 3 }, 2))
+        .await
+        .unwrap();
+    assert_eq!(query_ids(&boundary), ["main-1", "main-2"]);
+    assert_eq!(
+        boundary.next,
+        Some(TimelineCursor {
+            branch_id: "main".into(),
+            sequence: 2
+        })
+    );
+
+    let into_child = child
+        .query(query(Chain, Range { start: 1, end: 3 }, 3))
+        .await
+        .unwrap();
+    assert_eq!(query_ids(&into_child), ["main-1", "main-2", "child-1"]);
+    assert_eq!(
+        into_child.next,
+        Some(TimelineCursor {
+            branch_id: "child".into(),
+            sequence: 1
+        })
+    );
+    let after = child
+        .query(query(
+            Chain,
+            Cursor {
+                cursor: into_child.next.unwrap(),
+                through: 3,
+            },
+            16,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(query_ids(&after), ["child-2", "child-3"]);
+
+    assert!(matches!(
+        main.query(query(Branch, Range { start: 1, end: 7 }, 16))
+            .await,
+        Err(AgentError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        main.query(query(
+            Branch,
+            Cursor {
+                cursor: TimelineCursor {
+                    branch_id: "main".into(),
+                    sequence: 4,
+                },
+                through: 5,
+            },
+            16,
+        ))
+        .await,
+        Err(AgentError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        child
+            .query(query(
+                Branch,
+                Cursor {
+                    cursor: TimelineCursor {
+                        branch_id: "main".into(),
+                        sequence: 2,
+                    },
+                    through: 3,
+                },
+                16,
+            ))
+            .await,
+        Err(AgentError::InvalidInput(_))
+    ));
+
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// What a query returned or how it failed, as text two stores can compare.
+async fn comparable(timeline: &Timeline, query: dim_agent_runtime::TimelineQuery) -> String {
+    match timeline.query(query).await {
+        Ok(reply) => format!("{:?} {:?}", query_ids(&reply), reply.next),
+        Err(AgentError::InvalidInput(message)) => format!("invalid: {message}"),
+        Err(error) => format!("error: {error:?}"),
+    }
+}
+
+#[tokio::test]
+async fn the_memory_and_sqlite_stores_agree_on_a_query() {
+    use dim_agent_runtime::TimelineQueryPosition::{Cursor, Range};
+    use dim_agent_runtime::TimelineQueryScope::{Branch, Chain};
+    use dim_agent_runtime::{TimelineCursor, TimelineQueryPredicate};
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let sqlite = SqliteTimelineStore::new(db.clone());
+    let memory = Arc::new(MemoryTimelineStore::default());
+    let (sqlite_main, sqlite_child) = query_histories(sqlite.clone()).await;
+    let (memory_main, memory_child) = query_histories(memory).await;
+
+    let cursor = |branch: &str, sequence: u64| TimelineCursor {
+        branch_id: branch.into(),
+        sequence,
+    };
+    let predicate = |path: &str, value: serde_json::Value| TimelineQueryPredicate {
+        path: path.into(),
+        value,
+    };
+    let mut main_cases = vec![
+        query(Branch, Range { start: 1, end: 6 }, 16),
+        query(Branch, Range { start: 1, end: 6 }, 2),
+        query(Branch, Range { start: 1, end: 6 }, 1),
+        query(
+            Branch,
+            Cursor {
+                cursor: cursor("main", 2),
+                through: 6,
+            },
+            16,
+        ),
+        query(
+            Branch,
+            Cursor {
+                cursor: cursor("main", 3),
+                through: 6,
+            },
+            1,
+        ),
+        query(Branch, Range { start: 2, end: 5 }, 16),
+        query(Branch, Range { start: 1, end: 7 }, 16),
+        query(
+            Branch,
+            Cursor {
+                cursor: cursor("main", 4),
+                through: 6,
+            },
+            16,
+        ),
+        query(
+            Branch,
+            Cursor {
+                cursor: cursor("main", 6),
+                through: 5,
+            },
+            16,
+        ),
+    ];
+    let mut kinded = query(Branch, Range { start: 1, end: 6 }, 16);
+    kinded.kinds = vec!["step/text".into()];
+    main_cases.push(kinded);
+    let mut marked = query(Branch, Range { start: 1, end: 6 }, 16);
+    marked.kinds = vec!["test/marked".into()];
+    main_cases.push(marked);
+    main_cases.push(dim_agent_runtime::TimelineQuery {
+        context_render: Some(true),
+        ..query(Branch, Range { start: 1, end: 6 }, 16)
+    });
+    main_cases.push(dim_agent_runtime::TimelineQuery {
+        context_state: Some(false),
+        ..query(Branch, Range { start: 1, end: 6 }, 16)
+    });
+    for (path, value) in [
+        ("tool", serde_json::json!("search")),
+        ("nested.level", serde_json::json!(3)),
+        ("delta", serde_json::json!("b")),
+        ("nested.absent", serde_json::json!(3)),
+    ] {
+        main_cases.push(dim_agent_runtime::TimelineQuery {
+            predicate: Some(predicate(path, value)),
+            ..query(Branch, Range { start: 1, end: 6 }, 16)
+        });
+    }
+
+    let mut child_cases = vec![
+        query(Chain, Range { start: 1, end: 3 }, 16),
+        query(Chain, Range { start: 1, end: 3 }, 2),
+        query(Chain, Range { start: 1, end: 3 }, 3),
+        query(
+            Chain,
+            Cursor {
+                cursor: cursor("main", 1),
+                through: 3,
+            },
+            16,
+        ),
+        query(
+            Chain,
+            Cursor {
+                cursor: cursor("child", 1),
+                through: 3,
+            },
+            16,
+        ),
+        query(Branch, Range { start: 1, end: 3 }, 16),
+        query(
+            Branch,
+            Cursor {
+                cursor: cursor("main", 2),
+                through: 3,
+            },
+            16,
+        ),
+        query(Chain, Range { start: 1, end: 5 }, 16),
+    ];
+    let mut inputs = query(Chain, Range { start: 1, end: 3 }, 16);
+    inputs.kinds = vec!["input/message".into()];
+    child_cases.push(inputs);
+    let mut child_marked = query(Chain, Range { start: 1, end: 3 }, 16);
+    child_marked.kinds = vec!["test/marked".into()];
+    child_cases.push(child_marked);
+    child_cases.push(dim_agent_runtime::TimelineQuery {
+        predicate: Some(predicate("tool", serde_json::json!("search"))),
+        ..query(Chain, Range { start: 1, end: 3 }, 16)
+    });
+
+    for (index, case) in main_cases.iter().enumerate() {
+        assert_eq!(
+            comparable(&sqlite_main, case.clone()).await,
+            comparable(&memory_main, case.clone()).await,
+            "main case {index}: {case:?}"
+        );
+    }
+    for (index, case) in child_cases.iter().enumerate() {
+        assert_eq!(
+            comparable(&sqlite_child, case.clone()).await,
+            comparable(&memory_child, case.clone()).await,
+            "child case {index}: {case:?}"
+        );
+    }
+
+    sqlite.close().await.unwrap();
     db.close().await.unwrap();
 }

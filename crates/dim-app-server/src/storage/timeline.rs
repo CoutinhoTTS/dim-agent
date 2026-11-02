@@ -13,15 +13,16 @@ use dim_agent_capabilities::host::SessionFilesHost;
 use dim_agent_runtime::Names;
 use dim_agent_runtime::{
     AgentError, BoxFuture, BranchRecord, PolicyEvent, PolicyFacts, PolicyOrder, PolicyOrderEvent,
-    PolicyWindow, PublishCallback, Result, SessionConfig, StoredBranch, StoredEvent, TimelineKey,
-    TimelineStore, TimelineTrace, panic_message,
+    PolicyWindow, PublishCallback, Result, SessionConfig, StoredBranch, StoredEvent,
+    TimelineCursor, TimelineKey, TimelineQuery, TimelineQueryPosition, TimelineQueryReply,
+    TimelineQueryScope, TimelineStore, TimelineTrace, panic_message,
 };
 use dim_agent_types::{
     AgentEvent, BranchCreateAt, ContextCompactionResult, EventKind, ModelRequest, RecoverySnapshot,
     SessionForkedData, TimelinePosition,
     grant::{GrantKind, GrantMode, SessionGrant},
 };
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 use rutis::Ctx;
 use rutis::host::{CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis_bridge::session::{HostDispatch, host_key};
@@ -368,6 +369,51 @@ impl SqliteTimelineStore {
         }
         self.finish(reader);
         Ok(events)
+    }
+    /// The events a query selects in `range`, decoded with one reader. The SQL
+    /// applies the kinds, flags and predicate; a predicate that matches a
+    /// record inside a merged output row is re-checked on the decoded events,
+    /// because that row holds several of them.
+    async fn query_range(
+        &self,
+        key: &TimelineKey,
+        query: &TimelineQuery,
+        range: RangeInclusive<u64>,
+    ) -> Result<Vec<StoredEvent>> {
+        let session = key.session_id.clone();
+        let branch = key.branch_id.clone();
+        let selection = query.clone();
+        let fetch = range.clone();
+        let mut reader = self.reader(RequestBodies::Rebuild);
+        let rows = holds(
+            &self.db,
+            &mut reader,
+            None,
+            move |connection, reader, rows: &mut Option<Rows>| {
+                let rows = match rows {
+                    Some(rows) => rows,
+                    None => rows.insert(Rows {
+                        fetched: query_rows(connection, &session, &branch, &selection, &fetch)?,
+                        decoded: vec![],
+                    }),
+                };
+                rows.advance(connection, &session, reader)
+            },
+        )
+        .await?;
+        self.finish(reader);
+        let records = rows
+            .expect("a finished read fetched its rows")
+            .records(&range, false)?;
+        Ok(records
+            .into_iter()
+            .filter(|record| {
+                query
+                    .predicate
+                    .as_ref()
+                    .is_none_or(|predicate| predicate.matches(&record.event))
+            })
+            .collect())
     }
     /// The records of `segments`, decoded with one reader of `request_bodies`.
     async fn segments(
@@ -1831,6 +1877,29 @@ fn head(connection: &Connection, key: &TimelineKey) -> Result<u64> {
         })
         .map_err(error)
 }
+/// The last sequence of the row that holds `sequence` on `branch`, `None`
+/// when the branch has no row at or before it. A read position ends an atomic
+/// batch exactly when this equals it.
+fn row_end(
+    connection: &Connection,
+    session: &str,
+    branch: &str,
+    sequence: u64,
+) -> Result<Option<u64>> {
+    let last: Option<i64> = connection
+        .prepare_cached(
+            "SELECT last_sequence FROM timeline_events \
+             WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3 \
+             ORDER BY sequence DESC LIMIT 1",
+        )
+        .map_err(error)?
+        .query_row(params![session, branch, sql_sequence(sequence)?], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(error)?;
+    last.map(sequence_value).transpose()
+}
 pub(super) fn read_sequence(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
     let value: i64 = row.get(index)?;
     u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
@@ -2092,6 +2161,107 @@ fn query_fetched(
             Fetched::parse(first, last, kind, &body, event_id)
         })
         .collect()
+}
+/// The rows a query selects from `session`'s `branch` in `range`, in sequence
+/// order. Position, kinds, flags and predicate select in SQL; the decoded
+/// events are checked against the predicate again, because a merged output
+/// row holds several events and SQL selects the row.
+fn query_rows(
+    connection: &Connection,
+    session: &str,
+    branch: &str,
+    query: &TimelineQuery,
+    range: &RangeInclusive<u64>,
+) -> Result<VecDeque<Fetched>> {
+    let start = sql_sequence(*range.start())?;
+    let end = sql_sequence(*range.end())?;
+    let text = |value: &str| rusqlite::types::Value::Text(value.to_owned());
+    let mut sql = String::from(
+        "SELECT sequence, last_sequence, kind, body FROM timeline_events \
+         WHERE session_id=? AND branch_id=? \
+         AND sequence >= coalesce((SELECT max(sequence) FROM timeline_events \
+           WHERE session_id=? AND branch_id=? AND sequence<=?), ?) \
+         AND sequence<=? AND last_sequence>=?",
+    );
+    let mut parameters = vec![
+        text(session),
+        text(branch),
+        text(session),
+        text(branch),
+        start.into(),
+        start.into(),
+        end.into(),
+        start.into(),
+    ];
+    if !query.kinds.is_empty() {
+        let placeholders = vec!["?"; query.kinds.len()].join(",");
+        sql.push_str(&format!(" AND kind IN ({placeholders})"));
+        parameters.extend(query.kinds.iter().map(|kind| text(kind)));
+    }
+    if let Some(render) = query.context_render {
+        sql.push_str(" AND context_render=?");
+        parameters.push(i64::from(render).into());
+    }
+    if let Some(state) = query.context_state {
+        sql.push_str(" AND context_state=?");
+        parameters.push(i64::from(state).into());
+    }
+    if let Some(predicate) = &query.predicate {
+        if predicate.json_path().is_none() {
+            return Err(error("query path is not field names joined by dots"));
+        }
+        let value = json_value(&predicate.value)?;
+        sql.push_str(
+            " AND ((json_type(body, ?) IS NOT NULL AND json_extract(body, ?) IS ?) \
+             OR EXISTS (SELECT 1 FROM json_each(json_extract(body, '$.records')) AS r \
+               WHERE json_type(r.value, ?) IS NOT NULL AND json_extract(r.value, ?) IS ?))",
+        );
+        let row_path = text(&format!("$.record.event.data.{}", predicate.path));
+        let record_path = text(&format!("$.event.data.{}", predicate.path));
+        parameters.extend([
+            row_path.clone(),
+            row_path,
+            value.clone(),
+            record_path.clone(),
+            record_path,
+            value,
+        ]);
+    }
+    let mut statement = connection.prepare(&sql).map_err(error)?;
+    statement
+        .query_map(params_from_iter(parameters), |row| {
+            Ok((
+                read_sequence(row, 0)?,
+                read_sequence(row, 1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(error)?
+        .map(|row| {
+            let (first, last, kind, body) = row.map_err(error)?;
+            Fetched::parse(first, last, kind, &body, None)
+        })
+        .collect()
+}
+/// The SQLite value a predicate's JSON scalar binds as. JSON `true` and
+/// `false` extract as 1 and 0, and a number binds as the integer or real it
+/// extracts as; the decoded-event check settles the exact equality.
+fn json_value(value: &serde_json::Value) -> Result<rusqlite::types::Value> {
+    use rusqlite::types::Value;
+    Ok(match value {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(flag) => Value::Integer(i64::from(*flag)),
+        serde_json::Value::Number(number) => match (number.as_i64(), number.as_f64()) {
+            (Some(integer), _) => Value::Integer(integer),
+            (None, Some(real)) => Value::Real(real),
+            (None, None) => return Err(error("query predicate value is not a JSON number")),
+        },
+        serde_json::Value::String(text) => Value::Text(text.clone()),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            return Err(error("query predicate compares one JSON scalar"));
+        }
+    })
 }
 /// The rows of one query, decoded in sequence order with one `Reader`.
 struct Rows {
@@ -3161,6 +3331,120 @@ impl TimelineStore for SqliteTimelineStore {
         Box::pin(async move {
             self.page(key, after, limit, through, RequestBodies::Unused)
                 .await
+        })
+    }
+    fn query<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        query: &'a TimelineQuery,
+    ) -> BoxFuture<'a, Result<TimelineQueryReply>> {
+        Box::pin(async move {
+            if query.scope != TimelineQueryScope::Branch {
+                return Err(AgentError::InvalidInput(
+                    "a store read applies one branch; the Timeline service composes the chain"
+                        .into(),
+                ));
+            }
+            let (through, start, cursor) = match &query.position {
+                TimelineQueryPosition::Range { start, end } => {
+                    if *start == 0 {
+                        return Err(AgentError::InvalidInput(
+                            "timeline sequences start at 1".into(),
+                        ));
+                    }
+                    (*end, *start, None)
+                }
+                TimelineQueryPosition::Cursor { cursor, through } => {
+                    if cursor.branch_id != key.branch_id {
+                        return Err(AgentError::InvalidInput(format!(
+                            "query cursor names branch {}",
+                            cursor.branch_id
+                        )));
+                    }
+                    if cursor.sequence == 0 {
+                        return Err(AgentError::InvalidInput(
+                            "a query cursor names a committed sequence".into(),
+                        ));
+                    }
+                    if cursor.sequence > *through {
+                        return Err(AgentError::InvalidInput("future Timeline cursor".into()));
+                    }
+                    (
+                        *through,
+                        cursor.sequence.checked_add(1).ok_or_else(|| {
+                            AgentError::InvalidInput(
+                                "query cursor is past the last sequence".into(),
+                            )
+                        })?,
+                        Some(cursor.sequence),
+                    )
+                }
+            };
+            let session = key.session_id.clone();
+            let branch = key.branch_id.clone();
+            let bounds = key.clone();
+            let (head, through_end, cursor_end) = self
+                .db
+                .run_read(move |connection| {
+                    Ok((
+                        head(connection, &bounds)?,
+                        row_end(connection, &session, &branch, through)?,
+                        cursor
+                            .map(|sequence| row_end(connection, &session, &branch, sequence))
+                            .transpose()?
+                            .flatten(),
+                    ))
+                })
+                .await?;
+            if through > head {
+                return Err(AgentError::InvalidInput(format!(
+                    "future Timeline sequence {through}"
+                )));
+            }
+            if through > 0 && through_end != Some(through) {
+                return Err(AgentError::InvalidInput(format!(
+                    "sequence {through} is inside an atomic batch"
+                )));
+            }
+            if let Some(cursor) = cursor
+                && cursor_end != Some(cursor)
+            {
+                return Err(AgentError::InvalidInput(
+                    "cursor is inside an atomic batch".into(),
+                ));
+            }
+            if start > through {
+                return Ok(TimelineQueryReply {
+                    events: vec![],
+                    next: None,
+                });
+            }
+            let limit = usize::try_from(query.limit.get()).unwrap_or(usize::MAX);
+            let mut events: Vec<StoredEvent> = Vec::new();
+            let mut window = start;
+            let mut target = None;
+            while window <= through {
+                let end = window
+                    .saturating_add(255)
+                    .min(target.unwrap_or(through))
+                    .min(through);
+                events.extend(self.query_range(key, query, window..=end).await?);
+                window = end + 1;
+                if target.is_none() && events.len() >= limit {
+                    let end = events[limit - 1].batch_end;
+                    events.retain(|record| record.event.sequence <= end);
+                    if end < through {
+                        target = Some(end);
+                    }
+                }
+            }
+            Ok(TimelineQueryReply {
+                events: events.into_iter().map(|record| record.event).collect(),
+                next: target.map(|sequence| TimelineCursor {
+                    branch_id: key.branch_id.clone(),
+                    sequence,
+                }),
+            })
         })
     }
 

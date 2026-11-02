@@ -291,24 +291,38 @@ fn same_schema(actual: &[(String, String)], mut expected: Vec<(&str, String)>) -
                 name == expected_name && *sql == expected_sql
             })
 }
-/// The read index the daemon creates at open (session-history-window §5.1).
-/// It carries no data and no decode rule, so it is not part of the format:
-/// `schema` and the format gate ignore it, and every open recreates it.
-const DERIVED_INDEX: (&str, &str) = (
-    "timeline_history_anchors",
-    "CREATE INDEX IF NOT EXISTS timeline_history_anchors ON timeline_events(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'input/message')",
-);
+/// The read indexes the daemon creates at open: the latest-turn window's
+/// ([session-history-window §5.1](../../../../docs/design/appserver/session-history-window.md#51-the-derived-index))
+/// and the event query's by kind, which carries the event id so a kind read
+/// needs no table body for it (ADR 019 D4). They carry no data and no decode
+/// rule, so they are not part of the format: `schema` and the format gate
+/// ignore them, and every open recreates them.
+const DERIVED_INDEXES: &[(&str, &str)] = &[
+    (
+        "timeline_history_anchors",
+        "CREATE INDEX IF NOT EXISTS timeline_history_anchors ON timeline_events(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'input/message')",
+    ),
+    (
+        "timeline_events_by_kind",
+        "CREATE INDEX IF NOT EXISTS timeline_events_by_kind ON timeline_events(session_id, branch_id, kind, sequence, event_id)",
+    ),
+];
 /// The schema objects of `connection`'s database that belong to the format,
 /// sorted by name.
 fn schema(connection: &Connection) -> Result<Vec<(String, String)>> {
+    let derived = DERIVED_INDEXES
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>();
+    let placeholders = vec!["?"; derived.len()].join(",");
     let mut query = connection
-        .prepare(
+        .prepare(&format!(
             "SELECT name, sql FROM sqlite_master \
-             WHERE name NOT LIKE 'sqlite_%' AND name != ?1 ORDER BY name",
-        )
+             WHERE name NOT LIKE 'sqlite_%' AND name NOT IN ({placeholders}) ORDER BY name"
+        ))
         .map_err(storage)?;
     query
-        .query_map(rusqlite::params![DERIVED_INDEX.0], |row| {
+        .query_map(rusqlite::params_from_iter(derived), |row| {
             Ok((row.get(0)?, row.get(1)?))
         })
         .map_err(storage)?
@@ -650,7 +664,9 @@ impl SqliteStorage {
                 path.display()
             )));
         }
-        tx.execute_batch(DERIVED_INDEX.1).map_err(storage)?;
+        for (_, sql) in DERIVED_INDEXES {
+            tx.execute_batch(sql).map_err(storage)?;
+        }
         tx.commit().map_err(storage)?;
         connection
             .pragma_update(None, "journal_mode", "WAL")
