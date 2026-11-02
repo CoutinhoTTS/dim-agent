@@ -12,13 +12,13 @@ use crate::protocol::SessionOrigin;
 use dim_agent_capabilities::host::SessionFilesHost;
 use dim_agent_runtime::Names;
 use dim_agent_runtime::{
-    AgentError, BoxFuture, BranchRecord, PolicyFacts, PolicyOrder, PolicyOrderEvent, PolicyWindow,
-    PublishCallback, Result, SessionConfig, StoredBranch, StoredEvent, TimelineKey, TimelineStore,
-    TimelineTrace, panic_message,
+    AgentError, BoxFuture, BranchRecord, PolicyEvent, PolicyFacts, PolicyOrder, PolicyOrderEvent,
+    PolicyWindow, PublishCallback, Result, SessionConfig, StoredBranch, StoredEvent, TimelineKey,
+    TimelineStore, TimelineTrace, panic_message,
 };
 use dim_agent_types::{
     AgentEvent, BranchCreateAt, ContextCompactionResult, EventKind, ModelRequest, RecoverySnapshot,
-    SessionForkedData,
+    SessionForkedData, TimelinePosition,
     grant::{GrantKind, GrantMode, SessionGrant},
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -1764,8 +1764,8 @@ impl SessionStore {
                     .map_err(error)?;
                 }
                 tx.execute(
-                    "INSERT INTO timeline_events (session_id, branch_id, sequence, last_sequence, kind, body, event_id) \
-                     SELECT ?2, branch_id, sequence, last_sequence, kind, body, event_id FROM timeline_events \
+                    "INSERT INTO timeline_events (session_id, branch_id, sequence, last_sequence, kind, body, event_id, context_render, context_state) \
+                     SELECT ?2, branch_id, sequence, last_sequence, kind, body, event_id, context_render, context_state FROM timeline_events \
                      WHERE session_id=?1 AND branch_id='main' AND sequence<=?3",
                     params![source, fork, cut],
                 )
@@ -1833,6 +1833,7 @@ impl SessionStore {
                         &key,
                         at + 1,
                         forked.event.kind.key(),
+                        forked.event.kind.context_flags(),
                         &Row::Event {
                             record: Box::new(wire),
                         },
@@ -2156,7 +2157,14 @@ fn write_batch(
                     started_at: record.event.create_at,
                     records: vec![wire],
                 };
-                let bytes = insert_event(connection, &batch.key, sequence, kind, &row)?;
+                let bytes = insert_event(
+                    connection,
+                    &batch.key,
+                    sequence,
+                    kind,
+                    record.event.kind.context_flags(),
+                    &row,
+                )?;
                 outputs.insert(
                     batch.key.branch_id.clone(),
                     OutputRow {
@@ -2174,6 +2182,7 @@ fn write_batch(
                     &batch.key,
                     sequence,
                     kind,
+                    record.event.kind.context_flags(),
                     &Row::Event {
                         record: Box::new(wire),
                     },
@@ -2226,11 +2235,12 @@ fn insert_event(
     key: &TimelineKey,
     sequence: u64,
     kind: &str,
+    flags: (bool, bool),
     row: &Row,
 ) -> Result<usize> {
     let body = serde_json::to_string(row).map_err(error)?;
     connection
-        .prepare_cached("INSERT INTO timeline_events VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6)")
+        .prepare_cached("INSERT INTO timeline_events VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8)")
         .map_err(error)?
         .execute(params![
             key.session_id,
@@ -2241,7 +2251,9 @@ fn insert_event(
             match row {
                 Row::Event { record } => record.event["id"].as_str(),
                 Row::Output { .. } => None,
-            }
+            },
+            i64::from(flags.0),
+            i64::from(flags.1),
         ])
         .map_err(error)?;
     Ok(body.len())
@@ -2667,7 +2679,7 @@ fn policy_rows(
     turn_id: &str,
 ) -> Result<Vec<(i64, i64)>> {
     let mut rows = Vec::new();
-    for kind in ["context/configured", "context/compaction"] {
+    for kind in ["context/configured", "context/compaction", "prompt/changed"] {
         let row: Option<(i64, i64)> = connection
             .prepare(
                 "SELECT sequence, MAX(last_sequence, COALESCE(json_extract(body, '$.record.batch_end'), last_sequence)) FROM timeline_events \
@@ -2997,6 +3009,7 @@ impl TimelineStore for SqliteTimelineStore {
                          FROM timeline_events \
                          WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3 \
                          AND event_id IS NOT NULL \
+                         AND kind IN ('turn/start', 'context/compaction-start', 'context/compaction') \
                          ORDER BY sequence",
                     )
                     .map_err(error)?;
@@ -3018,6 +3031,7 @@ impl TimelineStore for SqliteTimelineStore {
             };
             Ok(PolicyOrder {
                 through,
+                branches: Vec::new(),
                 events: rows
                     .into_iter()
                     .map(|(id, kind, sequence, through)| PolicyOrderEvent {
@@ -3028,6 +3042,7 @@ impl TimelineStore for SqliteTimelineStore {
                         compaction_start: (kind == "context/compaction-start")
                             .then_some(through.map(|value| value as u64))
                             .flatten(),
+                        boundary: false,
                     })
                     .collect(),
             })
@@ -3127,10 +3142,215 @@ impl TimelineStore for SqliteTimelineStore {
                 .await?
                 .into_iter()
                 .flatten()
-                .map(|record| record.event)
-                .filter(|event| event.sequence <= through && is_policy_event(event))
+                .filter(|record| record.event.sequence <= through && is_policy_event(&record.event))
+                .map(|record| PolicyEvent {
+                    position: TimelinePosition {
+                        branch_id: key.branch_id.clone(),
+                        sequence: record.event.sequence,
+                    },
+                    event: record.event,
+                })
                 .collect();
             Ok(PolicyFacts { through, events })
+        })
+    }
+    fn events_of_kind<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        kind: &'a str,
+        through: u64,
+    ) -> BoxFuture<'a, Result<Vec<Arc<dim_agent_types::AgentEvent>>>> {
+        Box::pin(async move {
+            let session = key.session_id.clone();
+            let branch = key.branch_id.clone();
+            let wanted = kind.to_owned();
+            let end = sql_sequence(through)?;
+            let mut reader = self.reader(RequestBodies::Rebuild);
+            let rows = holds(
+                &self.db,
+                &mut reader,
+                None,
+                move |connection, reader, rows: &mut Option<Rows>| {
+                    let rows = match rows {
+                        Some(rows) => rows,
+                        None => {
+                            let mut query = connection
+                                .prepare(
+                                    "SELECT sequence, last_sequence, kind, body, event_id \
+                                     FROM timeline_events \
+                                     WHERE session_id=?1 AND branch_id=?2 AND kind=?3 AND sequence<=?4 \
+                                     ORDER BY sequence",
+                                )
+                                .map_err(error)?;
+                            rows.insert(Rows {
+                                fetched: query_fetched(
+                                    &mut query,
+                                    rusqlite::params![session, branch, wanted, end],
+                                )?
+                                .into(),
+                                decoded: vec![],
+                            })
+                        }
+                    };
+                    rows.advance(connection, &session, reader)
+                },
+            )
+            .await?;
+            self.finish(reader);
+            let mut rows = rows.expect("a finished read fetched its rows");
+            Ok(rows
+                .records(&(1..=through), false)?
+                .into_iter()
+                .map(|record| record.event)
+                .collect())
+        })
+    }
+    fn event_by_id<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<Arc<dim_agent_types::AgentEvent>>>> {
+        Box::pin(async move {
+            let session = key.session_id.clone();
+            let branch = key.branch_id.clone();
+            let wanted = id.to_owned();
+            let sequence: Option<i64> = self
+                .db
+                .run(move |connection| {
+                    connection
+                        .query_row(
+                            "SELECT sequence FROM timeline_events \
+                             WHERE session_id=?1 AND branch_id=?2 AND event_id=?3 LIMIT 1",
+                            rusqlite::params![session, branch, wanted],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(error)
+                })
+                .await?;
+            let Some(sequence) = sequence else {
+                return Ok(None);
+            };
+            let mut reader = self.reader(RequestBodies::Rebuild);
+            let records = read_range(
+                &self.db,
+                &mut reader,
+                key,
+                sequence as u64..=sequence as u64,
+                false,
+            )
+            .await?;
+            self.finish(reader);
+            Ok(records
+                .into_iter()
+                .map(|record| record.event)
+                .find(|event| event.id == id))
+        })
+    }
+    fn last_event<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> BoxFuture<'a, Result<Option<Arc<dim_agent_types::AgentEvent>>>> {
+        Box::pin(async move {
+            let mut reader = self.reader(RequestBodies::Rebuild);
+            let records =
+                read_range(&self.db, &mut reader, key, sequence..=sequence, false).await?;
+            self.finish(reader);
+            Ok(records
+                .into_iter()
+                .map(|record| record.event)
+                .rfind(|event| event.sequence <= sequence))
+        })
+    }
+    fn read_context_page<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        after: u64,
+        limit: usize,
+        through: u64,
+    ) -> BoxFuture<'a, Result<Vec<StoredEvent>>> {
+        Box::pin(async move {
+            if after > through || limit == 0 {
+                return Ok(Vec::new());
+            }
+            let mut records = Vec::new();
+            let mut cursor = after.max(1);
+            let mut decoded = 0;
+            while cursor <= through && decoded < limit {
+                let end = cursor.saturating_add(255).min(through);
+                let mut page = self.read_context(key, cursor, end).await?;
+                decoded += page.len();
+                records.append(&mut page);
+                cursor = end + 1;
+            }
+            let mut records: Vec<_> = records
+                .into_iter()
+                .filter(|record| record.event.sequence > after)
+                .collect();
+            if let Some(record) = records.get(limit - 1) {
+                let end = record.batch_end;
+                while cursor <= end && cursor <= through {
+                    let window = cursor.saturating_add(255).min(through);
+                    let mut page = self.read_context(key, cursor, window).await?;
+                    cursor = window + 1;
+                    records.append(&mut page);
+                }
+                records.retain(|record| record.event.sequence <= end);
+            }
+            Ok(records)
+        })
+    }
+    fn read_context<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        from: u64,
+        through: u64,
+    ) -> BoxFuture<'a, Result<Vec<StoredEvent>>> {
+        Box::pin(async move {
+            if from == 0 || from > through {
+                return Ok(Vec::new());
+            }
+            let session = key.session_id.clone();
+            let branch = key.branch_id.clone();
+            let (start, end) = (sql_sequence(from)?, sql_sequence(through)?);
+            let mut reader = self.reader(RequestBodies::Rebuild);
+            let rows = holds(
+                &self.db,
+                &mut reader,
+                None,
+                move |connection, reader, rows: &mut Option<Rows>| {
+                    let rows = match rows {
+                        Some(rows) => rows,
+                        None => {
+                            let mut query = connection
+                                .prepare(
+                                    "SELECT sequence, last_sequence, kind, body, event_id FROM timeline_events \
+                             WHERE session_id=?1 AND branch_id=?2 \
+                             AND sequence >= coalesce((SELECT max(sequence) FROM timeline_events \
+                               WHERE session_id=?1 AND branch_id=?2 AND sequence <= ?3), ?3) \
+                             AND sequence<=?4 AND last_sequence >= ?3 \
+                             AND (context_render=1 OR context_state=1) ORDER BY sequence"
+                                )
+                                .map_err(error)?;
+                            rows.insert(Rows {
+                                fetched: query_fetched(
+                                    &mut query,
+                                    rusqlite::params![session, branch, start, end],
+                                )?
+                                .into(),
+                                decoded: vec![],
+                            })
+                        }
+                    };
+                    rows.advance(connection, &session, reader)
+                },
+            )
+            .await?;
+            self.finish(reader);
+            let mut rows = rows.expect("a finished read fetched its rows");
+            let records = rows.records(&(from..=through), false)?;
+            Ok(records)
         })
     }
     fn read_segments<'a>(

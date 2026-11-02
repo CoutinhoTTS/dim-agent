@@ -29,6 +29,9 @@ pub enum WriteTarget {
     Area { revision: String },
     /// One entry's document, at the revision it was read at.
     Entry { id: String, revision: String },
+    /// The input document of one entry's operation. A run always sends it,
+    /// so it has no revision and is never unchanged.
+    Run { id: String },
 }
 
 impl WriteTarget {
@@ -39,6 +42,7 @@ impl WriteTarget {
         match (self, other) {
             (Self::Create, Self::Create) | (Self::Area { .. }, Self::Area { .. }) => true,
             (Self::Entry { id, .. }, Self::Entry { id: other, .. }) => id == other,
+            (Self::Run { id }, Self::Run { id: other }) => id == other,
             _ => false,
         }
     }
@@ -55,6 +59,7 @@ impl WriteTarget {
                     id: Some(written), ..
                 },
             ) => id == written,
+            (Self::Run { id }, ManagementAction::Run { id: written, .. }) => id == written,
             _ => false,
         }
     }
@@ -172,6 +177,9 @@ pub enum Effect {
         area: crate::model::session::Area,
         target: WriteTarget,
         text: String,
+        /// The document the editor opens with, when the panel has one to
+        /// measure the user's edits against: a run's parameters.
+        seed: Option<serde_json::Value>,
     },
     /// Change a provider (`/connect`).
     Provider(crate::model::session::ProviderAction),
@@ -1041,6 +1049,16 @@ impl AskUserPrompt {
         labels.push(t("Confirm").to_owned());
         let tabs = choices(&labels, self.active_tab, p);
         let counter = format!("{}/{}", self.active_tab + 1, labels.len());
+        if visible_width(&tabs) > inner {
+            let label = truncate_cells(
+                &format!("{SELECTED_MARKER}{}", labels[self.active_tab]),
+                inner.saturating_sub(counter.len() + 1),
+            );
+            return fg(
+                &truncate_cells(&format!("{label} {counter}"), inner),
+                &p.accent,
+            );
+        }
         let used = visible_width(&tabs) + counter.len();
         if inner < used + 2 {
             return tabs;
@@ -1761,6 +1779,19 @@ mod tests {
                 .iter()
                 .all(|row| crate::ui::text::display_width(&strip(row)) <= 48)
         );
+        let mut ask = dinner(false);
+        ask.call.questions[0].header = Some("Dinner selection for the whole team".into());
+        for width in [24, 32, 40] {
+            let rows = ask.render(width, 12, &theme.palette);
+            assert!(rows.iter().all(|row| visible_width(row) <= width));
+            assert!(strip(&rows[1]).contains("1/2"));
+            ask.handle_key(key(KeyCode::Tab));
+            let rows = ask.render(width, 12, &theme.palette);
+            assert!(rows.iter().all(|row| visible_width(row) <= width));
+            assert!(strip(&rows[1]).contains(t("Confirm")));
+            assert!(strip(&rows[1]).contains("2/2"));
+            ask.handle_key(key(KeyCode::BackTab));
+        }
     }
 
     #[test]

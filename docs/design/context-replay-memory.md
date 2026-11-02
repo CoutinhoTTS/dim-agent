@@ -142,16 +142,17 @@ compaction（[agent_loop.rs:359](../../crates/dim-agent-capabilities/src/agent_l
 不保留投影 cache，也不把整段历史装进 `ContextHistory.events`。每次 prepare 按批读取事件，
 边读边投影，投影之外的批立即释放。没有跨 prepare 的派生状态，也没有缓存失效规则。
 
-- **读取**：`Timeline::stored_page` 在固定 head 上读取某个位置之后的完整原子批次，
+- **读取**：`Timeline::stored_context_page_in` 读取某个位置之后、带上下文开关的完整原子批次，
   目标是一批的事件数、永不在原子批次中间结束；`HistoryRenderer::rendered_stream`
-  以 256 条为默认批大小顺序读取；不经过 hot cache，不保留事件体。
+  以 256 条为默认批大小，从快照的恢复位置或第一个有效段的段首顺序读取；不经过 hot cache，
+  不保留事件体。
 - **投影**：`project_batch` 接受上一批的 `ProjectionCheckpointState`，返回新的 entries/state；
   `rendered_stream` 合并 entries，事件只活到当前批。
 - **压缩**：批次内遇到 completed compaction 时按 `retain_from` 裁剪已累计的 history；
-  cut 在更早批次时按 `PolicyOrder` 在累计 history 上裁剪；找不到 cut、cut 比已生效的 cut
-  更靠前（压缩路径写不出这样的数据）或数据损坏时回退全量。
-- **结果**：一次 prepare 的峰值 = 一批事件 + 投影，不随历史长度增长；每次 prepare 仍读全量，
-  CPU/IO 不承诺下降。
+  cut 在更早批次时按 `PolicyOrder` 在累计 history 上裁剪；找不到 cut 或数据损坏时报错，
+  不再回退全量。
+- **结果**：一次 prepare 的峰值 = 一批事件 + 投影，不随历史长度增长；读取从快照的恢复位置
+  或第一个有效段的段首开始，只取参与投影的行。
 
 #### policy 不再消费整份 ContextHistory
 
@@ -163,11 +164,10 @@ policy 需要的事实和窗口单独查询，不经过 `ContextHistory.events`�
   用于合法 cut 枚举和 `regrown`。
 - `PolicyWindow`：锚点、当前 turn 输入、`input/consumed`、上一次 cut 之后的 tool-result；
   合并 ancestry，用于 pinning 和 digest。
-- `ContextPolicy` 的输入改为 `PolicyContext`，只持有 configuration、compaction、order
-  和可选的 full context；`full` 只用于自定义 renderer/损坏数据回退。
-- `compact_step` 的 snapshot 只按本次压缩自己的 `retain_from` 构建：有完整 context 时用它，
-  否则按 `stream_checkpoint` 二次流式重放到 cut；自定义 checkpoint builder 仍走完整路径。
-  准备视图时（本次压缩尚不存在）不会留下可复用的 checkpoint。
+- `ContextPolicy` 的输入改为 `PolicyContext`，只持有 configuration、compaction、order、
+  streamed checkpoint 和可选的 full context；`full` 只用于显式的 `rendered_context` 读取，
+  准备路径总是用默认投影。
+- `compact_step` 的 snapshot 由 `stream_checkpoint` 从最近的有效快照折叠到 cut。
 
 #### 与快照的关系
 
@@ -203,7 +203,7 @@ P3 已经覆盖冷重建：读取按批进行，不再一次物化整段历史�
 - `ModelRequest` 序列化不变；冻结的事件 fixture 不动；压缩 `replacement` 仍是 `Message`，
   `ContextBaselineEntry.message` 改为 `Arc<Message>`，事件 JSON 不变。
 - 改动限于 capabilities 的内部类型，以及 runtime 新增的批量读取、policy facts/order/window 查询。
-- P3 不改变事件、快照、压缩契约；自定义 renderer、祖先范围和损坏数据保留全量回退。
+- P3 不改变事件、快照、压缩契约；准备好整条分支链统一从位置起读，没有全量回退。
 - `PolicyContext` 是 crate 内部输入，不新增事件、服务、配置项或持久状态。
 - `Timeline` 的快照和压缩契约不变；读取新增分页入口，现有读取语义不变。
 
@@ -211,10 +211,10 @@ P3 已经覆盖冷重建：读取按批进行，不再一次物化整段历史�
 
 | 项 | 说明 |
 | --- | --- |
-| P3 的一致性 | 流式投影必须与全量 `rendered_context` 在固定前缀上一致；读取/解码/校验失败、cut 比已生效的 cut 更靠前时回退全量；没有跨 prepare 的缓存状态 |
-| P3 的内存 | 峰值 = 一批事件 + 投影；不保留历史；每次 prepare 仍读全量，CPU/IO 不降 |
+| P3 的一致性 | 流式投影必须与全量 `rendered_context` 在固定前缀上一致；读取/解码/校验失败报错，不回退；没有跨 prepare 的缓存状态 |
+| P3 的内存 | 峰值 = 一批事件 + 投影；不保留历史；读取从快照的恢复位置或段首开始，只取参与投影的行，压缩之后的读取量随裁剪点而不是历史长度增长 |
 | policy facts | SQL 选择必须与默认 store 相同；按 ancestry 合并；`input/consumed` 引用的输入即使写在 turn 之前也要选中 |
-| policy 窗口 | cut 必须落在窗口内；跨 batch cut 在累计 history 上裁剪；找不到或损坏时回退全量 |
+| policy 窗口 | cut 必须落在窗口内；跨 batch cut 在累计 history 上裁剪；找不到或损坏时报错 |
 | restore | `Dispatcher::follow` 仍为每个 consumer 读完整本地历史，restore peak 约 19.9MB；这是后续分页 replay 的工作，不影响 prepare |
 | 代码页 | 产品二进制 `.text` 约 60MB；空 daemon RSS 29.7MB，单会话 50.8MB；代码页是 RSS 下限，不是 allocator 能解决 |
 | P1 的分配 | `HistoryEntry.message` 和 `ContextBaselineEntry.message` 共享 Arc；baseline 重复从 24.09 MB 降到共享 |

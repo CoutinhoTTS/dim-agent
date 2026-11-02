@@ -40,6 +40,8 @@ mod session_management;
 mod skills;
 #[path = "cli_flow/tasks.rs"]
 mod tasks;
+#[path = "cli_flow/workflow.rs"]
+mod workflow;
 
 #[path = "support/daemon.rs"]
 mod daemon_cleanup;
@@ -9608,7 +9610,8 @@ fn daemon_vacuum_reclaims_an_offline_store() {
     for sequence in 1..=2000 {
         connection
             .execute(
-                "INSERT INTO timeline_events VALUES ('s', 'main', ?1, ?1, 'turn/start', ?2, NULL)",
+                "INSERT INTO timeline_events (session_id, branch_id, sequence, last_sequence, kind, body) \
+                 VALUES ('s', 'main', ?1, ?1, 'turn/start', ?2)",
                 rusqlite::params![sequence, "x".repeat(4000)],
             )
             .unwrap();
