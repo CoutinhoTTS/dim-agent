@@ -910,8 +910,8 @@ async fn both_transports_report_stop_failure_instead_of_success() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unix_and_websocket_share_all_session_requests_and_subscriptions() {
     let server = launch(Arc::new(MockTools), ServerConfig::default()).await;
-    let mut local = Client::new(&server, false).await;
-    let mut remote = Client::new(&server, true).await;
+    let mut local = Client::new_version(&server, false, 3).await;
+    let mut remote = Client::new_version(&server, true, 3).await;
     let ping = local.rpc("daemon.ping", json!({})).await;
     assert_eq!(ping["result"]["connections"], 2);
     let created = local
@@ -921,17 +921,21 @@ async fn unix_and_websocket_share_all_session_requests_and_subscriptions() {
     let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
     let attach = remote.rpc("session.attach", json!({"sessionId":sid})).await;
     assert_eq!(attach["result"]["sessionId"], sid);
-    let listed = local.rpc("session.list", json!({})).await;
+    let listed = local.rpc("session.summaries", json!({})).await;
     assert_eq!(listed["result"][0]["attachedClients"], 1);
     let submitted = local
         .rpc(
             "session.submit",
-            json!({"sessionId":sid,"text":"tool:wait {\"millis\":80,\"text\":\"done\"}"}),
+            json!({"sessionId":sid,"branchId":"main","text":"tool:wait {\"millis\":80,\"text\":\"done\"}"}),
         )
         .await;
     assert_ok(&submitted);
     drop(local);
-    assert_ok(&remote.rpc("session.idle", json!({"sessionId":sid})).await);
+    assert_ok(
+        &remote
+            .rpc("session.idle", json!({"sessionId":sid,"branchId":"main"}))
+            .await,
+    );
     let mut events = vec![];
     loop {
         let event = remote.notice("session.event").await["params"]["event"].clone();
@@ -949,17 +953,28 @@ async fn unix_and_websocket_share_all_session_requests_and_subscriptions() {
     remote.notices.clear();
     assert_ok(
         &remote
-            .rpc("session.submit", json!({"sessionId":sid,"text":"next"}))
+            .rpc(
+                "session.submit",
+                json!({"sessionId":sid,"branchId":"main","text":"next"}),
+            )
             .await,
     );
     let next = remote.notice("session.event").await;
     assert!(next["params"]["event"]["sequence"].as_u64().unwrap() > high);
-    assert_ok(&remote.rpc("session.idle", json!({"sessionId":sid})).await);
+    assert_ok(
+        &remote
+            .rpc("session.idle", json!({"sessionId":sid,"branchId":"main"}))
+            .await,
+    );
     assert_ok(&remote.rpc("session.detach", json!({"sessionId":sid})).await);
-    let listed = remote.rpc("session.list", json!({})).await;
+    let listed = remote.rpc("session.summaries", json!({})).await;
     assert_eq!(listed["result"][0]["attachedClients"], 0);
     assert_ok(&remote.rpc("session.attach", json!({"sessionId":sid})).await);
-    assert_ok(&remote.rpc("session.stop", json!({"sessionId":sid})).await);
+    assert_ok(
+        &remote
+            .rpc("session.stop", json!({"sessionId":sid,"branchId":"main"}))
+            .await,
+    );
     assert_ok(&remote.rpc("session.close", json!({"sessionId":sid})).await);
     let closed = remote.notice("session.closed").await;
     assert_eq!(closed["params"]["sessionId"], sid);
@@ -1450,7 +1465,7 @@ async fn large_live_event_has_no_32mib_outbound_cap_and_slow_client_is_local() {
     )
     .await
     .unwrap();
-    let mut control = Client::new(&server, false).await;
+    let mut control = Client::new_version(&server, false, 3).await;
     let created = control.rpc("session.create", create(json!([]))).await;
     assert_ok(&created);
     let sid = created["result"]["sessionId"].clone();
@@ -1459,13 +1474,16 @@ async fn large_live_event_has_no_32mib_outbound_cap_and_slow_client_is_local() {
             .rpc("session.attach", json!({"sessionId":sid}))
             .await,
     );
-    let mut remote = Client::new(&server, true).await;
+    let mut remote = Client::new_version(&server, true, 3).await;
     assert_ok(&remote.rpc("session.attach", json!({"sessionId":sid})).await);
-    let mut slow = Client::new(&server, false).await;
+    let mut slow = Client::new_version(&server, false, 3).await;
     assert_ok(&slow.rpc("session.attach", json!({"sessionId":sid})).await);
     assert_ok(
         &control
-            .rpc("session.submit", json!({"sessionId":sid,"text":"large"}))
+            .rpc(
+                "session.submit",
+                json!({"sessionId":sid,"branchId":"main","text":"large"}),
+            )
             .await,
     );
     for client in [&mut control, &mut remote] {
@@ -1481,7 +1499,11 @@ async fn large_live_event_has_no_32mib_outbound_cap_and_slow_client_is_local() {
         );
     }
     drop(remote);
-    assert_ok(&control.rpc("session.idle", json!({"sessionId":sid})).await);
+    assert_ok(
+        &control
+            .rpc("session.idle", json!({"sessionId":sid,"branchId":"main"}))
+            .await,
+    );
     tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             let ping = control.rpc("daemon.ping", json!({})).await;
@@ -1495,7 +1517,7 @@ async fn large_live_event_has_no_32mib_outbound_cap_and_slow_client_is_local() {
     .await
     .expect("slow connection is removed without closing its Session");
     drop(slow);
-    let listed = control.rpc("session.list", json!({})).await;
+    let listed = control.rpc("session.summaries", json!({})).await;
     assert_eq!(listed["result"].as_array().unwrap().len(), 1);
     assert_ok(&control.rpc("session.close", json!({"sessionId":sid})).await);
     server.shutdown();
@@ -1503,43 +1525,42 @@ async fn large_live_event_has_no_32mib_outbound_cap_and_slow_client_is_local() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn attach_replies_the_record_the_catalog_lists_for_that_session() {
+async fn attach_replies_the_record_the_listing_shows_for_that_session() {
     use dim_agent_types::InputMode;
-    for version in [3, 2] {
-        for ws in [false, true] {
-            let server = launch(Arc::new(MockTools), ServerConfig::default()).await;
-            let mut client = Client::new_version(&server, ws, version).await;
-            let created = client.rpc("session.create", create(json!([]))).await;
-            assert_ok(&created);
-            let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
-            let session = server.agent().unwrap().get_session(&sid).unwrap();
-            session
-                .submit("a Session with history".into(), InputMode::Queue, "main")
-                .await
-                .unwrap();
-            session.idle("main").await.unwrap();
+    for ws in [false, true] {
+        let server = launch(Arc::new(MockTools), ServerConfig::default()).await;
+        let mut client = Client::new_version(&server, ws, 3).await;
+        let created = client.rpc("session.create", create(json!([]))).await;
+        assert_ok(&created);
+        let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
+        let session = server.agent().unwrap().get_session(&sid).unwrap();
+        session
+            .submit("a Session with history".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
 
-            let attached = client.rpc("session.attach", json!({"sessionId":sid})).await;
-            assert_ok(&attached);
-            let listed = client.rpc("session.list", json!({})).await;
-            assert_ok(&listed);
-            let entry = listed["result"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|entry| entry["sessionId"] == sid.as_str())
-                .expect("the Session is listed");
-            assert_eq!(
-                attached["result"], *entry,
-                "protocol v{version}: the attach reply is the list entry"
-            );
-            assert_eq!(attached["result"]["attachedClients"], 1);
-            if version < 3 {
-                assert!(entry.get("agentId").is_none() && entry.get("title").is_none());
-            }
-            server.shutdown();
-            server.join().await.unwrap();
+        let attached = client.rpc("session.attach", json!({"sessionId":sid})).await;
+        assert_ok(&attached);
+        let listed = client.rpc("session.summaries", json!({})).await;
+        assert_ok(&listed);
+        let mut entry = listed["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["sessionId"] == sid.as_str())
+            .expect("the Session is listed")
+            .clone();
+        for field in ["preview", "updatedAt", "closed"] {
+            entry.as_object_mut().unwrap().remove(field);
         }
+        assert_eq!(
+            attached["result"], entry,
+            "the attach reply is the listed record"
+        );
+        assert_eq!(attached["result"]["attachedClients"], 1);
+        server.shutdown();
+        server.join().await.unwrap();
     }
 }
 
@@ -1792,7 +1813,7 @@ async fn unix_accept_recovers_from_descriptor_exhaustion_and_shutdown_interrupts
         };
         assert_ok(
             &control
-                .rpc("hello", json!({"protocolVersion":1,"clientKind":"other"}))
+                .rpc("hello", json!({"protocolVersion":3,"clientKind":"other"}))
                 .await,
         );
         let created = control.rpc("session.create", create(json!([]))).await;
@@ -1846,10 +1867,10 @@ async fn unix_accept_recovers_from_descriptor_exhaustion_and_shutdown_interrupts
             };
             assert_ok(
                 &restored
-                    .rpc("hello", json!({"protocolVersion":1,"clientKind":"other"}))
+                    .rpc("hello", json!({"protocolVersion":3,"clientKind":"other"}))
                     .await,
             );
-            let sessions = restored.rpc("session.list", json!({})).await;
+            let sessions = restored.rpc("session.summaries", json!({})).await;
             assert_eq!(
                 sessions["result"][0]["sessionId"], sid,
                 "accept failure must preserve the live Session"

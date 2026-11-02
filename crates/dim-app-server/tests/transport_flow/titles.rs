@@ -165,15 +165,13 @@ fn listed(reply: &Value, session: &str) -> Value {
     })
 }
 async fn listed_everywhere(client: &mut Client, session: &str) -> Value {
-    let list = client.rpc("session.list", json!({})).await;
     let summaries = client.rpc("session.summaries", json!({})).await;
-    assert_eq!(listed(&list, session), listed(&summaries, session));
-    listed(&list, session)
+    listed(&summaries, session)
 }
 
 /// §16 items 1, 3, 4, 7 and 11: revision-checked writes, one notice per
 /// commit in commit order on both transports, none for a conflict, an
-/// unknown Session or a malformed call, and the v3 list fields.
+/// unknown Session or a malformed call, and the v3 summary fields.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn set_title_commits_revisions_and_announces_each_commit_once() {
     for _ in 0..3 {
@@ -479,37 +477,21 @@ async fn closing_settles_admitted_title_writes_and_refuses_later_ones() {
     }
 }
 
-/// §16 items 7 and 8: v2 lists stay frozen; a fork starts untitled; a title
-/// survives a restart and is read and written while its Session is not
-/// loaded; a delete removes it with the Session.
+/// §16 items 7 and 8: a fork starts untitled; a title survives a restart and
+/// is read and written while its Session is not loaded; a delete removes it
+/// with the Session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn titles_survive_restart_skip_forks_and_go_with_their_session() {
     let store = Store::new();
     let (server, agent, metadata) = serve_titles(&store).await;
     let mut client = Client::new_version(&server, false, 3).await;
-    let mut legacy = Client::new_version(&server, false, 2).await;
     let sid = session(&mut client).await;
     turn(&mut client, &sid, "first").await;
-    let legacy_sid = session(&mut legacy).await;
     let kept = title("Kept", "manual");
     assert_eq!(
         metadata.set(&sid, 0, kept.clone()).await,
         ok(json!({"revision": 1}))
     );
-    assert_eq!(
-        metadata.set(&legacy_sid, 0, title("Legacy", "auto")).await,
-        ok(json!({"revision": 1}))
-    );
-    let old = legacy.rpc("session.list", json!({})).await;
-    let entry = old["result"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entry| entry["sessionId"] == legacy_sid)
-        .unwrap();
-    for field in ["title", "titleSource", "titleRevision"] {
-        assert!(entry.get(field).is_none(), "{entry}");
-    }
 
     let at = agent.get_session(&sid).unwrap().sequence("main").unwrap();
     let fork = client
@@ -526,7 +508,7 @@ async fn titles_survive_restart_skip_forks_and_go_with_their_session() {
         listed_everywhere(&mut client, &sid).await,
         fields(Some(("Kept", "manual")), 1)
     );
-    drop((client, legacy, agent));
+    drop((client, agent));
     server.shutdown();
     server.join().await.unwrap();
 

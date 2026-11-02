@@ -105,7 +105,7 @@ Session load, a follow-up for the runtime outside this design.
 | D5 | A level-triggered pass every `G` decides; it unloads a Session lease-free since the previous pass whose `unload_if_idle()` succeeds | (a) Edge-triggered: a timer on the last lease drop plus a runtime "became quiescent" watch; (b) unload at the last lease drop | (a) needs a new facade notification and one watcher task per lease-free Session, and a lost edge leaves a Session loaded forever; it still needs the grace timer. (b) misses a Session that becomes idle after its last lease dropped (submit and leave, `sessions.input` without `idle`) and thrashes on call sequences. [Orleans' activation collection](https://learn.microsoft.com/en-us/dotnet/orleans/host/configuration-guide/activation-collection) works the same way: an idle age, checked by a periodic scan, with calls as activity and `DelayDeactivation` as a hold |
 | D6 | Grace `G` = 60 s, `ServerConfig.idle_unload_after` | No grace; a count bound (keep the N most recent lease-free Sessions); a user setting | Without a grace an S2 run restores its Session for nearly every call (§6.2). A count bound keeps N Sessions loaded forever and picks N as arbitrarily as a time. No user need is known for a setting (ADR 002 D4); tests need a short value, so it is host configuration beside `startup_timeout` |
 | D7 | The unload runs under the Session's admission gate; the pass never waits for a gate | A separate unload lock, or an "unloading" flag `acquire` checks | The gate already orders `acquire`'s restore, prepared creation and delete (S5c §7). A second lock invites lock-order bugs with them, and a flag needs its own wait |
-| D8 | Reads that do not take a lease (`session.list`, `session.summaries`, Collaboration's `agent` read of a member through `AgentIndex::read_page`) fall back to the store when the loaded Session they found unloads under them | Take a lease for each listed Session | A lease would restore and pin every listed Session. Stored records hold every published event |
+| D8 | Reads that do not take a lease (`session.summaries`, Collaboration's `agent` read of a member through `AgentIndex::read_page`) fall back to the store when the loaded Session they found unloads under them | Take a lease for each listed Session | A lease would restore and pin every listed Session. Stored records hold every published event |
 | D9 | Withdrawn by [ADR 005](../../adr/005-observability.md), which removed the trace archive: no Session holds a lease for observation | — | A run is read afterwards through the Timeline and process logs, which an unload and restore do not interrupt |
 | D10 | SessionTitle's generation and an S5b `setTitle` take no hold | Holding until the title is written | SessionTitle's design accepts that an unload cancels generation before the store handover and retries on the next adopted input ([SessionTitle §4](../plugins/SessionTitle.md#4-timing-and-conflicts)). Its 30 s budget is below `G`, so a submit-and-leave Session finishes its title before an unload can start. An admitted `setTitle` is SessionStore's process-scope operation and settles whether or not the Session is loaded |
 | D11 | No client API and no metric; a debug log line per unload and a warning per failed one | A `session.unload` method, an unload event or counter | No consumer. `agent.list` already reports each Agent's loaded Session count |
@@ -129,7 +129,7 @@ A holder takes a lease with `AgentIndex::acquire`, which restores the Session if
 | Running `!` run, BackgroundExec task, the leader side of an open Collaboration request | Nothing today | Blocks through a hold (§5) |
 | C4 leaf observers (rows listening to `session/{sessionId}`) | The rows unload with the Session; the restored Session's rows listen again ([C4 design](../session-typescript.md#native-session-broadcast)) | No: they observe |
 | C6 notice listeners | Attached clients only | Through the attachment |
-| `session.list`, `session.summaries`, `agent.list`, Collaboration's Team status and `agent` read | Non-restoring reads | No: they tolerate an unload (D8) |
+| `session.summaries`, `agent.list`, Collaboration's Team status and `agent` read | Non-restoring reads | No: they tolerate an unload (D8) |
 | Scheduler and Workflow run records | Their own records; per-call leases | No: S2 D12, and they must not add an unload loop |
 | SessionTitle generation, S5b `setTitle` | Session part task; SessionStore operation | No (D10) |
 | Processes a `!cmd &` left in the background | Outside ShellInput after the run ends ([ShellInput A.2](../plugins/ShellInput.md#a2-execution)) | No: nothing in Dim tracks them, and no unload reaches them |
@@ -318,7 +318,7 @@ pass, the slots released since the previous one.
 
 - **Creation.** Only `acquire`, `session.close`, a creation (`admit`) and a delete create a slot. `acquire` and
   `session.close` look up the Session's owner and create the slot in one step under the index lock, so once a delete
-  has forgotten a Session, nothing gives it a new, open slot. Reads that only check the closed flag (`session.list`,
+  has forgotten a Session, nothing gives it a new, open slot. Reads that only check the closed flag (`session.summaries`,
   `session.summaries`, Rpc's close check and Collaboration's Team status) look the
   slot up and create none.
 - **Removal.** Only under the index lock, and only when the map holds the slot's sole reference, its Session is not
@@ -349,7 +349,7 @@ creation drops those of Sessions no longer loaded, as before.
 | `session.close` during an unload | Close acquires an available S, so it waits for the gate | Restores S and closes it with its close facts | Rpc, Agents |
 | Agent close or process shutdown during an unload | Not gated | Joins the release already under way, as concurrent closes share one flow (lifecycle §5) | Runtime |
 | Agents index reload during a pass | Old generation stopping | The pass stops; a release under way finishes before the old generation's cleanup returns; the next generation marks again | Agents |
-| `session.list`, `session.summaries` or a Collaboration `agent` read while S unloads | S found loaded, then released | The loaded read fails as S is released; the store is read instead (D8); the call never fails and never drops S | Agents, Rpc |
+| `session.summaries` or a Collaboration `agent` read while S unloads | S found loaded, then released | The loaded read fails as S is released; the store is read instead (D8); the call never fails and never drops S | Agents, Rpc |
 | Collaboration Team status of an unloaded member | Any | `idle`, as for any available Session | Collaboration |
 | Collaboration request to an unloaded member | Leader tool call | `lookup` restores the member; `SessionRestored` lets Collaboration watch it again; relations kept | Collaboration |
 | Last Session of an owned Agent unloaded | Any | The Agent stays: unload keeps the Session's rows, so its record keeps the Agent, and its instance stays loaded | Agents |
@@ -357,7 +357,7 @@ creation drops those of Sessions no longer loaded, as before.
 | `session.delete` / `sessions.delete` of an unloaded Session | Delete under the gate; S neither loaded nor closed in this process | Agents removes S's rows and emits `UnloadedSessionDeleted` with the Agent and Session ids, as it emits `SessionRestored` for a restore. Deleting S's last member Session also closes the Agent and removes its record. Collaboration drops S's relation when it observes the event, and an owned Agent left with no member is removed at startup | Agents, Collaboration |
 | The delete of an unloaded Session ends while Agents reloads | `sessions.delete` runs to its own outcome across the reload, which reloads Collaboration | Agents emits `UnloadedSessionDeleted` on the process root, so a delete that ends after the next Collaboration subscribed reaches it. One that ends while Collaboration reloads reaches no listener. Collaboration therefore reconciles once it has subscribed, before it provides its service: it rebuilds the relations from the stored leaders, so a member whose rows are gone is no longer one | Agents, Collaboration |
 | C4 leaf observers | Any | The rows stop admitting work when their `closing` settles and unload with the Session; the restored Session's rows listen again | C4 |
-| C6 notice while unloaded | No listener | Dropped, as for any Session without an attached client; a client that attaches reads current state through `session.list` ([C6](https://github.com/arcships/dim/pull/85)) | C6 |
+| C6 notice while unloaded | No listener | Dropped, as for any Session without an attached client; a client that attaches reads current state through `session.summaries` ([C6](https://github.com/arcships/dim/pull/85)) | C6 |
 | S5b `setTitle` admitted before an unload | Any | Settled by SessionStore regardless; its notice is dropped if S is unloaded by then | SessionStore |
 | Pending approval in a launched Session nobody watches | Turn open | Never unloaded; Scheduler or Workflow ends the run with `stop` | Runtime |
 | Queue inputs left held by S2 §6.4 item 2 (Loop reload between `input/applied` and `stop/interrupt`) | Loop idle | The unload may proceed; the restore rebuilds InputQueue and Loop from history, which decides the held inputs as after a restart | InputQueue, Loop |
@@ -374,8 +374,8 @@ creation drops those of Sessions no longer loaded, as before.
 | --- | --- | --- |
 | `SessionSlot` | [agents.rs](../../../crates/dim-app-server/src/agents.rs) | An acquire counter beside `uses`, incremented by `acquire`. From [#345](https://github.com/arcships/dim/issues/345), a deleted flag, and removal once nothing needs the slot (§6.4) |
 | Unload pass | agents.rs | Started by `AgentsPlugin` for its index generation when a native store is present; stopped and drained by the generation's cleanup. Its marks hold their slots, and it ends by removing the slots that can go (§6.1, §6.4) |
-| Closed-flag reads | agents.rs `session_directory`, `session_available` | Look the slot up instead of creating it (§6.4) |
-| Lease-free reads | agents.rs `session_directory`, `session_summary`, `read_page` | Fall back to the store when the loaded Session is released under them (D8) |
+| Closed-flag reads | agents.rs `session_catalog`, `session_available` | Look the slot up instead of creating it (§6.4) |
+| Lease-free reads | agents.rs `session_catalog`, `session_summary`, `read_page` | Fall back to the store when the loaded Session is released under them (D8) |
 | Delete of an unloaded Session | agents.rs `delete`, `UnloadedSessionDeleted` | Once the rows of a Session that was neither loaded nor closed are gone, announces its Agent and Session ids to the owners of process state. It emits on the process root, because a delete can outlive its index generation. Collaboration listens as it does for `SessionRestored`, ends the Session as after a close, and reconciles at load what a reload made it miss (§7) |
 | `ServerConfig.idle_unload_after` | App Server `lib.rs` | One field with its default, in the assembly lane (zerob13), as S2 added one line there |
 
@@ -481,7 +481,7 @@ milliseconds. Each waits on an observed transition (`Session::closed()` of the r
 
 1. **Measured cost (#126).** A test plugin launches 50 Sessions through `sessions`, runs one input, `idle` and the
    `history` pages in each, then drops them. All are unloaded after the grace: `agent.list` reports none loaded, while
-   `session.list` lists all 50 and their history reads in full. A later `sessions.input` restores one, and its turn
+   `session.summaries` lists all 50 and their history reads in full. A later `sessions.input` restores one, and its turn
    runs. The implementation PR also reports `xtask measure` numbers, loaded count and tasks, before and after.
 2. **No restore inside a run.** Within one run (`input`, `idle`, three `history` pages) the Session is not restored
    between the calls: no `branch/resume` is added to `main`.
@@ -489,7 +489,7 @@ milliseconds. Each waits on an observed transition (`Session::closed()` of the r
    is under way when `sessions.history` and an Rpc `session.history` arrive. Both wait, then succeed on the restored
    Session; neither replies `session_closed`.
 4. **Unload is not close.** The unload leaves the stored head of every branch unchanged and writes no
-   `stop/interrupt`; the restore adds only `branch/resume`. The Session stays in `session.list`, a Collaboration
+   `stop/interrupt`; the restore adds only `branch/resume`. The Session stays in `session.summaries`, a Collaboration
    relation still routes the leader's next request, and a C4 observer receives the restored Session's events.
 5. **Held subscription.** An attached client keeps the Session loaded past `2G`. After detach, or connection close,
    it unloads; a re-attach restores it, and events stream again.
@@ -498,7 +498,7 @@ milliseconds. Each waits on an observed transition (`Session::closed()` of the r
    and the Session unloads after the grace.
 7. **Pending approval.** A launched non-interactive Session with a pending approval and no lease stays loaded until
    `stop`.
-8. **Reads during unloads.** `session.list`, `session.summaries` and a leader's `agent` read of a member, called
+8. **Reads during unloads.** `session.summaries` and a leader's `agent` read of a member, called
    repeatedly while Sessions unload, never fail and never omit a stored Session or event.
 9. **Index reload.** An Agents index reload while a release is held under way as in 3: it completes, no Session is
    lost, the next generation unloads the remaining lease-free Sessions, and an `acquire` after the reload restores.

@@ -10,7 +10,9 @@ use dim_agent_types::{CommandMatch, CommandRule, CommandRuleDecision};
 
 use super::Groups;
 use crate::client::Client;
-use crate::model::session::{ActionKind, ManagementAction, ManagementEntry, ManagementView};
+use crate::model::session::{
+    ActionKind, ManagementAction, ManagementEntry, ManagementView, RemoveVerb,
+};
 use crate::permission::{self, Added, Removed, Rules};
 use crate::ui::i18n::{t, tf};
 
@@ -159,12 +161,15 @@ pub(super) fn view(rules: &Rules, actions: &[ActionKind]) -> ManagementView {
                 enabled: None,
                 states: Vec::new(),
                 actions: super::entry_kinds(actions),
+                remove_verb: RemoveVerb::Remove,
                 document: None,
                 run: None,
             },
         );
     }
     ManagementView {
+        // The panel keeps the title its area names.
+        title: None,
         // Nothing in this area writes at the view's revision: the one write
         // replaces the whole list, and a remove re-reads before it.
         revision: None,

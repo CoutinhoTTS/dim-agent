@@ -42,7 +42,7 @@ async fn scoped_plugin_names_cannot_replace_process_modules() {
         }
     })
     .await;
-    let mut client = Client::new(&server, true).await;
+    let mut client = Client::new_version(&server, true, 3).await;
     for _ in 0..2 {
         let created = client.rpc("session.create", create(json!([]))).await;
         assert_ok(&created);
@@ -56,7 +56,7 @@ async fn scoped_plugin_names_cannot_replace_process_modules() {
         assert_eq!(count.load(Ordering::SeqCst), 4, "{name}");
     }
     server.restart("Rpc").await.unwrap();
-    let listed = client.rpc("session.list", json!({})).await;
+    let listed = client.rpc("session.summaries", json!({})).await;
     assert_ok(&listed);
     assert_eq!(listed["result"].as_array().unwrap().len(), 2);
     server.shutdown();
@@ -128,7 +128,7 @@ async fn process_plugin_reloads_keep_sessions() {
         release: release.clone(),
     };
     let server = launch(Arc::new(tool), ServerConfig::default()).await;
-    let mut client = Client::new(&server, false).await;
+    let mut client = Client::new_version(&server, false, 3).await;
     let created = client
         .rpc(
             "session.create",
@@ -142,16 +142,18 @@ async fn process_plugin_reloads_keep_sessions() {
         &client
             .rpc(
                 "session.submit",
-                json!({"sessionId":sid,"text":"tool:hold {}","mode":"queue"}),
+                json!({"sessionId":sid,"branchId":"main","text":"tool:hold {}","mode":"queue"}),
             )
             .await,
     );
     tokio::time::timeout(Duration::from_secs(5), started.notified())
         .await
         .expect("tool started");
-    let stop = client.send("session.stop", json!({"sessionId":sid})).await;
+    let stop = client
+        .send("session.stop", json!({"sessionId":sid,"branchId":"main"}))
+        .await;
     assert_ok(&client.rpc("daemon.ping", json!({})).await);
-    let mut observer = Client::new(&server, false).await;
+    let mut observer = Client::new_version(&server, false, 3).await;
     {
         let restart = server.restart("Rpc");
         tokio::pin!(restart);
@@ -175,7 +177,7 @@ async fn process_plugin_reloads_keep_sessions() {
     }
     assert_ok(&client.response(stop).await);
     assert_ok(&observer.rpc("daemon.ping", json!({})).await);
-    let listed = observer.rpc("session.list", json!({})).await;
+    let listed = observer.rpc("session.summaries", json!({})).await;
     assert_eq!(listed["result"][0]["sessionId"], sid);
 
     let (mut parent, child) = UnixStream::pair().unwrap();
@@ -209,7 +211,7 @@ async fn process_plugin_reloads_keep_sessions() {
     reloaded
         .expect("Connection reload must settle while a child holds inherited descriptors")
         .unwrap();
-    let mut reconnected = Client::new(&server, false).await;
+    let mut reconnected = Client::new_version(&server, false, 3).await;
     assert_eq!(reconnected.instance, client.instance);
     assert_ok(
         &reconnected
@@ -220,7 +222,7 @@ async fn process_plugin_reloads_keep_sessions() {
     server.restart("Agents").await.unwrap();
     let listed = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let listed = reconnected.rpc("session.list", json!({})).await;
+            let listed = reconnected.rpc("session.summaries", json!({})).await;
             if listed["error"]["data"]["appError"] != "service_reloading" {
                 return listed;
             }
@@ -230,7 +232,7 @@ async fn process_plugin_reloads_keep_sessions() {
     .await
     .expect("Session capabilities returned");
     assert_eq!(listed["result"][0]["sessionId"], sid);
-    let mut fresh = Client::new(&server, false).await;
+    let mut fresh = Client::new_version(&server, false, 3).await;
     assert_eq!(fresh.instance, client.instance);
     assert_ok(&fresh.rpc("session.create", create(json!([]))).await);
 

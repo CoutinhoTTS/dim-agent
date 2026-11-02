@@ -88,7 +88,7 @@ flowchart LR
   META -->|"title notice"| SB
   ST -->|"read at use"| Settings
   Rpc -->|"session.rename dispatched through the Session"| ST
-  Rpc -->|"session.list reads title fields"| META
+  Rpc -->|"session.summaries reads title fields"| META
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
@@ -213,7 +213,7 @@ Never sent: images, raw input blocks, deleted inputs, later inputs, assistant ou
 | --- | --- | --- |
 | `session.rename {sessionId, title \| null}` | `sessionMethods` namespace `session.rename` | Set or clear a manual title |
 | `session-title` source: `enabled`, `maxLength`, `model` | Business configuration (Settings source) | Turn generation off; title length; model for titles (unset: the Session's model) |
-| `title`, `titleSource`, `titleRevision` in v3 `session.list`/`session.summaries` | Rpc protocol fields read from SessionStore ([S5b §8](../appserver/session-title-metadata.md#8-session-lists)) | Display; the revision orders a list against notices |
+| `title`, `titleSource`, `titleRevision` in v3 `session.summaries` | Rpc protocol fields read from SessionStore ([S5b §8](../appserver/session-title-metadata.md#8-session-lists)) | Display; the revision orders a list against notices |
 | Title notice, `data: {title, titleSource, titleRevision}` | Session broadcast notice emitted by SessionStore (C6 record, §9; [S5b §7](../appserver/session-title-metadata.md#7-the-title-notice)) | Live title update for subscribed clients |
 
 ## 7. Security
@@ -250,9 +250,9 @@ post-commit title notices. SessionTitle consumes these delivered contracts.
 | Item | Content |
 | --- | --- |
 | Blocked by | Principles §4 rules 9 and 4: process-level state such as the SessionStore title must not enter the Timeline, yet clients must see title changes live; the delivered C6 `Notice` record carries these post-commit changes ([session_broadcast.rs](../../../crates/dim-agent-capabilities/src/session_broadcast.rs)). |
-| Existing mechanisms considered | A `session/titled` Timeline event (puts process state on the Timeline; rejected in overview §7); client polling of `session.list` (no live update); a title-specific channel (a business-specific port, rule 8). |
+| Existing mechanisms considered | A `session/titled` Timeline event (puts process state on the Timeline; rejected in overview §7); client polling of `session.summaries` (no live update); a title-specific channel (a business-specific port, rule 8). |
 | Generic capability | A notice record `{source, kind, data}` on a Session's broadcast channel, emitted by the owner of process-level state about that Session after a committed change; no business meaning. The title notice is this record with `source: "SessionStore"`, `kind: "title"`, `data: {title, titleSource, titleRevision}` ([S5b §7](../appserver/session-title-metadata.md#7-the-title-notice)). Rpc forwards that record unchanged as `session.notice`, adding the channel's `sessionId` ([C6 D4](../appserver/session-notices.md#10-decisions)), so `data` does not repeat it. |
-| Effect on sequence, batch, interrupt, reload | No sequence number and no batch; not replayed: a client that resubscribes reads current state through the owner's query (`session.list`); interrupts do not apply; a reload of the emitter only stops notices. |
+| Effect on sequence, batch, interrupt, reload | No sequence number and no batch; not replayed: a client that resubscribes reads current state through the owner's query (`session.summaries`); interrupts do not apply; a reload of the emitter only stops notices. |
 | Owner and issue | Runtime C6 [#49](https://github.com/arcships/dim/issues/49), implemented in [#85](https://github.com/arcships/dim/pull/85): the record, `session_broadcast::notify` and Rpc's `session.notice` ([Session broadcast notices](../appserver/session-notices.md)). SessionStore emits the title notice ([S5b](../appserver/session-title-metadata.md), the supplement in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). |
 
 **#4: None.** Observation uses the Session services and the Session channel; history, Settings, `sessionMetadata` and the auxiliary model are process services. SessionTitle injects no branch service.
@@ -348,7 +348,7 @@ omits `maxOutputTokens`, using S4's existing model limit; the 30 s budget remain
 ## Appendix D. Acceptance
 
 Flow tests through configured optional C4 rows, `session.create`/`session.submit`, `session.rename`,
-`session.list`, `settings.read/update` and a fake auxiliary model:
+`session.summaries`, `settings.read/update` and a fake auxiliary model:
 
 1. Hold the main turn open with the existing model fixture. The first `session.submit` on an interactive leader Session starts generation after adoption and produces an `auto` title while that controlled turn is still active; the request contains only the system text and that input's text, and one title notice reaches subscribed clients. Completion before turn end is not a production ordering guarantee.
 2. Interrupting or failing the first turn does not prevent the title.
@@ -378,7 +378,7 @@ A1–A12 are the policies for the first implementation.
 | A8 | A first user input without text produces no automatic title | Decision: title from first user input | Later inputs or a placeholder |
 | A9 | Generation waits for adoption (`input/applied`); a deleted input never titles the Session | Maintainer decision | Deleted text could reach the auxiliary model |
 | A10 | "User input" means operator input: in an interactive leader Session it is the input with `user` content, since Collaboration, Goal and ShellInput write raw blocks only (Scheduler and Workflow inputs carry `user` content but run in non-interactive Sessions, which SessionTitle does not title) | Judgment | Source-written inputs could title a Session |
-| A11 | SessionStore announces title changes with a Session broadcast notice; a client that is not subscribed sees the change at its next `session.list` | Principles §4 rule 9 | Clients poll `session.list` |
+| A11 | SessionStore announces title changes with a Session broadcast notice; a client that is not subscribed sees the change at its next `session.summaries` | Principles §4 rule 9 | Clients poll `session.summaries` |
 | A12 | User-only source file session-title.json, no project merge; native Settings row user/session-title | Existing S8b row source mechanism, A.3 | Different source/scope requires explicit confirmation |
 
 ## Appendix F. Open questions

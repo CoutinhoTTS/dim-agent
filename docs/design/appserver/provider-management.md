@@ -84,7 +84,7 @@ catalog. Aggregation does not promise an atomic snapshot across account owners.
 | `account` | Optional `{namespace, loginMethods, state}`; namespace is `account`, `account.codex` or `account.grok`, login methods are `browser`/`device`, and state is that namespace's existing public status reply; absent for static authority |
 | `actions` | Available operation names: `update`, `delete`, `refresh`, `models.create`, `models.edit`, `models.reset`, `models.delete`, `models.set_enabled`, `preferences.update`, `login`, `logout`, `usage`; no per-action reason codes |
 | `connection` | Safe static-record connection below; `null` when connection configuration exists only in the optional account package |
-| `models` | `{model: ModelEntry, source: "default" \| "override" \| "user", enabled: boolean, endpoint: ModelProtocol \| null, unavailableReason: string \| null, missingLimits: ("contextWindow" \| "maxOutputTokens")[], actions: string[], endpointOverride?: NewApiEndpoint}[]`; endpoint overrides use the executable subset in §6. `null` only for an account entry with no local catalog record. Bad catalog data is an error. `missingLimits` names the limits no source declared (§3.5) and is empty otherwise. Model actions are `set_enabled`, `edit`, `reset`, `delete`, restricted by origin/authority |
+| `models` | `{model: ModelEntry, source: "default" \| "override" \| "user", enabled: boolean, endpoint: ModelProtocol \| null, unavailableReason: string \| null, missingLimits: ("contextWindow" \| "maxOutputTokens")[], actions: string[], endpointOverride?: NewApiEndpoint}[]`; endpoint overrides use the executable subset in §6. `null` only for an account entry with no local catalog record. Bad catalog data is an error. `missingLimits` names the limits no source declared (§3.5) and is empty otherwise. Model actions are `set_enabled`, `edit`, `reset`, `delete`, restricted by origin/authority, and `set_enabled` only on an entry without an `unavailableReason`, because the set keeps an unavailable entry's enablement |
 | `preferences` | Map from model ID to the existing `ModelPreferences` shape |
 | `modelsListed` | Absent from the reads and from an update that did not change `baseUrl`, `credential` or `headers`; on the other updates it says what the write did with the record's models: `listed`, `bundled`, `unsupported` or `disabled` |
 
@@ -223,7 +223,9 @@ clears preferences together with descriptor overrides and disables; a same-accou
 refresh preserves them.
 Descriptor edits to a user model replace that model's `userModels` entry; they
 never write the user ID into `modelConfigOverrides`. `models.set_enabled` accepts IDs
-from both defaults and user models. These operations update the effective catalog
+from both defaults and user models and names the complete set the account can use:
+an ID that names no entry is rejected, and an entry that is unavailable keeps the
+enablement it already has. These operations update the effective catalog
 and routes from the same record; endpoint overrides remain their separate map.
 Managed account catalogs do not gain user-added routes/models through these methods.
 
@@ -696,7 +698,11 @@ Neither action changes an adopted Session model. Discovery and adoption errors
 keep historical preferences until this explicit user action.
 `←` and `→` cycle the selected model's advertised reasoning efforts. Enter
 adopts that model; a cycled effort is saved as its `reasoningEffort` and sent
-with the model's other saved preferences.
+with the model's other saved preferences. Editing a Provider's model list is the
+models management area ([CLI commands § The Models area](../cli-commands.md#the-models-area)):
+`Edit models` in `/models` and `dimcode models PROVIDER add|edit|set|remove|inspect`
+read `provider.management` and write through `provider.models.*`; the picker
+actions above are unchanged.
 
 Models whose catalog entry has `zdr: true` show a `ZDR` tag before the
 reasoning effort, including in the fixed subagent model picker. Searching

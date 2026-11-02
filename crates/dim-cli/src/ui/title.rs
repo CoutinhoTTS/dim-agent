@@ -1,10 +1,11 @@
 //! The window title: the product, the session's topic, and a mark for the run.
 //!
-//! The title reads `DIM | topic`, the topic being the session's first message
-//! cut to a glance, or `DIM` alone before there is one. While a run works, a
-//! quarter-circle turns in front of it; while one waits on a permission or a
-//! question, a still dot stands there instead. Tab bars show the title where
-//! no progress bar (`progress`) or status record (`status`) is drawn.
+//! The title reads `DIM | topic`, the topic being the Session's stored title
+//! when it has one and otherwise its first message, cut to a glance, or `DIM`
+//! alone before either. While a run works, a quarter-circle turns in front of
+//! it; while one waits on a permission or a question, a still dot stands there
+//! instead. Tab bars show the title where no progress bar (`progress`) or
+//! status record (`status`) is drawn.
 //!
 //! Apple Terminal keeps no title stack and is set with OSC 2; elsewhere OSC 0
 //! sets both window and icon title over the shell's, which entering the

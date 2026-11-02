@@ -426,7 +426,7 @@ compaction terminal committed
 consume pending inputs --> prepare next request
 ```
 
-**预算恢复。** ModelProvider 在每次模型调用前调用 `validate`。它使用与触发点相同的请求估算（有提供方基线时为基线加增量，否则为完整的本地计数），超过 `B` 时带预算事实失败；随后 Loop 带 `recovery` 重试该请求一次。因此恢复的含义是“请求放不进声明的预算”，与触发点一致。恢复不受再增长规则约束，每个请求至多压缩一次（§5.6）。恢复压缩之后，准备过程自己检查投影后的请求：有界限时它至多 `0.5 × B`；没有界限时，只要那个切点存在，恢复就取了替换全部的切点。若它的计数仍超过 `B`，准备过程带预算事实失败，错误指出让它超出的东西：过大的不可压缩部分（与标记相同的部分和命名规则），或者它们都放得下时、最后的事件放置的、任何切点都切不掉的条目。其后不再有 `model/call`。Loop 不再压缩，turn 带着这个错误失败。没有提供方基线时，完整本地估算及其误差依旧存在（#128）。
+**预算恢复。** 准备阶段的估算超过 `B` 时，直接以 `trigger: provider_output_budget_exhausted` 压缩，再发布 `model/call`。这属于正常上下文管理：只发布预算和压缩事实，不产生中间的模型失败结果。恢复使用提供方基线加增量，否则使用完整本地计数，绕过阈值与再增长规则。ModelProvider 每次调用模型前的 `validate` 仍是最终保护，用于检查准备完成后被修改的请求；该处或提供方返回的预算失败由 Loop 带 `recovery` 重试一次。恢复压缩之后，准备过程自己检查投影后的请求：有界限时它至多 `0.5 × B`；没有界限时，只要那个切点存在，恢复就取替换全部的切点。若计数仍超过 `B`，准备过程直接失败，错误指出过大的不可压缩部分，或者最后事件放置的、任何切点都切不掉的条目。其后没有 `model/call`，也不再压缩。这个终态错误不携带可触发恢复的预算信号；预算和压缩事实保留估算与诊断。没有提供方基线时，完整本地估算及其误差依旧存在（#128）。
 
 ### 5.4 手动压缩
 
@@ -507,7 +507,7 @@ consume pending inputs --> prepare next request
 ### 5.6 ContextPreparation 新增的内容
 
 - `ContextPolicy::prepare` 改为调用 `compact_step`。ContextPreparation 注入 `CompactionStrategyHost`；两个宿主都是 `Some` 时它才有策略。
-- **触发点。** 自动触发只在以下两条同时成立时于 `prepare` 中运行：
+- **触发点。** 估算未超过输入预算时，阈值压缩只在以下两条同时成立时于 `prepare` 中运行：
   - 估算达到 `threshold_tokens`（现有）；
   - 自分支最近一次压缩尝试以来，至少累积了 `0.25 × B` 的新历史。新历史是由该尝试的 `context/compaction-start` 的 `through` 之后的事件放置的条目，用 `count_tokens` 逐个计数后求和。该尝试是任何触发原因、任何结局的最近一条开始事实；分支上没有开始事实时，全部历史都算新历史。
 
@@ -716,7 +716,7 @@ consume pending inputs --> prepare next request
 测试用产品配置的 App Server 连接一个上下文窗口很小的 mock HTTP 提供方，也用同样的 App Server 连接一个模型条目声明了小窗口的 `--models` 文件（`crates/dim-app-server/tests`），另加 `crates/dim-agent-capabilities/tests` 中的 Loop 与策略流程测试。
 
 1. **自动。** 超过阈值、且自上一次压缩以来已有 `0.25 × B` 的新历史后，下一次准备依次写 `context/budget`、`context/compaction-start {trigger: threshold}`。所选切点挤出的 token 多于替换内容的计划大小时，它还发出一个摘要请求，并提交 `completed` 的 `context/compaction`：带该请求的 id 和 `start`，没有 `command`，`strategy: "summary"`，`replacement` 只有一条消息，`retain_from` 为保留尾部放得进 `min(0.25 × B, 0.5 × B − resident)` 的最早合法切点（§5.3）。模型请求以这条消息开头，原样保留该尾部。产品窗口事实给出余量的上限、下限和比例（32k/8k → 19,200；128k/8k → 104,000；1M/128k → 784,800）。一个大轮次之后的许多小轮次会保留两轮以上；当 `0.5 × B` 是约束项（框架或基线占去上限的大部分）时，切点后会重放的带 key 块比同样内容不带 key 时保留的轮次少。所选切点挤出的 token 不超过该计划大小时，不发出摘要请求：同一次准备写 `skipped` 的 `context/compaction`，原因 `nothing_to_compact`，`modelCallCount` 为 0（`an_automatic_compaction_skips_a_cut_that_removes_no_more_than_its_replacement`，位于 `transport_flow/compaction.rs`）。
-2. **预算恢复。** 重试时以 `trigger: provider_output_budget_exhausted` 压缩。有提供方基线时，本地计数放得进窗口、但基线估算超过 `B` 的请求会恢复；基线估算放得下的不会。
+2. **预算恢复。** 准备阶段的估算超过 `B` 时直接以 `trigger: provider_output_budget_exhausted` 压缩，不受阈值与再增长门槛限制。本地恢复成功时不产生模型失败结果，只在压缩完成后调用模型。有提供方基线时，本地计数放得进窗口、但基线估算超过 `B` 的请求会恢复；基线估算放得下的不会。
 3. **手动，没有 turn。** `session.context.compact` 只写 `context/compact`、`context/compaction-start {command}` 和 `context/compaction {command, start}`；没有 `turn/*`、`step/*` 或 `model/call`。回复为 `completed`。两轮的 Session 上切点为最新一轮的开头；该轮的输入本身超出尾部预算时，切点在这一轮内部。
 4. **手动，turn 内。** 序列为 `step/tool-result` → `context/compaction-start {turn_id, command}` → `context/compaction {turn_id, command, start}` → 下一个请求的 `step/model-start`，该请求基于压缩后的上下文准备。
 5. **重放与替换策略。**

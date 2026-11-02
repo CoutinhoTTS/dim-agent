@@ -880,47 +880,6 @@ impl AgentIndex {
         *marks = next;
         self.directory.inner.lock().expect("agent index").sweep();
     }
-    pub(crate) async fn session_directory(
-        &self,
-        agent: Option<String>,
-        version: u32,
-        cancel: tokio_util::sync::CancellationToken,
-    ) -> dim_agent_runtime::Result<Option<Vec<crate::protocol::SessionInfo>>> {
-        let Some(store) = &self.session_store else {
-            return Ok(None);
-        };
-        let mut records = store.directory(agent, version, cancel).await?;
-        records.retain(|record| {
-            !self.closed(&record.session_id)
-                && record
-                    .agent_id
-                    .as_deref()
-                    .is_some_and(|id| self.host(Some(id)).is_some())
-        });
-        for record in &mut records {
-            if let Some((_, session)) = self.session(&record.session_id) {
-                match session
-                    .state("main")
-                    .and_then(|state| Ok((state.running, session.sequence("main")?)))
-                {
-                    Ok((running, sequence)) => {
-                        record.running = running;
-                        record.sequence = sequence;
-                    }
-                    // Released under the read: the stored record stands (D8).
-                    Err(_) if session.is_unloading() => {}
-                    Err(error) => {
-                        tracing::warn!(session_id=%record.session_id, %error, "Session state was not read for the listing");
-                    }
-                }
-            }
-            if version < 3 {
-                record.agent_id = None;
-                record.title = None;
-            }
-        }
-        Ok(Some(records))
-    }
 
     pub(crate) async fn session_catalog(
         &self,
@@ -979,7 +938,7 @@ impl AgentIndex {
     }
 
     /// The directory record of one Session whose lease the caller holds, with
-    /// the fields `session_directory` gives it. It reads this Session's title
+    /// the fields a session summary carries. It reads this Session's title
     /// row and no other Session or history; the caller fills
     /// `attached_clients`.
     ///
@@ -1185,7 +1144,7 @@ impl AgentIndex {
     }
     /// A prepared creation loads its new id ([S5c §7](../../../docs/design/appserver/session-deletion-and-fork.md#7-serialization-and-races)):
     /// it holds the id's admission gate from before its prepare step commits
-    /// the rows, which `session.list` then shows, until the Session is
+    /// the rows, which `session.summaries` then shows, until the Session is
     /// published and its protocol version recorded. A delete of the id waits
     /// for the build and closes what it published. A failed creation keeps
     /// no slot once nothing else holds it.

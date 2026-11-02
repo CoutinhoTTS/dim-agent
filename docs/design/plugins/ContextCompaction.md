@@ -783,18 +783,21 @@ compaction terminal committed
 consume pending inputs --> prepare next request
 ```
 
-**Budget recovery.** `validate`, called by ModelProvider before every model call, uses the
-trigger's estimate of the request (the provider baseline plus the delta when one exists, else the
-full local count) and fails with budget facts when it exceeds `B`; the Loop then retries the request
-once with `recovery`. Recovery thus means "the request does not fit the declared budget",
-consistent with the trigger. Recovery is exempt from the regrowth rule and may compact once per
-request (§5.6). After a recovery compaction the preparation checks the projected request itself:
+**Budget recovery.** When the preparation's estimate exceeds `B`, preparation directly runs a
+recovery compaction with `trigger: provider_output_budget_exhausted`, before publishing
+`model/call`. This is normal context management: it publishes the budget and compaction facts,
+without an intermediate failed model result. Recovery uses the provider baseline plus the delta
+when one exists, else the full local count, and bypasses both the threshold and regrowth rules.
+`validate`, called by ModelProvider before every model call, remains a final guard for requests
+changed after preparation; a budget failure there or from the provider lets the Loop retry once
+with `recovery`. After a recovery compaction the preparation checks the projected request itself:
 with a limit it is at most `0.5 × B`, and without one the recovery took the replace-everything
-cut when the cut existed. If its count still exceeds `B`, the preparation fails with budget facts
-and an error that names what keeps it there: the resident parts that are too large, by the same
+cut when the cut existed. If its count still exceeds `B`, the preparation fails with
+an error that names what keeps it there: the resident parts that are too large, by the same
 naming rule as the mark, or, when they fit, the entries the last event placed, which no cut
 removes. No `model/call` follows. The Loop does not compact again and the turn fails with that
-error.
+error. This terminal failure carries no recoverable budget signal; the budget and compaction
+facts retain the estimates and diagnostics.
 Without a provider baseline the full local estimate and its error remain (#128).
 
 ### 5.4 Manual compaction
@@ -904,7 +907,7 @@ requests, budget recovery, `LoopSnapshot` and `context/prepare`.
 
 - `ContextPolicy::prepare` calls `compact_step`. ContextPreparation injects
   `CompactionStrategyHost`, and its policy exists when both hosts are `Some`.
-- **Trigger.** The automatic trigger runs in `prepare` only when both hold:
+- **Trigger.** Below or at the input budget, threshold compaction runs in `prepare` only when both hold:
   - the estimate reaches `threshold_tokens` (existing);
   - at least `0.25 × B` of new history has accumulated since the branch's latest compaction
     attempt. New history is the entries placed by events after that attempt's
@@ -1317,7 +1320,9 @@ window, and the same App Server on a `--models` file whose entry declares a smal
    the same preparation writes `context/compaction` `skipped` with reason `nothing_to_compact`
    and `modelCallCount` 0 (`an_automatic_compaction_skips_a_cut_that_removes_no_more_than_its_replacement`
    in `transport_flow/compaction.rs`).
-2. **Budget recovery.** The retry compacts with `trigger: provider_output_budget_exhausted`.
+2. **Budget recovery.** Preparation compacts directly with `trigger: provider_output_budget_exhausted`
+   when its estimate exceeds `B`, even below the threshold or regrowth requirement. Successful
+   local recovery emits no failed model result and invokes the model only after compaction.
    With a provider baseline, a request whose local count fits the window but whose baseline
    estimate exceeds `B` recovers; one whose baseline estimate fits does not.
 3. **Manual, no turn.** `session.context.compact` writes exactly `context/compact`,

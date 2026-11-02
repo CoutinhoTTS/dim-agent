@@ -58,10 +58,18 @@ pub enum Event {
     Refresh,
 }
 
+/// The panel's title.
+enum Title {
+    /// English until it is drawn.
+    Fixed(&'static str),
+    /// The caller's text, drawn as it is.
+    Set(String),
+}
+
 pub struct ListPanel {
-    /// The fixed texts are English, translated as they are drawn so a
-    /// language preview shows at once.
-    title: &'static str,
+    /// A fixed title is English until it is drawn, so a language preview
+    /// shows at once; a set title is drawn as it was given.
+    title: Title,
     hint: String,
     loading_text: &'static str,
     empty_text: &'static str,
@@ -97,7 +105,7 @@ impl ListPanel {
         refreshable: bool,
     ) -> Self {
         Self {
-            title,
+            title: Title::Fixed(title),
             hint: hint.into(),
             loading_text,
             empty_text,
@@ -136,6 +144,11 @@ impl ListPanel {
     /// when the selection moves sets it here.
     pub fn set_hint(&mut self, hint: String) {
         self.hint = hint;
+    }
+
+    /// The title a caller draws in place of the panel's own.
+    pub fn set_title(&mut self, title: impl Into<String>) {
+        self.title = Title::Set(title.into());
     }
 
     /// Explanatory paragraphs below the choices, separate from keyboard hints.
@@ -422,13 +435,17 @@ impl ListPanel {
             content.extend(notes);
         }
         content.extend_from_slice(footer);
+        let title = match &self.title {
+            Title::Fixed(text) => t(text),
+            Title::Set(text) => text.as_str(),
+        };
         content.extend(hint_rows);
         bordered(
             &content,
             width,
             None,
             &p.border,
-            Some(&title_plain(t(self.title), inner, p)),
+            Some(&title_plain(title, inner, p)),
             bottom_hint.as_deref(),
         )
     }

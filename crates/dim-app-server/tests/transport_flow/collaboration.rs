@@ -825,7 +825,7 @@ async fn next_member(session: &Session, count: usize) -> String {
 async fn running(client: &mut Client, session: &str) {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let listed = client.rpc("session.list", json!({})).await;
+            let listed = client.rpc("session.summaries", json!({})).await;
             let info = listed["result"]
                 .as_array()
                 .unwrap()
@@ -926,7 +926,7 @@ async fn leader_delegates_and_team_members_communicate() {
             .rpc("session.detach", json!({"sessionId": lead}))
             .await,
     );
-    let listed = client.rpc("session.list", json!({})).await;
+    let listed = client.rpc("session.summaries", json!({})).await;
     assert!(
         listed["result"]
             .as_array()
@@ -982,7 +982,7 @@ async fn leader_delegates_and_team_members_communicate() {
         agent_results(&timeline)[1].contains("Status: completed.\nResult preview:\nEcho: again\n")
     );
 
-    let sessions_before = client.rpc("session.list", json!({})).await["result"]
+    let sessions_before = client.rpc("session.summaries", json!({})).await["result"]
         .as_array()
         .unwrap()
         .len();
@@ -1079,7 +1079,7 @@ async fn leader_delegates_and_team_members_communicate() {
         .collect();
     assert_eq!(not_found, [agent_not_found(), agent_not_found()]);
     assert_eq!(
-        client.rpc("session.list", json!({})).await["result"]
+        client.rpc("session.summaries", json!({})).await["result"]
             .as_array()
             .unwrap()
             .len(),
@@ -1481,14 +1481,14 @@ async fn a_member_is_an_internal_child_of_its_leader() {
         .unwrap_or_else(|| panic!("the member is missing: {page}"));
     assert_eq!(row["origin"], "internal");
     assert_eq!(row["parentSessionId"], lead);
-    let listed = client.rpc("session.list", json!({})).await;
+    let listed = client.rpc("session.summaries", json!({})).await;
     assert_ok(&listed);
     let row = listed["result"]
         .as_array()
         .unwrap()
         .iter()
         .find(|row| row["sessionId"] == member.as_str())
-        .unwrap_or_else(|| panic!("the member is missing from session.list: {listed}"));
+        .unwrap_or_else(|| panic!("the member is missing from session.summaries: {listed}"));
     assert_eq!(row["origin"], "internal");
     assert_eq!(row["parentSessionId"], lead);
     let attached = client
@@ -1578,7 +1578,7 @@ async fn members_cancel_close_and_leave_the_team() {
     .await;
     idle(&mut client, &foreign).await;
     assert!(last_error(&events(&foreign_session).await).starts_with("agent_not_found"));
-    let foreign_sessions = client.rpc("session.list", json!({})).await["result"]
+    let foreign_sessions = client.rpc("session.summaries", json!({})).await["result"]
         .as_array()
         .unwrap()
         .len();
@@ -1598,7 +1598,7 @@ async fn members_cancel_close_and_leave_the_team() {
         );
     }
     assert_eq!(
-        client.rpc("session.list", json!({})).await["result"]
+        client.rpc("session.summaries", json!({})).await["result"]
             .as_array()
             .unwrap()
             .len(),
@@ -1745,7 +1745,7 @@ async fn members_cancel_close_and_leave_the_team() {
         1,
         "an owned Agent belongs to its Team, not the public directory"
     );
-    let listed = client.rpc("session.list", json!({})).await;
+    let listed = client.rpc("session.summaries", json!({})).await;
     assert!(
         listed["result"]
             .as_array()
@@ -4048,7 +4048,7 @@ async fn deleting_the_last_two_members_together_ends_their_agent() {
     assert_ok(&deleted);
 
     poll("both members disappear", async || {
-        let listed = client.rpc("session.list", json!({})).await;
+        let listed = client.rpc("session.summaries", json!({})).await;
         let ids: Vec<&str> = listed["result"]
             .as_array()
             .unwrap()

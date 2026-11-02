@@ -116,8 +116,8 @@ ledger 并推送到 `eval-ledger`。
 
 ## 被测产物
 
-`build/build_image.py` 以 `cargo zigbuild` 编出 glibc 2.28 的 `dimcode`（与
-`scripts/build-all.mjs` 相同），用发布脚本 `scripts/stage-plugins.mjs` 准备默认插件，按发布包的
+`build/build_image.py` 以 `cargo zigbuild` 编出 glibc 2.34 的 `dimcode`（release
+仍用 `scripts/build-all.mjs` 的 2.28 目标），用发布脚本 `scripts/stage-plugins.mjs` 准备默认插件，按发布包的
 目录结构打成只读挂载的镜像：
 
 ```

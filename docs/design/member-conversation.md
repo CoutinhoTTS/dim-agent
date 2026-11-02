@@ -287,7 +287,7 @@ historical activity or be attributed to a particular reused-member request.
 Show absence as activity not observed on this attachment. No dim model is
 exposed by that notice, so do not display the leader's model as the provider's.
 
-`session.list` is not the current-model source: its `model` comes from the
+`session.summaries` is not the current-model source: its `model` comes from the
 creation-time Session configuration, including in stored records. Requested
 `profile.model` is a requested target, not a replacement for the member's
 adopted configuration. For Session members, decode the existing configuration
