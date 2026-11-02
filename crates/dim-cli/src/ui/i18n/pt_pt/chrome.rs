@@ -256,6 +256,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Connected {provider}" => "{provider} ligado",
         "Opened {url}" => "{url} aberto",
         "Tool details not saved: {error}" => "Detalhes das ferramentas não guardados: {error}",
+        "Thinking details not saved: {error}" => "Detalhes de raciocínio não guardados: {error}",
         "/{name} needs a session — send a message first" => {
             "/{name} requer sessão — envie primeiro uma mensagem"
         }
@@ -379,6 +380,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "fullscreen" => "ecrã inteiro",
         "scrollback" => "histórico do terminal",
         "Tool details" => "Detalhes das ferramentas",
+        "Thinking details" => "Detalhes de raciocínio",
         "expanded" => "expandido",
         "collapsed" => "recolhido",
         "Mouse (fullscreen)" => "Rato (ecrã inteiro)",

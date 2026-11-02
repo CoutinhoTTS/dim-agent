@@ -252,6 +252,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Connected {provider}" => "{provider} terhubung",
         "Opened {url}" => "Membuka {url}",
         "Tool details not saved: {error}" => "Detail tool tak disimpan: {error}",
+        "Thinking details not saved: {error}" => "Detail pemikiran tak disimpan: {error}",
         "/{name} needs a session — send a message first" => {
             "/{name} perlu sesi — kirim pesan dulu"
         }
@@ -363,6 +364,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "fullscreen" => "layar penuh",
         "scrollback" => "scrollback",
         "Tool details" => "Detail tool",
+        "Thinking details" => "Detail pemikiran",
         "expanded" => "terbuka",
         "collapsed" => "terlipat",
         "Mouse (fullscreen)" => "Mouse (layar penuh)",

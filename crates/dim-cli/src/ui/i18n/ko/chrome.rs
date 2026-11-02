@@ -226,6 +226,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Connected {provider}" => "{provider} 연결됨",
         "Opened {url}" => "{url} 열림",
         "Tool details not saved: {error}" => "도구 상세 저장 실패: {error}",
+        "Thinking details not saved: {error}" => "생각 상세 저장 실패: {error}",
         "/{name} needs a session — send a message first" => {
             "/{name}에는 세션 필요 — 먼저 메시지 전송"
         }
@@ -335,6 +336,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "fullscreen" => "전체 화면",
         "scrollback" => "스크롤백",
         "Tool details" => "도구 상세",
+        "Thinking details" => "생각 상세",
         "expanded" => "펼침",
         "collapsed" => "접힘",
         "Mouse (fullscreen)" => "마우스 (전체 화면)",

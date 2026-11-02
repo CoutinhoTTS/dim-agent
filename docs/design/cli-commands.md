@@ -12,6 +12,26 @@ local image sources and paste handling. The multiline/paste editor and headless 
 arguments, clipboard/file insertion, completion and dropped paths are implemented. The attachment
 contract records the native platform acceptance evidence and outstanding checks.
 
+## Transcript detail settings
+
+In both scrollback and fullscreen TUI, `/settings` exposes independent
+`Tool details` and `Thinking details` switches. Enter, Left/Right or Space
+toggles the selected switch and saves it immediately in the CLI home.
+Both switches default to collapsed.
+Saved preferences are preserved independently for both switches.
+
+```text
+Settings · Interface
+  Tool details       collapsed
+  Thinking details   collapsed
+```
+
+`/tools` changes tool details only, retaining its existing control of compaction
+details. Thinking details controls both streaming and completed thoughts,
+including the line side panel. Changing either setting updates its retained
+history and live content without changing the other setting. Scrollback already
+written to the terminal remains append-only; fullscreen redraws retained history.
+
 ## Command menu
 
 In both scrollback and fullscreen TUI, group commands by category and sort
