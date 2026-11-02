@@ -7548,7 +7548,6 @@
         "path context_configuration",
         "path crate::history::StreamedContext",
         "path digest_message",
-        "path projection_checkpoint",
         "path truncate_middle",
         "path user_message",
         "use crate::history::HistoryEntry",
@@ -7556,7 +7555,6 @@
         "use crate::history::context_compaction",
         "use crate::history::context_configuration",
         "use crate::history::digest_message",
-        "use crate::history::projection_checkpoint",
         "use crate::history::truncate_middle",
         "use crate::history::user_message"
       ]
@@ -7613,7 +7611,7 @@
       "from": "dim_agent_capabilities::context_policy",
       "to": "dim_agent_types::checkpoint",
       "references": [
-        "path ProjectionCheckpoint"
+        "path TimelinePosition"
       ]
     },
     {
@@ -8782,6 +8780,14 @@
     },
     {
       "from": "dim_agent_capabilities::hooks::runner",
+      "to": "dim_agent_capabilities::tool_registry",
+      "references": [
+        "path ToolRegistry",
+        "use crate::tool_registry::ToolRegistry"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner",
       "to": "dim_agent_runtime::config",
       "references": [
         "path BranchLifecycle",
@@ -8903,9 +8909,7 @@
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolDefinition",
-        "path ToolMetadata",
-        "use dim_agent_types::ToolDefinition",
-        "use dim_agent_types::ToolMetadata"
+        "use dim_agent_types::ToolDefinition"
       ]
     },
     {
