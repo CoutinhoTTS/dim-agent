@@ -11,48 +11,60 @@ position, the folded context with its checkpoint, and the policy order, window a
 
 Each method encodes what one consumer wants. The runtime therefore defines what a context page,
 a policy window or a recall page is, and other languages see an arbitrary subset of those
-methods. Some of the reads are unbounded: the fold that decides a fork rest point, the recall
-tool's history read and the branch opening each read every event of the branch.
+methods. Several of the reads are unbounded: the fold that decides a fork rest point, the recall
+tool's history read, and the replay a part registers when a branch opens, which reads the branch
+from its first event to the published head and shares one decode while the branch is opening.
 
 The event envelope and its data are a frozen compatibility contract;
-`crates/dim-agent-types/tests/fixtures/` is the baseline every compatible store must decode.
-The storage layout is not part of any contract: tables, columns, indexes, content references and
-atomic batches belong to the store.
+`crates/dim-agent-types/tests/fixtures/` is the baseline every compatible store must decode, and
+`crates/dim-agent-types/tests/wire_contract.rs` pins that wire shape. The persisted layout is a
+different contract: it has its own format version, schema, indexes and migration, and it is a
+contract between stores, not an interface for a capability.
 
 ## Decision
 
 ### D1. One bounded query over events
 
-The Timeline exposes one read for capabilities: the scope (this branch, or the branch chain root
-first), the position (a sequence range, or a cursor with the sequence it may read through), the
-accepted event kinds plus the envelope's context flags, one equality predicate over a data field,
-the order, and a required limit. It returns decoded events and the next cursor.
+The Timeline exposes one read for capabilities: the scope (this branch, or the branch chain —
+each ancestor up to its cut, root first, then this branch to its head), the position (a sequence
+range, or a cursor with the sequence it may read through), the accepted event kinds plus the
+envelope's two context flags, one equality predicate over a data field, the order, and a limit
+that is nonzero by type. It returns decoded events and the next cursor.
 
-A capability that needs a different selection extends this query; it does not add a method.
+A kind or field path the store does not know matches no rows; it is not an error. A capability
+that needs a different selection extends this query; it does not add a method.
 
 ### D2. Fixed semantics
 
-A cursor is the last fully read sequence at an atomic batch boundary: a read never splits a batch,
-and the limit is a target that the final batch may exceed. Results are ordered by chain position,
-then sequence. Events are returned decoded; content references and batch rules never leave the
-store.
+A cursor is the last fully read sequence at an atomic batch boundary: the query never splits a
+batch, and the limit is a target that the final batch may exceed. Results are ordered by chain
+position, then sequence. Positions past the published head and cursors that do not end a batch
+are rejected as invalid input.
+
+The existing reads do not all share this convention: the context page accepts a cursor inside a
+batch and returns the row it names. The query has one convention. A consumer that still uses its
+own read keeps that read's behavior until it migrates, and the migration states which convention
+it adopts.
 
 ### D3. The query addresses the event contract, not the storage
 
-Kinds and data-field paths are part of the event wire contract. Table names, column names,
-indexes and the storage format are not addressable, and SQL text is not a capability interface.
+Addressable: the session, the branch, the sequence, the kind, the event id, the two context
+flags, and paths inside the event's data. Not addressable: table names, column names, index
+names, the content table, batch metadata, and any other storage layout. SQL text is not a
+capability interface.
 
-### D4. Indexes are derived and declared by the core
+### D4. Indexes are derived or part of the format, never named by a capability
 
-An index a query needs is created at open from what the core's own reads query. It carries no
-data, stays outside the storage format, and a capability never names one.
+An index that serves the storage format stays part of the format and its gate. An index added
+for a query is a derived object created at open: it carries no data, is recreated on every open,
+and is outside the format gate. A capability never names either.
 
 ### D5. Consumer-shaped reads are temporary
 
 A read shaped for one consumer exists only while that consumer moves to the query. The service
-keeps three things: append one event, read the published sequence, and this query. Entities that
-are not events — branch segments and recovery snapshots — keep typed reads of their own, not the
-event query.
+keeps three things: append one event, read the published sequence, and this query. Branch
+segments and recovery snapshots are not events — the first is the branch directory, the second
+is derived state — and keep typed reads of their own.
 
 ## Consequences
 
@@ -61,15 +73,17 @@ event query.
 - Every read has a bound, so an unbounded read has no interface. A consumer that folds a whole
   prefix folds it from bounded pages.
 - Rust and other languages see the same query; the generated declarations describe it once.
-- A selection the query cannot express is a decision to extend it here, not a method to add.
+- A selection the query cannot express is a decision to extend the query here, not a method to
+  add. No consumer keeps a private read past its migration.
 - While a consumer still uses its old read, both shapes exist and must agree on ordering, batch
-  boundaries and cursor meaning.
+  boundaries and cursor meaning — or the difference is stated where the migration is tracked.
 
 ## Non-goals
 
 - Changing event types, the envelope, the storage format or any fixture.
 - Deciding where the context projection lives.
 - A general expression language: the first form is equality on one data field.
+- Folding, projecting or aggregating in the query; it returns events.
 - Covering branch segments and recovery snapshots.
 
 ## Supersession
@@ -89,13 +103,13 @@ ADR.
 | §4 rule 5 | Unchanged: appends and their batch contract. |
 | §4 rule 6 | Unchanged: context enters only through adopted inputs and tool results. |
 | §4 rule 7 | Callers keep reading through the Session and branch facades; the query is a public service and speaks only public event data. |
-| §4 rule 8 | Requirement raised to the Timeline's owner: one bounded query and the derived-index declaration. |
+| §4 rule 8 | Requirement raised to the Timeline's owner: one bounded query, its cursor and ordering semantics, and the derived-index rule. |
 | §4 rule 9 | No new fact. |
 | ADR 002 D2, D3, D5 | No wiring part, no dependency crossing, and the query is language-neutral data. |
 
 ## Requirements raised to mechanism owners
 
-The Timeline service owner (runtime) provides the query, its cursor and batch-boundary semantics,
-and the derived-index declaration. The storage owners (SQLite and the in-memory store) implement
-the same semantics. The plugin contract describes the query as a public service, and the owner of
-each consumer-shaped read replaces it with the query.
+The Timeline service owner (runtime) provides the query, its scope, cursor and ordering
+semantics, and the derived-index rule. The storage owners (SQLite and the in-memory store)
+implement the same semantics. The plugin contract describes the query as a public service, and
+the owner of each consumer-shaped read replaces it with the query.
