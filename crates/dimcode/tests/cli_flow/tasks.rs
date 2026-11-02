@@ -1846,6 +1846,11 @@ fn tui_member_cards_attach_only_unfinished_members_and_keep_a_failed_read_unavai
 #[test]
 fn tui_member_cards_read_agent_names_once_for_ids_the_list_does_not_return() {
     let home = Home::new();
+    fs::write(
+        home.0.join("config.json"),
+        json!({"locale":"en","tuiToolDetailsExpanded":true}).to_string(),
+    )
+    .unwrap();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
         wire.created();
@@ -2014,6 +2019,11 @@ fn tui_member_cards_keep_the_id_when_the_shared_agent_list_read_fails() {
 #[test]
 fn tui_rejected_delegations_are_not_agents_the_leader_worked_with() {
     let home = Home::new();
+    fs::write(
+        home.0.join("config.json"),
+        json!({"locale":"en","tuiToolDetailsExpanded":true}).to_string(),
+    )
+    .unwrap();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
         wire.created();

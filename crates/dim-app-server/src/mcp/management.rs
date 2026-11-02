@@ -1,6 +1,8 @@
 //! MCP management wire boundary over the MCP and Settings owners.
 use super::auth::{AuthState, McpAuth, McpAuthError, credential_key, stored_key};
-use super::config::{BearerAuth, McpServerSettings, McpSettings, RemoteTransport};
+use super::config::{
+    self, BearerAuth, McpSecretEntry, McpServerSettings, McpSettings, RemoteTransport,
+};
 use super::{McpChange, McpError, McpService, McpSource};
 use crate::{
     methods::{ManagementMethods, SelectionScope},
@@ -20,6 +22,25 @@ pub enum McpScope {
     Project,
     /// Entries registered by plugins; they change only through their plugin.
     Plugin,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MoveScope {
+    User,
+    Project,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MoveMcp {
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub cwd: Option<String>,
+    pub id: String,
+    pub from: MoveScope,
+    pub to: MoveScope,
+    pub expected_from_version: String,
+    pub expected_to_version: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -134,6 +155,32 @@ where
     T: Deserialize<'de>,
 {
     Option::<T>::deserialize(deserializer).map(Some)
+}
+
+fn patch_sets_secret(patch: &ConfigurationPatch, secret: &McpSecretEntry) -> bool {
+    let static_credential = secret.auth.is_some()
+        || secret.headers.as_ref().is_some_and(|headers| {
+            headers
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case("authorization"))
+        });
+    patch.args.is_some()
+        || patch.env.is_some()
+        || patch.headers.is_some()
+        || patch.bearer.is_some()
+        || patch.url.is_some()
+        || (patch.oauth.is_some() && static_credential)
+        || matches!(&patch.oauth, Some(OAuthPatch::Remove) if secret.oauth.is_some())
+        || matches!(
+            &patch.oauth,
+            Some(OAuthPatch::Set {
+                auth_server_metadata_url: Some(_),
+                ..
+            }) if secret
+                .oauth
+                .as_ref()
+                .is_some_and(|oauth| oauth.auth_server_metadata_url.is_some())
+        )
 }
 
 fn configuration_view(configuration: McpServerSettings) -> Result<serde_json::Value, RpcError> {
@@ -344,6 +391,7 @@ pub struct McpConfigurationResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
     pub enabled: bool,
+    pub secrets_in_user_scope: bool,
     pub configuration: serde_json::Value,
 }
 #[derive(Debug, Serialize)]
@@ -364,6 +412,10 @@ pub(crate) fn error(error: McpError) -> RpcError {
         McpError::Settings(SettingsError::Conflict) => "mcp_settings_conflict",
         McpError::Settings(SettingsError::Invalid(_)) | McpError::InvalidId => "mcp_invalid_config",
         McpError::UnknownServer => "mcp_unknown_server",
+        McpError::MoveConflict => "mcp_move_conflict",
+        McpError::MovePartial { .. } => "mcp_move_partial",
+        McpError::CredentialsAreUserScoped => "mcp_credentials_are_user_scoped",
+        McpError::StaleSecretRecord => "mcp_stale_secret_record",
         McpError::Closed | McpError::Settings(SettingsError::Closed) => {
             return RpcError::reloading();
         }
@@ -382,6 +434,15 @@ pub(crate) fn error(error: McpError) -> RpcError {
             McpError::Worker(_) | McpError::Settings(SettingsError::Worker(_)) => {
                 "MCP worker failed".into()
             }
+            McpError::MoveConflict => "MCP destination source already has this entry".into(),
+            McpError::MovePartial { into_project: true } => {
+                "MCP move is partial: remove the destination entry and retry".into()
+            }
+            McpError::MovePartial { into_project: false } => {
+                "MCP move is partial: remove the project source entry".into()
+            }
+            McpError::CredentialsAreUserScoped => "MCP secret fields are stored in user scope; call mcp.move {id, from: 'project', to: 'user', cwd, expectedFromVersion, expectedToVersion} to edit them".into(),
+            McpError::StaleSecretRecord => "MCP withheld record remains for this id without a project entry; call mcp.remove {source: 'project', id, cwd, expectedVersion} to delete it (it answers mcp_unknown_server after cleaning), then save again".into(),
             other => other.to_string(),
         },
     )
@@ -452,6 +513,7 @@ pub(super) fn provide(
             "mcp.save",
             "mcp.remove",
             "mcp.set_enabled",
+            "mcp.move",
             "mcp.disconnect",
             "mcp.auth.start",
             "mcp.auth.complete",
@@ -519,6 +581,7 @@ pub(super) fn provide(
                         return reply(McpConfigurationResult {
                             revision: entry.revision,
                             enabled: entry.enabled,
+                            secrets_in_user_scope: entry.secrets_in_user_scope,
                             configuration: configuration_view(entry.configuration)?,
                         });
                     }
@@ -527,7 +590,15 @@ pub(super) fn provide(
                         let source = source(p.source, project(&settings, p.cwd, &stopping).await?)?;
                         let scope = writable(source)?;
                         let mut entry = directory.editable(source, p.id.clone(), &stopping).await.map_err(error)?;
+                        if let Some(secret) = &entry.secret
+                            && patch_sets_secret(&p.patch, secret)
+                        {
+                            return Err(error(McpError::CredentialsAreUserScoped));
+                        }
                         patch_configuration(&mut entry.configuration, p.patch)?;
+                        if let Some(secret) = &entry.secret {
+                            config::strip_secret(&mut entry.configuration, secret);
+                        }
                         directory.update(scope, p.expected_version, p.id, McpChange::Put(entry.configuration), &stopping).await.map_err(error)?;
                     }
                     "mcp.temporary.capabilities" => return Ok(serde_json::json!({"transports":["stdio","http","sse"],"leaseSeconds":super::temporary::LEASE.as_secs()})),
@@ -590,10 +661,56 @@ pub(super) fn provide(
                     }
                     "mcp.save" => {
                         let p: SaveMcp = params(value)?;
-                        let source = writable(source(
+                        let mcp_source = source(
                             p.source,
                             project(&settings, p.cwd, &stopping).await?,
-                        )?)?;
+                        )?;
+                        let source = writable(mcp_source)?;
+                        if matches!(mcp_source, McpSource::Project(_)) {
+                            // A save replaces the whole entry, so an overlay
+                            // is refused while its entry exists, and a record
+                            // whose entry an external edit deleted is refused
+                            // rather than merged into the new entry. The save
+                            // deletes nothing: a concurrent move may own that
+                            // record, and may have committed the entry between
+                            // the reads, so the entry read again after the
+                            // record decides the answer. An unreadable overlay
+                            // fails the save.
+                            match directory
+                                .editable(mcp_source, p.id.clone(), &stopping)
+                                .await
+                            {
+                                Ok(entry) if entry.secrets_in_user_scope => {
+                                    return Err(error(McpError::CredentialsAreUserScoped));
+                                }
+                                Ok(_) => {}
+                                Err(McpError::UnknownServer) => {
+                                    if directory
+                                        .overlay(source, p.id.clone(), &stopping)
+                                        .await
+                                        .map_err(error)?
+                                        .is_some()
+                                    {
+                                        match directory
+                                            .editable(mcp_source, p.id.clone(), &stopping)
+                                            .await
+                                        {
+                                            Ok(entry) if entry.secrets_in_user_scope => {
+                                                return Err(error(
+                                                    McpError::CredentialsAreUserScoped,
+                                                ));
+                                            }
+                                            Ok(_) => {}
+                                            Err(McpError::UnknownServer) => {
+                                                return Err(error(McpError::StaleSecretRecord));
+                                            }
+                                            Err(failure) => return Err(error(failure)),
+                                        }
+                                    }
+                                }
+                                Err(failure) => return Err(error(failure)),
+                            }
+                        }
                         directory
                             .update(
                                 source,
@@ -634,6 +751,43 @@ pub(super) fn provide(
                                 p.expected_version,
                                 p.id,
                                 McpChange::SetEnabled(p.enabled),
+                                &stopping,
+                            )
+                            .await
+                            .map_err(error)?;
+                    }
+                    "mcp.move" => {
+                        let p: MoveMcp = params(value)?;
+                        if p.id.trim().is_empty() {
+                            return Err(RpcError::invalid("id must not be empty"));
+                        }
+                        let project = project(&settings, p.cwd, &stopping).await?;
+                        let (from, to) = match (p.from, p.to) {
+                            (MoveScope::User, MoveScope::Project) => (
+                                McpSource::User,
+                                McpSource::Project(project.ok_or_else(|| {
+                                    RpcError::invalid("Project MCP operations require cwd")
+                                })?),
+                            ),
+                            (MoveScope::Project, MoveScope::User) => (
+                                McpSource::Project(project.ok_or_else(|| {
+                                    RpcError::invalid("Project MCP operations require cwd")
+                                })?),
+                                McpSource::User,
+                            ),
+                            _ => {
+                                return Err(RpcError::invalid(
+                                    "mcp.move requires one user and one project scope",
+                                ));
+                            }
+                        };
+                        directory
+                            .move_entry(
+                                from,
+                                to,
+                                p.id,
+                                p.expected_from_version,
+                                p.expected_to_version,
                                 &stopping,
                             )
                             .await
