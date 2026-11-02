@@ -22,7 +22,7 @@ pub(crate) struct AgentRecords(pub Arc<SqliteStorage>);
 impl AgentRecords {
     pub async fn agents(&self) -> Result<Vec<AgentRecord>> {
         self.0
-            .run(|connection| {
+            .run_read(|connection| {
                 let mut query = connection
                     .prepare(
                         "SELECT agent_id, profile, is_default, owner_session_id FROM agents \
@@ -141,7 +141,7 @@ impl AgentRecords {
     pub async fn owned_agents(&self, owner: &str) -> Result<Vec<String>> {
         let owner = owner.to_owned();
         self.0
-            .run(move |connection| {
+            .run_read(move |connection| {
                 let mut query = connection
                     .prepare(
                         "SELECT agent_id FROM agents WHERE owner_session_id = ?1 ORDER BY agent_id",
@@ -160,7 +160,7 @@ impl AgentRecords {
     pub async fn led_members(&self, leader: &str) -> Result<Vec<String>> {
         let leader = leader.to_owned();
         self.0
-            .run(move |connection| {
+            .run_read(move |connection| {
                 let mut query = connection
                     .prepare(
                         "SELECT session_id FROM agent_sessions WHERE leader_session_id = ?1 \
@@ -180,7 +180,7 @@ impl AgentRecords {
     pub async fn member_sessions(&self, agent: &str) -> Result<Vec<String>> {
         let agent = agent.to_owned();
         self.0
-            .run(move |connection| {
+            .run_read(move |connection| {
                 let mut query = connection
                     .prepare("SELECT session_id FROM session_owners WHERE agent_id = ?1 ORDER BY session_id")
                     .map_err(storage_error)?;
@@ -197,7 +197,7 @@ impl AgentRecords {
     pub async fn agent_owner(&self, agent: &str) -> Result<Option<String>> {
         let agent = agent.to_owned();
         self.0
-            .run(move |connection| {
+            .run_read(move |connection| {
                 connection
                     .query_row(
                         "SELECT owner_session_id FROM agents WHERE agent_id = ?1",
@@ -214,7 +214,7 @@ impl AgentRecords {
     /// Every stored member Session and its leader, in Session id order.
     pub async fn members(&self) -> Result<Vec<(String, String)>> {
         self.0
-            .run(|connection| {
+            .run_read(|connection| {
                 let mut query = connection
                     .prepare(
                         "SELECT session_id, leader_session_id FROM agent_sessions \
@@ -237,7 +237,7 @@ impl AgentRecords {
     /// removes them.
     pub async fn unfinished_owned(&self) -> Result<(Vec<String>, Vec<String>)> {
         self.0
-            .run(|connection| {
+            .run_read(|connection| {
                 let mut query = connection
                     .prepare(
                         "SELECT a.agent_id, \
@@ -263,7 +263,7 @@ impl AgentRecords {
     }
 
     pub async fn owners(&self) -> Result<Vec<SessionOwner>> {
-        self.0.run(|connection| {
+        self.0.run_read(|connection| {
             let mut query = connection.prepare(
                 "SELECT ids.session_id, s.session_id IS NOT NULL, o.agent_id, o.protocol_version, \
                  a.agent_id IS NOT NULL FROM (\

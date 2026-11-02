@@ -301,7 +301,7 @@ impl ProviderService {
                         let id = provider_id.clone();
                         let mut record = owner
                             .db
-                            .run(move |db| read_static(db, &id))
+                            .run_read(move |db| read_static(db, &id))
                             .await?
                             .ok_or(ProviderError::NotFound)?;
                         connection.apply(&mut record)?;
@@ -419,7 +419,7 @@ impl ProviderService {
                 let id = provider_id.clone();
                 let record = owner
                     .db
-                    .run(move |db| read_static(db, &id))
+                    .run_read(move |db| read_static(db, &id))
                     .await
                     .map_err(ProviderError::from)?
                     .ok_or(ProviderError::NotFound)?;
