@@ -30,6 +30,7 @@ mod question;
 mod recording;
 mod sanitize;
 mod session;
+mod session_command;
 mod session_host;
 mod ui;
 mod update;
@@ -568,6 +569,8 @@ async fn run_acp(root: &rutis::Ctx, options: &Options, agent_id: Option<String>)
 }
 
 async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
+    // `block_on` polls `act` on this thread, so the thread-local language holds.
+    crate::ui::i18n::set(crate::ui::i18n::interface_locale(&options.home));
     if let Action::Migration(command) = &options.action {
         return migration_command::run(root, &options, command).await;
     }
@@ -657,14 +660,28 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             export::write(&mut client, session_id, *format, output.as_deref()).await?;
             Ok(0)
         }
+        Action::SessionRename {
+            session_id,
+            title,
+            clear,
+        } => {
+            let title = if *clear { None } else { title.as_deref() };
+            session_command::rename(&mut client, session_id, title).await?;
+            Ok(0)
+        }
+        Action::SessionDelete { session_id } => {
+            session_command::delete(&mut client, session_id).await?;
+            Ok(0)
+        }
+        Action::SessionCleanup {
+            older_than,
+            keep,
+            yes,
+        } => session_command::cleanup(&mut client, *older_than, *keep, *yes).await,
         Action::Login(provider) => login::login(&mut client, &options, provider.as_deref()).await,
         Action::Account(provider) => login::account(&mut client, provider).await,
         Action::Logout(provider) => login::logout(&mut client, provider).await,
         Action::Models(provider) => {
-            crate::ui::i18n::set(
-                crate::ui::i18n::saved_locale(&options.home)
-                    .unwrap_or_else(crate::ui::i18n::system_locale),
-            );
             if let Some(model) = &options.clear_preferences {
                 session_host::clear_saved_model_preferences(&mut client, provider, model).await?;
                 println!("{}", crate::ui::i18n::t("Saved model preferences cleared"));

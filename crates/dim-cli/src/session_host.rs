@@ -146,13 +146,15 @@ impl SessionPort for SessionHost {
 
 impl SessionHost {
     /// Runs the session on `client`, the connection the composition root
-    /// took from the client tree.
-    pub fn start(options: Options, client: Client) -> Self {
+    /// took from the client tree, composing management text in `language`,
+    /// the interface's language code.
+    pub fn start(options: Options, client: Client, language: &'static str) -> Self {
         let (commands, command_rx) = unbounded_channel();
         let (update_tx, updates) = mpsc::channel();
         let thread = std::thread::Builder::new()
             .name("dim-session".into())
             .spawn(move || {
+                crate::management::use_language(language);
                 let runtime = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
@@ -1257,6 +1259,7 @@ impl Worker {
                 }
             }
             Command::Compact => self.compact().await,
+            Command::Rename(title) => self.rename(title).await,
             Command::Goal(request) => self.goal(request).await,
             Command::ToggleWeb => {
                 let result: crate::Result<WebToggled> =
@@ -1574,6 +1577,7 @@ impl Worker {
                 let result = crate::management::apply(&mut self.client, &request, &cwd).await;
                 self.send(Update::Management(ManagementReply { request, result }));
             }
+            Command::SetLocale(language) => crate::management::use_language(language),
             Command::Configure(text) => {
                 if self.session_id.is_empty() && configure::needs_session(&text) {
                     self.report(NO_SESSION.to_owned(), true);
@@ -1788,6 +1792,15 @@ impl Worker {
             Ok(request) => self.compact_requests.push(request),
             Err(error) => self.send(Update::Compacted(CompactReply::Failed(error.to_string()))),
         }
+    }
+
+    /// `/rename`: sets the shown Session's manual title, or clears it when
+    /// `title` is `None`. The text is a command, never an input.
+    async fn rename(&mut self, title: Option<String>) {
+        let reply =
+            crate::session_command::set_title(&mut self.client, &self.session_id, title.as_deref())
+                .await;
+        self.send(Update::Renamed(reply));
     }
 
     /// `/goal`: the shown line's goal, written by the method the request

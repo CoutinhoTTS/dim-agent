@@ -221,6 +221,10 @@ pub enum Command {
     Usage,
     /// `/compact`: ask the shown line to compact its context.
     Compact,
+    /// `/rename`: set the shown Session's manual title, or clear it when
+    /// `title` is `None`; an empty text is refused, and only `--clear`
+    /// clears. Nothing here reaches the model.
+    Rename(Option<String>),
     /// `/goal`: show, set, edit, pause, resume or clear the shown line's goal.
     Goal(crate::goal::Request),
     SetPermission(crate::permission::Change),
@@ -261,6 +265,9 @@ pub enum Command {
     ListPlugins,
     /// One request to a management area's owner, through its adapter.
     Management(ManagementRequest),
+    /// The interface language's code (`en`, `zh-CN`, ...), which the worker
+    /// composes management text in from the next command on.
+    SetLocale(&'static str),
     /// Change one plugin; the worker lists the plugins again after it.
     Plugin(PluginAction),
     /// A configuration command line (`/effort high`, `/agent`, ...).
@@ -446,9 +453,13 @@ pub enum ManagementResult {
     },
     /// The action was applied and the read that reports the area failed:
     /// the change was made, and `read_error` says why the area is not shown.
-    /// `note` is the action's own line, always: the owner's answer when that
-    /// is more than the view, else the line its kind reports.
-    Applied { note: String, read_error: String },
+    /// `note` is the owner's answer when that is more than the view, such as
+    /// a run's state; without one, the surface composes the action's line
+    /// with the entry's name from the read it holds.
+    Applied {
+        note: Option<String>,
+        read_error: String,
+    },
     /// What an inspect found, in place of the list.
     Detail(ManagementDetail),
     /// Nothing was applied, and this is why.
@@ -468,11 +479,11 @@ pub struct ManagementDetail {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ManagementRefusal {
     /// The owner kept the stored document because it changed since the client
-    /// read it. Nothing was written, the area was read again, and this is what
-    /// it now is.
+    /// read it. Nothing was written; the area was read again, and this is
+    /// what it now is, or why that read failed.
     Conflict {
         message: String,
-        view: Box<ManagementView>,
+        view: Result<Box<ManagementView>, String>,
     },
     /// The daemon does not advertise the methods, or the owner refused the
     /// text: nothing was written.
@@ -482,7 +493,11 @@ pub enum ManagementRefusal {
 impl std::fmt::Display for ManagementRefusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Conflict { message, .. } | Self::Refused(message) => formatter.write_str(message),
+            Self::Conflict { message, view } => match view {
+                Ok(_) => formatter.write_str(message),
+                Err(error) => write!(formatter, "{message} {error}"),
+            },
+            Self::Refused(message) => formatter.write_str(message),
         }
     }
 }
@@ -826,6 +841,19 @@ pub enum CompactReply {
     Unsupported,
 }
 
+/// A `session.rename` reply as `/rename` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenameReply {
+    /// The manual title the server stored.
+    Titled(String),
+    /// The Session has no title again.
+    Untitled,
+    /// The daemon serves no `session.rename` for this Session.
+    Unsupported,
+    /// The call failed, with its message.
+    Failed(String),
+}
+
 #[allow(dead_code)]
 pub enum Update {
     /// A queued input the TUI withdrew (`Command::InputControl` with action
@@ -929,6 +957,8 @@ pub enum Update {
     Context(Option<ContextReading>),
     /// What a `/compact` came to, localized by the interface.
     Compacted(CompactReply),
+    /// What a `/rename` came to, localized by the interface.
+    Renamed(RenameReply),
     /// Progress of the sign-in tagged `attempt`.
     Oauth {
         attempt: u64,

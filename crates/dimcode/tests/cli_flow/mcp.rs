@@ -336,7 +336,7 @@ fn tui_mcp_panel_edits_and_creates_entries() {
         terminal.write(b"/mcp\r");
         terminal.until("Executable: npx");
         terminal.raw(b"\x05");
-        terminal.until("Saved.");
+        terminal.until("Saved docs.");
         terminal.raw(b"\x0e");
         terminal.until("Added example.");
         terminal.raw(b"\x1b");
@@ -569,7 +569,7 @@ fn tui_mcp_panel_keeps_the_users_text_when_the_revision_is_stale() {
         terminal.until("The MCP entry changed since it was read; nothing was written.");
         terminal.until("text is kept in");
         terminal.raw(b"\x05");
-        terminal.until("Saved.");
+        terminal.until("Saved docs.");
         terminal.raw(b"\x1b");
         thread::sleep(Duration::from_millis(200));
         terminal.write(b"/exit\r");
@@ -622,7 +622,7 @@ fn tui_mcp_panel_reports_a_refused_write() {
     terminal.until("invalid MCP transport configuration");
     terminal.until("text is kept in");
     terminal.raw(b"\x05");
-    terminal.until("Saved.");
+    terminal.until("Saved docs.");
     terminal.raw(b"\x1b");
     thread::sleep(Duration::from_millis(200));
     terminal.write(b"/exit\r");
