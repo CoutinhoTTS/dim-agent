@@ -51,6 +51,23 @@ async fn messages(
     )
 }
 
+/// The fake OpenAI-compatible provider: records every request body and
+/// streams a short reply.
+async fn completions(
+    State(capture): State<Arc<Capture>>,
+    Json(body): Json<Value>,
+) -> impl axum::response::IntoResponse {
+    capture.requests.lock().unwrap().push(body);
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+        format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            json!({"id":"fixture","choices":[{"index":0,"delta":{"content":"ok"},
+                "finish_reason":"stop"}]})
+        ),
+    )
+}
+
 struct Server {
     child: tokio::process::Child,
     socket: std::path::PathBuf,
@@ -128,28 +145,57 @@ fn directory(name: &str) -> std::path::PathBuf {
 }
 
 /// A model descriptor whose reasoning declaration carries `default` beside
-/// its offered efforts.
-fn model(model_id: &str, default: Option<&str>, options: &[&str]) -> Value {
+/// its offered efforts, and `off` when the model declares one. `reasoning`
+/// is the model's reasoning capability: `false` denies the control the
+/// declaration would otherwise describe, and the projection derives the
+/// capability from it.
+fn model_with_off(
+    model_id: &str,
+    default: Option<&str>,
+    options: &[&str],
+    off: Option<Value>,
+    reasoning: bool,
+) -> Value {
     let capabilities = dim_agent_types::CatalogCapabilities {
-        reasoning: true,
+        reasoning,
         ..dim_agent_types::CatalogCapabilities::with_limits(32_000, 4_096)
     };
-    let mut reasoning = json!({"supported":true,"effortOptions":options,
-        "off":{"kind":"thinking_type","value":"disabled"}});
+    let mut declaration = json!({"supported":reasoning,"effortOptions":options});
+    if let Some(off) = off {
+        declaration["off"] = off;
+    }
     if let Some(default) = default {
-        reasoning["effort"] = json!(default);
+        declaration["effort"] = json!(default);
     }
     json!({"modelId":model_id,"displayName":model_id,"status":"active",
-        "capabilities":capabilities,"metadata":{"reasoning":reasoning}})
+        "capabilities":capabilities,"metadata":{"reasoning":declaration}})
 }
 
-async fn create_provider(client: &mut Client, provider: &str, base_url: &str, models: Vec<Value>) {
+/// A model descriptor whose reasoning declaration carries `default` beside
+/// its offered efforts.
+fn model(model_id: &str, default: Option<&str>, options: &[&str]) -> Value {
+    model_with_off(
+        model_id,
+        default,
+        options,
+        Some(json!({"kind":"thinking_type","value":"disabled"})),
+        true,
+    )
+}
+
+async fn create_provider(
+    client: &mut Client,
+    provider: &str,
+    driver: &str,
+    base_url: &str,
+    models: Vec<Value>,
+) {
     assert_ok(
         &client
             .rpc(
                 "provider.create",
                 json!({"providerId":provider,"displayName":"Fixture",
-                    "connection":{"driverKind":"anthropic","baseUrl":base_url,
+                    "connection":{"driverKind":driver,"baseUrl":base_url,
                         "auth":{"type":"anonymous"}},
                     "models":models,"enabled":true}),
             )
@@ -199,6 +245,17 @@ async fn configured(client: &mut Client, session_id: &Value) -> Value {
         .clone()
 }
 
+/// The last request body the fake provider received.
+fn last_body(capture: &Capture) -> Value {
+    capture
+        .requests
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("the provider received a request")
+}
+
 /// The effort the last request carried, if any.
 fn sent_effort(capture: &Capture) -> Option<String> {
     capture
@@ -231,6 +288,7 @@ async fn a_declared_default_reaches_every_read_and_the_request() {
         create_provider(
             &mut client,
             provider,
+            "anthropic",
             &format!("http://{endpoint}"),
             vec![model("defaulted", Some("high"), &["low", "high", "max"])],
         )
@@ -292,6 +350,7 @@ async fn a_model_with_no_declared_default_carries_none() {
         create_provider(
             &mut client,
             provider,
+            "anthropic",
             &format!("http://{endpoint}"),
             vec![model("open", None, &["low", "high"])],
         )
@@ -331,11 +390,19 @@ async fn a_model_with_no_declared_default_carries_none() {
     .unwrap();
 }
 
-/// 3. A default outside the offered efforts, and a protocol that cannot
-/// express an effort, both adopt successfully with no effort.
+/// 3. A default outside the offered efforts, a model whose capabilities deny
+/// reasoning, and a protocol that cannot express an effort all adopt
+/// successfully with no effort.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_inexpressible_default_never_fails_an_adoption() {
     tokio::time::timeout(Duration::from_secs(120), async {
+        let capture = Arc::new(Capture::default());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/v1/messages", post(messages))
+            .with_state(capture.clone());
+        let http = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let directory = directory("inexpressible-effort");
         let mut server = launch_product(&directory).await;
         let mut client = connect(&server).await;
@@ -343,8 +410,18 @@ async fn an_inexpressible_default_never_fails_an_adoption() {
         create_provider(
             &mut client,
             provider,
-            "http://127.0.0.1:9",
-            vec![model("outside", Some("high"), &["low"])],
+            "anthropic",
+            &format!("http://{endpoint}"),
+            vec![
+                model("outside", Some("high"), &["low"]),
+                model_with_off(
+                    "unsupported-reasoning",
+                    Some("high"),
+                    &["low", "high"],
+                    None,
+                    false,
+                ),
+            ],
         )
         .await;
 
@@ -360,6 +437,31 @@ async fn an_inexpressible_default_never_fails_an_adoption() {
             created["result"].get("modelPreferences").is_none(),
             "{created}"
         );
+
+        let created = client
+            .rpc(
+                "session.create",
+                json!({"cwd":directory,"tools":[],
+                    "model":{"provider":provider,"modelId":"unsupported-reasoning"}}),
+            )
+            .await;
+        assert_ok(&created);
+        assert!(
+            created["result"].get("modelPreferences").is_none(),
+            "{created}"
+        );
+        let session_id = created["result"]["sessionId"].clone();
+        let attached = client
+            .rpc("session.attach", json!({"sessionId":session_id}))
+            .await;
+        assert!(
+            attached["result"].get("modelPreferences").is_none(),
+            "{attached}"
+        );
+        turn(&mut client, &session_id, "hello").await;
+        let data = configured(&mut client, &session_id).await;
+        assert!(data.get("model_preferences").is_none(), "{data}");
+        assert_eq!(sent_effort(&capture), None);
 
         // Bedrock rejects every reasoning preference; the declared default is
         // not applied and the adoption still succeeds.
@@ -393,6 +495,7 @@ async fn an_inexpressible_default_never_fails_an_adoption() {
         );
 
         server.child.kill().await.unwrap();
+        http.abort();
         std::fs::remove_dir_all(directory).unwrap();
     })
     .await
@@ -417,6 +520,7 @@ async fn an_explicit_preference_wins_over_the_declared_default() {
         create_provider(
             &mut client,
             provider,
+            "anthropic",
             &format!("http://{endpoint}"),
             vec![model("defaulted", Some("high"), &["low", "high"])],
         )
@@ -472,6 +576,7 @@ async fn a_clear_returns_to_the_declared_default() {
         create_provider(
             &mut client,
             provider,
+            "anthropic",
             &format!("http://{endpoint}"),
             vec![model("defaulted", Some("high"), &["low", "high"])],
         )
@@ -542,6 +647,7 @@ async fn a_stored_effortless_configuration_is_unchanged_on_reopen() {
         create_provider(
             &mut client,
             provider,
+            "anthropic",
             &format!("http://{endpoint}"),
             vec![model("open", None, &["low", "high"])],
         )
@@ -581,6 +687,166 @@ async fn a_stored_effortless_configuration_is_unchanged_on_reopen() {
         );
         turn(&mut reopened, &session_id, "hello").await;
         assert_eq!(sent_effort(&capture), None);
+
+        server.child.kill().await.unwrap();
+        http.abort();
+        std::fs::remove_dir_all(directory).unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// 7. A default `none` adopts the form the model declares: a native `none`
+/// reaches the request as the effort, an off declaration as the protocol's
+/// off field, and a declaration the protocol cannot express adopts with
+/// no effort.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_declared_default_none_needs_an_expressible_off_declaration() {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let capture = Arc::new(Capture::default());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/v1/chat/completions", post(completions))
+            .with_state(capture.clone());
+        let http = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let directory = directory("none-effort");
+        let mut server = launch_product(&directory).await;
+        let mut client = connect(&server).await;
+        let provider = "018ec73f-0000-7000-8000-000000000108";
+        create_provider(
+            &mut client,
+            provider,
+            "openai-compatible",
+            &format!("http://{endpoint}/v1"),
+            vec![
+                model_with_off("native", Some("none"), &["low", "none"], None, true),
+                model("off", Some("none"), &["low"]),
+                model_with_off(
+                    "unexpressible",
+                    Some("none"),
+                    &["low"],
+                    Some(json!({"kind":"chat_template_kwargs","keys":["thinking"]})),
+                    true,
+                ),
+            ],
+        )
+        .await;
+
+        let created = client
+            .rpc(
+                "session.create",
+                json!({"cwd":directory,"tools":[],
+                    "model":{"provider":provider,"modelId":"native"}}),
+            )
+            .await;
+        assert_ok(&created);
+        assert_eq!(
+            created["result"]["modelPreferences"],
+            json!({"reasoningEffort":"none"}),
+            "{created}"
+        );
+        let session_id = created["result"]["sessionId"].clone();
+        turn(&mut client, &session_id, "hello").await;
+        let wire = last_body(&capture);
+        assert_eq!(wire["reasoning_effort"], json!("none"), "{wire}");
+        assert!(wire.get("thinking").is_none(), "{wire}");
+
+        let created = client
+            .rpc(
+                "session.create",
+                json!({"cwd":directory,"tools":[],
+                    "model":{"provider":provider,"modelId":"off"}}),
+            )
+            .await;
+        assert_ok(&created);
+        assert_eq!(
+            created["result"]["modelPreferences"],
+            json!({"reasoningEffort":"none"}),
+            "{created}"
+        );
+        let session_id = created["result"]["sessionId"].clone();
+        turn(&mut client, &session_id, "hello").await;
+        let wire = last_body(&capture);
+        assert_eq!(wire["thinking"], json!({"type":"disabled"}), "{wire}");
+        assert!(wire.get("reasoning_effort").is_none(), "{wire}");
+
+        // The declaration the protocol cannot express leaves the adoption
+        // without an effort, and it still succeeds.
+        let created = client
+            .rpc(
+                "session.create",
+                json!({"cwd":directory,"tools":[],
+                    "model":{"provider":provider,"modelId":"unexpressible"}}),
+            )
+            .await;
+        assert_ok(&created);
+        assert!(
+            created["result"].get("modelPreferences").is_none(),
+            "{created}"
+        );
+        let session_id = created["result"]["sessionId"].clone();
+        turn(&mut client, &session_id, "hello").await;
+        let wire = last_body(&capture);
+        assert!(wire.get("reasoning_effort").is_none(), "{wire}");
+        assert!(wire.get("thinking").is_none(), "{wire}");
+
+        server.child.kill().await.unwrap();
+        http.abort();
+        std::fs::remove_dir_all(directory).unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// 8. A model that declares a default service tier adopts it and sends it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_declared_default_service_tier_is_applied() {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let capture = Arc::new(Capture::default());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/v1/chat/completions", post(completions))
+            .with_state(capture.clone());
+        let http = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let directory = directory("default-tier");
+        let mut server = launch_product(&directory).await;
+        let mut client = connect(&server).await;
+        let provider = "018ec73f-0000-7000-8000-000000000109";
+        let mut tiered = model("tiered", None, &["low"]);
+        tiered["metadata"]["serviceTier"] = json!({"supported":true,
+            "default":"priority","options":["priority","default"]});
+        create_provider(
+            &mut client,
+            provider,
+            "openai-compatible",
+            &format!("http://{endpoint}/v1"),
+            vec![tiered],
+        )
+        .await;
+
+        let created = client
+            .rpc(
+                "session.create",
+                json!({"cwd":directory,"tools":[],
+                    "model":{"provider":provider,"modelId":"tiered"}}),
+            )
+            .await;
+        assert_ok(&created);
+        assert_eq!(
+            created["result"]["modelPreferences"],
+            json!({"serviceTier":"priority"}),
+            "{created}"
+        );
+        let session_id = created["result"]["sessionId"].clone();
+        turn(&mut client, &session_id, "hello").await;
+        assert_eq!(
+            configured(&mut client, &session_id).await["model_preferences"],
+            json!({"serviceTier":"priority"})
+        );
+        let wire = last_body(&capture);
+        assert_eq!(wire["service_tier"], json!("priority"), "{wire}");
 
         server.child.kill().await.unwrap();
         http.abort();
