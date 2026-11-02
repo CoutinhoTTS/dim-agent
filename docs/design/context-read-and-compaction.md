@@ -73,7 +73,8 @@ Rules: [design rules](../architecture/rust-agent/principles.md)、[ADR 002](../a
 2. 段顺序是祖先链顺序；跨段比较用“段序，再序号”。
 3. `regrown` 的边界是该次尝试的 `through` 在它所在段的位置；条目位置在边界之后即算新内容。
 4. `legal_cuts` 的候选是轮次开始、条目来源位置、边界事件，按位置排序。
-5. `policy_order` 每段只返回：最后一个轮次开始、最后一个压缩开始（带它的 `through`）、边界事件，以及保留窗口之后的轮次开始。窗口从最后一条“保留尾仍超出 `RETAINED_SHARE × B`”的条目之后开始：更早的裁剪点保留的尾不会更小，保留规则不可能先选中它，所以这些轮次开始不读。轮次开始由派生索引 `timeline_policy_turns` 覆盖（[原生存储格式](appserver/native-storage-format.md#索引与实际查询)），只读索引不读正文；只有最后一个压缩开始的正文被读出它的 `through`。
+5. `policy_order` 每段只返回：最后一个轮次开始、最后一个压缩开始（带它的 `through`）、边界事件，以及保留窗口之后的轮次开始。窗口从最后一条“保留尾仍超出 `RETAINED_SHARE × B`”的条目之后开始：更早的裁剪点保留的尾不会更小，保留规则不可能先选中它，所以这些轮次开始不读。普通准备只读这些锚点（窗口为空）：`rendered_stream` 的 `PolicyOrder` 只需要锚点、边界和已完成压缩的裁剪点。保留窗口只在计算裁剪点的压缩步骤读取，`regrown` 也只用锚点里的最后一个压缩开始。轮次开始由派生索引 `timeline_policy_turns` 覆盖（[原生存储格式](appserver/native-storage-format.md#索引与实际查询)），只读索引不读正文；只有最后一个压缩开始的正文被读出它的 `through`。
+6. 预算重试复用它来源的压缩（`reusable`）。它的裁剪点可能不是最后一个轮次开始，流式 order 不带时就按事件 id 做一次定点读取（`Timeline::event_position`）取得位置，再按位置定位保留的第一条条目；不因此重新读取全部轮次开始。
 
 ## 6. 迁移与兼容
 

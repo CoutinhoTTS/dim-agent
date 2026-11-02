@@ -23,6 +23,18 @@ use std::{
 use tokio::sync::{OnceCell, watch};
 use uuid::Uuid;
 
+/// Which turn starts a policy order read keeps.
+#[derive(Debug, Clone, Copy)]
+pub enum PolicyTurns<'a> {
+    /// Only each segment's last turn start, next to its last compaction
+    /// start: the anchors a streamed context resolves cut ids against.
+    Anchors,
+    /// Every turn start of every segment.
+    All,
+    /// Every turn start after this chain position.
+    After(&'a TimelinePosition),
+}
+
 /// One draft offered to the branch's `before` middleware. Each wrapper records
 /// the step it applied, so steps follow the order the transforms took effect.
 /// The steps stay local: the event is dispatched only by its own branch's
@@ -944,13 +956,9 @@ impl Timeline {
 
     /// The event order for legal compaction cuts: each segment's boundary, its
     /// last turn start and its last compaction start at its cut, and the turn
-    /// starts after `turns_from` (`None` keeps every turn start).
+    /// starts `turns` keeps.
     #[service(skip)]
-    pub async fn policy_order(
-        &self,
-        through: u64,
-        turns_from: Option<TimelinePosition>,
-    ) -> Result<PolicyOrder> {
+    pub async fn policy_order(&self, through: u64, turns: PolicyTurns<'_>) -> Result<PolicyOrder> {
         let through = self.through(Some(through))?;
         let segments: Vec<_> = self
             .0
@@ -960,9 +968,11 @@ impl Timeline {
             .chain(std::iter::once((self.0.key.branch_id.clone(), through)))
             .collect();
         let rank = |branch: &str| segments.iter().position(|(name, _)| name == branch);
-        let from = turns_from
-            .as_ref()
-            .and_then(|at| rank(&at.branch_id).map(|index| (index, at.sequence)));
+        let window = match turns {
+            PolicyTurns::Anchors => None,
+            PolicyTurns::All => Some(None),
+            PolicyTurns::After(at) => Some(rank(&at.branch_id).map(|index| (index, at.sequence))),
+        };
         let mut events = Vec::new();
         let mut branches = Vec::new();
         for (index, (branch, cut)) in segments.into_iter().enumerate() {
@@ -974,11 +984,12 @@ impl Timeline {
                 branch_id: branch.clone(),
             };
             branches.push(branch.clone());
-            let turns = match from {
-                None => 1..=cut,
-                Some((rank, _)) if index > rank => 1..=cut,
-                Some((rank, sequence)) if index == rank => sequence.saturating_add(1)..=cut,
-                Some(_) => cut.saturating_add(1)..=cut,
+            let turns = match window {
+                None => cut.saturating_add(1)..=cut,
+                Some(None) => 1..=cut,
+                Some(Some((rank, _))) if index > rank => 1..=cut,
+                Some(Some((rank, sequence))) if index == rank => sequence.saturating_add(1)..=cut,
+                Some(Some(_)) => cut.saturating_add(1)..=cut,
             };
             events.extend(self.0.store.policy_order(&key, turns, cut).await?.events);
             if let Some(boundary) = self.boundary_event(&key, cut).await? {

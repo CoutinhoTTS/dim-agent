@@ -285,7 +285,9 @@ impl HistoryRenderer {
                 "a stream needs a positive batch size".into(),
             ));
         }
-        let policy_order = timeline.policy_order(through, None).await?;
+        let policy_order = timeline
+            .policy_order(through, dim_agent_runtime::PolicyTurns::Anchors)
+            .await?;
         let checkpoint = timeline
             .checkpoint(through, self.checkpoint_interpreter, self.decode_checkpoint)
             .await?;
