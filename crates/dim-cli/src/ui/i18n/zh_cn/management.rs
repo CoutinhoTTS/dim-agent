@@ -6,6 +6,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Issues" => "问题",
         "sources" => "来源",
         "skills" => "技能",
+        "hooks" => "钩子",
+        "scheduled jobs" => "定时任务",
+        "command rules" => "命令规则",
         "enabled" => "已启用",
         "shadowed by {name}" => "被 {name} 覆盖",
         "Reloaded." => "已重新加载。",
@@ -22,7 +25,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "No change." => "没有变化。",
         "Your text is kept in {path}." => "你的内容保留在 {path}。",
         "The user's own document; always in effect." => "用户自己的文档；始终生效。",
-        "No .dimcode/hooks.json in this workspace." => "此工作区没有 .dimcode/hooks.json。",
+        "There is no hooks file there." => "那里没有 hooks 文件。",
         "Owned by plugin {plugin}." => "由插件 {plugin} 提供。",
         "The user document turns every hook off (disableAllHooks)." => {
             "用户文档关闭了所有钩子（disableAllHooks）。"
@@ -69,6 +72,17 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "The Scheduler has no area document." => "调度器没有领域文档。",
         "No scheduled job has that id." => "没有该 id 的定时任务。",
         "This daemon cannot manage {area}." => "无法管理{area}。",
+        "This daemon lists {area} but cannot toggle them." => "可以列出{area}，但无法切换它们。",
+        "This daemon lists {area} but cannot edit them." => "可以列出{area}，但无法编辑它们。",
+        "This daemon lists {area} but cannot reload them." => {
+            "可以列出{area}，但无法重新加载它们。"
+        }
+        "This daemon lists {area} but cannot add them." => "可以列出{area}，但无法添加它们。",
+        "This daemon lists {area} but cannot remove them." => "可以列出{area}，但无法删除它们。",
+        "This daemon lists {area} but cannot run them." => "可以列出{area}，但无法运行它们。",
+        "This daemon lists {area} but cannot inspect them." => {
+            "可以列出{area}，但无法查看它们的详情或历史。"
+        }
         "The document deleted {field}, which the owner cannot clear; nothing was written." => {
             "文档删除了 {field}，所有者无法清除它；本次没有写入。"
         }

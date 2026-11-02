@@ -61,10 +61,11 @@ pub struct Hook {
 /// Why a Hooks action did not produce a catalog.
 pub enum Failure {
     /// The stored document changed since it was read: nothing was written,
-    /// and this is the catalog as it now is.
+    /// and this is the catalog as it now is, or why the read that reports it
+    /// failed.
     Conflict {
         message: String,
-        catalog: Box<Catalog>,
+        catalog: Result<Box<Catalog>, String>,
     },
     /// The action was applied and the read that follows failed.
     ReadFailed(String),
@@ -75,23 +76,23 @@ pub enum Failure {
 impl std::fmt::Display for Failure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Conflict { message, .. } | Self::ReadFailed(message) | Self::Refused(message) => {
-                formatter.write_str(message)
-            }
+            Self::Conflict { message, catalog } => match catalog {
+                Ok(_) => formatter.write_str(message),
+                Err(error) => write!(formatter, "{message} {error}"),
+            },
+            Self::ReadFailed(message) | Self::Refused(message) => formatter.write_str(message),
         }
     }
 }
 
 /// What a write the owner refused over a newer document leaves: nothing was
 /// written, and the area is read again so the next write starts from what is
-/// stored now.
+/// stored now. A read that fails is still a conflict, and says why it cannot
+/// show the area.
 async fn conflict(client: &mut Client, cwd: &str, message: &'static str) -> Failure {
-    match catalog(client, cwd).await {
-        Ok(catalog) => Failure::Conflict {
-            message: t(message).to_owned(),
-            catalog: Box::new(catalog),
-        },
-        Err(error) => Failure::Refused(error),
+    Failure::Conflict {
+        message: t(message).to_owned(),
+        catalog: catalog(client, cwd).await.map(Box::new),
     }
 }
 
@@ -236,22 +237,32 @@ pub(super) fn view(catalog: &Catalog, available: &[ActionKind]) -> ManagementVie
     }
 }
 
+/// The line a source's state adds to what it says about itself, in the one
+/// wording the panel and `dimcode hooks list` show. A source with a path its
+/// owner reported as missing has no hooks file there; an invalid one names
+/// what its owner could not use. An `ok` source has no line.
+pub fn state_line(source: &Source) -> Option<String> {
+    match (source.state.as_str(), source.path.as_deref()) {
+        ("ok", _) => None,
+        ("missing", Some(_)) => Some(t("There is no hooks file there.").to_owned()),
+        (state, _) => Some(match source.message.as_deref() {
+            Some(message) => format!("{state}: {message}"),
+            None => state.to_owned(),
+        }),
+    }
+}
+
 /// What a source says about itself.
 fn detail(source: &Source) -> Vec<String> {
     let mut lines = Vec::new();
     match source.source.as_str() {
         "user" => lines.push(t("The user's own document; always in effect.").to_owned()),
-        PROJECT => match &source.path {
-            Some(path) => lines.push(path.clone()),
-            None => lines.push(t("No .dimcode/hooks.json in this workspace.").to_owned()),
-        },
+        PROJECT => lines.extend(source.path.iter().cloned()),
         _ => {
             let plugin = source.source.trim_start_matches("plugin:");
             lines.push(tf("Owned by plugin {plugin}.", &[("plugin", plugin)]));
         }
     }
-    if let Some(message) = &source.message {
-        lines.push(message.clone());
-    }
+    lines.extend(state_line(source));
     lines
 }
