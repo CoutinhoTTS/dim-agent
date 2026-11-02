@@ -721,6 +721,115 @@ fn scheduled_set_refuses_a_deleted_member_the_owner_cannot_clear() {
     assert!(stderr.contains("Your text is kept in"), "{stderr}");
 }
 
+/// The revision moved between the read that supplied the draft and the
+/// save's re-read: the command refuses and sends no save.
+#[test]
+fn scheduled_set_refuses_a_revision_that_moved_before_the_write() {
+    let home = Home::new();
+    let path = home.0.join("job.json");
+    fs::write(&path, serde_json::to_string(&edited_document()).unwrap()).unwrap();
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
+        // Another writer moved the job on before the save's re-read.
+        let request = wire.read("schedule.list");
+        wire.reply(&request, newer_jobs());
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            assert!(!line.contains("schedule.save"), "{line}");
+            line.clear();
+        }
+    });
+    let output = home
+        .command()
+        .args(["scheduled", "set", "job-1"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("The job changed since it was read; nothing was written."),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Your text is kept in"), "{stderr}");
+}
+
+/// The job already holds what the draft says at the save's re-read: the
+/// patch is empty, so the command refuses and sends no save.
+#[test]
+fn scheduled_set_refuses_a_patch_that_changes_nothing() {
+    let home = Home::new();
+    let path = home.0.join("job.json");
+    fs::write(&path, serde_json::to_string(&edited_document()).unwrap()).unwrap();
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
+        // The job gained the draft's prompt since the draft was read.
+        let mut job = job("job-1", "nightly", 3, true, Value::Null);
+        job["prompt"] = json!("Summarize the day in one line.");
+        let request = wire.read("schedule.list");
+        wire.reply(&request, json!({"jobs": [job]}));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            assert!(!line.contains("schedule.save"), "{line}");
+            line.clear();
+        }
+    });
+    let output = home
+        .command()
+        .args(["scheduled", "set", "job-1"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("The document changes no field; nothing was written."),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Your text is kept in"), "{stderr}");
+}
+
+/// The job is gone at the save's re-read: the command refuses and sends no
+/// save.
+#[test]
+fn scheduled_set_refuses_a_job_that_is_gone_at_the_re_read() {
+    let home = Home::new();
+    let path = home.0.join("job.json");
+    fs::write(&path, serde_json::to_string(&edited_document()).unwrap()).unwrap();
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
+        let request = wire.read("schedule.list");
+        wire.reply(
+            &request,
+            json!({"jobs": [job("job-2", "release", 7, false, Value::Null)]}),
+        );
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            assert!(!line.contains("schedule.save"), "{line}");
+            line.clear();
+        }
+    });
+    let output = home
+        .command()
+        .args(["scheduled", "set", "job-1"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("No scheduled job has that id."), "{stderr}");
+    assert!(stderr.contains("Your text is kept in"), "{stderr}");
+}
+
 /// Setting a reuse job's mode to create clears its Session: the draft
 /// deleted it, the owner clears it itself, and the patch carries no
 /// session_id.
