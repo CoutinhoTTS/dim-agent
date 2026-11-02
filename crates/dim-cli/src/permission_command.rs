@@ -18,18 +18,9 @@ const NOTICE: &str = "Waiting for the permission result before accepting more in
 
 fn print_state(display: &mut Display, state: &State) -> Result<()> {
     display.record(&format!(
-        "File access: {}",
-        permission::file_label(state.policy.file_access())
+        "permission: {}",
+        permission::name(state.policy.preset)
     ))?;
-    display.record(&format!(
-        "Tool approval: {}",
-        permission::tool_policy_label(&state.policy)
-    ))?;
-    if state.policy.tool_approval.is_none() {
-        display.record(
-            "Legacy policy: risk-based behavior remains until you explicitly choose Ask or Bypass.",
-        )?;
-    }
     display.record(&format!(
         "Legacy preset seed (main branch): {}",
         permission::name(state.policy.preset)
@@ -91,25 +82,6 @@ pub async fn command(
     let words: Vec<_> = text.split_whitespace().collect();
     match words[1..] {
         [] => show(client, interrupts, session_id, display, listing).await,
-        [control @ ("file-access" | "tool-approval"), value] => {
-            let value = serde_json::Value::String(value.into());
-            let change = if control == "file-access" {
-                permission::Change::FileAccess(serde_json::from_value(value)?)
-            } else {
-                permission::Change::ToolApproval(serde_json::from_value(value)?)
-            };
-            let policy = settle(
-                interrupts,
-                NOTICE,
-                permission::select_control(client, session_id, change),
-            )
-            .await?;
-            display.record(&format!(
-                "File access: {}; Tool approval: {}",
-                permission::file_label(policy.file_access()),
-                permission::tool_policy_label(&policy)
-            ))
-        }
         ["remove", number] => {
             require_rules(client)?;
             let Some(seen) = listing.as_ref() else {

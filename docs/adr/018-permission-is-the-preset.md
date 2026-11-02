@@ -1,6 +1,6 @@
 # 018: Permission is the preset; file scope and isolation are sandbox settings
 
-Decision status: Proposed.
+Decision status: Accepted.
 
 ## Context
 

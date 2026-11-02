@@ -38,8 +38,7 @@ pub struct Values {
     pub mouse: bool,
     pub notify: bool,
     pub acp_sessions: bool,
-    pub file_access: String,
-    pub approvals: String,
+    pub permission: String,
 }
 
 /// One row: a switch flips in place, a link opens its picker.
@@ -52,12 +51,11 @@ pub enum Setting {
     Mouse,
     Notify,
     AcpSessions,
-    FileAccess,
-    Approvals,
+    Permission,
     Isolation,
 }
 
-const ROWS: [(Setting, &str); 10] = [
+const ROWS: [(Setting, &str); 9] = [
     (Setting::Theme, "theme"),
     (Setting::Language, "language"),
     (Setting::StartupForm, "startup-form"),
@@ -65,8 +63,7 @@ const ROWS: [(Setting, &str); 10] = [
     (Setting::Mouse, "mouse"),
     (Setting::Notify, "notify"),
     (Setting::AcpSessions, "acp-sessions"),
-    (Setting::FileAccess, "file-access"),
-    (Setting::Approvals, "approvals"),
+    (Setting::Permission, "permission"),
     (Setting::Isolation, "isolation"),
 ];
 
@@ -141,12 +138,7 @@ impl SettingsPanel {
                 on_off(values.acp_sessions).to_owned(),
             ),
             Item::heading(t("Permissions")),
-            row(
-                Setting::FileAccess,
-                "File access",
-                link(&values.file_access),
-            ),
-            row(Setting::Approvals, "Tool approval", link(&values.approvals)),
+            row(Setting::Permission, "Permission", link(&values.permission)),
             row(Setting::Isolation, "Process isolation", link("")),
         ];
         let mut list = ListPanel::new(

@@ -116,8 +116,7 @@ PATH is relative to the CLI current directory; ~ is literal.\n\
 /permissions (aliases /approvals, /approval) opens separate File access, Tool\n\
   approval (Ask/Bypass) and Process isolation controls in the terminal UI, and\n\
   a Command rules row that lists, adds and removes the user's command rules.\n\
-The line prompt accepts file-access read-only|workspace-read-write|unrestricted,\n\
-  tool-approval ask|bypass, PRESET, allow|deny exact|prefix COMMAND, or remove N.\n\
+The line prompt accepts PRESET, allow|deny exact|prefix COMMAND, or remove N.\n\
 Approval accepts only y/yes; empty input denies. For a simple exec command, a/always\n\
   also saves a command rule. Noninteractive approval exits 3.\n\
 The terminal UI offers a newer version on its npm channel (alpha, beta or latest),\n\
@@ -278,8 +277,6 @@ pub struct Options {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub permission: Option<PermissionPreset>,
-    pub file_access: Option<dim_agent_types::FileAccess>,
-    pub tool_approval: Option<dim_agent_types::ToolApproval>,
     pub directory: Option<String>,
     pub device: bool,
     /// Set only for a hosted leaf `Tui`.
@@ -320,8 +317,6 @@ impl Options {
             provider: None,
             model: None,
             permission: None,
-            file_access: None,
-            tool_approval: None,
             directory: None,
             device: false,
             ui_identity: None,
