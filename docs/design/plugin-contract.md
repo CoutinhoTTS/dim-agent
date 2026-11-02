@@ -117,7 +117,7 @@ R4). This table says what each name Dim defines is for.
 | `sessionIdentity` | `session` | SessionScope | yes | `get()`: `{sessionId, restored}` |
 | `sessionLifecycle` | `session` | SessionScope | yes | `activated`, `closing`, `hold`, `release`: a hold is an id the calling row owns, ended by `release(id)` or that row's unload |
 | `sessionConfig` | `session` | SessionScope | yes | `get()`: the creation-time configuration, the snapshot a tool call carries |
-| `timeline` | `branch` | BranchScope | yes, except `before` | `append` of the part's own domain; history reads |
+| `timeline` | `branch` | BranchScope | yes, except `before` | `append` of the part's own domain; the published sequence; the event query (§5.4) |
 | `dispatcher` | `branch` | BranchScope | yes, `consume`, `listen` and reads; their Rust forms `follow` and `subscribe` are Rust-only | Ordered consumption (§5.2) |
 | `branchLifecycle` | `branch` | BranchScope | yes | `activated`, `closing` |
 | `timelineIdentity` | `branch` | BranchScope | yes | `{sessionId, branchId}` |
@@ -198,6 +198,57 @@ Public bus events:
 | `agent/session-restored`, `agent/unloaded-session-deleted` | Agents | ids | Host-internal, consumed by Collaboration |
 
 *Today:* the events are implemented as listed, and TypeScript rows listen to them directly.
+
+### 5.4 The event query
+
+A part reads facts through its branch's `timeline` service with one bounded query. The selection is:
+
+| Element | What it says |
+| --- | --- |
+| Scope | This branch, or the branch chain: each ancestor up to its cut, root first, then this branch to its head |
+| Position | A sequence range, or a cursor with the sequence the read may go through. A read never returns a fact above the published head, the last fact the branch has published |
+| Kinds and flags | The event kinds it accepts (`domain/name`), and each of the envelope's two context flags (§5.1) that it names. A selection that names no kind accepts every kind, and a flag it does not name constrains nothing |
+| Predicate | One equality: a path of field names inside the event's data, and the value it must equal |
+| Order | Chain position, then sequence |
+| Limit | Nonzero by type, so no read is unbounded. It is a target, not a bound: a reply ends at an atomic batch boundary, so it may be longer than the limit |
+
+The cursor is opaque. It names a position, not a number: it carries the branch of the last event
+the read returned together with that event's sequence, so the same sequence on a parent and on its
+child are different positions. A cursor always ends an atomic batch, so a read never splits one.
+The reply is the events and the next cursor.
+
+The query returns facts; it does not fold, project or aggregate them. What a part folds from facts
+is its own state and stays with it ([ADR 002](../adr/002-plugin-scope.md) D1). A part that needs a
+whole prefix reads pages and folds them itself.
+
+| Input | Result |
+| --- | --- |
+| A position past the published head | Invalid input |
+| A cursor that does not end an atomic batch | Invalid input |
+| A cursor that names a branch the read's scope does not cover | Invalid input |
+| A kind or a data path the store does not know | No rows; not an error |
+
+The query addresses the event contract, not the storage: the session, the branch, the sequence,
+the kind, the event id, the two context flags and paths inside the event's data. Table, column and
+index names, the content table, batch metadata and every other part of the stored layout are not
+addressable, and SQL is not a capability interface
+([ADR 019](../adr/019-event-query.md) D3).
+
+Besides the query, the service keeps two things: appending a fact of the part's own domain (§5.1)
+and reading the published sequence. Branch segments are the branch directory and recovery
+snapshots are derived state; neither is an event, and each keeps a typed read of its own.
+
+A read shaped for one consumer is compatibility, not a contract: it exists only while that
+consumer moves to this query, and it is removed after. A selection the query cannot express is a
+decision to extend the query, never a method to add. While a consumer still uses its own read, the
+two shapes must agree on ordering, batch boundaries and cursor meaning, or the difference is stated
+where that consumer's move is followed ([ADR 019](../adr/019-event-query.md) D2, D5).
+
+The request and reply are serde data of the `timeline` name
+([How Dim uses rutis §3.2](rutis-usage.md#32-shape)), so the spelling of a scope, a position or a
+data path belongs to a binding: its Rust form is
+[appendix A](rutis-usage.md#appendix-a-rust-binding), and the generated declarations are where the
+other languages read its shape. This section states the query, not its spelling.
 
 ## 6. Capability
 
