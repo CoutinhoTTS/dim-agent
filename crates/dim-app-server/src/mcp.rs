@@ -686,14 +686,14 @@ impl McpService {
         .await
     }
 
-    /// Deletes a project entry's withheld record only while it is still the
-    /// record captured before the entry removal. A replacement entry for the
-    /// same id writes a different record, and that one is kept.
+    /// Deletes a project entry's withheld record only while it still carries
+    /// the captured generation. A replacement entry for the same id writes a
+    /// new generation, even with equal values, and that record is kept.
     pub async fn clear_secret_if(
         &self,
         source: SettingsScope,
         id: String,
-        captured: McpSecretEntry,
+        generation: String,
         cancel: &CancellationToken,
     ) -> Result<()> {
         if id.trim().is_empty() {
@@ -701,7 +701,7 @@ impl McpService {
         }
         self.run(cancel, move |settings, cancel| async move {
             let workspace = config::workspace(&settings, source)?;
-            remove_secret_if(&settings, &workspace, &id, &captured, &cancel).await
+            remove_secret_if(&settings, &workspace, &id, &generation, &cancel).await
         })
         .await
     }
@@ -1024,17 +1024,17 @@ async fn declared(
 /// every tool page.
 const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// One source mutation's committed result: the source revision, the withheld
-/// record captured before a project entry removal, and whether the entry was
-/// already absent.
+/// One source mutation's committed result: the source revision, the generation
+/// of the withheld record captured before a project entry removal, and whether
+/// the entry was already absent.
 struct WriteOutcome {
     revision: String,
-    captured: Option<McpSecretEntry>,
+    captured: Option<String>,
     entry_absent: bool,
 }
 
 /// Writes one change to its source and returns the source's revision and the
-/// removal's captured record.
+/// removal's captured record generation.
 async fn write(
     settings: &Arc<SettingsService>,
     source: SettingsScope,
@@ -1100,10 +1100,12 @@ async fn write(
             entry_absent: false,
         });
     };
-    // Capture the record this removal owns before the document commit, so the
-    // cleanup cannot delete a replacement entry's record.
+    // Capture the record generation this removal owns before the document
+    // commit, so the cleanup cannot delete a replacement entry's record.
     let captured = if project {
-        secret(settings, source, &id, cancel).await?
+        secret(settings, source, &id, cancel)
+            .await?
+            .map(|secret| secret.generation)
     } else {
         None
     };
@@ -1130,9 +1132,10 @@ async fn write_secret(
     settings: &Arc<SettingsService>,
     workspace: &str,
     id: &str,
-    secret: McpSecretEntry,
+    mut secret: McpSecretEntry,
     cancel: &CancellationToken,
 ) -> Result<()> {
+    secret.generation = uuid::Uuid::new_v4().to_string();
     let snapshot = settings
         .read::<McpSecrets>(SettingsScope::User, cancel)
         .await?;
@@ -1163,20 +1166,23 @@ async fn remove_secret(
     Ok(())
 }
 
-/// Deletes the record only while it is still `captured`; a replacement move
-/// writes a different record for the same id, and that record is kept.
+/// Deletes the record only while it still carries `generation`; a replacement
+/// move writes a new generation for the same id, and that record is kept.
 async fn remove_secret_if(
     settings: &Arc<SettingsService>,
     workspace: &str,
     id: &str,
-    captured: &McpSecretEntry,
+    generation: &str,
     cancel: &CancellationToken,
 ) -> Result<()> {
     loop {
         let snapshot = settings
             .read::<McpSecrets>(SettingsScope::User, cancel)
             .await?;
-        if snapshot.document.get(workspace, id) != Some(captured) {
+        let Some(current) = snapshot.document.get(workspace, id) else {
+            return Ok(());
+        };
+        if current.generation != generation {
             return Ok(());
         }
         let mut document = snapshot.document;

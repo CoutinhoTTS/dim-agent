@@ -1607,8 +1607,9 @@ async fn remove_keeps_a_replacement_moves_overlay() {
         .user_revision;
     let replacement: McpServerSettings = serde_json::from_value(json!({
         "type":"http",
-        "url":"https://replacement.test/mcp",
-        "auth":{"type":"bearer","token":"replacement"},
+        "url":"https://example.test/mcp",
+        "auth":{"type":"bearer","token":"private"},
+        "future":{"keep":true},
         "enabled":false
     }))
     .unwrap();
@@ -1636,13 +1637,31 @@ async fn remove_keeps_a_replacement_moves_overlay() {
         )
         .await
         .unwrap();
+    let replacement_record = fixture
+        .mcp
+        .overlay(SettingsScope::Project(1), "user-only".into(), &cancel)
+        .await
+        .unwrap()
+        .expect("the replacement move writes its own record");
+    let mut captured_values = captured.clone();
+    captured_values.generation.clear();
+    let mut replacement_values = replacement_record.clone();
+    replacement_values.generation.clear();
+    assert!(
+        replacement_values == captured_values,
+        "the replacement writes the same withheld values as the removed record"
+    );
+    assert_ne!(
+        replacement_record.generation, captured.generation,
+        "the replacement writes a new generation"
+    );
 
     fixture
         .mcp
         .clear_secret_if(
             SettingsScope::Project(1),
             "user-only".into(),
-            captured,
+            captured.generation.clone(),
             &cancel,
         )
         .await
@@ -1653,8 +1672,9 @@ async fn remove_keeps_a_replacement_moves_overlay() {
         .await
         .unwrap()
         .expect("the replacement move's record survives the earlier removal's cleanup");
+    assert_eq!(overlay.generation, replacement_record.generation);
     assert!(overlay.auth.is_some());
-    assert_eq!(overlay.url.as_deref(), Some("https://replacement.test/mcp"));
+    assert_eq!(overlay.url.as_deref(), Some("https://example.test/mcp"));
 
     let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
     fixture

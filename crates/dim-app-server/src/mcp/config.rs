@@ -223,6 +223,11 @@ impl BusinessDocument for McpSecrets {
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct McpSecretEntry {
+    /// The record's generation, renewed on every write. A removal deletes the
+    /// record only while it still carries the generation it captured, so a
+    /// replacement with equal values keeps its own record.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub generation: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
