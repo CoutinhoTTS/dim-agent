@@ -61,10 +61,11 @@ pub struct Hook {
 /// Why a Hooks action did not produce a catalog.
 pub enum Failure {
     /// The stored document changed since it was read: nothing was written,
-    /// and this is the catalog as it now is.
+    /// and this is the catalog as it now is, or why the read that reports it
+    /// failed.
     Conflict {
         message: String,
-        catalog: Box<Catalog>,
+        catalog: Result<Box<Catalog>, String>,
     },
     /// The action was applied and the read that follows failed.
     ReadFailed(String),
@@ -75,23 +76,23 @@ pub enum Failure {
 impl std::fmt::Display for Failure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Conflict { message, .. } | Self::ReadFailed(message) | Self::Refused(message) => {
-                formatter.write_str(message)
-            }
+            Self::Conflict { message, catalog } => match catalog {
+                Ok(_) => formatter.write_str(message),
+                Err(error) => write!(formatter, "{message} {error}"),
+            },
+            Self::ReadFailed(message) | Self::Refused(message) => formatter.write_str(message),
         }
     }
 }
 
 /// What a write the owner refused over a newer document leaves: nothing was
 /// written, and the area is read again so the next write starts from what is
-/// stored now.
+/// stored now. A read that fails is still a conflict, and says why it cannot
+/// show the area.
 async fn conflict(client: &mut Client, cwd: &str, message: &'static str) -> Failure {
-    match catalog(client, cwd).await {
-        Ok(catalog) => Failure::Conflict {
-            message: t(message).to_owned(),
-            catalog: Box::new(catalog),
-        },
-        Err(error) => Failure::Refused(error),
+    Failure::Conflict {
+        message: t(message).to_owned(),
+        catalog: catalog(client, cwd).await.map(Box::new),
     }
 }
 

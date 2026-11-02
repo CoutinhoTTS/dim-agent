@@ -409,11 +409,11 @@ pub enum ManagementResult {
 #[derive(Debug, Clone)]
 pub enum ManagementRefusal {
     /// The owner kept the stored document because it changed since the client
-    /// read it. Nothing was written, the area was read again, and this is what
-    /// it now is.
+    /// read it. Nothing was written; the area was read again, and this is
+    /// what it now is, or why that read failed.
     Conflict {
         message: String,
-        view: Box<ManagementView>,
+        view: Result<Box<ManagementView>, String>,
     },
     /// The daemon does not advertise the methods, or the owner refused the
     /// text: nothing was written.
@@ -423,7 +423,11 @@ pub enum ManagementRefusal {
 impl std::fmt::Display for ManagementRefusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Conflict { message, .. } | Self::Refused(message) => formatter.write_str(message),
+            Self::Conflict { message, view } => match view {
+                Ok(_) => formatter.write_str(message),
+                Err(error) => write!(formatter, "{message} {error}"),
+            },
+            Self::Refused(message) => formatter.write_str(message),
         }
     }
 }

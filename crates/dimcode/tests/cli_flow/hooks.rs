@@ -1295,6 +1295,57 @@ fn hooks_set_reports_the_save_when_the_read_after_it_fails() {
     assert!(drafts(&home).is_empty(), "the written draft is removed");
 }
 
+/// A conflict whose re-read fails is still a conflict: nothing was written,
+/// the command says so with the read error that followed, and exits 1.
+#[test]
+fn hooks_set_reports_a_conflict_when_the_read_after_it_fails() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("hooks.catalog");
+        wire.reply(&request, document_catalog("user:1", json!({"hooks": {}})));
+        let request = wire.read("hooks.save");
+        assert_eq!(request["params"]["expectedRevision"], "user:1");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"settings changed; read the current version before updating",
+            "data":{"appError":"hooks_conflict"}}}));
+        // The conflict writes nothing, and the read of the area as it now is
+        // fails.
+        let request = wire.read("hooks.catalog");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"hooks catalog unavailable",
+            "data":{"appError":"hooks_failed"}}}));
+        drains(wire);
+    });
+    let mut child = home
+        .command()
+        .args(["hooks", "set", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(json!({"hooks": {"Stop": []}}).to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("The user document changed since it was read; nothing was written."),
+        "{stderr}"
+    );
+    assert!(stderr.contains("hooks catalog unavailable"), "{stderr}");
+    assert!(stderr.contains("Your text is kept in"), "{stderr}");
+    assert_eq!(drafts(&home).len(), 1, "the refused draft stays");
+}
+
 /// An editor that writes a different document for a draft holding the
 /// stored one: the next edit is told which document it was opened on.
 const ANSWERS_STORED: &str = "case \"$(cat \"$1\")\" in\n\
@@ -1391,6 +1442,107 @@ fn tui_hooks_panel_settles_a_save_whose_read_fails() {
         assert!(terminal.wait().success());
         daemon.join().unwrap();
         assert!(drafts(&home).is_empty(), "the written draft is removed");
+        assert_eq!(
+            terminal
+                .transcript
+                .matches("hooks catalog unavailable")
+                .count(),
+            1,
+            "the read error is drawn once: {}",
+            terminal.transcript
+        );
+    }
+}
+
+/// A conflict whose re-read fails still settles the draft: the panel says
+/// nothing was written, shows the read error once, keeps no view, and the
+/// next edit opens the stored document, in both terminal modes.
+#[test]
+fn tui_hooks_panel_drops_the_draft_when_the_conflict_read_fails() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let script = editor(&home, "editor.sh", ANSWERS_STORED);
+        let (shown, wait_shown) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            hello(wire);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history");
+            wire.reply(
+                &history,
+                json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+            );
+            for _ in 0..2 {
+                let request = wire.read_any();
+                match request["method"].as_str() {
+                    Some("account.providers") => wire.reply(&request, json!([])),
+                    Some("session.context.usage") => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                        "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+                    method => panic!("unexpected request {method:?}"),
+                }
+            }
+            wait_shown.recv_timeout(PATIENCE).unwrap();
+            let request = wire.read("hooks.catalog");
+            wire.reply(&request, document_catalog("user:1", json!({"hooks": {}})));
+            let request = wire.read("hooks.save");
+            assert_eq!(request["params"]["expectedRevision"], "user:1");
+            wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                "code":-32000,
+                "message":"settings changed; read the current version before updating",
+                "data":{"appError":"hooks_conflict"}}}));
+            // The conflict writes nothing, and the read of the area as it now
+            // is fails.
+            let request = wire.read("hooks.catalog");
+            wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                "code":-32000,
+                "message":"hooks catalog unavailable",
+                "data":{"appError":"hooks_failed"}}}));
+            // Ctrl+R reads the area, and the next edit opens the document
+            // that read returned, not the draft the save kept.
+            let request = wire.read("hooks.catalog");
+            wire.reply(
+                &request,
+                document_catalog("user:9", json!({"hooks": {"Stop": ["stored"]}})),
+            );
+            let request = wire.read("hooks.save");
+            assert_eq!(request["params"]["expectedRevision"], "user:9");
+            assert_eq!(
+                request["params"]["document"]["hooks"]["Stop"][0],
+                json!("kept")
+            );
+            wire.reply(&request, json!({"revision": "user:10"}));
+            let request = wire.read("hooks.catalog");
+            wire.reply(&request, document_catalog("user:10", json!({"hooks": {}})));
+            drains(wire);
+        });
+        let mut command = edit_command(&home, &script, &[]);
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("test / model");
+        shown.send(()).unwrap();
+        terminal.write(b"/hooks\r");
+        terminal.until("The user's own document; always in effect.");
+        terminal.raw(b"\x05");
+        terminal.until("The user document changed since it was read");
+        terminal.until("Your text is kept");
+        terminal.until("hooks catalog unavailable");
+        let settled = terminal.transcript.clone();
+        assert!(!settled.contains("Saved."), "{settled}");
+        // The link to the stale revision went, so the next edit is the stored
+        // document's.
+        terminal.raw(b"\x12");
+        terminal.until("Reloaded.");
+        terminal.raw(b"\x05");
+        terminal.until("Saved.");
+        terminal.raw(b"\x1b");
+        thread::sleep(Duration::from_millis(200));
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
         assert_eq!(
             terminal
                 .transcript

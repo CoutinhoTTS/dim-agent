@@ -137,9 +137,18 @@ impl ManagementPanel {
                 }
             }
             ManagementResult::Refused(ManagementRefusal::Conflict { message, view }) => {
-                // The owner wrote nothing; this is the document as it now is.
+                // The owner wrote nothing. A read that failed leaves no view,
+                // so the next read retries the area; the link to the stale
+                // revision is dropped on every conflict either way.
                 self.message = Some(Err(message.clone()));
-                self.set_view((**view).clone());
+                match view {
+                    Ok(view) => self.set_view((**view).clone()),
+                    Err(error) => {
+                        self.view = None;
+                        self.read_error = Some(error.clone());
+                        self.list.loading();
+                    }
+                }
             }
         }
         self.refresh_hint();
@@ -877,12 +886,12 @@ mod tests {
             },
             result: ManagementResult::Refused(ManagementRefusal::Conflict {
                 message: "The user document changed since it was read.".into(),
-                view: Box::new(ManagementView {
+                view: Ok(Box::new(ManagementView {
                     revision: Some("user:2".into()),
                     document: Some(serde_json::json!({"hooks": {}})),
                     actions: vec![ActionKind::Reload],
                     ..hooks_view()
-                }),
+                })),
             }),
         });
         let text = shown(&panel, 72, 20).join(" ");

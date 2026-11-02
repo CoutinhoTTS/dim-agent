@@ -178,7 +178,7 @@ pub async fn apply(
             Err(hooks::Failure::Conflict { message, catalog }) => {
                 ManagementResult::Refused(ManagementRefusal::Conflict {
                     message,
-                    view: Box::new(hooks::view(&catalog, &actions)),
+                    view: catalog.map(|catalog| Box::new(hooks::view(&catalog, &actions))),
                 })
             }
         },

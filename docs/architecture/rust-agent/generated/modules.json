@@ -3098,7 +3098,8 @@
       "unexpandedMacros": [
         "format",
         "json",
-        "matches"
+        "matches",
+        "write"
       ]
     },
     {
@@ -3183,7 +3184,9 @@
       "crate": "dim_cli",
       "parent": "dim_cli::model",
       "file": "crates/dim-cli/src/model/session.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "write"
+      ]
     },
     {
       "id": "dim_cli::model::shell",

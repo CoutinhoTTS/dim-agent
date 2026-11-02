@@ -8807,7 +8807,7 @@ mod tests {
         app.apply(save_reply(ManagementResult::Refused(
             ManagementRefusal::Conflict {
                 message: "The user document changed since it was read.".into(),
-                view: Box::new(view()),
+                view: Ok(Box::new(view())),
             },
         )));
         assert!(path.exists(), "the conflicted draft stays");
