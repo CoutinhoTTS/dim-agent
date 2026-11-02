@@ -922,7 +922,10 @@ async fn launch_admitted_before_an_index_reload_replies_the_created_session() {
         lock.execute_batch("COMMIT").unwrap();
     });
     restarted.unwrap();
-    let reply = launch.await.unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(5), launch)
+        .await
+        .expect("the launch did not finish")
+        .unwrap();
     assert_eq!(reply["ok"], true, "{reply}");
     let session = agent
         .get_session(reply["value"]["sessionId"].as_str().unwrap())
@@ -931,6 +934,14 @@ async fn launch_admitted_before_an_index_reload_replies_the_created_session() {
     assert_eq!(agent.sessions().len(), before + 1);
     server.shutdown();
     server.join().await.unwrap();
+}
+
+/// Waits until an `idle` call is admitted and waiting on its branch.
+async fn admitted(server: &RunningServer) {
+    let signal = server.idle_admitted().expect("an Agents index");
+    tokio::time::timeout(Duration::from_secs(5), signal.notified())
+        .await
+        .expect("idle was not admitted");
 }
 
 /// A cancelled idle or stop wait re-checks `reached >= token`, because `session.close` can
@@ -955,19 +966,25 @@ async fn idle_ends_reloading_on_an_index_reload_and_session_closed_on_close() {
 
     let applied = sessions.applied.load(Ordering::SeqCst);
     let idle = waiting();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    admitted(&server).await;
     assert!(!idle.is_finished());
     server.restart("Agents").await.unwrap();
-    let ended = idle.await.unwrap();
+    let ended = tokio::time::timeout(Duration::from_secs(5), idle)
+        .await
+        .expect("idle did not end after the index reload")
+        .unwrap();
     assert_eq!(ended["error"]["code"], "reloading", "{ended}");
     assert_eq!(ended["error"]["retryable"], true);
     assert_eq!(sessions.applied.load(Ordering::SeqCst), applied);
     let idle = waiting();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    admitted(&server).await;
     assert!(!idle.is_finished(), "the approval is still pending");
 
     session.close().await.unwrap();
-    let ended = idle.await.unwrap();
+    let ended = tokio::time::timeout(Duration::from_secs(5), idle)
+        .await
+        .expect("idle did not end after the close")
+        .unwrap();
     assert_eq!(ended["error"]["code"], "session_closed", "{ended}");
     assert_eq!(sessions.error("idle", at.clone()).await, "session_closed");
     server.shutdown();

@@ -168,7 +168,7 @@ impl SessionStore {
                 Ok((time, id))
             })
             .transpose()?;
-        self.timeline.db.run_cancellable(cancel, move |connection| {
+        self.timeline.db.run_read_cancellable(cancel, move |connection| {
             let index = if request.with_preview { "session_catalog_with_preview" } else { "session_catalog_by_activity" };
             let mut sql = format!(
                 "SELECT c.session_id AS session_id, c.cwd, s.created_at_ms, b.sequence, o.agent_id, \
@@ -395,32 +395,38 @@ mod tests {
             let (entered, ready) = tokio::sync::oneshot::channel();
             let (release, blocked) = std::sync::mpsc::channel();
             let calls = Arc::new(AtomicUsize::new(0));
-            let observed = calls.clone();
-            database
-                .run(move |connection| {
-                    let entered = std::sync::Mutex::new(Some(entered));
-                    connection
-                        .create_scalar_function(
-                            "catalog_fold",
-                            1,
-                            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
-                            move |ctx| {
-                                observed.fetch_add(1, Ordering::SeqCst);
-                                if let Some(entered) = entered.lock().unwrap().take() {
-                                    let _ = entered.send(());
-                                    blocked
-                                        .recv_timeout(Duration::from_secs(10))
-                                        .expect("the running SQL is released");
-                                }
-                                Ok(ctx
-                                    .get::<Option<String>>(0)?
-                                    .map(|text| text.to_lowercase()))
-                            },
-                        )
-                        .map_err(error)
-                })
-                .await
-                .unwrap();
+            let entered = Arc::new(std::sync::Mutex::new(Some(entered)));
+            let blocked = Arc::new(std::sync::Mutex::new(blocked));
+            for reader in &database.readers.connections {
+                let (entered, blocked, observed) =
+                    (entered.clone(), blocked.clone(), calls.clone());
+                reader
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .create_scalar_function(
+                        "catalog_fold",
+                        1,
+                        rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                        move |ctx| {
+                            observed.fetch_add(1, Ordering::SeqCst);
+                            if let Some(entered) = entered.lock().unwrap().take() {
+                                let _ = entered.send(());
+                                blocked
+                                    .lock()
+                                    .unwrap()
+                                    .recv_timeout(Duration::from_secs(10))
+                                    .expect("the running SQL is released");
+                            }
+                            Ok(ctx
+                                .get::<Option<String>>(0)?
+                                .map(|text| text.to_lowercase()))
+                        },
+                    )
+                    .map_err(error)
+                    .unwrap();
+            }
             let mut wire = connect(address).await;
             send(
                 &mut wire,
@@ -451,21 +457,14 @@ mod tests {
             let writing = database.run(|connection| {
                 connection.execute("UPDATE session_catalog SET preview='write after cancellation' WHERE session_id='catalog-0000'", []).map_err(error)
             });
-            tokio::pin!(writing);
-            assert!(
-                tokio::time::timeout(Duration::from_millis(30), &mut writing)
-                    .await
-                    .is_err(),
-                "the query owns the real SQLite connection"
-            );
-            release.send(()).unwrap();
             assert_eq!(
                 tokio::time::timeout(Duration::from_secs(10), writing)
                     .await
-                    .unwrap()
+                    .expect("a write does not wait for the catalog read")
                     .unwrap(),
                 1
             );
+            release.send(()).unwrap();
             assert!(
                 calls.load(Ordering::SeqCst) < 2300,
                 "cancellation interrupted the scan before it visited every Session"

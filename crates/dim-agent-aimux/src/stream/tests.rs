@@ -62,6 +62,28 @@ fn fixture(
     (stream, cancel, abort, dropped)
 }
 
+/// The next chunk; a fixture stream that stalls instead of ending fails the
+/// case rather than hanging the suite.
+async fn next_or_stall(
+    stream: &mut ModelStream,
+    case: &str,
+) -> Option<Result<ModelChunk, HostError>> {
+    tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+        .await
+        .unwrap_or_else(|_| panic!("{case}: the stream stalled instead of ending"))
+}
+
+/// Every chunk of `stream`; a fixture stream that stalls instead of ending
+/// fails the case rather than hanging the suite.
+async fn collect_or_stall(stream: ModelStream, case: &str) -> Vec<Result<ModelChunk, HostError>> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.collect::<Vec<_>>(),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("{case}: the stream stalled instead of ending"))
+}
+
 fn start() -> StreamPart {
     StreamPart::StreamStart { warnings: vec![] }
 }
@@ -387,13 +409,17 @@ async fn unsupported_parameters_and_results_end_the_call() {
         finish(FinishReasonUnified::ContentFilter, NativeUsage::default()),
     ];
     for part in cases {
+        let case = format!("{part:?}");
         let (mut stream, _, _, dropped) = fixture(vec![Ok(part)]);
         assert!(matches!(
-            stream.next().await,
+            next_or_stall(&mut stream, &case).await,
             Some(Err(HostError::Failed { .. }))
         ));
         assert!(dropped.load(Ordering::SeqCst));
-        assert!(stream.next().await.is_none());
+        assert!(
+            next_or_stall(&mut stream, &case).await.is_none(),
+            "{case}: the stream did not end after the failure"
+        );
     }
 }
 
@@ -473,7 +499,7 @@ async fn malformed_tool_lifecycles_fail_and_release_transport() {
     ];
     for (parts, diagnostic) in cases {
         let (stream, _, abort, dropped) = fixture(parts.into_iter().map(Ok).collect());
-        let chunks = stream.collect::<Vec<_>>().await;
+        let chunks = collect_or_stall(stream, &format!("the {diagnostic:?} lifecycle")).await;
         let Some(Err(failure)) = chunks.last() else {
             panic!("missing failure: {chunks:?}")
         };

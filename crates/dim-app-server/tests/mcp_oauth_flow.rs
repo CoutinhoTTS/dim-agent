@@ -1574,3 +1574,100 @@ async fn sign_out_and_newer_sign_ins_supersede_pending_attempts() {
     daemon.close().await;
     servers.stop.cancel();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scope_moves_keep_the_oauth_record_and_the_sign_in_state() {
+    let _logs = logs();
+    let servers = Servers::start().await;
+    let (resource, authority) = (servers.resource.clone(), servers.authority.clone());
+    let daemon = Daemon::start(&[("docs", json!({"type":"http","url":resource.url()}))]).await;
+    let mut client = daemon.client().await;
+    let catalog = client.ok("mcp.catalog", json!({"cwd":daemon.work})).await;
+
+    client
+        .sign_in(&authority, user("docs"), "move-code-secret")
+        .await;
+    assert_eq!(
+        client
+            .catalog_auth(json!({"cwd":daemon.work}), "docs")
+            .await,
+        json!({"status":"authorized"})
+    );
+    let record = daemon.store();
+
+    client
+        .ok(
+            "mcp.move",
+            json!({"id":"docs","from":"user","to":"project","cwd":daemon.work,
+                "expectedFromVersion":catalog["userRevision"],
+                "expectedToVersion":catalog["projectRevision"]}),
+        )
+        .await;
+    assert_eq!(
+        client
+            .catalog_auth(json!({"cwd":daemon.work}), "docs")
+            .await,
+        json!({"status":"authorized"}),
+        "the credential follows the entry to the project"
+    );
+    let moved = client
+        .ok(
+            "mcp.configuration",
+            json!({"source":"project","id":"docs","cwd":daemon.work}),
+        )
+        .await;
+    assert_eq!(moved["secretsInUserScope"], true);
+    assert_eq!(moved["configuration"]["oauthConfigured"], false);
+    assert_eq!(moved["configuration"]["authConfigured"], false);
+    let skeleton = std::fs::read_to_string(daemon.work.join(".mcp.json")).unwrap();
+    assert!(
+        !skeleton.contains(resource.url().as_str()),
+        "the project file keeps only the origin"
+    );
+    for secret in ["access-1-secret", "refresh-2-secret", "move-code-secret"] {
+        assert!(!skeleton.contains(secret));
+    }
+    assert_eq!(daemon.store(), record);
+
+    client
+        .ok(
+            "mcp.update",
+            json!({"source":"project","id":"docs","cwd":daemon.work,
+                "expectedVersion":moved["revision"],
+                "patch":{"oauth":{"action":"set","clientId":"abc"}}}),
+        )
+        .await;
+    let inspected = client
+        .ok(
+            "mcp.inspect",
+            json!({"source":"project","id":"docs","cwd":daemon.work}),
+        )
+        .await;
+    assert_eq!(inspected["configuration"]["oauthConfigured"], true);
+    assert!(!inspected.to_string().contains("access-1-secret"));
+
+    let catalog = client.ok("mcp.catalog", json!({"cwd":daemon.work})).await;
+    client
+        .ok(
+            "mcp.move",
+            json!({"id":"docs","from":"project","to":"user","cwd":daemon.work,
+                "expectedFromVersion":catalog["projectRevision"],
+                "expectedToVersion":catalog["userRevision"]}),
+        )
+        .await;
+    let back = client
+        .ok("mcp.configuration", json!({"source":"user","id":"docs"}))
+        .await;
+    assert_eq!(back["secretsInUserScope"], false);
+    assert_eq!(back["configuration"]["oauthConfigured"], true);
+    assert_eq!(back["configuration"]["oauth"]["clientId"], "abc");
+    assert_eq!(
+        client
+            .catalog_auth(json!({"cwd":daemon.work}), "docs")
+            .await,
+        json!({"status":"authorized"}),
+        "moving back keeps the sign-in state"
+    );
+    assert_eq!(daemon.store(), record);
+    daemon.close().await;
+}
