@@ -622,7 +622,8 @@ With `--product-home` or `--home`, PluginManager keeps the host's plugin configu
 `<home>/plugins.json` and serves the `plugin.*` management methods and the agent's `plugin_*`
 tools ([design](../../docs/design/plugins/PluginManager.md)). `--defaults FILE` names the default
 configuration file: the default plugins by name and directory, and the locked names
-(development uses `runtime/default-plugins.json`). Plugin code runs in the runtimes given by
+(development passes the copy `./dev` stages from `runtime/default-plugins.json` into
+`staging/dev-plugins`). Plugin code runs in the runtimes given by
 `--node` and `--js-runtime` (and `--python`); with `--defaults` and no `--session-rows`, packages
 resolve from the default configuration file's location. A plugin whose runtime is not given shows
 its row's status in `plugin.list`.

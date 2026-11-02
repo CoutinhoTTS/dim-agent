@@ -526,6 +526,8 @@ impl ProviderService {
         if !self.oauth.contains(&provider_id, cancel).await? {
             let available = self.account_available(&provider_id, cancel).await?;
             let id = provider_id.clone();
+            let bundled = self.bundled.clone();
+            let scoped = provider_id.clone();
             let record = self
                 .mutate_static(
                     provider_id,
@@ -542,21 +544,21 @@ impl ProviderService {
                                 "Model is unavailable".into(),
                             ));
                         }
-                        record.disabled_model_ids.retain(|id| {
-                            !record
-                                .models
-                                .iter()
-                                .chain(&record.user_models)
-                                .any(|model| &model.model_id == id)
-                        });
-                        record.disabled_model_ids.extend(
-                            record
-                                .models
-                                .iter()
-                                .chain(&record.user_models)
-                                .filter(|model| !ids.contains(&model.model_id))
-                                .map(|model| model.model_id.clone()),
-                        );
+                        // A whole-set write governs the entries the provider
+                        // can use: an unavailable entry keeps the enablement
+                        // it has, whether the set names it or omits it.
+                        let governed: Vec<String> =
+                            static_models(&bundled, &scoped, record, available)
+                                .into_iter()
+                                .filter(|model| model.unavailable_reason.is_none())
+                                .map(|model| model.id)
+                                .collect();
+                        record
+                            .disabled_model_ids
+                            .retain(|id| !governed.contains(id));
+                        record
+                            .disabled_model_ids
+                            .extend(governed.iter().filter(|id| !ids.contains(id)).cloned());
                         Ok(())
                     },
                     cancel,
@@ -584,28 +586,32 @@ impl ProviderService {
                                 ));
                             }
                             if ids.iter().any(|id| {
-                                !record.models.iter().any(|model| {
-                                    &model.entry.model_id == id
-                                        && model.unavailable_reason.is_none()
-                                })
+                                !record
+                                    .models
+                                    .iter()
+                                    .any(|model| &model.entry.model_id == id)
                             }) {
                                 return Err(ProviderError::InvalidConfig(
                                     "Model is unavailable".into(),
                                 ));
                             }
-                            record.disabled_model_ids.retain(|id| {
-                                !record
-                                    .models
-                                    .iter()
-                                    .any(|model| &model.entry.model_id == id)
-                            });
-                            record.disabled_model_ids.extend(
-                                record
-                                    .models
-                                    .iter()
-                                    .filter(|model| !ids.contains(&model.entry.model_id))
-                                    .map(|model| model.entry.model_id.clone()),
-                            );
+                            // The set governs the entries this account can use,
+                            // as the effective limits make them: a model this
+                            // area's own edit made usable is governed even
+                            // while the stored reason still records the base
+                            // entry.
+                            let governed: Vec<String> = record
+                                .effective_models(&bundled)
+                                .into_iter()
+                                .filter(|model| model.unavailable_reason.is_none())
+                                .map(|model| model.entry.model_id)
+                                .collect();
+                            record
+                                .disabled_model_ids
+                                .retain(|id| !governed.contains(id));
+                            record
+                                .disabled_model_ids
+                                .extend(governed.iter().filter(|id| !ids.contains(id)).cloned());
                             record.version =
                                 record.version.checked_add(1).ok_or(ProviderError::Failed)?;
                             save_catalog(&tx, &provider_id, &record)?;

@@ -432,57 +432,79 @@ pub struct ProviderRecordError {
 }
 
 impl ProviderRecord {
-    fn catalog(&self, bundled: &BundledCatalog) -> ProviderCatalog {
-        let defaults: Vec<_> = self
-            .models
+    /// Every model as this record serves it: the base entry with its
+    /// override's limits inherited and the bundled limits filled in, and the
+    /// reason those effective limits leave it unusable. The catalog, the
+    /// management view and the whole-set write all read this one derivation,
+    /// so the toggle a view offers is the toggle the write governs.
+    ///
+    /// The stored reason records the base entry: `limits_undeclared` is
+    /// derived from the effective limits, so a supplied limit makes the
+    /// model available again, while the stored value stays for the reset
+    /// that puts the base entry back in force.
+    pub(crate) fn effective_models(&self, bundled: &BundledCatalog) -> Vec<EffectiveModel<'_>> {
+        self.models
             .iter()
-            .map(|model| model.entry.clone())
-            .collect();
-        let entries: Vec<_> = defaults
-            .into_iter()
-            .map(|entry| {
-                self.model_config_overrides
+            .map(|source| {
+                let replacement = self
+                    .model_config_overrides
                     .iter()
-                    .find(|m| m.model_id == entry.model_id)
-                    .map(|replacement| inherit_limits(replacement.clone(), &entry))
-                    .unwrap_or(entry)
+                    .find(|entry| entry.model_id == source.entry.model_id);
+                let mut entry = match replacement {
+                    Some(replacement) => inherit_limits(replacement.clone(), &source.entry),
+                    None => source.entry.clone(),
+                };
+                fill_bundled_limits(bundled, &mut entry);
+                let missing_limits = entry.capabilities.missing_limits();
+                let unavailable_reason =
+                    limits_reason(source.unavailable_reason.clone(), &missing_limits);
+                EffectiveModel {
+                    source,
+                    entry,
+                    missing_limits,
+                    unavailable_reason,
+                    overridden: replacement.is_some(),
+                }
             })
-            .collect();
+            .collect()
+    }
+
+    fn catalog(&self, bundled: &BundledCatalog) -> ProviderCatalog {
         ProviderCatalog {
             account: Some(self.account.clone()),
             version: self.version,
             disabled_model_ids: self.disabled_model_ids.clone(),
-            models: entries
+            models: self
+                .effective_models(bundled)
                 .into_iter()
-                .filter_map(|mut entry| {
-                    let source = self
-                        .models
-                        .iter()
-                        .find(|model| model.entry.model_id == entry.model_id)?;
-                    fill_bundled_limits(bundled, &mut entry);
-                    let missing_limits = entry.capabilities.missing_limits();
-                    // `limits_undeclared` is derived from the effective limits,
-                    // so a supplied limit makes the model available again.
-                    let unavailable_reason =
-                        limits_reason(source.unavailable_reason.clone(), &missing_limits);
-                    Some(ProviderModel {
-                        id: entry.model_id,
-                        name: entry.display_name,
-                        endpoint: Some(source.protocol),
-                        config: ModelConfig {
-                            max_tokens: entry.capabilities.max_output_tokens.map(|n| n as f64),
-                            ..Default::default()
-                        },
-                        capabilities: entry.capabilities,
-                        missing_limits,
-                        unavailable_reason,
-                        zdr: source.zdr,
-                        metadata: entry.metadata,
-                    })
+                .map(|model| ProviderModel {
+                    id: model.entry.model_id,
+                    name: model.entry.display_name,
+                    endpoint: Some(model.source.protocol),
+                    config: ModelConfig {
+                        max_tokens: model.entry.capabilities.max_output_tokens.map(|n| n as f64),
+                        ..Default::default()
+                    },
+                    capabilities: model.entry.capabilities,
+                    missing_limits: model.missing_limits,
+                    unavailable_reason: model.unavailable_reason,
+                    zdr: model.source.zdr,
+                    metadata: model.entry.metadata,
                 })
                 .collect(),
         }
     }
+}
+
+/// One model as a record serves it: the effective entry the catalog and the
+/// management view publish, and the reason those effective limits leave it
+/// unusable. `overridden` says whether an override supplied the entry.
+pub(crate) struct EffectiveModel<'a> {
+    pub source: &'a ManagedModel,
+    pub entry: ModelEntry,
+    pub missing_limits: Vec<String>,
+    pub unavailable_reason: Option<String>,
+    pub overridden: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -16,6 +16,8 @@ npm ci --prefix runtime/plugins/session-title --ignore-scripts
 (cd runtime && npm install --no-save --package-lock=false --ignore-scripts --install-links ./plugins/session-title)
 ```
 
+These commands set up the shared runtime and this package in the checkout for `--session-rows` embedding and the package's tests. `./dev` needs none of them: it stages the default plugins, with their own dependencies, into `staging/dev-plugins`.
+
 The plugin directory carries [dim-plugin.json](dim-plugin.json) and is a default plugin listed in
 [runtime/default-plugins.json](../../default-plugins.json), which PluginManager loads (`--defaults`).
 An embedding host may still build a row from the manifest's `code` fields (`entry`, `inject`); the

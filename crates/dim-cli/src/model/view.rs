@@ -339,8 +339,12 @@ pub struct ViewSnapshot {
     pub running: bool,
     pub main_running: bool,
     /// The first message the user sent on `main`: the window title's topic
-    /// (`ui::title`), whichever line is shown.
+    /// until the Session has a stored title (`ui::title`), whichever line is
+    /// shown.
     pub main_topic: Option<String>,
+    /// The Session's stored title, when it has a real one: the window
+    /// title's topic in place of `main_topic` (`ui::title`).
+    pub session_title: Option<String>,
     pub approvals: Vec<ApprovalView>,
     pub questions: Vec<crate::question::Call>,
     /// Oldest first.

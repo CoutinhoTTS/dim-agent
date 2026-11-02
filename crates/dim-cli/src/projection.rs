@@ -798,7 +798,8 @@ impl Projection {
         &self.tasks
     }
 
-    /// The first message the user sent: the window title's topic.
+    /// The first message the user sent: the window title's topic until the
+    /// Session has a stored title (`ui::title`).
     pub fn first_message(&self) -> Option<String> {
         self.rows
             .iter()

@@ -26,6 +26,8 @@ mod mcp;
 
 #[path = "cli_flow/migration.rs"]
 mod migration;
+#[path = "cli_flow/models.rs"]
+mod models;
 #[path = "cli_flow/permission.rs"]
 mod permission;
 #[path = "cli_flow/question.rs"]
@@ -40,6 +42,8 @@ mod session_management;
 mod skills;
 #[path = "cli_flow/tasks.rs"]
 mod tasks;
+#[path = "cli_flow/title.rs"]
+mod title;
 #[path = "cli_flow/workflow.rs"]
 mod workflow;
 
@@ -8861,6 +8865,48 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
     );
 }
 
+/// `/models` lists a Provider's models without offering `Edit models` when
+/// the daemon does not advertise the area's method.
+#[test]
+fn tui_models_picker_hides_edit_models_without_management_methods() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            let request: Value = serde_json::from_str(&line).unwrap();
+            line.clear();
+            let result = match request["method"].as_str().unwrap() {
+                "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,
+                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history",
+                    "provider.list","provider.catalog","provider.selection","provider.select"]}),
+                "session.create" => json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}),
+                "session.history" => json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+                "session.idle" => json!({"sequence":8}),
+                "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
+                "provider.catalog" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
+                    {"id":"model","name":"Model","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]}}),
+                "account.providers" => json!([]),
+                _ => json!({}),
+            };
+            wire.reply(&request, result);
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/models\r");
+    terminal.until("Test / model");
+    thread::sleep(Duration::from_millis(300));
+    let opened = terminal.transcript.clone();
+    assert!(opened.contains("Model"), "{opened}");
+    assert!(!opened.contains("Edit models"), "{opened}");
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
 /// ←/→ in `/models` cycles advertised reasoning efforts, including `none`
 /// when the model can turn reasoning off. Enter saves the cycled effort and
 /// adopts the model with that effort plus the other saved preferences.
@@ -9191,7 +9237,13 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
     let home = Home::new();
     let refreshed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let seen = refreshed.clone();
+    // The daemon reports the re-list that follows its refill: after the
+    // second list's last catalog reply the client has nothing in flight, so
+    // the kill below cannot interrupt a reply.
+    let (settled, wait_settled) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
+        let mut version = 1u32;
+        let mut catalogs = 0usize;
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             let request: Value = serde_json::from_str(&line).unwrap();
@@ -9228,9 +9280,14 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
                     {"providerId":"broken","displayName":"Broken","enabled":true}]}),
                 "provider.catalog" => {
                     let provider = request["params"]["providerId"].as_str().unwrap();
+                    catalogs += 1;
+                    let last = catalogs == 14;
                     if provider == "broken" {
                         wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
                             "code":-32000,"message":"catalog read failed"}}));
+                        if last {
+                            settled.send(()).ok();
+                        }
                         continue;
                     }
                     let (models, disabled) = match provider {
@@ -9254,13 +9311,24 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
                         "blank" | "manual" => (json!([]), json!([])),
                         _ => (json!([model("vendor/model-a", None, true)]), json!([])),
                     };
-                    json!({"catalog":{"version":1,"disabledModelIds":disabled,"models":models}})
+                    wire.reply(
+                        &request,
+                        json!({"catalog":{"version":version,"disabledModelIds":disabled,"models":models}}),
+                    );
+                    if last {
+                        settled.send(()).ok();
+                    }
+                    continue;
                 }
                 "provider.refresh" => {
                     seen.lock()
                         .unwrap()
                         .push(request["params"]["providerId"].as_str().unwrap().to_owned());
-                    json!({"version":2,"disabledModelIds":[],"models":[]})
+                    // The refresh stores the listed catalog under a new
+                    // version, and the read reports it, so the re-list does
+                    // not ask for the same refill again.
+                    version = 2;
+                    json!({"version":version,"disabledModelIds":[],"models":[]})
                 }
                 "account.providers" => json!([]),
                 _ => json!({}),
@@ -9278,7 +9346,6 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
     terminal.until("Blank: no models · dimcode models blank --refresh");
     terminal.until("Manual: no models · add a model with provider.models.create");
     terminal.until("Broken: catalog unreadable · dimcode models broken");
-    terminal.until("Edit models");
     assert!(
         !terminal.transcript.contains("Ready / vendor/hidden-b"),
         "a disabled model is not selectable"
@@ -9287,6 +9354,9 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
         !terminal.transcript.contains("need a window"),
         "a model unavailable for another reason, and a disabled one, raise no limits row"
     );
+    wait_settled
+        .recv_timeout(PATIENCE)
+        .expect("the picker settles after its re-list");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();

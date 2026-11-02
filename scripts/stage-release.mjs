@@ -7,7 +7,7 @@ import path from 'node:path';
 import { buildPlatform, checkArchitecture } from './native-binary.mjs';
 
 const [binaryDirectory, destination, version, sourceCommit, ...rest] = process.argv.slice(2);
-const usage = 'Usage: node scripts/stage-release.mjs BIN_DIR DESTINATION VERSION SOURCE_COMMIT [--account] [--plugins DIR]';
+const usage = 'Usage: node scripts/stage-release.mjs BIN_DIR DESTINATION VERSION SOURCE_COMMIT --plugins DIR [--account]';
 assert(binaryDirectory && destination && version && sourceCommit, usage);
 let account = false;
 let plugins;
@@ -16,7 +16,8 @@ for (let index = 0; index < rest.length; index += 1) {
   else if (rest[index] === '--plugins' && plugins === undefined && rest[index + 1]) plugins = path.resolve(rest[++index]);
   else assert.fail(usage);
 }
-assert(plugins === undefined || existsSync(path.join(plugins, 'default-plugins.json')), 'The plugins directory has no default-plugins.json');
+assert(plugins !== undefined, '--plugins DIR is required: a payload without the default plugins is not a release payload');
+assert(existsSync(path.join(plugins, 'default-plugins.json')), 'The plugins directory has no default-plugins.json');
 assert(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/.test(version), 'Invalid version');
 assert(/^[a-f0-9]{40}$/.test(sourceCommit), 'Invalid source commit');
 const { platform, host, osName, cpu } = buildPlatform();
@@ -43,7 +44,7 @@ try {
   copyFileSync(cli, path.join(output, 'bin', `dimcode${suffix}`));
   chmodSync(path.join(output, 'bin', `dimcode${suffix}`), 0o755);
   copyFileSync(path.join(repo, 'LICENSE'), path.join(output, 'LICENSE'));
-  if (plugins) cpSync(plugins, output, { recursive: true });
+  cpSync(plugins, output, { recursive: true });
   const notices = ['LICENSE', 'NOTICE', 'xai-ratatui-inline/NOTICE', 'xai-ratatui-textarea/NOTICE'];
   for (const file of notices) {
     const destination = path.join(output, 'licenses/grok-build', file);

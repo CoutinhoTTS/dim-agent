@@ -200,6 +200,10 @@ Hosts without the advertised management methods omit this action; no legacy or
 in-memory write fallback is added. No independent settings screen or second
 command route is required for this TUI scope.
 
+The picker's `Edit models` row opens the models management area for the Provider
+its row names, and is absent from a daemon that does not advertise
+`provider.management` ([CLI commands](cli-commands.md#the-models-area)).
+
 ## 6. Implementation and acceptance
 
 The implementation touches Collaboration's process plugin and existing creation

@@ -135,7 +135,7 @@ A name with no entry is in its shipped state: a built-in or default plugin on. W
 
 ### 2.3 The default configuration file
 
-Shipped with Dim, read-only, given to the App Server with `--defaults PATH` (the default CLI passes the file in its release; development uses `runtime/default-plugins.json`).
+Shipped with Dim, read-only, given to the App Server with `--defaults PATH` (the default CLI passes the file in its release; `./dev` stages this file and the plugins it lists into the checkout's ignored `staging/dev-plugins` and passes that copy, so the plugins resolve the runtime's single copy of `@deepseek-ai/cordis`).
 
 ```json
 {
