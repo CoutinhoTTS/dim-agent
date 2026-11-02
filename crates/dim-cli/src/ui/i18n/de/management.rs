@@ -113,6 +113,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "A command rule is DECISION MATCH COMMAND, such as deny prefix git push." => {
             "Eine Befehlsregel lautet DECISION MATCH COMMAND, zum Beispiel deny prefix git push."
         }
+        "Command: {command}" => "Befehl: {command}",
         "Use the line prompt or dimcode permissions." => {
             "Nutze die Zeilenaufforderung oder dimcode permissions."
         }

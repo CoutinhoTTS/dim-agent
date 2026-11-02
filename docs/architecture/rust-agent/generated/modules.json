@@ -30091,7 +30091,6 @@
         "path ManagementAction::Toggle",
         "path ManagementDetail",
         "path ManagementEntry",
-        "path ManagementGroup",
         "path ManagementRefusal::Conflict",
         "path ManagementRefusal::Refused",
         "path ManagementReply",

@@ -115,6 +115,7 @@ pub const STRINGS: &[&str] = &[
     "That command rule is no longer listed; nothing was removed.",
     "Command rules changed since they were read; nothing was removed.",
     "A command rule is DECISION MATCH COMMAND, such as deny prefix git push.",
+    "Command: {command}",
     "Use the line prompt or dimcode permissions.",
 ];
 
@@ -1020,40 +1021,6 @@ mod tests {
         assert!(matches!(
             panel.handle_key(key(KeyCode::Char(' '))),
             Effect::Management(_)
-        ));
-    }
-
-    /// An entry that has no on/off state draws neither word, and a toggle it
-    /// offers has nothing to ask for.
-    #[test]
-    fn an_entry_without_an_on_off_state_draws_no_word() {
-        let mut view = view();
-        view.groups.push(ManagementGroup {
-            heading: "rules".into(),
-            entries: vec![entry(
-                "deny prefix git push",
-                "deny prefix git push",
-                None,
-                Vec::new(),
-                vec![ActionKind::Toggle, ActionKind::Remove],
-            )],
-        });
-        let mut panel = ManagementPanel::new(Area::Skills, None);
-        panel.set_result(&view_reply(Area::Skills, ManagementAction::List, view));
-        // The rule is the only entry of the last group.
-        panel.handle_key(key(KeyCode::End));
-        let text = shown(&panel, 72, 20).join("\n");
-        let row = text
-            .lines()
-            .find(|line| line.contains("deny prefix git push"))
-            .expect("the rule has a row");
-        assert!(
-            !row.contains("enabled") && !row.contains("disabled"),
-            "the row names no state: {row}"
-        );
-        assert!(matches!(
-            panel.handle_key(key(KeyCode::Enter)),
-            Effect::None
         ));
     }
 

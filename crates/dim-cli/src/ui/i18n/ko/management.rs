@@ -107,6 +107,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "A command rule is DECISION MATCH COMMAND, such as deny prefix git push." => {
             "명령 규칙은 DECISION MATCH COMMAND 형식입니다. 예: deny prefix git push."
         }
+        "Command: {command}" => "명령: {command}",
         "Use the line prompt or dimcode permissions." => {
             "줄 프롬프트 또는 dimcode permissions에서 사용하세요."
         }

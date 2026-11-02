@@ -189,8 +189,8 @@ fn create() -> serde_json::Value {
     })
 }
 
-/// What the selected rule says about itself: how it matches, what it
-/// decides, and where it applies.
+/// What the selected rule says about itself: the command in full, how it
+/// matches, what it decides, and where it applies.
 fn detail(rule: &CommandRule) -> Vec<String> {
     let matching = match rule.matching {
         CommandMatch::Exact => t("Matches only this command."),
@@ -201,6 +201,9 @@ fn detail(rule: &CommandRule) -> Vec<String> {
         CommandRuleDecision::Deny => t("Denies the command under every preset."),
     };
     vec![
+        // The row is one line and the confirmation repeats it, so the
+        // command in full is here, where the footer wraps it.
+        tf("Command: {command}", &[("command", &rule.command)]),
         matching.to_owned(),
         decision.to_owned(),
         t("Applies in every Session, in every workspace.").to_owned(),

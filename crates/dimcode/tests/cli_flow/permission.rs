@@ -1505,7 +1505,8 @@ fn rules_editor(home: &Home) -> PathBuf {
 }
 
 /// `/permissions` reaches the Command rules area, which lists the rules with
-/// their states and detail, and Esc returns to the Permissions panel.
+/// their states and detail, and Esc returns to the Permissions panel. A
+/// command wider than the panel is readable in full in the entry's detail.
 #[test]
 fn tui_permissions_panel_lists_command_rules_and_returns() {
     for fullscreen in [false, true] {
@@ -1522,6 +1523,12 @@ fn tui_permissions_panel_lists_command_rules_and_returns() {
                     json!([
                         command_rule("allow", "exact", "cargo test -p dim-cli"),
                         command_rule("deny", "prefix", "git push"),
+                        command_rule(
+                            "deny",
+                            "prefix",
+                            "cargo run --example a-command-wider-than-the-panel \
+                             --features wide-tail",
+                        ),
                     ]),
                 ),
             );
@@ -1531,6 +1538,7 @@ fn tui_permissions_panel_lists_command_rules_and_returns() {
         if fullscreen {
             command.arg("--fullscreen");
         }
+        sized(&mut command, 80, 24);
         let mut terminal = Terminal::launch_tui(command);
         terminal.until("test / model");
         shown.send(()).unwrap();
@@ -1543,6 +1551,12 @@ fn tui_permissions_panel_lists_command_rules_and_returns() {
         // The hint paints each key and its label as separate spans.
         terminal.until("Ctrl+N");
         terminal.until("Ctrl+X");
+        // The row is one line and cuts the tail; the detail wraps the whole
+        // command, so the end of it is on screen once the entry is selected.
+        for _ in 0..2 {
+            terminal.raw(b"\x1b[B");
+        }
+        terminal.until("wide-tail");
         // Esc returns to the Permissions panel the row was opened from.
         terminal.raw(b"\x1b");
         terminal.until("File access");
