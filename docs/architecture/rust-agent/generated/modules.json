@@ -33918,6 +33918,7 @@
       "from": "dim_cli::ui::theme_panel::tests",
       "to": "dim_cli::ui::theme_panel",
       "references": [
+        "path ThemePanel::new",
         "path entries"
       ]
     },
