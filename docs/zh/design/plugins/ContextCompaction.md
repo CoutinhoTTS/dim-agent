@@ -155,8 +155,8 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 | 事件 | 写入方 | 消费方 | 数据 |
 | --- | --- | --- | --- |
 | `context/compact`（新） | Loop，经其公开写操作 `AgentLoop::compact` | Loop，按序号 | `{}` |
-| `context/compaction-start`（新） | ContextPolicy 在 `compact_step` 中代其调用方（Loop 的步骤或 ContextPreparation）写入 | Loop 与 ContextPreparation（重建）、客户端 | `{turn_id?, request_id?, command?, through, trigger: "manual" \| "threshold" \| "provider_output_budget_exhausted", strategy}` |
-| `context/compaction`（有改动） | ContextPolicy，代其调用方；重载时由负责结算的所有者写入 | Loop（手动步骤的终态）、ContextPolicy（重试复用）、投影、ContextMethods、客户端 | `{turn_id?, request_id?, command?, start?, through, outcome}` |
+| `context/compaction-start`（新） | ContextPolicy 在 `compact_step` 中代其调用方（Loop 的步骤或 ContextPreparation）写入 | Loop（重建）、ContextPreparation（延后 steer 与重建）、客户端 | `{turn_id?, request_id?, command?, through, trigger: "manual" \| "threshold" \| "provider_output_budget_exhausted", strategy}` |
+| `context/compaction`（有改动） | ContextPolicy，代其调用方；重载时由负责结算的所有者写入 | Loop（手动步骤的终态）、ContextPreparation（延后 steer）、ContextPolicy（重试复用）、投影、ContextMethods、客户端 | `{turn_id?, request_id?, command?, start?, through, outcome}` |
 
 `outcome` 为以下之一：
 
@@ -483,7 +483,7 @@ consume pending inputs --> prepare next request
   - **防御规则。** Loop 在另一条指令未完成时消费到的 `context/compact`（不是经 `AgentLoop::compact` 写入的，或旧数据），立即以引用它的 `context/compaction {command: <其序号>, outcome: skipped {reason: "a compaction is already in progress"}}` 结算，不带开始，不排队。
 - **不推进。** 步骤运行期间，`next_model` 和 `try_start` 等待它的事实。输入照常排队，不被步骤消费。
 
-**steer。** 步骤期间应用的驱动输入不取消步骤。它加入下一个请求，或在步骤结束后启动一个 turn。中断、失败、重载与重启见 §5.8。
+**steer。** 输入按 §5.3 等待，加入下一个请求，或在步骤结束后启动一个 turn。中断、失败、重载与重启见 §5.8。
 
 ### 5.5 Loop 新增的内容
 

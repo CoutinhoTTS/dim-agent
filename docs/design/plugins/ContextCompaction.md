@@ -237,8 +237,8 @@ failures before any model work.
 | Event | Writer | Consumer | Data |
 | --- | --- | --- | --- |
 | `context/compact` (new) | Loop, through its public write operation `AgentLoop::compact` | Loop, in sequence order | `{}` |
-| `context/compaction-start` (new) | ContextPolicy in `compact_step`, for its caller (Loop step or ContextPreparation) | Loop and ContextPreparation (rebuild), clients | `{turn_id?, request_id?, command?, through, trigger: "manual" \| "threshold" \| "provider_output_budget_exhausted", strategy}` |
-| `context/compaction` (changed) | ContextPolicy, for its caller; on reload, the settling owner | Loop (manual step terminal), ContextPolicy (retry reuse), projection, ContextMethods, clients | `{turn_id?, request_id?, command?, start?, through, outcome}` |
+| `context/compaction-start` (new) | ContextPolicy in `compact_step`, for its caller (Loop step or ContextPreparation) | Loop (rebuild), ContextPreparation (steer deferral and rebuild), clients | `{turn_id?, request_id?, command?, through, trigger: "manual" \| "threshold" \| "provider_output_budget_exhausted", strategy}` |
+| `context/compaction` (changed) | ContextPolicy, for its caller; on reload, the settling owner | Loop (manual step terminal), ContextPreparation (steer deferral), ContextPolicy (retry reuse), projection, ContextMethods, clients | `{turn_id?, request_id?, command?, start?, through, outcome}` |
 
 `outcome` is one of:
 
@@ -863,8 +863,8 @@ Without a provider baseline the full local estimate and its error remain (#128).
 - **No advance.** While a step runs, `next_model` and `try_start` wait for its fact. Inputs queue
   as usual and are not consumed by the step.
 
-**Steer.** A driving input applied during a step does not cancel it. It joins the next request,
-or starts a turn after the step. Interrupt, failure, reload and restart are in §5.8.
+**Steer.** Inputs wait as in §5.3, joining the next request or starting a turn after the step.
+Interrupt, failure, reload and restart are in §5.8.
 
 ### 5.5 What the Loop gains
 
