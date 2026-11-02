@@ -4361,40 +4361,57 @@ impl App {
             } else {
                 cols.saturating_sub(4).min(OVERLAY_LIST_WIDTH)
             };
-            let caret = panel_cursor(list_width, budget)
-                .flatten()
-                .map(|(row, column)| (row as u16, column as u16));
-            let list = |rows: Vec<String>| {
-                Some(Overlay {
-                    rows,
-                    cursor: caret,
-                })
-            };
             frame.overlay = match &self.prompt {
                 _ if palette_overlay => {
                     let width = cols.saturating_sub(4).min(OVERLAY_PALETTE_WIDTH);
                     self.composer.palette_overlay(width, budget, p)
                 }
-                Some(Prompt::Sessions(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Tasks(prompt)) => {
-                    list(prompt.render(list_width, budget, p, &self.markdown))
+                prompt => {
+                    let rows = match prompt {
+                        Some(Prompt::Sessions(prompt)) => {
+                            Some(prompt.render(list_width, budget, p))
+                        }
+                        Some(Prompt::Tasks(prompt)) => {
+                            Some(prompt.render(list_width, budget, p, &self.markdown))
+                        }
+                        Some(Prompt::Lines(prompt)) => {
+                            Some(prompt.render(list_width, budget, p, &self.markdown))
+                        }
+                        Some(Prompt::Timeline(prompt)) => {
+                            Some(prompt.render(list_width, budget, p))
+                        }
+                        Some(Prompt::Models(prompt)) => Some(prompt.render(list_width, budget, p)),
+                        Some(Prompt::Providers(prompt)) => {
+                            Some(prompt.render(list_width, budget, p))
+                        }
+                        Some(Prompt::Plugins(prompt)) => Some(prompt.render(list_width, budget, p)),
+                        Some(Prompt::Runtime(prompt)) => Some(prompt.render(list_width, budget, p)),
+                        Some(Prompt::Management(prompt)) => {
+                            Some(prompt.render(list_width, budget, p))
+                        }
+                        Some(Prompt::Login(prompt)) => Some(prompt.render(list_width, budget, p)),
+                        Some(Prompt::Approvals(prompt)) => {
+                            Some(prompt.render(list_width, budget, p))
+                        }
+                        Some(Prompt::Theme(prompt)) => Some(prompt.render(list_width, budget, p)),
+                        Some(Prompt::Language(prompt)) => {
+                            Some(prompt.render(list_width, budget, p))
+                        }
+                        Some(Prompt::Settings(prompt)) => {
+                            Some(prompt.render(list_width, budget, p))
+                        }
+                        Some(Prompt::Isolation(prompt)) => {
+                            Some(prompt.render(list_width, budget, p))
+                        }
+                        _ => None,
+                    };
+                    // A panel's cursor follows the rows it just drew, so it
+                    // is read after the render.
+                    let cursor = panel_cursor(list_width, budget)
+                        .flatten()
+                        .map(|(row, column)| (row as u16, column as u16));
+                    rows.map(|rows| Overlay { rows, cursor })
                 }
-                Some(Prompt::Lines(prompt)) => {
-                    list(prompt.render(list_width, budget, p, &self.markdown))
-                }
-                Some(Prompt::Timeline(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Models(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Providers(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Plugins(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Runtime(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Management(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Login(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Approvals(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Theme(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Language(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Settings(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Isolation(prompt)) => list(prompt.render(list_width, budget, p)),
-                _ => None,
             };
         }
         let panel = match &self.prompt {
@@ -6110,6 +6127,333 @@ mod tests {
             }
         }
         i18n::set(i18n::Locale::En);
+    }
+
+    /// From the smallest size the App gives a panel to the panel's own full
+    /// height, in both layouts: the composer and the hint's closing key stay
+    /// on the screen, the panel ends above the composer, and the selected
+    /// entry is drawn whenever the panel has a list row. The panel with notes
+    /// keeps its first three list rows while it can still show a note.
+    #[test]
+    fn list_panels_keep_their_row_budget_on_short_screens() {
+        use crate::model::session::{
+            ActionKind, Area, ExecutionSnapshot, ManagementAction, ManagementEntry,
+            ManagementGroup, ManagementReply, ManagementRequest, ManagementResult, ManagementView,
+            SessionItem,
+        };
+        use crate::model::view::{LineState, LineView, ViewSnapshot};
+        use crate::ui::render::panel::{strip_escapes, visible_width};
+
+        let sessions = || {
+            let mut panel = SessionsPanel::new(false);
+            panel.set_items(Ok((0..11)
+                .map(|i| SessionItem {
+                    id: format!("s{i}"),
+                    title: Some(format!("item{i}")),
+                    preview: None,
+                    cwd: "/work".into(),
+                    updated_at: u64::MAX,
+                    model: "p/m".into(),
+                    origin: None,
+                })
+                .collect()));
+            Prompt::Sessions(panel)
+        };
+        let workflow = || {
+            let mut panel = ManagementPanel::new(Area::Workflow, None);
+            panel.set_result(&ManagementReply {
+                request: ManagementRequest {
+                    area: Area::Workflow,
+                    action: ManagementAction::List,
+                },
+                result: ManagementResult::View {
+                    view: Box::new(ManagementView {
+                        actions: vec![ActionKind::Reload],
+                        groups: vec![ManagementGroup {
+                            heading: "user".into(),
+                            entries: vec![ManagementEntry {
+                                id: "cleanup".into(),
+                                label: "cleanup".into(),
+                                detail: vec!["Runs first.".into()],
+                                enabled: Some(true),
+                                states: Vec::new(),
+                                actions: vec![ActionKind::Toggle],
+                                remove_verb: Default::default(),
+                                document: None,
+                                run: None,
+                            }],
+                        }],
+                        ..ManagementView::default()
+                    }),
+                    note: None,
+                },
+            });
+            Prompt::Management(Box::new(panel))
+        };
+        let lines = || {
+            let snapshot = ViewSnapshot {
+                session_id: "s1".into(),
+                projection_id: 3,
+                focus: "b-7c".into(),
+                lines: vec![
+                    LineView {
+                        id: "main".into(),
+                        parent: None,
+                        purpose: String::new(),
+                        state: LineState::Main,
+                        cut: None,
+                    },
+                    LineView {
+                        id: "b-7c".into(),
+                        parent: Some("main".into()),
+                        purpose: "parser race".into(),
+                        state: LineState::EndedItself,
+                        cut: None,
+                    },
+                ],
+                ..ViewSnapshot::default()
+            };
+            let mut panel = LinesPanel::new(&snapshot);
+            let key = |code| {
+                crate::ui::terminal::KeyEvent::new(code, crate::ui::terminal::Modifiers::NONE)
+            };
+            panel.handle_key(key(KeyCode::Char('x')));
+            Prompt::Lines(Box::new(panel))
+        };
+        let isolation = || {
+            let mut panel = crate::ui::isolation_panel::IsolationPanel::new();
+            panel.set_snapshot(Ok(ExecutionSnapshot {
+                revision: "r1".into(),
+                sandbox: false,
+                network: false,
+            }));
+            Prompt::Isolation(Box::new(panel))
+        };
+        let render = |prompt: &Prompt, app: &App, width: usize, rows: usize| match prompt {
+            Prompt::Sessions(panel) => panel.render(width, rows, &app.palette),
+            Prompt::Management(panel) => panel.render(width, rows, &app.palette),
+            Prompt::Lines(panel) => panel.render(width, rows, &app.palette, &app.markdown),
+            Prompt::Isolation(panel) => panel.render(width, rows, &app.palette),
+            _ => unreachable!(),
+        };
+
+        let sweep = |fullscreen: bool,
+                     open: &dyn Fn() -> Prompt,
+                     title: &str,
+                     selected: &str,
+                     notes: bool| {
+            let mut drawn = Drawn::new((40, 8), None, true);
+            drawn.app.fullscreen = fullscreen;
+            let mut natural = None;
+            let mut reached = false;
+            for height in 8..=40u16 {
+                let size = (40, height);
+                drawn.app.composer.set_draft("draft");
+                drawn.app.prompt = Some(open());
+                let frame = drawn.app.frame(size);
+                let mut top = 0;
+                let panel: Vec<String> = if fullscreen {
+                    let overlay = frame
+                        .overlay
+                        .as_ref()
+                        .unwrap_or_else(|| panic!("no overlay for {title}"));
+                    overlay.rows.iter().map(|row| strip_escapes(row)).collect()
+                } else {
+                    let live: Vec<String> =
+                        frame.live.iter().map(|row| strip_escapes(row)).collect();
+                    top = live
+                        .iter()
+                        .rposition(|row| row.contains(&format!("╭─ {title}")))
+                        .unwrap_or_else(|| panic!("no {title} panel: {live:#?}"));
+                    live[top..live.len() - 1].to_vec()
+                };
+                let natural = *natural.get_or_insert_with(|| {
+                    render(&open(), &drawn.app, visible_width(&panel[0]), 100).len()
+                });
+                let text = panel.join("\n");
+                assert!(
+                    text.contains("Esc close"),
+                    "{title} {size:?} fullscreen={fullscreen}: the closing key: {text}"
+                );
+                if fullscreen {
+                    let dock = frame.live.len() - frame.dock;
+                    let overlay = frame.overlay.as_ref().unwrap().rows.len();
+                    assert!(
+                        overlay + dock <= size.1 as usize,
+                        "{title} {size:?} fullscreen: {overlay} rows and a {dock}-row dock: {text}"
+                    );
+                } else {
+                    assert!(
+                        frame.live.len() <= size.1 as usize,
+                        "{title} {size:?}: {} live rows: {text}",
+                        frame.live.len()
+                    );
+                }
+                if panel.len() >= 3 {
+                    assert!(
+                        panel
+                            .iter()
+                            .any(|row| row.contains(selected) && !row.contains("End line")),
+                        "{title} {size:?} fullscreen={fullscreen}: the selection: {text}"
+                    );
+                }
+                if notes {
+                    // The first three list rows stay while the notes still
+                    // show a line; the notes give up lines before they do.
+                    let entries = [
+                        "No network",
+                        "Network allowed",
+                        "Save",
+                        "Reset to defaults",
+                        "Reload",
+                    ];
+                    let rows = panel
+                        .iter()
+                        .filter(|row| {
+                            (row.contains("Off") && row.contains("selected"))
+                                || entries.iter().any(|entry| row.contains(entry))
+                        })
+                        .count();
+                    let note = panel.iter().any(|row| row.contains("Applies to"));
+                    assert!(
+                        !note || rows >= 3,
+                        "{title} {size:?} fullscreen={fullscreen}: {rows} list rows beside a note: {text}"
+                    );
+                }
+                if matches!(
+                    drawn.app.prompt,
+                    Some(Prompt::Sessions(_) | Prompt::Lines(_))
+                ) {
+                    // The cursor sits on the `> query` row, or nowhere once
+                    // the panel gave the row up.
+                    let query = panel
+                        .iter()
+                        .position(|row| row.trim_start().starts_with("│ > "));
+                    let caret = if fullscreen {
+                        frame.overlay.as_ref().unwrap().cursor
+                    } else {
+                        frame.cursor
+                    };
+                    assert_eq!(
+                        caret.map(|(row, _)| row as usize),
+                        query.map(|row| row + top),
+                        "{title} {size:?} fullscreen={fullscreen}: the query cursor: {text}"
+                    );
+                }
+                let bytes = if fullscreen {
+                    FullScreen::new(size, true).render(&frame, size, &drawn.app.palette, &drawn.app)
+                } else {
+                    Screen::new(size, true).render(&frame, size)
+                };
+                let mut emu =
+                    crate::ui::render::testterm::Emu::new(size.0 as usize, size.1 as usize);
+                emu.feed(&bytes);
+                let screen = emu.rows_text().join("\n").replace('\0', "");
+                assert!(
+                    screen.contains("draft"),
+                    "{title} {size:?} fullscreen={fullscreen}: the composer: {screen}"
+                );
+                assert!(
+                    screen.contains("Esc close"),
+                    "{title} {size:?} fullscreen={fullscreen}: the keys: {screen}"
+                );
+                if panel.len() >= natural {
+                    reached = true;
+                    break;
+                }
+            }
+            assert!(
+                reached,
+                "{title} fullscreen={fullscreen}: never reached {natural:?}"
+            );
+        };
+
+        for fullscreen in [false, true] {
+            sweep(fullscreen, &sessions, "Sessions", "item0", false);
+            sweep(fullscreen, &workflow, "Workflow", "cleanup", false);
+            sweep(fullscreen, &lines, "Lines", "b-7c", false);
+            sweep(fullscreen, &isolation, "Process isolation", "Off", true);
+        }
+    }
+
+    /// At the sizes a short screen leaves it, the management panel keeps the
+    /// composer, the selected entry and the key hint, in both layouts.
+    #[test]
+    fn short_management_panels_keep_the_composer_and_key_hint() {
+        use crate::model::session::{
+            ActionKind, Area, ManagementAction, ManagementEntry, ManagementGroup, ManagementReply,
+            ManagementRequest, ManagementResult, ManagementView,
+        };
+        let view = || ManagementView {
+            actions: vec![ActionKind::Reload, ActionKind::Add],
+            groups: vec![ManagementGroup {
+                heading: "user".into(),
+                entries: vec![ManagementEntry {
+                    id: "review-and-fix".into(),
+                    label: "review-and-fix".into(),
+                    detail: vec!["Runs the review first.".into()],
+                    enabled: Some(true),
+                    states: Vec::new(),
+                    actions: vec![
+                        ActionKind::Toggle,
+                        ActionKind::Edit,
+                        ActionKind::Run,
+                        ActionKind::Inspect,
+                    ],
+                    remove_verb: Default::default(),
+                    document: None,
+                    run: None,
+                }],
+            }],
+            ..ManagementView::default()
+        };
+        for fullscreen in [false, true] {
+            for size in [(32, 8), (40, 10), (32, 12)] {
+                let mut drawn = Drawn::new(size, None, true);
+                drawn.app.fullscreen = fullscreen;
+                drawn.app.composer.set_draft("draft");
+                let mut panel = ManagementPanel::new(Area::Workflow, None);
+                panel.set_result(&ManagementReply {
+                    request: ManagementRequest {
+                        area: Area::Workflow,
+                        action: ManagementAction::List,
+                    },
+                    result: ManagementResult::View {
+                        view: Box::new(view()),
+                        note: None,
+                    },
+                });
+                drawn.app.prompt = Some(Prompt::Management(Box::new(panel)));
+                let frame = drawn.app.frame(size);
+                let bytes = if fullscreen {
+                    FullScreen::new(size, true).render(&frame, size, &drawn.app.palette, &drawn.app)
+                } else {
+                    Screen::new(size, true).render(&frame, size)
+                };
+                let mut emu =
+                    crate::ui::render::testterm::Emu::new(size.0 as usize, size.1 as usize);
+                emu.feed(&bytes);
+                let text = emu.rows_text().join("\n").replace('\0', "");
+                assert!(
+                    text.contains("draft"),
+                    "{size:?} fullscreen={fullscreen}: the composer: {text}"
+                );
+                assert!(
+                    text.contains("review"),
+                    "{size:?} fullscreen={fullscreen}: the selected entry: {text}"
+                );
+                assert!(
+                    text.contains("Esc close"),
+                    "{size:?} fullscreen={fullscreen}: the keys: {text}"
+                );
+                if size.0 >= 40 {
+                    assert!(
+                        text.contains("Enter toggle"),
+                        "{size:?} fullscreen={fullscreen}: the action keys: {text}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

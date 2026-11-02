@@ -5163,6 +5163,7 @@
         "matches",
         "panic",
         "serde_json::json",
+        "unreachable",
         "vec"
       ]
     },
@@ -30991,7 +30992,6 @@
       "from": "dim_cli::ui::lines_panel",
       "to": "dim_cli::ui::theme::ansi",
       "references": [
-        "path fg",
         "use crate::ui::theme::ansi::fg"
       ]
     },
@@ -36012,6 +36012,7 @@
         "path Area::Models",
         "path Area::Scheduled",
         "path Area::Skills",
+        "path Area::Workflow",
         "path Command",
         "path Command::AskAnswers",
         "path Command::InputControl",
@@ -36109,6 +36110,20 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::isolation_panel",
+      "references": [
+        "path crate::ui::isolation_panel::IsolationPanel::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::lines_panel",
+      "references": [
+        "path LinesPanel::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::management_panel",
       "references": [
         "path ManagementPanel::new"
@@ -36172,6 +36187,13 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::sessions_panel",
+      "references": [
+        "path SessionsPanel::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::settings_panel",
       "references": [
         "path Setting::Approvals"
@@ -36199,7 +36221,8 @@
         "path Modifiers::CTRL",
         "path Modifiers::NONE",
         "path Modifiers::SHIFT",
-        "path crate::ui::terminal::KeyEvent::new"
+        "path crate::ui::terminal::KeyEvent::new",
+        "path crate::ui::terminal::Modifiers::NONE"
       ]
     },
     {
@@ -36256,10 +36279,14 @@
         "path ImageRead",
         "path LOAD_MORE",
         "path ManagementDraft",
+        "path Prompt",
         "path Prompt::Ask",
+        "path Prompt::Isolation",
+        "path Prompt::Lines",
         "path Prompt::Login",
         "path Prompt::Management",
         "path Prompt::Runtime",
+        "path Prompt::Sessions",
         "path QUEUE_HINT",
         "path QUEUE_HINT_MORE",
         "path ThemeContext",

@@ -886,7 +886,6 @@ impl ManagementPanel {
         if !footer.is_empty() {
             footer.insert(0, String::new());
         }
-        footer.truncate(rows.saturating_sub(2 + 3 + 1));
         self.list.render_with_footer(width, rows, p, &footer)
     }
 }

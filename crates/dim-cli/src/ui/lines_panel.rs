@@ -218,15 +218,14 @@ impl LinesPanel {
         p: &Palette,
         _markdown: &MarkdownRenderer,
     ) -> Vec<String> {
-        let mut lines = self.list.render(width, rows, p);
-        if let Some(line) = &self.confirm {
-            let prompt = format!("{} {}? ({})", t("End line"), safe(line), t("y/N"));
-            if lines.len() >= rows {
-                lines.truncate(rows.saturating_sub(1));
+        let footer: Vec<String> = match &self.confirm {
+            Some(line) => {
+                let prompt = format!("{} {}? ({})", t("End line"), safe(line), t("y/N"));
+                vec![fg(&prompt, &p.warning)]
             }
-            lines.push(fg(&prompt, &p.warning));
-        }
-        lines
+            None => Vec::new(),
+        };
+        self.list.render_with_footer(width, rows, p, &footer)
     }
 }
 

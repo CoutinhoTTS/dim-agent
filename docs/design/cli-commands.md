@@ -42,6 +42,28 @@ and the palette's query padding before overlapping either input. The draft
 editor scrolls within the remaining rows and keeps its caret visible without
 discarding text. Otherwise the usual history reservation is retained.
 
+A list panel never draws more rows than it is given. The list fills the rows
+the other parts leave. While the list cannot draw its first three entries, the
+notes give up lines from the end, the blank row before them going with the last
+line. When not even one list row fits beside the other parts, the panel gives
+up the rest of the notes, the filter's padding (the row below the query first),
+its footer lines (the first first), the hint's rows above the border, the query
+row and the list's last row, in that order. The selected entry and the hint's
+closing key stay the longest. A hint too wide for the bottom border drops whole
+parts and keeps its first and closing keys.
+
+```text
+Natural height                                      Short budget, 5 rows
+╭─ Sessions ─────────────────────────────────────╮  ╭─ Sessions ─────────────────────────────────────╮
+│                                                │  │                                                │
+│ >                                              │  │ >                                              │
+│                                                │  │ › [Chat] review the parser                     │
+│   [Chat] review the parser                     │  ╰────── Enter open · Ctrl+R refresh · Esc close ─╯
+│   [Chat] fix the flaky test                    │
+│   [Chat] release notes                         │
+╰────── Enter open · Ctrl+R refresh · Esc close ─╯
+```
+
 ```text
 Commands
   app     /exit        exit
