@@ -1365,6 +1365,10 @@ a number never refers to a position the user has not seen. A form that prints no
 already present, a preset switch, an "always" answer during a turn) keeps the last printed one; if
 the rules changed since, its revision makes the next `remove` fail, and the conflict prints the
 current list. Without a printed list in this process, `remove` asks for `/permissions` first.
+`remove N` keeps the number because it acts on the list this prompt printed and holds that
+listing's revision, while `dimcode permissions remove` and the panel take the rule's value
+because each reads the list immediately before the write, so there is no printed listing to
+number.
 COMMAND is the rest of the line; the CLI rejects an empty command or one containing a separator
 character (`dim_agent_types::COMMAND_SEPARATORS`, the set F2 validates) before any call. A
 preset that is already in force writes nothing. Without the advertised methods, the command

@@ -108,7 +108,8 @@ Without -p, exec reads redirected stdin through EOF, including with --image.\n\
 Idle commands: /export <markdown|json> PATH, /exit.\n\
 PATH is relative to the CLI current directory; ~ is literal.\n\
 /permissions (aliases /approvals, /approval) opens separate File access, Tool\n\
-  approval (Ask/Bypass), and Process isolation controls in the terminal UI.\n\
+  approval (Ask/Bypass) and Process isolation controls in the terminal UI, and\n\
+  a Command rules row that lists, adds and removes the user's command rules.\n\
 The line prompt accepts file-access read-only|workspace-read-write|unrestricted,\n\
   tool-approval ask|bypass, PRESET, allow|deny exact|prefix COMMAND, or remove N.\n\
 Approval accepts only y/yes; empty input denies. For a simple exec command, a/always\n\
