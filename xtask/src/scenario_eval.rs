@@ -233,7 +233,8 @@ use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::{Path, PathBuf},
+    ffi::OsStr,
+    path::{Component, Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -1037,15 +1038,21 @@ impl Options {
             home.ok_or(usage)?
         };
         let out = out.ok_or(usage)?;
-        refuse_output_inside_sources(&out, rejudge.as_deref(), &pool)?;
+        let scenarios = scenarios.ok_or(usage)?;
+        let model = model.ok_or(usage)?;
+        let judge = judge.ok_or(usage)?;
+        let resolved = resolve_output(&out)?;
+        refuse_output_inside_sources(&out, &resolved, rejudge.as_deref(), &pool)?;
+        std::fs::create_dir_all(&resolved)
+            .map_err(|error| format!("--out {}: {error}", out.display()))?;
         Ok(Self {
-            scenarios: scenarios.ok_or(usage)?,
+            scenarios,
             texts,
-            model: model.ok_or(usage)?,
-            judge: judge.ok_or(usage)?,
+            model,
+            judge,
             runs,
             jobs: jobs.unwrap_or(1).max(1),
-            out: output_directory(&out)?,
+            out: resolved,
             home,
             model_config,
             defaults,
@@ -1066,45 +1073,93 @@ fn env_path(name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Creates `--out` and resolves it: `session.create` takes an absolute cwd,
-/// and every run path is built from this one.
-fn output_directory(path: &Path) -> Result<PathBuf> {
-    let error = |error: std::io::Error| format!("--out {}: {error}", path.display());
-    std::fs::create_dir_all(path).map_err(error)?;
-    Ok(std::fs::canonicalize(path).map_err(error)?)
-}
-
-/// A finished read never writes to its sources: refuses an `--out` inside
-/// one. The source exists; `--out` may not, so its nearest existing ancestor
-/// is resolved instead. The check runs before `--out` is created, so a
-/// refusal leaves the source as it was.
-fn refuse_output_inside_sources(
-    out: &Path,
-    rejudge: Option<&Path>,
-    pool: &[PathBuf],
-) -> Result<()> {
-    if rejudge.is_none() && pool.is_empty() {
-        return Ok(());
-    }
-    let mut existing = if out.is_absolute() {
+/// Resolves `--out` once, before anything is created, to the path every run
+/// writes under: `session.create` takes it as an absolute cwd.
+///
+/// A component that exists is resolved with `canonicalize`, so a link is
+/// followed as the OS follows it and `..` is resolved against the real
+/// parent. After the first component that does not exist, the rest are the
+/// directories `create_dir_all` will create as real directories: `.` is
+/// skipped, a name is appended and `..` removes the last appended name,
+/// going back to the filesystem once the missing part is emptied. A link
+/// whose target does not exist is refused: the resolution cannot say where
+/// creating through it would land. The result has no `.` or `..` and no link
+/// in its existing part, in the form `canonicalize` gives a source, so
+/// `starts_with` compares like with like.
+fn resolve_output(out: &Path) -> Result<PathBuf> {
+    let absolute = if out.is_absolute() {
         out.to_path_buf()
     } else {
         std::env::current_dir()
             .map_err(|error| format!("--out {}: {error}", out.display()))?
             .join(out)
     };
-    let resolved = loop {
-        match std::fs::canonicalize(&existing) {
-            Ok(resolved) => break resolved,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                existing = existing
-                    .parent()
-                    .ok_or_else(|| format!("--out {}: {error}", out.display()))?
-                    .to_path_buf();
+    let root = absolute
+        .ancestors()
+        .last()
+        .expect("an absolute path has a root");
+    let mut resolved =
+        std::fs::canonicalize(root).map_err(|error| format!("--out {}: {error}", out.display()))?;
+    let mut missing: Vec<&OsStr> = Vec::new();
+    for component in absolute
+        .strip_prefix(root)
+        .expect("the root is a prefix of the path")
+        .components()
+    {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir if !missing.is_empty() => {
+                missing.pop();
             }
-            Err(error) => return Err(format!("--out {}: {error}", out.display()).into()),
+            Component::ParentDir => {
+                resolved = std::fs::canonicalize(resolved.join(".."))
+                    .map_err(|error| format!("--out {}: {error}", out.display()))?;
+            }
+            Component::Normal(name) if !missing.is_empty() => missing.push(name),
+            Component::Normal(name) => {
+                let path = resolved.join(name);
+                match std::fs::canonicalize(&path) {
+                    Ok(canonical) => resolved = canonical,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        let link = std::fs::symlink_metadata(&path)
+                            .is_ok_and(|metadata| metadata.file_type().is_symlink());
+                        if link {
+                            return Err(format!(
+                                "--out {}: {} is a link to a path that does not exist",
+                                out.display(),
+                                path.display()
+                            )
+                            .into());
+                        }
+                        missing.push(name);
+                    }
+                    Err(error) => return Err(format!("--out {}: {error}", out.display()).into()),
+                }
+            }
+            Component::Prefix(_) | Component::RootDir => {
+                unreachable!("the root of an absolute path is resolved first")
+            }
         }
-    };
+    }
+    for name in missing {
+        resolved.push(name);
+    }
+    Ok(resolved)
+}
+
+/// A finished read never writes to its sources: refuses an `--out` inside
+/// one. It compares the path `--out` resolved to, the path that is then
+/// created, so the path checked is the path created and a refusal leaves the
+/// source as it was. The message names `--out` as given.
+fn refuse_output_inside_sources(
+    out: &Path,
+    resolved: &Path,
+    rejudge: Option<&Path>,
+    pool: &[PathBuf],
+) -> Result<()> {
+    if rejudge.is_none() && pool.is_empty() {
+        return Ok(());
+    }
     for (flag, source) in rejudge
         .into_iter()
         .map(|source| ("--rejudge", source))
@@ -3486,8 +3541,10 @@ mod tests {
     }
 
     /// A finished read never writes to its source: an `--out` inside it is
-    /// refused before `--out` is created, so the source is left byte for
-    /// byte as it was, with no new directory or file.
+    /// refused however it is spelled, before `--out` is created, so the
+    /// source is left byte for byte as it was, with no new directory or file.
+    /// The spellings cover a plain nesting, the source itself, a missing
+    /// component followed by `..`, and a link to the source.
     #[test]
     fn a_finished_read_refuses_an_out_inside_its_source() {
         let directory = std::env::temp_dir().join(format!(
@@ -3499,9 +3556,139 @@ mod tests {
         std::fs::create_dir_all(source.join("current").join("case").join("run-0")).unwrap();
         std::fs::write(source.join("runs.jsonl"), "{\"arm\": \"current\"}\n").unwrap();
         std::fs::write(source.join("scenario.md"), "the source's report").unwrap();
-        let before = tree(&source);
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&source, directory.join("link")).unwrap();
+        }
+        let before = tree(&directory);
+        let outs = [
+            vec![
+                source.join("inside"),
+                source.clone(),
+                directory
+                    .join("new")
+                    .join("..")
+                    .join("source")
+                    .join("inside"),
+            ],
+            #[cfg(unix)]
+            vec![
+                directory.join("link").join("inside"),
+                directory.join("new").join("..").join("link").join("inside"),
+            ],
+        ]
+        .concat();
         for read in ["--rejudge", "--pool"] {
-            let out = source.join("inside");
+            for out in &outs {
+                let args = [
+                    "--scenarios",
+                    "scenarios",
+                    "--model",
+                    "gateway/model",
+                    "--judge",
+                    "gateway/model",
+                    "--model-config",
+                    "models.json",
+                    "--out",
+                    out.to_str().unwrap(),
+                    read,
+                    source.to_str().unwrap(),
+                ];
+                let error = match Options::parse_from(args.map(str::to_owned)) {
+                    Err(error) => error.to_string(),
+                    Ok(_) => panic!(
+                        "{read}: an --out inside the source is refused: {}",
+                        out.display()
+                    ),
+                };
+                assert!(
+                    error.contains(&format!("--out {} is inside {read}", out.display())),
+                    "{read}: {}: {error}",
+                    out.display()
+                );
+                assert_eq!(
+                    tree(&directory),
+                    before,
+                    "{read}: {}: nothing is created",
+                    out.display()
+                );
+            }
+            assert!(
+                !directory.join("new").exists(),
+                "{read}: the missing component is not created"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// `--out` is created where it resolves: a missing component followed by
+    /// `..` carries the resolution back to the directory that exists, and is
+    /// never created on the way.
+    #[test]
+    fn a_finished_read_creates_the_path_it_resolved() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-out-resolution-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        let source = directory.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        let out = directory.join("new").join("..").join("elsewhere");
+        let options = Options::parse_from(
+            [
+                "--scenarios",
+                "scenarios",
+                "--model",
+                "gateway/model",
+                "--judge",
+                "gateway/model",
+                "--model-config",
+                "models.json",
+                "--out",
+                out.to_str().unwrap(),
+                "--rejudge",
+                source.to_str().unwrap(),
+            ]
+            .map(str::to_owned),
+        )
+        .unwrap();
+        assert_eq!(
+            options.out,
+            directory.canonicalize().unwrap().join("elsewhere"),
+            "the parsed --out is the path the resolution reaches"
+        );
+        assert!(
+            !directory.join("new").exists(),
+            "the missing component is not created"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// A link whose target does not exist is refused by name: the resolution
+    /// cannot say where creating through it would land, so nothing is.
+    #[cfg(unix)]
+    #[test]
+    fn a_finished_read_refuses_an_out_through_a_dangling_link() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-dangling-link-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        let source = directory.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        let dangling = directory.join("dangling");
+        std::os::unix::fs::symlink(directory.join("nowhere"), &dangling).unwrap();
+        let entries = |directory: &Path| {
+            let mut names: Vec<_> = std::fs::read_dir(directory)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        };
+        let before = entries(&directory);
+        let out = dangling.join("x");
+        for read in ["--rejudge", "--pool"] {
             let args = [
                 "--scenarios",
                 "scenarios",
@@ -3518,13 +3705,14 @@ mod tests {
             ];
             let error = match Options::parse_from(args.map(str::to_owned)) {
                 Err(error) => error.to_string(),
-                Ok(_) => panic!("{read}: an --out inside the source is refused"),
+                Ok(_) => panic!("{read}: an --out through a dangling link is refused"),
             };
+            let link = directory.canonicalize().unwrap().join("dangling");
             assert!(
-                error.contains(&format!("--out {} is inside {read}", out.display())),
-                "{read}: {error}"
+                error.contains(&format!("{} is a link", link.display())),
+                "{read}: the error names the link: {error}"
             );
-            assert_eq!(tree(&source), before, "{read}: the source is unchanged");
+            assert_eq!(entries(&directory), before, "{read}: nothing is created");
         }
         let _ = std::fs::remove_dir_all(&directory);
     }
