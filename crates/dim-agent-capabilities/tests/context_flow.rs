@@ -2,7 +2,8 @@ use dim_agent_capabilities::{
     adapters::{DefaultPrepareModelPlugin, EchoModel, MockTools},
     defaults,
     history::{
-        HistoryEntry, HistoryRenderer, project_context_history, project_history, summary_message,
+        CheckpointBuilder, HistoryEntry, HistoryRender, HistoryRenderer, project_context_history,
+        project_history, projection_checkpoint, summary_message,
     },
     host::*,
 };
@@ -325,7 +326,7 @@ async fn external_pure_history_renderer_drives_the_final_request_and_context_bud
     let agent = MinimalHost::start(&builder_with_context(
         Arc::new(EchoModel),
         HistoryRenderer {
-            render: external_history,
+            render: HistoryRender::Custom(external_history),
             ..HistoryRenderer::default()
         },
         Context::default(),

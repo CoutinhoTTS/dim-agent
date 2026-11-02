@@ -132,8 +132,8 @@ fn an_incompatible_store_reports_the_startup_note() {
     rusqlite::Connection::open(&database)
         .unwrap()
         .execute_batch(
-            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 30));
-             INSERT INTO agent_store_format VALUES (30);",
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 31));
+             INSERT INTO agent_store_format VALUES (31);",
         )
         .unwrap();
     let original = fs::read(&database).unwrap();
@@ -145,20 +145,20 @@ fn an_incompatible_store_reports_the_startup_note() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("Cannot open native store"), "{stderr}");
-    assert!(stderr.contains("Store format: v30"), "{stderr}");
-    assert!(stderr.contains("Daemon format: v29"), "{stderr}");
+    assert!(stderr.contains("Store format: v31"), "{stderr}");
+    assert!(stderr.contains("Daemon format: v30"), "{stderr}");
     assert!(stderr.contains("Existing data was preserved"), "{stderr}");
-    assert!(stderr.contains("Run a build supporting v30"), "{stderr}");
+    assert!(stderr.contains("Run a build supporting v31"), "{stderr}");
     assert!(stderr.contains("Details:"), "{stderr}");
     assert!(!stderr.contains("App Server exited"), "{stderr}");
     assert_eq!(fs::read(&database).unwrap(), original);
     assert!(!home.0.join("rust/dimcode.sqlite.startup").exists());
 }
 
-/// A daemon that exits without a storage note keeps the generic cause and log
-/// location.
+/// A `--server` program that exits without a storage note keeps the
+/// requirement and the log location.
 #[test]
-fn a_daemon_that_exits_without_a_note_keeps_the_generic_error() {
+fn a_server_that_exits_without_a_note_keeps_the_requirement() {
     let home = Home::new();
     let server = home.0.join("failing-server");
     fs::write(&server, "#!/bin/sh\nexit 1\n").unwrap();
@@ -170,7 +170,12 @@ fn a_daemon_that_exits_without_a_note_keeps_the_generic_error() {
         .unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("App Server exited"), "{stderr}");
+    assert!(
+        stderr.contains("--server must name a standalone dim-app-server binary"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("it exited before serving"), "{stderr}");
+    assert!(stderr.contains("daemon.log"), "{stderr}");
     assert!(!stderr.contains("Cannot open native store"), "{stderr}");
 }
 
@@ -210,7 +215,10 @@ fn a_startup_note_for_another_pid_is_not_printed() {
     let output = server.output().unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("App Server exited"), "{stderr}");
+    assert!(
+        stderr.contains("--server must name a standalone dim-app-server binary"),
+        "{stderr}"
+    );
     assert!(!stderr.contains("Cannot open native store"), "{stderr}");
     assert!(!note.exists(), "the client removes the note it rejects");
 }
@@ -228,7 +236,10 @@ fn a_startup_note_other_users_can_read_is_not_printed() {
     let output = server.output().unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("App Server exited"), "{stderr}");
+    assert!(
+        stderr.contains("--server must name a standalone dim-app-server binary"),
+        "{stderr}"
+    );
     assert!(!stderr.contains("Cannot open native store"), "{stderr}");
     assert!(!note.exists(), "the client removes the note it rejects");
 }

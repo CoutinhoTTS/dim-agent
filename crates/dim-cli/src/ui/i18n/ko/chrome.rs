@@ -70,6 +70,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "after message {count}" => "메시지 {count}개 이후",
         "open a line from the end of the shown line" => "표시 중인 라인의 끝에서 라인 열기",
         "fork the session at its last finished turn" => "마지막으로 끝난 턴에서 세션 포크",
+        "rename this session" => "이 세션 이름 바꾸기",
+        "Renamed to {title}" => "{title}(으)로 이름을 바꿨습니다",
+        "The Session is now untitled." => "세션에 이제 제목이 없습니다.",
+        "This daemon does not support renaming Sessions" => {
+            "이 데몬은 세션 이름 바꾸기를 지원하지 않습니다"
+        }
+        "Renaming failed" => "이름 바꾸기에 실패했습니다",
         "Starting" => "시작 중",
         "Delegation result" => "위임 결과",
         "Enter details · x stop selected · Ctrl+X stop all · Esc close" => {
@@ -225,7 +232,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Nothing is running" => "실행 중인 작업 없음",
         "No queued message" => "대기 중인 메시지 없음",
         "Only in fullscreen (/tui)" => "전체 화면에서만 가능 (/tui)",
-        "/{name} is not yet available" => "/{name} 아직 사용 불가",
         "new session" => "새 세션",
         "resumed {id} · {count} messages" => "{id} 재개됨 · 메시지 {count}개",
         " · earlier history: /timeline" => " · 이전 기록: /timeline",
@@ -238,9 +244,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "answer required" => "답변 필요",
         "permission required" => "권한 필요",
         "esc interrupt" => "esc 중단",
-        "↑ edit · ctrl+s steer now · /queue" => "↑ 편집 · ctrl+s 지금 steer · /queue",
-        "+{count} more · ↑ edit · ctrl+s steer now · /queue" => {
-            "+{count}개 더 · ↑ 편집 · ctrl+s 지금 steer · /queue"
+        "shift+← edit last · ctrl+s steer now" => "shift+← 마지막 편집 · ctrl+s 지금 steer",
+        "+{count} more · shift+← edit last · ctrl+s steer now" => {
+            "+{count}개 더 · shift+← 마지막 편집 · ctrl+s 지금 steer"
         }
         "Queue ({count})" => "대기열 ({count})",
         "Thinking…" => "생각 중…",
@@ -441,14 +447,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Permission needed: {tool}" => "권한 필요: {tool}",
         "Question waiting for your answer" => "답변 대기 중인 질문",
         "Notify when agent needs you" => "에이전트 요청 시 알림",
+        "Show ACP sessions" => "ACP 세션 표시",
         // keys.rs
         "show the key bindings" => "단축키 보기",
         "Application keys" => "앱 단축키",
-        "Enter submit · Shift+Enter or Ctrl+J newline · ↑↓ history" => {
-            "Enter 제출 · Shift+Enter/Ctrl+J 줄바꿈 · ↑↓ 기록"
+        "Enter submit or queue · empty draft: steer first queued · Shift+Enter or Ctrl+J newline · ↑↓ history" => {
+            "Enter 제출 또는 대기열 추가 · 빈 입력: 첫 대기 메시지 steer · Shift+Enter/Ctrl+J 줄바꿈 · ↑↓ 기록"
         }
-        "Ctrl+O or Ctrl+P commands · Esc interrupt or clear · Ctrl+S steer queued · ↑ edit queued" => {
-            "Ctrl+O/Ctrl+P 명령 · Esc 중단/지우기 · Ctrl+S 대기 메시지 steer · ↑ 대기 메시지 편집"
+        "Ctrl+O or Ctrl+P commands · Esc interrupt, queued messages return · Ctrl+S steer draft or first queued · Shift+← edit last queued" => {
+            "Ctrl+O/Ctrl+P 명령 · Esc 중단, 대기 메시지는 입력란으로 복귀 · Ctrl+S 입력 또는 첫 대기 메시지 steer · Shift+← 마지막 대기 메시지 편집"
         }
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C 지우기, 두 번 누르면 종료 · 빈 초안에서 Ctrl+D 종료"
@@ -482,6 +489,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "이 데몬은 컨텍스트 압축을 지원하지 않습니다"
         }
         "compact the context of the shown line" => "표시된 라인의 컨텍스트 압축",
+        "follow or change the shown line's goal" => "표시된 라인의 목표 추적 또는 변경",
+        "◎ goal active" => "◎ 목표 진행 중",
+        "◎ goal paused" => "◎ 목표 일시정지",
         "Kept verbatim" => "원문 그대로 유지",
         "Tool effects" => "도구 작업 기록",
         "insufficient space: {parts}" => "공간 부족: {parts}",

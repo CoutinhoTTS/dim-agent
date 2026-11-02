@@ -60,6 +60,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "after message {count}" => "第 {count} 則訊息之後",
         "open a line from the end of the shown line" => "從目前線的末尾開一條線",
         "fork the session at its last finished turn" => "在最近結束的回合處派生會話",
+        "rename this session" => "重新命名此工作階段",
+        "Renamed to {title}" => "已重新命名為 {title}",
+        "The Session is now untitled." => "工作階段現在沒有標題。",
+        "This daemon does not support renaming Sessions" => "此守護進程不支援重新命名工作階段",
+        "Renaming failed" => "重新命名失敗",
         "Starting" => "啟動中",
         "Delegation result" => "委派結果",
         "Enter details · x stop selected · Ctrl+X stop all · Esc close" => {
@@ -211,7 +216,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Nothing is running" => "沒有執行中項目",
         "No queued message" => "佇列中沒有訊息",
         "Only in fullscreen (/tui)" => "僅限全螢幕模式（/tui）",
-        "/{name} is not yet available" => "/{name} 尚未提供",
         "new session" => "新工作階段",
         "resumed {id} · {count} messages" => "已繼續 {id} · {count} 則訊息",
         " · earlier history: /timeline" => " · 較早歷程：/timeline",
@@ -224,9 +228,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "answer required" => "需要回答",
         "permission required" => "需要授權",
         "esc interrupt" => "esc 中斷",
-        "↑ edit · ctrl+s steer now · /queue" => "↑ 編輯 · ctrl+s 立即 steer · /queue",
-        "+{count} more · ↑ edit · ctrl+s steer now · /queue" => {
-            "還有 {count} 則 · ↑ 編輯 · ctrl+s 立即 steer · /queue"
+        "shift+← edit last · ctrl+s steer now" => "shift+← 編輯最後一則 · ctrl+s 立即 steer",
+        "+{count} more · shift+← edit last · ctrl+s steer now" => {
+            "還有 {count} 則 · shift+← 編輯最後一則 · ctrl+s 立即 steer"
         }
         "Queue ({count})" => "佇列（{count}）",
         "Thinking…" => "思考中…",
@@ -421,14 +425,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Permission needed: {tool}" => "需要授權：{tool}",
         "Question waiting for your answer" => "有問題等你回答",
         "Notify when agent needs you" => "需要你時通知",
+        "Show ACP sessions" => "顯示 ACP 工作階段",
         // keys.rs
         "show the key bindings" => "顯示快速鍵",
         "Application keys" => "應用程式快速鍵",
-        "Enter submit · Shift+Enter or Ctrl+J newline · ↑↓ history" => {
-            "Enter 送出 · Shift+Enter 或 Ctrl+J 換行 · ↑↓ 歷程"
+        "Enter submit or queue · empty draft: steer first queued · Shift+Enter or Ctrl+J newline · ↑↓ history" => {
+            "Enter 送出或排隊 · 草稿為空時 steer 第一則佇列訊息 · Shift+Enter 或 Ctrl+J 換行 · ↑↓ 歷程"
         }
-        "Ctrl+O or Ctrl+P commands · Esc interrupt or clear · Ctrl+S steer queued · ↑ edit queued" => {
-            "Ctrl+O 或 Ctrl+P 指令 · Esc 中斷或清除 · Ctrl+S steer 佇列訊息 · ↑ 編輯佇列訊息"
+        "Ctrl+O or Ctrl+P commands · Esc interrupt, queued messages return · Ctrl+S steer draft or first queued · Shift+← edit last queued" => {
+            "Ctrl+O 或 Ctrl+P 指令 · Esc 中斷，佇列訊息回到輸入框 · Ctrl+S steer 草稿或第一則佇列訊息 · Shift+← 編輯最後一則佇列訊息"
         }
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C 清除，按兩次離開 · 草稿為空時 Ctrl+D 離開"
@@ -460,6 +465,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "near the compaction threshold" => "接近壓縮閾值",
         "This daemon does not support context compaction" => "此守護進程不支援上下文壓縮",
         "compact the context of the shown line" => "壓縮目前顯示線的上下文",
+        "follow or change the shown line's goal" => "跟隨或修改目前顯示線的目標",
+        "◎ goal active" => "◎ 目標進行中",
+        "◎ goal paused" => "◎ 目標已暫停",
         "Kept verbatim" => "原文保留",
         "Tool effects" => "工具操作紀錄",
         "insufficient space: {parts}" => "空間不足：{parts}",
