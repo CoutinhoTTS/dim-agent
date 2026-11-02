@@ -491,6 +491,20 @@ async fn start(
             document.clone()
         }
     };
+    // A parameter left at the default the listing gave is not sent: the
+    // listed default may be a cut preview, and the owner applies the
+    // definition's own default to a parameter the request leaves out. A
+    // value the user changed is sent as typed.
+    let mut params = params;
+    if let Some(object) = params.as_object_mut() {
+        for parameter in &entry.parameters {
+            if let Some(default) = &parameter.default
+                && object.get(&parameter.name).and_then(Value::as_str) == Some(default.as_str())
+            {
+                object.remove(&parameter.name);
+            }
+        }
+    }
     let mut request = json!({
         "name": entry.name,
         "source": entry.source,

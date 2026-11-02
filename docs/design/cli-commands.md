@@ -649,7 +649,8 @@ the line the transcript shows, the line a submitted message goes to, which is ho
 management-started run when it is next opened. A panel with no Session yet, as after `/new`
 before the first message, starts a run that reports nowhere. The command line has no Session, so
 `dimcode workflow start` sends no `report_to` and its runs are outside `/tasks`. The note is
-`Started <name>: <run_id>.`.
+`Started <name>: <run_id>.`. A parameter left at its listed default is not sent, so the owner
+applies the definition's own default.
 
 Inspect reads `workflow.status {}` and filters the retained runs to the entry's name and source.
 A project definition belongs to one workspace, so its runs are filtered to this workspace's `cwd`

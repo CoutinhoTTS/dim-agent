@@ -1178,6 +1178,19 @@ fn two_parameterized() -> Value {
     ])
 }
 
+/// A definition whose `target` default is a cut preview, as the listing's
+/// 1024-byte field bound leaves it, and whose `style` default fits.
+fn cut_default() -> Value {
+    json!({"definitions": [{
+        "name": "review-and-fix", "source": "user", "enabled": true,
+        "description": "Analyze", "parameters": [
+            {"name": "target", "description": "Path to review", "default": "a long default the listing cut …"},
+            {"name": "style", "description": "Writing style", "default": "concise"}
+        ],
+        "valid": true, "issues": [], "issue_count": 0
+    }], "truncated": false})
+}
+
 /// A run the owner refused keeps its parameters for its own definition:
 /// Ctrl+T on another definition opens that definition's template and starts
 /// it, and the refused one still reopens its own kept text.
@@ -1300,6 +1313,69 @@ fn tui_workflow_panel_keeps_a_runs_parameters_for_its_own_definition() {
         assert!(entries[1].contains("\"path\": \"\""), "{opened}");
         assert_eq!(entries[2].trim(), "{\"target\":\"kept\"}", "{opened}");
     }
+}
+
+/// A parameter left at the default the listing gave is not sent: the listed
+/// default may be a cut preview, so the owner applies the definition's own
+/// default to a parameter the request leaves out. A value the user changed
+/// is sent as typed.
+#[test]
+fn tui_workflow_run_leaves_a_listed_default_unsent() {
+    let home = Home::new();
+    // The user keeps `target` as the template filled it and changes `style`.
+    let script = editor(
+        &home,
+        "sed 's/\"concise\"/\"verbose\"/' \"$1\" > \"$1.new\" && mv \"$1.new\" \"$1\"",
+    );
+    let (shown, wait_shown) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        opened_with(
+            wire,
+            &[
+                "workflow.list",
+                "workflow.save",
+                "workflow.start",
+                "workflow.status",
+                "settings.read",
+                "settings.update",
+            ],
+        );
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        let request = wire.read("workflow.list");
+        wire.reply(&request, cut_default());
+        let request = wire.read("settings.read");
+        wire.reply(&request, settings());
+        // Ctrl+T reads the definitions again, then starts: `target` is left
+        // at its listed default and sent by nobody; `style` was changed.
+        let request = wire.read("workflow.list");
+        wire.reply(&request, cut_default());
+        let request = wire.read("workflow.start");
+        assert_eq!(request["params"]["name"], "review-and-fix");
+        assert_eq!(
+            request["params"]["params"],
+            json!({"style": "verbose"}),
+            "{request}"
+        );
+        wire.reply(&request, json!({"run_id": "wf-1"}));
+        let request = wire.read("workflow.list");
+        wire.reply(&request, cut_default());
+        let request = wire.read("settings.read");
+        wire.reply(&request, settings());
+        drains(wire);
+    });
+    let mut terminal = Terminal::launch_tui(edit_command(&home, &script, false));
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/workflow\r");
+    terminal.until("review-and-fix");
+    terminal.raw(b"\x14");
+    terminal.until("Started review-and-fix: wf-1.");
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
 }
 
 /// A run started from the panel reports to the line the panel shows: the
