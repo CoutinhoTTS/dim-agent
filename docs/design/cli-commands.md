@@ -35,12 +35,12 @@ omits the menu title and footer when necessary; fullscreen keeps its palette
 query and selection above the composer. Category grouping and ordering do not
 change with terminal size.
 
-At 8–10 terminal rows, live controls take priority over the usual history
-reservation: either renderer can use up to eight rows for the live region,
-limited by terminal height. Fullscreen reduces the composer's empty padding
+When the usual history reservation leaves fewer than eight live rows,
+live controls take priority: either renderer can use up to eight rows for
+the live region, limited by terminal height. Fullscreen reduces the composer's empty padding
 and the palette's query padding before overlapping either input. The draft
 editor scrolls within the remaining rows and keeps its caret visible without
-discarding text. Taller terminals retain their usual history reservation.
+discarding text. Otherwise the usual history reservation is retained.
 
 ```text
 Commands

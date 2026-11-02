@@ -18,6 +18,15 @@ scrollback 与 fullscreen TUI 都按分类分组，分类及分类内的命令�
 菜单不列出运行、排队和 steer 的按键，它们只由按键触发。菜单只列出斜杠命令：选择较早消息、滚动到顶部或底部等视图操作也不列出；
 `Tab`、`Home`、`End` 保留各自的绑定。
 
+两种模式下，菜单都适应终端可用的列数和行数。命令名优先于描述和快捷键标签；快捷键标签会挤占
+命令名时省略标签，但不改变按键绑定。短屏幕少显示一些命令，可见窗口跟随选择。
+Scrollback 保留菜单上方的命令草稿，必要时省略菜单标题和页脚；fullscreen 保留输入框上方的
+命令面板查询行和选中项。分类分组和排序不随终端尺寸变化。
+
+当通常的历史保留空间使实时区域不足八行时，实时控件优先：两种渲染器都可为实时区域使用最多八行，
+但不超过终端高度。Fullscreen 先减少输入框的空白内边距和命令面板查询行的留白，避免两个输入区域
+重叠。草稿编辑器在剩余行数内滚动，保持光标可见且不丢弃文字。其他情况下保留通常的历史空间。
+
 ```text
 Commands
   app     /exit        exit
@@ -28,6 +37,18 @@ Commands
 / + Enter          -> /exit (completion only)
 /exit + Enter      -> exit
 /permissions + Enter -> permission controls
+```
+
+```text
+Fullscreen, 8 rows             Scrollback, 8 rows
++- Command Palette -------+
+| >                       |   +- input -----------------+
+| app /exit               |   | > /                     |
++-------------------------+   +-------------------------+
+                              +-------------------------+
++- input -----------------+   | app /exit               |
+|                         |   +-------------------------+
++-------------------------+   AGENT
 ```
 
 ## 运行按键与排队
@@ -834,6 +855,22 @@ current directory; ~ is literal; use an absolute path for another base`。调用
 其他目标命令依赖各自的功能。F6 不实现全屏界面、常驻 RPC/ACP 服务、验证/修复循环、Provider
 编辑器或 Session 删除/分叉。`dimcode export` 是 [Timeline 导出](appserver/timeline-export.md)（ADR 005 D3）：每个最终模型请求都是其中的一行 `model/call`；功能清单中请求快照的过滤项尚未实现。
 
+## 更新对话框
+
+既有更新对话框在 fullscreen 和 scrollback 中使用相同的动作，并适应可用列数和行数。
+较长的版本、命令和错误文字换行，必要时用 Up/Down 滚动。标题和动作行保持可见。
+所有动作无法放在同一行时，只显示当前聚焦的动作及其序号；Left/Right 和 Tab/BackTab 仍循环
+切换所有动作，Enter 确认，Esc 关闭。宽屏空间足够时保留既有确认布局。
+
+```text
++- Update available --------+
+| Version 0.12.0-alpha.124  |
+| is available (you have   |
+| > Later 3/3              |
+| Left/Right Tab Enter Esc |
++----------- Up/Down 1-2/7-+
+```
+
 ## 终端交互
 
 ```text
@@ -1339,6 +1376,9 @@ Session 地址及 `(branchId,requestId,callId)`。
 Confirm 上 Enter 提交。只有 allowCustom 为 true 时显示自定义输入，并与所选标签分开提交。
 自定义行输入非空文字即勾选（单选时替换已选标签），清空则取消；编辑中 Esc 保留文字退出编辑，
 Enter 保留并进入下一题。编辑之外 Esc 拒答整次调用。显示脱敏不改变提交给 owner 的原始标签，composer 草稿保持。
+
+问题标签页无法放在同一行时，只显示当前标签及其位置，包括 Confirm 页。
+Tab/Shift+Tab 和 Left/Right 保留既有切换行为；标签文字不能超出提示框边界。
 
 挂起的问题不阻塞命令。其自定义回答未进入编辑时，`/`、Ctrl+O 和 Ctrl+P 在问题之上打开命令面板，
 画在该模式画命令面板的位置，问题保留标签页、选择和已输入的回答。命令面板开启命令输入状态，

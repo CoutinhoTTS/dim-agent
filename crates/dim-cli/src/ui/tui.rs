@@ -5956,7 +5956,7 @@ mod tests {
                     let mut drawn = Drawn::new(size, None, true);
                     drawn.app.fullscreen = fullscreen;
                     drawn.key(KeyCode::Char('/'));
-                    for command in ["/exit", "/keys", "/settings"] {
+                    for command in ["/exit", "/keys", "/runtime", "/settings"] {
                         let frame = drawn.app.frame(size);
                         let rows = frame.overlay.as_ref().map_or(&frame.live, |o| &o.rows);
                         let width = frame
