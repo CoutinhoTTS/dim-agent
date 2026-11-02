@@ -10881,6 +10881,14 @@
     },
     {
       "from": "dim_agent_capabilities::recall",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path BranchPage",
+        "use dim_agent_runtime::BranchPage"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::recall",
       "to": "dim_agent_types",
       "references": [
         "path JsonObject",
@@ -10911,6 +10919,7 @@
         "path CollaborationOutcome::Cancelled",
         "path CollaborationOutcome::Completed",
         "path CollaborationOutcome::Failed",
+        "path EventKind",
         "path EventKind::ApprovalCancelled",
         "path EventKind::ApprovalRequest",
         "path EventKind::ApprovalRespond",
@@ -10979,6 +10988,7 @@
         "path ToolResult::error",
         "path ToolResult::text",
         "path ToolSource::Extension",
+        "path kind",
         "path tool"
       ]
     },
@@ -10989,6 +10999,7 @@
         "path Fold",
         "path Fold::new",
         "path super::Arguments::parse",
+        "path super::FOLDS",
         "use super::Narrative"
       ]
     },

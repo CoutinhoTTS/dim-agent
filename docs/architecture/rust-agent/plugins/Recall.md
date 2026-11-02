@@ -12,10 +12,13 @@ Registers the Session `recall` tool. A call resolves the calling branch from
 `Branch::sequence()`, and reads that history backwards in pages through
 `Branch::page_cursor` and `Branch::page`: the newest stored rows of the kinds
 the narrative folds, at or below the pinned head, continued until the answer is
-met. It answers from the collected suffix: the turn index, one turn, one thing
-in full, or a search. The turn a page cuts is not told; everything after it is
-folded as the whole history folds it, so a page boundary changes what was read,
-never the answer.
+met. It does not fold while it pages: it stops when the collected pages reach
+the turn or the count the answer needs and folds them once; a search whose fold
+finds fewer matches than a page finishes the read and folds the whole chain once
+more, so a call folds at most twice. It answers from the collected suffix: the
+turn index, one turn, one thing in full, or a search. The turn a page cuts is
+not told; everything after it is folded as the whole history folds it, so a page
+boundary changes what was read, never the answer.
 
 ### Dependencies
 
@@ -54,6 +57,9 @@ line bounds, the read-only preset, a long turn, interrupted outputs, the
 argument errors, a 120-turn history whose index, search and newest thing
 answer from bounded pages, and a child branch paging through its inherited
 prefix.
+[recall_pages.rs](../../../../crates/dim-agent-capabilities/tests/recall_pages.rs)
+counts the folds of a no-match search over two history lengths: the count stays
+at two, so the work does not grow with the pages read.
 [transport_flow/recall.rs](../../../../crates/dim-app-server/tests/transport_flow/recall.rs)
 finds `recall` in the tool table of both the product and the `--models`
 profile.

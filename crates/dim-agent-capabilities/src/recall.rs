@@ -16,11 +16,15 @@ use crate::{
     tool_registry::{ToolContribution, ToolHandler, ToolRegistry, definition},
 };
 use chrono::{DateTime, TimeZone, Utc};
-use dim_agent_runtime::{AgentBuilder, AgentError, CAPABILITY_RELOADING, Feature, Names};
+use dim_agent_runtime::{
+    AgentBuilder, AgentError, BranchPage, CAPABILITY_RELOADING, Feature, Names,
+};
 use dim_agent_types::*;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
+#[cfg(feature = "testing")]
 use std::collections::HashSet;
 use std::{collections::HashMap, sync::Arc};
 use tokio_util::sync::CancellationToken;
@@ -65,6 +69,11 @@ const KINDS: &[&str] = &[
     "context/compaction",
     "session/forked",
 ];
+
+/// Folds this process has built, for the paging regression test. Feature
+/// `testing` only.
+#[cfg(feature = "testing")]
+static FOLDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// The Recall plugin: the Session tool.
 pub fn feature() -> Feature {
@@ -171,36 +180,40 @@ impl RecallTool {
             Ok(arguments) => arguments,
             Err(message) => return Ok(ToolResult::error(message)),
         };
-        let mut cursor = branch.page_cursor().map_err(Self::facade_error)?;
-        let mut events: Vec<Arc<AgentEvent>> = Vec::new();
-        loop {
+        let mut read = Read::new(&arguments);
+        let mut next = Some(branch.page_cursor().map_err(Self::facade_error)?);
+        while let Some(cursor) = next {
             let page = branch
                 .page(cursor, PAGE_ROWS, KINDS)
                 .await
                 .map_err(Self::facade_error)?;
-            let own_oldest = page.own;
-            let mut older = page.events;
-            older.append(&mut events);
-            events = older;
+            next = page.next;
+            read.push(page);
             check_cancel(&cancel)?;
-            let complete = match page.next {
-                Some(next) => {
-                    cursor = next;
-                    false
-                }
-                None => true,
-            };
-            let Some(floor) = window_floor(&events, complete) else {
-                continue;
-            };
-            if !complete && !origins_closed(&events, floor) {
+            if !read.reached(&arguments) {
                 continue;
             }
-            let narrative = Narrative::window(&events, floor, own_oldest);
-            if complete || narrative.reaches(&arguments) {
+            let narrative = read.fold();
+            if read.complete || narrative.reaches(&arguments) {
                 return Ok(narrative.answer(&context.turn_id, &arguments));
             }
+            break;
         }
+        // The first fold could not answer: finish the read, then fold the
+        // collected chain once. Every answer comes from the whole chain or
+        // from a fold the answer already reached, and a call folds at most
+        // twice however many pages it reads.
+        while let Some(cursor) = next {
+            let page = branch
+                .page(cursor, PAGE_ROWS, KINDS)
+                .await
+                .map_err(Self::facade_error)?;
+            next = page.next;
+            read.push(page);
+            check_cancel(&cancel)?;
+        }
+        let narrative = read.fold();
+        Ok(narrative.answer(&context.turn_id, &arguments))
     }
 }
 
@@ -213,6 +226,239 @@ impl ToolHandler for RecallTool {
     ) -> HostFuture<'_, ToolResult> {
         Box::pin(self.run(call, context, cancel))
     }
+}
+
+/// The pages read backwards from the pinned head, and the positions that say
+/// when one fold can answer (§3.1, §5.3). A page never moves an older
+/// event's distance, so the read adds a page without re-folding the pages it
+/// already holds.
+struct Read<'a> {
+    /// The collected events, oldest first.
+    events: Vec<Arc<AgentEvent>>,
+    /// Distance of the next event read, counted from the newest end.
+    distance: usize,
+    own_oldest: bool,
+    complete: bool,
+    /// Distance of the oldest `turn/end` read: the fold tells nothing before
+    /// it.
+    turn_end: Option<usize>,
+    /// Distances of the `turn/start` events read, oldest last.
+    turn_starts: Vec<usize>,
+    /// Distances of the events that can become a thing, oldest last. An upper
+    /// bound, so the read never stops before the answer can.
+    candidates: Vec<usize>,
+    /// Consumed inputs whose `input/message` has not been read, by input id.
+    consumed: HashMap<String, Vec<usize>>,
+    unresolved: BTreeSet<usize>,
+    target: Option<Target<'a>>,
+}
+
+struct Target<'a> {
+    id: &'a str,
+    event: Option<(LineKind, usize)>,
+    consumed: Option<usize>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LineKind {
+    /// An origin the narrative can tell as a turn or a thing.
+    Line,
+    /// An `input/message`, which is a thing only once it is consumed.
+    Input,
+    /// An event no line names.
+    Other,
+}
+
+impl LineKind {
+    fn of(kind: &EventKind) -> Self {
+        match kind {
+            EventKind::InputMessage(_) => Self::Input,
+            EventKind::TurnStart(_)
+            | EventKind::ModelStart(_)
+            | EventKind::ToolUseStart(_)
+            | EventKind::StopInterrupt(_)
+            | EventKind::PermissionChanged(_)
+            | EventKind::ContextCompaction(_)
+            | EventKind::BranchStart(_)
+            | EventKind::SessionForked(_) => Self::Line,
+            _ => Self::Other,
+        }
+    }
+}
+
+impl Target<'_> {
+    fn line(&self) -> bool {
+        match self.event {
+            Some((LineKind::Line, _)) => true,
+            Some((LineKind::Input, _)) => self.consumed.is_some(),
+            _ => false,
+        }
+    }
+
+    fn anchor(&self) -> Option<usize> {
+        let (kind, distance) = self.event?;
+        if !self.line() {
+            return None;
+        }
+        Some(match kind {
+            LineKind::Input => self.consumed.unwrap_or(distance),
+            LineKind::Line => distance,
+            LineKind::Other => return None,
+        })
+    }
+}
+
+impl<'a> Read<'a> {
+    fn new(arguments: &'a Arguments) -> Self {
+        let target = arguments
+            .open
+            .as_deref()
+            .or(arguments.before.as_deref())
+            .map(|id| Target {
+                id,
+                event: None,
+                consumed: None,
+            });
+        Self {
+            events: Vec::new(),
+            distance: 0,
+            own_oldest: false,
+            complete: false,
+            turn_end: None,
+            turn_starts: Vec::new(),
+            candidates: Vec::new(),
+            consumed: HashMap::new(),
+            unresolved: BTreeSet::new(),
+            target,
+        }
+    }
+
+    fn push(&mut self, page: BranchPage) {
+        self.complete = page.next.is_none();
+        self.own_oldest = page.own;
+        for event in page.events.iter().rev() {
+            self.visit(event);
+            self.distance += 1;
+        }
+        let mut older = page.events;
+        older.append(&mut self.events);
+        self.events = older;
+    }
+
+    fn visit(&mut self, event: &Arc<AgentEvent>) {
+        let distance = self.distance;
+        if let Some(target) = &mut self.target {
+            if event.id == target.id {
+                target.event = Some((LineKind::of(&event.kind), distance));
+            }
+            if let EventKind::InputConsumed(data) = &event.kind
+                && data.input_id == target.id
+            {
+                target.consumed = Some(distance);
+            }
+        }
+        match &event.kind {
+            EventKind::TurnEnd(_) => self.turn_end = Some(distance),
+            EventKind::TurnStart(_) => self.turn_starts.push(distance),
+            EventKind::InputConsumed(data) => {
+                self.consumed
+                    .entry(data.input_id.clone())
+                    .or_default()
+                    .push(distance);
+                self.unresolved.insert(distance);
+            }
+            EventKind::InputMessage(_) => {
+                for distance in self.consumed.remove(&event.id).unwrap_or_default() {
+                    self.unresolved.remove(&distance);
+                }
+            }
+            _ => {}
+        }
+        if candidate(&event.kind) {
+            self.candidates.push(distance);
+        }
+    }
+
+    /// Whether every input consumed in the part the fold tells has its
+    /// `input/message` read: the join and the keyed liveness rule need it.
+    fn closed(&self) -> bool {
+        if self.complete {
+            return self.unresolved.is_empty();
+        }
+        self.turn_end.is_some_and(|end| {
+            self.unresolved
+                .first()
+                .is_none_or(|distance| *distance > end)
+        })
+    }
+
+    /// Whether the pages read can answer with one fold. The positions here
+    /// are bounds, not the answer: a fold that disagrees reads the rest of
+    /// the chain and folds once more, so a wrong bound adds work, never an
+    /// answer.
+    fn reached(&self, arguments: &Arguments) -> bool {
+        if !self.closed() {
+            return false;
+        }
+        if self.complete {
+            return true;
+        }
+        if let Some(target) = &self.target {
+            if target.event.is_none() {
+                return false;
+            }
+            if target.line() {
+                let anchor = target.anchor().expect("a line has an anchor");
+                if !self.turn_end.is_some_and(|end| end >= anchor) {
+                    return false;
+                }
+            } else if arguments.open.is_some() || arguments.before.is_some() {
+                return true;
+            }
+            if arguments.open.is_some() {
+                return true;
+            }
+        }
+        let before = self.target.as_ref().and_then(Target::anchor);
+        // A search is complete once 21 things can match: a thing older than
+        // those cannot be among the page's newest 20. The index needs 21
+        // visible entries; every turn is one, and the floor hides at most the
+        // turn it cuts, so 22 turns are enough.
+        if arguments.about.is_some() || arguments.tool.is_some() {
+            older(&self.candidates, before) > PAGE_ENTRIES
+        } else {
+            older(&self.turn_starts, before) >= PAGE_ENTRIES + 2
+        }
+    }
+
+    fn fold(&self) -> Narrative<'_> {
+        let floor = window_floor(&self.events, self.complete).unwrap_or(0);
+        Narrative::window(&self.events, floor, self.own_oldest)
+    }
+}
+
+/// How many of `positions`, oldest last, are older than `before`.
+fn older(positions: &[usize], before: Option<usize>) -> usize {
+    match before {
+        Some(before) => positions.len() - positions.partition_point(|distance| *distance <= before),
+        None => positions.len(),
+    }
+}
+
+/// Kinds whose events can become a thing (§3.2), whether or not their joins
+/// or folded text keep them. An upper bound used only to decide when to fold.
+fn candidate(kind: &EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::InputConsumed(_)
+            | EventKind::ModelStart(_)
+            | EventKind::ToolUseStart(_)
+            | EventKind::StopInterrupt(_)
+            | EventKind::PermissionChanged(_)
+            | EventKind::ContextCompaction(_)
+            | EventKind::BranchStart(_)
+            | EventKind::SessionForked(_)
+    )
 }
 
 /// What a thing is (§3.2), with what its later events fold into it.
@@ -457,22 +703,6 @@ fn window_floor(events: &[Arc<AgentEvent>], complete: bool) -> Option<usize> {
         .position(|event| matches!(event.kind, EventKind::TurnEnd(_)))
 }
 
-/// Whether every input consumed from `floor` on has its `input/message` in
-/// the page: the join and the keyed liveness rule both need it.
-fn origins_closed(events: &[Arc<AgentEvent>], floor: usize) -> bool {
-    let inputs: HashSet<&str> = events
-        .iter()
-        .filter_map(|event| match &event.kind {
-            EventKind::InputMessage(_) => Some(event.id.as_str()),
-            _ => None,
-        })
-        .collect();
-    events[floor..].iter().all(|event| match &event.kind {
-        EventKind::InputConsumed(data) => inputs.contains(data.input_id.as_str()),
-        _ => true,
-    })
-}
-
 impl<'a> Narrative<'a> {
     /// Folds a pinned branch history into things and turns.
     #[cfg(feature = "testing")]
@@ -490,6 +720,8 @@ impl<'a> Narrative<'a> {
     }
 
     fn fold(events: &'a [Arc<AgentEvent>], floor: usize, own_start: usize) -> Self {
+        #[cfg(feature = "testing")]
+        FOLDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let own_start = events
             .iter()
             .rposition(|event| matches!(event.kind, EventKind::BranchStart(_)))
@@ -1909,5 +2141,16 @@ pub mod testing {
         pub fn tells(&self, event_id: &str) -> bool {
             self.0.told.contains(event_id)
         }
+    }
+
+    /// The folds this process has built. A test that is the only test of its
+    /// binary resets and reads it to count one call's work.
+    pub fn folds() -> usize {
+        super::FOLDS.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Zeroes [`folds`].
+    pub fn reset_folds() {
+        super::FOLDS.store(0, std::sync::atomic::Ordering::SeqCst);
     }
 }

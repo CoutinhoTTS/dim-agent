@@ -82,6 +82,13 @@ Session tool that resolves the calling branch from `ToolExecutionContext.branch_
 `TreeCommands`. Recall does not apply compaction: it walks the whole pinned history the pages
 reach.
 
+The read does not fold while it pages. It stops when the collected pages reach the turn or the
+count the answer needs: the turn of the id it opens, 21 entries for the index, 21 candidate things
+for a search, or the start of the chain. It then folds the collected pages once. A search whose
+fold finds fewer matches than a page finishes the read without folding and folds the whole chain
+once more, so a call folds at most twice however many pages it reads; a search with no match reads
+the chain and folds twice, not once per page.
+
 A page cuts the oldest turn it holds. Recall folds the collected events in order and tells
 nothing from before that turn's `turn/end`, so the turn a page cuts is not reported and every
 later event is folded exactly as folding the whole history folds it. The `input/message` of an
@@ -553,7 +560,7 @@ Considered and not needed:
 | Risk | `session` |
 | Assembly | Every real-model profile: installed in `defaults::install_local_execution` beside `wait`, which the product and `--models` profiles both use. Recall does not depend on compaction, so a `--models` branch without compaction still has it |
 | State, writes, type changes | None |
-| Cost | No cache: each call reads the pages its answer needs, newest first, and folds them. An answer that needs the oldest history (an old turn or thing, an id that names no line, a search with few matches) reads to the start; the index, a search page and a thing near the head read only the newest pages. A cache keyed by branch and head inside the tool is added only if a measurement shows the need; the facade does not change |
+| Cost | No cache: each call reads the pages its answer needs, newest first, and folds what it read once (twice when a search must finish the chain). An answer that needs the oldest history (an old turn or thing, an id that names no line, a search with few matches) reads to the start; the index, a search page and a thing near the head read only the newest pages. A cache keyed by branch and head inside the tool is added only if a measurement shows the need; the facade does not change |
 | Delivery | Milestone M2 (#129); implementation follows the M2 plan |
 
 ## 14. Acceptance (flow tests)
@@ -616,7 +623,9 @@ in `crates/dim-app-server/tests` that finds `recall` in the tool table of both t
     one thing in the newest turn answer exactly as folding the whole pinned history does, and
     their reads decode fewer events than that history holds. Opening the first turn and a search
     that only the oldest pages match also answer exactly. A child branch with a 40-turn own
-    segment pages through its inherited prefix and opens an inherited id the same way.
+    segment pages through its inherited prefix and opens an inherited id the same way. A search
+    with no match over 40 and 120 turns builds the same number of folds, at most two, so the fold
+    work does not grow with the pages read.
 
 ## 15. Ready
 
