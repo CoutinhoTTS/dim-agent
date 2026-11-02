@@ -335,7 +335,8 @@ Each area has two surfaces in the native client:
 - a subcommand, `dimcode <area> <verb>`.
 
 Both surfaces use the same area adapter. `dimcode hooks list|enable|disable` keeps its output and
-exit codes, and `dimcode hooks edit` and `dimcode hooks set PATH` write through the same adapter.
+exit codes, except that a source's state line is worded once for the panel and the command;
+`dimcode hooks edit` and `dimcode hooks set PATH` write through the same adapter.
 
 ### The adapter
 
@@ -423,9 +424,10 @@ Writes follow [Execution settings](#execution-settings):
   since it calls nothing before `hooks.catalog`;
 - a write the daemon accepted is reported as done: a failure of the read that follows is
   reported after the action, as a read failure, never as a refusal or a conflict. The CLI prints
-  the action's line, then the read error on standard error, and exits 0; a toggle's line names
-  the id, since the read is what supplies the name, and a read on its own that fails is still a
-  failure. The panel shows the action's message and the read error, keeps no view until the next
+  the action's line, then the read error on standard error, and exits 0; a Skills toggle's line
+  names the id, since the read is what supplies the name, and a Hooks toggle names the workspace,
+  since the toggle is the project source; a read on its own that fails is still a failure. The
+  panel shows the action's message and the read error, keeps no view until the next
   read, and settles the draft as on success: its file is removed and its link dropped;
 - loading and writing disable mutation.
 
