@@ -3391,7 +3391,7 @@ impl TimelineStore for SqliteTimelineStore {
             let wanted = id.to_owned();
             let sequence: Option<i64> = self
                 .db
-                .run(move |connection| {
+                .run_read(move |connection| {
                     connection
                         .query_row(
                             "SELECT sequence FROM timeline_events \
