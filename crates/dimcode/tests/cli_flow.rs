@@ -9235,7 +9235,13 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
     let home = Home::new();
     let refreshed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let seen = refreshed.clone();
+    // The daemon reports the re-list that follows its refill: after the
+    // second list's last catalog reply the client has nothing in flight, so
+    // the kill below cannot interrupt a reply.
+    let (settled, wait_settled) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
+        let mut version = 1u32;
+        let mut catalogs = 0usize;
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             let request: Value = serde_json::from_str(&line).unwrap();
@@ -9272,9 +9278,14 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
                     {"providerId":"broken","displayName":"Broken","enabled":true}]}),
                 "provider.catalog" => {
                     let provider = request["params"]["providerId"].as_str().unwrap();
+                    catalogs += 1;
+                    let last = catalogs == 14;
                     if provider == "broken" {
                         wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
                             "code":-32000,"message":"catalog read failed"}}));
+                        if last {
+                            settled.send(()).ok();
+                        }
                         continue;
                     }
                     let (models, disabled) = match provider {
@@ -9298,13 +9309,24 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
                         "blank" | "manual" => (json!([]), json!([])),
                         _ => (json!([model("vendor/model-a", None, true)]), json!([])),
                     };
-                    json!({"catalog":{"version":1,"disabledModelIds":disabled,"models":models}})
+                    wire.reply(
+                        &request,
+                        json!({"catalog":{"version":version,"disabledModelIds":disabled,"models":models}}),
+                    );
+                    if last {
+                        settled.send(()).ok();
+                    }
+                    continue;
                 }
                 "provider.refresh" => {
                     seen.lock()
                         .unwrap()
                         .push(request["params"]["providerId"].as_str().unwrap().to_owned());
-                    json!({"version":2,"disabledModelIds":[],"models":[]})
+                    // The refresh stores the listed catalog under a new
+                    // version, and the read reports it, so the re-list does
+                    // not ask for the same refill again.
+                    version = 2;
+                    json!({"version":version,"disabledModelIds":[],"models":[]})
                 }
                 "account.providers" => json!([]),
                 _ => json!({}),
@@ -9330,6 +9352,9 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
         !terminal.transcript.contains("need a window"),
         "a model unavailable for another reason, and a disabled one, raise no limits row"
     );
+    wait_settled
+        .recv_timeout(PATIENCE)
+        .expect("the picker settles after its re-list");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();
