@@ -18,7 +18,7 @@ use super::Groups;
 use crate::client::Client;
 use crate::model::session::{
     ActionKind, EntryDocument, EntryState, ManagementAction, ManagementDetail, ManagementEntry,
-    ManagementView,
+    ManagementView, RemoveVerb,
 };
 use crate::ui::i18n::{t, tf};
 
@@ -631,6 +631,7 @@ pub(super) fn view(listing: &Listing, available: &[ActionKind], cwd: &Path) -> M
                     .collect(),
                 document,
                 run: run_template(entry),
+                remove_verb: RemoveVerb::Remove,
             },
         );
     }
@@ -641,6 +642,7 @@ pub(super) fn view(listing: &Listing, available: &[ActionKind], cwd: &Path) -> M
         );
     }
     ManagementView {
+        title: None,
         revision: None,
         document: None,
         create: Some(create()),

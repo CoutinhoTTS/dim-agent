@@ -12,7 +12,7 @@ use std::{
 };
 
 /// The native store format this daemon creates and opens.
-pub const FORMAT: u32 = 30;
+pub const FORMAT: u32 = 31;
 /// The oldest schema the startup transaction upgrades: the first step of
 /// `UPGRADES`, which is ordered oldest first.
 const MIN_FORMAT: u32 = UPGRADES[0].0;
@@ -33,7 +33,7 @@ const LEGACY_BY_END: (&str, &str) = (
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 30))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 31))",
     ),
     (
         "settings_documents",
@@ -85,7 +85,7 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
     ),
     (
         "timeline_events",
-        "CREATE TABLE timeline_events (session_id TEXT NOT NULL, branch_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK (sequence > 0), last_sequence INTEGER NOT NULL CHECK (last_sequence >= sequence), kind TEXT NOT NULL, body TEXT NOT NULL, event_id TEXT, PRIMARY KEY (session_id, branch_id, sequence), FOREIGN KEY (session_id, branch_id) REFERENCES timeline_branches(session_id, branch_id))",
+        "CREATE TABLE timeline_events (session_id TEXT NOT NULL, branch_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK (sequence > 0), last_sequence INTEGER NOT NULL CHECK (last_sequence >= sequence), kind TEXT NOT NULL, body TEXT NOT NULL, event_id TEXT, context_render INTEGER NOT NULL DEFAULT 0, context_state INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (session_id, branch_id, sequence), FOREIGN KEY (session_id, branch_id) REFERENCES timeline_branches(session_id, branch_id))",
     ),
     (
         "timeline_snapshots",
@@ -98,6 +98,18 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "timeline_events_by_id",
         "CREATE INDEX timeline_events_by_id ON timeline_events(session_id, event_id) WHERE event_id IS NOT NULL",
+    ),
+    (
+        "timeline_events_render",
+        "CREATE INDEX timeline_events_render ON timeline_events(session_id, branch_id, sequence) WHERE context_render = 1",
+    ),
+    (
+        "timeline_events_state",
+        "CREATE INDEX timeline_events_state ON timeline_events(session_id, branch_id, sequence) WHERE context_state = 1",
+    ),
+    (
+        "timeline_events_positions",
+        "CREATE INDEX timeline_events_positions ON timeline_events(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'context/compaction-start', 'context/compaction')",
     ),
     (
         "timeline_tool_use_starts",
@@ -151,6 +163,8 @@ const AGENTS_BEFORE_V27: &str = "CREATE TABLE agents(agent_id TEXT PRIMARY KEY, 
 /// The text of `agent_sessions` from v27 through v29; `schema_of` uses it to
 /// recognize a store older than v30.
 const AGENT_SESSIONS_BEFORE_V30: &str = "CREATE TABLE agent_sessions (session_id TEXT NOT NULL PRIMARY KEY, config TEXT NOT NULL, created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0), leader_session_id TEXT REFERENCES agent_sessions(session_id))";
+/// The text of `timeline_events` before v31 adds the two reading switches.
+const TIMELINE_EVENTS_BEFORE_V31: &str = "CREATE TABLE timeline_events (session_id TEXT NOT NULL, branch_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK (sequence > 0), last_sequence INTEGER NOT NULL CHECK (last_sequence >= sequence), kind TEXT NOT NULL, body TEXT NOT NULL, event_id TEXT, PRIMARY KEY (session_id, branch_id, sequence), FOREIGN KEY (session_id, branch_id) REFERENCES timeline_branches(session_id, branch_id))";
 /// v27 adds a column to two tables, which `SCHEMA` cannot express as a new
 /// entry: the upgrade alters them before it creates the indexes on them.
 const V27_COLUMNS: &str = "ALTER TABLE agent_sessions ADD COLUMN leader_session_id TEXT REFERENCES agent_sessions(session_id);
@@ -161,10 +175,15 @@ ALTER TABLE agents ADD COLUMN owner_session_id TEXT REFERENCES agent_sessions(se
 /// statement character by character.
 const V30_COLUMNS: &str = "ALTER TABLE agent_sessions ADD COLUMN origin TEXT NOT NULL DEFAULT 'unknown' CHECK (origin IN ('client', 'acp', 'internal', 'unknown'));
 UPDATE agent_sessions SET origin='internal' WHERE leader_session_id IS NOT NULL;";
+/// v31 adds the two reading switches; the upgrade alters the table before it
+/// creates the partial indexes on them.
+const V31_COLUMNS: &str =
+    "ALTER TABLE timeline_events ADD COLUMN context_render INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE timeline_events ADD COLUMN context_state INTEGER NOT NULL DEFAULT 0;";
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 16] = [
+const UPGRADES: [(u32, &[&str]); 17] = [
     (
         13,
         &[
@@ -217,6 +236,15 @@ const UPGRADES: [(u32, &[&str]); 16] = [
     // #557: a Session's creation origin; the column only, and the step fills
     // in the rows whose leader link already records one.
     (29, &[]),
+    // #708: the two reading switches on timeline events.
+    (
+        30,
+        &[
+            "timeline_events_render",
+            "timeline_events_state",
+            "timeline_events_positions",
+        ],
+    ),
 ];
 
 fn format_table(version: u32) -> String {
@@ -241,6 +269,7 @@ fn schema_of(version: u32) -> Vec<(&'static str, String)> {
                 "agent_sessions" if version < 27 => AGENT_SESSIONS_BEFORE_V27.to_owned(),
                 "agent_sessions" if version < 30 => AGENT_SESSIONS_BEFORE_V30.to_owned(),
                 "agents" if version < 27 => AGENTS_BEFORE_V27.to_owned(),
+                "timeline_events" if version < 31 => TIMELINE_EVENTS_BEFORE_V31.to_owned(),
                 _ => sql.to_owned(),
             };
             (name, sql)
@@ -507,6 +536,25 @@ impl SqliteStorage {
                     }
                     if *from == 29 {
                         tx.execute_batch(V30_COLUMNS).map_err(storage)?;
+                    }
+                    if *from == 30 {
+                        tx.execute_batch(V31_COLUMNS).map_err(storage)?;
+                        let keys = |list: &[&str]| {
+                            list.iter()
+                                .map(|key| format!("'{key}'"))
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        };
+                        tx.execute_batch(&format!(
+                            "UPDATE timeline_events SET context_render=1 WHERE kind IN ({});",
+                            keys(dim_agent_types::CONTEXT_RENDER_KEYS)
+                        ))
+                        .map_err(storage)?;
+                        tx.execute_batch(&format!(
+                            "UPDATE timeline_events SET context_state=1 WHERE kind IN ({});",
+                            keys(dim_agent_types::CONTEXT_STATE_KEYS)
+                        ))
+                        .map_err(storage)?;
                     }
                     for (_, sql) in SCHEMA.iter().filter(|(name, _)| added.contains(name)) {
                         tx.execute_batch(sql).map_err(storage)?;

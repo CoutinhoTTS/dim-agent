@@ -8,6 +8,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "skills" => "スキル",
         "hooks" => "フック",
         "scheduled jobs" => "スケジュール済みジョブ",
+        "models" => "モデル",
         "workflow definitions" => "ワークフロー定義",
         "command rules" => "コマンドルール",
         "enabled" => "有効",
@@ -46,6 +47,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "↑↓ scroll · Esc back" => "↑↓ スクロール · Esc で戻る",
         "Added." => "作成しました。",
         "Removed {name}." => "{name} を削除しました。",
+        "unavailable" => "利用不可",
+        "Reset {name}? Enter confirm · Esc cancel" => {
+            "{name} をリセットしますか？Enter で確定 · Esc でキャンセル"
+        }
+        "Reset {name} to its catalog entry." => "{name} をカタログ項目にリセットしました。",
         "Ran {name}." => "{name} を実行しました。",
         "The user document changed since it was read; nothing was written." => {
             "ユーザードキュメントは読み取り後に変更されています。今回は何も書き込んでいません。"
@@ -115,6 +121,85 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "このワークスペースのフック設定は読み取り後に変更されています。今回は何も書き込んでいません。"
         }
+        "Models" => "モデル",
+        "catalog" => "カタログ",
+        "overrides" => "オーバーライド",
+        "added" => "追加",
+        "Models · {name}" => "モデル · {name}",
+        "undeclared" => "未宣言",
+        "Context window {window} · max output {output}" => {
+            "コンテキストウィンドウ {window} · 最大出力 {output}"
+        }
+        "Endpoint {endpoint}" => "エンドポイント {endpoint}",
+        "Endpoint {endpoint} · override {value}" => {
+            "エンドポイント {endpoint} · オーバーライド {value}"
+        }
+        "The provider reports it unavailable." => "プロバイダーは利用不可と報告しています。",
+        "Limits undeclared; edit the model to declare them." => {
+            "上限が未宣言です。モデルを編集して宣言してください。"
+        }
+        "Sign in to the account to use its models." => {
+            "アカウントにサインインするとモデルを使えます。"
+        }
+        "The signed-in account changed; reload to list its models." => {
+            "サインイン中のアカウントが変わりました。再読み込みでモデルを一覧します。"
+        }
+        "The provider has no catalog yet." => "このプロバイダーにはまだカタログがありません。",
+        "The provider listed no models." => "プロバイダーはモデルを何も一覧しませんでした。",
+        "Listed {count} models." => "{count} 個のモデルを一覧しました。",
+        "Refreshed the models." => "モデルを更新しました。",
+        "Could not list models: {error}. Showing the stored list." => {
+            "モデルを一覧できませんでした：{error}。保存済みの一覧を表示します。"
+        }
+        "The signed-in account changed; the refresh cleared preferences, overrides and disables." => {
+            "サインイン中のアカウントが変わりました。更新により設定、オーバーライド、無効化が消去されました。"
+        }
+        "The models changed since they were read; nothing was removed." => {
+            "モデルは読み取り後に変更されています。今回は何も削除していません。"
+        }
+        "The models changed since they were read; nothing was written." => {
+            "モデルは読み取り後に変更されています。今回は何も書き込んでいません。"
+        }
+        "No provider has that id." => "その id のプロバイダーはありません。",
+        "{name} is unavailable ({reason}); its enablement is kept as it is." => {
+            "{name} は利用できません（{reason}）。有効状態はそのまま維持されます。"
+        }
+        "No model has that id." => "その id のモデルはありません。",
+        "This model cannot be removed." => "このモデルは削除できません。",
+        "A Provider's models have no area document." => {
+            "プロバイダーのモデルには領域ドキュメントがありません。"
+        }
+        "Models have no run operation." => "モデルに実行操作はありません。",
+        "The document is not an object; nothing was written." => {
+            "ドキュメントがオブジェクトではありません。今回は何も書き込んでいません。"
+        }
+        "The document changes no editable field; nothing was written." => {
+            "ドキュメントは編集可能なフィールドを変更していません。今回は何も書き込んでいません。"
+        }
+        "The model document names no model." => "モデルドキュメントがモデルを指定していません。",
+        "The provider has no model catalog to write." => {
+            "このプロバイダーには書き込めるモデルカタログがありません。"
+        }
+        "ID {id}" => "ID {id}",
+        "Source {source}" => "ソース {source}",
+        "Status {status}" => "ステータス {status}",
+        "Tools {value}" => "ツール {value}",
+        "Vision {value}" => "ビジョン {value}",
+        "Reasoning {value}" => "推論 {value}",
+        "Modalities {list}" => "モダリティ {list}",
+        "Description {text}" => "説明 {text}",
+        "Release date {date}" => "リリース日 {date}",
+        "Pricing {value}" => "価格 {value}",
+        "Rate limit {value}" => "レート制限 {value}",
+        "Matched provider {id}" => "一致プロバイダー {id}",
+        "Matched model {id}" => "一致モデル {id}",
+        "Match strategy {strategy}" => "一致戦略 {strategy}",
+        "Capability overrides {fields}" => "ケイパビリティの上書き {fields}",
+        "yes" => "はい",
+        "no" => "いいえ",
+        "not supported" => "非対応",
+        "supported" => "対応",
+
         "Workflow" => "ワークフロー",
         "Saved {name}. It stays disabled until you enable it." => {
             "{name} を保存しました。有効にするまで無効のままです。"

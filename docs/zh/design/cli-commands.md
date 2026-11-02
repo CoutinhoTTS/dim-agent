@@ -415,7 +415,7 @@ Reset 要求确认后把两个布尔值都写为 false。Off 可保留无效的�
 
 ## 管理界面
 
-一个管理领域就是一个所有者的一组管理方法。App Server 经各自的所有者提供每个领域，不向客户端提供跨领域的通用通路（[Settings 服务](appserver/settings-service.md#11-不做什么)）：Skills 是 `skills.*`，Hooks 是 `hooks.*`，MCP 是 `mcp.*`，Scheduler 是 `schedule.*`，Workflow 定义是 `workflow.*`，命令规则是 `permission.rules` 与 `permission.set_rules`，插件是 PluginManager 的方法。它们的入口形态各不相同，并保持不变；本节只把客户端一侧做成同一个结构，使一个领域接入一次，而不是每个界面各接一次。
+一个管理领域就是一个所有者的一组管理方法。App Server 经各自的所有者提供每个领域，不向客户端提供跨领域的通用通路（[Settings 服务](appserver/settings-service.md#11-不做什么)）：Skills 是 `skills.*`，Hooks 是 `hooks.*`，MCP 是 `mcp.*`，Scheduler 是 `schedule.*`，Workflow 定义是 `workflow.*`，命令规则是 `permission.rules` 与 `permission.set_rules`，插件是 PluginManager 的方法，单个提供方的模型是 `provider.*`。它们的入口形态各不相同，并保持不变；本节只把客户端一侧做成同一个结构，使一个领域接入一次，而不是每个界面各接一次。
 
 每个领域在原生客户端里有两个界面：
 
@@ -436,7 +436,7 @@ Reset 要求确认后把两个布尔值都写为 false。Off 可保留无效的�
 
 ### 视图
 
-条目按所有者报告的分组归类——user、project、`plugin:<id>`、内置——顺序与所有者的报告顺序一致；一个 Hook 来源本身就是一个条目，归在 `sources` 分组下。每个条目有标签、详情、它的状态（已启用、已禁用、无效、被覆盖、只读）以及它提供的动作。所有者不允许客户端写入的条目（插件所有、已锁定）不提供写入动作，详情说明原因。所有者无法使用的东西作为 issue 列在条目之后。当 run 种类接受输入文档时，条目可以携带该操作的输入文档：Ctrl+T 先用外部编辑器打开它，run 随编辑器留下的文本发出。
+条目按所有者报告的分组归类——user、project、`plugin:<id>`、内置——顺序与所有者的报告顺序一致；一个 Hook 来源本身就是一个条目，归在 `sources` 分组下。每个条目有标签、详情、它的状态（已启用、已禁用、无效、不可用、被覆盖、只读）以及它提供的动作。所有者不允许客户端写入的条目（插件所有、已锁定）不提供写入动作，详情说明原因。所有者无法使用的东西作为 issue 列在条目之后。当 run 种类接受输入文档时，条目可以携带该操作的输入文档：Ctrl+T 先用外部编辑器打开它，run 随编辑器留下的文本发出。
 
 ```text
 ╭─ Skills ──────────────────────────────────────╮
@@ -473,7 +473,7 @@ Esc 关闭面板。动作键要么是 Ctrl 组合键，要么是筛选从不接�
 底部边框放不下的键提示会画在朴素底边之上的几行里，在 ` · ` 分隔处换行；比一行还宽的部件按显示宽度换行，任何键和动作都不会被截掉。这些行与页脚一样从列表中占用空间，所以任何宽度下每个键都可见，删除确认也不例外。
 
 - add 用外部编辑器打开适配器给出的新建条目文档——所有者的创建形态，填入示例值——并以领域的创建方法写入。文档没有改动时不写入；被拒绝时保留草稿，下次 Ctrl+N 重新打开用户的文本，与 Ctrl+E 对编辑的处理一致。冲突时也同样保留：新建没有 revision，丢弃草稿与过期 revision 的关联只是编辑的规则，不适用于新建。把条目追加到已读到列表的 add（如命令规则领域）改为重试冲突，因为追加不覆盖任何内容。`dimcode <area> add PATH`（`-` 表示 stdin）是不经编辑器的同一次写入。
-- remove 先在键提示里询问：键提示变为 `Remove <label>? Enter confirm · Esc cancel`，除 Enter 外的任何键都取消且什么都不改。Enter 调用领域的删除方法，然后重新读取该领域。`dimcode <area> remove ID` 不提问直接删除，因为命令行上输入的 id 就是意图，与 `dimcode logout PROVIDER` 不提问直接退出一致。
+- remove 先在键提示里询问，动词随条目报告：会把条目移出的删除是 `Remove <label>? Enter confirm · Esc cancel`，会把条目恢复为默认的重置是 `Reset <label>? Enter confirm · Esc cancel`。除 Enter 外的任何键都取消且什么都不改。Enter 调用领域的移除方法，然后重新读取该领域，消息也用同一个动词。`dimcode <area> remove ID` 不提问直接移除，因为命令行上输入的 id 就是意图，与 `dimcode logout PROVIDER` 不提问直接退出一致。
 - run 对所选条目调用领域的具名操作。答复会改变领域所列内容的运行——Scheduler 的立即运行会加入任务的历史和上次结果——重新读取该领域，并把答复作为消息报告；所有者跳过的一次运行会说明原因。答复不改变领域所列内容的运行，像 inspect 一样把答复作为详情显示，且不重新读取该领域：MCP 的 test 是临时连接发现的工具列表。所有者是否把该方法声明为 mutating 并不决定这一点，因为 `mcp.test` 会运行该条目，却仍然不写入领域所列的任何内容。需要参数的操作是该领域自己的步骤，不属于这个种类：条目携带输入文档，run 种类在调用前用外部编辑器打开它。
 - inspect 向适配器索取条目的详情：一个标题和若干行，而不是一个视图。面板用它替代列表显示，方向键与 PageUp/PageDown 滚动，Esc 带着保留的选中项回到列表，再按一次 Esc 关闭面板。`dimcode <area> inspect ID` 打印同样的行，或该领域自己的动词，如果它的设计另有规定。
 
@@ -567,6 +567,57 @@ Ctrl+T 立即运行所选任务，并报告所有者的答复——`launching`�
 ```
 
 `dimcode scheduled add PATH`（`-` 表示 stdin）是不经编辑器的创建；`dimcode scheduled history ID` 打印详情显示的那些行；`dimcode scheduled remove ID` 不经面板的确认直接删除。
+
+### Models 领域
+
+Models 领域（#818）：`/models` 里的 `Edit models` 打开单个提供方的面板，`dimcode models PROVIDER enable|disable|remove|inspect MODEL`、`edit MODEL`、`set MODEL PATH` 与 `add PATH` 是它在命令行上的同一领域，经 `provider.management` 与 `provider.models.*` 写入（[提供方管理](appserver/provider-management.md)）。提供方是领域的一部分，所以另一个提供方的回复不会落到面板里，面板标题也写明提供方（`Models · <name>`）。`dimcode models PROVIDER` 保持原有列表与四个标志；`--refresh` 就是该领域在命令行上的 reload。
+
+一个模型是一个条目。标签是显示名，详情是 id、两个上限（或 `undeclared`）、端点及其覆盖，以及所有者报告的不可用原因。条目按所有者报告的来源分组：默认模型在 `catalog`，descriptor 覆盖在 `overrides`，用户新增在 `added`，顺序固定。所有者报告为不可用的模型保留 `unavailable` 状态词，详情说明原因。账号条目在没有目录记录时没有条目；本次读取的 issue 说明它还没有目录。
+
+| 类别 | toggle | edit | remove | inspect |
+| --- | --- | --- | --- | --- |
+| 目录模型 | 是 | 是 | 否 | 是 |
+| 被覆盖的目录模型 | 是 | 是 | 是，`Reset` | 是 |
+| 用户新增模型 | 是 | 是 | 是，`Delete` | 是 |
+| 不可用模型 | 否 | 同其类别 | 同其类别 | 是 |
+
+Provider 记录的 `version` 是每次写入所取的 revision（`expectedVersion`）。写入以 Provider 目录回复，所以客户端在写入后再次读取该领域。edit 打开条目的 `ModelEdit`——`displayName`、`contextWindow`、`maxOutputTokens`、`toolCalling`、`vision`、`reasoning` 与 `modalityCapabilities`，静态 New API 模型再加 `endpoint`——并且只发送草稿改动的字段，与从新读取构建的模板对比，因此把继承的上限原样写回不会变成用户声明。toggle、add 与 remove 在写入前紧邻读取该领域：toggle 发送翻转该模型后的完整启用集合，不可用模型没有 toggle，对它的 `enable` 与 `disable` 在写入前即被拒绝，拒绝信息写明所有者的原因并说明其启用状态保持不变；remove 按条目自己的动词删除用户模型或重置覆盖；add 发送创建模板的 `ModelEntry`，两个上限都未声明。`provider_conflict` 按新读取报告的 version 分类：version 变了说明模型已变更、什么都没写；version 没变则是所有者自己的拒绝，例如重复的模型 id，草稿保留原 revision。
+
+Ctrl+R 读取该领域，并在提供方的 actions 含 `refresh` 时先发送 `provider.refresh`；被拒绝的列目录不写入任何东西，所以已存储的列表保留，所有者的原因作为 note。Tab 用完整描述替代列表显示：id、来源、状态、两个上限、端点与覆盖、工具、视觉、推理及其档位、模态、描述、发布日期、价格、速率限制、内建匹配与能力覆盖字段。
+
+```text
+╭─ Models · Relay ─────────────────────────────────────────────────────────────────────────────╮
+│ >                                                                                           │
+│   catalog                                                                                   │
+│ › flash           enabled                                                                   │
+│   reasoner        enabled   unavailable                                                     │
+│   overrides                                                                                 │
+│   tuned           enabled                                                                   │
+│   added                                                                                     │
+│   house-model     disabled                                                                  │
+│                                                                                             │
+│   tuned                                                                                     │
+│   Context window 128,000 · max output 16,384                                                │
+│   Endpoint openai-compatible · override openai                                              │
+╰──── Enter toggle · Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Tab inspect ─╯
+```
+
+选择器为每个提供方增加一行：`Edit models`，位于该提供方的块内，detail 写明提供方，因此没有可选模型的提供方也能打开。守护进程未声明 `provider.management` 时没有这一行。它在选择器的位置打开该领域，在那里按 Esc 关闭到提示符，而不是回到选择器。
+
+```text
+Select a model
+> Ready / flash              ZDR  ‹ high ›  current
+  Ready / plain              low
+  Edit models                Ready  ready
+  Other / model-x
+  Edit models                Other  other
+  Manual: no models · add a model with provider.models.create
+  Edit models                Manual  manual
+  Subagent models: Agent choice
+Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close
+```
+
+`dimcode models PROVIDER remove MODEL` 不经面板的确认直接移除；`dimcode models PROVIDER inspect MODEL` 打印详情显示的那些行。
 
 ### Workflow 领域
 

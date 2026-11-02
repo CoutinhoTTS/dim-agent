@@ -28,10 +28,22 @@ use rutis::Ctx;
 use rutis::host::BoxFuture;
 use std::sync::{Mutex as StdMutex, Weak};
 
+/// What the account's catalog reports for its second model.
+#[derive(Clone, Copy, PartialEq)]
+enum Limited {
+    /// The catalog holds the one fixture model.
+    Absent,
+    /// A second model the account can use.
+    Available,
+    /// A second model whose limits are undeclared, so it cannot be used.
+    Unavailable,
+}
+
 /// A signed-in managed account whose first credential the relay rejects.
 struct Fixture {
     base_url: String,
     account: StdMutex<AccountSnapshot>,
+    limited: StdMutex<Limited>,
     recovered: AtomicUsize,
     released: StdMutex<Vec<String>>,
 }
@@ -144,14 +156,42 @@ impl ManagedProvider for Provider {
             "capabilities":dim_agent_types::CatalogCapabilities {
                 reasoning: true, ..dim_agent_types::CatalogCapabilities::with_limits(32_000, 128) }}))
         .unwrap();
+        let mut models = vec![ManagedModel {
+            entry,
+            protocol: ModelProtocol::OpenaiCompatible,
+            unavailable_reason: None,
+            zdr: false,
+        }];
+        match *self.0.limited.lock().unwrap() {
+            Limited::Absent => {}
+            Limited::Available => {
+                let entry: ModelEntry = serde_json::from_value(json!({"modelId":"limited-model",
+                    "displayName":"Limited model","status":"active",
+                    "capabilities":dim_agent_types::CatalogCapabilities::with_limits(64_000, 256)}))
+                .unwrap();
+                models.push(ManagedModel {
+                    entry,
+                    protocol: ModelProtocol::OpenaiCompatible,
+                    unavailable_reason: None,
+                    zdr: false,
+                });
+            }
+            Limited::Unavailable => {
+                let entry: ModelEntry = serde_json::from_value(json!({"modelId":"limited-model",
+                    "displayName":"Limited model","status":"active",
+                    "capabilities":dim_agent_types::CatalogCapabilities::default()}))
+                .unwrap();
+                models.push(ManagedModel {
+                    entry,
+                    protocol: ModelProtocol::OpenaiCompatible,
+                    unavailable_reason: Some("limits_undeclared".into()),
+                    zdr: false,
+                });
+            }
+        }
         ready(Ok(ManagedCatalog {
             account: self.0.account.lock().unwrap().clone(),
-            models: vec![ManagedModel {
-                entry,
-                protocol: ModelProtocol::OpenaiCompatible,
-                unavailable_reason: None,
-                zdr: false,
-            }],
+            models,
         }))
     }
     fn credential(&self, _: &str, _: &str) -> ManagedFuture<CredentialLease> {
@@ -224,6 +264,7 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
                 granted_scopes: vec!["model".into()],
             }),
         }),
+        limited: StdMutex::new(Limited::Absent),
         recovered: AtomicUsize::new(0),
         released: StdMutex::new(vec![]),
     });
@@ -455,6 +496,98 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
         "high"
     );
     assert_ok(&client.rpc("provider.models.set_enabled", json!({"providerId":"managed-fixture","expectedVersion":5,"modelIds":["fixture-model"]})).await);
+    // A catalog that holds one unavailable model still toggles the rest. The
+    // client's toggle sends the whole enabled set, the unavailable model
+    // included, and a set that omits the model leaves its state alone.
+    *fixture.limited.lock().unwrap() = Limited::Unavailable;
+    let mixed = client
+        .rpc("provider.refresh", json!({"providerId":"managed-fixture"}))
+        .await;
+    assert_ok(&mixed);
+    assert_eq!(mixed["result"]["disabledModelIds"], json!([]));
+    let listed = client
+        .rpc(
+            "provider.management",
+            json!({"providerId":"managed-fixture"}),
+        )
+        .await;
+    assert_eq!(
+        listed["result"]["providers"][0]["models"][1]["unavailableReason"],
+        "limits_undeclared"
+    );
+    // The set keeps an unavailable entry's enablement, so the view offers no
+    // toggle for it; the available entry beside it still offers one.
+    let actions = listed["result"]["providers"][0]["models"][1]["actions"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(!actions.contains(&json!("set_enabled")), "{actions:?}");
+    assert!(actions.contains(&json!("edit")), "{actions:?}");
+    let actions = listed["result"]["providers"][0]["models"][0]["actions"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(actions.contains(&json!("set_enabled")), "{actions:?}");
+    assert_ok(
+        &client
+            .rpc(
+                "provider.models.set_enabled",
+                json!({"providerId":"managed-fixture","expectedVersion":7,
+                    "modelIds":["fixture-model","limited-model"]}),
+            )
+            .await,
+    );
+    let omitted = client
+        .rpc(
+            "provider.models.set_enabled",
+            json!({"providerId":"managed-fixture","expectedVersion":8,
+                "modelIds":["fixture-model"]}),
+        )
+        .await;
+    assert_ok(&omitted);
+    assert_eq!(omitted["result"]["disabledModelIds"], json!([]));
+    // An entry that was disabled while it was usable and is unavailable now
+    // keeps that disable when a set names it: the set governs only the
+    // entries the account can use.
+    *fixture.limited.lock().unwrap() = Limited::Available;
+    let usable = client
+        .rpc("provider.refresh", json!({"providerId":"managed-fixture"}))
+        .await;
+    assert_ok(&usable);
+    assert_eq!(usable["result"]["disabledModelIds"], json!([]));
+    let disabled = client
+        .rpc(
+            "provider.models.set_enabled",
+            json!({"providerId":"managed-fixture","expectedVersion":10,
+                "modelIds":["fixture-model"]}),
+        )
+        .await;
+    assert_ok(&disabled);
+    assert_eq!(
+        disabled["result"]["disabledModelIds"],
+        json!(["limited-model"])
+    );
+    *fixture.limited.lock().unwrap() = Limited::Unavailable;
+    let frozen = client
+        .rpc("provider.refresh", json!({"providerId":"managed-fixture"}))
+        .await;
+    assert_ok(&frozen);
+    assert_eq!(
+        frozen["result"]["disabledModelIds"],
+        json!(["limited-model"])
+    );
+    let named = client
+        .rpc(
+            "provider.models.set_enabled",
+            json!({"providerId":"managed-fixture","expectedVersion":12,
+                "modelIds":["fixture-model","limited-model"]}),
+        )
+        .await;
+    assert_ok(&named);
+    assert_eq!(
+        named["result"]["disabledModelIds"],
+        json!(["limited-model"])
+    );
     let created = client
         .rpc(
             "session.create",
@@ -509,7 +642,7 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
         )
         .await;
     assert_ok(&stale);
-    assert_eq!(stale["result"]["providers"][0]["version"], 6);
+    assert_eq!(stale["result"]["providers"][0]["version"], 13);
     assert_eq!(
         stale["result"]["providers"][0]["models"][0]["unavailableReason"],
         "account_changed"
@@ -545,7 +678,7 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
         )
         .await;
     assert_ok(&signed_out);
-    assert_eq!(signed_out["result"]["providers"][0]["version"], 7);
+    assert_eq!(signed_out["result"]["providers"][0]["version"], 14);
     assert_eq!(
         signed_out["result"]["providers"][0]["models"][0]["unavailableReason"],
         "account_required"
@@ -557,5 +690,202 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
     assert_eq!(released, ["initial", "recovered"]);
     http.abort();
     std::fs::remove_dir_all(assets).unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A managed model whose stored reason is `limits_undeclared` becomes usable
+/// when an edit declares its limits: the whole set then governs it. A reset
+/// puts the stored reason back in force, and a set that omits it leaves its
+/// enablement as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_managed_model_made_usable_by_its_edit_is_governed_by_its_effective_limits() {
+    let home = std::env::temp_dir().join(format!(
+        "dm-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    ));
+    std::fs::create_dir_all(&home).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let home = home.canonicalize().unwrap();
+    let fixture = Arc::new(Fixture {
+        base_url: "http://127.0.0.1:1/v1".into(),
+        account: StdMutex::new(AccountSnapshot {
+            credential_epoch: "epoch".into(),
+            generation: 1,
+            account: Some(AccountView {
+                issuer: "https://accounts.example".into(),
+                subject: "fixture".into(),
+                email: Some("fixture@example.com".into()),
+                name: Some("Fixture".into()),
+                granted_scopes: vec!["model".into()],
+            }),
+        }),
+        limited: StdMutex::new(Limited::Unavailable),
+        recovered: AtomicUsize::new(0),
+        released: StdMutex::new(vec![]),
+    });
+    let provider = fixture.clone();
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::install_local_execution(
+        &mut builder,
+        ModelProviderPlugin::process,
+        WorkspaceToolsConfig {
+            output_root: home.join("output"),
+        },
+        dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),
+    );
+    dim_app_server::permission_rules::install(&mut builder);
+    builder
+        .session_value(Arc::new(HistoryRenderer::default()))
+        .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
+        .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
+            }),
+        );
+    let config = ServerConfig {
+        unix_path: Some(home.join("daemon.sock")),
+        product_home: Some(home.clone()),
+        target_home: Some(home.join("rust")),
+        managed_provider: Some(ManagedProviderRow(Arc::new(move |builtins, _| {
+            let provider = provider.clone();
+            builtins
+                .builtins
+                .register::<Value, _, _>("ManagedFixture", move |_| {
+                    Ok(FixturePlugin(provider.clone()))
+                });
+            "ManagedFixture".to_owned()
+        }))),
+        session_defaults: dim_agent_runtime::SessionConfig {
+            tools: Some(["read"].map(String::from).to_vec()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let server = serve(builder, config).await.unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client
+        .rpc("provider.refresh", json!({"providerId":"managed-fixture"}))
+        .await;
+    assert_ok(&created);
+    assert_eq!(created["result"]["version"], 1);
+    let listed = client
+        .rpc(
+            "provider.management",
+            json!({"providerId":"managed-fixture"}),
+        )
+        .await;
+    assert_ok(&listed);
+    let models = listed["result"]["providers"][0]["models"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(models[1]["model"]["modelId"], "limited-model");
+    assert_eq!(models[1]["unavailableReason"], "limits_undeclared");
+    assert!(
+        !models[1]["actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("set_enabled")),
+        "{models:?}"
+    );
+    // The edit declares the limits the base entry lacks; the stored reason
+    // stays, and the effective one is derived from what the read now holds.
+    assert_ok(
+        &client
+            .rpc(
+                "provider.models.edit",
+                json!({"providerId":"managed-fixture","expectedVersion":1,
+                    "modelId":"limited-model",
+                    "edit":{"contextWindow":128000,"maxOutputTokens":4096}}),
+            )
+            .await,
+    );
+    let usable = client
+        .rpc(
+            "provider.management",
+            json!({"providerId":"managed-fixture"}),
+        )
+        .await;
+    assert_ok(&usable);
+    assert_eq!(
+        usable["result"]["providers"][0]["models"][1]["unavailableReason"],
+        Value::Null
+    );
+    assert!(
+        usable["result"]["providers"][0]["models"][1]["actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("set_enabled")),
+        "the model's own edit makes it toggleable"
+    );
+    // A set that omits the now-usable model disables it.
+    let disabled = client
+        .rpc(
+            "provider.models.set_enabled",
+            json!({"providerId":"managed-fixture","expectedVersion":2,
+                "modelIds":["fixture-model"]}),
+        )
+        .await;
+    assert_ok(&disabled);
+    assert_eq!(
+        disabled["result"]["disabledModelIds"],
+        json!(["limited-model"])
+    );
+    let reread = client
+        .rpc(
+            "provider.management",
+            json!({"providerId":"managed-fixture"}),
+        )
+        .await;
+    assert_eq!(
+        reread["result"]["providers"][0]["models"][1]["enabled"],
+        false
+    );
+    // A set that names it enables it again.
+    let enabled = client
+        .rpc(
+            "provider.models.set_enabled",
+            json!({"providerId":"managed-fixture","expectedVersion":3,
+                "modelIds":["fixture-model","limited-model"]}),
+        )
+        .await;
+    assert_ok(&enabled);
+    assert_eq!(enabled["result"]["disabledModelIds"], json!([]));
+    // Reset removes the override: the stored reason applies again, so the
+    // set does not govern the model and a set that omits it changes nothing.
+    assert_ok(
+        &client
+            .rpc(
+                "provider.models.reset",
+                json!({"providerId":"managed-fixture","expectedVersion":4,
+                    "modelId":"limited-model"}),
+            )
+            .await,
+    );
+    let reset = client
+        .rpc(
+            "provider.management",
+            json!({"providerId":"managed-fixture"}),
+        )
+        .await;
+    assert_ok(&reset);
+    assert_eq!(
+        reset["result"]["providers"][0]["models"][1]["unavailableReason"],
+        "limits_undeclared"
+    );
+    let omitted = client
+        .rpc(
+            "provider.models.set_enabled",
+            json!({"providerId":"managed-fixture","expectedVersion":5,
+                "modelIds":["fixture-model"]}),
+        )
+        .await;
+    assert_ok(&omitted);
+    assert_eq!(omitted["result"]["disabledModelIds"], json!([]));
+    assert_ok(&client.rpc("daemon.shutdown", json!({})).await);
+    server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
