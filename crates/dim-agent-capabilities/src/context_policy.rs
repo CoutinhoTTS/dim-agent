@@ -1,7 +1,7 @@
 use crate::{
     history::{
         HistoryEntry, HistoryRenderer, context_compaction, context_configuration, digest_message,
-        projection_checkpoint, truncate_middle, user_message,
+        truncate_middle, user_message,
     },
     host::*,
 };
@@ -71,7 +71,6 @@ pub(crate) struct PolicyContext {
     compaction: Option<ContextCompactionData>,
     order: Vec<PolicyOrderEvent>,
     full: Option<ContextHistory>,
-    checkpoint: Option<ProjectionCheckpoint>,
 }
 
 impl PolicyContext {
@@ -101,7 +100,6 @@ impl PolicyContext {
             compaction,
             order,
             full: Some(context),
-            checkpoint: None,
         }
     }
 
@@ -118,7 +116,6 @@ impl PolicyContext {
             compaction,
             order: streamed.order.clone(),
             full: None,
-            checkpoint: streamed.checkpoint.clone(),
         }
     }
 
@@ -185,10 +182,6 @@ impl PolicyContext {
 
     pub fn full(&self) -> Option<&ContextHistory> {
         self.full.as_ref()
-    }
-
-    pub fn checkpoint(&self) -> Option<&ProjectionCheckpoint> {
-        self.checkpoint.as_ref()
     }
 
     pub fn sequence(&self, id: &str) -> Option<u64> {
@@ -734,7 +727,9 @@ impl ContextPolicy {
                     None,
                 ),
             };
-            return self.commit(step, view, model, start, outcome).await;
+            return self
+                .commit(step, view, model, start, outcome, &policy_order)
+                .await;
         }
         let first = self
             .pass(
@@ -851,7 +846,8 @@ impl ContextPolicy {
             },
             StepOutcome::Cancelled { reason } => ContextCompactionResult::Cancelled { reason },
         };
-        self.commit(step, view, model, start, outcome).await
+        self.commit(step, view, model, start, outcome, &policy_order)
+            .await
     }
 
     /// Whether the entries a compaction at `cut` removes — less the pinned
@@ -897,6 +893,7 @@ impl ContextPolicy {
         model: Arc<dyn ContextModel>,
         start: Arc<AgentEvent>,
         outcome: ContextCompactionResult,
+        policy_order: &PolicyOrder,
     ) -> Result<Compacted, HostError> {
         let fact = self
             .timeline
@@ -938,27 +935,32 @@ impl ContextPolicy {
             });
         if request.is_ok() {
             let saved = async {
-                let snapshot = match (view.context.full(), view.context.checkpoint()) {
-                    (Some(context), _) => {
-                        Some(self.history.snapshot(context, retain_from, &fact)?)
-                    }
-                    (None, Some(checkpoint)) => {
-                        Some(self.history.snapshot_from_checkpoint(checkpoint, &fact)?)
-                    }
-                    (None, None)
-                        if std::ptr::eq(
-                            self.history.checkpoint as *const (),
-                            projection_checkpoint as *const (),
-                        ) =>
-                    {
+                let snapshot = match view.context.full() {
+                    Some(context) => Some(self.history.snapshot(context, retain_from, &fact)?),
+                    None if self.history.checkpoint.is_builtin() => {
+                        let resume = policy_order
+                            .events
+                            .iter()
+                            .find(|event| event.id == *retain_from)
+                            .map(|event| TimelinePosition {
+                                branch_id: event.branch_id.clone(),
+                                sequence: event.sequence,
+                            })
+                            .ok_or_else(|| "compaction cut is outside the branch".to_owned())?;
                         let checkpoint = self
                             .history
-                            .stream_checkpoint(&self.timeline, view.facts.through, retain_from, 256)
+                            .stream_checkpoint(
+                                &self.timeline,
+                                resume,
+                                view.facts.through,
+                                retain_from,
+                                256,
+                            )
                             .await
                             .map_err(|error| error.to_string())?;
                         Some(self.history.snapshot_from_checkpoint(&checkpoint, &fact)?)
                     }
-                    (None, None) => {
+                    None => {
                         let (context, _) = self
                             .history
                             .rendered_context(&self.timeline, view.facts.through)

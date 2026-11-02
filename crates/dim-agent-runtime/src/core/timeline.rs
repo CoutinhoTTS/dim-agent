@@ -756,33 +756,6 @@ impl Timeline {
             .map(|record| record.event)
             .collect())
     }
-    /// A local event range read from the store, bypassing the hot cache.
-    #[service(skip)]
-    pub async fn stored_local<R: RangeBounds<u64> + Send>(
-        &self,
-        range: R,
-    ) -> Result<Vec<Arc<AgentEvent>>> {
-        let start = match range.start_bound() {
-            Bound::Included(n) => *n,
-            Bound::Excluded(n) => n.saturating_add(1),
-            Bound::Unbounded => 1,
-        }
-        .max(1);
-        let end = match range.end_bound() {
-            Bound::Included(n) => *n,
-            Bound::Excluded(n) => n.saturating_sub(1),
-            Bound::Unbounded => self.committed(),
-        };
-        let end = self.through(Some(end))?;
-        Ok(self
-            .0
-            .store
-            .read(&self.0.key, start..=end)
-            .await?
-            .into_iter()
-            .map(|record| record.event)
-            .collect())
-    }
 
     /// Full fact replay; no interpreter or snapshot is required.
     #[service(skip)]
