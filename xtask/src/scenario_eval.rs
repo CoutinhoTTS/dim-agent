@@ -1520,6 +1520,12 @@ async fn decline_question(
                     continue;
                 }
                 let call_id = call["id"].as_str().unwrap_or_default();
+                // `ToolCallData.calls[].id` is as required as `request_id`:
+                // the decline is keyed by both, so a call without an id
+                // cannot be keyed to any reply either.
+                if call_id.is_empty() {
+                    return Err(format!("{branch}: the ask_user call carries no id"));
+                }
                 if request.is_empty() {
                     return Err(format!(
                         "{branch}: the ask_user call {call_id} carries no request_id"
@@ -5183,6 +5189,9 @@ mod tests {
         /// The `step/tool-call` carries no `request_id`, which the event
         /// contract never does, so its call cannot be keyed.
         Unkeyed,
+        /// The `ask_user` call carries no id, which `ToolCallData` never
+        /// does, so its decline cannot be keyed to the call.
+        CallWithoutId,
     }
 
     /// What a scripted peer read: the `requestId` of every decline, in order,
@@ -5229,15 +5238,25 @@ mod tests {
             json!({"error": {"code": -32000, "message": "No ask_user call is waiting for this answer",
                              "data": {"appError": "question_not_pending"}}})
         }
-        /// One `ask_user` `step/tool-call` asking `call` under `request`;
-        /// `None` leaves the `request_id` out.
-        fn question_call(request: Option<&str>, call: &str) -> Vec<u8> {
-            let mut data = json!({"turn_id": "t1",
-                                  "calls": [{"id": call, "name": "ask_user", "input":
-                                    {"questions": [{"header": "Deploy",
-                                                    "question": "Where to deploy?",
-                                                    "options": [{"label": "production"},
-                                                                {"label": "staging"}]}]}}]});
+        /// One `ask_user` `step/tool-call` asking `calls` under `request`; a
+        /// `None` request leaves the `request_id` out, and a `None` call
+        /// leaves its id out.
+        fn question_call(request: Option<&str>, calls: &[Option<&str>]) -> Vec<u8> {
+            let calls: Vec<Value> = calls
+                .iter()
+                .map(|call| {
+                    let mut asked = json!({"name": "ask_user", "input":
+                        {"questions": [{"header": "Deploy",
+                                        "question": "Where to deploy?",
+                                        "options": [{"label": "production"},
+                                                    {"label": "staging"}]}]}});
+                    if let Some(call) = call {
+                        asked["id"] = json!(call);
+                    }
+                    asked
+                })
+                .collect();
+            let mut data = json!({"turn_id": "t1", "calls": calls});
             if let Some(request) = request {
                 data["request_id"] = json!(request);
             }
@@ -5338,7 +5357,7 @@ mod tests {
                                     .await
                                     .unwrap();
                                 write
-                                    .write_all(&question_call(Some("r2"), "c1"))
+                                    .write_all(&question_call(Some("r2"), &[Some("c1")]))
                                     .await
                                     .unwrap();
                                 None
@@ -5358,7 +5377,7 @@ mod tests {
                                 Some("r2")
                             }
                         },
-                        PeerScript::Unkeyed => {
+                        PeerScript::Unkeyed | PeerScript::CallWithoutId => {
                             write
                                 .write_all(&frame(&request, not_pending()))
                                 .await
@@ -5395,8 +5414,12 @@ mod tests {
                         PeerScript::Unkeyed => None,
                         _ => Some("r1"),
                     };
+                    let calls = match &script {
+                        PeerScript::CallWithoutId => vec![None],
+                        _ => vec![Some("c1")],
+                    };
                     write
-                        .write_all(&question_call(request, "c1"))
+                        .write_all(&question_call(request, &calls))
                         .await
                         .unwrap();
                 }
@@ -5583,6 +5606,36 @@ mod tests {
             error.contains("the ask_user call c1 carries no request_id"),
             "{error}"
         );
+        assert!(
+            reads.declines.lock().unwrap().is_empty(),
+            "the run sends no decline for the call"
+        );
+    }
+
+    /// A question's `ask_user` call always carries its own id
+    /// (`ToolCallData.calls[].id`), so a call without one cannot be keyed to
+    /// any reply: the run ends with an error naming the field rather than
+    /// keeping a decline the Session cannot match and sending it again for
+    /// the rest of the run.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_call_with_no_id_ends_the_run() {
+        let directory =
+            std::env::temp_dir().join(format!("dim-scenario-eval-no-id-{}", std::process::id()));
+        let (socket, reads) = scripted_peer(&directory, 8_000, PeerScript::CallWithoutId).await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.seconds = 10.;
+        let driven = drive(&mut client, &scenario, &std::env::temp_dir(), &peer_model()).await;
+        // The peer reads a request only after the driver sent it, so the
+        // count is final once it has read the last one.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let _ = std::fs::remove_dir_all(directory);
+        // The budget writes `seconds`, so `error` is the run ending on the
+        // call, not on its budget.
+        assert_eq!(driven.stop, "error", "{:?}", driven.error);
+        let error = driven.error.unwrap_or_default();
+        assert!(error.contains("the ask_user call carries no id"), "{error}");
         assert!(
             reads.declines.lock().unwrap().is_empty(),
             "the run sends no decline for the call"
