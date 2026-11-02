@@ -1,3 +1,4 @@
+use super::deletion::Store;
 use super::*;
 use dim_agent_capabilities::prompt_state::PromptSnapshot;
 use dim_agent_runtime::{Agent, CollaborationRole, Session};
@@ -1430,6 +1431,74 @@ async fn temporary_agents_stay_private_during_concurrent_create_and_close() {
     }
     done.cancel();
     assert!(reader.await.unwrap() > 0);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// #557: a Collaboration member records `internal` and its leader as parent,
+/// so the picker can leave it out and a client can open it by id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_is_an_internal_child_of_its_leader() {
+    let store = Store::new();
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let lead = leader(&mut client, allowed()).await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action": "request", "prompt": "tool:wait {\"millis\":30000}",
+            "profile": {"name": "helper", "description": "temporary", "systemPrompt": "", "tools": ["wait"]}})),
+        "queue",
+    )
+    .await;
+    let started = poll("temporary request", async || {
+        let timeline = events(&lead_session).await;
+        (!results(&timeline).is_empty()).then(|| last_ok(&timeline))
+    })
+    .await;
+    let member = started["sessionId"].as_str().unwrap().to_owned();
+    let ids = |page: &Value| -> Vec<String> {
+        page["result"]["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["sessionId"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let page = client.rpc("session.catalog", json!({})).await;
+    assert_ok(&page);
+    assert!(!ids(&page).contains(&member), "{page}");
+    let page = client
+        .rpc("session.catalog", json!({"withInternal":true}))
+        .await;
+    assert_ok(&page);
+    let row = page["result"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["sessionId"] == member.as_str())
+        .unwrap_or_else(|| panic!("the member is missing: {page}"));
+    assert_eq!(row["origin"], "internal");
+    assert_eq!(row["parentSessionId"], lead);
+    let listed = client.rpc("session.list", json!({})).await;
+    assert_ok(&listed);
+    let row = listed["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["sessionId"] == member.as_str())
+        .unwrap_or_else(|| panic!("the member is missing from session.list: {listed}"));
+    assert_eq!(row["origin"], "internal");
+    assert_eq!(row["parentSessionId"], lead);
+    let attached = client
+        .rpc("session.attach", json!({"sessionId": member}))
+        .await;
+    assert_ok(&attached);
+    assert_eq!(attached["result"]["origin"], "internal");
+    assert_eq!(attached["result"]["parentSessionId"], lead);
+    drop(client);
+    drop(agent);
     server.shutdown();
     server.join().await.unwrap();
 }
@@ -4016,6 +4085,69 @@ async fn deleting_the_last_two_members_together_ends_their_agent() {
     server.shutdown();
     server.join().await.unwrap();
     tokio::fs::remove_dir_all(directory).await.unwrap();
+}
+
+/// S5c §3.1: `requireInactive` covers the Sessions a delete would remove
+/// with the one it names. A leader whose led member is in use refuses
+/// `session_active`, names the member, and removes neither.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_leader_whose_member_is_in_use_is_not_deleted_when_inactive_is_required() {
+    let store = super::deletion::Store::new();
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, true, 3).await;
+    let lead = leader(&mut client, allowed()).await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    let holder = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action": "request", "agentId": holder, "prompt": "hello"})),
+        "queue",
+    )
+    .await;
+    returned(&mut client, &lead, &lead_session, 1).await;
+    let member = next_member(&lead_session, 0).await;
+    // An attached client keeps the member in use; the leader itself is idle
+    // once its request completed.
+    let mut watcher = Client::new_version(&server, true, 3).await;
+    assert_ok(
+        &watcher
+            .rpc("session.attach", json!({"sessionId":member}))
+            .await,
+    );
+
+    let refused = client
+        .rpc(
+            "session.delete",
+            json!({"sessionId":lead,"requireInactive":true}),
+        )
+        .await;
+    assert_eq!(refused["error"]["data"]["appError"], "session_active");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(&member),
+        "the reason names the member in use: {refused}"
+    );
+    assert!(
+        agent.get_session(&lead).is_some(),
+        "the leader is not closed"
+    );
+    assert!(!store.rows(&lead).is_empty() && !store.rows(&member).is_empty());
+
+    assert_ok(
+        &client
+            .rpc("session.delete", json!({"sessionId":lead}))
+            .await,
+    );
+    assert!(store.rows(&lead).is_empty() && store.rows(&member).is_empty());
+    drop((client, agent));
+    server.shutdown();
+    server.join().await.unwrap();
 }
 
 /// A store left with an incomplete delegation and an orphaned one: startup

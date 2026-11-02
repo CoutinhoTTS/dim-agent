@@ -1,6 +1,6 @@
 use crate::{
     ServerConfig,
-    agents::{AgentIndex, SessionUse},
+    agents::{AgentIndex, DeleteOutcome, SessionUse},
     control::ServerControl,
     outbound::{Frame, Sender},
     protocol::*,
@@ -421,7 +421,11 @@ impl Connection {
                 "Method requires protocol v3",
             ));
         }
-        if matches!(call, Call::SessionMcp(_) | Call::McpRefresh(_)) && rpc.mcp.is_none() {
+        if matches!(
+            call,
+            Call::SessionMcp(_) | Call::McpRefresh(_) | Call::McpAppWidget(_) | Call::McpAppCall(_)
+        ) && rpc.mcp.is_none()
+        {
             return Err(RpcError::app(
                 -32601,
                 "unknown_method",
@@ -457,6 +461,8 @@ impl Connection {
             | Call::SessionMcp(p)
             | Call::McpRefresh(p)
             | Call::SessionMethods(p) => (Some(&p.session_id), None),
+            Call::McpAppWidget(p) => (Some(&p.session_id), None),
+            Call::McpAppCall(p) => (Some(&p.session_id), None),
             Call::Create(p) => {
                 if p.agent_id.is_some() && self.protocol_version() < 3 {
                     return Err(RpcError::invalid("agentId requires protocol v3"));
@@ -622,6 +628,8 @@ impl Connection {
             Call::ExecStop(p) => Some(&p.session_id),
             Call::ModelUpdate(p) => Some(&p.session_id),
             Call::SessionMcp(p) | Call::McpRefresh(p) => Some(&p.session_id),
+            Call::McpAppWidget(p) => Some(&p.session_id),
+            Call::McpAppCall(p) => Some(&p.session_id),
             Call::Attach(p) => Some(&p.session_id),
             Call::BranchCreate(p) => Some(&p.session_id),
             Call::BranchEnd(p) => Some(&p.session_id),
@@ -657,6 +665,7 @@ impl Connection {
                 .map(|a| a.delivery.clone())
         });
         let include_summary = matches!(call, Call::Summaries(_));
+        let include_closed = matches!(&call, Call::Summaries(params) if params.include_closed);
         Some(match call {
             Call::Hello(_) => Err(RpcError::invalid("hello has already completed")),
             Call::Ping => Ok(Reply::Ping(PingResult {
@@ -710,7 +719,7 @@ impl Connection {
                     .expect("catalog reads have cancellation");
                 match rpc
                     .index
-                    .session_catalog(params, None, self.protocol_version(), cancel)
+                    .session_catalog(params, None, self.protocol_version(), false, cancel)
                     .await
                 {
                     Ok(mut page) => {
@@ -729,9 +738,9 @@ impl Connection {
                     Err(error) => Err(RpcError::from(error)),
                 }
             }
-            Call::List(params) | Call::Summaries(params) => {
+            Call::List(SessionList { agent_id }) | Call::Summaries(Summaries { agent_id, .. }) => {
                 let filter: Option<String> = if self.protocol_version() >= 3 {
-                    params.agent_id
+                    agent_id
                 } else {
                     Some(rpc.index.default_agent_id().to_owned())
                 };
@@ -748,9 +757,14 @@ impl Connection {
                         match rpc
                             .index
                             .session_catalog(
-                                Catalog::default(),
+                                Catalog {
+                                    with_internal: true,
+                                    with_acp_sessions: true,
+                                    ..Catalog::default()
+                                },
                                 filter,
                                 self.protocol_version(),
+                                include_closed,
                                 cancel,
                             )
                             .await
@@ -815,6 +829,8 @@ impl Connection {
                                 attached_clients: self.hub.attached_clients(s.id()),
                                 agent_id: (self.protocol_version() >= 3)
                                     .then(|| host.agent_id.clone()),
+                                origin: None,
+                                parent_session_id: None,
                                 title: (self.protocol_version() >= 3)
                                     .then(crate::storage::TitleFields::default),
                             })
@@ -843,6 +859,7 @@ impl Connection {
                         Err(error) => return Some(Err(RpcError::from(error))),
                     };
                     summaries.push(SessionSummary {
+                        closed: rpc.index.closed(&session.session_id),
                         session,
                         preview,
                         updated_at,
@@ -936,11 +953,25 @@ impl Connection {
                 rpc.index.remove_version(&params.session_id);
                 result.map(|_| Reply::empty())
             }
+            Call::Delete(params) if params.require_inactive => {
+                match rpc.index.delete_if_inactive(&params.session_id).await {
+                    Ok(DeleteOutcome::Removed(deleted)) => {
+                        Ok(Reply::Deleted(DeleteResult { deleted }))
+                    }
+                    Ok(DeleteOutcome::InUse(reason)) => {
+                        Err(RpcError::app(-32000, "session_active", reason))
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, session_id=%params.session_id, "Session delete failed");
+                        Err(RpcError::from(error))
+                    }
+                }
+            }
             Call::Delete(params) => rpc
                 .index
                 .delete(&params.session_id)
                 .await
-                .map(|()| Reply::empty())
+                .map(|deleted| Reply::Deleted(DeleteResult { deleted }))
                 .map_err(|error| {
                     tracing::error!(%error, session_id=%params.session_id, "Session delete failed");
                     RpcError::from(error)
@@ -1048,6 +1079,43 @@ impl Connection {
                     .refresh()
                     .map_err(mcp::error)?;
                 Reply::empty()
+            }
+            Call::McpAppWidget(p) => {
+                if p.tool.is_empty() {
+                    return Err(RpcError::invalid("tool must not be empty"));
+                }
+                let widget = session
+                    .session_service::<crate::mcp::McpSession>()?
+                    .widget(&p.tool)
+                    .await
+                    .map_err(mcp::app_error)?;
+                Reply::McpWidget(widget)
+            }
+            Call::McpAppCall(p) => {
+                if p.server.is_empty() {
+                    return Err(RpcError::invalid("server must not be empty"));
+                }
+                if p.tool.is_empty() {
+                    return Err(RpcError::invalid("tool must not be empty"));
+                }
+                let started = std::time::Instant::now();
+                let outcome = session
+                    .session_service::<crate::mcp::McpSession>()?
+                    .call(&p.server, &p.tool, p.arguments)
+                    .await;
+                tracing::info!(
+                    target: "mcp.app",
+                    session = %session.id(),
+                    server = %p.server,
+                    tool = %p.tool,
+                    operation = "call",
+                    outcome = %match &outcome {
+                        Ok(_) => "ok".to_owned(),
+                        Err(error) => error.to_string(),
+                    },
+                    duration_ms = started.elapsed().as_millis() as u64,
+                );
+                Reply::McpAppCall(outcome.map_err(mcp::app_error)?)
             }
             Call::PermissionGet(p) => {
                 let state = session
@@ -1285,9 +1353,18 @@ impl Connection {
         if let Some(interactive) = params.interactive {
             config.interactive = interactive;
         }
+        let origin = match params.origin {
+            None | Some(SessionOrigin::Client) => SessionOrigin::Client,
+            Some(SessionOrigin::Acp) => SessionOrigin::Acp,
+            Some(_) => {
+                return Err(RpcError::invalid(
+                    "a client may declare client or acp as a Session origin",
+                ));
+            }
+        };
         let session = rpc
             .index
-            .create_session(&host, config, self.protocol_version(), None)
+            .create_session(&host, config, self.protocol_version(), None, origin)
             .await
             .map_err(RpcError::from)?;
         rpc.index.retain_versions();

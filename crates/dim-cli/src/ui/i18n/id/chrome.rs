@@ -76,6 +76,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "fork the session at its last finished turn" => {
             "fork sesi pada giliran terakhir yang selesai"
         }
+        "rename this session" => "ganti nama sesi ini",
+        "Renamed to {title}" => "Diganti namanya menjadi {title}",
+        "The Session is now untitled." => "Sesi ini sekarang tanpa judul.",
+        "This daemon does not support renaming Sessions" => {
+            "Daemon ini tidak mendukung penggantian nama Sesi"
+        }
+        "Renaming failed" => "Penggantian nama gagal",
         "Starting" => "Memulai",
         "Delegation result" => "Hasil delegasi",
         "Enter details · x stop selected · Ctrl+X stop all · Esc close" => {
@@ -251,7 +258,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Nothing is running" => "Tak ada yang berjalan",
         "No queued message" => "Antrean kosong",
         "Only in fullscreen (/tui)" => "Hanya di layar penuh (/tui)",
-        "/{name} is not yet available" => "/{name} belum tersedia",
         "new session" => "sesi baru",
         "resumed {id} · {count} messages" => "lanjut {id} · {count} pesan",
         " · earlier history: /timeline" => " · riwayat lama: /timeline",
@@ -264,9 +270,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "answer required" => "perlu jawaban",
         "permission required" => "perlu izin",
         "esc interrupt" => "esc interupsi",
-        "↑ edit · ctrl+s steer now · /queue" => "↑ edit · ctrl+s steer kini · /queue",
-        "+{count} more · ↑ edit · ctrl+s steer now · /queue" => {
-            "+{count} lagi · ↑ edit · ctrl+s steer kini · /queue"
+        "shift+← edit last · ctrl+s steer now" => "shift+← edit terakhir · ctrl+s steer kini",
+        "+{count} more · shift+← edit last · ctrl+s steer now" => {
+            "+{count} lagi · shift+← edit terakhir · ctrl+s steer kini"
         }
         "Queue ({count})" => "Antrean ({count})",
         "Thinking…" => "Berpikir…",
@@ -473,14 +479,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Permission needed: {tool}" => "Perlu izin: {tool}",
         "Question waiting for your answer" => "Pertanyaan menunggu jawaban",
         "Notify when agent needs you" => "Beri tahu saat agen butuh Anda",
+        "Show ACP sessions" => "Tampilkan sesi ACP",
         // keys.rs
         "show the key bindings" => "lihat pintasan tombol",
         "Application keys" => "Tombol aplikasi",
-        "Enter submit · Shift+Enter or Ctrl+J newline · ↑↓ history" => {
-            "Enter kirim · Shift+Enter/Ctrl+J baris baru · ↑↓ riwayat"
+        "Enter submit or queue · empty draft: steer first queued · Shift+Enter or Ctrl+J newline · ↑↓ history" => {
+            "Enter kirim atau antrekan · draf kosong: steer antrean pertama · Shift+Enter/Ctrl+J baris baru · ↑↓ riwayat"
         }
-        "Ctrl+O or Ctrl+P commands · Esc interrupt or clear · Ctrl+S steer queued · ↑ edit queued" => {
-            "Ctrl+O/Ctrl+P perintah · Esc interupsi/hapus · Ctrl+S steer antrean · ↑ edit antrean"
+        "Ctrl+O or Ctrl+P commands · Esc interrupt, queued messages return · Ctrl+S steer draft or first queued · Shift+← edit last queued" => {
+            "Ctrl+O/Ctrl+P perintah · Esc interupsi, pesan antrean kembali · Ctrl+S steer draf atau antrean pertama · Shift+← edit antrean terakhir"
         }
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C hapus, 2x untuk keluar · Ctrl+D keluar jika draf kosong"
@@ -514,6 +521,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Daemon ini tidak mendukung kompresi konteks"
         }
         "compact the context of the shown line" => "kompresi konteks baris yang ditampilkan",
+        "follow or change the shown line's goal" => "ikuti atau ubah goal baris yang ditampilkan",
+        "◎ goal active" => "◎ goal aktif",
+        "◎ goal paused" => "◎ goal dijeda",
         "Kept verbatim" => "Dipertahankan apa adanya",
         "Tool effects" => "Catatan operasi alat",
         "insufficient space: {parts}" => "ruang tidak cukup: {parts}",

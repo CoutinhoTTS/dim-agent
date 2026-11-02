@@ -203,7 +203,7 @@ sequenceDiagram
   end
 ```
 
-`PostToolUse` 对 `step/tool-result` 批次中结果不是错误的每个匹配调用运行，`PostToolUseFailure` 对结果为 `is_error` 的每个匹配调用运行；一个批次写一个 Append 输入。`Stop` 在结果为 `completed` 的 `turn/end` 上运行；阻止会写一个携带原因的 Queue 续跑输入，连续最多 3 次（A8）。`SessionStart` 在 `main` 的历史中没有 `turn/start` 且没有 `hooks:session-start/*` 带键块时运行一次；其 Append 输入与任何空闲 Append 一样，等待第一个驱动输入。分支上已有回合开始时，`SessionStart` 的输出同样被丢弃，因为该块必须先于第一个回合。`Notification` 在 `approval/request` 上运行，不写任何东西。带 `async: true` 的处理器可在上述任何点运行，没有任何东西等待或读取它们的输出。`HooksBranch` 还从它消费的已采用 `context/configured` 中，记下每个已声明 MCP 工具的迁移别名（G.2）。
+`PostToolUse` 对 `step/tool-result` 批次中结果不是错误的每个匹配调用运行，`PostToolUseFailure` 对结果为 `is_error` 的每个匹配调用运行；一个批次写一个 Append 输入。`Stop` 在结果为 `completed` 的 `turn/end` 上运行；阻止会写一个携带原因的 Queue 续跑输入，连续最多 3 次（A8）。`SessionStart` 在 `main` 的历史中没有 `turn/start` 且没有 `hooks:session-start/*` 带键块时运行一次；其 Append 输入与任何空闲 Append 一样，等待第一个驱动输入。分支上已有回合开始时，`SessionStart` 的输出同样被丢弃，因为该块必须先于第一个回合。`Notification` 在 `approval/request` 上运行，不写任何东西。带 `async: true` 的处理器可在上述任何点运行，没有任何东西等待或读取它们的输出。`HooksBranch` 按分支上生效的声明解析每个工具事件的迁移别名（G.2）。
 
 ## 4. 时序与冲突
 
@@ -319,7 +319,7 @@ AcpGateway 自己的设计把 Hooks 对 `session.submit` 的 `input_blocked` 拒
 | — | 事件的 stdin 对象（A.3）写入 HostPlatform 为它启动的进程的 stdin，写完即关闭；环境新增 `DIMCODE_HOME` 与 `DIM_PLUGIN_ROOT`（A.6.3） |
 | — | Hook 经 `dimcode export "$DIM_SESSION_ID"` 读取 Session 的 Timeline；没有 `transcript_path`（A.3） |
 | — | `PreCompact`/`PostCompact`、`SessionEnd` 与 `SubagentStart`/`SubagentStop` 仍不支持，原因见 G.1 |
-| — | 原生 CLI 新增 `dimcode hooks list` 与 `dimcode hooks enable\|disable`（[CLI 命令](../cli-commands.md#命令)） |
+| — | 原生 CLI 新增 `dimcode hooks list`、`dimcode hooks enable\|disable`、`dimcode hooks edit` 与 `dimcode hooks set PATH`（[CLI 命令](../cli-commands.md#命令)） |
 
 ### 10.2 已接受的所有者改动
 
@@ -473,11 +473,11 @@ AcpGateway 自己的设计把 Hooks 对 `session.submit` 的 `input_blocked` 拒
 
 | 方法 | 参数 | 结果 |
 | --- | --- | --- |
-| `hooks.catalog`（不修改状态） | `{cwd?}` | `userRevision`、`projectsRevision`；每个来源：`source`、`path`（插件来源为 `dir`）、`enabled`、`state`（`ok`、`missing`、带消息的 `invalid`）；每个处理器：`event`、`matcher`、`command`、`timeout`、`onFailure`、`async`、`state`（`ok`、`unsupported`、`invalid`）；`disableAllHooks` |
+| `hooks.catalog`（不修改状态） | `{cwd?}` | `userRevision`、`userDocument`（用户文档的存储形式，`hooks.save` 以该版本替换它）、`projectsRevision`；每个来源：`source`、`path`（插件来源为 `dir`）、`enabled`、`state`（`ok`、`missing`、带消息的 `invalid`）；每个处理器：`event`、`matcher`、`command`、`timeout`、`onFailure`、`async`、`state`（`ok`、`unsupported`、`invalid`）；`disableAllHooks` |
 | `hooks.save` | `{expectedRevision, document}` | `{revision}`；以 CAS 写 `hooks` 的用户作用域，由其 `BusinessDocument` 校验 |
 | `hooks.set_enabled` | `{cwd, enabled, expectedRevision}` | `{revision}`；为 Settings 给 `cwd` 授权的项目根以 CAS 写 `hooks-projects` |
 
-项目文件在仓库中编辑，不经这些方法。`hooks-plugins` 只由所有者操作写入（§1），这里的方法都不写它。Hooks 没有写配置的工具，也没有 agent 可达的写配置路径。原生 CLI 是 `hooks.catalog` 与 `hooks.set_enabled` 的客户端界面（[CLI 命令](../cli-commands.md#命令)）。
+项目文件在仓库中编辑，不经这些方法。`hooks-plugins` 只由所有者操作写入（§1），这里的方法都不写它。Hooks 没有写配置的工具，也没有 agent 可达的写配置路径。原生客户端的管理界面是 `hooks.catalog`、`hooks.save` 与 `hooks.set_enabled` 的客户端界面：`/hooks` 面板、`dimcode hooks list|enable|disable`、`dimcode hooks edit` 与 `dimcode hooks set PATH`（[CLI 命令](../cli-commands.md#命令)）。
 
 ## 附录 B. 完整冲突表
 
@@ -572,7 +572,7 @@ AcpGateway 自己的设计把 Hooks 对 `session.submit` 的 `input_blocked` 拒
 
 ## 附录 G. 从 Claude Code 与 Codex 迁移
 
-Dim 不读取 Claude 或 Codex 的文件，也没有导入命令。迁移时复制 `hooks` 对象：把 `~/.claude/settings.json` 或 `~/.codex/hooks.json` 中的复制到用户文档（`hooks.save`，或调用它的 CLI），把仓库的 `.claude/settings.json`、`.claude/settings.local.json` 或 `.codex/hooks.json` 中的复制到 `.dimcode/hooks.json`，然后启用该工作区（`hooks.set_enabled`）。Codex 在 `config.toml` 中的 `[hooks]` 表需改写为 JSON。脚本只要仅使用下面的兼容部分，就继续可用。
+Dim 不读取 Claude 或 Codex 的文件，也没有导入命令。迁移时复制 `hooks` 对象：把 `~/.claude/settings.json` 或 `~/.codex/hooks.json` 中的复制到用户文档（用 `dimcode hooks edit`、`dimcode hooks set PATH` 或 `/hooks` 面板中的 Ctrl+E，它们调用 `hooks.save`），把仓库的 `.claude/settings.json`、`.claude/settings.local.json` 或 `.codex/hooks.json` 中的复制到 `.dimcode/hooks.json`，然后启用该工作区（`hooks.set_enabled`）。Codex 在 `config.toml` 中的 `[hooks]` 表需改写为 JSON。脚本只要仅使用下面的兼容部分，就继续可用。
 
 ### G.1 事件
 
@@ -590,11 +590,11 @@ Dim 不读取 Claude 或 Codex 的文件，也没有导入命令。迁移时复�
 
 ### G.2 工具名
 
-匹配器同时对 Dim 工具名和别名测试，所以粘贴过来的匹配器仍选中相同的工具；stdin 上的 `tool_name` 始终是 Dim 名。
+匹配器同时对 Dim 工具名和别名测试，所以粘贴过来的匹配器仍选中相同的工具；stdin 上的 `tool_name` 始终是 Dim 名。别名是工具声明的属性，`HooksBranch` 在每个工具事件上用同一种方式解析它：分支已采用工具部分时，别名来自该部分的声明；只有分支未采用任何工具部分时，才读取注册表。
 
 | Dim 工具 | 匹配器接受的别名 |
 | --- | --- |
-| 风险为 `execute_process` 的任何工具（`exec`，即 shell 工具） | `Bash` |
+| 声明风险为 `execute_process` 的任何工具（`exec`，即 shell 工具） | `Bash` |
 | `read` | `Read` |
 | `write` | `Write` |
 | `edit` | `Edit` |

@@ -15,26 +15,56 @@ scrollback 与 fullscreen TUI 都按分类分组，分类及分类内的命令�
 退出和挂起必须完整匹配命令名或别名才执行：选择不完整匹配时只补全命令名并保留输入框。
 完整输入的命令（包括隐藏命令）仍走各自的处理流程。
 菜单中的权限入口为 `/permissions`；`/approvals` 和 `/approval` 是完整输入时仍可使用的兼容别名。
-菜单只列出斜杠命令，移除中断、steer、选择较早消息、滚动到顶部或底部等仅由按键触发的操作。
-`/keys` 仍列出这些快捷键：两种模式均支持 `Esc` 和 `Ctrl+S`；fullscreen 还支持
-`Tab`、`Home`、`End`，其中 `Home/End` 仅在草稿为空时滚动历史。
+菜单不列出运行、排队和 steer 的按键，它们只由按键触发。菜单只列出斜杠命令：选择较早消息、滚动到顶部或底部等视图操作也不列出；
+`Tab`、`Home`、`End` 保留各自的绑定。
 
 ```text
 Commands
   app     /exit        exit
   app     /keys        show the key bindings
   model   /permissions   file access, tool approval and process isolation
+  session /rename      rename this session
 
 / + Enter          -> /exit (completion only)
 /exit + Enter      -> exit
 /permissions + Enter -> permission controls
-
-Esc     interrupt the run
-Ctrl+S  steer with the next queued message
-Tab     pick an earlier message to edit or quote (fullscreen)
-Home    scroll to the top (fullscreen, empty draft)
-End     scroll to the bottom (fullscreen, empty draft)
 ```
+
+## 运行按键与排队
+
+排队与引导和 Codex CLI 不同：运行中 `Enter` 排队，`Ctrl+S` 引导。其余运行按键与 Codex CLI 的交互一致（已在其 TUI v0.166.0 中核对）。没有运行时，`Enter` 提交。
+
+```text
+按键                 空闲                         运行中
+Enter               提交                         排队草稿；草稿为空：steer 最早的排队消息
+Tab                 选择较早消息                 选择较早消息
+                    （fullscreen）               （fullscreen）
+Shift+Left          —                            草稿为空：把最新一条排队消息取回草稿
+Esc                 保留草稿                     中断；所有排队消息按先后顺序回到草稿
+Ctrl+S              —                            草稿非空：steer 草稿；为空：steer 最早的排队消息
+Up / Down           输入历史                     输入历史
+Home / End          滚动（fullscreen，草稿为空） 滚动（fullscreen，草稿为空）
+```
+
+- 排队消息在当前运行结束后运行，每次运行一条。被 steer 的消息在当前运行的下一个轮次边界并入该运行。
+- 取回消息和中断都通过 `session.input.withdraw` 撤回消息。文字只在撤回被删除后才进入草稿。
+  已离开队列的消息不会放回，其文字也不会再次发送。
+- 中断产生的撤回先于 stop 发出，因此运行不会开始下一条排队消息。
+- `Ctrl+C` 清空草稿。`Esc` 从不清空草稿。
+
+### 队列条
+
+有消息排队时，输入框上方的队列条在带标题的边框里画出队列：按排队顺序排列，最先运行的一条在最上面，最后一行提示作用于队列的按键。运行中，草稿为空时，`Shift+Left` 把最新排队的消息取回输入框编辑。`Ctrl+S` steer 当前草稿；草稿为空时，`Ctrl+S` 或 `Enter` steer 最早的排队消息。Up/Down 仍用于输入历史。提示只在命令表里有对应命令时才写出命令名，因此它写出的 `/name` 都在本地执行，不会作为用户消息发给模型。目前没有查看队列的命令，所以提示只列按键。
+
+```text
+┌─ Queue (2) ─────────────────────────────────────┐
+│ › fix the failing test in session_host          │
+│ › then update the design note                   │
+│ shift+← edit last · ctrl+s steer now            │
+└────────────────────────────────────────────────┘
+```
+
+队列条没有显示的消息把数量加进提示：`+3 more · shift+← edit last · ctrl+s steer now`。队列条最多显示五条消息，并在队列排空时保持已达到的高度。
 
 ## 用量报告
 
@@ -61,6 +91,100 @@ End     scroll to the bottom (fullscreen, empty draft)
 
   Web search  211 / 1,500  14%
   [######----------------------------------]
+```
+
+## 目标
+
+`/goal` 读取当前显示线的目标，并通过 Goal 注册的方法写入它。方法、标记块和读取目标的规则属于
+[Goal](plugins/Goal.md#a2-session-方法)（A.2、A.3）和 [Pursuit](plugins/Pursuit.md#3-对-goal-的修改)；
+本节规定原生客户端用它们做什么。该命令作为 `session` 分类列在命令菜单里，与 `/compact` 相同。
+
+| 形式 | 调用 |
+| --- | --- |
+| `/goal` | 无调用：当前显示线上的目标，或它没有目标 |
+| `/goal OBJECTIVE` | 目标处于进行中或暂停时 `session.goal.edit`，否则 `session.goal.set` |
+| `/goal set OBJECTIVE` | `session.goal.set` |
+| `/goal edit OBJECTIVE` | `session.goal.edit` |
+| `/goal pause` | `session.goal.pause` |
+| `/goal resume` | `session.goal.resume` |
+| `/goal clear` | `session.goal.clear` |
+
+每次调用都把当前显示线写进 `branchId`，并以该输入的 `sequence` 回复。不写其他内容的形式
+（`/goal`、`pause`、`resume`、`clear`）不再接受别的词；否则行内其余内容就是目标文本，含空格。
+`set` 和 `edit` 也显式给出目标，因此恰好是这些形式词之一的目标写成 `/goal set pause`（目标为 "pause"），
+目标为 "set" 时写成 `/goal set set`。
+
+`/goal OBJECTIVE` 只在目标处于进行中或暂停时写 `edit`：状态、裁判和续跑计数保持不变，暂停中的目标仍为暂停。
+没有目标、目标没有状态、或目标已完成/受阻时，它写 `set`：完成的目标不会被编辑回工作状态，完成之后再输入
+新目标就是开始下一个目标——状态为进行中、计数从第一次续跑重新开始，该线会朝它工作。
+
+`judge` 属于 Pursuit，任何形式都不发送它：从终端设置的目标由模型判定；由评审者判定的目标经
+`/goal edit` 保持其裁判不变，因为 `edit` 只写目标文本。`/pursue` 是 Pursuit 的后续选项（§10），
+不属于本契约。
+
+**读取目标。** 客户端按 Goal A.3 的规则，从它本来就在读的分支事件中折叠目标：最新存活的
+`goal:objective` 块是目标文本，最新存活的 `goal:status` 块是状态，`clear` 退役两者，`edit` 保留裁判，
+被 InputQueue 删除的输入会使折叠跳过它的块。它不新增查询方法，也不向 Goal 询问任何东西。不带参数的 `/goal`
+打印这个折叠结果。在 `set` 与 `edit` 之间选择之前，客户端先把该线读到已发布的头部，写入之后再读一次才打印：
+显示的状态与选择的方法都来自事件，而不是从回复猜出来的状态。折叠在该线自己的开场事件处重新开始——它的 `branch/start`，
+或分叉在复制完事实之后写入的 `session/forked`——所以新开的线没有目标，分叉 Session 的 `main` 也从不显示
+复制来的目标（Goal §2、A11）。v3 客户端会收到这个开场事件，因此分叉在客户端与 Goal 里的读法一致。
+
+**Goal 未装载时。** Session 会列出它提供的方法（`session.methods`）。其中没有 `session.goal.set` 时，
+`/goal` 打印 `Goal is not available on this daemon.` 并且不做任何调用。不提供 `session.methods` 的守护进程
+按它的话处理，直到某次调用回复 `unknown_method`，那时打印同一行。任何形式都不把输入行当作消息提交：
+会写入的 `/goal` 发送的是 Goal 自己的变更输入，之后由 Goal 决定。
+
+**客户端显示什么。**
+
+```text
+> /goal
+No goal on main.
+
+> /goal Make the CLI tests pass
+Goal set on main · active
+  Make the CLI tests pass
+
+> /goal Keep the CLI tests green
+Goal edited on main · active
+  Keep the CLI tests green
+
+> /goal pause
+Goal paused on main · paused (user)
+  Keep the CLI tests green
+
+> /goal
+Goal on main · paused (user)
+  Keep the CLI tests green
+
+> /goal resume
+Goal resumed on main · active
+  Keep the CLI tests green
+
+> /goal clear
+Goal cleared on main.
+```
+
+第一行给出实际调用的方法、目标所属的线和当前状态；`edited` 表示找到已有目标、只改了目标文本的那种形式。
+目标由 Pursuit 的裁判判定时，状态后跟 `evaluator judge`。暂停状态给出原因：`user`、`interrupted`、
+`limit`、`turn failed` 或 `evaluation failed`。目标文本另起一行，按它自身的换行输出。目标已清除或该线没有目标时只打印一行。
+
+行客户端和两种终端 UI 模式都打印这些行；在终端 UI 里它们是一段报告，因此更早的报告仍能在上方读到。
+当前显示线跟随目标（进行中或暂停）时，状态区带一个短元素，完成、受阻或已清除的目标没有：
+
+```text
+ ╭──────────────────────────────────────────────────────────────────────────────╮
+ │ › _                                                                          │
+ ╰────────────────────────────── ⑂ main ▸ child work · after message 0 ─────────╯
+  AGENT  ⏵⏵ Ask (legacy)  ◎ goal active  1.8K / 256K              provider/model
+```
+
+fullscreen 把同一元素画在输入框的下边框，位于运行状态旁：
+
+```text
+ ╭──────────────────────────────────────────────────────────────────────────────╮
+ │ › _                                                                          │
+ ╰──── ◎ goal paused   ⏵⏵ Bypass   1.8K / 256K ───── ● main · after message 4 ─╯
 ```
 
 ## 提供方账号
@@ -142,6 +266,114 @@ Reset 要求确认后把两个布尔值都写为 false。Off 可保留无效的�
 获准写入该来源的模型可以像用户操作此控件一样改变下次进程的边界；写入不创建授权，也不改变运行中的
 进程（[ADR 011 D2](../../adr/011-execution-settings.md)）。File access 不是 shell 代码的 OS 隔离。
 
+## 管理界面
+
+一个管理领域就是一个所有者的一组管理方法。App Server 经各自的所有者提供每个领域，不向客户端提供跨领域的通用通路（[Settings 服务](appserver/settings-service.md#11-不做什么)）：Skills 是 `skills.*`，Hooks 是 `hooks.*`，MCP 是 `mcp.*`，Scheduler 是 `schedule.*`，Workflow 定义是 `workflow.*`，命令规则是 `permission.rules` 与 `permission.set_rules`，插件是 PluginManager 的方法。它们的入口形态各不相同，并保持不变；本节只把客户端一侧做成同一个结构，使一个领域接入一次，而不是每个界面各接一次。
+
+每个领域在原生客户端里有两个界面：
+
+- 终端 UI 面板 `/<area>`，两种 TUI 模式都有，遵循[命令菜单契约](#命令菜单)；
+- 子命令 `dimcode <area> <verb>`。
+
+两个界面使用同一个领域适配器。`dimcode hooks list|enable|disable` 保持现有输出与退出码，只有来源的状态行与面板共用同一措辞；`dimcode hooks edit` 与 `dimcode hooks set PATH` 经同一个适配器写入。
+
+### 适配器
+
+适配器经客户端连接与守护进程通信，所以子命令不需要 Session。它在边界处把所有者的回复转成同一个客户端视图，执行该领域的动作，并拒绝守护进程没有公布其方法的动作，给出「守护进程不支持」错误。它从不回退到文件、别的方法或本机环境。
+
+客户端不推断方法没有报告的东西。视图需要回复里没有的事实时，由生产者报告：`skills.catalog` 报告每个条目的 `source`，`hooks.catalog` 报告用户文档及其 revision。
+
+比这些事实更旧的守护进程得到的领域缺少该事实：没有报告 `source` 的 Skill 列在领域自己的标题 `skills` 下，没有报告 `userDocument` 的 Hooks 不提供编辑。客户端从不从 id、路径或别的东西推导这类事实，所以也不需要靠特性串识别更新的契约。
+
+### 视图
+
+条目按所有者报告的分组归类——user、project、`plugin:<id>`、内置——顺序与所有者的报告顺序一致；一个 Hook 来源本身就是一个条目，归在 `sources` 分组下。每个条目有标签、详情、它的状态（已启用、已禁用、无效、被覆盖、只读）以及它提供的动作。所有者不允许客户端写入的条目（插件所有、已锁定）不提供写入动作，详情说明原因。所有者无法使用的东西作为 issue 列在条目之后。
+
+```text
+╭─ Skills ──────────────────────────────────────╮
+│ >                                             │
+│                                               │
+│   user                                        │
+│ › commit      enabled                         │
+│   review      disabled  shadowed by commit    │
+│   project                                     │
+│   deploy      enabled                         │
+│   Issues                                      │
+│     /w/.agents/skills/old/SKILL.md: no name   │
+│   Writes commit messages from the staged diff.│
+│   /home/u/.agents/skills/commit/SKILL.md      │
+╰──── Enter toggle · Ctrl+R reload · Esc close ─╯
+```
+
+### 动作
+
+客户端有一组封闭的动作种类。每种在每个面板里都只有一个键，键提示按表格顺序列出该领域提供的种类，加上所选条目提供的种类。
+
+| 种类 | 键 | 做什么 |
+| --- | --- | --- |
+| toggle | Enter 或 Space | 启用或停用该条目，与[执行设置](#执行设置)一致。 |
+| edit | Ctrl+E | 用外部编辑器打开该领域的文档，再写回。 |
+| reload | Ctrl+R | 重新读取该领域，或请所有者重新扫描，如 `skills.refresh`。 |
+| add | Ctrl+N | 新建一个条目。 |
+| remove | Ctrl+X | 确认后删除该条目，与 `/models` 清除已保存记录一致。 |
+| run | Ctrl+T | 该领域的具名操作，例如 test、run now 或 start。 |
+| inspect | Tab | 只读的详情视图。 |
+
+Esc 关闭面板。动作键要么是 Ctrl 组合键，要么是筛选从不接收的键，因为筛选会接收所有普通字母。作用于领域本身的种类属于领域的视图而不是某个条目——目前只有 reload——所以它不需要选中项：无论是否选中条目，键提示都会列出它，读取失败后 Ctrl+R 会重新读取该领域。这几个界面最先承载的领域用 toggle、reload 和 edit；之后的领域按需加入它用到的种类的代码，引入该种类的领域设计在此表中写下它。
+
+### 写入
+
+写入遵循[执行设置](#执行设置)：
+
+- 适配器保存它与草稿一起读到的 revision，revision 不是用户输入的字段；
+- 冲突时什么都不写并显示错误；随后重新读取该领域，丢弃草稿与过期 revision 的关联，下次编辑打开已存储的文档。它从不自动重试，也从不覆盖更新的文档；
+- 重新加载丢弃草稿并重新读取；
+- 因冲突而未写入的编辑不会静默丢失：消息说明用户文本所在的文件；
+- 与更新文档无关的拒绝——文本解析失败，或所有者拒绝该文本——保留草稿的 revision，所以编辑键会带着用户的文本再次打开并再次写入；
+- 与草稿无关的回复——toggle、读取、其他领域的回复——同样保留草稿及其 revision；只有草稿自身的保存发生冲突、它所属领域重新加载，或草稿自身结算时才丢弃这一关联；
+- 一个动作算不算写入，由它背后的方法决定：toggle、save 与 Skills 的 reload（`skills.refresh`），这些方法所有者都声明为 mutating；Hooks 的 reload 是读取，因为它在 `hooks.catalog` 之前不调用任何方法；
+- 守护进程已接受的写入按已完成报告：其后的读取失败在动作之后作为读取失败报告，绝不算拒绝或冲突。CLI 先打印动作那一行，再在标准错误上打印读取错误并以 0 退出；Skills 的 toggle 那一行写 id，因为名字来自读取；Hooks 的 toggle 写工作区，因为 toggle 就是项目来源；而单独的读取失败仍然是失败。面板显示动作的消息和读取错误，在下一次读取前不保留视图，并按成功结算草稿：删除其文件并丢弃其关联；
+- 读取和写入期间禁止修改。
+
+### 外部编辑器
+
+- 编辑器依次取 `$VISUAL`、`$EDITOR`、平台默认值：`vi`，Windows 上为 `notepad`。Unix 上像 git 一样经 `sh -c '<editor> "$@"' <editor> <file>` 运行，所以带引号的值或含空格的路径都能用。
+- 每次编辑写入自己的文件，独占创建且只有用户可读（Unix 上权限 0600），位于产品 home 下的临时目录（`<home>/edit/<area>-<unique>.json`），它既不是原生存储、不是 Web 工作区，也不被导出。写入成功或草稿没有变化时删除该文件；保留的草稿一直留到用户删除它，每条保留草稿的消息都说明它的路径。
+- 编辑器运行期间终端 UI 挂起——退出原始模式和备用屏幕，结束后恢复——两种 TUI 模式都一样。
+- 文件内容没有变化时不写入；编辑器以非零状态退出时同样不写入：消息说明退出状态和保留用户文本的文件。
+- 文本解析失败或所有者拒绝时，显示错误，编辑键带着用户的文本再次打开编辑器。
+- 交互式编辑需要终端。每次编辑都有一个非交互的孪生命令 `dimcode <area> set PATH`（`-` 表示 stdin），它用写入前紧邻读到的那次 revision 写入。
+- 文档可以包含命令、环境变量和请求头。临时文件的暴露面与用户自己的设置文件相同，不会更多。
+
+### 会话端口与唯一的面板
+
+- 管理经会话端口上的一个通用请求和一个通用回复，各自携带领域与类型化的动作或视图：`Command::Management(ManagementRequest)` 与 `Update::Management(ManagementReply)`。
+- 一个面板类型绘制所有领域。它建立在共享列表面板（[`ListPanel`](../../../crates/dim-cli/src/ui/list_panel.rs)）之上，确认、忙碌和消息状态只有一处。
+- 新增一个领域意味着：一个适配器、它的命令菜单行、它的子命令动词和它的设计表格行。它不新增 `Prompt`、`Command` 或 `Update` 变体。
+- 现有面板——`/plugins`、`/permissions`——在下次改动时迁移到这个结构。本节不迁移它们，在迁移前它们保留自己的按键。
+
+```text
+/skills ──► Command::Management { area, List } ──► 适配器
+                                                    │ 方法已公布？ 否 ──► 不支持该守护进程的错误
+                                                    │ skills.catalog
+                          Update::Management ◄───────┴ 分组、条目、状态、动作、issues
+面板  ◄───────────────────{ area, view }◄──────────┘
+   │
+   ├─ Enter ──► Command { area, Toggle { id, enabled } } ──► skills.set_enabled ──► skills.catalog
+   │                                                                                （再次给出视图）
+   └─ Ctrl+E ──► 外部编辑器 ──► Command { area, Save { expectedRevision, document } }
+                                ──► hooks.save ──► hooks.catalog
+
+dimcode skills enable ID ──────────────────────────────► 同一个适配器，用自己的连接
+dimcode hooks set PATH   ──────────────────────────────► 同一个适配器，用自己的连接
+```
+
+### 最先承载的两个领域
+
+Skills（#814）：`/skills` 面板与 `dimcode skills list|enable|disable|reload`，经 `skills.catalog`、`skills.set_enabled` 与 `skills.refresh`；`/reload-skills` 不打开面板，直接运行 reload 动作并报告结果。条目按 id 启用或停用，所以 toggle 不需要自己的 revision。安装和删除 Skill 包仍归插件安装（[总览](overview.md#附录-d-cli-层)）所有。
+
+Hooks（#809）：`/hooks` 面板与 `dimcode hooks list|enable|disable|edit|set PATH`。面板把每个来源列为一个带状态的条目；toggle 经 `hooks.set_enabled` 启用或停用项目来源（项目来源初始为停用，只有用户可以启用它）；edit 用编辑器打开用户文档，并以 `hooks.save` 写入，即 Settings 来源 `hooks` 的 CAS 写入。`dimcode hooks set PATH`（`-` 表示 stdin）是不经编辑器的同一次写入；revision 过期时两者都把用户文本留在 `<home>/edit/` 下它自己的文件里。用户来源提供 edit、不提供 toggle，因为它始终生效；插件来源两者都不提供，详情说明所属插件。
+
 ## 命令
 
 | 入口 | 行为 |
@@ -150,10 +382,24 @@ Reset 要求确认后把两个布尔值都写为 false。Off 可保留无效的�
 | `dimcode exec [-p TEXT] [--image PATH ...] [--json]` | 运行文本和/或本地图片后退出；没有 `-p` 时读取重定向的 stdin。 |
 | `dimcode exec resume SESSION_ID [-p TEXT] [--image PATH ...] [--json]` | 用文本和/或图片继续指定的已持久化 Session。 |
 | `dimcode session export SESSION_ID --format markdown\|json [--output PATH]` | 导出主分支；未给输出路径时写到 stdout。 |
+| `dimcode session rename SESSION TITLE` | 经 `session.rename` 设置该 Session 的手动标题，并打印服务端返回的标题。 |
+| `dimcode session rename SESSION --clear` | 清除手动标题，Session 回到无标题状态。 |
+| `dimcode session delete SESSION` | 永久删除该 Session 及存储为它保留的一切；不弹出确认。 |
+| `dimcode session cleanup (--older-than DURATION\|--keep N) [--yes]` | 列出某个选择器命中的 Session，确认后删除。 |
+| `/rename TITLE` 或 `/rename --clear` | 设置或清除所显示 Session 的手动标题；该文本是命令，永不成为模型输入。 |
 | `/export markdown PATH` 或 `/export json PATH` | 交互客户端空闲时把当前主分支导出到文件。 |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | 不经守护进程，把 Session 的完整 Timeline 写成带版本的 JSONL（[Timeline 导出](appserver/timeline-export.md)）；未给输出路径时写到 stdout。 |
+| `dimcode daemon vacuum [--database PATH]` | 用 SQLite `VACUUM` 重写离线原生库，回收已删除 Session 留下的页，并打印操作前后的大小（[存储格式](appserver/native-storage-format.md#sqlite-运行参数与空间回收)）；守护进程持库时失败，也不创建或升级库。 |
+| `dimcode skills list` | 经 `skills.catalog` 列出工作区的 Skills：每个条目的名称、来源、状态、文件与描述，然后是目录的 issues。 |
+| `dimcode skills enable\|disable ID` | 经 `skills.set_enabled` 启用或停用单个 Skill，然后再次报告目录。 |
+| `dimcode skills reload` | 经 `skills.refresh` 重新扫描用户与项目根，并通过 [Skills 管理界面](#管理界面)报告结果。 |
+| `/skills` | 打开会话所在工作区的 Skills 面板（[管理界面](#管理界面)）。 |
+| `/reload-skills` | 不打开面板，直接为会话所在工作区运行 reload 动作并报告找到的条目与 issues。 |
 | `dimcode hooks list [--cwd DIR]` | 经 `hooks.catalog` 列出生效的 Hook 目录（[Hooks](plugins/Hooks.md#a7-管理方法)）：每个来源的路径、启用状态与状态，以及每个处理器的事件、匹配器、命令与状态。 |
 | `dimcode hooks enable\|disable [--cwd DIR]` | 经 `hooks.set_enabled` 启用或停用 `DIR`（默认当前目录）所在工作区的项目 Hook，记录在 Settings 为其授权的项目根上。 |
+| `dimcode hooks edit` | 用 `$VISUAL`、`$EDITOR` 或平台默认编辑器打开用户 Hook 文档，并以 `hooks.catalog` 报告的 revision 经 `hooks.save` 写回；交互式编辑需要终端。 |
+| `dimcode hooks set PATH` | 从 `PATH`（`-` 表示 stdin）读取用户 Hook 文档并写入，用写入前紧邻读到的 revision；内容没有变化时不写入。 |
+| `/hooks` | 打开会话所在工作区的 Hooks 面板（[管理界面](#管理界面)）：每个来源一个条目，项目来源提供 toggle，用户文档提供 edit。 |
 | `dimcode login [PROVIDER] [--directory URL] [--device] [--redirect-uri URI]` | 启动被描述账号的浏览器或设备签到（[提供方账号](#提供方账号)）；不给 PROVIDER 时列出被描述的账号。 |
 | `dimcode account PROVIDER` | 打印被描述账号的非机密状态。 |
 | `dimcode logout PROVIDER` | 让被描述的账号退出。 |
@@ -161,23 +407,34 @@ Reset 要求确认后把两个布尔值都写为 false。Off 可保留无效的�
 | `/exit` | 在空闲的交互提示符处断开并退出。 |
 | `!command` / `!!command` | 以 record/private 模式调用 Session 现有的 `shell.run`，模型回合进行中也可用。 |
 | `--permission read-only\|workspace-write\|full-access` | 为 `dimcode`、`tui`、`exec` 和 `exec resume` 选择新建或恢复的 Session 的预设（[权限控制](#权限控制)）。 |
+| `/goal [OBJECTIVE \| set OBJECTIVE \| edit OBJECTIVE \| pause \| resume \| clear]` | 在行客户端和两种终端 UI 模式下读取并写入当前显示线的目标（[目标](#目标)）。 |
 | `/permissions` | 打开独立的 File access、Tool approval 和 Process isolation 控件；空闲时管理命令规则（[权限控制](#权限控制)）。 |
 | `/approvals`、`/approval` | `/permissions` 的兼容别名，仍支持旧预设参数。 |
 
-`dimcode hooks` 从不写 Hook 文档。用户文档是守护进程所服务 home 的 Settings 来源 `hooks`
-（原生存储中为 `user/hooks`，独立 home 中为 `hooks.json`），由 `hooks.save` 写入；
+`dimcode hooks` 只写用户的 Hook 文档，而且只经 edit 这一种类：`dimcode hooks edit`、
+`dimcode hooks set PATH` 以及 `/hooks` 里的 Ctrl+E 都调用守护进程所服务 home 的 Settings
+来源 `hooks`（原生存储中为 `user/hooks`，独立 home 中为 `hooks.json`）上的 `hooks.save`。
 项目文档是仓库中的 `.dimcode/hooks.json`，在仓库里编辑。`dimcode hooks enable|disable`
 把该工作区记录在用户本地的 `hooks-projects` 中，所以项目文件不能启用自己
 （[Hooks](plugins/Hooks.md#a7-管理方法)）。
 
-全局的 home、工作区、server 和模型配置选项保持现有含义，放在命令前后都可以。现有的
+全局的 home、工作区、server 和模型配置选项保持现有含义，放在命令前后都可以。`--server PATH`
+指向独立的 `dim-app-server` 二进制，CLI 按它自己的名字直接运行；默认则运行本可执行文件的
+`app-server` 子命令，因此指向本可执行文件是参数错误。指向不存在的路径、程序在开始服务前
+退出，或未及时开始服务时，也按同一要求报错，除非它留下了[启动说明](#守护进程启动失败)。现有的
 login/account/logout、models、MCP 和 daemon 命令仍然可用。现有的 `--prompt`、管道 stdin 和
 `--resume` 调用行为不变；`exec resume` 也接受同样的全局选项。重复给出 Session 或提示词是参数错误。
 `--json` 是 `exec` 的选项，`tui` 需要终端。help/version 与参数错误不会启动守护进程。
 
 ### 守护进程启动失败
 
-所有启动守护进程的入口共用 `connect_inner` 里的客户端启动。守护进程是 detached 的，
+所有启动守护进程的入口共用 `connect_inner` 里的客户端启动。在 Unix 上，守护进程只保留
+从启动方继承的标准描述符 0-2，启动时关闭其余继承来的描述符，因此长期运行的守护进程
+不会持有启动方的管道。Linux 用一次 `close_range` 调用关闭整个范围；该调用不可用时，
+以及其他 Unix 系统上，守护进程列出 Linux 的 `/proc/self/fd` 或 `/dev/fd`，关闭列表中
+的每个编号；连列表都读不到时，从 3 关闭到进程的描述符上限（依次取软限制、硬限制、
+`sysconf(_SC_OPEN_MAX)`，都没有时取 65,536），因此没有哪条路径会留下
+继承来的描述符。守护进程是 detached 的，
 stderr 追加到 `daemon.log`，所以每次启动的一份说明是唯一既不解析历史、也不依赖客户端
 可能关闭的管道的通道。启动前 CLI 删除 `<native home>/dimcode.sqlite.startup`；原生 home
 是守护进程自己的 home，即 `<home>/rust`。子进程在客户端连上之前退出时，CLI 读取这份
@@ -189,7 +446,8 @@ stderr 追加到 `daemon.log`，所以每次启动的一份说明是唯一既不
 诊断出不兼容时写这份说明，写明库、标记、守护进程支持的格式、库是更新、标记与结构
 不符、无法识别还是过旧，以及恢复办法（[原生存储格式 §
 启动不兼容诊断](../../design/appserver/native-storage-format.md#启动不兼容诊断)）。
-没有匹配的说明时保留现有的 `App Server exited (<status>); see ...`。失败的启动读完后
+没有匹配的说明时，内嵌守护进程保留现有的 `App Server exited (<status>); see ...`，
+`--server` 指定的程序则报出该选项必须指向独立的 `dim-app-server` 二进制。失败的启动读完后
 删除说明；连接成功也删除任何说明。CLI 从不打印 `daemon.log`，从不删除、重建、降级或
 改写库，并以 1 退出。开发说明继续使用 `./dev` 和它的隔离 home；终端说明本身只给兼容
 构建或 `--home PATH` 两条路。
@@ -207,6 +465,100 @@ Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
 交互式导出解析器读取格式词，把行的其余部分当作字面路径（包括空格），不做 shell 求值或引号展开。
 缺少路径或格式不支持时打印用法并回到提示符，不提交输入。`/exit` 不带参数。只拦截这些确切的命令名；
 其他文本走普通输入路径。子命令不建立插件命令注册表。
+
+### 会话标题
+
+手动标题是 Session 自己的状态：`session.list` 与 `session.summaries` 以 `manual` 来源报告它，
+之后的自动生成永不替换它（[标题元数据](appserver/session-title-metadata.md)、
+[SessionTitle](plugins/SessionTitle.md)）。`session.rename {sessionId, title}` 设置它，
+`title: null` 清除它。标题文本不属于任何线，也不产生 Timeline 事件，所以重命名不增添模型读到的内容。
+
+`session.rename` 是 Session 方法：客户端直接调用它，`hello.features` 并不列出它。不提供它的
+Session 回答 `unknown_method`，客户端将其报告为不支持的守护进程错误，输入的文字绝不会
+作为替代被提交。尚未附加 Session 时同理：没有显示中的 Session，`/rename` 直接说明并不发送任何内容。
+
+`dimcode session rename SESSION TITLE` 打印服务端返回的标题，`--clear` 打印该 Session 已无标题。
+TITLE 与 `--clear` 必须恰好给出一个，所以漏写参数是用法错误，绝不因此清除标题；空白或只含空格的
+TITLE 视为缺失，也按同样方式拒绝。
+`/rename TITLE` 与 `/rename --clear` 对所显示的 Session 做同样的事，并用一行状态说明发生了
+哪一种。命令面板的这一行声明了标题参数，所以从面板选中 `/rename` 只是填入 `/rename ` 并等待
+输入；对空的 `/rename` 回车会得到 `needs <title>` 提示且不发送任何内容，`--clear` 是唯一
+无需标题即可清除的形式。两种形式都是客户端处理的命令：文本从不入队、从不提交，模型回合进行
+中也是如此。`/resume` 列表每次打开都读取 `session.catalog`，在没有该目录的守护进程上退回
+`session.summaries`，因此显示新标题；页头显示的是首条消息的主题，不受影响。空闲的行式客户端
+读取同样的两种形式，对空的 `/rename` 打印 `Use /rename TITLE or /rename --clear`。
+
+### 会话删除与清理
+
+`dimcode session delete SESSION` 删除该 Session 及其存储为它保留的一切
+（[Session 删除](appserver/session-deletion-and-fork.md)）。不弹出确认：命令行上给出的 id 就是意图。
+回复说明本次调用是否移除了它（[`deleted`](appserver/session-deletion-and-fork.md#31-method)）：为
+`true` 时打印 `Deleted ID`，为 `false` 时在 stderr 打印
+`Nothing was removed: no stored Session ID.` 并以 1 退出。守护进程
+在这个 id 下没有行，是一次什么都没移除的成功删除；这不是用法错误，命令行本身写错才是。回复不带该字段
+（来自更旧的 App Server）时按一次删除处理：两种情况下行都已不在，也就是所要求的状态。
+
+`dimcode session cleanup` 用同样的两个方法组合删除，符合
+[§5.1](appserver/session-deletion-and-fork.md#51-cleanup-by-age-or-count) 的要求。它用
+`includeClosed: true` 读 `session.summaries`，因此本守护进程关闭的 Session 也会列出，并在预览里
+标为 `closed`：它的行仍在存储中，而别的列目录都不显示它
+（[Session 目录](appserver/session-catalog.md#33-sessionsummaries)）。没有这个参数的旧版 App Server
+会以 `invalid_params` 拒绝，而缺了它命令就看不到本守护进程关闭的 Session；因此命令在任何删除之前
+停下，打印 `This App Server is too old to clean up Sessions safely; nothing was deleted.` 并以 1
+退出。它在每次删除时带的 `requireInactive` 与 `includeClosed` 一同落地，所以拒绝其一的服务器两者
+都拒绝；某次删除在尚未删除任何东西之前回答 `invalid_params` 时，也按同一方式停下。它用两个选择器之一，
+两者都读 `session.summaries` 的 `updatedAt`，即 Session 的最后活跃时间：
+
+| 选择器 | 选择范围 |
+| --- | --- |
+| `--older-than DURATION` | `updatedAt` 距今至少 `DURATION` 的每个 Session。`DURATION` 是数字加单位 `d`、`h` 或 `m`，例如 `30d`。 |
+| `--keep N` | 保留最近活跃的 N 个 Session；其余全部选中。 |
+
+清理只选 `/resume` 默认列出的 Session
+（[分类](../../design/appserver/session-classification.md#35-catalog-visibility)）：来源为 `client` 或 `unknown`。
+`internal` 的 Session
+永远不会被选中：成员随其 leader 的删除一起消失，启动的 Session 属于它的插件。`acp` 的 Session
+同样不会被选中；用 `dimcode session delete ID` 删除它。不被选中的 Session 既不占用 `--keep N`
+的名额，也不出现在预览里。
+
+轮次正在运行或仍有客户端附着的 Session 会被保留：预览在选择结果之后以 `Kept (active):` 列出这些
+被跳过的 Session，列与选择结果相同，其后是原因（`running`、`N clients attached`），这样的 Session
+一律不删除，`--yes` 也一样。失败或正在关闭的线不是保留的理由：线上没有工作，删除自身的关闭会结算它，
+所以没有别的使用在用时，清理会删除这样的 Session。`--keep N` 仍然保留最近活跃的 N 个 Session；
+比这 N 个更旧的活跃 Session
+也保留，且不占用 N 中的一个名额。`dimcode session delete ID` 仍可有意删除一个活跃 Session：服务端
+允许，这条规则属于批量命令。这个划分是预览对 `running`（只覆盖 `main`）与 `attachedClients` 的读取；
+每个删除都带 `requireInactive: true`，所以所有者在删除时再查一次，逐条线，并把使用与 hold 都算进去。
+被所有者以 `session_active` 拒绝的 Session 在删除之后以 `Kept (in use at the delete):` 列出，列相同，
+其后是所有者的
+原因；拒绝不是失败，不改变退出状态。回复为 `deleted: false` 的删除表示摘要读出之后另一个调用方已把该
+Session 移除：命令打印 `Already gone: ID`，既不算作删除也不算作失败。回复中没有该字段则算作删除，与
+`dimcode session delete` 的读法一致。选中的 Session 全部被保留时，命令打印
+`Nothing to delete: every matching Session is active.` 并以 0 退出，无论预览把它们全部保留还是
+所有者拒绝了每一次删除。
+
+必须恰好给出一个选择器。命令在读取按键之前先打印选择结果——id、标题（无标题时 `-`）以及该 Session
+最后活跃距今多久，每个一行，本守护进程关闭的 Session 在其后加 `closed`，此处以空格示意——确认之后
+才删除：
+
+```text
+$ dimcode session cleanup --keep 1
+a1b2c3d4-…  Notes on the build  3d ago
+5e6f7a8b-…  -                   12d ago  closed
+Kept (active):
+c3d4e5f6-…  Fix the parser      1d ago   running
+Delete 2 Sessions? [y/N] y
+Deleted a1b2c3d4-…
+Deleted 5e6f7a8b-…
+```
+
+在终端上只有 `y` 或 `yes` 确认。没有终端时任何输入都不算确认，脚本要传 `--yes`，它同时跳过提示；
+否则命令拒绝并点名 `--yes`。确认后的运行即使某个 id 失败也会删除其余每个选中的 id：每个失败都连同
+其 id 和方法错误一起报告，并为每个失败的 id 打印可重试的命令（`dimcode session delete ID`），
+整次运行以 1 退出。选择器没有选中任何 Session 时，命令说明它保留了什么：`--keep N` 打印
+`Nothing to delete: --keep N keeps every Session.`，`--older-than DURATION` 打印
+`Nothing to delete: no Session is older than DURATION.`；两种情况都以 0 退出。
+选中的 Session 全部活跃时打印上面那句。
 
 P1 shell 前缀只用于交互输入。其执行、记录、进度、取消和生命周期遵循 [ShellInput](plugins/ShellInput.md)。
 CLI 在发送请求前生成 `runId`，从不重试一次运行。前缀之后的命令原样传递；空命令打印用法。
@@ -433,7 +785,9 @@ Assistant: ...
 [permission] main: File access = Workspace read/write  <- 由其他客户端修改
 ```
 
-没有状态行：滚动回显客户端没有常驻区域，编辑器的提示行是按终端宽度截断的固定帮助文本。
+滚动回显客户端在编辑器下方画一行状态行：代理标记与工具审批方式（旧策略下为 `Ask (legacy)`）、目标标记、
+上下文对窗口的占用，以及一个显示当前状态的槽位——通知、需要回答或审批、`esc interrupt` 或后台任务数。
+模型（放得下时连同推理强度）靠右对齐；整行按终端宽度截断。
 
 ### 无头执行
 

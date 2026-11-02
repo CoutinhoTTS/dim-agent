@@ -15,6 +15,9 @@ mod context;
 #[path = "cli_flow/exit.rs"]
 mod exit;
 
+#[path = "cli_flow/goal.rs"]
+mod goal;
+
 #[path = "cli_flow/hooks.rs"]
 mod hooks;
 
@@ -24,8 +27,17 @@ mod migration;
 mod permission;
 #[path = "cli_flow/question.rs"]
 mod question;
+#[path = "cli_flow/server.rs"]
+mod server;
+#[path = "cli_flow/session_management.rs"]
+mod session_management;
+#[path = "cli_flow/skills.rs"]
+mod skills;
 #[path = "cli_flow/tasks.rs"]
 mod tasks;
+
+#[path = "support/daemon.rs"]
+mod daemon_cleanup;
 
 use dim_agent_capabilities::images::{MAX_BASE64_BYTES, MAX_EDGE, base64_len};
 use serde_json::{Value, json};
@@ -57,8 +69,25 @@ impl Home {
         let path = self.0.join("rust/daemon.sock");
         let listener = UnixListener::bind(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        listener.set_nonblocking(true).unwrap();
         thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
+            // A client that fails before connecting must fail the test, not
+            // hang the run.
+            let deadline = Instant::now() + PATIENCE;
+            let stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "no client connected within {PATIENCE:?}"
+                        );
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(PATIENCE)).unwrap();
             let mut wire = Wire(BufReader::new(stream));
             flow(&mut wire);
@@ -73,7 +102,8 @@ impl Home {
 }
 impl Drop for Home {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        daemon_cleanup::stop_daemon(&self.0);
+        daemon_cleanup::remove_directory(&self.0);
     }
 }
 
@@ -799,6 +829,158 @@ fn a_daemon_of_another_version_is_stopped_and_replaced() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// The daemon the CLI started for a home is gone once the home drops.
+///
+/// The harness finds it with `ps`, so a missing `ps` fails the test instead
+/// of reading as no daemon.
+#[test]
+fn a_home_drop_leaves_no_daemon_behind() {
+    let home = Home::new();
+    let path = home.0.clone();
+    let output = home.command().args(["models", "fixture"]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let pattern = path.to_str().unwrap();
+    assert_eq!(
+        daemon_cleanup::pids_naming(pattern).len(),
+        1,
+        "the CLI did not start its daemon for {}",
+        path.display()
+    );
+    drop(home);
+    assert!(
+        daemon_cleanup::pids_naming(pattern).is_empty(),
+        "the test left its daemon running for {}",
+        path.display()
+    );
+    assert!(!path.exists(), "the test left {} on disk", path.display());
+}
+
+/// The daemon closes the descriptors it inherited from the CLI.
+///
+/// The sweep and this test use the same listing: `/dev/fd` on macOS and the
+/// other Unix systems, and on Linux `close_range` or `/proc/self/fd`. The
+/// bounded fallback closes every number below the soft `RLIMIT_NOFILE`,
+/// which includes the pipe's inherited write end.
+#[test]
+fn a_daemon_keeps_no_descriptor_the_cli_inherited() {
+    let home = Home::new();
+    let (reader, writer) = std::io::pipe().unwrap();
+    let mut command = home.command();
+    command.args(["models", "fixture"]);
+    let inherited = writer.as_raw_fd();
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(&mut command, move || {
+            if libc::fcntl(inherited, libc::F_SETFD, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let status = command.status().unwrap();
+    drop(writer);
+    assert!(
+        status.success(),
+        "the CLI did not start the daemon for {}",
+        home.0.display()
+    );
+    let mut descriptor = libc::pollfd {
+        fd: reader.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ready = unsafe { libc::poll(&mut descriptor, 1, PATIENCE.as_millis() as libc::c_int) };
+    assert!(
+        ready > 0,
+        "the daemon kept the pipe's write end for {}",
+        home.0.display()
+    );
+    let mut byte = [0u8; 1];
+    let read = unsafe {
+        libc::read(
+            reader.as_raw_fd(),
+            byte.as_mut_ptr().cast::<libc::c_void>(),
+            byte.len(),
+        )
+    };
+    assert_eq!(read, 0, "the pipe carried data instead of EOF");
+}
+
+/// A server a test starts on a home itself is stopped even before it binds:
+/// the CLI's `daemon.log` and the server's `daemon.sock.lock` do not exist
+/// yet, so the marker the test writes is what tells the drop to stop it.
+#[test]
+fn a_home_stops_a_marked_server_that_never_binds() {
+    let home = Home::new();
+    let pattern = home.0.to_str().unwrap().to_owned();
+    daemon_cleanup::mark_test_server(&home.0);
+    // A stand-in for a server that is still starting when the test ends: it
+    // names the home in its command line, never binds, and is a grandchild,
+    // so the test holds no handle on it and the drop has to find it.
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg("sh -c \"$2\" sh \"$1\" & exit 0")
+        .arg("sh")
+        .arg(&pattern)
+        .arg("while :; do sleep 1; done")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the stand-in server did not start");
+    let deadline = Instant::now() + PATIENCE;
+    while daemon_cleanup::pids_naming(&pattern).is_empty() {
+        assert!(Instant::now() < deadline, "the stand-in server never ran");
+        thread::sleep(Duration::from_millis(10));
+    }
+    drop(home);
+    assert!(
+        daemon_cleanup::pids_naming(&pattern).is_empty(),
+        "the drop left the marked server for {pattern} running"
+    );
+}
+
+/// A stop re-reads a pid's command line before it signals, so a pid that now
+/// runs something else is left alone. The process here starts with the home
+/// in its command line and then replaces it, the shape a reused pid has.
+#[test]
+fn a_stop_never_signals_a_process_that_no_longer_names_the_home() {
+    let home = Home::new();
+    let pattern = home.0.to_str().unwrap();
+    let mut process = Command::new("sh")
+        .arg("-c")
+        .arg("exec sleep 30")
+        .arg(pattern)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = process.id() as libc::pid_t;
+    let deadline = Instant::now() + PATIENCE;
+    while daemon_cleanup::command_of(pid).is_some_and(|command| command.contains(pattern)) {
+        assert!(
+            Instant::now() < deadline,
+            "the stand-in never replaced its command line"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !daemon_cleanup::signal_if_naming(pid, pattern, libc::SIGTERM),
+        "the stop signalled a process that no longer names the home"
+    );
+    assert!(
+        process.try_wait().unwrap().is_none(),
+        "the signal reached a process that no longer names the home"
+    );
+    process.kill().unwrap();
+    process.wait().unwrap();
 }
 
 #[test]
@@ -4970,6 +5152,7 @@ fn real_daemon_profile_conflicts_preserve_the_running_daemon_and_endpoint() {
         fs::write(&original, &body).unwrap();
         fs::write(&requested, format!("{body}\n")).unwrap();
         let socket = home.0.join("rust/daemon.sock");
+        daemon_cleanup::mark_test_server(&home.0);
         let mut command = Command::new(&binary);
         command
             .arg("--unix")
@@ -7168,7 +7351,7 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
     terminal.write(b"third\r");
     terminal.until("Queue (1)");
     terminal.until("› third");
-    terminal.write(b"\x1b[A");
+    terminal.write(b"\x1b[1;2D");
     terminal.until("third");
     let plain = {
         let mut out = String::new();
@@ -7213,6 +7396,86 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();
+}
+
+#[test]
+fn tui_ctrl_s_steers_the_draft_while_a_run_is_in_progress() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        wire.no_context();
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let first = wire.read("session.submit");
+        assert_eq!(first["params"]["text"], "first");
+        wire.reply(&first, json!({"event":{}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-1","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"first"}]},"mode":"queue"}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-1","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"in-1","mode":"queue"}}}));
+        wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":true}));
+        let second = wire.read("session.submit");
+        assert_eq!(second["params"]["text"], "second");
+        assert_eq!(second["params"]["mode"], "steer");
+        wire.reply(&second, json!({"event":{}}));
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"first\r");
+    terminal.until("first");
+    terminal.until("working…");
+    terminal.write(b"second");
+    terminal.write(b"\x13");
+    daemon.join().unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+}
+
+#[test]
+fn tui_escape_withdraws_the_queue_before_the_run_stops() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        wire.no_context();
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let first = wire.read("session.submit");
+        assert_eq!(first["params"]["text"], "first");
+        wire.reply(&first, json!({"event":{}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-1","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"first"}]},"mode":"queue"}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-1","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"in-1","mode":"queue"}}}));
+        wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":true}));
+        let queued = wire.read("session.submit");
+        assert_eq!(queued["params"]["text"], "second");
+        assert_eq!(queued["params"]["mode"], "queue");
+        wire.reply(&queued, json!({"event":{}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-2","sequence":11,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"second"}]},"mode":"queue"}}}));
+        let withdraw = wire.read("session.input.withdraw");
+        assert_eq!(withdraw["params"]["inputId"], "in-2");
+        assert!(withdraw["params"].get("steer").is_none());
+        wire.reply(&withdraw, json!({"status":"deleted","sequence":12}));
+        let stop = wire.read("session.stop");
+        wire.reply(&stop, json!({"sequence":13}));
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"first\r");
+    terminal.until("first");
+    terminal.until("working…");
+    terminal.write(b"second\r");
+    terminal.until("Queue (1)");
+    terminal.write(b"\x1b");
+    daemon.join().unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
 }
 
 #[test]
@@ -9310,4 +9573,48 @@ fn tui_default_theme_respects_background_and_saved_choice() {
             serde_json::from_slice(&fs::read(home.0.join("config.json")).unwrap()).unwrap();
         assert_eq!(config.get("themeId").and_then(Value::as_str), saved);
     }
+}
+
+/// `dimcode daemon vacuum` rewrites an offline store through the sibling App
+/// Server and reports its size before and after (#600).
+#[test]
+fn daemon_vacuum_reclaims_an_offline_store() {
+    use dim_app_server::storage::SqliteStorage;
+    let home = Home::new();
+    let database = home.0.join("rust/dimcode.sqlite");
+    drop(SqliteStorage::open(database.clone()).unwrap());
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO agent_sessions(session_id, config, created_at_ms) VALUES ('s', '{}', 0);
+             INSERT INTO timeline_branches VALUES ('s', 'main', '{}', 0);",
+        )
+        .unwrap();
+    connection.execute_batch("BEGIN").unwrap();
+    for sequence in 1..=2000 {
+        connection
+            .execute(
+                "INSERT INTO timeline_events VALUES ('s', 'main', ?1, ?1, 'turn/start', ?2, NULL)",
+                rusqlite::params![sequence, "x".repeat(4000)],
+            )
+            .unwrap();
+    }
+    connection
+        .execute_batch("COMMIT; DELETE FROM timeline_events; PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    drop(connection);
+    let before = fs::metadata(&database).unwrap().len();
+    let output = home.command().args(["daemon", "vacuum"]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.starts_with("Vacuumed "), "{stdout}");
+    let after = fs::metadata(&database).unwrap().len();
+    assert!(
+        after < before,
+        "vacuum reclaims free pages: {after} >= {before}"
+    );
 }

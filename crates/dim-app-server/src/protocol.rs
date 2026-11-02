@@ -99,7 +99,7 @@ pub enum Call {
     Shutdown(Shutdown),
     Create(Create),
     List(SessionList),
-    Summaries(SessionList),
+    Summaries(Summaries),
     Catalog(Catalog),
     CatalogCancel(CatalogCancel),
     Attach(Attach),
@@ -110,7 +110,7 @@ pub enum Call {
     Stop(Stop),
     Idle(Idle),
     Close(SessionId),
-    Delete(SessionId),
+    Delete(Delete),
     Fork(Fork),
     ApprovalRespond(ApprovalRespond),
     BranchCreate(BranchCreate),
@@ -126,6 +126,8 @@ pub enum Call {
     PromptRefresh(BranchRequest),
     SessionMcp(SessionId),
     McpRefresh(SessionId),
+    McpAppWidget(McpAppWidget),
+    McpAppCall(McpAppCall),
     SessionMethods(SessionId),
     WebOpen(WebOpen),
     WebToggle(WebOpen),
@@ -151,6 +153,8 @@ impl Call {
                 | Self::PromptRefresh(_)
                 | Self::SessionMcp(_)
                 | Self::McpRefresh(_)
+                | Self::McpAppWidget(_)
+                | Self::McpAppCall(_)
         )
     }
     /// Methods that open and report the local web entry; local transport only.
@@ -238,6 +242,8 @@ pub const WEB_MANAGEMENT_METHODS: &[&str] = &[
     "permission.set_rules",
     "collaboration.model_policy",
     "collaboration.set_model_policy",
+    "modality.capabilities",
+    "modality.configure",
     "host.exec_shell.get",
     "host.exec_shell.update",
     "host.execution.backend",
@@ -266,7 +272,7 @@ pub const WEB_MANAGEMENT_METHODS: &[&str] = &[
 
 pub const WEB_SETTINGS_SOURCES: &[&str] = &["model-log", "execution"];
 
-pub const LOCAL_EXECUTION_METHODS: [&str; 8] = [
+pub const LOCAL_EXECUTION_METHODS: [&str; 10] = [
     "session.permission.get",
     "session.permission.update",
     "session.exec.stop",
@@ -275,6 +281,8 @@ pub const LOCAL_EXECUTION_METHODS: [&str; 8] = [
     "session.prompt.refresh",
     "session.mcp",
     "session.mcp.refresh",
+    "session.mcp.app.widget",
+    "session.mcp.app.call",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -301,6 +309,24 @@ pub struct McpRejection {
     pub reason: String,
 }
 
+/// `session.mcp.app.widget`: the mount read starts from the published tool
+/// name a `tool/call` fact carries (MCP Apps D4).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpAppWidget {
+    pub session_id: String,
+    pub tool: String,
+}
+/// `session.mcp.app.call`: the server's own tool name in the entry the view
+/// was mounted from (MCP Apps §4.2).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpAppCall {
+    pub session_id: String,
+    pub server: String,
+    pub tool: String,
+    pub arguments: JsonObject,
+}
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BranchRequest {
@@ -499,6 +525,10 @@ pub struct Create {
     /// unknown fields.
     #[serde(default, deserialize_with = "optional_non_null")]
     pub interactive: Option<bool>,
+    /// The creation origin the client declares: `client` when absent, or
+    /// `acp` from an editor (#557). Any other value is refused at the boundary.
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub origin: Option<SessionOrigin>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -519,6 +549,16 @@ pub struct SessionList {
 }
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Summaries {
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub agent_id: Option<String>,
+    /// Whether the catalog also lists Sessions this daemon closed, which
+    /// keep their stored rows.
+    #[serde(default)]
+    pub include_closed: bool,
+}
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Catalog {
     #[serde(default, deserialize_with = "optional_non_null")]
     pub limit: Option<usize>,
@@ -530,6 +570,12 @@ pub struct Catalog {
     pub cwd: Option<String>,
     #[serde(default)]
     pub with_preview: bool,
+    /// Whether Sessions whose origin is `internal` are listed (#557).
+    #[serde(default)]
+    pub with_internal: bool,
+    /// Whether Sessions whose origin is `acp` are listed (#557).
+    #[serde(default)]
+    pub with_acp_sessions: bool,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -547,6 +593,15 @@ pub struct CatalogCancel {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionId {
     pub session_id: String,
+}
+/// `session.delete`: with `requireInactive`, a Session in use refuses the
+/// delete with `session_active` instead of being closed and removed.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Delete {
+    pub session_id: String,
+    #[serde(default)]
+    pub require_inactive: bool,
 }
 /// `session.fork`: `at` is the last `main` sequence the fork inherits.
 #[derive(Debug, Deserialize)]
@@ -765,6 +820,8 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "session.prompt.refresh" => Call::PromptRefresh(params(raw_params)?),
             "session.mcp" => Call::SessionMcp(params(raw_params)?),
             "session.mcp.refresh" => Call::McpRefresh(params(raw_params)?),
+            "session.mcp.app.widget" => Call::McpAppWidget(params(raw_params)?),
+            "session.mcp.app.call" => Call::McpAppCall(params(raw_params)?),
             "session.methods" => Call::SessionMethods(params(raw_params)?),
             "web.open" => Call::WebOpen(params(raw_params)?),
             "web.toggle" => Call::WebToggle(params(raw_params)?),
@@ -988,6 +1045,44 @@ pub struct ForkResult {
     pub session_id: String,
     pub sequence: u64,
 }
+/// The `session.delete` reply (S5c §3.1): `deleted` is true when this call
+/// removed the Session's stored rows, or, in a daemon without a native
+/// store, a loaded Session.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteResult {
+    pub deleted: bool,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionOrigin {
+    Client,
+    Acp,
+    Internal,
+    Unknown,
+}
+impl SessionOrigin {
+    /// The value the stored Session record holds for this origin.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Client => "client",
+            Self::Acp => "acp",
+            Self::Internal => "internal",
+            Self::Unknown => "unknown",
+        }
+    }
+    /// The origin a stored value names; `None` for a value this build does not
+    /// know, which the column's `CHECK` and the store's format gate keep out.
+    pub fn from_stored(value: &str) -> Option<Self> {
+        match value {
+            "client" => Some(Self::Client),
+            "acp" => Some(Self::Acp),
+            "internal" => Some(Self::Internal),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+}
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionInfo {
@@ -1000,6 +1095,13 @@ pub struct SessionInfo {
     pub attached_clients: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
+    /// The Session's creation origin; protocol v3 with a native store (#557).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<SessionOrigin>,
+    /// The leader Session a Collaboration member belongs to; absent when the
+    /// store records none (#557).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
     /// `title`, `titleSource` and `titleRevision` from SessionStore (S5b);
     /// protocol v3 only.
     #[serde(flatten)]
@@ -1023,6 +1125,9 @@ pub struct SessionSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
     pub updated_at: u64,
+    /// Whether this daemon closed the Session; its rows stay stored, and
+    /// only a read that asked for closed Sessions lists it.
+    pub closed: bool,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1056,6 +1161,8 @@ pub enum Reply {
     Ping(PingResult),
     Create(CreateResult),
     Fork(ForkResult),
+    /// The `session.delete` reply: whether this call removed the Session.
+    Deleted(DeleteResult),
     List(Vec<SessionInfo>),
     /// The attached Session's directory record, with `model` and
     /// `modelPreferences` from its latest adopted configuration, falling back
@@ -1077,6 +1184,8 @@ pub enum Reply {
     ModelUpdate(ModelUpdateResult),
     Configuration(ConfigurationResult),
     McpState(McpStateResult),
+    McpWidget(crate::mcp::McpWidgetResult),
+    McpAppCall(crate::mcp::McpAppCallResult),
     SessionMethods(SessionMethodsResult),
     WebOpened(WebOpened),
     WebToggled(WebToggled),

@@ -76,6 +76,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "fork the session at its last finished turn" => {
             "die Sitzung am letzten beendeten Zug forken"
         }
+        "rename this session" => "diese Sitzung umbenennen",
+        "Renamed to {title}" => "Umbenannt in {title}",
+        "The Session is now untitled." => "Die Sitzung hat jetzt keinen Titel.",
+        "This daemon does not support renaming Sessions" => {
+            "Dieser Daemon unterstützt das Umbenennen von Sitzungen nicht"
+        }
+        "Renaming failed" => "Umbenennen fehlgeschlagen",
         "Starting" => "Startet",
         "Delegation result" => "Delegationsergebnis",
         "Enter details · x stop selected · Ctrl+X stop all · Esc close" => {
@@ -253,7 +260,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Nothing is running" => "Nichts läuft",
         "No queued message" => "Keine Nachricht eingereiht",
         "Only in fullscreen (/tui)" => "Nur im Vollbild (/tui)",
-        "/{name} is not yet available" => "/{name} noch nicht verfügbar",
         "new session" => "neue Session",
         "resumed {id} · {count} messages" => "{id} fortgesetzt · {count} Nachrichten",
         " · earlier history: /timeline" => " · früherer Verlauf: /timeline",
@@ -268,9 +274,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "answer required" => "Antwort nötig",
         "permission required" => "Freigabe nötig",
         "esc interrupt" => "esc unterbrechen",
-        "↑ edit · ctrl+s steer now · /queue" => "↑ bearbeiten · ctrl+s jetzt steuern · /queue",
-        "+{count} more · ↑ edit · ctrl+s steer now · /queue" => {
-            "+{count} weitere · ↑ bearbeiten · ctrl+s jetzt steuern · /queue"
+        "shift+← edit last · ctrl+s steer now" => {
+            "shift+← bearbeiten (letzte) · ctrl+s jetzt steuern"
+        }
+        "+{count} more · shift+← edit last · ctrl+s steer now" => {
+            "+{count} weitere · shift+← bearbeiten (letzte) · ctrl+s jetzt steuern"
         }
         "Queue ({count})" => "Warteschlange ({count})",
         "Thinking…" => "Denkt…",
@@ -481,14 +489,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Permission needed: {tool}" => "Freigabe nötig: {tool}",
         "Question waiting for your answer" => "Frage wartet auf Antwort",
         "Notify when agent needs you" => "Benachrichtigen, wenn Agent Eingabe braucht",
+        "Show ACP sessions" => "ACP-Sitzungen anzeigen",
         // keys.rs
         "show the key bindings" => "Tastenbelegung anzeigen",
         "Application keys" => "Anwendungstasten",
-        "Enter submit · Shift+Enter or Ctrl+J newline · ↑↓ history" => {
-            "Enter senden · Shift+Enter/Ctrl+J neue Zeile · ↑↓ Verlauf"
+        "Enter submit or queue · empty draft: steer first queued · Shift+Enter or Ctrl+J newline · ↑↓ history" => {
+            "Enter senden oder einreihen · leerer Entwurf: erste eingereihte steuern · Shift+Enter/Ctrl+J neue Zeile · ↑↓ Verlauf"
         }
-        "Ctrl+O or Ctrl+P commands · Esc interrupt or clear · Ctrl+S steer queued · ↑ edit queued" => {
-            "Ctrl+O/Ctrl+P Befehle · Esc unterbrechen/leeren · Ctrl+S Eingereihte steuern · ↑ Eingereihte bearbeiten"
+        "Ctrl+O or Ctrl+P commands · Esc interrupt, queued messages return · Ctrl+S steer draft or first queued · Shift+← edit last queued" => {
+            "Ctrl+O/Ctrl+P Befehle · Esc unterbrechen, eingereihte Nachrichten kommen zurück · Ctrl+S Entwurf oder erste eingereihte steuern · Shift+← letzte eingereihte bearbeiten"
         }
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C leeren, zweimal beenden · Ctrl+D beendet bei leerem Entwurf"
@@ -522,6 +531,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Dieser Daemon unterstützt keine Kontextkomprimierung"
         }
         "compact the context of the shown line" => "den Kontext der angezeigten Linie komprimieren",
+        "follow or change the shown line's goal" => {
+            "das Ziel der angezeigten Linie verfolgen oder ändern"
+        }
+        "◎ goal active" => "◎ Ziel aktiv",
+        "◎ goal paused" => "◎ Ziel pausiert",
         "Kept verbatim" => "Wörtlich behalten",
         "Tool effects" => "Aktionen der Werkzeuge",
         "insufficient space: {parts}" => "zu wenig Platz: {parts}",

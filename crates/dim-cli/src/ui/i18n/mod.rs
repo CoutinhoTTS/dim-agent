@@ -190,11 +190,37 @@ mod tests {
         }
     }
 
+    /// Every string the management panel draws has a translation in every
+    /// locale.
+    #[test]
+    fn every_locale_translates_the_management_strings() {
+        for (code, lookup) in tables() {
+            for key in crate::ui::management_panel::STRINGS {
+                assert!(lookup(key).is_some(), "{code} lacks {key:?}");
+            }
+        }
+    }
+
     /// `/settings` names the execution row.
     #[test]
     fn every_locale_translates_execution_settings() {
         for (code, lookup) in tables() {
             assert!(lookup("Execution").is_some(), "{code} lacks Execution");
+        }
+    }
+
+    /// `/goal`'s palette row and the goal element of the status area exist in
+    /// every locale.
+    #[test]
+    fn every_locale_translates_the_goal_strings() {
+        for (code, lookup) in tables() {
+            for key in [
+                "follow or change the shown line's goal",
+                "◎ goal active",
+                "◎ goal paused",
+            ] {
+                assert!(lookup(key).is_some(), "{code} lacks {key:?}");
+            }
         }
     }
 
@@ -251,6 +277,23 @@ mod tests {
                 "pinned inputs",
                 "digest",
                 "summary",
+            ] {
+                assert!(lookup(key).is_some(), "{code} lacks {key:?}");
+            }
+        }
+    }
+
+    /// `/rename`, its menu row and its replies are translated in every
+    /// locale.
+    #[test]
+    fn every_locale_translates_the_rename_strings() {
+        for (code, lookup) in tables() {
+            for key in [
+                "rename this session",
+                "Renamed to {title}",
+                "The Session is now untitled.",
+                "This daemon does not support renaming Sessions",
+                "Renaming failed",
             ] {
                 assert!(lookup(key).is_some(), "{code} lacks {key:?}");
             }

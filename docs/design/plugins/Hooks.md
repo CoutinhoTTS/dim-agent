@@ -203,7 +203,7 @@ sequenceDiagram
   end
 ```
 
-`PostToolUse` runs per matching call of a `step/tool-result` batch whose result is not an error, `PostToolUseFailure` per matching call whose result has `is_error`; one batch writes one Append input. `Stop` runs on `turn/end` with status `completed`; a block writes a Queue follow-up carrying the reason, at most 3 consecutive (A8). `SessionStart` runs once on `main` when its history has no `turn/start` and no `hooks:session-start/*` keyed block; its Append input waits, as any idle Append does, for the first driving input. `SessionStart` output is also dropped once a turn has started on the branch, because its block must come before the first turn. `Notification` runs on `approval/request` and writes nothing. Handlers with `async: true` run on any of these points and nothing waits for or reads their output. `HooksBranch` also keeps, from the adopted `context/configured` it consumes, the migration alias of each declared MCP tool (G.2).
+`PostToolUse` runs per matching call of a `step/tool-result` batch whose result is not an error, `PostToolUseFailure` per matching call whose result has `is_error`; one batch writes one Append input. `Stop` runs on `turn/end` with status `completed`; a block writes a Queue follow-up carrying the reason, at most 3 consecutive (A8). `SessionStart` runs once on `main` when its history has no `turn/start` and no `hooks:session-start/*` keyed block; its Append input waits, as any idle Append does, for the first driving input. `SessionStart` output is also dropped once a turn has started on the branch, because its block must come before the first turn. `Notification` runs on `approval/request` and writes nothing. Handlers with `async: true` run on any of these points and nothing waits for or reads their output. `HooksBranch` resolves the migration alias of each tool event from the declaration in force on the branch (G.2).
 
 ## 4. Timing and conflicts
 
@@ -319,7 +319,7 @@ AcpGateway's own design reports a Hooks `input_blocked` rejection from `session.
 | — | The event's stdin object (A.3) goes to a process HostPlatform starts for it, whose stdin is closed after the bytes; the environment adds `DIMCODE_HOME` and `DIM_PLUGIN_ROOT` (A.6.3) |
 | — | A hook reads the Session's Timeline with `dimcode export "$DIM_SESSION_ID"`; there is no `transcript_path` (A.3) |
 | — | `PreCompact`/`PostCompact`, `SessionEnd` and `SubagentStart`/`SubagentStop` stay unsupported, for the reasons in G.1 |
-| — | The native CLI gets `dimcode hooks list` and `dimcode hooks enable\|disable` ([CLI commands](../cli-commands.md#commands)) |
+| — | The native CLI gets `dimcode hooks list`, `dimcode hooks enable\|disable`, `dimcode hooks edit` and `dimcode hooks set PATH` ([CLI commands](../cli-commands.md#commands)) |
 
 ### 10.2 Accepted owner changes
 
@@ -472,11 +472,11 @@ Context and reasons are each at most 16 KiB per hook. Fields Dim does not suppor
 
 | Method | Parameters | Result |
 | --- | --- | --- |
-| `hooks.catalog` (not mutating) | `{cwd?}` | `userRevision`, `projectsRevision`; per source: `source`, `path` (`dir` for a plugin source), `enabled`, `state` (`ok`, `missing`, `invalid` with message); per handler: `event`, `matcher`, `command`, `timeout`, `onFailure`, `async`, `state` (`ok`, `unsupported`, `invalid`); `disableAllHooks` |
+| `hooks.catalog` (not mutating) | `{cwd?}` | `userRevision`, `userDocument` (the user's document as stored, which `hooks.save` replaces with that revision), `projectsRevision`; per source: `source`, `path` (`dir` for a plugin source), `enabled`, `state` (`ok`, `missing`, `invalid` with message); per handler: `event`, `matcher`, `command`, `timeout`, `onFailure`, `async`, `state` (`ok`, `unsupported`, `invalid`); `disableAllHooks` |
 | `hooks.save` | `{expectedRevision, document}` | `{revision}`; CAS write of the user scope of `hooks`, validated by its `BusinessDocument` |
 | `hooks.set_enabled` | `{cwd, enabled, expectedRevision}` | `{revision}`; CAS write of `hooks-projects` for the project root Settings authorizes for `cwd` |
 
-The project file is edited in the repository, not through these methods. `hooks-plugins` is written only by the owner operations (§1), never by a method here. Hooks has no tool and no agent-reachable path that writes configuration. The native CLI is the client surface for `hooks.catalog` and `hooks.set_enabled` ([CLI commands](../cli-commands.md#commands)).
+The project file is edited in the repository, not through these methods. `hooks-plugins` is written only by the owner operations (§1), never by a method here. Hooks has no tool and no agent-reachable path that writes configuration. The native client's management surfaces are the client surface for `hooks.catalog`, `hooks.save` and `hooks.set_enabled`: the `/hooks` panel, `dimcode hooks list|enable|disable`, `dimcode hooks edit` and `dimcode hooks set PATH` ([CLI commands](../cli-commands.md#commands)).
 
 ## Appendix B. Full conflict table
 
@@ -571,7 +571,7 @@ Neither is part of this design, and both stay unsupported.
 
 ## Appendix G. Migrating from Claude Code and Codex
 
-Dim does not read Claude or Codex files and has no import command. To migrate, copy the `hooks` object: from `~/.claude/settings.json` or `~/.codex/hooks.json` into the user document (`hooks.save`, or the CLI that calls it), and from a repository's `.claude/settings.json`, `.claude/settings.local.json` or `.codex/hooks.json` into `.dimcode/hooks.json`, then enable that workspace (`hooks.set_enabled`). Codex `[hooks]` tables in `config.toml` are rewritten as JSON. Scripts keep working when they use only the compatible parts below.
+Dim does not read Claude or Codex files and has no import command. To migrate, copy the `hooks` object: from `~/.claude/settings.json` or `~/.codex/hooks.json` into the user document (`dimcode hooks edit`, `dimcode hooks set PATH`, or Ctrl+E in `/hooks`, which call `hooks.save`), and from a repository's `.claude/settings.json`, `.claude/settings.local.json` or `.codex/hooks.json` into `.dimcode/hooks.json`, then enable that workspace (`hooks.set_enabled`). Codex `[hooks]` tables in `config.toml` are rewritten as JSON. Scripts keep working when they use only the compatible parts below.
 
 ### G.1 Events
 
@@ -589,11 +589,11 @@ Dim does not read Claude or Codex files and has no import command. To migrate, c
 
 ### G.2 Tool names
 
-Matchers are tested against the Dim tool name and its alias, so pasted matchers keep selecting the same tools; `tool_name` on stdin is always the Dim name.
+Matchers are tested against the Dim tool name and its alias, so pasted matchers keep selecting the same tools; `tool_name` on stdin is always the Dim name. The alias is a property of the tool's declaration, and `HooksBranch` resolves it the same way on every tool event: when the branch has adopted a tool part, the aliases come from that part's declarations, and the registry is read only when it has adopted none.
 
 | Dim tool | Alias accepted by matchers |
 | --- | --- |
-| Any tool with risk `execute_process` (`exec`, the shell tool) | `Bash` |
+| Any tool with declared risk `execute_process` (`exec`, the shell tool) | `Bash` |
 | `read` | `Read` |
 | `write` | `Write` |
 | `edit` | `Edit` |

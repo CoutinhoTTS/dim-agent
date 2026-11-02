@@ -31,8 +31,9 @@ pub struct TimelineContext {
     children: Vec<FiberView>,
     /// Loader row ids the branch profile requires.
     required: Arc<[String]>,
-    /// The required parts its mounters mounted before it published.
-    parts: Vec<FiberView>,
+    /// The required views its scope handed and the required parts its
+    /// mounter mounted before it published.
+    awaited: Vec<FiberView>,
     copies: crate::parts::Copies,
     scope: BranchScope,
     timeline: Timeline,
@@ -152,7 +153,7 @@ impl TimelineContext {
         view: FiberView,
         children: Vec<FiberView>,
         required: Arc<[String]>,
-        parts: Vec<FiberView>,
+        awaited: Vec<FiberView>,
         copies: crate::parts::Copies,
         scope: BranchScope,
         timeline: Timeline,
@@ -169,7 +170,7 @@ impl TimelineContext {
             view,
             children,
             required,
-            parts,
+            awaited,
             copies,
             scope,
             timeline,
@@ -332,12 +333,7 @@ impl TimelineContext {
     pub(crate) fn diagnostics(&self) -> rutis::host::diagnostics::RuntimeDiagnostics {
         let scope = self.view.id;
         let mut snapshot = self.ctx.diagnostics();
-        let rows: std::collections::HashSet<_> = snapshot
-            .plugins
-            .iter()
-            .filter(|p| p.parent == Some(scope))
-            .map(|p| p.id)
-            .collect();
+        let rows: std::collections::HashSet<_> = self.children.iter().map(|view| view.id).collect();
         crate::assembly::retain_scope(&mut snapshot, scope, |plugin| rows.contains(&plugin));
         snapshot
     }
@@ -349,9 +345,10 @@ impl TimelineContext {
     pub(crate) fn required_rows(&self) -> &[String] {
         &self.required
     }
-    /// The required parts its mounters mounted when it opened.
-    pub(crate) fn required_parts(&self) -> &[FiberView] {
-        &self.parts
+    /// The required views its scope handed and the parts its mounter mounted
+    /// when it opened.
+    pub(crate) fn awaited(&self) -> &[FiberView] {
+        &self.awaited
     }
     pub(crate) fn state_cell<S: Clone + Send + Sync + 'static>(&self) -> Option<Arc<StateCell<S>>> {
         self.ctx
@@ -563,19 +560,43 @@ impl TimelineContext {
             tokio::time::sleep(LOOP_RETURN_POLL).await;
         }
     }
+    /// Whether this line has work going on: a turn running, or accepted work
+    /// dispatch has not reached yet. A line that is closing or failed has
+    /// none: nothing runs on it, and its own close settles what it holds.
+    pub(crate) fn is_running(&self) -> bool {
+        if self.is_closing() || self.dispatcher.failure().is_some() {
+            return false;
+        }
+        !self.turn_idle()
+            || self
+                .timeline
+                .open_tail()
+                .is_some_and(|tail| !self.dispatched(tail))
+    }
+    /// Loop is idle at `tail`: not closing or failed, dispatch has reached it
+    /// and Loop is between turns.
+    fn idle_at(&self, tail: u64) -> bool {
+        !self.is_closing()
+            && self.dispatcher.failure().is_none()
+            && self.dispatched(tail)
+            && self.turn_idle()
+    }
+    /// Loop is between turns; `false` while it runs one, and while Loop is
+    /// being replaced.
+    fn turn_idle(&self) -> bool {
+        self.loop_state()
+            .is_ok_and(|state| state.state().phase == LoopPhase::Idle)
+    }
+    /// Dispatch has reached `tail`.
+    fn dispatched(&self, tail: u64) -> bool {
+        self.dispatcher.sequence() == tail
+    }
     /// Holds the commit lock and returns it when Loop is idle, nothing is
     /// pending and dispatch has reached the tail; `None` otherwise, without
     /// freezing or rejecting appends. Detached work is judged by Session holds.
     pub(crate) fn lock_idle(&self) -> Option<TailLock<'_>> {
-        if self.is_closing() || self.dispatcher.failure().is_some() {
-            return None;
-        }
         let tail = self.timeline.lock_tail()?;
-        let idle = self.dispatcher.sequence() == tail.sequence()
-            && self
-                .loop_state()
-                .is_ok_and(|state| state.state().phase == LoopPhase::Idle);
-        idle.then_some(tail)
+        self.idle_at(tail.sequence()).then_some(tail)
     }
     /// Releases the instance after an idle check: no stop is recorded.
     pub fn unload(self: &Arc<Self>) -> BoxFuture<'static, Result<()>> {
