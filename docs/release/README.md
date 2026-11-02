@@ -161,7 +161,8 @@ One product version is shared by `Cargo.toml`, workspace versions in `Cargo.lock
 
 ```sh
 DIM_RELEASE_BUILD=1 cargo build --release --locked -p dimcode
-node scripts/stage-release.mjs target/release staging/local 0.1.0 FULL_SOURCE_COMMIT
+node scripts/stage-plugins.mjs staging/local-plugins
+node scripts/stage-release.mjs target/release staging/local 0.1.0 FULL_SOURCE_COMMIT --plugins staging/local-plugins
 node scripts/pack-release.mjs staging/local release/local
 node scripts/stage-web.mjs release/web 0.1.0 FULL_SOURCE_COMMIT
 ```
@@ -174,7 +175,8 @@ These commands stage an API-key-only distribution. An account build is the same 
 
 ```sh
 DIM_RELEASE_BUILD=1 DIM_OAUTH_CLIENT_ID_CN=… DIM_OAUTH_CLIENT_ID_GLOBAL=… cargo build --release --locked -p dimcode
-node scripts/stage-release.mjs target/release staging/local 0.1.0 FULL_SOURCE_COMMIT --account
+node scripts/stage-plugins.mjs staging/local-plugins
+node scripts/stage-release.mjs target/release staging/local 0.1.0 FULL_SOURCE_COMMIT --account --plugins staging/local-plugins
 ```
 
 In CI, set the `DIM_OAUTH_CLIENT_ID_CN` and `DIM_OAUTH_CLIENT_ID_GLOBAL` repository secrets. Every target is then an account build; without both secrets CI builds API-key-only payloads, and a partial configuration fails. The IDs are compiled into the executable and never enter manifests. The account build adds no runtime, package or Node. Each platform package and native archive holds the executable, the default configuration file and the default plugins (`scripts/stage-plugins.mjs`, then `stage-release.mjs --plugins DIR`); the Node and Python runtimes are not bundled: RuntimeManager downloads them, verified against pins compiled into Dim, into the home ([RuntimeManager](../design/plugins/RuntimeManager.md)):
@@ -187,6 +189,8 @@ LICENSE
 NOTICE
 release-manifest.json         # `account` records whether this is the account build
 ```
+
+The alpha publisher stages the plugin tree once on the build host and gives every platform the same copy, as `publish-alpha.mjs` does, so it runs `stage-plugins.mjs --portable`. That refuses, before installing anything, a listed plugin whose `package-lock.json` names a package with `os`, `cpu` or `libc`: one shared tree cannot carry another platform's package. `release.yml` stages on each platform's own runner and does not pass the flag.
 
 `pack-release.mjs` rejects changed staged files, then creates a native tar.gz (Windows zip) and a platform npm tgz from the same payload. It records SHA-256 for both. `collect-release.mjs` requires `release-<platform>` directories for all six targets and `release-web` from `stage-web.mjs`, checks identical source/version/toolchain/account provenance and artifact digests, creates the thin npm wrapper, then validates all seven npm archives without publishing.
 
