@@ -447,7 +447,9 @@ fn run_terminal(
             }
         }
         let wait = match (dirty, last_frame) {
-            (true, Some(at)) => FRAME_INTERVAL.saturating_sub(now.duration_since(at)),
+            (true, Some(at)) if !terminal.writing() => {
+                FRAME_INTERVAL.saturating_sub(now.duration_since(at))
+            }
             _ if app.running() => FRAME_INTERVAL,
             _ => SESSION_POLL,
         };
