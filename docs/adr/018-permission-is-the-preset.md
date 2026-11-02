@@ -51,6 +51,11 @@ misspelling in this type no longer fails to parse, so a typo in a policy reads a
 This is a breaking format decision, not a silent reinterpretation: client options, tests and
 ADR 017 in the current alpha still write the keys, and this decision stops reading their meaning.
 
+The documents that embed a policy follow the same rule: a Scheduler job's stored policy and a
+Workflow run's recorded cap load with the removed keys ignored, are not rewritten on read, and are
+written back without them. Their schemas stop rejecting a key they do not name, for the same
+reason this type does.
+
 ### D4. Cap and containment compare presets and tool lists
 
 Scheduler's `cap`, `within` and `effective` and Workflow's launch cap keep their authority
@@ -69,12 +74,11 @@ validation of a job.
   override as a user choice.
 - Clients stop rendering and writing the two overrides; a value they send under those names is
   ignored like any unknown field.
-- A Session that ran under a stricter override admits by its preset. That follows from the preset
-  being the policy of record, and it is stated here rather than treated as a defect.
-- Policy parsing in this type no longer rejects unknown keys, which also removes typo detection
-  there. Other types keep `deny_unknown_fields`.
-- The preset keeps its exact legacy meaning. Admission changes only for a record that carried an
-  override disagreeing with its preset, which now admits by the preset.
+- A record without an override keeps its exact legacy admission. A Session that ran under an
+  override admitting less than its preset now admits by its preset, which follows from the preset
+  being the policy of record rather than a defect.
+- Policy parsing no longer rejects unknown keys — in this type and in the plugin documents that
+  embed it — which also removes typo detection there. Other types keep `deny_unknown_fields`.
 
 ## Non-goals
 
