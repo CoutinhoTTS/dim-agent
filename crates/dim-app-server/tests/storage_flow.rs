@@ -7614,6 +7614,83 @@ async fn a_query_selects_and_pages_facts_from_sqlite() {
     db.close().await.unwrap();
 }
 
+#[tokio::test]
+async fn a_query_pages_a_range_wider_than_one_reader_window() {
+    use dim_agent_runtime::TimelineCursor;
+    use dim_agent_runtime::TimelineQueryPosition::{Cursor, Range};
+    use dim_agent_runtime::TimelineQueryScope::Branch;
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("wide", &SessionConfig::default())
+        .await
+        .unwrap();
+    let history = key("wide", "main");
+    let timeline_store: Arc<dyn TimelineStore> = store.clone();
+    let mut sequence = 0;
+    for batch in 0..3u64 {
+        let records = (0..100)
+            .map(|_| {
+                sequence += 1;
+                query_record(
+                    sequence,
+                    (batch + 1) * 100,
+                    &format!("wide-{sequence}"),
+                    EventKind::StopInterrupt(StopInterruptData {
+                        reason: "filler".into(),
+                        scope: InterruptScope::Turn,
+                    }),
+                )
+            })
+            .collect();
+        publish_records(&timeline_store, history.clone(), records).await;
+    }
+    let timeline = Timeline::restore(rutis::Ctx::root().unwrap(), history, vec![], store.clone())
+        .await
+        .unwrap();
+
+    let first = timeline
+        .query(query(Branch, Range { start: 1, end: 300 }, 1))
+        .await
+        .unwrap();
+    assert_eq!(
+        first.events.len(),
+        100,
+        "the limit is a target: its first batch already ends at 100"
+    );
+    assert_eq!(
+        first.next,
+        Some(TimelineCursor {
+            branch_id: "main".into(),
+            sequence: 100
+        })
+    );
+    let second = timeline
+        .query(query(
+            Branch,
+            Cursor {
+                cursor: first.next.unwrap(),
+                through: 300,
+            },
+            16,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(second.events.len(), 100);
+    assert_eq!(
+        second.next,
+        Some(TimelineCursor {
+            branch_id: "main".into(),
+            sequence: 200
+        })
+    );
+
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
 /// What a query returned or how it failed, as text two stores can compare.
 async fn comparable(timeline: &Timeline, query: dim_agent_runtime::TimelineQuery) -> String {
     match timeline.query(query).await {

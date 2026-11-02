@@ -3424,6 +3424,9 @@ impl TimelineStore for SqliteTimelineStore {
             let mut window = start;
             let mut target = None;
             while window <= through {
+                if target.is_some_and(|target| window > target) {
+                    break;
+                }
                 let end = window
                     .saturating_add(255)
                     .min(target.unwrap_or(through))
