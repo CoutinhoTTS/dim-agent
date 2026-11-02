@@ -1552,3 +1552,130 @@ async fn a_save_racing_a_move_keeps_the_moves_overlay() {
     );
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn remove_keeps_a_replacement_moves_overlay() {
+    let fixture = Fixture::new().await;
+    let cancel = CancellationToken::new();
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    fixture
+        .mcp
+        .move_entry(
+            McpSource::User,
+            McpSource::Project(1),
+            "user-only".into(),
+            catalog.user_revision,
+            catalog.project_revision.unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let captured = fixture
+        .mcp
+        .overlay(SettingsScope::Project(1), "user-only".into(), &cancel)
+        .await
+        .unwrap()
+        .expect("the move writes the record A's removal captures");
+
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    fixture
+        .mcp
+        .update(
+            SettingsScope::Project(1),
+            catalog.project_revision.unwrap(),
+            "user-only".into(),
+            McpChange::Remove,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(
+        fixture
+            .mcp
+            .overlay(SettingsScope::Project(1), "user-only".into(), &cancel)
+            .await
+            .unwrap()
+            .is_none(),
+        "the removal deletes the record it captured"
+    );
+
+    let user_revision = fixture
+        .mcp
+        .catalog(Some(1), &cancel)
+        .await
+        .unwrap()
+        .user_revision;
+    let replacement: McpServerSettings = serde_json::from_value(json!({
+        "type":"http",
+        "url":"https://replacement.test/mcp",
+        "auth":{"type":"bearer","token":"replacement"},
+        "enabled":false
+    }))
+    .unwrap();
+    fixture
+        .mcp
+        .update(
+            SettingsScope::User,
+            user_revision,
+            "user-only".into(),
+            McpChange::Put(replacement),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    fixture
+        .mcp
+        .move_entry(
+            McpSource::User,
+            McpSource::Project(1),
+            "user-only".into(),
+            catalog.user_revision,
+            catalog.project_revision.unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+    fixture
+        .mcp
+        .clear_secret_if(
+            SettingsScope::Project(1),
+            "user-only".into(),
+            captured,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let overlay = fixture
+        .mcp
+        .overlay(SettingsScope::Project(1), "user-only".into(), &cancel)
+        .await
+        .unwrap()
+        .expect("the replacement move's record survives the earlier removal's cleanup");
+    assert!(overlay.auth.is_some());
+    assert_eq!(overlay.url.as_deref(), Some("https://replacement.test/mcp"));
+
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    fixture
+        .mcp
+        .update(
+            SettingsScope::Project(1),
+            catalog.project_revision.unwrap(),
+            "user-only".into(),
+            McpChange::Remove,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(
+        fixture
+            .mcp
+            .overlay(SettingsScope::Project(1), "user-only".into(), &cancel)
+            .await
+            .unwrap()
+            .is_none(),
+        "a later removal deletes the replacement's own record"
+    );
+    fixture.close().await;
+}

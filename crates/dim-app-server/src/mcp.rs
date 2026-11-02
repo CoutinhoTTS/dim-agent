@@ -686,6 +686,26 @@ impl McpService {
         .await
     }
 
+    /// Deletes a project entry's withheld record only while it is still the
+    /// record captured before the entry removal. A replacement entry for the
+    /// same id writes a different record, and that one is kept.
+    pub async fn clear_secret_if(
+        &self,
+        source: SettingsScope,
+        id: String,
+        captured: McpSecretEntry,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        if id.trim().is_empty() {
+            return Err(McpError::InvalidId);
+        }
+        self.run(cancel, move |settings, cancel| async move {
+            let workspace = config::workspace(&settings, source)?;
+            remove_secret_if(&settings, &workspace, &id, &captured, &cancel).await
+        })
+        .await
+    }
+
     /// The configuration a Session runs, from the declared one a client reads
     /// and patches.
     pub async fn effective(
@@ -763,9 +783,11 @@ impl McpService {
     /// project files. Enabling checks `expected` against the project source and
     /// that the entry exists there. Disabling or removing first withdraws the
     /// record without depending on the project file, so an entry the user
-    /// turned off stays off even if the file is unreadable. Disabling or
-    /// removing returns once the publisher has retired the entry's generations
-    /// in every Session.
+    /// turned off stays off even if the file is unreadable. A remove deletes
+    /// the entry's withheld record only while it is still the record captured
+    /// before the removal, so a replacement entry for the same id keeps its
+    /// own. Disabling or removing returns once the publisher has retired the
+    /// entry's generations in every Session.
     pub async fn update(
         &self,
         source: SettingsScope,
@@ -779,11 +801,19 @@ impl McpService {
         }
         let withdraws = matches!(change, McpChange::SetEnabled(false) | McpChange::Remove);
         let publication = self.publication.clone();
-        let revision = self
+        let cleanup_id = id.clone();
+        let written = self
             .run(cancel, move |settings, cancel| async move {
                 write(&settings, source, expected, id, change, &cancel).await
             })
             .await?;
+        if let Some(captured) = written.captured {
+            self.clear_secret_if(source, cleanup_id, captured, cancel)
+                .await?;
+        }
+        if written.entry_absent {
+            return Err(McpError::UnknownServer);
+        }
         if withdraws {
             let _ = self
                 .run(cancel, move |_, cancel| async move {
@@ -791,7 +821,7 @@ impl McpService {
                 })
                 .await;
         }
-        Ok(revision)
+        Ok(written.revision)
     }
 
     /// Move one entry between the user and project sources. The destination is
@@ -994,7 +1024,17 @@ async fn declared(
 /// every tool page.
 const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Writes one change to its source and returns the source's revision.
+/// One source mutation's committed result: the source revision, the withheld
+/// record captured before a project entry removal, and whether the entry was
+/// already absent.
+struct WriteOutcome {
+    revision: String,
+    captured: Option<McpSecretEntry>,
+    entry_absent: bool,
+}
+
+/// Writes one change to its source and returns the source's revision and the
+/// removal's captured record.
 async fn write(
     settings: &Arc<SettingsService>,
     source: SettingsScope,
@@ -1002,15 +1042,19 @@ async fn write(
     id: String,
     change: McpChange,
     cancel: &CancellationToken,
-) -> Result<String> {
+) -> Result<WriteOutcome> {
     let project = matches!(source, SettingsScope::Project(_));
     if project && matches!(change, McpChange::SetEnabled(false) | McpChange::Remove) {
         set_project_enabled(settings, source, &id, false, cancel).await?;
         if matches!(change, McpChange::SetEnabled(false)) {
-            return Ok(settings
-                .read::<McpSettings>(source, cancel)
-                .await
-                .map_or(expected, |snapshot| snapshot.revision));
+            return Ok(WriteOutcome {
+                revision: settings
+                    .read::<McpSettings>(source, cancel)
+                    .await
+                    .map_or(expected, |snapshot| snapshot.revision),
+                captured: None,
+                entry_absent: false,
+            });
         }
     }
     let snapshot = settings.read::<McpSettings>(source, cancel).await?;
@@ -1023,7 +1067,11 @@ async fn write(
             return Err(McpError::UnknownServer);
         }
         set_project_enabled(settings, source, &id, true, cancel).await?;
-        return Ok(snapshot.revision);
+        return Ok(WriteOutcome {
+            revision: snapshot.revision,
+            captured: None,
+            entry_absent: false,
+        });
     }
     let removed = match change {
         McpChange::Put(configuration) => {
@@ -1043,15 +1091,22 @@ async fn write(
         }
     };
     let Some(present) = removed else {
-        return Ok(settings
-            .update(source, &expected, document, cancel)
-            .await?
-            .revision);
+        return Ok(WriteOutcome {
+            revision: settings
+                .update(source, &expected, document, cancel)
+                .await?
+                .revision,
+            captured: None,
+            entry_absent: false,
+        });
     };
-    // The document removal commits before the overlay is deleted, so a remove
-    // that loses a race to a concurrent write leaves an inert overlay instead
-    // of a live entry without its withheld values. An overlay whose entry is
-    // already gone is still deleted, so a leftover record can be cleaned.
+    // Capture the record this removal owns before the document commit, so the
+    // cleanup cannot delete a replacement entry's record.
+    let captured = if project {
+        secret(settings, source, &id, cancel).await?
+    } else {
+        None
+    };
     let revision = if present {
         settings
             .update(source, &expected, document, cancel)
@@ -1060,14 +1115,11 @@ async fn write(
     } else {
         expected
     };
-    if project {
-        let workspace = config::workspace(settings, source)?;
-        remove_secret(settings, &workspace, &id, cancel).await?;
-    }
-    if !present {
-        return Err(McpError::UnknownServer);
-    }
-    Ok(revision)
+    Ok(WriteOutcome {
+        revision,
+        captured,
+        entry_absent: !present,
+    })
 }
 
 fn partial(_error: McpError, into_project: bool) -> McpError {
@@ -1109,6 +1161,35 @@ async fn remove_secret(
         .update(SettingsScope::User, &snapshot.revision, document, cancel)
         .await?;
     Ok(())
+}
+
+/// Deletes the record only while it is still `captured`; a replacement move
+/// writes a different record for the same id, and that record is kept.
+async fn remove_secret_if(
+    settings: &Arc<SettingsService>,
+    workspace: &str,
+    id: &str,
+    captured: &McpSecretEntry,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    loop {
+        let snapshot = settings
+            .read::<McpSecrets>(SettingsScope::User, cancel)
+            .await?;
+        if snapshot.document.get(workspace, id) != Some(captured) {
+            return Ok(());
+        }
+        let mut document = snapshot.document;
+        document.remove(workspace, id);
+        match settings
+            .update(SettingsScope::User, &snapshot.revision, document, cancel)
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(SettingsError::Conflict) => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 /// Records the user's enablement of one project entry. Toggles of different
