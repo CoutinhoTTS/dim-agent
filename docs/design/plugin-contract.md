@@ -211,7 +211,7 @@ A part reads facts through its branch's `timeline` service with one bounded quer
 | Event id | An equality on the event id: one id selects that event, so a caller reads one event or looks up its position without paging |
 | Predicate | One equality against one JSON scalar. The path is a sequence of field names inside the event's data joined by dots, with no array indexing and no wildcards |
 | Direction and order | The caller chooses the end a page is taken from: ascending (oldest first) or descending (newest first). A reply is always ordered by chain position, then sequence, ascending, so a consumer folds a page directly; the direction decides only which end of the remaining range the page comes from |
-| Limit | Nonzero by type, so no read is unbounded. It is a target, not a bound: a reply ends at an atomic batch boundary, so it may be longer than the limit |
+| Limit | Nonzero by type, so no read is unbounded. It counts events, not storage rows: a row may carry several events, so a page ends at an atomic batch boundary and may return fewer or more events than the limit. The reply's cursor is what tells the caller to continue; a page shorter than the limit is returned only when the scope is exhausted |
 
 The elements combine: an event is selected when it satisfies all of them, and flags named together
 are alternatives, so an event is accepted when it carries at least one of them — the context read
