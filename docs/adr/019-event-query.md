@@ -1,4 +1,4 @@
-# 018: One bounded event query is the Timeline read surface
+# 019: One bounded event query is the Timeline read surface
 
 Decision status: Proposed.
 
@@ -36,8 +36,11 @@ that needs a different selection extends this query; it does not add a method.
 
 ### D2. Fixed semantics
 
-A cursor is the last fully read sequence at an atomic batch boundary: the query never splits a
-batch, and the limit is a target that the final batch may exceed. Results are ordered by chain
+A cursor names a position, not a number alone: in a chain read it carries the branch of the last
+fully read event together with that event's sequence, and is opaque to the caller. The same
+sequence number on a parent and on its child are different positions. A cursor always ends an
+atomic batch, so the query never splits one, and the limit is a target that the final batch may
+exceed. Results are ordered by chain
 position, then sequence. Positions past the published head and cursors that do not end a batch
 are rejected as invalid input.
 
