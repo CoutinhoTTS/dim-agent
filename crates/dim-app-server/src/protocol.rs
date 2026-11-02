@@ -344,7 +344,33 @@ pub struct UpdatePermission {
     pub branch_id: String,
     #[serde(deserialize_with = "cursor")]
     pub expected_version: u64,
+    #[serde(deserialize_with = "strict_policy")]
     pub policy: PermissionPolicy,
+}
+
+/// A live policy update names every field it sends: the policy type reads a
+/// stored record with unknown keys ignored (ADR 018), but a request that
+/// misspells a list would otherwise empty a deny silently.
+fn strict_policy<'de, D>(deserializer: D) -> Result<PermissionPolicy, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Strict {
+        #[serde(default)]
+        preset: dim_agent_types::PermissionPreset,
+        #[serde(default)]
+        allowed_tools: Vec<String>,
+        #[serde(default)]
+        disallowed_tools: Vec<String>,
+    }
+    let strict = Strict::deserialize(deserializer)?;
+    Ok(PermissionPolicy {
+        preset: strict.preset,
+        allowed_tools: strict.allowed_tools,
+        disallowed_tools: strict.disallowed_tools,
+    })
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
