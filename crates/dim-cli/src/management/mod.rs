@@ -357,11 +357,11 @@ pub async fn apply(
                 ManagementResult::Refused(ManagementRefusal::Refused(message))
             }
             Err(mcp::Failure::Conflict { message, catalog }) => {
-                let view = mcp::view(client, cwd, &catalog, &actions).await;
-                ManagementResult::Refused(ManagementRefusal::Conflict {
-                    message,
-                    view: Ok(Box::new(view)),
-                })
+                let view = match catalog {
+                    Ok(catalog) => Ok(Box::new(mcp::view(client, cwd, &catalog, &actions).await)),
+                    Err(error) => Err(error),
+                };
+                ManagementResult::Refused(ManagementRefusal::Conflict { message, view })
             }
         },
         Area::Scheduled => match scheduler::apply(client, &request.action).await {

@@ -993,6 +993,56 @@ fn mcp_set_keeps_the_users_text_on_a_conflict() {
     assert!(error.contains(path.to_str().unwrap()), "{error}");
 }
 
+/// A conflict whose re-read fails is still a conflict: nothing was written,
+/// the command says so with the read error that followed, and the user's
+/// text is kept.
+#[test]
+fn mcp_set_reports_a_conflict_when_the_read_after_it_fails() {
+    let home = Home::new();
+    let path = home.0.join("patch.json");
+    fs::write(
+        &path,
+        json!({"command": "npx", "cwd": "/workspace", "env": {}}).to_string(),
+    )
+    .unwrap();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, cli_catalog());
+        configuration(wire, "docs", "user", docs(true));
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, cli_catalog());
+        let request = wire.read("mcp.update");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"The MCP settings changed; read them before updating",
+            "data":{"appError":"mcp_settings_conflict"}}}));
+        // The conflict wrote nothing, and the read of the area as it now is
+        // fails.
+        let request = wire.read("mcp.catalog");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"MCP settings are unavailable",
+            "data":{"appError":"mcp_unavailable"}}}));
+    });
+    let output = home
+        .command()
+        .args(["mcp", "set", "docs"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("The MCP entry changed since it was read; nothing was written."),
+        "{error}"
+    );
+    assert!(error.contains("MCP settings are unavailable"), "{error}");
+    assert!(error.contains("Your text is kept in"), "{error}");
+    assert!(error.contains(path.to_str().unwrap()), "{error}");
+}
+
 /// `mcp remove` deletes at the source revision; when the read after it
 /// fails, the removal stands and the error goes to stderr with exit 0.
 #[test]

@@ -3149,7 +3149,8 @@
         "format",
         "json",
         "matches",
-        "vec"
+        "vec",
+        "write"
       ]
     },
     {

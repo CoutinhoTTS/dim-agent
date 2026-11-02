@@ -412,10 +412,11 @@ pub async fn set_enabled(
 /// Why an MCP action did not happen.
 pub enum Failure {
     /// The stored settings changed since they were read: nothing was
-    /// written, and this is the area as it now is.
+    /// written, and this is the area as it now is, or why the read that
+    /// reports it failed.
     Conflict {
         message: String,
-        catalog: Box<Catalog>,
+        catalog: Result<Box<Catalog>, String>,
     },
     /// The action was applied and the read that reports the area failed.
     ReadFailed { note: Option<String>, error: String },
@@ -426,9 +427,13 @@ pub enum Failure {
 impl std::fmt::Display for Failure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Conflict { message, .. }
-            | Self::ReadFailed { error: message, .. }
-            | Self::Refused(message) => formatter.write_str(message),
+            Self::Conflict { message, catalog } => match catalog {
+                Ok(_) => formatter.write_str(message),
+                Err(error) => write!(formatter, "{message} {error}"),
+            },
+            Self::ReadFailed { error: message, .. } | Self::Refused(message) => {
+                formatter.write_str(message)
+            }
         }
     }
 }
@@ -518,7 +523,8 @@ enum Conflict {
 }
 
 /// The area after a refusal, when the owner refused because the settings
-/// changed; any other refusal leaves the draft where it is.
+/// changed; any other refusal leaves the draft where it is. A read that
+/// fails is still a conflict, and says why it cannot show the area.
 async fn refused(client: &mut Client, cwd: &str, error: &crate::Error, kind: Conflict) -> Failure {
     if crate::client::app_error(error) != Some("mcp_settings_conflict") {
         return Failure::Refused(error.to_string());
@@ -531,12 +537,9 @@ async fn refused(client: &mut Client, cwd: &str, error: &crate::Error, kind: Con
         Conflict::Add => t("The MCP entries changed since they were read; nothing was written."),
         Conflict::Remove => t("The MCP entry changed since it was read; nothing was removed."),
     };
-    match catalog(client, cwd).await {
-        Ok(catalog) => Failure::Conflict {
-            message: message.to_owned(),
-            catalog: Box::new(catalog),
-        },
-        Err(error) => Failure::Refused(error),
+    Failure::Conflict {
+        message: message.to_owned(),
+        catalog: catalog(client, cwd).await.map(Box::new),
     }
 }
 
