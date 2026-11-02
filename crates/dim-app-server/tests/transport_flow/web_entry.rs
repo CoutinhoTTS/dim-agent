@@ -421,6 +421,8 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
         "skills.update",
         "skills.remove",
         "skills.installations",
+        "modality.capabilities",
+        "modality.configure",
     ] {
         assert!(features.contains(&json!(method)), "{method}");
     }
@@ -431,6 +433,8 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
         "ui.open",
         "ui.shutdown",
         "provider.import_legacy",
+        "modality.task.submit",
+        "modality.task.result",
     ] {
         assert!(!features.contains(&json!(method)), "{method}");
     }
@@ -468,6 +472,7 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
         ("permission.rules", json!({})),
         ("mcp.catalog", json!({})),
         ("plugin.list", json!({})),
+        ("modality.capabilities", json!({})),
         (
             "provider.catalog",
             json!({"providerId":"018ec73f-0000-7000-8000-000000000011"}),
@@ -521,6 +526,31 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
     assert_eq!(
         view["result"]["providers"][0]["connection"]["headerNames"],
         json!(["X-Private"])
+    );
+    let modality = web.rpc("modality.capabilities", json!({})).await;
+    assert_ok(&modality);
+    let cleared = web
+        .rpc(
+            "modality.configure",
+            json!({"expectedRevision":modality["result"]["revision"],
+                "category":"image","operation":"generate","model":null}),
+        )
+        .await;
+    assert_ok(&cleared);
+    assert_eq!(
+        cleared["result"]["categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|category| category["category"] == "image")
+            .unwrap()["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|operation| operation["operation"] == "generate")
+            .unwrap()["reasons"][0]["dimension"],
+        "adapter",
+        "the web entry sees the product build's unavailable image operations"
     );
     let settings = web
         .rpc(
@@ -588,6 +618,14 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
         (
             "settings.update",
             json!({"source":"web","scope":"user","document":{}}),
+        ),
+        (
+            "modality.task.submit",
+            json!({"category":"image","operation":"generate","params":{}}),
+        ),
+        (
+            "modality.task.result",
+            json!({"taskId":"mt_x","name":"out","offset":0,"length":1}),
         ),
     ] {
         assert_eq!(

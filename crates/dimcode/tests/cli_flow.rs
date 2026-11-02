@@ -34,6 +34,9 @@ mod skills;
 #[path = "cli_flow/tasks.rs"]
 mod tasks;
 
+#[path = "support/daemon.rs"]
+mod daemon_cleanup;
+
 use dim_agent_capabilities::images::{MAX_BASE64_BYTES, MAX_EDGE, base64_len};
 use serde_json::{Value, json};
 use std::{
@@ -80,7 +83,8 @@ impl Home {
 }
 impl Drop for Home {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        daemon_cleanup::stop_daemon(&self.0);
+        daemon_cleanup::remove_directory(&self.0);
     }
 }
 
@@ -806,6 +810,158 @@ fn a_daemon_of_another_version_is_stopped_and_replaced() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// The daemon the CLI started for a home is gone once the home drops.
+///
+/// The harness finds it with `ps`, so a missing `ps` fails the test instead
+/// of reading as no daemon.
+#[test]
+fn a_home_drop_leaves_no_daemon_behind() {
+    let home = Home::new();
+    let path = home.0.clone();
+    let output = home.command().args(["models", "fixture"]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let pattern = path.to_str().unwrap();
+    assert_eq!(
+        daemon_cleanup::pids_naming(pattern).len(),
+        1,
+        "the CLI did not start its daemon for {}",
+        path.display()
+    );
+    drop(home);
+    assert!(
+        daemon_cleanup::pids_naming(pattern).is_empty(),
+        "the test left its daemon running for {}",
+        path.display()
+    );
+    assert!(!path.exists(), "the test left {} on disk", path.display());
+}
+
+/// The daemon closes the descriptors it inherited from the CLI.
+///
+/// The sweep and this test use the same listing: `/dev/fd` on macOS and the
+/// other Unix systems, and on Linux `close_range` or `/proc/self/fd`. The
+/// bounded fallback closes every number below the soft `RLIMIT_NOFILE`,
+/// which includes the pipe's inherited write end.
+#[test]
+fn a_daemon_keeps_no_descriptor_the_cli_inherited() {
+    let home = Home::new();
+    let (reader, writer) = std::io::pipe().unwrap();
+    let mut command = home.command();
+    command.args(["models", "fixture"]);
+    let inherited = writer.as_raw_fd();
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(&mut command, move || {
+            if libc::fcntl(inherited, libc::F_SETFD, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let status = command.status().unwrap();
+    drop(writer);
+    assert!(
+        status.success(),
+        "the CLI did not start the daemon for {}",
+        home.0.display()
+    );
+    let mut descriptor = libc::pollfd {
+        fd: reader.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ready = unsafe { libc::poll(&mut descriptor, 1, PATIENCE.as_millis() as libc::c_int) };
+    assert!(
+        ready > 0,
+        "the daemon kept the pipe's write end for {}",
+        home.0.display()
+    );
+    let mut byte = [0u8; 1];
+    let read = unsafe {
+        libc::read(
+            reader.as_raw_fd(),
+            byte.as_mut_ptr().cast::<libc::c_void>(),
+            byte.len(),
+        )
+    };
+    assert_eq!(read, 0, "the pipe carried data instead of EOF");
+}
+
+/// A server a test starts on a home itself is stopped even before it binds:
+/// the CLI's `daemon.log` and the server's `daemon.sock.lock` do not exist
+/// yet, so the marker the test writes is what tells the drop to stop it.
+#[test]
+fn a_home_stops_a_marked_server_that_never_binds() {
+    let home = Home::new();
+    let pattern = home.0.to_str().unwrap().to_owned();
+    daemon_cleanup::mark_test_server(&home.0);
+    // A stand-in for a server that is still starting when the test ends: it
+    // names the home in its command line, never binds, and is a grandchild,
+    // so the test holds no handle on it and the drop has to find it.
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg("sh -c \"$2\" sh \"$1\" & exit 0")
+        .arg("sh")
+        .arg(&pattern)
+        .arg("while :; do sleep 1; done")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the stand-in server did not start");
+    let deadline = Instant::now() + PATIENCE;
+    while daemon_cleanup::pids_naming(&pattern).is_empty() {
+        assert!(Instant::now() < deadline, "the stand-in server never ran");
+        thread::sleep(Duration::from_millis(10));
+    }
+    drop(home);
+    assert!(
+        daemon_cleanup::pids_naming(&pattern).is_empty(),
+        "the drop left the marked server for {pattern} running"
+    );
+}
+
+/// A stop re-reads a pid's command line before it signals, so a pid that now
+/// runs something else is left alone. The process here starts with the home
+/// in its command line and then replaces it, the shape a reused pid has.
+#[test]
+fn a_stop_never_signals_a_process_that_no_longer_names_the_home() {
+    let home = Home::new();
+    let pattern = home.0.to_str().unwrap();
+    let mut process = Command::new("sh")
+        .arg("-c")
+        .arg("exec sleep 30")
+        .arg(pattern)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = process.id() as libc::pid_t;
+    let deadline = Instant::now() + PATIENCE;
+    while daemon_cleanup::command_of(pid).is_some_and(|command| command.contains(pattern)) {
+        assert!(
+            Instant::now() < deadline,
+            "the stand-in never replaced its command line"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !daemon_cleanup::signal_if_naming(pid, pattern, libc::SIGTERM),
+        "the stop signalled a process that no longer names the home"
+    );
+    assert!(
+        process.try_wait().unwrap().is_none(),
+        "the signal reached a process that no longer names the home"
+    );
+    process.kill().unwrap();
+    process.wait().unwrap();
 }
 
 #[test]
@@ -4977,6 +5133,7 @@ fn real_daemon_profile_conflicts_preserve_the_running_daemon_and_endpoint() {
         fs::write(&original, &body).unwrap();
         fs::write(&requested, format!("{body}\n")).unwrap();
         let socket = home.0.join("rust/daemon.sock");
+        daemon_cleanup::mark_test_server(&home.0);
         let mut command = Command::new(&binary);
         command
             .arg("--unix")
