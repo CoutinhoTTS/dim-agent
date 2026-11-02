@@ -192,10 +192,6 @@ async fn v2_tree_history_resume_and_protocol_isolation_work_on_both_transports()
             assert_eq!(tree.rpc(method, params).await["error"]["code"], -32602);
         }
         assert_eq!(
-            legacy.rpc("session.list", json!({})).await["result"],
-            json!([])
-        );
-        assert_eq!(
             error_name(&legacy.rpc("session.attach", json!({"sessionId":sid})).await),
             "session_protocol_version"
         );

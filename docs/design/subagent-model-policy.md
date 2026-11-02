@@ -53,7 +53,7 @@ decision by an LLM. `agent` means the existing request/profile selection behavio
 | Persist and edit policy | Native `BusinessDocument`, `SettingsService::read/update`, source CAS and owner management methods, as used by `permission_rules.rs` |
 | Start/restore and retain members | Existing Agents/Collaboration Session creation, usage holds and cleanup, including idle unloading |
 
-Do not use `leader.config().model` or `session.list` as the adopted leader model:
+Do not use `leader.config().model` or `session.summaries` as the adopted leader model:
 they describe creation configuration rather than a subsequent F3 adoption.
 The inherited selection consists only of the existing `ModelSelection` fields:
 provider/model IDs, capability snapshot, model config and Provider-owned selection

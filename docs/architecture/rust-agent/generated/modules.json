@@ -18150,7 +18150,6 @@
         "path Call::History",
         "path Call::Idle",
         "path Call::InputLookup",
-        "path Call::List",
         "path Call::McpAppCall",
         "path Call::McpAppWidget",
         "path Call::McpRefresh",
@@ -18201,7 +18200,6 @@
         "path Reply::Deleted",
         "path Reply::ExecEnded",
         "path Reply::Fork",
-        "path Reply::List",
         "path Reply::McpAppCall",
         "path Reply::McpState",
         "path Reply::McpWidget",
@@ -18222,7 +18220,6 @@
         "path RequestId",
         "path SERVER_VERSION",
         "path SessionInfo",
-        "path SessionList",
         "path SessionMethodsResult",
         "path SessionOrigin::Acp",
         "path SessionOrigin::Client",
@@ -23445,13 +23442,6 @@
       ]
     },
     {
-      "from": "dim_app_server::storage::catalog::tests",
-      "to": "dim_app_server::storage::timeline",
-      "references": [
-        "path SessionStore"
-      ]
-    },
-    {
       "from": "dim_app_server::storage::codec",
       "to": "dim_agent_runtime::core::timeline",
       "references": [
@@ -23965,19 +23955,11 @@
     },
     {
       "from": "dim_app_server::storage::timeline",
-      "to": "dim_agent_types::profile",
-      "references": [
-        "path dim_agent_types::ModelId"
-      ]
-    },
-    {
-      "from": "dim_app_server::storage::timeline",
       "to": "dim_app_server::protocol",
       "references": [
         "path SessionOrigin",
         "path SessionOrigin::Unknown",
         "path SessionOrigin::from_stored",
-        "path crate::protocol::SessionInfo",
         "use crate::protocol::SessionOrigin"
       ]
     },
@@ -24044,7 +24026,6 @@
         "path Titles",
         "path Titles::new",
         "path metadata::Dispatch",
-        "path metadata::decode",
         "use super::metadata",
         "use super::metadata::Titles"
       ]

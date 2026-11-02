@@ -1,7 +1,7 @@
 use super::*;
 
 /// v3 exposes Agents: parallel Agents isolate their Sessions, agent.list
-/// reports them and session.list routes by agentId.
+/// reports them and session.summaries routes by agentId.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn parallel_agents_isolate_sessions_and_listing() {
     for ws in [false, true] {
@@ -57,14 +57,16 @@ async fn parallel_agents_isolate_sessions_and_listing() {
         assert_eq!(default_info["sessions"], 0);
         assert_ne!(default_info["agentId"], first.as_str());
 
-        let listed = client.rpc("session.list", json!({})).await;
+        let listed = client.rpc("session.summaries", json!({})).await;
         let sessions = listed["result"].as_array().unwrap();
         assert_eq!(sessions.len(), 2);
         for session in sessions {
             let owner = session["agentId"].as_str().unwrap();
             assert!(owner == first || owner == second);
         }
-        let listed = client.rpc("session.list", json!({"agentId":first})).await;
+        let listed = client
+            .rpc("session.summaries", json!({"agentId":first}))
+            .await;
         let sessions = listed["result"].as_array().unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0]["agentId"], first.as_str());
@@ -180,10 +182,11 @@ async fn legacy_versions_stay_on_the_default_agent() {
             )
             .await,
     );
-    let listed = first.rpc("session.list", json!({})).await;
-    let sessions = listed["result"].as_array().unwrap();
-    assert_eq!(sessions.len(), 1);
-    assert!(sessions[0].get("agentId").is_none());
+    let listed = first.rpc("session.summaries", json!({})).await;
+    assert_eq!(
+        listed["error"]["data"]["appError"], "unknown_method",
+        "v1 has no Session listing: {listed}"
+    );
     let rejected = first.rpc("agent.create", json!({})).await;
     assert_eq!(rejected["error"]["data"]["appError"], "unknown_method");
     let mut with_agent = create(json!([]));

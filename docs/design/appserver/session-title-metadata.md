@@ -22,7 +22,7 @@ channel ([C6](session-notices.md)), and Rpc shows the title in protocol v3 Sessi
   is closing, and settles it itself; dropping the call only loses the reply.
 - **Notice.** After each commit, `{source: "SessionStore", kind: "title", data: {title, titleSource,
   titleRevision}}`, in commit order.
-- **Lists.** Protocol v3 `session.list` and `session.summaries` entries carry `title`, `titleSource` and
+- **Lists.** Protocol v3 `session.summaries` entries carry `title`, `titleSource` and
   `titleRevision`.
 - **Binding.** The process service `sessionMetadata` (`read`, `setTitle`), provided by SessionStore, reaches
   TypeScript through the existing service catalog, like `sessions` and `settings`.
@@ -48,16 +48,16 @@ protocol version.
                                               |                                        ^
  Session channel session/<id>  <--------------+  Notice {SessionStore, title, data}     |
    |                                                                                   |
-   v                                    Rpc: session.list / session.summaries ---------+
- Rpc subscription (v3)                    SessionStore's directory query joins the title row
+   v                                    Rpc: session.summaries ------------------------+
+ Rpc subscription (v3)                    SessionStore's catalog query joins the title row
    -> session.notice {sessionId, source, kind, data}
 ```
 
 | Part | Scope | Change |
 | --- | --- | --- |
-| SessionStore ([timeline.rs](../../../crates/dim-app-server/src/storage/timeline.rs), [metadata.rs](../../../crates/dim-app-server/src/storage/metadata.rs)) | Process | `metadata` and `set_title`, the title writer, the `sessionMetadata` service; delete and creation rollback remove the title row; the directory query reads it |
+| SessionStore ([timeline.rs](../../../crates/dim-app-server/src/storage/timeline.rs), [metadata.rs](../../../crates/dim-app-server/src/storage/metadata.rs)) | Process | `metadata` and `set_title`, the title writer, the `sessionMetadata` service; delete and creation rollback remove the title row; the catalog query reads it |
 | SqliteStorage ([sqlite.rs](../../../crates/dim-app-server/src/storage/sqlite.rs)) | Process | v16 schema and its upgrade step |
-| Rpc ([protocol.rs](../../../crates/dim-app-server/src/protocol.rs), [connection.rs](../../../crates/dim-app-server/src/connection.rs)) and Agents' directory read ([agents.rs](../../../crates/dim-app-server/src/agents.rs)) | Process | The v3 list fields |
+| Rpc ([protocol.rs](../../../crates/dim-app-server/src/protocol.rs), [connection.rs](../../../crates/dim-app-server/src/connection.rs)) | Process | The v3 list fields |
 | Service catalog ([lib.rs](../../../crates/dim-app-server/src/lib.rs)) | Process | `register_shared("sessionMetadata")`, one line, as S2 did for `sessions` |
 | Session broadcast, Rpc notice forwarding | Session, process | Unchanged (C6) |
 
@@ -172,7 +172,7 @@ that drops the call still has to read to learn the outcome; and a JavaScript cal
 
 ## 8. Session lists
 
-Protocol v3 `session.list` and `session.summaries` entries gain three fields:
+Protocol v3 `session.summaries` entries gain three fields:
 
 | Field | Value |
 | --- | --- |
@@ -180,9 +180,9 @@ Protocol v3 `session.list` and `session.summaries` entries gain three fields:
 | `titleSource` | `"auto"`, `"manual"`, or `null` when there is no title |
 | `titleRevision` | The revision the entry was read at; 0 when never written |
 
-- SessionStore's directory query joins the title row in the same SQL read, so a list costs no read per Session. A
+- SessionStore's catalog query joins the title row in the same SQL read, so a list costs no read per Session. A
   daemon without a native store has no titles; its v3 entries show `null`, `null`, `0`.
-- v1 and v2 entries carry none of them. Their reply shapes are frozen, and they never receive title notices
+- v1 and v2 clients get no Session listing and never receive title notices
   ([C6 D5](session-notices.md#10-decisions)).
 - **Why the revision is listed.** A list can be read before a commit and still reach the client after that commit's
   notice, on the same connection. The client keeps whichever has the higher `titleRevision`. C6 relies on this:
@@ -191,9 +191,9 @@ Protocol v3 `session.list` and `session.summaries` entries gain three fields:
 
 Rpc never calls `setTitle` and gains no method. How each error reaches clients:
 
-| SessionStore | `session.list` / `session.summaries` | `session.rename` ([SessionTitle A.1](../plugins/SessionTitle.md#a1-sessionrename)) |
+| SessionStore | `session.summaries` | `session.rename` ([SessionTitle A.1](../plugins/SessionTitle.md#a1-sessionrename)) |
 | --- | --- | --- |
-| `storage` | The directory read fails as it does today | `storage_failed` |
+| `storage` | The catalog read fails as it does today | `storage_failed` |
 | `not_found` | The Session is not listed | `session_not_found` |
 | `conflict` | — | SessionTitle reads again and retries ([§3.2](../plugins/SessionTitle.md#32-manual-rename)) |
 
@@ -329,7 +329,7 @@ None. S5b uses C6's `notify`, the existing service catalog and `HostDispatch`, a
    write at the same revision commits.
 6. A `setTitle` call whose caller awaits the reply and then drops it, while the write is held before its transaction,
    still commits and announces exactly once (handover, §6).
-7. v3 `session.list` and `session.summaries` carry `title`, `titleSource`, `titleRevision`; v2 lists do not.
+7. v3 `session.summaries` carries `title`, `titleSource`, `titleRevision`; v2 has no Session listing.
 8. A title survives a restart and can be read and written while its Session is not loaded; a fork starts untitled at
    revision 0; a delete removes the row.
 9. An empty store is created at v16. Disposable v15 and v13 stores upgrade in place to the exact v16 schema with

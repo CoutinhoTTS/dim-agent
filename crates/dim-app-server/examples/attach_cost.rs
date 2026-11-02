@@ -112,10 +112,10 @@ impl Client {
     }
 
     async fn sequence(&mut self, id: &str) -> std::result::Result<u64, Error> {
-        let listed = self.ok("session.list", json!({})).await?;
+        let listed = self.ok("session.summaries", json!({})).await?;
         let sessions = listed
             .as_array()
-            .ok_or("session.list did not return an array")?;
+            .ok_or("session.summaries did not return an array")?;
         Ok(sessions
             .iter()
             .find(|session| session["sessionId"] == id)

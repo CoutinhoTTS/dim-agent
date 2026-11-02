@@ -332,11 +332,8 @@ impl Connection {
                 "Connection request limit reached",
             ));
         }
-        let cancel = matches!(
-            request.call,
-            Call::Catalog(_) | Call::Summaries(_) | Call::List(_)
-        )
-        .then(|| self.closed.child_token());
+        let cancel = matches!(request.call, Call::Catalog(_) | Call::Summaries(_))
+            .then(|| self.closed.child_token());
         ids.insert(request.id.clone(), cancel);
         Ok(Inflight {
             connection: self.clone(),
@@ -393,7 +390,6 @@ impl Connection {
                 Call::Hello(_)
                     | Call::Ping
                     | Call::Shutdown(_)
-                    | Call::List(_)
                     | Call::Summaries(_)
                     | Call::Catalog(_)
                     | Call::CatalogCancel(_)
@@ -665,7 +661,6 @@ impl Connection {
                 .get(id)
                 .map(|a| a.delivery.clone())
         });
-        let include_summary = matches!(call, Call::Summaries(_));
         let include_closed = matches!(&call, Call::Summaries(params) if params.include_closed);
         Some(match call {
             Call::Hello(_) => Err(RpcError::invalid("hello has already completed")),
@@ -739,18 +734,13 @@ impl Connection {
                     Err(error) => Err(RpcError::from(error)),
                 }
             }
-            Call::List(SessionList { agent_id }) | Call::Summaries(Summaries { agent_id, .. }) => {
-                let filter: Option<String> = if self.protocol_version() >= 3 {
-                    agent_id
-                } else {
-                    Some(rpc.index.default_agent_id().to_owned())
-                };
-                if let Some(agent_id) = filter.as_deref()
+            Call::Summaries(Summaries { agent_id, .. }) => {
+                if let Some(agent_id) = agent_id.as_deref()
                     && let Some(reason) = rpc.index.unavailable_agent(agent_id)
                 {
                     return Some(Err(RpcError::from(AgentError::Storage(reason))));
                 }
-                if include_summary && rpc.config.database_path.is_some() {
+                if rpc.config.database_path.is_some() {
                     let cancel = self.ids.lock().expect("request identities")[&id]
                         .clone()
                         .expect("summary reads have cancellation");
@@ -763,7 +753,7 @@ impl Connection {
                                     with_acp_sessions: true,
                                     ..Catalog::default()
                                 },
-                                filter,
+                                agent_id,
                                 self.protocol_version(),
                                 include_closed,
                                 cancel,
@@ -786,67 +776,48 @@ impl Connection {
                         },
                     );
                 }
-                let cancel = self.ids.lock().expect("request identities")[&id]
-                    .clone()
-                    .expect("listing reads have cancellation");
-                let mut records = match rpc
+                let records = rpc
                     .index
-                    .session_directory(filter.clone(), self.protocol_version(), cancel)
-                    .await
-                {
-                    Ok(Some(records)) => records,
-                    Err(AgentError::Cancelled(_)) => {
-                        return Some(Err(RpcError::app(
-                            -32000,
-                            "cancelled",
-                            "Session listing cancelled",
-                        )));
-                    }
-                    Err(error) => return Some(Err(RpcError::from(error))),
-                    Ok(None) => match rpc
-                        .index
-                        .hosts()
-                        .into_iter()
-                        .filter(|host| filter.as_ref().is_none_or(|agent| agent == &host.agent_id))
-                        .flat_map(|host| {
-                            let sessions = host.agent.sessions();
-                            sessions.into_iter().map(move |s| (host.clone(), s))
+                    .hosts()
+                    .into_iter()
+                    .filter(|host| {
+                        agent_id
+                            .as_ref()
+                            .is_none_or(|agent| agent == &host.agent_id)
+                    })
+                    .flat_map(|host| {
+                        let sessions = host.agent.sessions();
+                        sessions.into_iter().map(move |s| (host.clone(), s))
+                    })
+                    .filter(|(_, session)| {
+                        rpc.index.version_of(session.id()) == Some(self.protocol_version())
+                    })
+                    .map(|(host, s)| {
+                        let status = s.state("main").map_err(RpcError::from)?;
+                        Ok(SessionInfo {
+                            session_id: s.id().to_owned(),
+                            cwd: s.config().cwd.clone(),
+                            model: dim_agent_types::ModelId {
+                                provider_id: s.config().model.provider_id.clone(),
+                                model_id: s.config().model.model_id.clone(),
+                            },
+                            created_at: s.created_at(),
+                            running: status.running,
+                            sequence: s.sequence("main").map_err(RpcError::from)?,
+                            attached_clients: 0,
+                            agent_id: Some(host.agent_id.clone()),
+                            origin: None,
+                            parent_session_id: None,
+                            title: Some(crate::storage::TitleFields::default()),
                         })
-                        .filter(|(_, session)| {
-                            rpc.index.version_of(session.id()) == Some(self.protocol_version())
-                        })
-                        .map(|(host, s)| {
-                            let status = s.state("main").map_err(RpcError::from)?;
-                            Ok(SessionInfo {
-                                session_id: s.id().to_owned(),
-                                cwd: s.config().cwd.clone(),
-                                model: dim_agent_types::ModelId {
-                                    provider_id: s.config().model.provider_id.clone(),
-                                    model_id: s.config().model.model_id.clone(),
-                                },
-                                created_at: s.created_at(),
-                                running: status.running,
-                                sequence: s.sequence("main").map_err(RpcError::from)?,
-                                attached_clients: self.hub.attached_clients(s.id()),
-                                agent_id: (self.protocol_version() >= 3)
-                                    .then(|| host.agent_id.clone()),
-                                origin: None,
-                                parent_session_id: None,
-                                title: (self.protocol_version() >= 3)
-                                    .then(crate::storage::TitleFields::default),
-                            })
-                        })
-                        .collect::<Result<Vec<_>, RpcError>>()
-                    {
-                        Ok(records) => records,
-                        Err(error) => return Some(Err(error)),
-                    },
+                    })
+                    .collect::<Result<Vec<_>, RpcError>>();
+                let mut records = match records {
+                    Ok(records) => records,
+                    Err(error) => return Some(Err(error)),
                 };
                 for record in &mut records {
                     record.attached_clients = self.hub.attached_clients(&record.session_id);
-                }
-                if !include_summary {
-                    return Some(Ok(Reply::List(records)));
                 }
                 let mut summaries = Vec::with_capacity(records.len());
                 for session in records {

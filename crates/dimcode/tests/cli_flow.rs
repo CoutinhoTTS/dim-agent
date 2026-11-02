@@ -228,7 +228,7 @@ impl Wire {
 
 /// The record `session.attach` replies for the Session it names: that
 /// Session's `SessionInfo`, whose model follows its latest adopted
-/// configuration rather than the creation model `session.list` reports until
+/// configuration rather than the creation model `session.summaries` reports until
 /// #795 lands.
 fn attach_record(request: &Value) -> Value {
     json!({
@@ -8447,7 +8447,7 @@ fn no_catalog(wire: &mut Wire) {
     let mut line = String::new();
     while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
         assert!(
-            !line.contains("session.summaries") && !line.contains("session.list"),
+            !line.contains("session.summaries"),
             "the open read the Session catalog: {line}"
         );
         line.clear();
