@@ -11,8 +11,8 @@ use crate::{
 };
 use dim_agent_capabilities::methods::{Interruption, MethodDecl, RpcError, params, reply};
 use dim_agent_capabilities::skills::{
-    InstallOutcome, RefreshTarget, SelectedSkill, SkillPreview, SkillStatus, SkillsCatalog,
-    SkillsError, valid_installation_id,
+    InstallOutcome, RefreshTarget, Replace, SelectedSkill, SkillPreview, SkillStatus,
+    SkillsCatalog, SkillsError, selection_path, valid_installation_id,
 };
 use dim_agent_capabilities::{
     host_platform::HostPlatform,
@@ -84,7 +84,7 @@ impl BusinessDocument for SkillDocument {
             if installation
                 .skills
                 .iter()
-                .any(|path| !relative_path(path).is_some())
+                .any(|path| selection_path(path).is_none())
             {
                 return Err(SettingsError::Invalid(
                     "invalid Skill installation selection path",
@@ -100,22 +100,6 @@ impl BusinessDocument for SkillDocument {
         }
         Ok(())
     }
-}
-
-/// A selection or record path: relative, no `.` or `..` component.
-fn relative_path(path: &str) -> Option<PathBuf> {
-    let path = Path::new(path);
-    if path.as_os_str().is_empty() || path.is_absolute() || path.has_root() {
-        return None;
-    }
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::Normal(part) => out.push(part),
-            _ => return None,
-        }
-    }
-    (!out.as_os_str().is_empty()).then_some(out)
 }
 
 /// Adapts the owner's business document to the reusable Skill catalog port.
@@ -337,6 +321,8 @@ pub struct PreviewParams {
     pub source: SourceParams,
     #[serde(default, deserialize_with = "optional_non_null")]
     pub id: Option<String>,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub cwd: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -469,6 +455,7 @@ pub(crate) fn skills_error(error: SkillsError) -> RpcError {
         SkillsError::SettingsRead(_) | SkillsError::RootUnreadable { .. } => "skills_unavailable",
         SkillsError::InstallationExists(_) => "skills_install_exists",
         SkillsError::UnknownInstallation(_) => "skills_install_unknown",
+        SkillsError::UnmanagedDirectory(_) => "skills_install_unmanaged",
         SkillsError::StalePreview { .. } => "skills_preview_stale",
         SkillsError::SelectionInvalid(_) => "skills_selection_invalid",
         SkillsError::InstallConflict(_) => "skills_install_conflict",
@@ -515,16 +502,46 @@ fn acquire_error(error: PluginError) -> RpcError {
     }
 }
 
-/// A source read into the operation's staging directory. The directory is
-/// removed when this is dropped.
+/// Deletes the staging root an earlier process left behind: an operation's
+/// directory is removed when it settles, and this is the one ending that does
+/// not run. Every component from `home` down must be a real directory, so a
+/// link or a file in that chain is left alone.
+fn clean_staging(home: &Path) {
+    let mut path = home.to_owned();
+    for part in STAGING.split('/') {
+        path.push(part);
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
+            _ => return,
+        }
+    }
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+/// A source read for one operation. A Git source is cloned into a staging
+/// directory, which is removed when this is dropped; a path source is read in
+/// place, and an operation directory is created only when the caller prepares
+/// files in one.
 struct Acquired {
     source: SkillInstallSource,
     root: PathBuf,
-    staging: Staging,
+    staging: Option<Staging>,
+}
+impl Acquired {
+    /// `<home>/.agents/.staging/<random>`, created on first use.
+    fn operation_dir(&mut self, home: &Path) -> Result<&Path, RpcError> {
+        if self.staging.is_none() {
+            self.staging = Some(Staging::in_root(&home.join(STAGING)).map_err(acquire_error)?);
+        }
+        Ok(self
+            .staging
+            .as_ref()
+            .expect("the staging directory just created")
+            .path())
+    }
 }
 
 async fn acquire(params: SourceParams, home: &Path) -> Result<Acquired, RpcError> {
-    let staging = Staging::in_root(&home.join(STAGING)).map_err(acquire_error)?;
     match params {
         SourceParams::Path { path } => {
             if !path.is_absolute() {
@@ -543,7 +560,7 @@ async fn acquire(params: SourceParams, home: &Path) -> Result<Acquired, RpcError
             Ok(Acquired {
                 source: SkillInstallSource::Path { path: root.clone() },
                 root,
-                staging,
+                staging: None,
             })
         }
         SourceParams::Git { git, reference } => {
@@ -551,6 +568,7 @@ async fn acquire(params: SourceParams, home: &Path) -> Result<Acquired, RpcError
             if let Some(reference) = &reference {
                 acquire::check_ref(reference).map_err(acquire_error)?;
             }
+            let staging = Staging::in_root(&home.join(STAGING)).map_err(acquire_error)?;
             let commit = acquire::clone(&git, reference.as_deref(), &staging)
                 .await
                 .map_err(acquire_error)?;
@@ -564,7 +582,7 @@ async fn acquire(params: SourceParams, home: &Path) -> Result<Acquired, RpcError
                     commit,
                 },
                 root,
-                staging,
+                staging: Some(staging),
             })
         }
     }
@@ -616,6 +634,7 @@ impl DynPlugin for SkillsCatalogPlugin {
             let methods = ctx.require_at(&self.methods)?;
             let parts = ctx.require_at(&self.parts)?;
             let home = platform.home.clone();
+            clean_staging(&home);
             settings.register::<SkillDocument>(ctx)?;
             let settings = Arc::new(SkillSettingsHost(Arc::new(SkillStorage { settings })));
             let catalog = dim_agent_capabilities::skills::SkillsCatalogPlugin::mount(
@@ -723,10 +742,14 @@ impl DynPlugin for SkillsCatalogPlugin {
                             }
                             "skills.preview" => {
                                 let p: PreviewParams = params(value)?;
+                                let cwd = match p.cwd {
+                                    Some(cwd) => Some(canonical_cwd(&cwd).await?),
+                                    None => None,
+                                };
                                 let acquired = acquire(p.source, &home).await?;
                                 let id = p.id.unwrap_or_else(|| acquired.source.default_id());
                                 let preview: SkillPreview = catalog
-                                    .preview(&acquired.root, &id)
+                                    .preview(&acquired.root, &id, cwd.as_deref())
                                     .await
                                     .map_err(skills_error)?;
                                 reply(SkillsPreviewResult {
@@ -764,7 +787,7 @@ impl DynPlugin for SkillsCatalogPlugin {
                             }
                             "skills.install" => {
                                 let p: InstallParams = params(value)?;
-                                let acquired = acquire(p.source, &home).await?;
+                                let mut acquired = acquire(p.source, &home).await?;
                                 let id = p.id.unwrap_or_else(|| acquired.source.default_id());
                                 let selection: Vec<SelectedSkill> = p
                                     .skills
@@ -774,14 +797,19 @@ impl DynPlugin for SkillsCatalogPlugin {
                                         revision: Some(skill.revision),
                                     })
                                     .collect();
+                                let operation_dir = acquired.operation_dir(&home)?.to_owned();
+                                let replace = match p.overwrite {
+                                    true => Replace::Recorded,
+                                    false => Replace::Create,
+                                };
                                 let outcome = catalog
                                     .install(
                                         &id,
                                         acquired.source.clone(),
                                         &acquired.root,
-                                        acquired.staging.path(),
+                                        &operation_dir,
                                         &selection,
-                                        p.overwrite,
+                                        replace,
                                     )
                                     .await
                                     .map_err(skills_error)?;
@@ -796,7 +824,7 @@ impl DynPlugin for SkillsCatalogPlugin {
                                     .ok_or_else(|| {
                                         skills_error(SkillsError::UnknownInstallation(p.id.clone()))
                                     })?;
-                                let acquired = acquire(recorded(&record.source), &home).await?;
+                                let mut acquired = acquire(recorded(&record.source), &home).await?;
                                 let selection: Vec<SelectedSkill> = record
                                     .skills
                                     .iter()
@@ -805,14 +833,15 @@ impl DynPlugin for SkillsCatalogPlugin {
                                         revision: None,
                                     })
                                     .collect();
+                                let operation_dir = acquired.operation_dir(&home)?.to_owned();
                                 let outcome = catalog
                                     .install(
                                         &p.id,
                                         acquired.source.clone(),
                                         &acquired.root,
-                                        acquired.staging.path(),
+                                        &operation_dir,
                                         &selection,
-                                        true,
+                                        Replace::Expected(record),
                                     )
                                     .await
                                     .map_err(skills_error)?;

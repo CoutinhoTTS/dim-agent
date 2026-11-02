@@ -2,7 +2,15 @@
 //! the user root ([docs/design/plugins/Skills.md]).
 use super::SkillsError;
 use sha2::{Digest, Sha256};
-use std::path::{Component, Path, PathBuf};
+use std::{
+    io::Read,
+    path::{Component, Path, PathBuf},
+};
+
+/// The largest file a revision digests. A Skill bundles text; a larger file is
+/// refused instead of being read, so previewing a source cannot allocate it.
+const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const CHUNK_BYTES: usize = 64 * 1024;
 
 /// The directories and files of a Skill, in sorted order, with `.git`
 /// skipped. Symbolic links are never followed or installed.
@@ -44,7 +52,7 @@ fn walk(root: &Path, dir: &Path, hasher: &mut Sha256) -> Result<(), SkillsError>
             hasher.update(b"f");
             hasher.update(relative.as_bytes());
             hasher.update([0]);
-            hasher.update(std::fs::read(&path).map_err(|error| unusable(&path, error))?);
+            hash_file(&path, hasher)?;
         } else {
             return Err(SkillsError::SelectionInvalid(format!(
                 "{}: only regular files are installed",
@@ -53,6 +61,30 @@ fn walk(root: &Path, dir: &Path, hasher: &mut Sha256) -> Result<(), SkillsError>
         }
     }
     Ok(())
+}
+
+/// Feeds `path` into `hasher` a chunk at a time, so memory does not follow the
+/// file's size.
+fn hash_file(path: &Path, hasher: &mut Sha256) -> Result<(), SkillsError> {
+    let mut file = std::fs::File::open(path).map_err(|error| unusable(path, error))?;
+    let mut buffer = vec![0u8; CHUNK_BYTES];
+    let mut total = 0u64;
+    loop {
+        let read = match file.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(unusable(path, error)),
+        };
+        total += read as u64;
+        if total > MAX_FILE_BYTES {
+            return Err(SkillsError::SelectionInvalid(format!(
+                "{}: a file larger than {MAX_FILE_BYTES} bytes is not digested",
+                path.display()
+            )));
+        }
+        hasher.update(&buffer[..read]);
+    }
 }
 
 /// The revision of one installation: its selected paths with their revisions,
@@ -86,8 +118,8 @@ pub(crate) fn valid_id(id: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
 }
 
-/// A selection path: relative, no `.` or `..` component, not empty.
-pub(crate) fn relative(path: &str) -> Option<PathBuf> {
+/// A selection or record path: relative, no `.` or `..` component, not empty.
+pub fn selection_path(path: &str) -> Option<PathBuf> {
     let path = Path::new(path);
     if path.as_os_str().is_empty() || path.is_absolute() || path.has_root() {
         return None;
@@ -147,25 +179,27 @@ impl Placed {
 }
 
 /// Copies `skills` (source directory and source-relative path) into
-/// `<operation_dir>/place` and renames it to `<user_root>/<id>`. The replaced
-/// directory is kept under `<operation_dir>/old` until the operation settles.
+/// `<operation_dir>/place` and renames it to `<user_root>/<id>`. With
+/// `replace`, the directory there is kept under `<operation_dir>/old` until the
+/// operation settles; the caller sets it only for a directory the record owns.
 pub(crate) fn place(
     user_root: &Path,
     id: &str,
     operation_dir: &Path,
     skills: &[(PathBuf, String)],
+    replace: bool,
 ) -> Result<Placed, SkillsError> {
     let place = operation_dir.join("place");
     std::fs::create_dir_all(&place).map_err(|error| unusable(&place, error))?;
     for (from, path) in skills {
-        let relative = relative(path)
+        let relative = selection_path(path)
             .ok_or_else(|| SkillsError::SelectionInvalid(format!("{path:?} is not relative")))?;
         copy_tree(from, &place.join(relative))?;
     }
     let dest = user_root.join(id);
     std::fs::create_dir_all(user_root).map_err(|error| unusable(user_root, error))?;
     let old = match std::fs::symlink_metadata(&dest) {
-        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+        Ok(meta) if replace && meta.is_dir() && !meta.file_type().is_symlink() => {
             let old = operation_dir.join("old");
             std::fs::rename(&dest, &old).map_err(|error| unusable(&old, error))?;
             Some(old)
@@ -186,6 +220,16 @@ pub(crate) fn place(
         return Err(unusable(&dest, error));
     }
     Ok(Placed { dest, old })
+}
+
+/// Whether anything, of any kind, is at `<user_root>/<id>`.
+pub(crate) fn occupied(user_root: &Path, id: &str) -> Result<bool, SkillsError> {
+    let dest = user_root.join(id);
+    match std::fs::symlink_metadata(&dest) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(unusable(&dest, error)),
+    }
 }
 
 /// Deletes `<user_root>/<id>`, and nothing else. `Ok(false)` when it is not

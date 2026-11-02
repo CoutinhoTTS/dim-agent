@@ -10,6 +10,7 @@ mod session;
 pub use catalog::{
     CatalogChanged, MemorySkillSettings, SkillsCatalog, SkillsCatalogPlugin, catalog_changes,
 };
+pub use install::selection_path;
 pub use session::{SessionSkills, SkillsBranch, SkillsBranchPlugin, SkillsPlugin};
 
 use crate::skill_settings::SkillInstallation;
@@ -164,6 +165,21 @@ pub struct SelectedSkill {
     pub revision: Option<String>,
 }
 
+/// What an install may replace at `<user root>/<id>`. Only a directory the
+/// record owns is ever replaced; the user root also holds hand-written Skills.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Replace {
+    /// Create the installation. A recorded id is [`SkillsError::InstallationExists`].
+    Create,
+    /// Replace the record the id holds now, or create it (the user confirmed
+    /// the overwrite).
+    Recorded,
+    /// Replace exactly this record. A record that is gone or different is
+    /// [`SkillsError::UnknownInstallation`], so an update cannot undo a removal
+    /// or another install made while its source was acquired.
+    Expected(SkillInstallation),
+}
+
 #[derive(Debug, Clone)]
 pub struct InstallOutcome {
     pub installation: SkillInstallation,
@@ -182,6 +198,10 @@ pub enum SkillsError {
     InstallationExists(String),
     #[error("unknown Skill installation: {0}")]
     UnknownInstallation(String),
+    /// `<user root>/<id>` holds something no record owns, which is never
+    /// replaced: the user root is where hand-written Skills live.
+    #[error("{0}")]
+    UnmanagedDirectory(String),
     #[error("Skill {path:?} changed since the preview: reviewed {expected}, found {found}")]
     StalePreview {
         path: String,

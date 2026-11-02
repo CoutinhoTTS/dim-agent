@@ -94,7 +94,7 @@ function loadPreview(): void {
   void action(async () => {
     previewError.value = ""
     try {
-      const next = await connection.client.call("skills.preview", { source: sourceParams(), ...(installId.value.trim() ? { id: installId.value.trim() } : {}) }, readSkillPreview, SOURCE_TIMEOUT_MS)
+      const next = await connection.client.call("skills.preview", { ...scope(), source: sourceParams(), ...(installId.value.trim() ? { id: installId.value.trim() } : {}) }, readSkillPreview, SOURCE_TIMEOUT_MS)
       preview.value = next
       const conflicted = new Set(next.conflicts.map((conflict) => conflict.path))
       selection.value = next.skills.filter((skill) => !conflicted.has(skill.path)).map((skill) => skill.path)

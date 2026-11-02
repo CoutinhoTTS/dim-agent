@@ -1,6 +1,7 @@
 use super::{
     CatalogEntry, CatalogVersion, CatalogView, InstallOutcome, PreviewConflict, PreviewShadow,
-    PreviewSkill, RefreshTarget, SelectedSkill, SkillIssue, SkillPreview, SkillStatus, SkillsError,
+    PreviewSkill, RefreshTarget, Replace, SelectedSkill, SkillIssue, SkillPreview, SkillStatus,
+    SkillsError,
     discovery::{RootKind, RootSnapshot, scan_root},
     install,
 };
@@ -361,12 +362,18 @@ impl SkillsCatalog {
     }
 
     /// The Skills a source tree holds, what installing them as `id` would
-    /// collide with, and what it would hide. Nothing is written.
-    pub async fn preview(&self, root: &Path, id: &str) -> Result<SkillPreview, SkillsError> {
+    /// collide with, and what it would hide. Nothing is written. `cwd` adds
+    /// that project root to what it would hide.
+    pub async fn preview(
+        &self,
+        root: &Path,
+        id: &str,
+        cwd: Option<&Path>,
+    ) -> Result<SkillPreview, SkillsError> {
         self.check_open()?;
         let view = {
             let _operating = self.operating.lock().await;
-            self.view(None).await?
+            self.view(cwd).await?
         };
         let snapshot = scan(root.to_owned(), RootKind::Preview)
             .await
@@ -434,9 +441,8 @@ impl SkillsCatalog {
     }
 
     /// Installs `selection` from the acquired tree `root` as `id`, replacing
-    /// the recorded installation only with `overwrite`. The files, then the
-    /// record, then the catalog view: a listener never sees an installation
-    /// the record does not hold.
+    /// only what `replace` names. The files, then the record, then the catalog
+    /// view: a listener never sees an installation the record does not hold.
     pub async fn install(
         &self,
         id: &str,
@@ -444,7 +450,7 @@ impl SkillsCatalog {
         root: &Path,
         operation_dir: &Path,
         selection: &[SelectedSkill],
-        overwrite: bool,
+        replace: Replace,
     ) -> Result<InstallOutcome, SkillsError> {
         self.check_open()?;
         if !install::valid_id(id) {
@@ -457,10 +463,22 @@ impl SkillsCatalog {
         self.reload_settings().await?;
         let recorded = self.installations_locked().await?;
         let previous = recorded.get(id).cloned();
-        if !overwrite && (previous.is_some() || self.user_root.join(id).exists()) {
-            return Err(SkillsError::InstallationExists(id.into()));
-        }
         let view = self.view(None).await?;
+        match (&replace, &previous) {
+            (Replace::Create, Some(_)) => {
+                return Err(SkillsError::InstallationExists(id.into()));
+            }
+            (Replace::Expected(expected), Some(record)) if record != expected => {
+                return Err(SkillsError::UnknownInstallation(id.into()));
+            }
+            (Replace::Expected(_), None) => {
+                return Err(SkillsError::UnknownInstallation(id.into()));
+            }
+            _ => {}
+        }
+        if previous.is_none() && install::occupied(&self.user_root, id)? {
+            return Err(unmanaged(id, &self.user_root, &view));
+        }
         let snapshot = scan(root.to_owned(), RootKind::Preview)
             .await
             .map_err(root_error)?;
@@ -519,7 +537,13 @@ impl SkillsCatalog {
             revisions.push((skill.path.clone(), revision));
             placements.push((dir.to_owned(), skill.path.clone()));
         }
-        let placed = install::place(&self.user_root, id, operation_dir, &placements)?;
+        let placed = install::place(
+            &self.user_root,
+            id,
+            operation_dir,
+            &placements,
+            previous.is_some(),
+        )?;
         let installation = SkillInstallation {
             source,
             revision: install::selection_revision(&revisions),
@@ -620,6 +644,26 @@ impl SkillsCatalog {
     }
 }
 
+/// `<user root>/<id>` without a record: what is there is reported, never
+/// replaced.
+fn unmanaged(id: &str, user_root: &Path, view: &CatalogView) -> SkillsError {
+    let owned = format!("user:{id}/");
+    let found: Vec<&str> = view
+        .entries
+        .iter()
+        .filter(|entry| entry.definition.id.starts_with(&owned))
+        .map(|entry| entry.definition.name.as_str())
+        .collect();
+    let holds = match found.as_slice() {
+        [] => "no Skill".to_owned(),
+        names => names.join(", "),
+    };
+    SkillsError::UnmanagedDirectory(format!(
+        "{id:?} is not a recorded installation; {} holds {holds}, and only a recorded installation is replaced: choose another id or move that directory",
+        user_root.join(id).display()
+    ))
+}
+
 /// A scan failure of a root the caller named.
 fn root_error(issue: SkillIssue) -> SkillsError {
     match issue {
@@ -643,7 +687,7 @@ fn validate_selection(selection: &[SelectedSkill]) -> Result<Vec<SelectedSkill>,
     }
     let mut seen = BTreeSet::new();
     for skill in selection {
-        if install::relative(&skill.path).is_none() {
+        if install::selection_path(&skill.path).is_none() {
             return Err(SkillsError::SelectionInvalid(format!(
                 "{:?} is not a relative path",
                 skill.path

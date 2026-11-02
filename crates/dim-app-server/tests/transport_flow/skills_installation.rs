@@ -190,6 +190,39 @@ async fn skills_preview_install_update_and_remove_a_repository() {
     .await;
     assert_eq!(app_error(&conflict), "skills_install_exists", "{conflict}");
 
+    std::fs::create_dir_all(user_root(&home).join("hand-written/writing")).unwrap();
+    std::fs::write(
+        user_root(&home).join("hand-written/writing/SKILL.md"),
+        skill_doc("writing", "hand written", "HAND"),
+    )
+    .unwrap();
+    let unmanaged = when_served(
+        &mut client,
+        "skills.install",
+        json!({"source": source, "id": "hand-written", "overwrite": true,
+            "skills": [selected(&preview, "writing/review")]}),
+    )
+    .await;
+    assert_eq!(
+        app_error(&unmanaged),
+        "skills_install_unmanaged",
+        "{unmanaged}"
+    );
+    assert!(
+        unmanaged.to_string().contains("hand-written"),
+        "{unmanaged}"
+    );
+    assert!(
+        user_root(&home)
+            .join("hand-written/writing/SKILL.md")
+            .is_file()
+    );
+    let installations = when_served(&mut client, "skills.installations", json!({})).await;
+    assert!(
+        !installations.to_string().contains("hand-written"),
+        "{installations}"
+    );
+
     drop(client);
     server.shutdown();
     server.join().await.unwrap();
@@ -257,6 +290,10 @@ async fn skills_replies_and_the_user_document_stay_safe() {
     )
     .await;
     assert_ok(&preview);
+    assert!(
+        !home.join("user/.agents").exists(),
+        "a preview of a path source writes nothing"
+    );
     let installed = when_served(
         &mut client,
         "skills.install",
@@ -330,6 +367,59 @@ async fn skills_replies_and_the_user_document_stay_safe() {
     assert_eq!(app_error(&unknown), "skills_install_unknown", "{unknown}");
     assert!(user_root(&home).join("private-git/writing/review").is_dir());
     assert!(!user_root(&home).join("notes").exists());
+
+    let failed = when_served(
+        &mut client,
+        "skills.preview",
+        json!({"source": {"git": format!("ssh://fixture{}.git", home.join("src/absent").display())}}),
+    )
+    .await;
+    assert_eq!(app_error(&failed), "skills_acquire_failed", "{failed}");
+    assert!(
+        !home.join("user/.agents/.staging").exists(),
+        "a failed clone leaves no operation directory"
+    );
+
+    #[cfg(unix)]
+    {
+        let linked = home.join("src/linked");
+        source_tree(&linked);
+        std::os::unix::fs::symlink("/etc/hostname", linked.join("escape.txt")).unwrap();
+        let refused = when_served(
+            &mut client,
+            "skills.preview",
+            json!({"source": {"path": linked}, "id": "linked"}),
+        )
+        .await;
+        assert_eq!(app_error(&refused), "skills_source_invalid", "{refused}");
+        assert!(!user_root(&home).join("linked").exists());
+    }
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn skills_startup_removes_a_staging_root_an_abnormal_end_left() {
+    let home = home();
+    let leftover = home.join("user/.agents/.staging/8e1f0f2b4c6d");
+    std::fs::create_dir_all(leftover.join("work/.git")).unwrap();
+    std::fs::write(leftover.join("work/.git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::create_dir_all(home.join("user/.agents/skills/hand")).unwrap();
+    std::fs::write(
+        home.join("user/.agents/skills/hand/SKILL.md"),
+        skill_doc("hand", "hand written", "HAND"),
+    )
+    .unwrap();
+
+    let (server, _, _) = start(skills_config(&home)).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let catalog = when_served(&mut client, "skills.catalog", json!({})).await;
+    assert_eq!(catalog_ids(&catalog), ["user:hand"], "{catalog}");
+    assert!(!home.join("user/.agents/.staging").exists());
+    assert!(user_root(&home).join("hand/SKILL.md").is_file());
     drop(client);
     server.shutdown();
     server.join().await.unwrap();

@@ -939,7 +939,8 @@
       "parent": "dim_agent_capabilities::skills",
       "file": "crates/dim-agent-capabilities/src/skills/install.rs",
       "unexpandedMacros": [
-        "format"
+        "format",
+        "vec"
       ]
     },
     {
@@ -11231,6 +11232,9 @@
         "path PreviewShadow",
         "path PreviewSkill",
         "path RefreshTarget",
+        "path Replace",
+        "path Replace::Create",
+        "path Replace::Expected",
         "path SelectedSkill",
         "path SkillIssue",
         "path SkillIssue::RootUnreadable",
@@ -11251,10 +11255,12 @@
         "path SkillsError::StalePreview",
         "path SkillsError::UnknownInstallation",
         "path SkillsError::UnknownSkill",
+        "path SkillsError::UnmanagedDirectory",
+        "path install::occupied",
         "path install::place",
-        "path install::relative",
         "path install::remove",
         "path install::revision",
+        "path install::selection_path",
         "path install::selection_revision",
         "path install::valid_id",
         "path super::SkillDefinition",
@@ -11267,6 +11273,7 @@
         "use super::PreviewShadow",
         "use super::PreviewSkill",
         "use super::RefreshTarget",
+        "use super::Replace",
         "use super::SelectedSkill",
         "use super::SkillIssue",
         "use super::SkillPreview",
@@ -22486,6 +22493,9 @@
       "references": [
         "path InstallOutcome",
         "path RefreshTarget",
+        "path Replace::Create",
+        "path Replace::Expected",
+        "path Replace::Recorded",
         "path SelectedSkill",
         "path SkillPreview",
         "path SkillStatus::Active",
@@ -22505,15 +22515,19 @@
         "path SkillsError::StalePreview",
         "path SkillsError::UnknownInstallation",
         "path SkillsError::UnknownSkill",
+        "path SkillsError::UnmanagedDirectory",
         "path dim_agent_capabilities::skills::SkillIssue",
         "path dim_agent_capabilities::skills::register_parts",
+        "path selection_path",
         "path valid_installation_id",
         "use dim_agent_capabilities::skills::InstallOutcome",
         "use dim_agent_capabilities::skills::RefreshTarget",
+        "use dim_agent_capabilities::skills::Replace",
         "use dim_agent_capabilities::skills::SelectedSkill",
         "use dim_agent_capabilities::skills::SkillPreview",
         "use dim_agent_capabilities::skills::SkillStatus",
         "use dim_agent_capabilities::skills::SkillsError",
+        "use dim_agent_capabilities::skills::selection_path",
         "use dim_agent_capabilities::skills::valid_installation_id"
       ]
     },

@@ -4,7 +4,7 @@ use dim_agent_capabilities::{
     settings::{SettingsChanged, SettingsScope, settings_changes},
     skill_settings::{SOURCE, SkillInstallSource, SkillInstallation, SkillSettings},
     skills::{
-        CatalogChanged, MemorySkillSettings, RefreshTarget, SelectedSkill, SkillIssue,
+        CatalogChanged, MemorySkillSettings, RefreshTarget, Replace, SelectedSkill, SkillIssue,
         SkillPreview, SkillStatus, SkillsBranch, SkillsError, catalog_changes,
     },
 };
@@ -1215,7 +1215,7 @@ async fn preview_lists_a_source_without_installing_it() {
     let source = installation_source(&dirs);
     let (env, settings) = installation_env(&dirs).await;
     let catalog = env.catalog();
-    let preview = catalog.preview(&source, "acme-skills").await.unwrap();
+    let preview = catalog.preview(&source, "acme-skills", None).await.unwrap();
     let paths: Vec<&str> = preview
         .skills
         .iter()
@@ -1247,7 +1247,7 @@ async fn install_copies_only_the_selected_skill() {
         &skill_file("writing", "hand written", "HAND"),
     );
     let catalog = env.catalog();
-    let preview = catalog.preview(&source, "acme-skills").await.unwrap();
+    let preview = catalog.preview(&source, "acme-skills", None).await.unwrap();
     let outcome = catalog
         .install(
             "acme-skills",
@@ -1255,7 +1255,7 @@ async fn install_copies_only_the_selected_skill() {
             &source,
             &operation_dir(&dirs),
             &[selected(&preview, "writing/review")],
-            false,
+            Replace::Create,
         )
         .await
         .unwrap();
@@ -1297,7 +1297,7 @@ async fn a_change_under_a_selected_skill_makes_the_preview_stale() {
     let (env, settings) = installation_env(&dirs).await;
     let catalog = env.catalog();
     let review = selected(
-        &catalog.preview(&source, "acme-skills").await.unwrap(),
+        &catalog.preview(&source, "acme-skills", None).await.unwrap(),
         "writing/review",
     );
     dirs.write(
@@ -1311,7 +1311,7 @@ async fn a_change_under_a_selected_skill_makes_the_preview_stale() {
             &source,
             &operation_dir(&dirs),
             &[review],
-            false,
+            Replace::Create,
         )
         .await
         .unwrap_err();
@@ -1323,7 +1323,7 @@ async fn a_change_under_a_selected_skill_makes_the_preview_stale() {
     assert!(recorded(&settings).await.is_empty());
 
     let review = selected(
-        &catalog.preview(&source, "acme-skills").await.unwrap(),
+        &catalog.preview(&source, "acme-skills", None).await.unwrap(),
         "writing/review",
     );
     dirs.write(&source.join("writing/review/SKILL.md"), "not a Skill");
@@ -1334,7 +1334,7 @@ async fn a_change_under_a_selected_skill_makes_the_preview_stale() {
             &source,
             &operation_dir(&dirs),
             &[review],
-            false,
+            Replace::Create,
         )
         .await
         .unwrap_err();
@@ -1361,7 +1361,7 @@ async fn install_refuses_conflicts_and_selections_outside_the_tree() {
     );
     let (env, settings) = installation_env(&dirs).await;
     let catalog = env.catalog();
-    let preview = catalog.preview(&source, "acme-skills").await.unwrap();
+    let preview = catalog.preview(&source, "acme-skills", None).await.unwrap();
     assert_eq!(
         preview
             .conflicts
@@ -1380,7 +1380,7 @@ async fn install_refuses_conflicts_and_selections_outside_the_tree() {
             &source,
             &operation_dir(&dirs),
             &[selected(&preview, "tooling/lint")],
-            false,
+            Replace::Create,
         )
         .await
         .unwrap_err();
@@ -1399,7 +1399,7 @@ async fn install_refuses_conflicts_and_selections_outside_the_tree() {
                 selected(&preview, "notes/deploy"),
                 selected(&preview, "notes/deploy-copy"),
             ],
-            false,
+            Replace::Create,
         )
         .await
         .unwrap_err();
@@ -1416,7 +1416,7 @@ async fn install_refuses_conflicts_and_selections_outside_the_tree() {
                     path: path.into(),
                     revision: None,
                 }],
-                false,
+                Replace::Create,
             )
             .await
             .unwrap_err();
@@ -1439,7 +1439,7 @@ async fn install_refuses_conflicts_and_selections_outside_the_tree() {
             source.join("linked/review.md"),
         )
         .unwrap();
-        let preview = catalog.preview(&source, "acme-skills").await.unwrap();
+        let preview = catalog.preview(&source, "acme-skills", None).await.unwrap();
         assert!(
             !preview.skills.iter().any(|skill| skill.path == "linked"),
             "{preview:?}"
@@ -1472,15 +1472,15 @@ async fn install_replaces_an_installation_only_with_overwrite() {
             &source,
             &operation_dir(&dirs),
             &[selected(
-                &catalog.preview(&source, "acme-skills").await.unwrap(),
+                &catalog.preview(&source, "acme-skills", None).await.unwrap(),
                 "writing/review",
             )],
-            false,
+            Replace::Create,
         )
         .await
         .unwrap();
 
-    let preview = catalog.preview(&source, "acme-skills").await.unwrap();
+    let preview = catalog.preview(&source, "acme-skills", None).await.unwrap();
     assert!(preview.conflicts.is_empty(), "{preview:?}");
     let refused = catalog
         .install(
@@ -1489,7 +1489,7 @@ async fn install_replaces_an_installation_only_with_overwrite() {
             &source,
             &operation_dir(&dirs),
             &[selected(&preview, "tooling/lint")],
-            false,
+            Replace::Create,
         )
         .await
         .unwrap_err();
@@ -1510,7 +1510,7 @@ async fn install_replaces_an_installation_only_with_overwrite() {
             &source,
             &operation_dir(&dirs),
             &[selected(&preview, "tooling/lint")],
-            true,
+            Replace::Recorded,
         )
         .await
         .unwrap();
@@ -1534,7 +1534,7 @@ async fn update_keeps_the_selection_and_reports_the_previous_record() {
     let source = installation_source(&dirs);
     let (env, settings) = installation_env(&dirs).await;
     let catalog = env.catalog();
-    let preview = catalog.preview(&source, "acme-skills").await.unwrap();
+    let preview = catalog.preview(&source, "acme-skills", None).await.unwrap();
     let installed = catalog
         .install(
             "acme-skills",
@@ -1545,7 +1545,7 @@ async fn update_keeps_the_selection_and_reports_the_previous_record() {
                 selected(&preview, "writing/review"),
                 selected(&preview, "tooling/lint"),
             ],
-            false,
+            Replace::Create,
         )
         .await
         .unwrap();
@@ -1570,7 +1570,7 @@ async fn update_keeps_the_selection_and_reports_the_previous_record() {
             &source,
             &operation_dir(&dirs),
             &selection,
-            true,
+            Replace::Recorded,
         )
         .await
         .unwrap();
@@ -1593,7 +1593,7 @@ async fn update_keeps_the_selection_and_reports_the_previous_record() {
             &source,
             &operation_dir(&dirs),
             &selection,
-            true,
+            Replace::Recorded,
         )
         .await
         .unwrap_err();
@@ -1623,7 +1623,7 @@ async fn remove_deletes_only_what_the_record_owns() {
         &skill_file("writing", "hand written", "HAND"),
     );
     let catalog = env.catalog();
-    let preview = catalog.preview(&source, "acme-skills").await.unwrap();
+    let preview = catalog.preview(&source, "acme-skills", None).await.unwrap();
     catalog
         .install(
             "acme-skills",
@@ -1631,7 +1631,7 @@ async fn remove_deletes_only_what_the_record_owns() {
             &source,
             &operation_dir(&dirs),
             &[selected(&preview, "notes/deploy")],
-            false,
+            Replace::Create,
         )
         .await
         .unwrap();
@@ -1642,7 +1642,7 @@ async fn remove_deletes_only_what_the_record_owns() {
             &source,
             &operation_dir(&dirs),
             &[selected(&preview, "tooling/lint")],
-            false,
+            Replace::Create,
         )
         .await
         .unwrap();
@@ -1693,10 +1693,10 @@ async fn a_new_catalog_restores_installations_from_settings() {
             &source,
             &operation_dir(&dirs),
             &[selected(
-                &catalog.preview(&source, "acme-skills").await.unwrap(),
+                &catalog.preview(&source, "acme-skills", None).await.unwrap(),
                 "writing/review",
             )],
-            false,
+            Replace::Create,
         )
         .await
         .unwrap();
@@ -1730,4 +1730,337 @@ async fn a_new_catalog_restores_installations_from_settings() {
             .any(|entry| entry.definition.id == "user:acme-skills/writing/review")
     );
     root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn install_replaces_only_a_directory_the_record_owns() {
+    let dirs = Dirs::new();
+    let source = installation_source(&dirs);
+    let (env, settings) = installation_env(&dirs).await;
+    dirs.write(
+        &user_root(&dirs).join("acme-skills/hand-written/SKILL.md"),
+        &skill_file("hand", "hand written", "HAND"),
+    );
+    let catalog = env.catalog();
+    let review = selected(
+        &catalog.preview(&source, "acme-skills", None).await.unwrap(),
+        "writing/review",
+    );
+    for replace in [Replace::Create, Replace::Recorded] {
+        let refused = catalog
+            .install(
+                "acme-skills",
+                path_source(&source),
+                &source,
+                &operation_dir(&dirs),
+                std::slice::from_ref(&review),
+                replace,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(refused, SkillsError::UnmanagedDirectory(ref message)
+                if message.contains("\"acme-skills\"") && message.contains("hand")),
+            "{refused}"
+        );
+    }
+    assert!(
+        user_root(&dirs)
+            .join("acme-skills/hand-written/SKILL.md")
+            .is_file()
+    );
+    assert!(recorded(&settings).await.is_empty());
+
+    dirs.write(&user_root(&dirs).join("from-file"), "not a directory");
+    let refused = catalog
+        .install(
+            "from-file",
+            path_source(&source),
+            &source,
+            &operation_dir(&dirs),
+            &[review],
+            Replace::Recorded,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused, SkillsError::UnmanagedDirectory(_)),
+        "{refused}"
+    );
+    assert!(user_root(&dirs).join("from-file").is_file());
+    assert!(recorded(&settings).await.is_empty());
+    env.agent.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_update_cannot_reinstall_an_installation_removed_or_replaced_meanwhile() {
+    let dirs = Dirs::new();
+    let source = installation_source(&dirs);
+    let (env, settings) = installation_env(&dirs).await;
+    let catalog = env.catalog();
+    let preview = catalog.preview(&source, "acme-skills", None).await.unwrap();
+    catalog
+        .install(
+            "acme-skills",
+            path_source(&source),
+            &source,
+            &operation_dir(&dirs),
+            &[selected(&preview, "writing/review")],
+            Replace::Create,
+        )
+        .await
+        .unwrap();
+    let record = catalog.installation("acme-skills").await.unwrap().unwrap();
+    catalog.uninstall("acme-skills").await.unwrap();
+
+    let resurrect = catalog
+        .install(
+            "acme-skills",
+            path_source(&source),
+            &source,
+            &operation_dir(&dirs),
+            &[SelectedSkill {
+                path: "writing/review".into(),
+                revision: None,
+            }],
+            Replace::Expected(record),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(resurrect, SkillsError::UnknownInstallation(ref id) if id == "acme-skills"),
+        "{resurrect}"
+    );
+    assert!(!user_root(&dirs).join("acme-skills").exists());
+    assert!(recorded(&settings).await.is_empty());
+
+    catalog
+        .install(
+            "acme-skills",
+            path_source(&source),
+            &source,
+            &operation_dir(&dirs),
+            &[selected(&preview, "writing/review")],
+            Replace::Create,
+        )
+        .await
+        .unwrap();
+    let stale = catalog.installation("acme-skills").await.unwrap().unwrap();
+    catalog
+        .install(
+            "acme-skills",
+            path_source(&source),
+            &source,
+            &dirs.dir("operation-2"),
+            &[selected(&preview, "tooling/lint")],
+            Replace::Recorded,
+        )
+        .await
+        .unwrap();
+    let refused = catalog
+        .install(
+            "acme-skills",
+            path_source(&source),
+            &source,
+            &dirs.dir("operation-3"),
+            &[SelectedSkill {
+                path: "writing/review".into(),
+                revision: None,
+            }],
+            Replace::Expected(stale),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused, SkillsError::UnknownInstallation(_)),
+        "{refused}"
+    );
+    assert!(
+        user_root(&dirs)
+            .join("acme-skills/tooling/lint/SKILL.md")
+            .is_file()
+    );
+    assert_eq!(
+        recorded(&settings).await["acme-skills"].skills,
+        ["tooling/lint"]
+    );
+    env.agent.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_file_too_large_for_a_revision_is_reported_and_not_read() {
+    let dirs = Dirs::new();
+    let source = installation_source(&dirs);
+    std::fs::write(
+        source.join("tooling/lint/bundle.bin"),
+        vec![b'x'; 8 * 1024 * 1024 + 1],
+    )
+    .unwrap();
+    let (env, settings) = installation_env(&dirs).await;
+    let catalog = env.catalog();
+
+    let preview = catalog.preview(&source, "acme-skills", None).await.unwrap();
+    assert!(
+        !preview
+            .skills
+            .iter()
+            .any(|skill| skill.path == "tooling/lint"),
+        "{preview:?}"
+    );
+    assert!(
+        preview.issues.iter().any(|issue| matches!(
+            issue,
+            SkillIssue::Unreadable { path, reason }
+                if path.ends_with("tooling/lint/SKILL.md") && reason.contains("larger than")
+        )),
+        "{preview:?}"
+    );
+
+    let refused = catalog
+        .install(
+            "acme-skills",
+            path_source(&source),
+            &source,
+            &operation_dir(&dirs),
+            &[SelectedSkill {
+                path: "tooling/lint".into(),
+                revision: None,
+            }],
+            Replace::Create,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused, SkillsError::SelectionInvalid(ref message) if message.contains("larger than")),
+        "{refused}"
+    );
+    assert!(!user_root(&dirs).join("acme-skills").exists());
+    assert!(recorded(&settings).await.is_empty());
+    env.agent.close().await.unwrap();
+}
+
+/// Settings whose second installation write fails, as storage does after the
+/// files were swapped in.
+struct FailingRecord {
+    inner: Arc<MemorySkillSettings>,
+    writes: std::sync::atomic::AtomicUsize,
+}
+impl SkillSettings for FailingRecord {
+    fn skills(
+        &self,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> rutis::host::BoxFuture<
+        '_,
+        std::result::Result<
+            dim_agent_capabilities::skill_settings::SkillSettingsSnapshot,
+            dim_agent_capabilities::skill_settings::SkillSettingsError,
+        >,
+    > {
+        self.inner.skills(cancel)
+    }
+    fn update_skills(
+        self: Arc<Self>,
+        expected: String,
+        id: String,
+        enabled: bool,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> rutis::host::BoxFuture<
+        'static,
+        std::result::Result<String, dim_agent_capabilities::skill_settings::SkillSettingsError>,
+    > {
+        self.inner
+            .clone()
+            .update_skills(expected, id, enabled, cancel)
+    }
+    fn set_plugin(
+        self: Arc<Self>,
+        plugin: String,
+        root: Option<PathBuf>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> rutis::host::BoxFuture<
+        'static,
+        std::result::Result<String, dim_agent_capabilities::skill_settings::SkillSettingsError>,
+    > {
+        self.inner.clone().set_plugin(plugin, root, cancel)
+    }
+    fn set_installation(
+        self: Arc<Self>,
+        id: String,
+        installation: Option<SkillInstallation>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> rutis::host::BoxFuture<
+        'static,
+        std::result::Result<String, dim_agent_capabilities::skill_settings::SkillSettingsError>,
+    > {
+        Box::pin(async move {
+            if self
+                .writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 1
+            {
+                return Err(
+                    dim_agent_capabilities::skill_settings::SkillSettingsError::Failed(
+                        "storage is read-only".into(),
+                    ),
+                );
+            }
+            self.inner
+                .clone()
+                .set_installation(id, installation, cancel)
+                .await
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_record_write_restores_the_previous_installation() {
+    let dirs = Dirs::new();
+    let source = installation_source(&dirs);
+    let settings = Arc::new(FailingRecord {
+        inner: Arc::new(MemorySkillSettings::default()),
+        writes: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let env = env(
+        &dirs,
+        Options {
+            settings: settings.clone(),
+            ..Options::default()
+        },
+    )
+    .await;
+    let catalog = env.catalog();
+    let preview = catalog.preview(&source, "acme-skills", None).await.unwrap();
+    let first = catalog
+        .install(
+            "acme-skills",
+            path_source(&source),
+            &source,
+            &operation_dir(&dirs),
+            &[selected(&preview, "writing/review")],
+            Replace::Create,
+        )
+        .await
+        .unwrap();
+    let refused = catalog
+        .install(
+            "acme-skills",
+            path_source(&source),
+            &source,
+            &dirs.dir("operation-2"),
+            &[selected(&preview, "tooling/lint")],
+            Replace::Recorded,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused, SkillsError::SettingsWrite(_)),
+        "{refused}"
+    );
+    let installed = user_root(&dirs).join("acme-skills");
+    assert!(installed.join("writing/review/SKILL.md").is_file());
+    assert!(!installed.join("tooling").exists());
+    let record = catalog.installation("acme-skills").await.unwrap().unwrap();
+    assert_eq!(record.skills, ["writing/review"]);
+    assert_eq!(record.revision, first.installation.revision);
+    env.agent.close().await.unwrap();
 }

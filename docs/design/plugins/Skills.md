@@ -55,8 +55,11 @@ that resolves to a directory and passes the same link check.
 Each operation owns one directory, `<home>/.agents/.staging/<random>`, outside every scanned root
 and on the same file system as the user skills root: the acquired tree under `work`, the
 installation being prepared under `place` and the one it replaces under `old`. The whole directory
-is deleted when the operation settles, however it ends. Apart from that directory, an installation
-creates and deletes nothing outside the user skills root.
+is deleted when the operation settles, however it ends; one that an abnormal end left behind is
+deleted when the process next starts. The directory is created only by an operation that needs it:
+install and update always, preview only to clone a Git source, so previewing a local directory
+writes nothing. Apart from that directory, an installation creates and deletes nothing outside the
+user skills root.
 
 Every reply and error is a safe projection: a Git URL is reported without user information, query
 or fragment, and Git's own error text is never forwarded. The record keeps the URL as given, like
@@ -66,15 +69,18 @@ The **revision** is SkillsCatalog's content identity of a Skill directory: a dig
 regular file under it, by relative path and content, in sorted order. A path component named
 `.git` is skipped, and symbolic links are never followed — a selected Skill that contains one is
 refused — so a bundled script or template changes the revision exactly as a `SKILL.md` change does.
-An installation's revision is the digest over its ordered selection of source-relative path and
-per-Skill revision, so the same tree yields the same installation revision whether it came from a
-path or a clone, and an unchanged branch is not stale.
+Each file is read in chunks, and a file larger than 8 MiB is not digested at all: the preview
+reports it as an issue and the install refuses the Skill that holds it, so a bundled asset cannot
+grow the process. An installation's revision is the digest over its ordered selection of
+source-relative path and per-Skill revision, so the same tree yields the same installation
+revision whether it came from a path or a clone, and an unchanged branch is not stale.
 
 ### 2.2 Reads
 
-`skills.preview {source, id?}` takes a source and the installation id it would install as (the
-caller derives it from the source when the user names none), and answers what installing it could
-add. It writes nothing.
+`skills.preview {source, id?, cwd?}` takes a source and the installation id it would install as
+(the caller derives it from the source when the user names none), and answers what installing it
+could add. It writes nothing. `cwd` is the project directory the caller has open, as
+`skills.catalog` takes it: its project root is read for `shadows` and nothing else.
 
 ```json
 {
@@ -152,9 +158,11 @@ Order:
 3. Check the selection against the scan: every path is one the scan found and directly contains
    `SKILL.md`; no two selected Skills declare the same name; no user-root Skill outside this
    installation provides one of those names; no selected Skill contains a symbolic link.
-4. Check the destination `<user skills root>/<id>`. It is created only by an installation: an
-   existing directory or record needs `overwrite`, and nothing outside `<user skills root>/<id>`
-   is ever written or deleted.
+4. Check the destination `<user skills root>/<id>`. Only a directory the record owns is replaced:
+   an id the record holds needs `overwrite`, and a directory or file at `<user skills root>/<id>`
+   that no record owns is `skills_install_unmanaged`, reporting the Skills found there, because the
+   user root is also where hand-written Skills live. Nothing outside `<user skills root>/<id>` is
+   ever written or deleted.
 5. Copy the selected Skill directories, keeping their source-relative paths, into `place`; rename
    the existing `<user skills root>/<id>`, when there is one, to `old`; rename `place` to
    `<user skills root>/<id>`. A replacing install keeps its id and replaces the selection as a
@@ -185,6 +193,11 @@ carries the record before the update under `previous`, so the caller can show wh
 changed: equal revisions mean the source had not moved. Update is also the repair for a recorded
 installation whose directory was removed by hand.
 
+The record read before the source is acquired is what the update may replace. The install compares
+it with the record under its lock: one that another client removed, or replaced with another source
+or revision, while the source was being acquired refuses with `skills_install_unknown` and changes
+nothing, so a slow clone cannot undo a removal or a newer installation.
+
 ### 2.5 Remove
 
 `skills.remove` takes an installation id, deletes `<user skills root>/<id>` after the same shape
@@ -200,8 +213,11 @@ first. The user retries; the next update reinstalls the files.
 ### 2.6 Ownership boundary with PluginManager
 
 A Skill installation is not a plugin: it has no manifest, no loader row, no enablement state of
-its own, and no `plugin.*` operation accepts it. `skills.install`, `skills.update` and
-`skills.remove` accept only ids the Skills record holds; a plugin id is `skills_install_unknown`.
+its own, and no `plugin.*` operation accepts it. `skills.install` creates an installation, or
+replaces one the record holds when the user confirms `overwrite`; an id that matches a plugin's
+name is simply a new installation, and installing it changes no plugin state. `skills.update` and
+`skills.remove` accept only ids the Skills record holds, and answer `skills_install_unknown` for
+anything else, a plugin id included.
 Plugin packages that carry Skills stay visible in the same settings page and keep their lifecycle
 (`plugin.enable`, `plugin.disable`, `plugin.update`, `plugin.remove`), and their Skills keep the
 `plugin:<plugin id>:` ids and the `pluginSkills` roots SkillsCatalog already holds.
@@ -213,13 +229,15 @@ Plugin packages that carry Skills stay visible in the same settings page and kee
 | `skills_source_invalid` | the source is not an absolute directory, is not an `https://`/`ssh://` URL, or a link in the tree leaves it | correct the source |
 | `skills_acquire_failed` | the clone or the staging directory failed | retry; check access to the repository |
 | `skills_preview_stale` | a selected Skill's files changed since the preview, bundled files included | preview again and reselect |
-| `skills_selection_invalid` | empty or repeated selection, a path the scan did not find, a repeated name in the selection, or a link inside a selected Skill | correct the selection |
-| `skills_install_exists` | the id is recorded or its directory exists and `overwrite` is false | confirm overwrite or choose another id |
-| `skills_install_unknown` | update or remove of an id the record does not hold | refresh `skills.installations` |
+| `skills_selection_invalid` | empty or repeated selection, a path the scan did not find, a repeated name in the selection, a link inside a selected Skill, or a Skill file larger than the digest limit | correct the selection |
+| `skills_install_exists` | the id is recorded and `overwrite` is false | confirm overwrite or choose another id |
+| `skills_install_unknown` | update or remove of an id the record does not hold, or an update whose record was removed or replaced while its source was acquired | refresh `skills.installations` and retry |
+| `skills_install_unmanaged` | `<user skills root>/<id>` exists but no record owns it; the reply names the Skills found there | choose another id, or move that directory |
 | `skills_install_conflict` | a selected name is already provided by a user-root Skill outside this installation | remove or rename the other Skill, or drop the selection |
-| `skills_install_failed` | copying, swapping or recording failed; the previous state was restored | retry |
+| `skills_install_failed` | copying or swapping the files failed; the previous state was restored | retry |
+| `skills_write_failed`, `skills_conflict` | the record could not be written; the previous state was restored | retry; when the document changed, read it again and retry |
 | `skills_remove_failed` | deleting the recorded files failed; the record was kept | retry; fix permissions |
-| `skill_unknown`, `skills_conflict`, `skills_write_failed`, `skills_sync_failed`, `skills_unavailable` | unchanged, from the existing catalog and enablement contract | unchanged |
+| `skill_unknown`, `skills_sync_failed`, `skills_unavailable` | unchanged, from the existing catalog and enablement contract | unchanged |
 
 ## 3. Events and state
 
@@ -345,6 +363,16 @@ pub enum SkillInstallSource {
     Git { git: String, reference: Option<String>, commit: String },
 }
 
+/// What an install may replace at `<user root>/<id>`.
+pub enum Replace {
+    /// Create it; a recorded id is `InstallationExists`.
+    Create,
+    /// Replace what the record holds now, or create it (`overwrite`).
+    Recorded,
+    /// Replace exactly this record; anything else is `UnknownInstallation`.
+    Expected(SkillInstallation),
+}
+
 // SkillSettings gains, next to set_plugin:
 fn set_installation(
     self: Arc<Self>, id: String, installation: Option<SkillInstallation>,
@@ -352,16 +380,16 @@ fn set_installation(
 ) -> BoxFuture<'static, Result<SettingsVersion, SkillSettingsError>>;
 ```
 
-Owner operations on the catalog: `preview(root)`, `install(id, source, root, operation_dir,
-skills, version_check)`, `uninstall(id)`, `installation(id)` and `installations()`. The first two
-return the previous record and the new catalog version.
+Owner operations on the catalog: `preview(root, id, cwd)`, `install(id, source, root,
+operation_dir, skills, replace)`, `uninstall(id)`, `installation(id)` and `installations()`. The
+first two return the previous record and the new catalog version.
 
 `SkillSettingsSnapshot` gains `installations: BTreeMap<String, SkillInstallation>`, and
 `SkillDocument` in the App Server serializes it under `installations` with unknown members
 preserved. New `SkillsError` variants: `InstallationExists`, `UnknownInstallation`,
 `StalePreview { expected, found }`, `SelectionInvalid(String)`, `InstallConflict(String)`,
-`InstallIo(String)`; the App Server maps them to the codes in §2.7. `SourceInvalid` and
-`AcquireFailed` stay on the App Server side, where acquisition happens.
+`UnmanagedDirectory(String)`, `InstallIo(String)`; the App Server maps them to the codes in §2.7.
+`SourceInvalid` and `AcquireFailed` stay on the App Server side, where acquisition happens.
 
 ## 8. Acceptance
 
@@ -377,9 +405,14 @@ and a source directory with several Skills and no manifest:
 - a name already provided in the user root, a repeated name in the selection, a `..` or absolute
   selection path, and a source whose link leaves it are each refused, with nothing written;
 - install over an existing installation needs `overwrite`, and with it replaces the selection
-  without touching another installation or a hand-written Skill;
+  without touching another installation or a hand-written Skill; a directory or file at
+  `<user skills root>/<id>` that the record does not own is refused with the Skills it holds, left
+  as it is, and `overwrite` does not change that;
+- a bundled file larger than the digest limit is a preview issue and refuses the install; a record
+  write that fails after the swap restores the previous directory and record;
 - update keeps the selection, refuses a selected path that disappeared, reports the previous
-  revision and commit, and repairs a directory removed by hand;
+  revision and commit, repairs a directory removed by hand, and refuses when its record was removed
+  or replaced while the source was acquired;
 - remove deletes only `<user skills root>/<id>` and its record, and removes a record whose
   directory is already gone;
 - the record survives a catalog reload and a process restart.
@@ -388,8 +421,10 @@ App Server flows, in [transport_flow](../../../crates/dim-app-server/tests/trans
 a disposable home and a local Git fixture: preview, install, catalog, update to a new commit and
 remove through the real protocol; the Web entry advertises the five methods while a remote and a
 legacy connection refuse them; a credential-bearing URL and a failing clone produce replies and
-errors without the URL or Git's stderr; `skills.json` keeps unrelated fields and a document
-written before this field existed still loads.
+errors without the URL or Git's stderr; a source whose link leaves it, a directory no record owns
+and a path source's preview write nothing outside the expected places; the staging root an
+abnormal end leaves behind is gone after a restart; `skills.json` keeps unrelated fields and a
+document written before this field existed still loads.
 
 Rendered verification follows the Web workspace's acceptance for the Skills page: desktop and
 compact layouts, preview with conflicts and shadows, cancelled and accepted overwrite, a failed
