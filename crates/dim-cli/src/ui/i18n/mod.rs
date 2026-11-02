@@ -263,6 +263,22 @@ mod tests {
         }
     }
 
+    /// The prompt-suggestion row and the line a failed change reports exist
+    /// in every locale, and the line keeps the error it carries.
+    #[test]
+    fn every_locale_translates_the_prompt_suggestion_strings() {
+        for (code, lookup) in tables() {
+            for key in ["Prompt suggestion", "Prompt suggestion: {error}"] {
+                assert!(lookup(key).is_some(), "{code} lacks {key:?}");
+            }
+            let text = lookup("Prompt suggestion: {error}").expect("translated line");
+            assert!(
+                text.contains("{error}"),
+                "{code} drops the error placeholder: {text:?}"
+            );
+        }
+    }
+
     /// `/goal`'s palette row and the goal element of the status area exist in
     /// every locale.
     #[test]

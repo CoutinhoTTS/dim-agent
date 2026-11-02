@@ -460,6 +460,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Question waiting for your answer" => "回答待ちの質問あり",
         "Notify when agent needs you" => "要対応時に通知",
         "Show ACP sessions" => "ACP セッションを表示",
+        "Prompt suggestion" => "プロンプト候補",
+        "Prompt suggestion: {error}" => "プロンプト候補：{error}",
         // keys.rs
         "show the key bindings" => "キーバインドを表示",
         "Application keys" => "アプリキー",

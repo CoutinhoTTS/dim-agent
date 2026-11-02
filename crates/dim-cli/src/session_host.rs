@@ -24,9 +24,9 @@ use crate::model::session::{
     ACCOUNT_NAMESPACE, Account, AccountDescriptor, Command, CompactReply, ContextReading,
     DIM_OAUTH_ID, DraftPart, EmptyProvider, EmptyReason, ExecutionSnapshot, ManagementReply,
     ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider, OauthEvent, OauthStart,
-    PluginItem, PluginReply, ProviderAction, ProviderEntry, RuntimeAction, RuntimeItem,
-    RuntimesError, SandboxBackend, SessionItem, SessionPort, SubagentModelPolicy, SwitchKind,
-    Update, Usage, stored_title,
+    PluginItem, PluginReply, PromptSuggestionSetting, ProviderAction, ProviderEntry, RuntimeAction,
+    RuntimeItem, RuntimesError, SandboxBackend, SessionItem, SessionPort, SubagentModelPolicy,
+    SwitchKind, Update, Usage, stored_title,
 };
 use crate::model::view::{
     LineState, LineView, SideLine, TaskOutputState, TaskTarget, WorkflowInventory,
@@ -295,6 +295,10 @@ struct Worker {
     /// The outstanding `provider.refresh` requests `models()` sent for those
     /// catalogs, with the provider each was sent for.
     refill_requests: Vec<(u64, String)>,
+    /// Whether this Session's method table lists `session.suggestion.request`:
+    /// `None` until the first completed turn reads it, and again after a
+    /// Session switch.
+    suggestion_methods: Option<bool>,
 }
 
 struct MemberDetailRead {
@@ -400,6 +404,7 @@ async fn run(
         compact_requests: Vec::new(),
         refilled_catalogs: Default::default(),
         refill_requests: Vec::new(),
+        suggestion_methods: None,
     };
     worker.send(Update::Permissions(Ok(dim_agent_types::PermissionPolicy {
         preset: worker
@@ -827,6 +832,7 @@ impl Worker {
         self.session_title = stored_title(attached.title.as_deref()).map(str::to_owned);
         self.title_revision = attached.title_revision;
         self.session_id = session_id.clone();
+        self.suggestion_methods = None;
         self.session_cwd = attached.cwd;
         self.register_ui().await;
         self.mcp_required.clear();
@@ -903,6 +909,31 @@ impl Worker {
     async fn attach(&mut self, session_id: String, kind: SwitchKind) -> crate::Result<()> {
         let attached_session = self.invalidate_projection();
         self.enter(session_id, None, kind, attached_session).await
+    }
+
+    async fn suggestion_offered(&mut self) -> bool {
+        #[derive(serde::Deserialize)]
+        struct Decl {
+            name: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct Table {
+            methods: Vec<Decl>,
+        }
+        if !self.client.offers("session.methods") {
+            return false;
+        }
+        match self
+            .client
+            .typed::<Table>("session.methods", json!({"sessionId": self.session_id}))
+            .await
+        {
+            Ok(table) => table
+                .methods
+                .iter()
+                .any(|decl| decl.name == "session.suggestion.request"),
+            Err(_) => false,
+        }
     }
 
     async fn list(&mut self) -> crate::Result<Vec<SessionSummary>> {
@@ -1375,6 +1406,78 @@ impl Worker {
                     .map_err(|error| error.to_string())
                     .and_then(execution_snapshot);
                 self.send(Update::Isolation(result));
+            }
+            Command::Suggest { turn_id } => {
+                let offered = match self.suggestion_methods {
+                    Some(offered) => offered,
+                    None => {
+                        let offered = self.suggestion_offered().await;
+                        self.suggestion_methods = Some(offered);
+                        offered
+                    }
+                };
+                if offered {
+                    let _ = self
+                        .client
+                        .typed::<serde_json::Value>(
+                            "session.suggestion.request",
+                            json!({"sessionId": self.session_id, "turnId": turn_id}),
+                        )
+                        .await;
+                }
+            }
+            Command::SuggestionRespond { turn_id, accept } => {
+                let action = if accept { "accept" } else { "dismiss" };
+                let _ = self
+                    .client
+                    .rpc(
+                        "session.suggestion.respond",
+                        json!({
+                            "sessionId": self.session_id,
+                            "turnId": turn_id,
+                            "action": action,
+                        }),
+                    )
+                    .await;
+            }
+            Command::ReadSuggestionSetting => {
+                if !self.client.supports(&["settings.read", "settings.update"]) {
+                    self.send(Update::SuggestionSetting(Err(
+                        "This daemon does not support prompt suggestions".into(),
+                    )));
+                } else {
+                    let result = self
+                        .client
+                        .typed(
+                            "settings.read",
+                            json!({"source": "prompt-suggestion", "scope": "user"}),
+                        )
+                        .await
+                        .map_err(|error| error.to_string())
+                        .and_then(suggestion_setting);
+                    self.send(Update::SuggestionSetting(result));
+                }
+            }
+            Command::SaveSuggestionSetting {
+                expected_revision,
+                enabled,
+                max_chars,
+            } => {
+                let result = self
+                    .client
+                    .typed(
+                        "settings.update",
+                        json!({
+                            "source": "prompt-suggestion",
+                            "scope": "user",
+                            "expectedRevision": expected_revision,
+                            "document": {"enabled": enabled, "maxChars": max_chars},
+                        }),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(suggestion_setting);
+                self.send(Update::SuggestionSetting(result));
             }
             Command::ReadModelPolicy => self.read_model_policy(false).await,
             Command::SetModelPolicy {
@@ -2024,7 +2127,23 @@ impl Worker {
                     {
                         self.context_stale = true;
                     }
+                    let completed = match &notice.event.content {
+                        EventContent::TurnEnd(data)
+                            if notice.branch_id == "main"
+                                && matches!(
+                                    data.outcome,
+                                    dim_agent_types::TurnOutcome::Completed { .. }
+                                ) =>
+                        {
+                            Some(data.turn_id.clone())
+                        }
+                        _ => None,
+                    };
                     self.task_event(&notice.branch_id, notice.event);
+                    if let Some(turn_id) = completed {
+                        self.publish();
+                        self.send(Update::TurnCompleted { turn_id });
+                    }
                 } else if notice.branch_id == "main" && self.observes_member(&notice.session_id) {
                     self.member_notice(&notice.session_id, member::Notice::Event(notice.event));
                 }
@@ -2108,6 +2227,31 @@ impl Worker {
                     && params["kind"] == "title" =>
             {
                 self.title_notice(&params["data"]);
+            }
+            "session.notice"
+                if params["sessionId"] == self.session_id
+                    && params["source"]
+                        == dim_agent_capabilities::prompt_suggestion::NOTICE_SOURCE =>
+            {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Suggestion {
+                    turn_id: String,
+                    #[serde(default)]
+                    text: Option<String>,
+                }
+                let notice: Suggestion = serde_json::from_value(params["data"].clone())?;
+                match notice.text {
+                    Some(text) if params["kind"] == "offer" => {
+                        self.send(Update::SuggestionOffer {
+                            turn_id: notice.turn_id,
+                            text,
+                        });
+                    }
+                    _ => self.send(Update::SuggestionCleared {
+                        turn_id: notice.turn_id,
+                    }),
+                }
             }
             "session.notice"
                 if params["sessionId"] == self.session_id
@@ -4195,6 +4339,29 @@ fn execution_snapshot(value: serde_json::Value) -> Result<ExecutionSnapshot, Str
             .get("network")
             .and_then(|value| value.as_bool())
             .unwrap_or(false),
+    })
+}
+
+/// The `prompt-suggestion` document as `settings.read` and `settings.update`
+/// answer it; the Settings boundary fills the members it defaults.
+fn suggestion_setting(value: serde_json::Value) -> Result<PromptSuggestionSetting, String> {
+    let revision = value
+        .get("revision")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "prompt suggestion settings response has no revision".to_string())?
+        .to_owned();
+    let document = value.get("document").cloned().unwrap_or_else(|| json!({}));
+    Ok(PromptSuggestionSetting {
+        revision,
+        enabled: document
+            .get("enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+        max_chars: document
+            .get("maxChars")
+            .and_then(|value| value.as_u64())
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(80),
     })
 }
 

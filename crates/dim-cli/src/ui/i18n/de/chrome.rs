@@ -490,6 +490,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Question waiting for your answer" => "Frage wartet auf Antwort",
         "Notify when agent needs you" => "Benachrichtigen, wenn Agent Eingabe braucht",
         "Show ACP sessions" => "ACP-Sitzungen anzeigen",
+        "Prompt suggestion" => "Prompthinweis",
+        "Prompt suggestion: {error}" => "Prompthinweis: {error}",
         // keys.rs
         "show the key bindings" => "Tastenbelegung anzeigen",
         "Application keys" => "Anwendungstasten",

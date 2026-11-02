@@ -45,6 +45,15 @@ pub struct ExecutionSnapshot {
     pub network: bool,
 }
 
+/// The `prompt-suggestion` settings document: the switch and the length
+/// limit the Session's offers obey.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromptSuggestionSetting {
+    pub revision: String,
+    pub enabled: bool,
+    pub max_chars: u32,
+}
+
 /// The host's answer to `host.execution.backend`; the Execution panel shows
 /// the reason when the platform has no sandbox backend.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -212,6 +221,25 @@ pub enum Command {
         network: bool,
     },
     ResetIsolation(String),
+    /// Ask the Session for the message the user would send next, after the
+    /// turn completed in this interface.
+    Suggest {
+        turn_id: String,
+    },
+    /// Report what became of the offer for `turn_id`; accepting inserts the
+    /// text locally and sends nothing.
+    SuggestionRespond {
+        turn_id: String,
+        accept: bool,
+    },
+    /// Read the `prompt-suggestion` switch.
+    ReadSuggestionSetting,
+    /// Write the `prompt-suggestion` switch.
+    SaveSuggestionSetting {
+        expected_revision: String,
+        enabled: bool,
+        max_chars: u32,
+    },
     ClearModelPreferences {
         provider_id: String,
         model_id: String,
@@ -1056,6 +1084,22 @@ pub enum Update {
     /// Read once with the switches; a failed read adds no line and leaves the
     /// switches usable.
     IsolationBackend(Result<SandboxBackend, String>),
+    /// The `prompt-suggestion` switch, as last read or written.
+    SuggestionSetting(Result<PromptSuggestionSetting, String>),
+    /// A turn completed on `main`: the interface may ask for the next
+    /// message when nothing else has its attention.
+    TurnCompleted {
+        turn_id: String,
+    },
+    /// The Session offered the message the user would send next.
+    SuggestionOffer {
+        turn_id: String,
+        text: String,
+    },
+    /// The offer for `turn_id` is withdrawn.
+    SuggestionCleared {
+        turn_id: String,
+    },
     /// A transient status-line message.
     Toast(String),
     Permissions(Result<dim_agent_types::PermissionPolicy, String>),

@@ -480,6 +480,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Question waiting for your answer" => "Pertanyaan menunggu jawaban",
         "Notify when agent needs you" => "Beri tahu saat agen butuh Anda",
         "Show ACP sessions" => "Tampilkan sesi ACP",
+        "Prompt suggestion" => "Saran prompt",
+        "Prompt suggestion: {error}" => "Saran prompt: {error}",
         // keys.rs
         "show the key bindings" => "lihat pintasan tombol",
         "Application keys" => "Tombol aplikasi",

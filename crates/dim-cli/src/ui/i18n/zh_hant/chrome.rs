@@ -426,6 +426,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Question waiting for your answer" => "有問題等你回答",
         "Notify when agent needs you" => "需要你時通知",
         "Show ACP sessions" => "顯示 ACP 工作階段",
+        "Prompt suggestion" => "提示建議",
+        "Prompt suggestion: {error}" => "提示建議：{error}",
         // keys.rs
         "show the key bindings" => "顯示快速鍵",
         "Application keys" => "應用程式快速鍵",

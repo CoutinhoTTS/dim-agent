@@ -448,6 +448,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Question waiting for your answer" => "답변 대기 중인 질문",
         "Notify when agent needs you" => "에이전트 요청 시 알림",
         "Show ACP sessions" => "ACP 세션 표시",
+        "Prompt suggestion" => "프롬프트 제안",
+        "Prompt suggestion: {error}" => "프롬프트 제안: {error}",
         // keys.rs
         "show the key bindings" => "단축키 보기",
         "Application keys" => "앱 단축키",

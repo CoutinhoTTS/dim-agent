@@ -16,6 +16,7 @@
 //! │   Mouse                  on                  │
 //! │   Notify when agent ...  on                  │
 //! │   Show ACP sessions      off                 │
+//! │   Prompt suggestion      off                 │
 //! │   Permissions                                │
 //! │   File access            Workspace read/write › │
 //! │   Tool approval          Ask ›               │
@@ -40,6 +41,7 @@ pub struct Values {
     pub mouse: bool,
     pub notify: bool,
     pub acp_sessions: bool,
+    pub prompt_suggestion: bool,
     pub file_access: String,
     pub approvals: String,
 }
@@ -55,12 +57,13 @@ pub enum Setting {
     Mouse,
     Notify,
     AcpSessions,
+    PromptSuggestion,
     FileAccess,
     Approvals,
     Isolation,
 }
 
-const ROWS: [(Setting, &str); 11] = [
+const ROWS: [(Setting, &str); 12] = [
     (Setting::Theme, "theme"),
     (Setting::Language, "language"),
     (Setting::StartupForm, "startup-form"),
@@ -69,6 +72,7 @@ const ROWS: [(Setting, &str); 11] = [
     (Setting::Mouse, "mouse"),
     (Setting::Notify, "notify"),
     (Setting::AcpSessions, "acp-sessions"),
+    (Setting::PromptSuggestion, "prompt-suggestion"),
     (Setting::FileAccess, "file-access"),
     (Setting::Approvals, "approvals"),
     (Setting::Isolation, "isolation"),
@@ -95,6 +99,7 @@ impl Setting {
                 | Self::Mouse
                 | Self::Notify
                 | Self::AcpSessions
+                | Self::PromptSuggestion
         )
     }
 }
@@ -159,6 +164,11 @@ impl SettingsPanel {
                 "Show ACP sessions",
                 on_off(values.acp_sessions).to_owned(),
             ),
+            row(
+                Setting::PromptSuggestion,
+                "Prompt suggestion",
+                on_off(values.prompt_suggestion).to_owned(),
+            ),
             Item::heading(t("Permissions")),
             row(
                 Setting::FileAccess,
@@ -184,6 +194,12 @@ impl SettingsPanel {
     /// A paste goes into the filter.
     pub fn paste(&mut self, text: &str) {
         self.list.paste(text);
+    }
+
+    /// Shows a value that was read after the panel opened.
+    pub fn set_prompt_suggestion(&mut self, enabled: bool) {
+        let value = if enabled { t("on") } else { t("off") };
+        self.list.set_detail(Setting::PromptSuggestion.id(), value);
     }
 
     pub fn selected(&self) -> Setting {
