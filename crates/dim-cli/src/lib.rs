@@ -7,11 +7,15 @@ mod composer;
 mod configure;
 mod display;
 mod export;
-mod hooks_command;
+mod goal;
+mod goal_command;
 mod images;
 mod input;
 mod leaf;
 mod login;
+mod maintenance;
+mod management;
+mod management_command;
 mod mcp;
 mod mcp_command;
 mod member_approval;
@@ -633,6 +637,10 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         export::timeline(&options, session_id, output.as_deref(), database.as_deref()).await?;
         return Ok(0);
     }
+    if let Action::DaemonVacuum { database } = &options.action {
+        maintenance::vacuum(&options, database.as_deref()).await?;
+        return Ok(0);
+    }
     let images = images::load(&options.images)?;
     let stop = matches!(options.action, Action::DaemonStop);
     let (_, connection) = daemon_link(root, &options, !stop).await?;
@@ -810,13 +818,14 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             mcp_command::print_report(rows, notes);
             Ok(0)
         }
-        Action::HooksList => {
-            hooks_command::list(&mut client, &options).await?;
-            Ok(0)
+        Action::Management(request) => {
+            management_command::run(&mut client, &options, request).await
         }
-        Action::HooksEnable { enabled } => {
-            hooks_command::set_enabled(&mut client, &options, *enabled).await?;
-            Ok(0)
+        Action::ManagementEdit(area) => {
+            management_command::edit(&mut client, &options, *area).await
+        }
+        Action::ManagementSet { area, path } => {
+            management_command::set(&mut client, &options, *area, path).await
         }
         Action::Recording { enabled } => recording::run(&mut client, &options, *enabled).await,
         Action::Chat | Action::Tui | Action::Exec => {
@@ -827,6 +836,7 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         | Action::Help
         | Action::Version
         | Action::DaemonStop
+        | Action::DaemonVacuum { .. }
         | Action::Timeline { .. }
         | Action::Web { .. }
         | Action::WebInstall
