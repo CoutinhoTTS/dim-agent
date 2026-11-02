@@ -206,7 +206,7 @@ A part reads facts through its branch's `timeline` service with one bounded quer
 | Element | What it says |
 | --- | --- |
 | Scope | This branch, or the branch chain: each ancestor up to its cut, root first, then this branch to its head |
-| Position | A sequence range whose ends are inclusive, or a cursor with the sequence the read may go through. The range's upper end defaults to the published head and may never exceed it. In a chain read the range applies to each branch's own sequence space, so an ancestor is read to the range's end or to its cut, whichever is lower. A range end must end an atomic batch, while its start may fall inside one |
+| Position | A sequence range whose ends are inclusive, or a cursor with the sequence the read may go through. Its upper end is optional: absent, the read covers each branch's own coverage — an ancestor to its cut, the read branch to its published head; named, it is an inclusive bound applied to each branch's own sequence space and clamped to that branch's cut, so it never hides an ancestor fact. A range end must end an atomic batch, while its start may fall inside one |
 | Kinds and flags | The event kinds it accepts (`domain/name`), and the envelope's context flags (§5.1) it selects on |
 | Event id | An equality on the event id: one id selects that event, so a caller reads one event or looks up its position without paging |
 | Predicate | One equality against one JSON scalar. The path is a sequence of field names inside the event's data joined by dots, with no array indexing and no wildcards |
