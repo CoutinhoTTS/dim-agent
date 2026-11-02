@@ -36,6 +36,8 @@ Commands:\n\
                                    List a Provider's models; --refresh reloads\n\
                                    the area's list\n\
   models PROVIDER enable|disable|remove|inspect MODEL\n\
+                                   Enable or disable one model, remove it,\n\
+                                   or print its descriptor\n\
   models PROVIDER edit MODEL       Edit the model's fields in the editor\n\
   models PROVIDER set MODEL PATH   Write the model's fields from PATH,\n\
                                    or from stdin for -\n\
