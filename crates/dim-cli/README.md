@@ -1234,7 +1234,7 @@ A remove asks first, `Remove LABEL? Enter confirm · Esc cancel`, and any other 
 `dimcode <area> remove ID` takes the id on the command line as the intent and does not ask.
 Inspect replaces the list with the title and lines the owner returned and scrolls them with the
 arrows and PageUp/PageDown; the first `Esc` returns to the list and the next closes the panel.
-The Skills and Hooks panels read and write the Session's workspace, not the directory the
+The Skills, Hooks and MCP panels read and write the Session's workspace, not the directory the
 client started in; the Scheduler's jobs are the host's, and only a new job's `cwd` defaults from
 the Session. A panel holds no area's vocabulary: an area's entries, kinds, documents and detail
 arrive from its adapter.
@@ -1245,7 +1245,6 @@ The areas below use it, over the same kinds:
 - Hooks (`/hooks`, `dimcode hooks ...`) adds the user document's edit.
 - The Scheduler (`/scheduled`, `/schedule`, `dimcode scheduled ...`) introduces add, remove, run and inspect, a job per entry from `schedule.list`, with `schedule.set_enabled`, `schedule.save` for the edit and the create, `schedule.delete`, `schedule.run_now` and `schedule.history`. Its subcommands are `dimcode scheduled list`, `enable ID`, `disable ID`, `edit ID`, `set ID PATH`, `add PATH`, `remove ID`, `run ID` and `history ID`.
 - MCP (`/mcp`, `dimcode mcp ...`) lists the effective catalog with `mcp.set_enabled`, reads each entry's `mcp.configuration` for its detail and its patch, writes `mcp.update`, creates with `mcp.save`, deletes with `mcp.remove`, and shows `mcp.test` and `mcp.inspect` as details. Its subcommands are `dimcode mcp list`, `add PATH`, `edit ID`, `set ID PATH`, `remove ID`, `test ID` and `inspect ID`.
-
 - Command rules (`/permissions`'s Command rules row, `dimcode permissions ...`) is a rule per entry from `permission.rules` with `Ctrl+R`, `Ctrl+N` and `Ctrl+X`, writing through `permission.set_rules`; its subcommands are `dimcode permissions list`, `add PATH` and `remove 'DECISION MATCH COMMAND'`.
 
 The external editor is `$VISUAL`, then `$EDITOR`, then `vi` (`notepad` on Windows), run on Unix
