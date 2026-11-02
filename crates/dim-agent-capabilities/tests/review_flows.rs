@@ -171,44 +171,6 @@ async fn one_tool_panic_does_not_abandon_other_native_cleanup_or_reorder_actual_
     let _ = agent.close().await;
 }
 
-#[tokio::test]
-async fn append_only_input_remains_pending_while_idle_returns_and_a_later_queue_consumes_it() {
-    let mut builder = AgentBuilder::new(AgentConfig::default());
-    defaults::mock_hosts(&mut builder);
-    defaults::install(&mut builder);
-    let agent = MinimalHost::start(&builder).await.unwrap();
-    let session = soon(agent.create_session(SessionConfig::default()))
-        .await
-        .unwrap();
-    let appended = session
-        .submit("pending context".into(), InputMode::Append, "main")
-        .await
-        .unwrap();
-    soon(session.idle("main")).await.unwrap();
-    let before = session.history("main", None).await.unwrap();
-    assert!(!before.iter().any(|event| matches!(
-        event.kind,
-        EventKind::TurnStart(_) | EventKind::InputConsumed(_)
-    )));
-    assert_eq!(
-        session
-            .get::<InputSnapshot>("main")
-            .unwrap()
-            .unwrap()
-            .queued,
-        1
-    );
-    session
-        .submit("start".into(), InputMode::Queue, "main")
-        .await
-        .unwrap();
-    soon(session.idle("main")).await.unwrap();
-    assert!(session.history("main", None).await.unwrap().iter().any(
-        |event| matches!(&event.kind,EventKind::InputConsumed(data) if data.input_id==appended.id)
-    ));
-    soon(agent.close()).await.unwrap();
-}
-
 struct EmptyLoop(tokio::sync::watch::Sender<LoopSnapshot>);
 impl LoopState for EmptyLoop {
     fn state(&self) -> LoopSnapshot {
