@@ -3141,6 +3141,19 @@
       ]
     },
     {
+      "id": "dim_cli::management::mcp",
+      "crate": "dim_cli",
+      "parent": "dim_cli::management",
+      "file": "crates/dim-cli/src/management/mcp.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches",
+        "vec",
+        "write"
+      ]
+    },
+    {
       "id": "dim_cli::management::permissions",
       "crate": "dim_cli",
       "parent": "dim_cli::management",
@@ -3181,6 +3194,7 @@
       "file": "crates/dim-cli/src/management_command.rs",
       "unexpandedMacros": [
         "format",
+        "matches",
         "vec"
       ]
     },
@@ -24542,6 +24556,7 @@
         "path Action::ManagementAdd",
         "path Action::ManagementEdit",
         "path Action::ManagementSet",
+        "path Action::McpDisconnect",
         "path Action::McpEnable",
         "path Action::McpList",
         "path Action::McpLogin",
@@ -24703,6 +24718,13 @@
     },
     {
       "from": "dim_cli",
+      "to": "dim_cli::management::mcp",
+      "references": [
+        "path management::mcp::set_enabled"
+      ]
+    },
+    {
+      "from": "dim_cli",
       "to": "dim_cli::management_command",
       "references": [
         "mod management_command",
@@ -24724,9 +24746,9 @@
       "to": "dim_cli::mcp_command",
       "references": [
         "mod mcp_command",
+        "path mcp_command::disconnect",
         "path mcp_command::list",
         "path mcp_command::print_report",
-        "path mcp_command::set_enabled",
         "path mcp_command::sign_in",
         "path mcp_command::sign_out"
       ]
@@ -25849,6 +25871,22 @@
     },
     {
       "from": "dim_cli::management",
+      "to": "dim_cli::management::mcp",
+      "references": [
+        "mod mcp",
+        "path mcp::Answer::Area",
+        "path mcp::Answer::Detail",
+        "path mcp::Answer::Tools",
+        "path mcp::Failure::Conflict",
+        "path mcp::Failure::ReadFailed",
+        "path mcp::Failure::Refused",
+        "path mcp::apply",
+        "path mcp::tools_detail",
+        "path mcp::view"
+      ]
+    },
+    {
+      "from": "dim_cli::management",
       "to": "dim_cli::management::permissions",
       "references": [
         "mod permissions",
@@ -25899,6 +25937,7 @@
         "path ActionKind::Toggle",
         "path Area",
         "path Area::Hooks",
+        "path Area::Mcp",
         "path Area::Permissions",
         "path Area::Scheduled",
         "path Area::Skills",
@@ -26009,6 +26048,97 @@
       "to": "dim_client",
       "references": [
         "path Client",
+        "path crate::client::app_error",
+        "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::management::mcp",
+      "to": "dim_cli",
+      "references": [
+        "path crate::Error",
+        "path crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::management::mcp",
+      "to": "dim_cli::management",
+      "references": [
+        "path Groups::default",
+        "path super::area_kinds",
+        "use super::Groups"
+      ]
+    },
+    {
+      "from": "dim_cli::management::mcp",
+      "to": "dim_cli::mcp",
+      "references": [
+        "path Auth",
+        "path Catalog",
+        "path Server",
+        "use crate::mcp::Auth",
+        "use crate::mcp::Catalog",
+        "use crate::mcp::Server"
+      ]
+    },
+    {
+      "from": "dim_cli::management::mcp",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path ActionKind",
+        "path ActionKind::Edit",
+        "path ActionKind::Inspect",
+        "path ActionKind::Remove",
+        "path ActionKind::Run",
+        "path ActionKind::Toggle",
+        "path EntryDocument",
+        "path EntryState::Invalid",
+        "path EntryState::ReadOnly",
+        "path ManagementAction",
+        "path ManagementAction::Add",
+        "path ManagementAction::Inspect",
+        "path ManagementAction::List",
+        "path ManagementAction::Reload",
+        "path ManagementAction::Remove",
+        "path ManagementAction::Run",
+        "path ManagementAction::Save",
+        "path ManagementAction::Toggle",
+        "path ManagementDetail",
+        "path ManagementEntry",
+        "path ManagementView",
+        "use crate::model::session::ActionKind",
+        "use crate::model::session::EntryDocument",
+        "use crate::model::session::EntryState",
+        "use crate::model::session::ManagementAction",
+        "use crate::model::session::ManagementDetail",
+        "use crate::model::session::ManagementEntry",
+        "use crate::model::session::ManagementView"
+      ]
+    },
+    {
+      "from": "dim_cli::management::mcp",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "path safe_line",
+        "use crate::sanitize::safe_line"
+      ]
+    },
+    {
+      "from": "dim_cli::management::mcp",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path t",
+        "path tf",
+        "use crate::ui::i18n::t",
+        "use crate::ui::i18n::tf"
+      ]
+    },
+    {
+      "from": "dim_cli::management::mcp",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "path crate::client::RpcError",
         "path crate::client::app_error",
         "use crate::client::Client"
       ]
@@ -26272,6 +26402,22 @@
     },
     {
       "from": "dim_cli::management_command",
+      "to": "dim_cli::management::mcp",
+      "references": [
+        "path mcp::Answer::Area",
+        "path mcp::Answer::Detail",
+        "path mcp::Answer::Tools",
+        "path mcp::Failure::ReadFailed",
+        "path mcp::apply",
+        "path mcp::editable",
+        "path mcp::seed",
+        "path mcp::target",
+        "path mcp::tool_row",
+        "use crate::management::mcp"
+      ]
+    },
+    {
+      "from": "dim_cli::management_command",
       "to": "dim_cli::management::permissions",
       "references": [
         "path permissions::Answer::Rules",
@@ -26308,6 +26454,13 @@
     },
     {
       "from": "dim_cli::management_command",
+      "to": "dim_cli::mcp",
+      "references": [
+        "path crate::mcp::catalog_report"
+      ]
+    },
+    {
+      "from": "dim_cli::management_command",
       "to": "dim_cli::mcp_command",
       "references": [
         "path print_report",
@@ -26322,6 +26475,7 @@
         "path ActionKind::Edit",
         "path Area",
         "path Area::Hooks",
+        "path Area::Mcp",
         "path Area::Permissions",
         "path Area::Scheduled",
         "path Area::Skills",
@@ -26389,7 +26543,7 @@
       "from": "dim_cli::mcp",
       "to": "dim_cli::sanitize",
       "references": [
-        "use crate::sanitize::safe"
+        "use crate::sanitize::safe_line"
       ]
     },
     {
@@ -26441,16 +26595,21 @@
     },
     {
       "from": "dim_cli::mcp_command",
+      "to": "dim_cli::management::mcp",
+      "references": [
+        "path crate::management::mcp::set_enabled"
+      ]
+    },
+    {
+      "from": "dim_cli::mcp_command",
       "to": "dim_cli::mcp",
       "references": [
-        "path Catalog",
         "path Started",
         "path catalog_report",
         "path error",
         "path self::error",
         "path session_report",
         "path target",
-        "use crate::mcp::Catalog",
         "use crate::mcp::Started",
         "use crate::mcp::catalog_report",
         "use crate::mcp::error",
@@ -27884,6 +28043,13 @@
     },
     {
       "from": "dim_cli::session_host",
+      "to": "dim_cli::management::mcp",
+      "references": [
+        "path crate::management::mcp::set_enabled"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
       "to": "dim_cli::mcp",
       "references": [
         "path mcp::Started",
@@ -27893,13 +28059,6 @@
         "path mcp::session_report",
         "path mcp::target",
         "use crate::mcp"
-      ]
-    },
-    {
-      "from": "dim_cli::session_host",
-      "to": "dim_cli::mcp_command",
-      "references": [
-        "path crate::mcp_command::set_enabled"
       ]
     },
     {
@@ -30710,6 +30869,7 @@
         "path ActionKind::Toggle",
         "path Area",
         "path Area::Hooks",
+        "path Area::Mcp",
         "path Area::Permissions",
         "path Area::Scheduled",
         "path Area::Skills",
@@ -30870,6 +31030,7 @@
         "path ActionKind",
         "path Area",
         "path Area::Hooks",
+        "path Area::Mcp",
         "path Area::Permissions",
         "path Area::Skills",
         "path EntryState",
@@ -34527,6 +34688,7 @@
       "references": [
         "path Area",
         "path Area::Hooks",
+        "path Area::Mcp",
         "path Area::Permissions",
         "path Area::Scheduled",
         "path Area::Skills",
@@ -37768,6 +37930,10 @@
     },
     {
       "module": "dim_cli::args",
+      "path": "Area::Mcp"
+    },
+    {
+      "module": "dim_cli::args",
       "path": "Area::Permissions"
     },
     {
@@ -37885,6 +38051,14 @@
     {
       "module": "dim_cli::input",
       "path": "INPUT_RECORD::default"
+    },
+    {
+      "module": "dim_cli::management::mcp",
+      "path": "D::Error"
+    },
+    {
+      "module": "dim_cli::management::mcp",
+      "path": "T::deserialize"
     },
     {
       "module": "dim_cli::mcp_command",

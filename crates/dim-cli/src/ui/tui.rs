@@ -3604,7 +3604,13 @@ impl App {
                 Outcome::Continue
             }
             "mcp" => {
-                self.host.send(Command::Mcp(args.to_owned()));
+                // Bare `/mcp` opens the panel; every argument form stays the
+                // line command it was.
+                if args.trim().is_empty() {
+                    self.open_management(Area::Mcp, None);
+                } else {
+                    self.host.send(Command::Mcp(args.to_owned()));
+                }
                 Outcome::Continue
             }
             "effort" | "fast" | "agent" => {
@@ -8976,7 +8982,7 @@ mod tests {
 
         press(&mut app, KeyCode::Char('/'));
         assert!(app.composer.palette_open(), "the palette opened over it");
-        typed(&mut app, "mcp");
+        typed(&mut app, "usage");
         assert!(
             app.frame((80, 40))
                 .live
@@ -8986,8 +8992,8 @@ mod tests {
         );
         press(&mut app, KeyCode::Enter);
         assert!(
-            matches!(sent.borrow().last(), Some(Command::Mcp(args)) if args.is_empty()),
-            "the palette ran /mcp"
+            matches!(sent.borrow().last(), Some(Command::Usage)),
+            "the palette ran /usage"
         );
         assert_eq!(
             selection(&app).as_deref(),
@@ -9268,8 +9274,14 @@ mod tests {
         assert_eq!(app.composer.text(), "/mc", "the query stays");
         press(&mut app, KeyCode::Enter);
         assert!(
-            matches!(sent.borrow().last(), Some(Command::Mcp(args)) if args.is_empty()),
-            "the palette ran /mcp"
+            matches!(
+                sent.borrow().last(),
+                Some(Command::Management(ManagementRequest {
+                    area: Area::Mcp,
+                    action: ManagementAction::List,
+                }))
+            ),
+            "the palette opened the MCP panel"
         );
     }
 
