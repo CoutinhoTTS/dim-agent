@@ -206,15 +206,19 @@ A part reads facts through its branch's `timeline` service with one bounded quer
 | Element | What it says |
 | --- | --- |
 | Scope | This branch, or the branch chain: each ancestor up to its cut, root first, then this branch to its head |
-| Position | A sequence range, or a cursor with the sequence the read may go through. A read never returns a fact above the published head, the last fact the branch has published |
-| Kinds and flags | The event kinds it accepts (`domain/name`), and each of the envelope's two context flags (§5.1) that it names |
+| Position | A sequence range whose ends are inclusive, or a cursor with the sequence the read may go through. The range's upper end defaults to the published head and may never exceed it. In a chain read the range applies to each branch's own sequence space, so an ancestor is read to the range's end or to its cut, whichever is lower |
+| Kinds and flags | The event kinds it accepts (`domain/name`), and the envelope's context flags (§5.1) it selects on |
+| Event id | An equality on the event id: one id selects that event, so a caller reads one event or looks up its position without paging |
 | Predicate | One equality against one JSON scalar. The path is a sequence of field names inside the event's data joined by dots, with no array indexing and no wildcards |
 | Direction and order | The caller chooses the end a page is taken from: ascending (oldest first) or descending (newest first). A reply is always ordered by chain position, then sequence, ascending, so a consumer folds a page directly; the direction decides only which end of the remaining range the page comes from |
 | Limit | Nonzero by type, so no read is unbounded. It is a target, not a bound: a reply ends at an atomic batch boundary, so it may be longer than the limit |
 
-A selection that names no kind accepts every kind, and a flag it does not name constrains nothing:
-neither omission is an error. The limit applies to every read, so a caller that wants everything in
-its scope pages the result from the cursor.
+The elements combine: an event is selected when it satisfies all of them, and flags named together
+are alternatives, so an event is accepted when it carries at least one of them — the context read
+selects the rows that carry `context_render` or `context_state`. A selection that names no kind
+accepts every kind, one with no event id accepts every event, and a flag it does not name constrains
+nothing: no omission is an error. The limit applies to every read, so a caller that wants everything
+in its scope pages the result from the cursor.
 
 The path's spelling is fixed here and not in a binding: there is one form, the one above, and the
 storage translates that form. A binding writes this path syntax and invents no other.
@@ -224,7 +228,8 @@ sequence, so the same sequence on a parent and on its child are different positi
 never splits an atomic batch: an ascending page does not end inside one, and a descending page does
 not start inside one. After an ascending page the cursor continues strictly after the last event
 returned; after a descending page, strictly before the oldest event returned. The reply is the
-events and the next cursor.
+events, each with its chain position — its branch and sequence — and the next cursor; the next
+cursor is absent once the scope is exhausted, so absence means no more, not start over.
 
 The query returns facts; it does not fold, project or aggregate them. What a part folds from facts
 is its own state and stays with it ([ADR 002](../adr/002-plugin-scope.md) D1). A part that needs a
