@@ -1321,6 +1321,96 @@ fn permissions_remove_takes_the_whole_rule_as_one_argument() {
     );
 }
 
+/// A rule document the line prompt would refuse is refused here too, before
+/// anything is read or written.
+#[test]
+fn permissions_add_refuses_an_invalid_rule_document() {
+    for (name, document) in [
+        (
+            "separator",
+            json!({"command": "git push; rm -rf /", "match": "prefix", "decision": "deny"}),
+        ),
+        (
+            "empty",
+            json!({"command": "", "match": "prefix", "decision": "deny"}),
+        ),
+    ] {
+        let home = Home::new();
+        let daemon = home.daemon(|wire| {
+            wire.hello(&RULE_METHODS);
+            let mut line = String::new();
+            while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+                assert!(
+                    !line.contains("\"permission.rules\"")
+                        && !line.contains("\"permission.set_rules\""),
+                    "a refused rule document sends no request: {line}"
+                );
+                line.clear();
+            }
+        });
+        let path = home.0.join(format!("{name}.json"));
+        fs::write(&path, document.to_string()).unwrap();
+        let output = home
+            .command()
+            .args(["permissions", "add"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        daemon.join().unwrap();
+        assert_eq!(output.status.code(), Some(1), "{name}");
+        assert!(output.stdout.is_empty(), "{name}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("A command rule needs a simple command without"),
+            "{name}: {stderr}"
+        );
+        assert!(stderr.contains("Your text is kept in"), "{name}: {stderr}");
+    }
+}
+
+/// A remove finds its rule by its words, so the owner's stored spacing is
+/// not an identity: the rule typed with different spacing is still removed.
+#[test]
+fn permissions_remove_matches_a_stored_rule_by_its_words() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&RULE_METHODS);
+        let read = wire.read("permission.rules");
+        wire.reply(
+            &read,
+            rules_reply(
+                "r1",
+                json!([
+                    command_rule("allow", "exact", "cargo test -p dim-cli"),
+                    command_rule("deny", "prefix", "git   push"),
+                ]),
+            ),
+        );
+        let write = wire.read("permission.set_rules");
+        assert_eq!(write["params"]["expectedRevision"], "r1");
+        assert_eq!(
+            write["params"]["commandRules"],
+            json!([command_rule("allow", "exact", "cargo test -p dim-cli")])
+        );
+        wire.reply(&write, json!({"revision": "r2"}));
+    });
+    let output = home
+        .command()
+        .args(["permissions", "remove", "deny prefix git push"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Rule removed: deny prefix `git   push`.\n"
+    );
+}
+
 #[test]
 fn permissions_remove_refuses_a_rule_that_is_no_longer_listed() {
     let home = Home::new();
