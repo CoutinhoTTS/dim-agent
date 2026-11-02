@@ -15538,7 +15538,7 @@
       "from": "dim_app_server::@bin:dim-app-server",
       "to": "dim_app_server::cli",
       "references": [
-        "path dim_app_server::cli::run"
+        "path dim_app_server::cli::process_entry"
       ]
     },
     {

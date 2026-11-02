@@ -21,10 +21,26 @@ use dim_agent_runtime::{AgentBuilder, AgentConfig};
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 /// Runs the App Server command line: `args` are the arguments after the
-/// program name. Both the `dim-app-server` binary and `dimcode app-server`
-/// enter here.
+/// program name. This keeps the descriptors the process inherited; a process
+/// `main` enters through [`process_entry`].
 pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::error::Error>> {
     run_with(args, None)
+}
+
+/// Runs a process that serves the App Server: closes every descriptor above
+/// standard error that the process inherited, then runs [`run_with`].
+///
+/// This is the only entry that does that, and a process `main` calls it as
+/// the first thing it does, before it opens anything it needs: the
+/// descriptors it inherited belong to the process that started it, and a
+/// daemon outlives that process.
+pub fn process_entry(
+    args: impl IntoIterator<Item = String>,
+    managed_provider: Option<crate::managed_provider::ManagedProviderRow>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    close_inherited_descriptors();
+    run_with(args, managed_provider)
 }
 
 /// Closes every descriptor above standard error that this process inherited.
@@ -186,15 +202,12 @@ pub fn product_session_defaults(defaults: &mut dim_agent_runtime::SessionConfig)
 /// [`run`] with a managed provider plugin, which an account build's own
 /// executable supplies; it is installed when the server has a product home.
 ///
-/// This is a process entry point: on Unix it closes every descriptor above 2
-/// that the process inherited, before it does anything else, so a caller must
-/// open nothing it needs beforehand.
+/// This is an in-process entry that keeps the descriptors the process has
+/// open; a process `main` calls [`process_entry`] instead.
 pub fn run_with(
     args: impl IntoIterator<Item = String>,
     managed_provider: Option<crate::managed_provider::ManagedProviderRow>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(unix)]
-    close_inherited_descriptors();
     let argv: Vec<String> = args.into_iter().collect();
     if argv.first().map(String::as_str) == Some("--connect-pipe") {
         let mut args = argv.iter().skip(1);
