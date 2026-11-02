@@ -14,44 +14,108 @@ use std::{
 const SHUTDOWN: Duration = Duration::from_secs(30);
 const KILLED: Duration = Duration::from_secs(5);
 
+/// The marker a test writes before it starts a server on the home itself.
+pub const TEST_SERVER_MARKER: &str = "rust/daemon.test-server";
+
+/// Marks `home` as owning a server this test starts directly, so the drop
+/// stops it even when it never binds and so never writes `daemon.sock.lock`.
+pub fn mark_test_server(home: &Path) {
+    std::fs::write(home.join(TEST_SERVER_MARKER), "").expect("write the server marker");
+}
+
+/// Whether the home may own a running server: the CLI writes `daemon.log`
+/// before every spawn, a server writes `daemon.sock.lock` when it binds, and
+/// a test writes the marker before it starts a server itself. Most homes have
+/// none of the three, and the check is three stats.
+fn owns_a_server(home: &Path) -> bool {
+    home.join("rust/daemon.log").exists()
+        || home.join("rust/daemon.sock.lock").exists()
+        || home.join(TEST_SERVER_MARKER).exists()
+}
+
 /// Stops every process whose command line names `home`.
 pub fn stop_daemon(home: &Path) {
-    // The CLI writes `rust/daemon.log` before every spawn, so a home without
-    // it never started a daemon through the CLI; `rust/daemon.sock.lock` is
-    // written by a server started directly on the home. Most homes have
-    // neither, and the check is two stats.
-    if !home.join("rust/daemon.log").exists() && !home.join("rust/daemon.sock.lock").exists() {
+    if !owns_a_server(home) {
         return;
     }
     let pattern = home.to_str().expect("a test home is UTF-8");
-    let mut pids = pids_naming(pattern);
-    if pids.is_empty() {
-        return;
-    }
-    for pid in &pids {
-        unsafe { libc::kill(*pid, libc::SIGTERM) };
+    let mut pids = Vec::new();
+    for pid in pids_naming(pattern) {
+        if signal_if_naming(pid, pattern, libc::SIGTERM) {
+            pids.push(pid);
+        }
     }
     wait(&pids, SHUTDOWN);
-    pids.retain(|pid| running(*pid));
-    for pid in &pids {
-        unsafe { libc::kill(*pid, libc::SIGKILL) };
+    for pid in pids.iter().filter(|pid| running(**pid)) {
+        signal_if_naming(*pid, pattern, libc::SIGKILL);
     }
     wait(&pids, KILLED);
 }
 
 /// The pids of the processes whose command line contains `pattern`.
+///
+/// The match is plain text over `ps` output, so a path with regex
+/// metacharacters cannot change what matches. A `ps` that cannot run is a
+/// test failure: an empty result would read as "no daemon", which the caller
+/// cannot tell from a leaked process.
 pub fn pids_naming(pattern: &str) -> Vec<libc::pid_t> {
-    let output = match Command::new("pgrep").args(["-f", pattern]).output() {
-        Ok(output) => output,
-        Err(error) => {
-            eprintln!("pgrep failed: {error}");
-            return Vec::new();
-        }
-    };
+    // `-ww` keeps a command line from being cut at the terminal width, which
+    // a piped `ps` would otherwise default to.
+    let output = Command::new("ps")
+        .args(["-ww", "-axo", "pid=,command="])
+        .output()
+        .unwrap_or_else(|error| panic!("ps -ww -axo pid=,command= failed: {error}"));
+    assert!(
+        output.status.success(),
+        "ps -ww -axo pid=,command= failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
     String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .filter_map(|pid| pid.parse().ok())
+        .lines()
+        .filter_map(|line| {
+            let (pid, command) = line.trim_start().split_once(' ')?;
+            if !command.contains(pattern) {
+                return None;
+            }
+            pid.parse().ok()
+        })
         .collect()
+}
+
+/// The command line `ps` reports for `pid`, or `None` when it has exited.
+pub fn command_of(pid: libc::pid_t) -> Option<String> {
+    let output = Command::new("ps")
+        .args(["-ww", "-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .unwrap_or_else(|error| panic!("ps -ww -p {pid} -o command= failed: {error}"));
+    if !output.status.success() {
+        // `ps` reports nothing for a pid that no longer exists; text on
+        // stderr is the tool failing, which a test must not read as "gone".
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.trim().is_empty(),
+            "ps -ww -p {pid} -o command= failed: {stderr}"
+        );
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_owned(),
+    )
+}
+
+/// Sends `signal` to `pid` only while its command line still names
+/// `pattern`, and reports whether it did. Between the listing and the signal
+/// the pid can be reused by a process the test does not own.
+pub fn signal_if_naming(pid: libc::pid_t, pattern: &str, signal: libc::c_int) -> bool {
+    if !command_of(pid).is_some_and(|command| command.contains(pattern)) {
+        return false;
+    }
+    // SAFETY: the command line just read names the test's home, so this is
+    // the process the listing named and a signal the test may send.
+    unsafe { libc::kill(pid, signal) };
+    true
 }
 
 fn running(pid: libc::pid_t) -> bool {

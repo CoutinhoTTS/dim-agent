@@ -444,6 +444,7 @@ fn normal_dimcode_is_the_leaf_until_it_leaves() {
     assert!(shown.contains("SHELL-RETURNED:0"), "{shown:?}");
     assert_restored(&pty);
     wait_unregistered(&mut rpc, &pty, &ui_id);
+    let _ = rpc.call("daemon.shutdown", json!({}));
 }
 
 #[test]
@@ -519,6 +520,7 @@ fn a_home_the_daemon_fits_also_fits_its_leaf() {
     pty.write(b"\r");
     let shown = wait_exit(&mut child, &pty);
     assert!(shown.contains("SHELL-RETURNED:0"), "{shown:?}");
+    let _ = rpc.call("daemon.shutdown", json!({}));
 }
 
 /// A daemon that opens the leaf's session and replies to `ui.open`, then
