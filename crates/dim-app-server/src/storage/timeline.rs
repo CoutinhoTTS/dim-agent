@@ -2662,7 +2662,7 @@ fn copy_fork(
 ) -> Result<()> {
     let copied = copy_fork_rows(connection, source, fork, at, content);
     if copied.is_err()
-        && let Err(cleanup) = clear_session(connection, fork)
+        && let Err(cleanup) = drop_session(connection, fork)
     {
         tracing::error!(session_id = fork, error = %cleanup, "Incomplete fork rows were kept");
     }
@@ -2900,34 +2900,6 @@ fn drop_session(connection: &mut Connection, session: &str) -> Result<usize> {
         }
     }
     Ok(released)
-}
-
-/// Removes every row of `session` in one transaction, for a fork that stopped
-/// before it became visible.
-fn clear_session(connection: &mut Connection, session: &str) -> Result<()> {
-    let tx = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(error)?;
-    for table in [
-        "timeline_snapshots",
-        "timeline_events",
-        "timeline_branches",
-        "timeline_content",
-        "session_file_owners",
-        "session_output_owners",
-        "session_grants",
-        "session_metadata",
-        "session_catalog",
-        "session_owners",
-        "agent_sessions",
-    ] {
-        tx.execute(
-            &format!("DELETE FROM {table} WHERE session_id=?1"),
-            [session],
-        )
-        .map_err(error)?;
-    }
-    tx.commit().map_err(error)
 }
 
 /// The content rows the events of `source`'s `main` through `at` reference,
@@ -3742,7 +3714,7 @@ pub(super) async fn read_directory(
     session: &str,
 ) -> Result<ValidatedDirectory> {
     let id = session.to_owned();
-    db.run(move |connection| directory_rows(connection, &id))
+    db.run_read(move |connection| directory_rows(connection, &id))
         .await
 }
 

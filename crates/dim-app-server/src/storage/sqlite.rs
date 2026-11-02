@@ -836,6 +836,10 @@ impl SqliteStorage {
             connection
                 .pragma_update(None, "foreign_keys", false)
                 .map_err(storage)?;
+            #[cfg(target_os = "macos")]
+            connection
+                .pragma_update(None, "fullfsync", true)
+                .map_err(storage)?;
             let result = catch_unwind(AssertUnwindSafe(|| operation(&mut connection)));
             outcome(&connection, result)
         })
