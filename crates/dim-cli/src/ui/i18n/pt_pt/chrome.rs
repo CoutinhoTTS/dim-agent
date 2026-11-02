@@ -256,6 +256,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Connected {provider}" => "{provider} ligado",
         "Opened {url}" => "{url} aberto",
         "Tool details not saved: {error}" => "Detalhes das ferramentas não guardados: {error}",
+        "Thinking details not saved: {error}" => "Detalhes de raciocínio não guardados: {error}",
         "/{name} needs a session — send a message first" => {
             "/{name} requer sessão — envie primeiro uma mensagem"
         }
@@ -331,8 +332,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "pick an earlier message to edit or quote" => {
             "escolher mensagem anterior para editar ou citar"
         }
-        "collapse or expand tool details, thoughts and compaction summaries" => {
-            "recolher/expandir detalhes de ferramentas, pensamentos e resumos de compactação"
+        "collapse or expand tool details and compaction summaries" => {
+            "recolher/expandir detalhes de ferramentas e resumos de compactação"
         }
         "switch between fullscreen and scrollback" => {
             "alternar entre ecrã inteiro e histórico do terminal"
@@ -378,6 +379,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "fullscreen" => "ecrã inteiro",
         "scrollback" => "histórico do terminal",
         "Tool details" => "Detalhes das ferramentas",
+        "Thinking details" => "Detalhes de raciocínio",
         "expanded" => "expandido",
         "collapsed" => "recolhido",
         "Mouse (fullscreen)" => "Rato (ecrã inteiro)",

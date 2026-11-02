@@ -445,31 +445,17 @@ fn mcp_shaped_tool_closed() -> Value {
 }
 
 #[test]
-fn the_openai_chat_body_carries_the_canonical_tool_schema() {
-    let body = aimux_providers::openai::convert::build_request_body(
-        "gpt-4o",
-        &options(ProviderKind::OpenaiChat),
-        false,
-    )
-    .unwrap();
-    assert_eq!(
-        body["tools"][0]["function"]["parameters"],
-        canonical_shaped_schema()
-    );
-}
-
-#[test]
-fn the_openai_compatible_body_carries_the_canonical_tool_schema() {
-    let body = aimux_providers::openai::convert::build_request_body(
-        "gpt-4o",
-        &options(ProviderKind::OpenaiCompatible),
-        false,
-    )
-    .unwrap();
-    assert_eq!(
-        body["tools"][0]["function"]["parameters"],
-        canonical_shaped_schema()
-    );
+fn the_openai_chat_and_compatible_bodies_carry_the_canonical_tool_schema() {
+    for kind in [ProviderKind::OpenaiChat, ProviderKind::OpenaiCompatible] {
+        let body =
+            aimux_providers::openai::convert::build_request_body("gpt-4o", &options(kind), false)
+                .unwrap();
+        assert_eq!(
+            body["tools"][0]["function"]["parameters"],
+            canonical_shaped_schema(),
+            "{kind:?}"
+        );
+    }
 }
 
 #[test]

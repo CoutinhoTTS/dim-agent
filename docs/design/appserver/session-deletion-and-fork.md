@@ -22,11 +22,12 @@ file steps.
   that lost their last owner. Deleting an absent Session succeeds.
 - **Cleanup.** One delete removes everything the Session owns (§3.3). Cleanup by age or count, with a preview, is the
   CLI composing `session.summaries` and `session.delete`; there is no server method for it.
-- **Crash safety.** The directory removal is durable before the row transaction commits, and Session files go by
-  S5a's rows. A delete interrupted anywhere leaves either the whole Session or none of its rows, and a retry or the
-  next sweep finishes it (§4).
-- **Fork.** A fork copies the source's `main` through a cut into a new Session in one transaction, byte for byte, and
-  shares the source's Session files. The cut is a rest point of `main`, and branches `main` created by then are
+- **Crash safety.** The directory removal is durable before the first row transaction commits, and Session files go
+  by S5a's rows. The first transaction removes what makes the Session visible; the remaining Timeline rows go in
+  bounded transactions. An interruption leaves the Session invisible and at most unreachable rows of the id, which a
+  retry removes; the next sweep finishes the files (§4).
+- **Fork.** A fork copies the source's `main` through a cut into a new Session in bounded transactions, byte for
+  byte, and shares the source's Session files. The cut is a rest point of `main`, and branches `main` created by then are
   copied without their events, so the fork starts no work until a client sends it input (§6.5). The fork's `main`
   opens with `branch/resume`: the fork is the source's conversation restored at the cut under a new id. Right after
   the copied facts the fork writes one fact of its own, `session/forked`, so an owner that folds a branch's own
@@ -53,7 +54,7 @@ or the Session facade.
                            | delete_session(S)               | prepared creation,
                            |                                 | prepare step = fork_session(S, F, at)
                            v                                 v
-                         SessionStore ---- one transaction each ----> SqliteStorage
+                         SessionStore ---- bounded transactions --> SqliteStorage
                            |      \
                            |       +-- S5a sweep (Session files)
                            | per call, by the Session's resource node (#38)
@@ -143,13 +144,15 @@ are Rust methods over the native store, not services: only Agents calls them.
    `command-output/<S>/` only while its database has rows of S: `command-output/` is shared by
    every database in the directory, so the directory of an id without rows here may belong to
    another database's Session (§4).
-4. **Rows.** One `IMMEDIATE` transaction removes every row of S: `session_file_owners`, `session_output_owners`, `timeline_snapshots`,
-   `timeline_events`, `timeline_branches`, `timeline_content`, `session_grants`, `session_owners`, `session_catalog` and
-   `agent_sessions`, in this order because of the foreign keys, plus S5b's title metadata (§14). `session_catalog` is
-   the derived row of [#556's catalog projection](native-storage-format.md#556-v23-格式决定). This is the operation a
-   creation rollback runs today ([timeline.rs](../../../crates/dim-app-server/src/storage/timeline.rs)
-   `rollback_creation`), extended by S5a with the owner rows; delete and rollback share it. It runs on the Timeline
-   writer, as a rollback does, so it follows every append already queued for S and clears S's recorded write failure.
+4. **Rows.** One `IMMEDIATE` transaction removes what makes S visible: `session_file_owners` (S5a releases its files),
+   `session_output_owners`, `session_grants`, S5b's title metadata (§14), `session_catalog`
+   ([#556's catalog projection](native-storage-format.md#556-v23-格式决定)), `session_owners`,
+   `timeline_branches` and `agent_sessions`. `timeline_snapshots`, `timeline_events` and `timeline_content` then go
+   in bounded transactions on a copy connection, each removing at most 256 rows, so other Sessions' commits and
+   publications run between them (#599). The copy connection has foreign keys off, which lets the first transaction
+   drop the rows the remaining deletes refer to. The operation runs after the writer has drained every append already
+   queued for S and clears S's recorded write failure; delete and creation rollback share it. See
+   [native storage format §SQLite 运行参数与空间回收](native-storage-format.md#sqlite-运行参数与空间回收).
 5. **Sweep.** SessionStore schedules S5a's sweep ([Session files §5.4](session-files.md#54-sweep)). Files whose last
    owner was S are removed there; files a fork still owns stay.
 6. **Forget.** Agents removes S's protocol version and unavailable-Session entry, marks S's slot closed and deleted,
@@ -164,7 +167,7 @@ are Rust methods over the native store, not services: only Agents calls them.
 
 | State | Where | Removed by |
 | --- | --- | --- |
-| Session record, owner, branches, events, content, snapshots | Native store | Step 4, one transaction |
+| Session record, owner, branches, events, content, snapshots | Native store | Step 4: the visible rows in one transaction, then the Timeline rows in bounded ones |
 | Session-file ownership | `session_file_owners` (S5a) | Step 4. Files left without an owner go in S5a's sweep |
 | Title metadata | Native store, S5b's `session_metadata` row ([title metadata](session-title-metadata.md#9-lifecycle)) | Step 4, same transaction |
 | File grants | Native store, `session_grants` rows (v28, [ADR 012](../../adr/012-session-grants.md) D1) | Step 4, same transaction |
@@ -215,12 +218,12 @@ gone.
 ## 4. Crash convergence
 
 ```
-            2 close            3 remove (synced)            4 commit              5 sweep
+            2 close            3 remove (synced)          4 visible rows          5 sweep
  [loaded] ----------> [closed] -------------------> [no dir] -----------> [no rows] -------> [gone]
     ^                    |                              |                     |
-    |                    | crash: all rows,             | crash: all rows,    | crash: unowned file
-    +--- next use -------+ part of the directory        | no directory        | rows (S5a)
-         loads S           retry the delete               retry the delete      next sweep
+    |                    | crash: all rows,             | crash: no visible   | crash: unowned file
+    +--- next use -------+ part of the directory        | rows, some Timeline | rows (S5a)
+         loads S           retry the delete               rows; retry delete    next sweep
 ```
 
 | Interrupted | Store | Disk | Converges by |
@@ -228,6 +231,7 @@ gone.
 | Before or during the close | All rows | The directory | Nothing lost; S loads on its next use; retry |
 | During the removal | All rows | Part of the directory | Retry: removal continues and absent entries count as removed |
 | After the removal, before the commit | All rows | No directory, durably | Retry. Meanwhile S loads, without its command output files |
+| During the Timeline row transactions | No visible rows; at most unreachable Timeline rows of S | No directory | S is invisible and no read reaches the remaining rows; repeating the delete removes them |
 | After the commit, before the reply | No rows | No directory; S's files unowned | The client's retry finds no rows, so it removes no directory, replies `{deleted: false}` and schedules the sweep again; otherwise S5a's next trigger (another delete, or the first put of a later generation) removes the files |
 | During the sweep | S5a's states | — | [Session files §6](session-files.md#6-deletion-crash-recovery-and-serialization) |
 
@@ -279,7 +283,7 @@ partial failure would still need per-id results.
 | --- | --- |
 | Session files | S5a's sweep: after each delete, retried ones included, and on the first put of each generation |
 | Command output | None needed: removed before the commit (§4) |
-| Rows of a deleted Session | None needed: one transaction |
+| Rows of a deleted Session | None needed: the first transaction makes the Session invisible and the rest are deleted in bounded transactions |
 | Rows left by earlier faults, such as Timeline rows with no record | A delete by that id removes them: every table is cleared by `session_id`, whether or not `agent_sessions` has the row |
 
 ## 6. Fork
@@ -333,7 +337,7 @@ fork's conversation would then not be its `main`, which clients, `session.summar
 ### 6.3 What a fork copies
 
 ```
- Source S                                                 Fork F (one transaction)
+ Source S                                                 Fork F (bounded transactions)
  main: 1 .. 7  8 branch/create(c1)  9 .. 12 | 13 ..       main: 1 .. 12, same ids     (at = 12, a rest point)
                       |                   cut                   then 13 session/forked; F's first load
  c1:   1 branch/start .. 30 (may still grow)                    writes 14 branch/resume, 15 branch/create-failed(c1)
@@ -387,8 +391,10 @@ Rejected alternatives:
 | Copy a child through its last rest point | It still carries work after the cut. A child on its first task has no rest point after its creation, and the check would read every copied child's facts while the fork transaction holds the write lock |
 | Copy every content row of the source | Disk and lock time for requests after the cut, which no copied event references |
 
-The copy is one write transaction; every Session's commits wait for it, as they wait for any write round, and its
-length grows with `main`'s copied prefix.
+The copy runs in bounded transactions on its own connection: the session row is inserted only by the last one, so no
+reader sees F before it is complete, and every Session's commits and publications run between them (#599). Its
+references and their content closure are read in bounded holds on read connections before the copy. The work still
+grows with `main`'s copied prefix, but no single transaction holds the writer for that whole prefix.
 
 ### 6.4 What a fork does not copy
 
@@ -751,11 +757,13 @@ impl SessionStore {
     /// database directory's root.
     pub fn new(db: Arc<SqliteStorage>, ctx: Ctx, files_root: usize) -> Self;
     /// Removes every output directory the id names, except one another
-    /// Session in this database still names (ADR 013 D4), then every row in
-    /// one transaction; schedules the Session-file sweep. Returns whether
-    /// this database had rows of the id.
+    /// Session in this database still names (ADR 013 D4), then the rows that
+    /// make it visible in one transaction and its Timeline rows in bounded
+    /// ones; schedules the Session-file sweep. Returns whether this database
+    /// had rows of the id.
     pub async fn delete_session(&self, id: &str) -> Result<bool>;
-    /// Prepare step of a fork: copies the rows of §6.3 in one transaction.
+    /// Prepare step of a fork: copies the rows of §6.3 in bounded
+    /// transactions, the session row last.
     pub async fn fork_session(&self, source: &str, fork: &str, at: u64) -> Result<()>;
     /// `sessionFiles.register` (ADR 013 D2): records `path` as output owned
     /// by `session_id`; a missing Session fails.

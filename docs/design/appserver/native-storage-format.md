@@ -127,15 +127,19 @@ Cannot open native store <path>.
 
 ## SQLite 运行参数与空间回收
 
-进程用一个连接打开本库；格式门禁及其准入事务提交后，才设置连接级 PRAGMA：`journal_mode=WAL`、`synchronous=FULL`（macOS 另加 `fullfsync`）、`foreign_keys=ON`、`wal_autocheckpoint=0`、`journal_size_limit=64 MiB`、`cache_size=-32768`（32 MiB）。
+进程用一个写连接打开本库，另有四个只读连接服务读取（[#599](https://github.com/arcships/dim/issues/599)）：写连接在格式门禁及其准入事务提交后才设置连接级 PRAGMA：`journal_mode=WAL`、`synchronous=FULL`（macOS 另加 `fullfsync`）、`foreign_keys=ON`、`wal_autocheckpoint=0`、`journal_size_limit=64 MiB`、`cache_size=-32768`（32 MiB）。只读连接以 `SQLITE_OPEN_READ_ONLY` 打开，只设 `busy_timeout=5s`、`cache_size=-32768` 和 `catalog_fold` 函数，不设 `journal_mode`、`synchronous`、`foreign_keys`、`wal_autocheckpoint`、`journal_size_limit` 或 `fullfsync`。每次读取在其语句开始时的最后提交上运行，不等待写事务或 fsync；调用按顺序轮换连接，目录扫描等长读不会占住其他读取。写连接与 fork/delete 的复制连接用 `sqlite3_busy_handler`：每 1 ms 重试一次、约 5 秒后放弃，两者因此轮流取得写锁，而不是一方在另一方退避期间长期占有。
 
 | 参数 | 值 | 作用 |
 | --- | --- | --- |
-| `wal_autocheckpoint` | `0` | 关闭提交事务内的自动检查点。writer 在每轮提交并发布后、WAL 达到 4 MiB（SQLite 默认的 1000 页）时执行 `PRAGMA wal_checkpoint(PASSIVE)`；检查点因此不占提交路径。 |
+| `wal_autocheckpoint` | `0` | 关闭提交事务内的自动检查点。writer 在每轮提交并发布后、WAL 达到 4 MiB（SQLite 默认的 1000 页）时执行 `PRAGMA wal_checkpoint(PASSIVE)`；检查点因此不占提交路径。只读连接不自动检查点。 |
 | `journal_size_limit` | 64 MiB | 检查点重启 WAL 后，文件截到不超过该值；单轮写入本身更大时保留该轮的大小。导出等读者持长读事务时 WAL 仍会在导出期间增长，导出结束后下一次检查点照常复制并重启。被动检查点不等待读者。 |
-| `cache_size` | 32 MiB | 在 650 MB、2,300 个 Session 的一次性库上重复读取每个 Session 的尾部事件：缓存为 2–16 MiB 时十次读取共从分页器读约 205 MB，32 MiB 起降到约 20 MB，64 MiB 与 128 MiB 不再减少。32 MiB 是容纳该热点工作集的最小值。 |
+| `cache_size` | 每个连接 32 MiB | 在 650 MB、2,300 个 Session 的一次性库上重复读取每个 Session 的尾部事件：缓存为 2–16 MiB 时十次读取共从分页器读约 205 MB，32 MiB 起降到约 20 MB，64 MiB 与 128 MiB 不再减少。32 MiB 是容纳该热点工作集的最小值；写连接和四个只读连接各用该值。 |
+| `busy handler` | 每 1 ms，约 5 秒 | 写连接与 fork/delete 的复制连接共用；两者在同一 WAL 上交替取得写锁，使分块的复制/删除与写入轮都能前进。 |
+| `foreign_keys` | 复制连接 `OFF` | fork 在最后一个事务才插入 `agent_sessions`，此前先写事件、内容、快照与分支；SQLite 的外键是连接级设置，复制连接关闭它，最后一个事务在提交时仍满足全部约束。 |
 
-关闭时执行 `PRAGMA wal_checkpoint(TRUNCATE)`，把 WAL 折回数据库并截为零；另一个连接（如运行中的导出）仍持读事务时这一步可能失败，下次打开继续。
+关闭时先关闭四个只读连接，再执行 `PRAGMA wal_checkpoint(TRUNCATE)`，把 WAL 折回数据库并截为零；另一个连接（如运行中的导出）仍持读事务时这一步可能失败，下次打开继续。
+
+fork 与 Session 删除各用一条复制连接，按 256 个逻辑序号（内容按 1024 个哈希）分块提交，每块之间让写入轮取得写锁。复制连接与写连接一样在 macOS 上设置 `fullfsync`。fork 的中间块以 `synchronous=NORMAL` 提交，最后插入 `agent_sessions` 的事务以 `FULL` 提交：它的 fsync（macOS 上为 F_FULLFSYNC）覆盖此前写入 WAL 的全部帧，中断只留下不可达的行，不会出现可见但不完整的 Session。删除先在一个 `FULL` 事务中移除使 Session 可见的行（文件与输出归属、授权、标题、目录、owner、session 与分支），再以 `NORMAL` 分块删除事件、快照和内容；中断只留下不可达的行，重试同一 id 即可清除。两者都不改变持久化格式。
 
 删除 Session 只释放库内页，数据库文件本身不缩小。维护入口是 `dimcode daemon vacuum [--database PATH]`：守护进程未运行时它取同一把维护锁，校验当前格式的精确结构后执行 `VACUUM`，打印操作前后数据库与 WAL 的字节数之和。`VACUUM` 重写整个库，需要约等于库大小的临时空间；守护进程持锁时该命令拒绝执行，也不升级或创建库。
 
@@ -634,7 +638,7 @@ ProjectionCheckpoint = {
 - **版本边界**：`agent_store_format` 改为 `CHECK (version = 25)`，唯一标记为 25。不能在 v24 内删除索引，因为启动门禁要求精确 SQL 结构；v24 守护进程拒绝 v25 库并保留数据。
 - **升级**：空库直接创建 v25。精确的 v24 库在同一启动准入事务内删除索引、重建标记并写入 25；精确的 v13、v15–v23 库先执行已有步骤，再删除索引。旧结构校验仍要求该索引存在，缺失索引、标记不符或半升级的库都拒绝并保留。失败回滚整个事务，不改写任何已有业务行。
 - **读取与迁移**：只读导出可以原样打开 v24 及既有受支持格式，也可读取 v25，不升级来源。迁移目标使用 v25；已有目标由同一存储准入路径升级。升级单向，不新增备份、降级或迁移选项。
-- **验证**：一次性 v24 库升级后精确结构、标记与业务行保持预期，重复打开不再升级；既有各版升级、损坏库保留、只读导出、迁移和主键区间计划由公共流程验证。`timeline_acceptance rounds` 报告前后的每事件 WAL 字节与 checkpoint sync 次数，测量结果放在 PR。
+- **验证**：一次性 v24 库升级后精确结构、标记与业务行保持预期，重复打开不再升级；既有各版升级、损坏库保留、只读导出、迁移和主键区间计划由公共流程验证。`timeline_acceptance rounds` 报告前后的每事件 WAL 字节与 checkpoint sync 次数，`read-load` 报告流式写入下的读延迟与 fork/delete 期间的发布延迟，测量结果放在 PR。
 
 ### #555 v24 格式决定
 
@@ -753,7 +757,7 @@ ProjectionCheckpoint = {
 | `timeline_events_state` | `(session_id, branch_id, sequence) WHERE context_state = 1` | 只取 checkpoint 折叠消费的行（v31） |
 | `timeline_events_positions` | `(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'context/compaction-start', 'context/compaction')` | 策略定位：轮次开始与压缩边界（v31） |
 
-正向页的 `after` 与 `through` 须为批次边界；上下文页（`stored_context_page`）例外：游标是事件序号，落在合并行内部时从覆盖它的物理行开始读、再按序号过滤，见 [读取边界](context-read-and-compaction.md#4-读取边界)。`limit` 为目标事件数，末批超出时完整返回。区间查询先按主键定位起点之前或等于起点的最后一条物理行，以其 `sequence` 为下界、区间终点为上界，按 `sequence` 读取；没有前驱行时以下界起点读取，并以 `last_sequence >= 起点` 排除不相交的前驱行。合并行覆盖页起点时完整解码，再按内部 sequence 过滤；反向页须纳入 `sequence < before <= last_sequence` 的跨界行，并停在原子批次边界。正向读取按 256 个逻辑序号分段，恢复校验按 64 条物理行分段，每段结束释放连接锁；请求列表的遍历每加载至多 256 个节点也释放一次，下一次持有从中断处继续。单条物理行完整解码，允许超过通常页大小。流程测试用 `EXPLAIN QUERY PLAN` 核对正向读取主键的上下界；`timeline_acceptance paged-reads` 测量长历史读/恢复与并发提交延迟；`restore_cost` 在一次性库上经 mock 模型轮次增长 Session，按历史规模测量恢复耗时，并拆分目录校验、事件读取与 `branch/resume` 写入，同时报告每条事件的存储字节数（`cargo run --release --locked -p dim-app-server --example restore_cost -- [plain|tools|product] [1001,3001,10001] [7]`；`product` 使用产品上下文窗口与摘要压缩）；`single-append` 与 `single-partial` 测量单个请求的冷读与重开后第一次写入（`-- [single-append|single-partial] [2000,20000] [7] [chain|last]`）。`timeline_acceptance crashes` 与 `powerloss` 的中断批次含一个请求，恢复后校验行可读、序号连续、每个列表的节点俱在，并核对重启后写入与未中断写入的行逐字节一致。反向历史接口仍为独立协议草案。
+正向页的 `after` 与 `through` 须为批次边界；上下文页（`stored_context_page`）例外：游标是事件序号，落在合并行内部时从覆盖它的物理行开始读、再按序号过滤，见 [读取边界](context-read-and-compaction.md#4-读取边界)。`limit` 为目标事件数，末批超出时完整返回。区间查询先按主键定位起点之前或等于起点的最后一条物理行，以其 `sequence` 为下界、区间终点为上界，按 `sequence` 读取；没有前驱行时以下界起点读取，并以 `last_sequence >= 起点` 排除不相交的前驱行。合并行覆盖页起点时完整解码，再按内部 sequence 过滤；反向页须纳入 `sequence < before <= last_sequence` 的跨界行，并停在原子批次边界。正向读取按 256 个逻辑序号分段，恢复校验按 64 条物理行分段，每段结束释放读连接；请求列表的遍历每加载至多 256 个节点也释放一次，下一次持有从中断处继续。单条物理行完整解码，允许超过通常页大小。流程测试用 `EXPLAIN QUERY PLAN` 核对正向读取主键的上下界；`timeline_acceptance paged-reads` 测量长历史读/恢复与并发提交延迟；`restore_cost` 在一次性库上经 mock 模型轮次增长 Session，按历史规模测量恢复耗时，并拆分目录校验、事件读取与 `branch/resume` 写入，同时报告每条事件的存储字节数（`cargo run --release --locked -p dim-app-server --example restore_cost -- [plain|tools|product] [1001,3001,10001] [7]`；`product` 使用产品上下文窗口与摘要压缩）；`single-append` 与 `single-partial` 测量单个请求的冷读与重开后第一次写入（`-- [single-append|single-partial] [2000,20000] [7] [chain|last]`）。`timeline_acceptance crashes` 与 `powerloss` 的中断批次含一个请求，恢复后校验行可读、序号连续、每个列表的节点俱在，并核对重启后写入与未中断写入的行逐字节一致。反向历史接口仍为独立协议草案。
 
 `session_owners.session_id` 与 `agents.agent_id` 两个 ID 列的 SQL 可空缺口见表结构。永久关闭字段与旧记录回填尚未设计。
 

@@ -317,7 +317,7 @@ impl SessionFiles {
         let candidates = self
             .0
             .db
-            .run(move |connection| {
+            .run_read(move |connection| {
                 let mut candidates = BTreeSet::from([own]);
                 let mut query = connection
                     .prepare("SELECT DISTINCT path FROM session_output_owners WHERE session_id = ?1")
@@ -462,7 +462,7 @@ impl SessionFiles {
             let owned = self
                 .0
                 .db
-                .run(move |connection| {
+                .run_read(move |connection| {
                     connection
                         .query_row(
                             "SELECT EXISTS(SELECT 1 FROM session_output_owners WHERE session_id = ?1 AND path = ?2)",
@@ -504,7 +504,7 @@ impl SessionFiles {
         let file_id = file_id.to_owned();
         self.0
             .db
-            .run(move |connection| {
+            .run_read(move |connection| {
                 connection
                     .query_row(
                         "SELECT EXISTS(SELECT 1 FROM session_file_owners WHERE session_id = ?1 AND file_id = ?2)",
@@ -527,7 +527,7 @@ impl SessionFiles {
         let (files, outputs) = self
             .0
             .db
-            .run(move |connection| {
+            .run_read(move |connection| {
                 let files: Vec<String> = connection
                     .prepare("SELECT file_id FROM session_file_owners WHERE session_id = ?1 ORDER BY file_id")
                     .map_err(error)?
@@ -781,7 +781,7 @@ impl Files {
         };
         let cancel = &self.stopping;
         let rows = |sql: &'static str| {
-            self.db.run(move |connection| {
+            self.db.run_read(move |connection| {
                 connection
                     .prepare(sql)
                     .and_then(|mut query| {
@@ -866,7 +866,7 @@ impl Files {
         let listed = names.clone();
         let recorded = self
             .db
-            .run(move |connection| {
+            .run_read(move |connection| {
                 let mut query = connection
                     .prepare("SELECT EXISTS(SELECT 1 FROM session_files WHERE file_id = ?1)")
                     .map_err(error)?;

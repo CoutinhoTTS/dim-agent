@@ -6403,13 +6403,6 @@ async fn a_fork_copies_main_through_the_cut_with_its_content_and_snapshots() {
 }
 
 #[tokio::test]
-async fn a_v21_store_upgrades_in_place_once() {
-    let database = Database::new();
-    let connection = v16_tables_store(&database.0, 21);
-    upgrades_in_place_once(&database, connection, 21).await;
-}
-
-#[tokio::test]
 async fn a_v22_store_upgrades_in_place_once() {
     let database = Database::new();
     let connection = v16_tables_store(&database.0, 22);

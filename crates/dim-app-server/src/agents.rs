@@ -336,6 +336,10 @@ pub struct AgentIndex {
     session_store: Option<Arc<SessionStore>>,
     settings: Option<Arc<SettingsService>>,
     stopping: CancellationToken,
+    /// Notified once an `idle` call on this generation is admitted and
+    /// waiting on its branch. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    idle_admitted: Arc<tokio::sync::Notify>,
 }
 impl AgentIndex {
     /// Whether this profile resolves Session models through a host.
@@ -365,6 +369,12 @@ impl AgentIndex {
             .default_agent_id
             .get()
             .expect("AgentsPlugin apply fixed the default id")
+    }
+    /// The signal an `idle` admission notifies, so a test knows the wait is
+    /// in flight before it reloads or closes. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub(crate) fn idle_admitted(&self) -> Arc<tokio::sync::Notify> {
+        self.idle_admitted.clone()
     }
     pub fn default_host(&self) -> Option<Arc<AgentHost>> {
         self.host(Some(self.default_agent_id()))
@@ -1872,6 +1882,8 @@ impl DynPlugin for AgentsPlugin {
                 settings,
                 selects_models: self.config.protected_profile(),
                 stopping: CancellationToken::new(),
+                #[cfg(feature = "testing")]
+                idle_admitted: Arc::new(tokio::sync::Notify::new()),
             };
             let index = Arc::new(index);
             let cleanup = index.clone();

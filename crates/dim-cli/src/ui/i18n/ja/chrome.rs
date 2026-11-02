@@ -234,6 +234,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Connected {provider}" => "{provider} に接続済み",
         "Opened {url}" => "{url} を開きました",
         "Tool details not saved: {error}" => "ツール詳細の保存失敗：{error}",
+        "Thinking details not saved: {error}" => "思考詳細の保存失敗：{error}",
         "/{name} needs a session — send a message first" => {
             "/{name} はセッションが必要。先にメッセージを送信"
         }
@@ -299,8 +300,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "先頭へスクロール",
         "scroll to the bottom" => "末尾へスクロール",
         "pick an earlier message to edit or quote" => "過去のメッセージを編集・引用",
-        "collapse or expand tool details, thoughts and compaction summaries" => {
-            "ツール詳細・思考・圧縮サマリーの開閉"
+        "collapse or expand tool details and compaction summaries" => {
+            "ツール詳細と圧縮サマリーの開閉"
         }
         "switch between fullscreen and scrollback" => "全画面/スクロールバック切替",
         "switch theme" => "テーマを切替",
@@ -344,6 +345,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "fullscreen" => "全画面",
         "scrollback" => "スクロールバック",
         "Tool details" => "ツール詳細",
+        "Thinking details" => "思考詳細",
         "expanded" => "展開",
         "collapsed" => "折りたたみ",
         "Mouse (fullscreen)" => "マウス（全画面）",

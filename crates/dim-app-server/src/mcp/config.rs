@@ -17,6 +17,7 @@ pub(super) fn settings_changes(
         McpSettings::NAMESPACE,
         McpProjectEnablement::NAMESPACE,
         McpPluginServers::NAMESPACE,
+        McpSecrets::NAMESPACE,
     ] {
         let wake = wake.clone();
         ctx.listen::<crate::settings::SettingsChanged>()
@@ -166,6 +167,373 @@ pub(crate) fn loopback(host: &url::Host<&str>) -> bool {
     }
 }
 
+/// The hidden part of a project entry moved from user scope, keyed by
+/// canonical workspace and server id. It never enters a project file and no
+/// client method returns it.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpSecrets {
+    #[serde(default)]
+    pub entries: BTreeMap<String, BTreeMap<String, McpSecretEntry>>,
+}
+impl McpSecrets {
+    pub(crate) fn get(&self, workspace: &str, id: &str) -> Option<&McpSecretEntry> {
+        self.entries
+            .get(workspace)
+            .and_then(|servers| servers.get(id))
+    }
+    pub(crate) fn set(&mut self, workspace: &str, id: &str, secret: McpSecretEntry) {
+        self.entries
+            .entry(workspace.to_owned())
+            .or_default()
+            .insert(id.to_owned(), secret);
+    }
+    pub(crate) fn remove(&mut self, workspace: &str, id: &str) -> bool {
+        let Some(servers) = self.entries.get_mut(workspace) else {
+            return false;
+        };
+        let removed = servers.remove(id);
+        if servers.is_empty() {
+            self.entries.remove(workspace);
+        }
+        removed.is_some()
+    }
+}
+impl BusinessDocument for McpSecrets {
+    const NAMESPACE: &'static str = "mcp-secrets";
+    const USER_FILE: &'static str = "mcp-secrets.json";
+
+    fn validate(&self) -> Result<()> {
+        for (workspace, servers) in &self.entries {
+            if !Path::new(workspace).is_absolute() || workspace.is_empty() {
+                return Err(SettingsError::Invalid("invalid MCP secret workspace"));
+            }
+            for (id, secret) in servers {
+                if id.trim().is_empty() {
+                    return Err(SettingsError::Invalid("empty MCP secret id"));
+                }
+                secret.validate()?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The sparse overlay record: only the members the project file withholds.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpSecretEntry {
+    /// The record's generation, renewed on every write. A removal deletes the
+    /// record only while it still carries the generation it captured, so a
+    /// replacement with equal values keeps its own record. The reserved name
+    /// keeps it out of the entry members flattened into `extra`.
+    #[serde(
+        rename = "$generation",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub generation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<BearerAuth>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<McpSecretOAuth>,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+impl McpSecretEntry {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.args.is_none()
+            && self.env.is_none()
+            && self.headers.is_none()
+            && self.auth.is_none()
+            && self.url.is_none()
+            && self.oauth.is_none()
+            && self.extra.is_empty()
+    }
+    fn validate(&self) -> Result<()> {
+        if self.extra.contains_key("$generation") {
+            return Err(SettingsError::Invalid("reserved MCP secret overlay field"));
+        }
+        if self
+            .env
+            .as_ref()
+            .is_some_and(|env| env.keys().any(|name| name.trim().is_empty()))
+            || self
+                .headers
+                .as_ref()
+                .is_some_and(|headers| headers.keys().any(|name| name.trim().is_empty()))
+            || self
+                .auth
+                .as_ref()
+                .is_some_and(|BearerAuth::Bearer { token }| token.trim().is_empty())
+        {
+            return Err(SettingsError::Invalid("invalid MCP secret values"));
+        }
+        if let Some(url) = &self.url {
+            let parsed = url::Url::parse(url)
+                .map_err(|_| SettingsError::Invalid("invalid MCP secret URL"))?;
+            if parsed.scheme() != "http" && parsed.scheme() != "https" {
+                return Err(SettingsError::Invalid("invalid MCP secret URL"));
+            }
+        }
+        if let Some(oauth) = &self.oauth {
+            oauth.validate()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpSecretOAuth {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_server_metadata_url: Option<String>,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+impl McpSecretOAuth {
+    fn validate(&self) -> Result<()> {
+        if let Some(value) = &self.auth_server_metadata_url {
+            let url = url::Url::parse(value)
+                .map_err(|_| SettingsError::Invalid("invalid MCP OAuth configuration"))?;
+            if !url.username().is_empty()
+                || url.password().is_some()
+                || url.fragment().is_some()
+                || !(url.scheme() == "https"
+                    || (url.scheme() == "http"
+                        && matches!(url.host(), Some(host) if loopback(&host))))
+            {
+                return Err(SettingsError::Invalid("invalid MCP OAuth configuration"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The safe part of a project entry, without the overlay-held members.
+pub(crate) fn public_url(value: &str) -> String {
+    let Ok(url) = url::Url::parse(value) else {
+        return value.to_owned();
+    };
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        url.origin().ascii_serialization()
+    } else {
+        value.to_owned()
+    }
+}
+
+fn public_oauth(oauth: &McpOAuthSettings) -> Option<McpOAuthSettings> {
+    let public = McpOAuthSettings {
+        client_id: oauth.client_id.clone(),
+        callback_port: oauth.callback_port,
+        auth_server_metadata_url: None,
+        scopes: oauth.scopes.clone(),
+        extra: BTreeMap::new(),
+    };
+    (public.client_id.is_some() || public.callback_port.is_some() || public.scopes.is_some())
+        .then_some(public)
+}
+
+/// Split one entry into the public skeleton written to `.mcp.json` and the
+/// withheld part kept in `mcp-secrets`.
+pub(crate) fn split_entry(
+    entry: &McpServerSettings,
+) -> (McpServerSettings, Option<McpSecretEntry>) {
+    match entry {
+        McpServerSettings::Stdio {
+            kind,
+            command,
+            args,
+            env,
+            cwd,
+            extra,
+            ..
+        } => {
+            let secret = McpSecretEntry {
+                args: (!args.is_empty()).then(|| args.clone()),
+                env: (!env.is_empty()).then(|| env.clone()),
+                extra: extra.clone(),
+                ..Default::default()
+            };
+            let skeleton = McpServerSettings::Stdio {
+                kind: kind.clone(),
+                command: command.clone(),
+                args: Vec::new(),
+                env: BTreeMap::new(),
+                cwd: cwd.clone(),
+                enabled: None,
+                extra: BTreeMap::new(),
+            };
+            (skeleton, (!secret.is_empty()).then_some(secret))
+        }
+        McpServerSettings::Remote {
+            kind,
+            url,
+            headers,
+            auth,
+            oauth,
+            extra,
+            ..
+        } => {
+            let public = public_url(url);
+            let (metadata, oauth_extra) = oauth.as_ref().map_or((None, BTreeMap::new()), |oauth| {
+                (oauth.auth_server_metadata_url.clone(), oauth.extra.clone())
+            });
+            let secret = McpSecretEntry {
+                headers: (!headers.is_empty()).then(|| headers.clone()),
+                auth: auth.clone(),
+                url: (public != *url).then(|| url.clone()),
+                oauth: (metadata.is_some() || !oauth_extra.is_empty()).then(|| McpSecretOAuth {
+                    auth_server_metadata_url: metadata,
+                    extra: oauth_extra,
+                }),
+                extra: extra.clone(),
+                ..Default::default()
+            };
+            let skeleton = McpServerSettings::Remote {
+                kind: kind.clone(),
+                url: public,
+                headers: BTreeMap::new(),
+                auth: None,
+                oauth: oauth.as_deref().and_then(public_oauth).map(Box::new),
+                enabled: None,
+                extra: BTreeMap::new(),
+            };
+            (skeleton, (!secret.is_empty()).then_some(secret))
+        }
+    }
+}
+
+/// Merge the overlay into a declared project entry. A member of the wrong
+/// transport is an invalid overlay, not a silently ignored value.
+pub(crate) fn merge_secret(config: &mut McpServerSettings, secret: &McpSecretEntry) -> Result<()> {
+    match config {
+        McpServerSettings::Stdio {
+            args, env, extra, ..
+        } => {
+            if secret.url.is_some()
+                || secret.headers.as_ref().is_some_and(|map| !map.is_empty())
+                || secret.auth.is_some()
+                || secret.oauth.as_ref().is_some_and(|oauth| {
+                    oauth.auth_server_metadata_url.is_some() || !oauth.extra.is_empty()
+                })
+            {
+                return Err(SettingsError::Invalid(
+                    "MCP secret overlay does not match the stdio transport",
+                ));
+            }
+            if let Some(value) = &secret.args {
+                *args = value.clone();
+            }
+            if let Some(values) = &secret.env {
+                env.extend(values.clone());
+            }
+            extra.extend(secret.extra.clone());
+        }
+        McpServerSettings::Remote {
+            url,
+            headers,
+            auth,
+            oauth,
+            extra,
+            ..
+        } => {
+            if secret.args.as_ref().is_some_and(|args| !args.is_empty())
+                || secret.env.as_ref().is_some_and(|env| !env.is_empty())
+            {
+                return Err(SettingsError::Invalid(
+                    "MCP secret overlay does not match the remote transport",
+                ));
+            }
+            if let Some(value) = &secret.url {
+                *url = value.clone();
+            }
+            if let Some(values) = &secret.headers {
+                headers.extend(values.clone());
+            }
+            if let Some(value) = &secret.auth {
+                *auth = Some(value.clone());
+            }
+            if let Some(secret_oauth) = &secret.oauth {
+                let oauth = oauth.get_or_insert_with(Default::default);
+                if let Some(value) = &secret_oauth.auth_server_metadata_url {
+                    oauth.auth_server_metadata_url = Some(value.clone());
+                }
+                oauth.extra.extend(secret_oauth.extra.clone());
+            }
+            extra.extend(secret.extra.clone());
+        }
+    }
+    Ok(())
+}
+
+/// Remove the overlay-held members before writing a project entry back.
+pub(crate) fn strip_secret(config: &mut McpServerSettings, secret: &McpSecretEntry) {
+    match config {
+        McpServerSettings::Stdio {
+            args, env, extra, ..
+        } => {
+            if secret.args.is_some() {
+                args.clear();
+            }
+            if let Some(values) = &secret.env {
+                for name in values.keys() {
+                    env.remove(name);
+                }
+            }
+            for name in secret.extra.keys() {
+                extra.remove(name);
+            }
+        }
+        McpServerSettings::Remote {
+            url,
+            headers,
+            auth,
+            oauth,
+            extra,
+            ..
+        } => {
+            if secret.url.is_some() {
+                *url = public_url(url);
+            }
+            if let Some(values) = &secret.headers {
+                for name in values.keys() {
+                    headers.remove(name);
+                }
+            }
+            if secret.auth.is_some() {
+                *auth = None;
+            }
+            if let Some(secret_oauth) = &secret.oauth
+                && let Some(oauth) = oauth
+            {
+                if secret_oauth.auth_server_metadata_url.is_some() {
+                    oauth.auth_server_metadata_url = None;
+                }
+                for name in secret_oauth.extra.keys() {
+                    oauth.extra.remove(name);
+                }
+            }
+            for name in secret.extra.keys() {
+                extra.remove(name);
+            }
+        }
+    }
+}
+
 impl BusinessDocument for McpSettings {
     const NAMESPACE: &'static str = "mcp";
     const USER_FILE: &'static str = "mcp.json";
@@ -225,6 +593,7 @@ impl BusinessDocument for McpSettings {
                             | "auth"
                             | "transport"
                             | "oauth"
+                            | "$generation"
                     )
                 })
             {
@@ -444,4 +813,43 @@ pub(crate) fn effective(
         }
     }
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn an_entry_member_named_generation_keeps_its_own_name() {
+        let record = McpSecretEntry {
+            generation: "g".into(),
+            extra: BTreeMap::from([("generation".into(), json!("custom"))]),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&record).unwrap();
+        assert_eq!(value["$generation"], "g");
+        assert_eq!(value["generation"], "custom");
+        assert_eq!(
+            serde_json::to_value(serde_json::from_value::<McpSecretEntry>(value).unwrap()).unwrap(),
+            serde_json::to_value(&record).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_reserved_generation_member_is_refused() {
+        let document: McpSettings = serde_json::from_value(json!({
+            "mcpServers": {
+                "collision": {"type": "stdio", "command": "server", "$generation": "g"}
+            }
+        }))
+        .unwrap();
+        assert!(document.validate().is_err());
+
+        let record = McpSecretEntry {
+            extra: BTreeMap::from([("$generation".into(), json!("g"))]),
+            ..Default::default()
+        };
+        assert!(record.validate().is_err());
+    }
 }

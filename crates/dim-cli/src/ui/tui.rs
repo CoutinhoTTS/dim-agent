@@ -76,6 +76,7 @@ const COMPOSER_PLACEHOLDER: &str = "Ask anything...";
 const SHELL_PLACEHOLDER: &str = "Run a shell command · Esc to exit";
 /// `config.json` key of the tool detail toggle, shared with the TS CLI.
 const TOOL_DETAILS_KEY: &str = "tuiToolDetailsExpanded";
+const THINKING_DETAILS_KEY: &str = "tuiThinkingDetailsExpanded";
 /// Share of the compaction threshold the context reading warns at. Set by
 /// the interface; the threshold itself is the one `session.context.usage`
 /// returns (compaction requirements §4).
@@ -816,6 +817,7 @@ struct App {
     /// How tool groups are drawn by default (`/tools`, which redraws every
     /// committed group too).
     tool_detail: Detail,
+    thinking_detail: Detail,
     /// Groups the user opened or closed by a click, by their first call's
     /// row id: a running group keeps its form when it commits.
     group_details: HashMap<String, Detail>,
@@ -1108,7 +1110,8 @@ impl App {
             host,
             composer,
             cwd_key,
-            tool_detail: saved_tool_detail(&home),
+            tool_detail: saved_detail(&home, TOOL_DETAILS_KEY),
+            thinking_detail: saved_detail(&home, THINKING_DETAILS_KEY),
             group_details: HashMap::new(),
             tail_groups: Vec::new(),
             home,
@@ -3207,6 +3210,7 @@ impl App {
             language,
             fullscreen_default: crate::ui::config::saved_fullscreen(&self.home),
             tools_expanded: self.tool_detail == Detail::Expanded,
+            thinking_expanded: self.thinking_detail == Detail::Expanded,
             mouse: self.mouse,
             notify: self.notify,
             acp_sessions: crate::ui::config::saved_show_acp(&self.home),
@@ -3273,6 +3277,29 @@ impl App {
                 self.settings_return = None;
                 self.open_settings(setting);
             }
+            Setting::ThinkingDetails => {
+                self.thinking_detail = self.thinking_detail.flipped();
+                let expanded = self.thinking_detail == Detail::Expanded;
+                for block in &mut self.history {
+                    if let Block::Thinking {
+                        expanded: value, ..
+                    } = block
+                    {
+                        *value = expanded;
+                    }
+                }
+                self.request_reflow();
+                if let Some(error) =
+                    crate::ui::config::write(&self.home, THINKING_DETAILS_KEY, expanded.into())
+                {
+                    self.set_notice(tf(
+                        "Thinking details not saved: {error}",
+                        &[("error", &error)],
+                    ));
+                }
+                self.settings_return = None;
+                self.open_settings(setting);
+            }
             Setting::Mouse => {
                 self.mouse = !self.mouse;
                 let value = if self.mouse { "on" } else { "off" };
@@ -3292,9 +3319,7 @@ impl App {
         for block in &mut self.history {
             match block {
                 Block::ToolGroup(group) => group.detail = detail,
-                Block::Thinking { expanded, .. } | Block::Compaction { expanded, .. } => {
-                    *expanded = detail == Detail::Expanded
-                }
+                Block::Compaction { expanded, .. } => *expanded = detail == Detail::Expanded,
                 _ => {}
             }
         }
@@ -4128,6 +4153,7 @@ impl App {
                     cols,
                     most,
                     self.tool_detail,
+                    self.thinking_detail,
                     &self.palette,
                     &self.markdown,
                 );
@@ -4600,6 +4626,9 @@ impl App {
         let mut sources: Vec<(Block, Placement)> = Vec::new();
         let (overrides, global) = (&self.group_details, self.tool_detail);
         let detail_of = |index: usize| {
+            if snapshot.rows[index].kind == RowKind::Thinking {
+                return self.thinking_detail;
+            }
             overrides
                 .get(&snapshot.rows[index].row_id)
                 .copied()
@@ -4725,7 +4754,7 @@ impl App {
                     _ => Vec::new(),
                 },
                 LiveItem::Thinking(text) => {
-                    live_thinking(text, self.tool_detail == Detail::Expanded, width, p)
+                    live_thinking(text, self.thinking_detail == Detail::Expanded, width, p)
                 }
                 LiveItem::Tool(index) => {
                     tail_groups.push((tail.len() + 1, snapshot.rows[*index].row_id.clone()));
@@ -5521,6 +5550,7 @@ fn side_reply(
     cols: usize,
     height: usize,
     detail: Detail,
+    thinking_detail: Detail,
     p: &Palette,
     markdown: &MarkdownRenderer,
 ) -> Vec<String> {
@@ -5542,6 +5572,7 @@ fn side_reply(
         }
         let block = match row.kind {
             RowKind::StreamingAssistant => Block::Assistant(row.text.clone()),
+            RowKind::Thinking => project_row(&side.rows, index, thinking_detail),
             _ => project_row(&side.rows, index, detail),
         };
         let rendered = render_block(&block, inner, p, markdown);
@@ -5999,12 +6030,10 @@ fn startup_header(greeting: &[String], body_width: usize) -> Vec<String> {
         .collect()
 }
 
-/// How tool groups and thoughts start: expanded unless the user saved
-/// collapsed (`/settings` › Tool details, or `/tools`).
-fn saved_tool_detail(home: &std::path::Path) -> Detail {
-    match crate::ui::config::read(home, TOOL_DETAILS_KEY).and_then(|v| v.as_bool()) {
-        Some(false) => Detail::Collapsed,
-        _ => Detail::Expanded,
+fn saved_detail(home: &std::path::Path, key: &str) -> Detail {
+    match crate::ui::config::read(home, key).and_then(|v| v.as_bool()) {
+        Some(true) => Detail::Expanded,
+        _ => Detail::Collapsed,
     }
 }
 
@@ -6542,19 +6571,28 @@ mod tests {
     }
 
     #[test]
-    fn tool_details_start_expanded_until_collapsed_is_saved() {
+    fn tool_details_start_collapsed_until_expanded_is_saved() {
         let home = tempfile::tempdir().unwrap();
-        assert_eq!(saved_tool_detail(home.path()), Detail::Expanded);
+        assert_eq!(
+            saved_detail(home.path(), TOOL_DETAILS_KEY),
+            Detail::Collapsed
+        );
         assert_eq!(
             crate::ui::config::write(home.path(), TOOL_DETAILS_KEY, false.into()),
             None
         );
-        assert_eq!(saved_tool_detail(home.path()), Detail::Collapsed);
+        assert_eq!(
+            saved_detail(home.path(), TOOL_DETAILS_KEY),
+            Detail::Collapsed
+        );
         assert_eq!(
             crate::ui::config::write(home.path(), TOOL_DETAILS_KEY, true.into()),
             None
         );
-        assert_eq!(saved_tool_detail(home.path()), Detail::Expanded);
+        assert_eq!(
+            saved_detail(home.path(), TOOL_DETAILS_KEY),
+            Detail::Expanded
+        );
     }
 
     fn test_theme() -> Theme {
@@ -6835,7 +6873,7 @@ mod tests {
         );
         let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
         app.run_command("settings", "");
-        for _ in 0..9 {
+        for _ in 0..10 {
             app.handle_input(key(KeyCode::Down));
         }
         app.handle_input(key(KeyCode::Enter));
@@ -7285,6 +7323,7 @@ mod tests {
             80,
             10,
             Detail::Collapsed,
+            Detail::Expanded,
             &app.palette,
             &app.markdown,
         );
@@ -8154,6 +8193,128 @@ mod tests {
             .app
             .switch_session("s1".into(), crate::model::session::SwitchKind::Resumed);
         drawn
+    }
+
+    #[test]
+    fn settings_keep_tool_and_thinking_details_independent() {
+        use crate::ui::render::panel::strip_escapes;
+
+        for fullscreen in [false, true] {
+            for streaming in [false, true] {
+                let mut drawn = Drawn::new((100, 40), None, true);
+                drawn.app.fullscreen = fullscreen;
+                let mut thought = (*message(false)).clone();
+                thought.row_id = "thought".into();
+                thought.kind = RowKind::Thinking;
+                thought.text =
+                    "Inspect the lock lifetime. The current guard remains held while the asynchronous operation waits for the worker, so the next caller cannot acquire it.\n\nMove the guard outside the await.".into();
+                thought.streaming = streaming;
+                let mut tool = (*message(false)).clone();
+                tool.row_id = "tool".into();
+                tool.kind = RowKind::ToolCall;
+                tool.text.clear();
+                tool.tool_name = Some("exec".into());
+                tool.tool_input = Some(serde_json::json!({"command": "cargo check"}));
+                tool.result_text = Some("Build succeeded".into());
+                tool.pending = streaming;
+                let rows = vec![message(false), thought.into(), tool.into()];
+                let snapshot = ViewSnapshot {
+                    session_id: "s1".into(),
+                    rows: rows.clone(),
+                    focus: "main".into(),
+                    history_complete: true,
+                    side: Some(SideLine {
+                        id: "side".into(),
+                        purpose: "Check the build".into(),
+                        state: LineState::Working,
+                        rows,
+                    }),
+                    ..ViewSnapshot::default()
+                };
+                drawn
+                    .app
+                    .apply(Update::Snapshot(Box::new(snapshot.clone())));
+                let frame = drawn.app.frame(drawn.size);
+                let defaults = strip_escapes(&frame.commits.join("\n"))
+                    + &strip_escapes(&frame.live.join("\n"));
+                assert!(
+                    !defaults.contains("Inspect the lock lifetime."),
+                    "{defaults}"
+                );
+                assert!(!defaults.contains("cargo check"), "{defaults}");
+                drawn.app.open_settings(Setting::ThinkingDetails);
+                press(&mut drawn.app, KeyCode::Char(' '));
+                press(&mut drawn.app, KeyCode::Esc);
+                let theme = test_theme();
+                drawn.app = App::new(
+                    Box::new(Idle),
+                    MarkdownRenderer::new(&theme),
+                    theme.palette,
+                    drawn._home.path().to_path_buf(),
+                    "/work".into(),
+                );
+                drawn.app.fullscreen = fullscreen;
+                drawn
+                    .app
+                    .apply(Update::Snapshot(Box::new(snapshot.clone())));
+                let _ = drawn.app.frame(drawn.size);
+                let expanded = strip_escapes(&drawn.app.reflow_history(100).join("\n"))
+                    + &strip_escapes(&drawn.app.frame(drawn.size).live.join("\n"));
+                assert_eq!(
+                    expanded.matches("Inspect the lock lifetime.").count(),
+                    2,
+                    "{expanded}"
+                );
+                assert!(!expanded.contains("cargo check"), "{expanded}");
+
+                drawn.app.open_settings(Setting::ThinkingDetails);
+                press(&mut drawn.app, KeyCode::Char(' '));
+                press(&mut drawn.app, KeyCode::Esc);
+                drawn.app.run_command("tools", "");
+                let collapsed = strip_escapes(&drawn.app.reflow_history(100).join("\n"))
+                    + &strip_escapes(&drawn.app.frame(drawn.size).live.join("\n"));
+                assert!(
+                    !collapsed.contains("Inspect the lock lifetime."),
+                    "{collapsed}"
+                );
+                assert!(collapsed.contains("cargo check"), "{collapsed}");
+
+                let theme = test_theme();
+                let mut reopened = App::new(
+                    Box::new(Idle),
+                    MarkdownRenderer::new(&theme),
+                    theme.palette,
+                    drawn._home.path().to_path_buf(),
+                    "/work".into(),
+                );
+                reopened.fullscreen = fullscreen;
+                reopened.apply(Update::Snapshot(Box::new(snapshot)));
+                let frame = reopened.frame(drawn.size);
+                let restored = strip_escapes(&frame.commits.join("\n"))
+                    + &strip_escapes(&frame.live.join("\n"));
+                assert!(
+                    !restored.contains("Inspect the lock lifetime."),
+                    "{restored}"
+                );
+                assert!(restored.contains("cargo check"), "{restored}");
+                reopened.open_settings(Setting::ToolDetails);
+                let frame = reopened.frame(drawn.size);
+                let settings = strip_escapes(&frame.live.join("\n"))
+                    + &strip_escapes(
+                        &frame
+                            .overlay
+                            .map_or_else(Vec::new, |overlay| overlay.rows)
+                            .join("\n"),
+                    );
+                assert!(
+                    settings
+                        .lines()
+                        .any(|line| line.contains("Tool details") && line.contains("expanded")),
+                    "{settings}"
+                );
+                assert!(settings.lines().any(|line| line.contains("Thinking details") && line.contains("collapsed")), "{settings}");
+            }
+        }
     }
 
     #[test]

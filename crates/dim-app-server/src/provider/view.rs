@@ -353,7 +353,7 @@ impl ProviderService {
         let db = self.db.clone();
         let target = provider_id.clone();
         let records = self.owned(cancel, move |_| Box::pin(async move {
-            db.run(move |connection| {
+            db.run_read(move |connection| {
                 let mut query = connection.prepare("SELECT provider_id,version,record FROM providers WHERE ?1 IS NULL OR provider_id=?1 ORDER BY provider_id").map_err(storage)?;
                 let rows = query.query_map([target], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, String>(2)?))).map_err(storage)?;
                 rows.map(|row| {
