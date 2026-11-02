@@ -1501,6 +1501,16 @@
       ]
     },
     {
+      "id": "dim_agent_types::events::context_flag_tests",
+      "crate": "dim_agent_types",
+      "parent": "dim_agent_types::events",
+      "file": "crates/dim-agent-types/src/events.rs",
+      "unexpandedMacros": [
+        "assert_eq",
+        "serde_json::json"
+      ]
+    },
+    {
       "id": "dim_agent_types::finite_number",
       "crate": "dim_agent_types",
       "parent": "dim_agent_types",
@@ -2666,6 +2676,7 @@
         "matches",
         "panic",
         "params",
+        "rusqlite::params",
         "tracing::error",
         "vec"
       ]
@@ -7265,9 +7276,7 @@
       "to": "dim_agent_capabilities::history",
       "references": [
         "path HistoryRenderer",
-        "path context_configuration",
-        "use crate::history::HistoryRenderer",
-        "use crate::history::context_configuration"
+        "use crate::history::HistoryRenderer"
       ]
     },
     {
@@ -7290,14 +7299,6 @@
       "to": "dim_agent_capabilities::prompt_guide",
       "references": [
         "path crate::prompt_guide::GuideEntries"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::agent_loop",
-      "to": "dim_agent_capabilities::prompt_state",
-      "references": [
-        "path PromptSnapshot::from_context",
-        "use crate::prompt_state::PromptSnapshot"
       ]
     },
     {
@@ -7904,7 +7905,6 @@
       "references": [
         "path ContextPolicy",
         "path ContextPolicy::bind",
-        "path PolicyContext::from_context",
         "path PolicyContext::from_stream",
         "path configured_request",
         "path crate::context_policy::check_cancel",
@@ -7919,6 +7919,7 @@
       "references": [
         "path HistoryRenderer",
         "path context_configuration",
+        "path crate::history::project_batch",
         "path crate::history::read_context",
         "use crate::history::HistoryRenderer",
         "use crate::history::context_configuration"
@@ -7937,7 +7938,8 @@
         "path HostError::classified",
         "path HostError::failed",
         "path HostErrorKind::InvalidRequest",
-        "path PrepareContextHost"
+        "path PrepareContextHost",
+        "path crate::host::ContextModel"
       ]
     },
     {
@@ -8039,7 +8041,8 @@
       "from": "dim_agent_capabilities::context_preparation",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
-        "path PolicyFacts::from_context",
+        "path PolicyFacts",
+        "path dim_agent_runtime::PolicyEvent",
         "use dim_agent_runtime::PolicyFacts"
       ]
     },
@@ -8071,6 +8074,11 @@
         "path ModelOutputEndData",
         "path ModelOutputOutcome::Cancelled",
         "path ModelOutputOutcome::Failed",
+        "path dim_agent_types::AgentEvent",
+        "path dim_agent_types::EventKind::InputConsumed",
+        "path dim_agent_types::EventKind::ModelCall",
+        "path dim_agent_types::EventKind::ModelUsage",
+        "path dim_agent_types::ModelUsageData",
         "path events"
       ]
     },
@@ -8079,7 +8087,9 @@
       "to": "dim_agent_types::model",
       "references": [
         "path BaselineSource",
+        "path BaselineSource::ProviderBaseline",
         "path ModelRequest",
+        "path ModelRequest::new",
         "path SystemPrompt",
         "path SystemPrompt::Text",
         "path model"
@@ -8702,6 +8712,7 @@
         "path ProjectionCheckpoint",
         "path ProjectionCheckpointState",
         "path RecoverySnapshot",
+        "path TimelinePosition",
         "path checkpoint",
         "path dim_agent_types::ProjectionCheckpoint",
         "path dim_agent_types::TimelinePosition"
@@ -14015,6 +14026,7 @@
       "to": "dim_agent_runtime::timeline_store",
       "references": [
         "mod timeline_store",
+        "use timeline_store::PolicyEvent",
         "use timeline_store::PolicyFacts",
         "use timeline_store::PolicyOrder",
         "use timeline_store::PolicyOrderEvent",
@@ -14609,12 +14621,14 @@
       "references": [
         "path PolicyFacts",
         "path PolicyOrder",
+        "path PolicyOrderEvent",
         "path PolicyWindow",
         "path StoredEvent",
         "path TimelineKey",
         "path TimelineStore",
         "use crate::PolicyFacts",
         "use crate::PolicyOrder",
+        "use crate::PolicyOrderEvent",
         "use crate::PolicyWindow",
         "use crate::StoredEvent",
         "use crate::TimelineKey",
@@ -15100,7 +15114,9 @@
       "to": "dim_agent_types::checkpoint",
       "references": [
         "path RecoverySnapshot",
-        "use dim_agent_types::RecoverySnapshot"
+        "path TimelinePosition",
+        "use dim_agent_types::RecoverySnapshot",
+        "use dim_agent_types::TimelinePosition"
       ]
     },
     {
@@ -15285,6 +15301,13 @@
     },
     {
       "from": "dim_agent_types::events",
+      "to": "dim_agent_types::events::context_flag_tests",
+      "references": [
+        "mod context_flag_tests"
+      ]
+    },
+    {
+      "from": "dim_agent_types::events",
       "to": "dim_agent_types::model",
       "references": [
         "path BaselineSource",
@@ -15328,6 +15351,14 @@
         "path ToolEffect",
         "path ToolResult",
         "path kind"
+      ]
+    },
+    {
+      "from": "dim_agent_types::events::context_flag_tests",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path super::ExtensionEvent::new",
+        "use super::context_flags"
       ]
     },
     {
@@ -23863,6 +23894,7 @@
       "from": "dim_app_server::storage::timeline",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
+        "path PolicyEvent",
         "path PolicyFacts",
         "path PolicyOrder",
         "path PolicyOrderEvent",
@@ -23872,6 +23904,7 @@
         "path StoredEvent",
         "path TimelineKey",
         "path TimelineStore",
+        "use dim_agent_runtime::PolicyEvent",
         "use dim_agent_runtime::PolicyFacts",
         "use dim_agent_runtime::PolicyOrder",
         "use dim_agent_runtime::PolicyOrderEvent",
@@ -23888,7 +23921,9 @@
       "to": "dim_agent_types::checkpoint",
       "references": [
         "path RecoverySnapshot",
-        "use dim_agent_types::RecoverySnapshot"
+        "path TimelinePosition",
+        "use dim_agent_types::RecoverySnapshot",
+        "use dim_agent_types::TimelinePosition"
       ]
     },
     {
