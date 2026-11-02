@@ -18,6 +18,14 @@ function fixture(t) {
   return temporary;
 }
 
+/** The default plugin payload a release payload must carry; content is not under test here. */
+function stubPlugins(temporary,name='plugins-stub') {
+  const directory=path.join(temporary,name);
+  mkdirSync(directory,{recursive:true});
+  writeFileSync(path.join(directory,'default-plugins.json'),'{"plugins":{}}\n');
+  return directory;
+}
+
 function entries(archive) {
   const data=gunzipSync(readFileSync(archive));
   const names=[];
@@ -49,7 +57,7 @@ test('stages public native payload, packs it and rejects modified content', {ski
   mkdirSync(bin);
   writeFileSync(path.join(bin,'dimcode'),`#!/bin/sh\nprintf "dimcode ${version}\\n"\n`,{mode:0o755});
   const stage=path.join(temporary,'stage');
-  const staged=run('stage-release.mjs',[bin,stage,version,commit]);
+  const staged=run('stage-release.mjs',[bin,stage,version,commit,'--plugins',stubPlugins(temporary)]);
   assert.equal(staged.status,0,staged.stderr);
   const manifest=JSON.parse(readFileSync(path.join(stage,'release-manifest.json')));
   assert.equal(manifest.account,false);
@@ -79,6 +87,10 @@ test('stages the default plugins beside bin/ in the native archive and the npm p
   const bin=path.join(temporary,'bin');
   mkdirSync(bin);
   writeFileSync(path.join(bin,'dimcode'),`#!/bin/sh\nprintf "dimcode ${version}\\n"\n`,{mode:0o755});
+  const noPlugins=run('stage-release.mjs',[bin,path.join(temporary,'no-plugins'),version,commit]);
+  assert.notEqual(noPlugins.status,0);
+  assert.match(noPlugins.stderr,/--plugins/);
+  assert.equal(existsSync(path.join(temporary,'no-plugins')),false);
   const plugins=path.join(temporary,'plugins');
   mkdirSync(path.join(plugins,'plugins/goal/node_modules/@arcships/rutis'),{recursive:true});
   writeFileSync(path.join(plugins,'default-plugins.json'),'{"plugins":{"goal":"plugins/goal"}}');
@@ -138,18 +150,18 @@ test('an account build records the account and stages only its executable', {ski
   mkdirSync(bin);
   writeFileSync(path.join(bin,'dimcode'),`#!/bin/sh\nprintf "dimcode ${version}\\n"\n`,{mode:0o755});
   const stage=path.join(temporary,'stage');
-  const staged=run('stage-release.mjs',[bin,stage,version,commit,'--account']);
+  const staged=run('stage-release.mjs',[bin,stage,version,commit,'--account','--plugins',stubPlugins(temporary)]);
   assert.equal(staged.status,0,staged.stderr);
   if(process.platform==='darwin') assert.equal(spawnSync('xattr',['-w','com.apple.provenance','x',path.join(stage,'bin/dimcode')]).status,0,
     'setting the extended attribute must succeed before packing');
   const manifest=JSON.parse(readFileSync(path.join(stage,'release-manifest.json')));
   assert.equal(manifest.account,true);
-  assert.deepEqual(Object.keys(manifest.files).sort(),['LICENSE','NOTICE','bin/dimcode',...['LICENSE','NOTICE','xai-ratatui-inline/NOTICE','xai-ratatui-textarea/NOTICE'].map((file)=>`licenses/grok-build/${file}`)].sort());
+  assert.deepEqual(Object.keys(manifest.files).sort(),['default-plugins.json','LICENSE','NOTICE','bin/dimcode',...['LICENSE','NOTICE','xai-ratatui-inline/NOTICE','xai-ratatui-textarea/NOTICE'].map((file)=>`licenses/grok-build/${file}`)].sort());
   const packed=run('pack-release.mjs',[stage,path.join(temporary,'packed')]);
   assert.equal(packed.status,0,packed.stderr);
   const npmFile=JSON.parse(readFileSync(path.join(temporary,'packed/release-manifest.json'))).npmPackages[0].file;
   assert.deepEqual(entries(path.join(temporary,'packed',npmFile)).filter((name)=>!name.endsWith('/')).sort(),
-    ['package/LICENSE','package/NOTICE','package/bin/dimcode','package/package.json','package/release-manifest.json',...['LICENSE','NOTICE','xai-ratatui-inline/NOTICE','xai-ratatui-textarea/NOTICE'].map((file)=>`package/licenses/grok-build/${file}`)].sort());
+    ['package/default-plugins.json','package/LICENSE','package/NOTICE','package/bin/dimcode','package/package.json','package/release-manifest.json',...['LICENSE','NOTICE','xai-ratatui-inline/NOTICE','xai-ratatui-textarea/NOTICE'].map((file)=>`package/licenses/grok-build/${file}`)].sort());
 });
 
 test('stages cross-built executables without running them and rejects the wrong architecture', (t)=>{
@@ -176,7 +188,8 @@ test('stages cross-built executables without running them and rejects the wrong 
   const cli=path.join(bin,`dimcode${suffix}`);
   writeFileSync(cli,header,{mode:0o755});
   const stage=path.join(temporary,'stage');
-  const result=run('stage-release.mjs',[bin,stage,version,commit],{DIM_BUILD_PLATFORM:platform});
+  const plugins=stubPlugins(temporary);
+  const result=run('stage-release.mjs',[bin,stage,version,commit,'--plugins',plugins],{DIM_BUILD_PLATFORM:platform});
   assert.equal(result.status,0,result.stderr);
   assert.equal(JSON.parse(readFileSync(path.join(stage,'release-manifest.json'))).platform,platform);
   const packed=run('pack-release.mjs',[stage,path.join(temporary,'packed')]);
@@ -187,7 +200,7 @@ test('stages cross-built executables without running them and rejects the wrong 
   else if(osName==='darwin') header.writeUInt32LE(cpu==='arm64'?0x01000007:0x0100000c,4);
   else header.writeUInt16LE(cpu==='arm64'?62:183,18);
   writeFileSync(cli,header);
-  const mismatch=run('stage-release.mjs',[bin,rejected,version,commit],{DIM_BUILD_PLATFORM:platform});
+  const mismatch=run('stage-release.mjs',[bin,rejected,version,commit,'--plugins',plugins],{DIM_BUILD_PLATFORM:platform});
   assert.notEqual(mismatch.status,0);
   assert.match(mismatch.stderr,/architecture mismatch/);
   assert.equal(existsSync(rejected),false);

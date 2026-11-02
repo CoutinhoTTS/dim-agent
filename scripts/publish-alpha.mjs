@@ -109,6 +109,11 @@ try {
   const { bavail, bsize } = statfsSync(repo);
   assert(bavail * bsize >= 8 * 2 ** 30,
     `Only ${(bavail * bsize / 2 ** 30).toFixed(1)} GiB free; a release build needs about 8 GiB`);
+  // The default plugins are the same for every platform: stage them once and
+  // give every platform's payload the copy, as the release workflow does on
+  // whichever runner builds a platform.
+  const plugins = path.join(staging, 'plugins');
+  run('node', ['scripts/stage-plugins.mjs', plugins]);
   for (const platform of platforms) {
     const { triple, zig } = targets[platform];
     console.log(`\n▸ ${platform}`);
@@ -117,7 +122,8 @@ try {
       '--target', `${triple}${zig ?? ''}`, '-p', 'dimcode'],
     { cwd: repo, env: { ...process.env, DIM_RELEASE_BUILD: '1' } });
     run('node', ['scripts/stage-release.mjs', path.join(repo, 'target', triple, 'release'),
-      path.join(staging, 'stage', platform), version, sourceCommit, ...(account ? ['--account'] : [])],
+      path.join(staging, 'stage', platform), version, sourceCommit, ...(account ? ['--account'] : []),
+      '--plugins', plugins],
     { env: { ...process.env, DIM_BUILD_PLATFORM: platform } });
     run('node', ['scripts/pack-release.mjs', path.join(staging, 'stage', platform),
       path.join(staging, 'platforms', `release-${platform}`)]);
