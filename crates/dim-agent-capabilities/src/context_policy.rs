@@ -516,7 +516,17 @@ impl ContextPolicy {
             .policy_order(source.through)
             .await
             .map_err(|error| HostError::failed(error.to_string()))?;
-        if source.recovery.is_none()
+        let provider_budget = source.recovery.clone().or_else(|| {
+            (estimate.input > input_budget(model.as_ref())).then(|| ProviderOutputBudgetFacts {
+                input_tokens: estimate.input,
+                context_window: model.context_window(),
+                requested_max_tokens: model.output_tokens(),
+                allowed_max_tokens: (model.context_window() - estimate.input).max(0.),
+                ratio: 1.,
+            })
+        });
+        let recovery = provider_budget.is_some();
+        if !recovery
             && (estimate.input < model.threshold_tokens()
                 || !regrown(&view, &policy_order, model.as_ref()))
         {
@@ -527,11 +537,12 @@ impl ContextPolicy {
             request_id: Some(source.request_id.clone()),
             command: None,
             through: source.through,
-            trigger: match source.recovery {
-                Some(_) => CompactionTrigger::ProviderOutputBudgetExhausted,
-                None => CompactionTrigger::Threshold,
+            trigger: if recovery {
+                CompactionTrigger::ProviderOutputBudgetExhausted
+            } else {
+                CompactionTrigger::Threshold
             },
-            provider_budget: source.recovery.clone(),
+            provider_budget,
         };
         let compacted = self
             .compact_step(
@@ -551,27 +562,20 @@ impl ContextPolicy {
             (_, Some(request)) => {
                 let request = request?;
                 let input = model.count_tokens(&request);
-                if source.recovery.is_some() && input > input_budget(model.as_ref()) {
-                    return Err(recovery_overflow(
-                        &data.outcome,
-                        input,
-                        model.as_ref(),
-                        &view,
-                    ));
+                if recovery && input > input_budget(model.as_ref()) {
+                    return Err(recovery_overflow(&data.outcome, model.as_ref(), &view));
                 }
                 Ok((request, input))
             }
             (ContextCompactionResult::Cancelled { reason }, _) => {
                 Err(HostError::Cancelled(reason.clone()))
             }
-            (ContextCompactionResult::Failed { error, .. }, _) if source.recovery.is_some() => {
+            (ContextCompactionResult::Failed { error, .. }, _) if recovery => {
                 Err(HostError::failed(error.clone()))
             }
-            (ContextCompactionResult::Skipped { reason, .. }, _) if source.recovery.is_some() => {
-                Err(HostError::failed(format!(
-                    "Context recovery could not compact: {reason}"
-                )))
-            }
+            (ContextCompactionResult::Skipped { reason, .. }, _) if recovery => Err(
+                HostError::failed(format!("Context recovery could not compact: {reason}")),
+            ),
             _ => Ok((view.prepared, estimate.input)),
         }
     }
@@ -1992,15 +1996,10 @@ fn insufficient_space(
     Some(InsufficientSpace { parts: marked })
 }
 
-/// The error of a recovery compaction whose request still does not fit:
-/// budget facts, and a message naming what keeps it there — the resident
-/// parts by the mark's naming rule, or, when they fit, the entries the last
-/// event placed (ContextCompaction §5.3). The mark itself now covers every
-/// result over the bound, so this asks the resident parts against `B`
-/// directly.
+/// A terminal recovery error naming the resident parts or uncuttable
+/// entries that still exceed the input budget (ContextCompaction §5.3).
 fn recovery_overflow(
     outcome: &ContextCompactionResult,
-    input: f64,
     model: &dyn ContextModel,
     view: &View,
 ) -> HostError {
@@ -2035,19 +2034,7 @@ fn recovery_overflow(
         }
         _ => "Context recovery could not fit the request.".into(),
     };
-    HostError::Failed {
-        kind: crate::host::HostErrorKind::Other,
-        message,
-        budget: Some(ProviderOutputBudgetFacts {
-            input_tokens: input,
-            context_window: model.context_window(),
-            requested_max_tokens: model.output_tokens(),
-            allowed_max_tokens: (model.context_window() - input).max(0.),
-            ratio: 1.,
-        }),
-        model: None,
-        presentation: None,
-    }
+    HostError::failed(message)
 }
 
 /// Every event boundary that replaces at least one entry without separating

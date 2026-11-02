@@ -8199,6 +8199,7 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
     let (shown, wait_shown) = std::sync::mpsc::channel();
     let (started, wait_started) = std::sync::mpsc::channel();
     let (more, wait_more) = std::sync::mpsc::channel();
+    let (fail, wait_fail) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
         wire.created();
@@ -8218,15 +8219,20 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
         // The wait carries no deadline of its own: the main thread's `until`
         // deadlines bound the flow, and a test that fails drops the sender.
         wait_shown.recv().unwrap();
+        let budget = json!({"inputTokens":130969.0,"contextWindow":258400.0,
+            "requestedMaxTokens":128000.0,"allowedMaxTokens":127431.0,"ratio":1.0});
+        wire.event(11, "model-output-end", json!({"turn_id":"turn","request_id":"budget-check",
+            "status":"failed","error":"Model input exhausts its context window.","budget":budget}));
+        wire.no_context();
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
             {"id":"dim-compaction-start","sequence":12,"create_at":1,"type":"context","name":"compaction-start",
-             "data":{"through":11,"trigger":"threshold","strategy":"summary"}}}));
+             "data":{"through":11,"trigger":"provider_output_budget_exhausted","strategy":"summary"}}}));
         wait_started.recv().unwrap();
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
             {"id":"dim-compaction","sequence":13,"create_at":1,"type":"context","name":"compaction",
              "data":{"through":11,"start":12,"status":"completed","retain_from":"dim-2","strategy":"summary",
                      "replacement":[{"role":"user","content":"<dim-summary>\nThe parser is half done.\n</dim-summary>"}],
-                     "diagnostics":{"reason":"auto","trigger":"threshold","estimatedInputTokens":300.0,
+                     "diagnostics":{"reason":"auto","trigger":"provider_output_budget_exhausted","estimatedInputTokens":300.0,
                                     "entriesReplaced":3,"modelCallCount":1,"durationMs":10,"strategy":{"kind":"summary"}}}}}));
         wire.no_context();
         wait_more.recv().unwrap();
@@ -8258,6 +8264,11 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
                                     "insufficientSpace":{"parts":[
                                         {"part":"summary","tokens":3200.0},
                                         {"part":"pinnedInputs","tokens":1100.0}]}}}}}));
+        wire.no_context();
+        wait_fail.recv().unwrap();
+        wire.event(18, "model-output-end", json!({"turn_id":"turn","request_id":"recovery",
+            "status":"failed","error":"Context recovery could not fit the request.","budget":budget}));
+        wire.end(json!({"turn_id":"turn","status":"failed","error":"Context recovery could not fit the request."}));
         wire.no_context();
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
@@ -8293,9 +8304,23 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
         "the kept input follows its label: {transcript}"
     );
     terminal.until("insufficient space: summary 3.2K, pinned inputs 1.1K");
+    fail.send(()).unwrap();
+    terminal.until("turn failed: Context recovery could not fit the request.");
     terminal.write(b"/exit\r");
     terminal.until("Bye!");
     assert!(terminal.wait().success());
+    assert!(
+        !terminal.transcript.contains("model failed:"),
+        "{}",
+        terminal.transcript
+    );
+    assert!(
+        !terminal
+            .transcript
+            .contains("Model input exhausts its context window."),
+        "{}",
+        terminal.transcript
+    );
     daemon.join().unwrap();
 }
 

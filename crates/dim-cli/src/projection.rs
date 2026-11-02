@@ -584,8 +584,9 @@ impl Projection {
                 if let ModelOutputOutcome::Failed {
                     error,
                     presentation,
-                    ..
+                    budget,
                 } = &data.outcome
+                    && (budget.is_none() || presentation.is_some())
                 {
                     let message = presentation
                         .as_ref()
