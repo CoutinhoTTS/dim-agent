@@ -212,6 +212,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Connected {provider}" => "已連線 {provider}",
         "Opened {url}" => "已開啟 {url}",
         "Tool details not saved: {error}" => "工具詳情未儲存：{error}",
+        "Thinking details not saved: {error}" => "思考詳情未儲存：{error}",
         "/{name} needs a session — send a message first" => "/{name} 需要工作階段，請先傳送訊息",
         "Nothing is running" => "沒有執行中項目",
         "No queued message" => "佇列中沒有訊息",
@@ -273,8 +274,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "捲動到頂端",
         "scroll to the bottom" => "捲動到底端",
         "pick an earlier message to edit or quote" => "選擇較早的訊息來編輯或引用",
-        "collapse or expand tool details, thoughts and compaction summaries" => {
-            "收合或展開工具詳情、思考與壓縮摘要"
+        "collapse or expand tool details and compaction summaries" => {
+            "收合或展開工具詳情與壓縮摘要"
         }
         "switch between fullscreen and scrollback" => "在全螢幕與回捲模式間切換",
         "switch theme" => "切換主題",
@@ -318,6 +319,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "fullscreen" => "全螢幕",
         "scrollback" => "回捲",
         "Tool details" => "工具詳情",
+        "Thinking details" => "思考詳情",
         "expanded" => "展開",
         "collapsed" => "收合",
         "Mouse (fullscreen)" => "滑鼠（全螢幕）",

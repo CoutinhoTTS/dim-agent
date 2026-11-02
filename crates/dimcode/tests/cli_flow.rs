@@ -8284,7 +8284,8 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
     shown.send(()).unwrap();
     terminal.until("Compacting context…");
     started.send(()).unwrap();
-    terminal.until("Context compacted");
+    terminal.until("Context compacted ▸");
+    terminal.write(b"/tools\r");
     terminal.until("The parser is half done.");
     terminal.write(b"/tools\r");
     terminal.until("Context compacted ▸");
@@ -8611,7 +8612,8 @@ fn tui_rebuilds_compaction_rows_from_history_on_resume() {
     let mut command = home.command();
     command.args(["--resume", "session"]);
     let mut terminal = Terminal::launch_tui(command);
-    terminal.until("Context compacted");
+    terminal.until("Context compacted ▸");
+    terminal.write(b"/tools\r");
     terminal.until("Restored summary text.");
     terminal.write(b"/exit\r");
     terminal.until("Bye!");

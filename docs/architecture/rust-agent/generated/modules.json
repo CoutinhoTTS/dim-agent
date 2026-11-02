@@ -35688,6 +35688,7 @@
         "path Setting::Notify",
         "path Setting::StartupForm",
         "path Setting::Theme",
+        "path Setting::ThinkingDetails",
         "path Setting::ToolDetails",
         "path SettingValues",
         "path SettingsPanel",
@@ -36117,6 +36118,8 @@
         "path LineState::Working",
         "path RowKind::AssistantMessage",
         "path RowKind::Status",
+        "path RowKind::Thinking",
+        "path RowKind::ToolCall",
         "path RowKind::UserMessage",
         "path SideLine",
         "path ViewRow",
@@ -36218,7 +36221,9 @@
       "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::settings_panel",
       "references": [
-        "path Setting::Approvals"
+        "path Setting::Approvals",
+        "path Setting::ThinkingDetails",
+        "path Setting::ToolDetails"
       ]
     },
     {
@@ -36286,7 +36291,8 @@
       "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::transcript::tool_group",
       "references": [
-        "path Detail::Collapsed"
+        "path Detail::Collapsed",
+        "path Detail::Expanded"
       ]
     },
     {
