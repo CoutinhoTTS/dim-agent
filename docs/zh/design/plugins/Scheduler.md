@@ -263,7 +263,7 @@ flowchart LR
 权限计算采用 S2 §6.1 既有的保守 `cap(x, bound)`，不新建完整策略的排序：
 
 - 预设采用 `read-only < workspace-write < full-access`，取较低者。
-- 保留公开 `PermissionPolicy` 的可选 `fileAccess` 和 `toolApproval`；文件范围取有效最小值，
+- 预设就是整个策略维度（[ADR 018](../../adr/018-permission-is-the-preset.md)）：保存了已删除的 `fileAccess` 和 `toolApproval` 键的 job 或 bound 读取时忽略它们，因此不比较、不 cap。
   工具审批按 [S2 §6.1](../../../design/appserver/sessions-service.md#61-launch) 求交。
   省略覆盖字段保持旧语义，不补为显式 Ask。
 - disallowed 取两侧列表的并集。
@@ -465,7 +465,7 @@ Settings 在外部边界统一应用默认值并校验文档。非法文档返�
 | `Run.session_origin` | 与 `session_id`、`policy` 原子保存：本次运行成功 S2 launch 回复才记为 `launch`，既有目标通过实时权限检查后记为 `reuse`。三个字段一起存在或一起缺失。 | A.7 只可删除有实际 `launch` 记录的身份；其他运行的 `reuse` 记录不产生所有权。 |
 | `Run.policy` | 输入前保存 launch 返回的实际权限，或 §1.3 检查并接受的 reuse 目标当前权限；不从 Job.policy/policy_cap 填默认值。 | 历史展示本次观察到的权限，不授予权限，也不保证后续 Permission 变化不会收窄它。 |
 
-`Run.policy` 直接保存既有原生 PermissionPolicy（preset、可选 fileAccess/toolApproval、
+`Run.policy` 直接保存既有原生 PermissionPolicy（preset、工具名单，
 allowedTools、disallowedTools），取自 launch(...).value.policy 或
 sessionPermissions.permission(...).policy，不缩减成 preset，也不重建缺失的工具规则。
 它和 `Job.policy_cap` 在保存及重载时均保留可选字段。Settings schema 与 inner-v1 解码器

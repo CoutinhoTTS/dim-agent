@@ -253,11 +253,11 @@ flowchart LR
 
 A run never widens authority (E2). **Confirmed admission flow (A17):** the first stage uses existing `sessions.launch` with the tool's `{sessionId,branchId}` starter and the definition's optional policy; management starts omit the starter, so S2 supplies the existing host bound and read-only default. Agents resolves the live bound and returns the effective `policy`. Persist that reply as `Run.policy_cap` before any stage input; this field is absent only while first admission has no confirmed reply. Later stages pass that stored policy explicitly and omit the starter: Agents caps it again by current host defaults, so a closed starter does not widen authority or prevent already-owned work from continuing. No fallback is allowed before the first confirmed policy.
 
-`Run.policy_cap` preserves the complete public `PermissionPolicy`, including
-optional `fileAccess` and `toolApproval`, in storage, reload and later launch
-requests. The inner-v2 decoder accepts these optional fields without defaults;
-legacy records retain their omission and meaning. This additive policy-field
-support does not change the inner document version or migrate records. Workflow
+`Run.policy_cap` preserves the complete public `PermissionPolicy` — the preset and the two tool
+lists — in storage, reload and later launch requests. A stored cap that still names the removed
+`fileAccess`/`toolApproval` keys is read without them and written back without them
+([ADR 018](../../adr/018-permission-is-the-preset.md)); the inner document version is unchanged and
+no record is migrated. Workflow
 does not reconstruct overrides or implement another cap: incompatible policy
 intersections fail through the existing stage launch error path under
 [S2 §6.1](../appserver/sessions-service.md#61-launch).

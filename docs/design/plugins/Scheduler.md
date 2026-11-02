@@ -294,10 +294,9 @@ Policy calculation uses S2 §6.1's existing conservative `cap(x, bound)`, not a
 new ordering of complete policies:
 
 - Presets use `read-only < workspace-write < full-access`; take the lower preset.
-- Preserve optional `fileAccess` and `toolApproval` from the public
-  `PermissionPolicy` contract. File scopes intersect by their effective minimum;
-  tool approval intersects as defined by [S2 §6.1](../appserver/sessions-service.md#61-launch).
-  Omitted overrides retain legacy behavior, not explicit Ask defaults.
+- The preset is the whole policy dimension ([ADR 018](../../adr/018-permission-is-the-preset.md)):
+  a job or bound that stores the removed `fileAccess`/`toolApproval` keys loads with them ignored,
+  so nothing compares or caps them.
 - Disallowed names are the union of both lists.
 - Allowed names come from the union of both lists, retaining only a name that
   each side allows unconditionally (effective Bypass or explicitly listed), then
@@ -515,11 +514,12 @@ records; no separate ownership store or scheduler state document is introduced.
 | `Run.session_origin` | Persist atomically with `session_id` and `policy`: `launch` only from this run's successful S2 launch reply, `reuse` only from the existing target after its live-policy check. These three fields are either all absent or all present. | A.7 may delete only an identity with an actual `launch` record; another run's `reuse` record does not confer ownership. |
 | `Run.policy` | Store the returned launch policy, or the current target policy read and accepted under §1.3 for reuse, before calling `sessions.input`. No default from `Job.policy`/`policy_cap`. | History exposes the authority observed for this run; it is not a grant or a promise that later Permission changes cannot narrow it. |
 
-`Run.policy` is the existing native `PermissionPolicy` value (`preset`, optional
-`fileAccess`/`toolApproval`, `allowedTools`, `disallowedTools`), copied from `launch(...).value.policy` or
+`Run.policy` is the existing native `PermissionPolicy` value (`preset`, `allowedTools`,
+`disallowedTools`), copied from `launch(...).value.policy` or
 `sessionPermissions.permission(...).policy`; do not reduce it to a preset or
 reconstruct omitted tool rules. Both this record and `Job.policy_cap` accept and
-preserve the optional fields at save and reload. They remain optional without
+preserve the tool lists at save and reload, and read a stored document that still
+names the removed dimension keys by ignoring them. They remain optional without
 defaults in the Settings schema and inner-v1 decoder; legacy records retain
 their omission and the inner document version remains 1. No migration or
 reinterpretation of old records occurs.

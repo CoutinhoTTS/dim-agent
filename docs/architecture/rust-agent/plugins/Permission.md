@@ -18,35 +18,25 @@ cache or event.
 
 ### Policy contract
 
-[ADR 017](../../../adr/017-independent-permission-controls.md) extends the public policy
-additively. `preset` remains the legacy compatibility seed; `allowedTools` and `disallowedTools`
-retain their tool-name lists. The independent optional fields are:
+The policy is the preset and two tool-name lists:
 
-| Field | Values | When omitted |
-| --- | --- | --- |
-| `fileAccess` | `read-only`, `workspace-read-write`, `unrestricted` | Keep the preset's exact file behavior |
-| `toolApproval` | `ask`, `bypass` | Keep the preset's exact risk-based behavior |
+| Field | Values |
+| --- | --- |
+| `preset` | `read-only`, `workspace-write`, `full-access` |
+| `allowedTools` | tool names that run without the preset's question |
+| `disallowedTools` | tool names that always deny; a deny wins over any allow |
 
-An explicit file override changes no tool-risk rule; an explicit tool override changes no file
-rule. With explicit `ask`, every call asks unless an explicit tool allow or matching simple-command
-allow answers the tool question. Explicit `bypass` skips that question only. A tool disallow or
-command deny still wins. Neither tool choice bypasses file checks or changes process isolation.
-File-scope Ask and tool Ask produce one approval for the same call, not sequential questions;
-the existing Approval recheck still applies before execution.
+`preset` answers both what may run and what is asked first, and it is the policy of record
+([ADR 018](../../../adr/018-permission-is-the-preset.md)): `read-only` denies writes and
+process/network/unclassified risks, `workspace-write` allows workspace writes and Session tools,
+asking for the rest, and `full-access` runs every call without asking. Tool lists refine that,
+one name at a time; they never lift a deny, a file check or process isolation.
 
-Omission is not an explicit Ask. Legacy `read-only` denies process/network/unknown risks and
-allows read/Session risks; `workspace-write` allows read/Session risks and workspace writes,
-asking for the other risks; `full-access` allows risks. Existing tool-list exceptions remain.
-Clients may show these as legacy tool exceptions, but must not silently replace the policy with
-an explicit override or imply that a legacy Ask label asks on every call. Explicit `ask` or
-`bypass` replaces only this risk behavior, including legacy risk denials, not explicit denies.
-
-Session configuration and `permission/changed {policy}` carry the same extended type. Existing
-policy versions, dispatch, ancestry and restoration rules are unchanged. Missing overrides remain
-absent when serialized; old Timeline/database records and frozen fixtures are not rewritten.
-New clients preserve all untouched policy fields when updating one dimension. The ability to
-read old policies does not imply that older servers accept the new fields; failed updates must
-not fall back to a wider preset.
+The type ignores keys it does not name. Policies written while ADR 017's `fileAccess` and
+`toolApproval` existed still load, with those keys dropped: nothing compares or migrates them, and
+a record that ran under a stricter override admits by its preset. Session configuration and
+`permission/changed {policy}` carry the same type; versions, dispatch, ancestry and restoration
+rules are unchanged. A client updating the preset sends the tool lists it read, unchanged.
 
 ### Dependencies
 
