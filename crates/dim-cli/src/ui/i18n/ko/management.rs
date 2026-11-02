@@ -105,6 +105,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "이 작업 공간의 훅 설정이 읽은 뒤에 변경되었습니다. 아무것도 쓰지 않았습니다."
         }
         "MCP" => "MCP",
+        "MCP servers" => "MCP 서버",
         "Ctrl+T test" => "Ctrl+T 테스트",
         "sign-in required" => "로그인 필요",
         "signed in" => "로그인됨",

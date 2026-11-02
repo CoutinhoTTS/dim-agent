@@ -93,6 +93,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "此工作区的钩子设置已在读取后发生变化；本次没有写入。"
         }
         "MCP" => "MCP",
+        "MCP servers" => "MCP 服务器",
         "Ctrl+T test" => "Ctrl+T 测试",
         "sign-in required" => "需要登录",
         "signed in" => "已登录",

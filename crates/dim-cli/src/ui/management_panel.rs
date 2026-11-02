@@ -119,6 +119,7 @@ pub const STRINGS: &[&str] = &[
     "This daemon lists {area} but cannot inspect them.",
     "This workspace's hook settings changed since they were read; nothing was written.",
     "MCP",
+    "MCP servers",
     "Ctrl+T test",
     "sign-in required",
     "signed in",

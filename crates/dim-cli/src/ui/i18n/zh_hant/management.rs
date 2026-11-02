@@ -93,6 +93,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "此工作區的鉤子設定已在讀取後變更；這次沒有寫入。"
         }
         "MCP" => "MCP",
+        "MCP servers" => "MCP 伺服器",
         "Ctrl+T test" => "Ctrl+T 測試",
         "sign-in required" => "需要登入",
         "signed in" => "已登入",

@@ -71,7 +71,7 @@ const HOOKS: Methods = Methods {
 
 const MCP: Methods = Methods {
     catalog: "mcp.catalog",
-    manages: "MCP",
+    manages: "MCP servers",
     kinds: &[
         (ActionKind::Toggle, "mcp.set_enabled"),
         (ActionKind::Edit, "mcp.update"),

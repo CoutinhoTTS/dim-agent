@@ -109,6 +109,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "このワークスペースのフック設定は読み取り後に変更されています。今回は何も書き込んでいません。"
         }
         "MCP" => "MCP",
+        "MCP servers" => "MCP サーバー",
         "Ctrl+T test" => "Ctrl+T テスト",
         "sign-in required" => "サインインが必要",
         "signed in" => "サインイン済み",

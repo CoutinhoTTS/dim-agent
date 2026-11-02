@@ -109,6 +109,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Die Hook-Einstellungen dieses Arbeitsbereichs wurden seit dem Lesen geändert; es wurde nichts geschrieben."
         }
         "MCP" => "MCP",
+        "MCP servers" => "MCP-Server",
         "Ctrl+T test" => "Ctrl+T testen",
         "sign-in required" => "Anmeldung erforderlich",
         "signed in" => "angemeldet",

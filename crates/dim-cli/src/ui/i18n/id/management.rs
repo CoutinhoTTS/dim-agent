@@ -105,6 +105,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Pengaturan hook ruang kerja ini berubah sejak dibaca; tidak ada yang ditulis."
         }
         "MCP" => "MCP",
+        "MCP servers" => "server MCP",
         "Ctrl+T test" => "Ctrl+T uji",
         "sign-in required" => "perlu masuk",
         "signed in" => "sudah masuk",

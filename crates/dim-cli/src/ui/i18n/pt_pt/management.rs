@@ -109,6 +109,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "As definições de hooks deste espaço de trabalho mudaram desde que foram lidas; nada foi escrito."
         }
         "MCP" => "MCP",
+        "MCP servers" => "servidores MCP",
         "Ctrl+T test" => "Ctrl+T testar",
         "sign-in required" => "login necessário",
         "signed in" => "conectado",

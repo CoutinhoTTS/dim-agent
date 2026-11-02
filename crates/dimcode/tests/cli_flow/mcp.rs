@@ -1269,7 +1269,55 @@ fn mcp_commands_refuse_a_daemon_without_the_namespace() {
         daemon.join().unwrap();
         assert_eq!(output.status.code(), Some(1), "{args:?}");
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains("This daemon cannot manage MCP."),
+            String::from_utf8_lossy(&output.stderr)
+                .contains("This daemon cannot manage MCP servers."),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// A daemon that serves the catalog but not a verb's method names that verb.
+#[test]
+fn mcp_commands_name_the_verb_the_daemon_cannot_serve() {
+    for (verb, sentence) in [
+        ("add", "This daemon lists MCP servers but cannot add them."),
+        ("set", "This daemon lists MCP servers but cannot edit them."),
+        (
+            "remove",
+            "This daemon lists MCP servers but cannot remove them.",
+        ),
+        ("test", "This daemon lists MCP servers but cannot run them."),
+        (
+            "inspect",
+            "This daemon lists MCP servers but cannot inspect them.",
+        ),
+    ] {
+        let home = Home::new();
+        let file = home.0.join("document.json");
+        fs::write(&file, json!({}).to_string()).unwrap();
+        let mut args = vec!["mcp".to_owned(), verb.to_owned()];
+        if verb == "set" {
+            args.push("docs".to_owned());
+        }
+        match verb {
+            "add" | "set" => args.push(file.to_str().unwrap().to_owned()),
+            _ => args.push("docs".to_owned()),
+        }
+        let daemon = home.daemon(|wire| {
+            wire.hello(&["mcp.catalog"]);
+            wire.hold();
+        });
+        let output = home
+            .command()
+            .args(&args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        daemon.join().unwrap();
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(sentence),
             "{args:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
