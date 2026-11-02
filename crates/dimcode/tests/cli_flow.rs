@@ -29,6 +29,8 @@ mod permission;
 mod question;
 #[path = "cli_flow/server.rs"]
 mod server;
+#[path = "cli_flow/session_management.rs"]
+mod session_management;
 #[path = "cli_flow/skills.rs"]
 mod skills;
 #[path = "cli_flow/tasks.rs"]
@@ -67,8 +69,25 @@ impl Home {
         let path = self.0.join("rust/daemon.sock");
         let listener = UnixListener::bind(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        listener.set_nonblocking(true).unwrap();
         thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
+            // A client that fails before connecting must fail the test, not
+            // hang the run.
+            let deadline = Instant::now() + PATIENCE;
+            let stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "no client connected within {PATIENCE:?}"
+                        );
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(PATIENCE)).unwrap();
             let mut wire = Wire(BufReader::new(stream));
             flow(&mut wire);
