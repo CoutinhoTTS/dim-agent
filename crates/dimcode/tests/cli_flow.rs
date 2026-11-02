@@ -42,6 +42,8 @@ mod skills;
 mod tasks;
 #[path = "cli_flow/title.rs"]
 mod title;
+#[path = "cli_flow/workflow.rs"]
+mod workflow;
 
 #[path = "support/daemon.rs"]
 mod daemon_cleanup;
