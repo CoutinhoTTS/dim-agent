@@ -4140,15 +4140,20 @@ fn home_after_new_drops_the_previous_sessions_effort() {
                 "data":{"turn_id":"next-turn","request_id":"next-request","delta":"next reply"}}}));
         wire.hold();
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut command = home.command();
+    // The waits below close on the end of a synchronized update, which frames
+    // every repaint; tmux would turn that framing off for the child.
+    command.env_remove("TMUX");
+    let mut terminal = Terminal::launch_tui(command);
     terminal.until("test / model · high");
     terminal.write(b"/effort high\r");
     terminal.until("Reasoning effort configuration adopted: high");
     terminal.write(b"/new\r");
-    terminal.until("new session");
+    // The palette lists `/new` with its description while it is typed, so
+    // wait for the rule the boundary commits once the command has run.
+    terminal.until("─ new session ─");
     // Widen the terminal so the whole label fits and every row is repainted:
     // the status line at home must carry the model alone.
-    let after_new = terminal.transcript.len();
     let size = libc::winsize {
         ws_row: 24,
         ws_col: 200,
@@ -4165,12 +4170,15 @@ fn home_after_new_drops_the_previous_sessions_effort() {
         },
         0
     );
+    let resized_at = terminal.transcript.len();
     terminal.signal(libc::SIGWINCH);
-    // The status line at home must carry the model alone while nothing is
-    // adopted, even once the terminal is wide enough for the whole label.
-    terminal.consumed = terminal.transcript.len();
-    terminal.until("AGENT");
-    let home = &terminal.transcript[after_new..];
+    // The repaint of a resize clears the screen first; its status line is
+    // the last row of the frame, so wait for the label on that row and for
+    // the frame to close behind it before reading either.
+    terminal.until("\u{1b}[2J\u{1b}[H\u{1b}[3J");
+    terminal.until("test / model");
+    terminal.until("\u{1b}[?2026l");
+    let home = &terminal.transcript[resized_at..];
     assert!(home.contains("test / model"), "home drew no label: {home}");
     assert!(
         !home.contains("· high"),
