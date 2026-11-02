@@ -1499,10 +1499,10 @@ async fn a_save_racing_a_move_keeps_the_moves_overlay() {
         .await
         .unwrap();
 
-    // B's move committed the entry and its record. A's guard reads the record
-    // (now the move's) and the entry again: the entry exists with the record,
-    // so the answer is mcp_credentials_are_user_scoped, never the stale
-    // refusal that names mcp.remove.
+    // B's move committed the entry and its record. A save that read the entry
+    // first now sees the move's record and reads the entry again; the entry in
+    // this state decides its answer: user-scoped, not the stale refusal that
+    // names mcp.remove.
     let overlay = fixture
         .mcp
         .overlay(SettingsScope::Project(1), "user-only".into(), &cancel)
