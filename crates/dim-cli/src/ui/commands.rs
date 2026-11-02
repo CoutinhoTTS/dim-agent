@@ -176,6 +176,16 @@ pub const COMMANDS: &[Command] = &[
         &[],
         Needs::Session,
     ),
+    Command {
+        argument: Some("<title>"),
+        ..slash(
+            "rename",
+            "session",
+            "rename this session",
+            &[],
+            Needs::Session,
+        )
+    },
     slash(
         "usage",
         "session",
@@ -323,7 +333,7 @@ pub const COMMANDS: &[Command] = &[
     slash(
         "permissions",
         "model",
-        "configure file access, tool approval and process isolation",
+        "configure file access, tool approval and process isolation, and manage command rules",
         &["approvals", "approval"],
         Needs::Nothing,
     ),

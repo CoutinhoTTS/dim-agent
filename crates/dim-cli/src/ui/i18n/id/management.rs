@@ -9,6 +9,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "hooks" => "hook",
         "scheduled jobs" => "tugas terjadwal",
         "models" => "model",
+        "command rules" => "Aturan perintah",
         "enabled" => "aktif",
         "shadowed by {name}" => "tertutup oleh {name}",
         "Reloaded." => "Dimuat ulang.",
@@ -17,6 +18,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Reloaded {area}: {entries} entries, {disabled} disabled." => {
             "{area} dimuat ulang: {entries} entri, {disabled} nonaktif."
         }
+        "Reloaded {area}: {entries} entries." => "{area} dimuat ulang: {entries} entri.",
         "Hooks" => "Hooks",
         "invalid" => "tidak valid",
         "Saved." => "Disimpan.",
@@ -178,6 +180,35 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "no" => "tidak",
         "not supported" => "tidak didukung",
         "supported" => "didukung",
+        "Command rules" => "Aturan perintah",
+        "user" => "pengguna",
+        "Matches only this command." => "Hanya cocok dengan perintah ini.",
+        "Matches commands whose first words are these." => {
+            "Cocok dengan perintah yang kata awalnya ini."
+        }
+        "Allows a simple command that would otherwise ask." => {
+            "Mengizinkan perintah sederhana yang biasanya ditanyakan."
+        }
+        "Denies the command under every preset." => "Menolak perintah itu pada setiap preset.",
+        "Applies in every Session, in every workspace." => {
+            "Berlaku di setiap Sesi, di setiap workspace."
+        }
+        "Rule added: {rule}." => "Aturan ditambahkan: {rule}.",
+        "Rule already present: {rule}." => "Aturan sudah ada: {rule}.",
+        "Rule removed: {rule}." => "Aturan dihapus: {rule}.",
+        "That command rule is no longer listed; nothing was removed." => {
+            "Aturan perintah itu tidak lagi terdaftar; tidak ada yang dihapus."
+        }
+        "Command rules changed since they were read; nothing was removed." => {
+            "Aturan perintah berubah sejak dibaca; tidak ada yang dihapus."
+        }
+        "A command rule is DECISION MATCH COMMAND, such as deny prefix git push." => {
+            "Aturan perintah ditulis DECISION MATCH COMMAND, misalnya deny prefix git push."
+        }
+        "Command: {command}" => "Perintah: {command}",
+        "Use the line prompt or dimcode permissions." => {
+            "Gunakan prompt baris atau dimcode permissions."
+        }
         _ => return None,
     })
 }

@@ -65,6 +65,7 @@ pub const STRINGS: &[&str] = &[
     "sources",
     "skills",
     "hooks",
+    "command rules",
     "scheduled jobs",
     "models",
     "jobs",
@@ -87,6 +88,7 @@ pub const STRINGS: &[&str] = &[
     "Enabled {name}.",
     "Disabled {name}.",
     "Reloaded {area}: {entries} entries, {disabled} disabled.",
+    "Reloaded {area}: {entries} entries.",
     "The user's own document; always in effect.",
     "There is no hooks file there.",
     "Owned by plugin {plugin}.",
@@ -171,6 +173,21 @@ pub const STRINGS: &[&str] = &[
     "no",
     "not supported",
     "supported",
+    "Command rules",
+    "user",
+    "Matches only this command.",
+    "Matches commands whose first words are these.",
+    "Allows a simple command that would otherwise ask.",
+    "Denies the command under every preset.",
+    "Applies in every Session, in every workspace.",
+    "Rule added: {rule}.",
+    "Rule already present: {rule}.",
+    "Rule removed: {rule}.",
+    "That command rule is no longer listed; nothing was removed.",
+    "Command rules changed since they were read; nothing was removed.",
+    "A command rule is DECISION MATCH COMMAND, such as deny prefix git push.",
+    "Command: {command}",
+    "Use the line prompt or dimcode permissions.",
 ];
 
 pub struct ManagementPanel {
@@ -185,6 +202,9 @@ pub struct ManagementPanel {
     busy: bool,
     /// What the last request came to.
     message: Option<Result<String, String>>,
+    /// The line the panel was opened with: it stands until the user's first
+    /// key here, whatever the opening read answers.
+    opening: Option<String>,
     /// Why the read that follows an applied action failed: the action was
     /// done, and the area is not reported.
     read_error: Option<String>,
@@ -212,7 +232,11 @@ impl ShownDetail {
 }
 
 impl ManagementPanel {
-    pub fn new(area: Area) -> Self {
+    /// The panel of `area`, opened holding `opening`.
+    ///
+    /// The line stands where the answers stand, but the opening read does
+    /// not replace it: only the user's first key here does.
+    pub fn new(area: Area, opening: Option<String>) -> Self {
         let title = title(&area);
         Self {
             area,
@@ -229,6 +253,7 @@ impl ManagementPanel {
             detail: None,
             busy: true,
             message: None,
+            opening,
             read_error: None,
         }
     }
@@ -458,6 +483,9 @@ impl ManagementPanel {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
+        // The line the panel was opened with belongs to the panel, not to
+        // the user: any key here takes it away.
+        self.opening = None;
         if self.detail.is_some() {
             return self.detail_key(key);
         }
@@ -542,11 +570,15 @@ impl ManagementPanel {
         if !entry.actions.contains(&ActionKind::Toggle) {
             return Effect::None;
         }
+        // An entry that has no on/off state has nothing to toggle.
+        let Some(enabled) = entry.enabled else {
+            return Effect::None;
+        };
         let request = ManagementRequest {
             area: self.area.clone(),
             action: ManagementAction::Toggle {
                 id: entry.id.clone(),
-                enabled: !entry.enabled,
+                enabled: !enabled,
             },
         };
         self.busy = true;
@@ -678,6 +710,11 @@ impl ManagementPanel {
                 }
             }
         }
+        if let Some(opening) = &self.opening {
+            for row in wrap_words(&safe(opening), inner) {
+                footer.push(fg(&row, &p.muted));
+            }
+        }
         if let Some(message) = &self.message {
             let (text, color) = match message {
                 Ok(text) => (safe(text), &p.success),
@@ -735,15 +772,30 @@ pub fn reloaded(area: &Area, view: &ManagementView) -> String {
         .iter()
         .flat_map(|group| &group.entries)
         .collect();
-    let disabled = entries.iter().filter(|entry| !entry.enabled).count();
-    let mut lines = vec![tf(
-        "Reloaded {area}: {entries} entries, {disabled} disabled.",
-        &[
-            ("area", t(title(area))),
-            ("entries", &entries.len().to_string()),
-            ("disabled", &disabled.to_string()),
-        ],
-    )];
+    // The disabled count says what an on/off state is, so only an area whose
+    // entries report one has it: an area of values, or an empty one, does
+    // not claim every entry is enabled.
+    let count = entries.len().to_string();
+    let size = if entries.iter().any(|entry| entry.enabled.is_some()) {
+        let disabled = entries
+            .iter()
+            .filter(|entry| entry.enabled == Some(false))
+            .count();
+        tf(
+            "Reloaded {area}: {entries} entries, {disabled} disabled.",
+            &[
+                ("area", t(title(area))),
+                ("entries", &count),
+                ("disabled", &disabled.to_string()),
+            ],
+        )
+    } else {
+        tf(
+            "Reloaded {area}: {entries} entries.",
+            &[("area", t(title(area))), ("entries", &count)],
+        )
+    };
+    let mut lines = vec![size];
     lines.extend(view.issues.iter().map(|issue| format!("  {issue}")));
     lines.join("\n")
 }
@@ -756,6 +808,7 @@ fn title(area: &Area) -> &'static str {
         Area::Hooks => "Hooks",
         Area::Scheduled => "Scheduler",
         Area::Models { .. } => "Models",
+        Area::Permissions => "Command rules",
     }
 }
 
@@ -817,9 +870,15 @@ fn items(view: &ManagementView) -> Vec<Item> {
     items
 }
 
-/// An entry's states: on or off, then the ones its owner adds.
+/// An entry's states: on or off, when it has one, then the ones its owner
+/// adds.
 fn states(entry: &ManagementEntry) -> Vec<String> {
-    let mut states = vec![t(if entry.enabled { "enabled" } else { "disabled" }).to_owned()];
+    let mut states = Vec::new();
+    match entry.enabled {
+        Some(true) => states.push(t("enabled").to_owned()),
+        Some(false) => states.push(t("disabled").to_owned()),
+        None => {}
+    }
     for state in &entry.states {
         states.push(match state {
             EntryState::Invalid => t("invalid").to_owned(),
@@ -862,7 +921,7 @@ mod tests {
     fn entry(
         id: &str,
         label: &str,
-        enabled: bool,
+        enabled: Option<bool>,
         states: Vec<EntryState>,
         actions: Vec<ActionKind>,
     ) -> ManagementEntry {
@@ -895,20 +954,20 @@ mod tests {
                         entry(
                             "user:commit",
                             "commit",
-                            true,
+                            Some(true),
                             Vec::new(),
                             vec![ActionKind::Toggle],
                         ),
                         entry(
                             "user:review",
                             "review",
-                            false,
+                            Some(false),
                             vec![EntryState::Shadowed {
                                 by: "commit".into(),
                             }],
                             vec![ActionKind::Toggle],
                         ),
-                        entry("user:locked", "locked", true, Vec::new(), vec![]),
+                        entry("user:locked", "locked", Some(true), Vec::new(), vec![]),
                     ],
                 },
                 ManagementGroup {
@@ -916,7 +975,7 @@ mod tests {
                     entries: vec![entry(
                         "workspace:/w:deploy",
                         "deploy",
-                        true,
+                        Some(true),
                         Vec::new(),
                         vec![ActionKind::Toggle],
                     )],
@@ -945,7 +1004,7 @@ mod tests {
     }
 
     fn opened() -> ManagementPanel {
-        let mut panel = ManagementPanel::new(Area::Skills);
+        let mut panel = ManagementPanel::new(Area::Skills, None);
         panel.set_result(&view_reply(Area::Skills, ManagementAction::List, view()));
         panel
     }
@@ -1065,11 +1124,87 @@ mod tests {
         ));
     }
 
+    /// A line the panel was opened with stands through the opening read,
+    /// however it turns out, and the user's first key takes it away.
+    #[test]
+    fn the_line_a_panel_was_opened_with_stands_until_the_first_key() {
+        let opening = "Use the line prompt or dimcode permissions.";
+        let mut panel = ManagementPanel::new(Area::Permissions, Some(opening.into()));
+        assert!(
+            shown(&panel, 80, 20).join(" ").contains(opening),
+            "the line is drawn while the read is out"
+        );
+        panel.set_result(&view_reply(
+            Area::Permissions,
+            ManagementAction::List,
+            ManagementView {
+                actions: vec![ActionKind::Reload],
+                ..ManagementView::default()
+            },
+        ));
+        assert!(
+            shown(&panel, 80, 20).join(" ").contains(opening),
+            "the opening read leaves the line"
+        );
+        panel.handle_key(key(KeyCode::Down));
+        let text = shown(&panel, 80, 20).join(" ");
+        assert!(!text.contains(opening), "{text}");
+    }
+
+    /// The Command rules area is titled for what it lists, and its hint
+    /// names the kinds it has.
+    #[test]
+    fn the_command_rules_area_names_its_title_and_kinds() {
+        let mut panel = ManagementPanel::new(Area::Permissions, None);
+        panel.set_result(&view_reply(
+            Area::Permissions,
+            ManagementAction::List,
+            ManagementView {
+                title: None,
+                revision: Some("r1".into()),
+                document: None,
+                create: Some(serde_json::json!({
+                    "command": "replace-with-a-command",
+                    "match": "prefix",
+                    "decision": "deny"
+                })),
+                actions: vec![ActionKind::Reload, ActionKind::Add],
+                groups: vec![ManagementGroup {
+                    heading: "user".into(),
+                    entries: vec![entry(
+                        "deny prefix git push",
+                        "deny prefix git push",
+                        None,
+                        Vec::new(),
+                        vec![ActionKind::Remove],
+                    )],
+                }],
+                issues: Vec::new(),
+            },
+        ));
+        let text = shown(&panel, 80, 20).join("\n");
+        assert!(text.contains("Command rules"), "{text}");
+        assert!(text.contains("user"), "{text}");
+        assert!(
+            text.contains("Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Esc close"),
+            "{text}"
+        );
+        // A rule has a decision, not an on/off state.
+        let row = text
+            .lines()
+            .find(|line| line.contains("deny prefix git push"))
+            .expect("the rule has a row");
+        assert!(
+            !row.contains("enabled") && !row.contains("disabled"),
+            "{row}"
+        );
+    }
+
     /// A panel with nothing to show says so, and a failed read keeps the
     /// error rather than an empty list.
     #[test]
     fn an_empty_area_and_a_failed_read_say_so() {
-        let mut panel = ManagementPanel::new(Area::Skills);
+        let mut panel = ManagementPanel::new(Area::Skills, None);
         assert!(shown(&panel, 40, 10).join("\n").contains("Loading..."));
         panel.set_result(&view_reply(
             Area::Skills,
@@ -1077,7 +1212,7 @@ mod tests {
             ManagementView::default(),
         ));
         assert!(shown(&panel, 40, 10).join("\n").contains("No entries."));
-        let mut panel = ManagementPanel::new(Area::Skills);
+        let mut panel = ManagementPanel::new(Area::Skills, None);
         panel.set_result(&reply(
             Area::Skills,
             ManagementAction::List,
@@ -1108,7 +1243,7 @@ mod tests {
                         id: "user".into(),
                         label: "user".into(),
                         detail: vec!["The user's own document; always in effect.".into()],
-                        enabled: true,
+                        enabled: Some(true),
                         states: Vec::new(),
                         actions: vec![ActionKind::Edit],
                         remove_verb: RemoveVerb::Remove,
@@ -1118,7 +1253,7 @@ mod tests {
                         id: "plugin:kit".into(),
                         label: "plugin:kit".into(),
                         detail: vec!["Owned by plugin kit.".into()],
-                        enabled: true,
+                        enabled: Some(true),
                         states: vec![EntryState::ReadOnly, EntryState::Invalid],
                         actions: vec![],
                         remove_verb: RemoveVerb::Remove,
@@ -1131,7 +1266,7 @@ mod tests {
     }
 
     fn opened_hooks() -> ManagementPanel {
-        let mut panel = ManagementPanel::new(Area::Hooks);
+        let mut panel = ManagementPanel::new(Area::Hooks, None);
         panel.set_result(&view_reply(
             Area::Hooks,
             ManagementAction::List,
@@ -1196,7 +1331,7 @@ mod tests {
         let mut view = hooks_view();
         view.document = None;
         view.groups[0].entries[0].actions = vec![ActionKind::Reload];
-        let mut panel = ManagementPanel::new(Area::Hooks);
+        let mut panel = ManagementPanel::new(Area::Hooks, None);
         panel.set_result(&view_reply(Area::Hooks, ManagementAction::List, view));
         assert!(matches!(panel.handle_key(ctrl('e')), Effect::None));
         let text = reloaded(&Area::Hooks, &hooks_view());
@@ -1206,11 +1341,40 @@ mod tests {
         );
     }
 
+    /// The reload summary counts disabled entries only for an area whose
+    /// entries report a state, and names the area as its panel does.
+    #[test]
+    fn a_reload_summary_fits_the_area() {
+        // A rule has a decision, not a state: nothing is off.
+        let rules = ManagementView {
+            groups: vec![ManagementGroup {
+                heading: "user".into(),
+                entries: vec![entry(
+                    "deny prefix git push",
+                    "deny prefix git push",
+                    None,
+                    Vec::new(),
+                    vec![ActionKind::Remove],
+                )],
+            }],
+            ..ManagementView::default()
+        };
+        assert_eq!(
+            reloaded(&Area::Permissions, &rules),
+            "Reloaded Command rules: 1 entries."
+        );
+        // An empty area has no entry that could be on or off either.
+        assert_eq!(
+            reloaded(&Area::Skills, &ManagementView::default()),
+            "Reloaded Skills: 0 entries."
+        );
+    }
+
     /// Reload belongs to the area: it works on an empty area where no entry
     /// is selected to offer it, and after a failed read Ctrl+R reads again.
     #[test]
     fn reload_works_on_an_empty_area_and_after_a_failed_read() {
-        let mut panel = ManagementPanel::new(Area::Skills);
+        let mut panel = ManagementPanel::new(Area::Skills, None);
         panel.set_result(&view_reply(
             Area::Skills,
             ManagementAction::List,
@@ -1230,7 +1394,7 @@ mod tests {
             _ => panic!("expected a reload"),
         }
         // A read that failed leaves nothing to select; Ctrl+R reads again.
-        let mut panel = ManagementPanel::new(Area::Skills);
+        let mut panel = ManagementPanel::new(Area::Skills, None);
         panel.set_result(&reply(
             Area::Skills,
             ManagementAction::List,
@@ -1346,7 +1510,7 @@ mod tests {
                         id: "job-1".into(),
                         label: "nightly".into(),
                         detail: vec!["every 60 minutes".into(), "no run yet".into()],
-                        enabled: true,
+                        enabled: Some(true),
                         states: Vec::new(),
                         actions: vec![
                             ActionKind::Toggle,
@@ -1365,7 +1529,7 @@ mod tests {
                         id: "job-2".into(),
                         label: "release".into(),
                         detail: vec!["at 2030-01-01T00:00:00Z".into()],
-                        enabled: false,
+                        enabled: Some(false),
                         states: vec![EntryState::Invalid],
                         actions: vec![ActionKind::Toggle],
                         remove_verb: RemoveVerb::Remove,
@@ -1381,7 +1545,7 @@ mod tests {
     }
 
     fn opened_catalogue() -> ManagementPanel {
-        let mut panel = ManagementPanel::new(Area::Skills);
+        let mut panel = ManagementPanel::new(Area::Skills, None);
         panel.set_result(&view_reply(
             Area::Skills,
             ManagementAction::List,
@@ -1431,7 +1595,7 @@ mod tests {
     fn a_remove_says_reset_when_the_entry_reports_reset() {
         let mut view = catalogue();
         view.groups[0].entries[0].remove_verb = RemoveVerb::Reset;
-        let mut panel = ManagementPanel::new(Area::Skills);
+        let mut panel = ManagementPanel::new(Area::Skills, None);
         panel.set_result(&view_reply(
             Area::Skills,
             ManagementAction::List,
@@ -1479,7 +1643,7 @@ mod tests {
         view.groups[0].entries[0]
             .states
             .push(EntryState::Unavailable);
-        let mut panel = ManagementPanel::new(Area::Skills);
+        let mut panel = ManagementPanel::new(Area::Skills, None);
         panel.set_result(&view_reply(Area::Skills, ManagementAction::List, view));
         let text = shown(&panel, 120, 20).join("\n");
         assert!(text.contains("enabled  unavailable"), "{text}");
@@ -1588,7 +1752,7 @@ mod tests {
     /// empty area and opens the document the adapter supplied.
     #[test]
     fn add_needs_no_selection_and_opens_the_adapters_document() {
-        let mut panel = ManagementPanel::new(Area::Skills);
+        let mut panel = ManagementPanel::new(Area::Skills, None);
         panel.set_result(&view_reply(
             Area::Skills,
             ManagementAction::List,
@@ -1616,7 +1780,7 @@ mod tests {
             _ => panic!("expected an editor draft"),
         }
         // An area with no create document offers no add.
-        let mut panel = ManagementPanel::new(Area::Skills);
+        let mut panel = ManagementPanel::new(Area::Skills, None);
         panel.set_result(&view_reply(
             Area::Skills,
             ManagementAction::List,
@@ -1777,7 +1941,7 @@ mod tests {
         view.groups[0].entries[0].label = "nightly\u{1b}[2J".into();
         view.groups[0].entries[0].detail = vec!["every 60 minutes\u{1b}[2J".into()];
         view.issues = vec!["an issue\u{1b}[2J".into()];
-        let mut panel = ManagementPanel::new(Area::Skills);
+        let mut panel = ManagementPanel::new(Area::Skills, None);
         panel.set_result(&reply(
             Area::Skills,
             ManagementAction::Run { id: "job-1".into() },

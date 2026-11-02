@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use crate::management::{self, editor};
 use crate::model::session::{
     Area, Command, CompactReply, ContextReading, DIM_OAUTH_ID, DraftPart, ManagementAction,
-    ManagementRefusal, ManagementRequest, ManagementResult, SessionPort, SubmitMode, SwitchKind,
-    Update,
+    ManagementRefusal, ManagementRequest, ManagementResult, RenameReply, SessionPort, SubmitMode,
+    SwitchKind, Update,
 };
 #[cfg(test)]
 use crate::model::shell::Outcome as ShellOutcome;
@@ -886,7 +886,9 @@ struct App {
     /// The `/settings` row a picker was opened from: closing the picker
     /// goes back to it.
     settings_return: Option<Setting>,
-    isolation_return_permissions: bool,
+    /// A surface was opened from the Permissions page: closing it goes back
+    /// to the page, as Process isolation and Command rules do.
+    permissions_return: bool,
     /// Fullscreen reads the mouse (`tuiMouseMode`); off leaves selection
     /// and the wheel to the terminal.
     pub mouse: bool,
@@ -1123,7 +1125,7 @@ impl App {
             service_tiers: false,
             jump: None,
             settings_return: None,
-            isolation_return_permissions: false,
+            permissions_return: false,
             mouse,
             notify,
             notifications: Vec::new(),
@@ -1953,21 +1955,31 @@ impl App {
             Update::Context(context) => self.context = context,
             Update::Compacted(reply) => {
                 let (text, tone) = match reply {
-                    CompactReply::Completed => (t("Context compacted").to_owned(), Tone::Muted),
-                    CompactReply::Skipped(reason) => (
-                        [t("Context compaction skipped"), " · ", reason.as_str()].concat(),
-                        Tone::Muted,
-                    ),
                     CompactReply::Failed(message) => (
                         [t("Context compaction failed"), " · ", message.as_str()].concat(),
                         Tone::Warning,
                     ),
-                    CompactReply::Cancelled(reason) => (
-                        [t("Context compaction cancelled"), " · ", reason.as_str()].concat(),
-                        Tone::Muted,
-                    ),
                     CompactReply::Unsupported => (
                         t("This daemon does not support context compaction").to_owned(),
+                        Tone::Warning,
+                    ),
+                };
+                self.reports.push(Block::Status { text, tone });
+            }
+            Update::Renamed(reply) => {
+                let (text, tone) = match reply {
+                    RenameReply::Titled(title) => {
+                        (tf("Renamed to {title}", &[("title", &title)]), Tone::Muted)
+                    }
+                    RenameReply::Untitled => {
+                        (t("The Session is now untitled.").to_owned(), Tone::Muted)
+                    }
+                    RenameReply::Unsupported => (
+                        t("This daemon does not support renaming Sessions").to_owned(),
+                        Tone::Warning,
+                    ),
+                    RenameReply::Failed(message) => (
+                        [t("Renaming failed"), " · ", message.as_str()].concat(),
                         Tone::Warning,
                     ),
                 };
@@ -2798,6 +2810,12 @@ impl App {
                     &self.permission_policy,
                 )));
             }
+            Effect::OpenArea { area, note } => {
+                // A surface opened from the Permissions page returns there on
+                // Esc; any other caller opens with no return.
+                self.permissions_return = matches!(self.prompt, Some(Prompt::Approvals(_)));
+                self.open_management(area, note);
+            }
             Effect::StopTask {
                 session_id,
                 projection_id,
@@ -2867,7 +2885,7 @@ impl App {
                 self.setting(setting);
                 if from_permissions {
                     self.settings_return = None;
-                    self.isolation_return_permissions = true;
+                    self.permissions_return = true;
                 }
             }
             Effect::ThemePreview(id) => self.paint_theme(&id),
@@ -2911,7 +2929,6 @@ impl App {
                 self.prompt = Some(Prompt::Models(ModelsPanel::new()));
                 self.host.send(Command::ListModels);
             }
-            Effect::OpenArea(area) => self.open_management(area),
             Effect::Logout(target) => self.host.send(Command::Logout(target)),
             Effect::LoginStatus(provider_id) => self.host.send(Command::LoginStatus(provider_id)),
             Effect::LoginUsage(provider_id) => self.host.send(Command::LoginUsage(provider_id)),
@@ -2966,7 +2983,7 @@ impl App {
                 policy,
             }),
         }
-        if self.prompt.is_none() && std::mem::take(&mut self.isolation_return_permissions) {
+        if self.prompt.is_none() && std::mem::take(&mut self.permissions_return) {
             self.open_prompt(Prompt::Approvals(ApprovalsPanel::new(
                 &self.permission_policy,
             )));
@@ -3420,9 +3437,10 @@ impl App {
     }
 
     /// `/<area>` opens the management panel of `area`, which reads it.
-    fn open_management(&mut self, area: Area) {
+    fn open_management(&mut self, area: Area, note: Option<String>) {
         self.open_prompt(Prompt::Management(Box::new(ManagementPanel::new(
             area.clone(),
+            note,
         ))));
         self.host.send(Command::Management(ManagementRequest {
             area,
@@ -3501,6 +3519,16 @@ impl App {
             }
             "compact" => {
                 self.host.send(Command::Compact);
+                Outcome::Continue
+            }
+            "rename" => {
+                let title = args.trim();
+                let title = if title == "--clear" {
+                    None
+                } else {
+                    Some(title.to_owned())
+                };
+                self.host.send(Command::Rename(title));
                 Outcome::Continue
             }
             "goal" => {
@@ -3589,8 +3617,19 @@ impl App {
                 Outcome::Continue
             }
             "permissions" | "approvals" | "approval" => {
-                let panel = ApprovalsPanel::new(&self.permission_policy);
-                self.open_prompt(Prompt::Approvals(panel));
+                // Arguments belong to the line prompt and to `dimcode
+                // permissions`; the terminal UI's surface is the rule panel,
+                // which opens holding where they work instead of ignoring
+                // them, and says it until the user's first key there.
+                if args.trim().is_empty() {
+                    let panel = ApprovalsPanel::new(&self.permission_policy);
+                    self.open_prompt(Prompt::Approvals(panel));
+                } else {
+                    self.open_management(
+                        Area::Permissions,
+                        Some(t("Use the line prompt or dimcode permissions.").to_owned()),
+                    );
+                }
                 Outcome::Continue
             }
             "plugins" => {
@@ -3598,7 +3637,7 @@ impl App {
                 Outcome::Continue
             }
             "skills" => {
-                self.open_management(Area::Skills);
+                self.open_management(Area::Skills, None);
                 Outcome::Continue
             }
             "reload-skills" => {
@@ -3609,11 +3648,11 @@ impl App {
                 Outcome::Continue
             }
             "hooks" => {
-                self.open_management(Area::Hooks);
+                self.open_management(Area::Hooks, None);
                 Outcome::Continue
             }
             "scheduled" => {
-                self.open_management(Area::Scheduled);
+                self.open_management(Area::Scheduled, None);
                 Outcome::Continue
             }
             "connect" => {
@@ -9053,7 +9092,7 @@ mod tests {
             root.path().join("home"),
             "/w".into(),
         );
-        let mut panel = ManagementPanel::new(Area::Skills);
+        let mut panel = ManagementPanel::new(Area::Skills, None);
         panel.set_result(&ManagementReply {
             request: ManagementRequest {
                 area: Area::Skills,
@@ -9067,7 +9106,7 @@ mod tests {
                             id: "user:commit".into(),
                             label: "commit".into(),
                             detail: Vec::new(),
-                            enabled: true,
+                            enabled: Some(true),
                             states: Vec::new(),
                             actions: vec![ActionKind::Toggle],
                             remove_verb: RemoveVerb::Remove,
@@ -9124,7 +9163,7 @@ mod tests {
             id: id.into(),
             label: label.into(),
             detail: Vec::new(),
-            enabled: true,
+            enabled: Some(true),
             states: Vec::new(),
             actions: vec![ActionKind::Toggle],
             remove_verb: RemoveVerb::Remove,
@@ -9133,7 +9172,7 @@ mod tests {
         let area = Area::Models {
             provider_id: "a".into(),
         };
-        let mut panel = ManagementPanel::new(area.clone());
+        let mut panel = ManagementPanel::new(area.clone(), None);
         panel.set_result(&ManagementReply {
             request: ManagementRequest {
                 area: area.clone(),
@@ -9246,6 +9285,7 @@ mod tests {
             .to_string();
         app.prompt = Some(Prompt::Management(Box::new(ManagementPanel::new(
             Area::Skills,
+            None,
         ))));
         app.apply(Update::Management(ManagementReply {
             request: ManagementRequest {
@@ -9329,6 +9369,7 @@ mod tests {
         for result in [refused(), conflict()] {
             app.prompt = Some(Prompt::Management(Box::new(ManagementPanel::new(
                 Area::Scheduled,
+                None,
             ))));
             let path = draft(&mut app);
             app.apply(create_reply(result));

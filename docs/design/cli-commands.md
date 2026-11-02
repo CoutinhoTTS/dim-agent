@@ -30,7 +30,8 @@ picking an earlier message and scrolling to the top or bottom are also omitted;
 Commands
   app     /exit        exit
   app     /keys        show the key bindings
-  model   /permissions   file access, tool approval and process isolation
+  model   /permissions   file access, tool approval, process isolation and command rules
+  session /rename      rename this session
 
 / + Enter          -> /exit (completion only)
 /exit + Enter      -> exit
@@ -416,7 +417,9 @@ stays visible at any width, the remove confirmation included.
   create shape, filled with example values — and writes it with the area's create method. An
   unchanged document writes nothing, and a refusal keeps the draft, which the next Ctrl+N
   reopens, as Ctrl+E does for an edit. A conflict keeps it too: a create has no revision, so
-  dropping the draft's link to a stale revision is an edit's rule, not a create's.
+  dropping the draft's link to a stale revision is an edit's rule, not a create's. An add that
+  appends an entry to a list it read, as the command rules area's does, retries the conflict
+  instead, because an append overwrites nothing.
   `dimcode <area> add PATH` (`-` for stdin) is the same write without an editor.
 - remove asks in the hint first, with the verb the entry reports: `Remove <label>? Enter confirm
   · Esc cancel` for an entry the remove takes out, `Reset <label>? Enter confirm · Esc cancel`
@@ -507,8 +510,9 @@ Writes follow [Execution settings](#execution-settings):
   message state live in one place.
 - Adding an area means an adapter, its command menu rows, its subcommand verbs and its design
   rows. It adds no new `Prompt`, `Command` or `Update` variant.
-- Existing panels — `/plugins`, `/permissions` — move onto this structure when they are next
-  changed. This section does not migrate them, and they keep their own keys until then.
+- `/plugins` keeps its own panel. `/permissions` keeps its panel and its keys, and its Command
+  rules row opens the area below; the three controls are choices among values, not entries, so
+  they stay pages of the one panel.
 
 ```text
 /skills ──► Command::Management { area, List } ──► adapter
@@ -682,6 +686,87 @@ Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close
 `dimcode models PROVIDER remove MODEL` removes without the panel's confirmation, and `dimcode
 models PROVIDER inspect MODEL` prints the lines the detail shows.
 
+### The command rules area
+
+Command rules (#819): the Permissions panel's Command rules row and `dimcode permissions
+list|add PATH|remove RULE` over the user's command rules ([permission
+controls](#permission-controls), [command rules](appserver/permission-command-rules.md)). The
+owner reports the list and its Settings revision with `permission.rules`, and replaces the whole
+list at that revision with `permission.set_rules`; a stale revision is
+`permission_rules_conflict`.
+
+The row is appended after Process isolation, so the existing rows keep their positions. It opens
+this area's panel, and Esc there returns to the Permissions panel; the three controls above it
+keep their own pages.
+
+```text
+╭─ Permissions ─────────────────────────────────────────────────╮
+│ >                                                             │
+│   File access          Workspace read/write                 › │
+│   Tool approval        Ask (legacy tool exceptions)         › │
+│   Process isolation                                         › │
+│   Command rules                                             › │
+╰──── ↑↓/Tab move · Enter apply · Esc back ─────────────────────╯
+
+╭─ Command rules ───────────────────────────────────────────────╮
+│ >                                                             │
+│   user                                                        │
+│ › allow exact cargo test -p dim-cli                           │
+│   deny prefix git push                                        │
+│                                                               │
+│   Matches only this command.                                  │
+│   Allows a simple command that would otherwise ask.           │
+│   Applies in every Session, in every workspace.               │
+╰──── Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Esc close ───╯
+```
+
+Every rule is an entry. The owner has no id for one, so the id and the label are the rule's value,
+`DECISION MATCH COMMAND` — `allow exact cargo test -p dim-cli`, `deny prefix git push`. A rule has
+a decision, not an on/off state, so the entry reports no enablement (`enabled: None`) and the
+panel draws neither `enabled` nor `disabled`; it reports no states either, because a stored rule
+the owner cannot use fails the whole read. The area offers three kinds: reload re-reads
+`permission.rules` (the owner reads the Settings source on every call, so there is no rescan
+method), add appends one rule, and remove removes the rule the entry names. Toggle, edit, run and
+inspect are not offered: a rule is not on or off, the one write replaces the whole list, and a
+rule's whole content is its label and its two detail lines.
+
+Add opens the external editor on one rule, the owner's write unit without the revision:
+
+```json
+{"command": "replace-with-a-command", "match": "prefix", "decision": "deny"}
+```
+
+The command is a placeholder no one keeps, so the template reads as the example it is: the
+shared create rule writes nothing for a document left as it was, and the panel says `No change.`
+`deny` with `prefix` is the fail-closed example: a user who replaces only the command still denies.
+The adapter decodes the document as a command rule and checks it with the line prompt's
+`permission::rule` (word normalization, a non-empty command, no shell separators); the write is
+`permission::add_rule`, the line prompt's own operation: read `permission.rules`, append unless an
+equal rule exists, and write at the read revision. An add is the one kind that retries a conflict,
+up to three attempts, because an append does not depend on the other rules and overwrites
+nothing. An equal rule writes nothing and says it is already present. `dimcode permissions add
+PATH` (`-` for stdin) is the same write without an editor.
+
+Remove asks in the hint first, `Remove deny prefix git push? Enter confirm · Esc cancel`, and
+writes the list without that rule at the revision the adapter read. The action carries no
+revision: a rule's id is its value, so a remove acts on exactly the rule the user saw, and a
+change to some other rule while the panel was open is not a conflict. Two failures write nothing
+and show the list as it now is: the rule is no longer listed (`That command rule is no longer
+listed; nothing was removed.`), or another client wrote between the read and the write and the
+owner answered `permission_rules_conflict` (`Command rules changed since they were read; nothing
+was removed.`). `dimcode permissions remove 'deny prefix git push'` takes the whole rule as one
+quoted argument and deletes without a prompt, because the rule typed on the command line is the
+intent.
+
+The area is user scope only: Permission has one user Settings source, with no project rules, and a
+`.dimcode/permission.json` has no effect. Nothing is cached: the panel reads the list when it
+opens, on Ctrl+R and after each of its writes, so a rule written by Allow always, by the line
+prompt or by Web appears on the next of those reads, not while the panel sits idle.
+
+`dimcode permissions list` prints one rule per line, with the decision, the match and the command
+separated by tabs, then the columns and what deny means. `dimcode permissions remove` takes the
+whole rule as one quoted argument, so global options stay unambiguous.
+
 ## Commands
 
 | Entry | Behavior |
@@ -691,6 +776,11 @@ models PROVIDER inspect MODEL` prints the lines the detail shows.
 | `dimcode exec [-p TEXT] [--image PATH ...] [--json]` | Run text and/or local images and exit; read redirected stdin when `-p` is absent. |
 | `dimcode exec resume SESSION_ID [-p TEXT] [--image PATH ...] [--json]` | Continue the named persisted Session with text and/or images. |
 | `dimcode session export SESSION_ID --format markdown\|json [--output PATH]` | Export the main branch; write to stdout when no output path is supplied. |
+| `dimcode session rename SESSION TITLE` | Set the Session's manual title through `session.rename` and print the title the server returns. |
+| `dimcode session rename SESSION --clear` | Clear the manual title, so the Session is untitled again. |
+| `dimcode session delete SESSION` | Permanently delete the Session and everything the store keeps for it; there is no prompt. |
+| `dimcode session cleanup (--older-than DURATION\|--keep N) [--yes]` | Show the Sessions one selector matches, then delete them after confirmation. |
+| `/rename TITLE` or `/rename --clear` | Set, or clear, the shown Session's manual title; the text is a command and never becomes model input. |
 | `/export markdown PATH` or `/export json PATH` | Export the current main branch to a file while the interactive client is idle. |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | Write the Session's whole Timeline as versioned JSONL without a daemon ([Timeline export](appserver/timeline-export.md)); write to stdout when no output path is supplied. |
 | `dimcode daemon vacuum [--database PATH]` | Rewrite an offline native store with SQLite `VACUUM` to reclaim the pages deleted Sessions left, and print its size before and after ([storage format](appserver/native-storage-format.md#sqlite-运行参数与空间回收)); it fails while a daemon owns the database and never creates or upgrades one. |
@@ -716,6 +806,9 @@ models PROVIDER inspect MODEL` prints the lines the detail shows.
 | `dimcode scheduled run ID` | Run one job now over `schedule.run_now` and report what the owner returned, or why it skipped the run. |
 | `dimcode scheduled history ID` | Print one job's recent runs over `schedule.history`, newest first, with each run's state and time. |
 | `/scheduled`, `/schedule` | Open the Scheduler panel ([management surfaces](#management-surfaces)): a job per entry with its schedule, next window and last outcome, and the toggle, edit, add, remove, run and inspect kinds; the Scheduler's verb for inspect is history. Jobs are the host's, not the Session's or workspace's; only a new job's default `cwd` comes from the Session. |
+| `dimcode permissions list` | List the user's command rules over `permission.rules`: each rule's decision, match and command, then the columns and what deny means. |
+| `dimcode permissions add PATH` | Add one rule from `PATH`, or from stdin for `-`, over `permission.rules` and `permission.set_rules`: an equal rule writes nothing; a conflict re-reads and retries, at most three attempts. |
+| `dimcode permissions remove RULE` | Remove the rule named by `RULE`, which is the whole rule as one quoted `'DECISION MATCH COMMAND'` argument, over `permission.rules` and `permission.set_rules` at the revision just read; a rule that is gone, or a raced write, writes nothing and exits 1. |
 | `dimcode login [PROVIDER] [--directory URL] [--device] [--redirect-uri URI]` | Start the described account's browser or device sign-in ([Provider accounts](#provider-accounts)); without PROVIDER, list the described accounts. |
 | `dimcode account PROVIDER` | Print the described account's non-secret state. |
 | `dimcode logout PROVIDER` | Sign the described account out. |
@@ -724,7 +817,7 @@ models PROVIDER inspect MODEL` prints the lines the detail shows.
 | `!command` / `!!command` | Call the Session's existing `shell.run` in record/private mode, including during a model turn. |
 | `--permission read-only\|workspace-write\|full-access` | Select the preset of a new or resumed Session for `dimcode`, `tui`, `exec` and `exec resume` ([permission controls](#permission-controls)). |
 | `/goal [OBJECTIVE \| set OBJECTIVE \| edit OBJECTIVE \| pause \| resume \| clear]` | Read and write the goal of the shown line, in the line client and both terminal UI modes ([goal](#goal)). |
-| `/permissions` | Open independent File access, Tool approval and Process isolation controls; manage command rules while idle ([permission controls](#permission-controls)). |
+| `/permissions` | Open the Permissions panel: independent File access, Tool approval and Process isolation controls, and the Command rules row that lists, adds and removes the user's command rules ([permission controls](#permission-controls)). |
 | `/approvals`, `/approval` | Compatibility aliases for `/permissions`; legacy preset arguments remain supported. |
 
 `dimcode hooks` writes only the user's hook document, and only through the edit kind: `dimcode hooks
@@ -751,6 +844,15 @@ argument errors do not start the daemon.
 ### Daemon startup failure
 
 All entries that start a daemon share the client startup in `connect_inner`.
+On Unix, the daemon keeps only the standard descriptors 0-2 that it inherits
+and closes every other inherited descriptor when it starts, so a long-lived
+daemon never holds its launcher's pipes. Linux closes the range in one
+`close_range` call; where that call is unavailable, and on the other Unix
+systems, the daemon lists `/proc/self/fd` (Linux) or `/dev/fd` and closes
+every number the listing names; when no listing can be read, it closes 3 up to
+the process's descriptor limit, which is the soft limit, else the hard limit,
+else `sysconf(_SC_OPEN_MAX)`, else 65,536, so no path leaves an inherited
+descriptor open.
 The daemon is detached and its stderr is the append-only `daemon.log`, so a
 per-launch note is the only channel that does not parse history or depend on a
 pipe the client may close. Before spawning, the CLI removes
@@ -793,6 +895,122 @@ quote expansion. Missing paths and unsupported formats print usage and return
 to the prompt without submitting input. `/exit` takes no arguments. Only these
 exact command names are intercepted; other text follows the normal input path.
 Subcommands do not create a plugin command registry.
+
+### Session titles
+
+The manual title is the Session's own state: `session.list` and
+`session.summaries` report it with its `manual` source, and later automatic
+generation never replaces it ([title metadata](appserver/session-title-metadata.md),
+[SessionTitle](plugins/SessionTitle.md)). `session.rename {sessionId, title}` sets
+it and `title: null` clears it. Title text belongs to no branch and to no Timeline
+event, so a rename adds nothing the model reads.
+
+`session.rename` is a Session method: the client calls it directly and `hello.features` does not list it. A Session that does not serve it answers `unknown_method`, which the client reports as the unsupported-daemon error, and the typed
+text is never submitted in its place. The same holds for a Session that is not
+attached yet: with no Session shown, `/rename` reports that and sends nothing.
+
+`dimcode session rename SESSION TITLE` prints the title the server returns and
+`--clear` prints that the Session is untitled. Exactly one of TITLE and `--clear`
+is required, so a forgotten argument is a usage error and never clears a title; a
+blank or whitespace-only TITLE is missing, and is refused the same way.
+
+`/rename TITLE` and `/rename --clear` do the same for the shown Session and report
+which happened in one status line. The palette row declares the title argument, so
+choosing `/rename` from the palette fills `/rename ` and waits for it; Enter on a
+bare `/rename` is refused with a `needs <title>` notice and sends nothing, and
+`--clear` is the only form that clears without one. Every form is a command the
+client handles: the text is never queued and never submitted, including while a turn
+runs. The `/resume` list reads `session.catalog` each time it opens, and falls back to
+`session.summaries` on a daemon before the catalog, so it shows the new title; the header
+shows the first message's topic and is unaffected. The
+idle line client reads the same two forms and prints
+`Use /rename TITLE or /rename --clear` for a bare `/rename`.
+
+### Session deletion and cleanup
+
+`dimcode session delete SESSION` removes the Session and everything its store keeps
+([session deletion](appserver/session-deletion-and-fork.md)). There is no prompt: the
+id on the command line is the intent. The reply says whether this call removed it
+([`deleted`](appserver/session-deletion-and-fork.md#31-method)): `Deleted ID` on `true`,
+and on `false` the command prints `Nothing was removed: no stored Session ID.` on stderr
+and exits 1. An id the daemon holds no rows of is a successful delete that removed
+nothing; that is not a usage error, a malformed command line is. A reply without the
+field, from an App Server before it, reads as a delete: the rows are gone either way,
+which is the state asked for.
+
+`dimcode session cleanup` composes deletion from the same two methods, as
+[§5.1](appserver/session-deletion-and-fork.md#51-cleanup-by-age-or-count) requires. It
+reads `session.summaries` with `includeClosed: true`, so a Session this daemon closed is
+listed too and marked `closed` in the preview: its rows are still stored, and no other
+listing shows it ([session catalog](appserver/session-catalog.md#33-sessionsummaries)).
+An App Server before that parameter refuses it `invalid_params`, and without it the
+command cannot see a closed Session; it therefore stops before any delete, prints
+`This App Server is too old to clean up Sessions safely; nothing was deleted.` and exits
+1. The field it sends with every delete, `requireInactive`, lands with `includeClosed`,
+so a server that refuses one refuses both, and a delete that answers `invalid_params`
+before anything was deleted stops the same way. It
+selects with one of two selectors and reads both from the `updatedAt` of
+`session.summaries`, the Session's last activity:
+
+| Selector | Selection |
+| --- | --- |
+| `--older-than DURATION` | Every Session whose `updatedAt` is at least `DURATION` ago. `DURATION` is a count and a unit `d`, `h` or `m`, such as `30d`. |
+| `--keep N` | The N most recently active Sessions stay; every other Session is selected. |
+
+Cleanup selects only the Sessions `/resume` lists by default
+([classification](appserver/session-classification.md#35-catalog-visibility)): origin
+`client` or `unknown`. An `internal` Session is never selected: a member goes with
+its leader's delete and a launched Session belongs to its plugin. An `acp` Session is
+never selected either; `dimcode session delete ID` deletes one. A Session it does not
+select neither counts toward `--keep N` nor appears in the preview.
+
+A Session with a running turn or an attached client is kept: the preview lists the
+skipped Sessions after the selection under `Kept (active):`, in the same columns
+followed by the reason (`running`, `N clients attached`), and no such Session is
+deleted, `--yes` included. A line that failed or is closing is not a reason to keep
+one: nothing runs on it, and the delete's own close settles it, so cleanup deletes such
+a Session when nothing else uses it. `--keep N`
+still keeps the N most recently active Sessions, and an active Session older than those
+is kept as well without its consuming one of the N. `dimcode session delete ID` still
+deletes an active Session on purpose: the server permits it, and this is the bulk
+command's rule. The partition is the preview's reading of `running` (which covers
+`main`) and `attachedClients`; every delete carries `requireInactive: true`, so the owner
+checks again at the delete, on every line and with uses and holds included. A Session
+the owner refuses with `session_active` is listed under `Kept (in use at the delete):`
+after the deletes, in the same columns followed by the owner's reason, and a refusal is
+not a failure: it does not change the exit status. A delete whose reply is
+`deleted: false` means another caller removed the Session after the summaries were read:
+the command prints `Already gone: ID` and counts it as neither a delete nor a failure. A
+reply without the field counts as a delete, as `dimcode session delete` reads it. When
+every selected Session was kept, the command prints `Nothing to delete: every matching
+Session is active.`, whether the preview kept them all or the owner refused each delete,
+and exits 0.
+
+Exactly one selector is required. The command prints the selection before it reads a
+key — the id, the title (`-` when untitled) and how long ago the Session was last
+active, as one tab-separated line each, with `closed` after a Session this daemon
+closed, drawn here with spaces — and deletes only after confirmation:
+
+```text
+$ dimcode session cleanup --keep 1
+a1b2c3d4-…  Notes on the build  3d ago
+5e6f7a8b-…  -                   12d ago  closed
+Kept (active):
+c3d4e5f6-…  Fix the parser      1d ago   running
+Delete 2 Sessions? [y/N] y
+Deleted a1b2c3d4-…
+Deleted 5e6f7a8b-…
+```
+
+On a terminal, only `y` or `yes` confirms. Without a terminal nothing confirms, so a
+script passes `--yes`, which also skips the prompt; otherwise the command refuses and
+names `--yes`. A confirmed run deletes every selected id even when one fails: each
+failure is reported with its id and the method's error, the command that retries it
+(`dimcode session delete ID`) is printed for each failed id, and the run exits 1. A
+selector that names no Session prints what it kept: `Nothing to delete: --keep N keeps
+every Session.` for `--keep N`, or `Nothing to delete: no Session is older than
+DURATION.` for `--older-than DURATION`; the run exits 0 either way. A selection whose
+Sessions are all active prints the sentence above instead.
 
 ### Migration interaction
 
@@ -1296,11 +1514,20 @@ same controls as compatibility aliases, not a second preset chooser. The control
 `main`; each field selection writes only its dimension using the current whole policy and
 version. A failed save neither changes remembered choices nor falls back to a legacy preset.
 
+Process isolation opens the execution settings. The Command rules row opens the management panel
+of [The command rules area](#the-command-rules-area), where the rules are listed, added and
+removed; Esc there returns to this panel, and the three controls above the row keep their pages.
+Arguments after `/permissions` in the terminal UI open that panel instead of being ignored, and
+it opens holding one line that says where arguments work — the line prompt and `dimcode
+permissions` — which stands above the panel's answers until the user's first key there, however
+long the opening read takes; the compact grammar belongs to the line prompt.
+
 ```text
 Permissions (main branch)
 > File access          Workspace read/write >
   Tool approval        Ask                  >
   Process isolation    Off                  >
+  Command rules                             >
 
 File access                         Tool approval
   Read only                       > Ask
@@ -1363,6 +1590,10 @@ a number never refers to a position the user has not seen. A form that prints no
 already present, a preset switch, an "always" answer during a turn) keeps the last printed one; if
 the rules changed since, its revision makes the next `remove` fail, and the conflict prints the
 current list. Without a printed list in this process, `remove` asks for `/permissions` first.
+`remove N` keeps the number because it acts on the list this prompt printed and holds that
+listing's revision, while `dimcode permissions remove` and the panel take the rule's value
+because each reads the list immediately before the write, so there is no printed listing to
+number.
 COMMAND is the rest of the line; the CLI rejects an empty command or one containing a separator
 character (`dim_agent_types::COMMAND_SEPARATORS`, the set F2 validates) before any call. A
 preset that is already in force writes nothing. Without the advertised methods, the command

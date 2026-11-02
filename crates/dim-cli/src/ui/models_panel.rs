@@ -338,9 +338,12 @@ impl ModelsPanel {
                     .strip_prefix(EDIT_MODELS)
                     .and_then(|rest| rest.strip_prefix("::"))
                 {
-                    Some(provider_id) => Effect::OpenArea(Area::Models {
-                        provider_id: provider_id.to_owned(),
-                    }),
+                    Some(provider_id) => Effect::OpenArea {
+                        area: Area::Models {
+                            provider_id: provider_id.to_owned(),
+                        },
+                        note: None,
+                    },
                     None => Effect::None,
                 }
             }
@@ -985,7 +988,10 @@ mod tests {
         // plain, its edit row.
         panel.handle_key(key_of(KeyCode::Down));
         match panel.handle_key(key_of(KeyCode::Enter)) {
-            Effect::OpenArea(Area::Models { provider_id }) => {
+            Effect::OpenArea {
+                area: Area::Models { provider_id },
+                note: None,
+            } => {
                 assert_eq!(provider_id, "dim");
             }
             _ => panic!("expected the Provider's area"),

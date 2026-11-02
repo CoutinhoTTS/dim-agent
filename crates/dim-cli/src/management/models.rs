@@ -655,7 +655,9 @@ fn entry(
         id: model.entry.model_id.clone(),
         label: model.entry.display_name.clone(),
         detail: detail_lines(model),
-        enabled: model.enabled,
+        // Every model has an on/off state, including an unavailable static
+        // model, whose enablement the owner's set keeps.
+        enabled: Some(model.enabled),
         states,
         actions: kinds,
         remove_verb,

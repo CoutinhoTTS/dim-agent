@@ -1259,6 +1259,7 @@ impl Worker {
                 }
             }
             Command::Compact => self.compact().await,
+            Command::Rename(title) => self.rename(title).await,
             Command::Goal(request) => self.goal(request).await,
             Command::ToggleWeb => {
                 let result: crate::Result<WebToggled> =
@@ -1782,15 +1783,22 @@ impl Worker {
         self.send(Update::Context(reading));
     }
 
-    /// `/compact`: asks the shown line's context to compact. The reply is
-    /// reported; the transcript row comes from the events (compaction
-    /// requirements §4).
+    /// Asks the shown line to compact; committed outcomes reach its transcript.
     async fn compact(&mut self) {
         let params = json!({"sessionId": self.session_id, "branchId": self.focus});
         match self.client.send("session.context.compact", params).await {
             Ok(request) => self.compact_requests.push(request),
             Err(error) => self.send(Update::Compacted(CompactReply::Failed(error.to_string()))),
         }
+    }
+
+    /// `/rename`: sets the shown Session's manual title, or clears it when
+    /// `title` is `None`. The text is a command, never an input.
+    async fn rename(&mut self, title: Option<String>) {
+        let reply =
+            crate::session_command::set_title(&mut self.client, &self.session_id, title.as_deref())
+                .await;
+        self.send(Update::Renamed(reply));
     }
 
     /// `/goal`: the shown line's goal, written by the method the request
@@ -3534,7 +3542,9 @@ impl Worker {
             .position(|request| *request == id)
         {
             self.compact_requests.remove(index);
-            self.send(Update::Compacted(compact_reply(result)));
+            if let Some(reply) = compact_reply(result) {
+                self.send(Update::Compacted(reply));
+            }
             return Ok(());
         }
         if let Some(index) = self
@@ -4018,23 +4028,27 @@ fn app_error(error: &client::RpcError) -> Option<&str> {
 }
 
 /// What a `session.context.compact` reply came to.
-fn compact_reply(result: Result<serde_json::Value, client::RpcError>) -> CompactReply {
+fn compact_reply(result: Result<serde_json::Value, client::RpcError>) -> Option<CompactReply> {
     #[derive(Deserialize)]
     #[serde(tag = "status", rename_all = "snake_case")]
     enum Reply {
         Completed {},
-        Skipped { reason: String },
+        Skipped {
+            #[serde(rename = "reason")]
+            _reason: String,
+        },
     }
     match result {
         Ok(value) => match serde_json::from_value::<Reply>(value) {
-            Ok(Reply::Completed { .. }) => CompactReply::Completed,
-            Ok(Reply::Skipped { reason }) => CompactReply::Skipped(reason),
-            Err(_) => CompactReply::Failed("Invalid session.context.compact response".into()),
+            Ok(Reply::Completed { .. } | Reply::Skipped { .. }) => None,
+            Err(_) => Some(CompactReply::Failed(
+                "Invalid session.context.compact response".into(),
+            )),
         },
         Err(error) => match app_error(&error) {
-            Some("unknown_method") => CompactReply::Unsupported,
-            Some("compaction_cancelled") => CompactReply::Cancelled(error.message),
-            _ => CompactReply::Failed(error.message),
+            Some("unknown_method") => Some(CompactReply::Unsupported),
+            Some("compaction_failed" | "compaction_cancelled") => None,
+            _ => Some(CompactReply::Failed(error.message)),
         },
     }
 }

@@ -221,6 +221,10 @@ pub enum Command {
     Usage,
     /// `/compact`: ask the shown line to compact its context.
     Compact,
+    /// `/rename`: set the shown Session's manual title, or clear it when
+    /// `title` is `None`; an empty text is refused, and only `--clear`
+    /// clears. Nothing here reaches the model.
+    Rename(Option<String>),
     /// `/goal`: show, set, edit, pause, resume or clear the shown line's goal.
     Goal(crate::goal::Request),
     SetPermission(crate::permission::Change),
@@ -297,6 +301,7 @@ pub enum Area {
     Models {
         provider_id: String,
     },
+    Permissions,
 }
 
 impl Area {
@@ -307,6 +312,7 @@ impl Area {
             Self::Hooks => "hooks",
             Self::Scheduled => "scheduled",
             Self::Models { .. } => "models",
+            Self::Permissions => "permissions",
         }
     }
 
@@ -394,8 +400,9 @@ pub struct ManagementEntry {
     /// What the entry says about itself, a line each, shown for the entry the
     /// panel has selected.
     pub detail: Vec<String>,
-    /// Whether the entry is on; a toggle asks for the other state.
-    pub enabled: bool,
+    /// Whether the entry is on; a toggle asks for the other state. `None`
+    /// for an entry that has no on/off state, such as a command rule.
+    pub enabled: Option<bool>,
     /// What the row names besides on and off.
     pub states: Vec<EntryState>,
     pub actions: Vec<ActionKind>,
@@ -848,16 +855,26 @@ pub struct ContextReading {
     pub threshold: u64,
 }
 
-/// A `session.context.compact` reply as `/compact` reports it.
+/// Failures `/compact` reports independently of committed outcomes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompactReply {
-    Completed,
-    Skipped(String),
-    /// `compaction_failed` or another failure of the call, with its message.
+    /// Failure of the call itself, with its message.
     Failed(String),
-    Cancelled(String),
     /// The daemon offers no `session.context.compact`.
     Unsupported,
+}
+
+/// A `session.rename` reply as `/rename` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenameReply {
+    /// The manual title the server stored.
+    Titled(String),
+    /// The Session has no title again.
+    Untitled,
+    /// The daemon serves no `session.rename` for this Session.
+    Unsupported,
+    /// The call failed, with its message.
+    Failed(String),
 }
 
 #[allow(dead_code)]
@@ -963,6 +980,8 @@ pub enum Update {
     Context(Option<ContextReading>),
     /// What a `/compact` came to, localized by the interface.
     Compacted(CompactReply),
+    /// What a `/rename` came to, localized by the interface.
+    Renamed(RenameReply),
     /// Progress of the sign-in tagged `attempt`.
     Oauth {
         attempt: u64,

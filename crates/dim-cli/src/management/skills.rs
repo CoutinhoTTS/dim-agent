@@ -121,7 +121,7 @@ pub(super) fn view(catalog: &Catalog, actions: &[ActionKind]) -> ManagementView 
                 id: entry.id.clone(),
                 label: entry.name.clone(),
                 detail: [entry.description.clone(), entry.file_path.clone()].to_vec(),
-                enabled: entry.enabled,
+                enabled: Some(entry.enabled),
                 states,
                 actions: super::entry_kinds(actions),
                 remove_verb: RemoveVerb::Remove,
