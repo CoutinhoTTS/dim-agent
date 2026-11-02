@@ -1965,7 +1965,7 @@ fn hooks_commands_refuse_a_daemon_that_does_not_advertise_them() {
     assert!(
         terminal
             .transcript
-            .contains("This daemon cannot manage hooks."),
+            .contains("This daemon lists hooks but cannot edit them."),
         "{}",
         terminal.transcript
     );
@@ -2008,7 +2008,8 @@ fn hooks_commands_refuse_a_daemon_that_does_not_advertise_them() {
     daemon.join().unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("This daemon cannot manage hooks."),
+        String::from_utf8_lossy(&output.stderr)
+            .contains("This daemon lists hooks but cannot edit them."),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );

@@ -70,6 +70,17 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "The Scheduler has no area document." => "调度器没有领域文档。",
         "No scheduled job has that id." => "没有该 id 的定时任务。",
         "This daemon cannot manage {area}." => "无法管理{area}。",
+        "This daemon lists {area} but cannot toggle them." => "可以列出{area}，但无法切换它们。",
+        "This daemon lists {area} but cannot edit them." => "可以列出{area}，但无法编辑它们。",
+        "This daemon lists {area} but cannot reload them." => {
+            "可以列出{area}，但无法重新加载它们。"
+        }
+        "This daemon lists {area} but cannot add them." => "可以列出{area}，但无法添加它们。",
+        "This daemon lists {area} but cannot remove them." => "可以列出{area}，但无法删除它们。",
+        "This daemon lists {area} but cannot run them." => "可以列出{area}，但无法运行它们。",
+        "This daemon lists {area} but cannot inspect them." => {
+            "可以列出{area}，但无法查看它们的详情或历史。"
+        }
         "The document deleted {field}, which the owner cannot clear; nothing was written." => {
             "文档删除了 {field}，所有者无法清除它；本次没有写入。"
         }

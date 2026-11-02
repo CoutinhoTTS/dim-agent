@@ -76,6 +76,27 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "The Scheduler has no area document." => "スケジューラーには領域ドキュメントがありません。",
         "No scheduled job has that id." => "その id のスケジュールジョブはありません。",
         "This daemon cannot manage {area}." => "{area} を管理できません。",
+        "This daemon lists {area} but cannot toggle them." => {
+            "{area} の一覧は表示できますが、切り替えはできません。"
+        }
+        "This daemon lists {area} but cannot edit them." => {
+            "{area} の一覧は表示できますが、編集はできません。"
+        }
+        "This daemon lists {area} but cannot reload them." => {
+            "{area} の一覧は表示できますが、再読み込みはできません。"
+        }
+        "This daemon lists {area} but cannot add them." => {
+            "{area} の一覧は表示できますが、追加はできません。"
+        }
+        "This daemon lists {area} but cannot remove them." => {
+            "{area} の一覧は表示できますが、削除はできません。"
+        }
+        "This daemon lists {area} but cannot run them." => {
+            "{area} の一覧は表示できますが、実行はできません。"
+        }
+        "This daemon lists {area} but cannot inspect them." => {
+            "{area} の一覧は表示できますが、詳細や履歴は見られません。"
+        }
         "The document deleted {field}, which the owner cannot clear; nothing was written." => {
             "ドキュメントから {field} が削除されましたが、所有者は消去できません。何も書き込みませんでした。"
         }

@@ -76,6 +76,27 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "The Scheduler has no area document." => "O Agendador não tem documento de área.",
         "No scheduled job has that id." => "Nenhuma tarefa agendada tem esse id.",
         "This daemon cannot manage {area}." => "Não é possível gerir {area}.",
+        "This daemon lists {area} but cannot toggle them." => {
+            "O daemon lista {area}, mas não permite alternar."
+        }
+        "This daemon lists {area} but cannot edit them." => {
+            "O daemon lista {area}, mas não permite editar."
+        }
+        "This daemon lists {area} but cannot reload them." => {
+            "O daemon lista {area}, mas não permite recarregar."
+        }
+        "This daemon lists {area} but cannot add them." => {
+            "O daemon lista {area}, mas não permite adicionar."
+        }
+        "This daemon lists {area} but cannot remove them." => {
+            "O daemon lista {area}, mas não permite remover."
+        }
+        "This daemon lists {area} but cannot run them." => {
+            "O daemon lista {area}, mas não permite executar."
+        }
+        "This daemon lists {area} but cannot inspect them." => {
+            "O daemon lista {area}, mas não permite ver os detalhes ou o histórico."
+        }
         "The document deleted {field}, which the owner cannot clear; nothing was written." => {
             "O documento removeu {field}, que o proprietário não pode limpar; nada foi escrito."
         }

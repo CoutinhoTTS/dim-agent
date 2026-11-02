@@ -76,6 +76,27 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "The Scheduler has no area document." => "Le planificateur n'a pas de document de domaine.",
         "No scheduled job has that id." => "Aucune tâche planifiée n'a cet id.",
         "This daemon cannot manage {area}." => "Impossible de gérer {area}.",
+        "This daemon lists {area} but cannot toggle them." => {
+            "Le daemon liste {area}, mais ne peut pas les basculer."
+        }
+        "This daemon lists {area} but cannot edit them." => {
+            "Le daemon liste {area}, mais ne peut pas les modifier."
+        }
+        "This daemon lists {area} but cannot reload them." => {
+            "Le daemon liste {area}, mais ne peut pas les recharger."
+        }
+        "This daemon lists {area} but cannot add them." => {
+            "Le daemon liste {area}, mais ne peut pas les ajouter."
+        }
+        "This daemon lists {area} but cannot remove them." => {
+            "Le daemon liste {area}, mais ne peut pas les supprimer."
+        }
+        "This daemon lists {area} but cannot run them." => {
+            "Le daemon liste {area}, mais ne peut pas les exécuter."
+        }
+        "This daemon lists {area} but cannot inspect them." => {
+            "Le daemon liste {area}, mais ne peut pas afficher leur détail ou leur historique."
+        }
         "The document deleted {field}, which the owner cannot clear; nothing was written." => {
             "Le document supprime {field}, que le propriétaire ne peut pas effacer ; rien n'a été écrit."
         }

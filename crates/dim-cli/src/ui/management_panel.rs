@@ -108,6 +108,13 @@ pub const STRINGS: &[&str] = &[
     "The document changes no field; nothing was written.",
     "The document deleted {field}, which the owner cannot clear; nothing was written.",
     "This daemon cannot manage {area}.",
+    "This daemon lists {area} but cannot toggle them.",
+    "This daemon lists {area} but cannot edit them.",
+    "This daemon lists {area} but cannot reload them.",
+    "This daemon lists {area} but cannot add them.",
+    "This daemon lists {area} but cannot remove them.",
+    "This daemon lists {area} but cannot run them.",
+    "This daemon lists {area} but cannot inspect them.",
     "This workspace's hook settings changed since they were read; nothing was written.",
 ];
 

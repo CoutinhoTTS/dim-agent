@@ -31,8 +31,9 @@ use crate::ui::i18n::{self, t, tf};
 struct Methods {
     catalog: &'static str,
     kinds: &'static [(ActionKind, &'static str)],
-    /// What the area manages, as the unsupported sentence names it: the
-    /// noun behind "This daemon cannot manage ...".
+    /// What the area manages, as the unsupported sentences name it: a
+    /// plural noun phrase behind "This daemon cannot manage ..." and the
+    /// subject of "This daemon lists ... but cannot ... them.".
     manages: &'static str,
 }
 
@@ -151,33 +152,55 @@ pub fn supported(client: &Client, request: &ManagementRequest) -> Result<(), Str
             if client.supports(&[methods.catalog]) {
                 Ok(())
             } else {
-                Err(unsupported(request.area))
+                Err(unsupported(request.area, None))
             }
         }
     }
 }
 
-/// Refuses a kind the daemon cannot serve for `area`, with the area's
-/// sentence, for a surface that checks before it gathers anything.
+/// Refuses a kind the daemon cannot serve for `area`: the area's sentence
+/// when the read is missing, and the kind's when the read is served without
+/// the kind's method, for a surface that checks before it gathers anything.
 pub fn supports_kind(client: &Client, area: Area, kind: ActionKind) -> Result<(), String> {
     let methods = methods_of(area);
     if !client.supports(&[methods.catalog]) {
-        return Err(unsupported(area));
+        return Err(unsupported(area, None));
     }
     match methods.method(kind) {
         Some(method) if client.supports(&[method]) => Ok(()),
-        _ => Err(unsupported(area)),
+        _ => Err(unsupported(area, Some(kind))),
     }
 }
 
-/// The unsupported-daemon sentence: what the area manages, translated
-/// where it is used, so the shared module names no area.
-fn unsupported(area: Area) -> String {
+/// The unsupported-daemon sentence: the area alone when the daemon does not
+/// serve its read, and the kind's own sentence when it serves the read
+/// without the kind's method. `manages` is always a plural noun phrase, so
+/// "them" holds for every area, and each sentence is translated whole.
+fn unsupported(area: Area, kind: Option<ActionKind>) -> String {
     let methods = methods_of(area);
-    tf(
-        "This daemon cannot manage {area}.",
-        &[("area", t(methods.manages))],
-    )
+    let Some(kind) = kind else {
+        return tf(
+            "This daemon cannot manage {area}.",
+            &[("area", t(methods.manages))],
+        );
+    };
+    tf(kind_sentence(kind), &[("area", t(methods.manages))])
+}
+
+/// The sentence a refused kind names, one per kind, so each language can
+/// word the whole refusal its own way. A kind whose method is the catalog
+/// itself (reload for Hooks and the Scheduler) cannot reach its sentence:
+/// the read's check has already passed. Skills' reload has its own method.
+fn kind_sentence(kind: ActionKind) -> &'static str {
+    match kind {
+        ActionKind::Toggle => "This daemon lists {area} but cannot toggle them.",
+        ActionKind::Edit => "This daemon lists {area} but cannot edit them.",
+        ActionKind::Reload => "This daemon lists {area} but cannot reload them.",
+        ActionKind::Add => "This daemon lists {area} but cannot add them.",
+        ActionKind::Remove => "This daemon lists {area} but cannot remove them.",
+        ActionKind::Run => "This daemon lists {area} but cannot run them.",
+        ActionKind::Inspect => "This daemon lists {area} but cannot inspect them.",
+    }
 }
 
 /// The id of the entry `action` names, when it names one.

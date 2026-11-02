@@ -346,7 +346,9 @@ Management text is composed in the interface language on both surfaces. The pane
 An adapter talks to the daemon through the client connection, so a subcommand needs no Session.
 It turns its owner's reply into one client view at that boundary, it performs the area's actions,
 and it refuses an action whose methods the daemon does not advertise, with an unsupported-daemon
-error. It never falls back to a file, to another method or to the host's own environment.
+error. That refusal names the area when the daemon does not serve its read, and names the kind
+when it serves the read without the kind's method: `This daemon lists scheduled jobs but cannot
+remove them.` It never falls back to a file, to another method or to the host's own environment.
 
 The client infers nothing the methods do not report. A view that needs a fact the reply does not
 carry gets that fact from the producer: `skills.catalog` reports each entry's `source`, and

@@ -72,6 +72,27 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "The Scheduler has no area document." => "스케줄러에는 영역 문서가 없습니다.",
         "No scheduled job has that id." => "해당 id의 예약 작업이 없습니다.",
         "This daemon cannot manage {area}." => "{area}을(를) 관리할 수 없습니다.",
+        "This daemon lists {area} but cannot toggle them." => {
+            "{area} 목록은 표시할 수 있지만 전환할 수 없습니다."
+        }
+        "This daemon lists {area} but cannot edit them." => {
+            "{area} 목록은 표시할 수 있지만 편집할 수 없습니다."
+        }
+        "This daemon lists {area} but cannot reload them." => {
+            "{area} 목록은 표시할 수 있지만 다시 로드할 수 없습니다."
+        }
+        "This daemon lists {area} but cannot add them." => {
+            "{area} 목록은 표시할 수 있지만 추가할 수 없습니다."
+        }
+        "This daemon lists {area} but cannot remove them." => {
+            "{area} 목록은 표시할 수 있지만 삭제할 수 없습니다."
+        }
+        "This daemon lists {area} but cannot run them." => {
+            "{area} 목록은 표시할 수 있지만 실행할 수 없습니다."
+        }
+        "This daemon lists {area} but cannot inspect them." => {
+            "{area} 목록은 표시할 수 있지만 세부 정보나 기록을 볼 수 없습니다."
+        }
         "The document deleted {field}, which the owner cannot clear; nothing was written." => {
             "{field}이(가) 문서에서 삭제되었지만 소유자가 지울 수 없습니다. 아무것도 쓰지 않았습니다."
         }

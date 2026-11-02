@@ -29119,9 +29119,23 @@
     },
     {
       "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::de::management",
+      "references": [
+        "path de::management::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
       "to": "dim_cli::ui::i18n::es",
       "references": [
         "path es::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::es::management",
+      "references": [
+        "path es::management::lookup"
       ]
     },
     {
@@ -29133,9 +29147,23 @@
     },
     {
       "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::fr::management",
+      "references": [
+        "path fr::management::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
       "to": "dim_cli::ui::i18n::id",
       "references": [
         "path id::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::id::management",
+      "references": [
+        "path id::management::lookup"
       ]
     },
     {
@@ -29147,9 +29175,23 @@
     },
     {
       "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::ja::management",
+      "references": [
+        "path ja::management::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
       "to": "dim_cli::ui::i18n::ko",
       "references": [
         "path ko::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::ko::management",
+      "references": [
+        "path ko::management::lookup"
       ]
     },
     {
@@ -29161,9 +29203,23 @@
     },
     {
       "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::pt_br::management",
+      "references": [
+        "path pt_br::management::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
       "to": "dim_cli::ui::i18n::pt_pt",
       "references": [
         "path pt_pt::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::pt_pt::management",
+      "references": [
+        "path pt_pt::management::lookup"
       ]
     },
     {
@@ -29175,9 +29231,23 @@
     },
     {
       "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::zh_cn::management",
+      "references": [
+        "path zh_cn::management::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
       "to": "dim_cli::ui::i18n::zh_hant",
       "references": [
         "path zh_hant::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::zh_hant::management",
+      "references": [
+        "path zh_hant::management::lookup"
       ]
     },
     {

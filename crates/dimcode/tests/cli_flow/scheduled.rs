@@ -1091,7 +1091,7 @@ fn scheduled_add_is_refused_before_stdin_is_read() {
     assert_eq!(output.status.code(), Some(1));
     assert!(
         String::from_utf8_lossy(&output.stderr)
-            .contains("This daemon cannot manage scheduled jobs."),
+            .contains("This daemon lists scheduled jobs but cannot add them."),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -1124,7 +1124,7 @@ fn scheduled_set_is_refused_before_stdin_is_read() {
     assert_eq!(output.status.code(), Some(1));
     assert!(
         String::from_utf8_lossy(&output.stderr)
-            .contains("This daemon cannot manage scheduled jobs."),
+            .contains("This daemon lists scheduled jobs but cannot edit them."),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -1155,6 +1155,35 @@ fn scheduled_commands_refuse_a_daemon_that_does_not_advertise_them() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+/// A daemon that serves the read but not the kind's method is refused by
+/// name: the sentence says which kind is missing, not that the area is
+/// unmanageable, and the refusal is made before anything is sent.
+#[test]
+fn scheduled_remove_names_the_kind_the_daemon_cannot_serve() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["schedule.list"]);
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            assert!(line.trim().is_empty(), "the command sent {line}");
+            line.clear();
+        }
+    });
+    let output = home
+        .command()
+        .args(["scheduled", "remove", "job-1"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("This daemon lists scheduled jobs but cannot remove them."),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// `/scheduled` lists the jobs with their schedule, state, next window and
