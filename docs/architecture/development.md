@@ -29,7 +29,7 @@ The account's OAuth client IDs never enter the repository. `dimcode` reads `DIM_
 
 ## CLI and daemon lifecycle
 
-`dimcode models PROVIDER [--refresh]` uses the catalog/refresh RPCs and prints model IDs and availability without credential information. `--provider` and `--model` select a model for a new session.
+`dimcode models PROVIDER [--refresh]` uses the catalog/refresh RPCs and prints model IDs and availability without credential information; its `enable`, `disable`, `edit`, `set`, `add`, `remove` and `inspect` verbs manage the same Provider's models through `provider.management` and the `provider.models.*` writes. `--provider` and `--model` select a model for a new session.
 
 `dimcode daemon stop` connects only to an existing authenticated endpoint for the selected home. No endpoint means successful completion without creating a daemon. Shutdown uses the normal server settlement path, waits for process/endpoint closure with a bounded timeout and never force-kills a process. The developer launcher uses this command before loading a new build. Account and session files are retained across restart.
 

@@ -733,10 +733,10 @@ fn edit_management(
 ) -> std::result::Result<(), i32> {
     // A draft a refused write kept continues in its own file; anything else
     // starts from the document the panel read.
-    let (target, draft, seed, reopened) = match app.kept_draft(area, &target) {
+    let (target, draft, seed, reopened) = match app.kept_draft(&area, &target) {
         Some((target, draft, seed)) => (target, draft, seed, true),
         None => {
-            let draft = match editor::Draft::open(&app.home, area, &text) {
+            let draft = match editor::Draft::open(&app.home, area.clone(), &text) {
                 Ok(draft) => draft,
                 Err(error) => {
                     if let Some(Prompt::Management(panel)) = &mut app.prompt {
@@ -1839,7 +1839,7 @@ impl App {
                 // one, and the notice still reports what the action came to.
                 let same_area = matches!(
                     &self.prompt,
-                    Some(Prompt::Management(panel)) if panel.area() == reply.request.area
+                    Some(Prompt::Management(panel)) if panel.area() == &reply.request.area
                 );
                 if same_area {
                     let Some(Prompt::Management(panel)) = &mut self.prompt else {
@@ -1860,7 +1860,7 @@ impl App {
                                 if creating =>
                             {
                                 panel.conflicted(
-                                    reply.request.area,
+                                    &reply.request.area,
                                     true,
                                     &settled.draft.path().display().to_string(),
                                 );
@@ -1868,14 +1868,14 @@ impl App {
                             }
                             ManagementResult::Refused(ManagementRefusal::Conflict { .. }) => {
                                 panel.conflicted(
-                                    reply.request.area,
+                                    &reply.request.area,
                                     false,
                                     &settled.draft.path().display().to_string(),
                                 );
                             }
                             ManagementResult::Refused(_) => {
                                 panel.kept(
-                                    reply.request.area,
+                                    &reply.request.area,
                                     &settled.draft.path().display().to_string(),
                                 );
                                 self.hold_draft(settled);
@@ -1936,7 +1936,7 @@ impl App {
                     match &reply.result {
                         ManagementResult::View { view, .. } => {
                             let text = crate::ui::management_panel::reloaded(
-                                reply.request.area,
+                                &reply.request.area,
                                 view.as_ref(),
                             );
                             self.reports.push(Block::Status {
@@ -3309,13 +3309,13 @@ impl App {
     /// Another target's kept draft is none of this target's business.
     fn kept_draft(
         &mut self,
-        area: Area,
+        area: &Area,
         target: &WriteTarget,
     ) -> Option<(WriteTarget, editor::Draft, Option<serde_json::Value>)> {
         let at = self
             .management_edits
             .iter()
-            .position(|kept| kept.area == area && kept.target.same_target(target))?;
+            .position(|kept| kept.area == *area && kept.target.same_target(target))?;
         let kept = self.management_edits.remove(at);
         if kept.draft.text().is_err() {
             self.management_edits.push(kept);
@@ -3331,7 +3331,7 @@ impl App {
             return;
         };
         self.management_named = Some((
-            request.area,
+            request.area.clone(),
             request.action.clone(),
             panel.label_of(&request.action),
         ));
@@ -3472,7 +3472,7 @@ impl App {
             }) {
                 Err(error) => {
                     panel.failed(error);
-                    panel.kept(area, &path);
+                    panel.kept(&area, &path);
                     Next::Keep
                 }
                 Ok(document) if panel.document(&target) == Some(&document) => {
@@ -3515,7 +3515,7 @@ impl App {
                     },
                 };
                 self.hold_draft(ManagementDraft {
-                    area,
+                    area: area.clone(),
                     target,
                     draft,
                     seed,
@@ -3530,7 +3530,8 @@ impl App {
     /// `/<area>` opens the management panel of `area`, which reads it.
     fn open_management(&mut self, area: Area, note: Option<String>) {
         self.open_prompt(Prompt::Management(Box::new(ManagementPanel::new(
-            area, note,
+            area.clone(),
+            note,
         ))));
         self.host.send(Command::Management(ManagementRequest {
             area,
@@ -3542,7 +3543,7 @@ impl App {
     /// opens the editor on the create document.
     fn open_management_create(&mut self, area: Area) {
         self.open_prompt(Prompt::Management(Box::new(
-            ManagementPanel::opening_create(area),
+            ManagementPanel::opening_create(area.clone()),
         )));
         self.host.send(Command::Management(ManagementRequest {
             area,
@@ -9747,6 +9748,7 @@ mod tests {
     fn a_toggle_without_its_panel_names_the_entrys_label() {
         use crate::model::session::{
             ActionKind, ManagementEntry, ManagementGroup, ManagementReply, ManagementView,
+            RemoveVerb,
         };
         let root = tempfile::tempdir().unwrap();
         let theme = test_theme();
@@ -9774,6 +9776,7 @@ mod tests {
                             enabled: Some(true),
                             states: Vec::new(),
                             actions: vec![ActionKind::Toggle],
+                            remove_verb: RemoveVerb::Remove,
                             document: None,
                             run: None,
                         }],
@@ -9804,6 +9807,87 @@ mod tests {
         }));
         let (text, _) = app.notice.clone().unwrap();
         assert_eq!(text, "Disabled commit. catalog unavailable");
+    }
+
+    /// A reply for another Provider's models leaves this panel as it is: the
+    /// panel manages one whole area, Provider scope included, and the notice
+    /// still reports what the action came to.
+    #[test]
+    fn a_reply_for_another_providers_models_leaves_the_panel_as_it_is() {
+        use crate::model::session::{
+            ActionKind, ManagementEntry, ManagementGroup, ManagementReply, ManagementView,
+            RemoveVerb,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            root.path().join("home"),
+            "/w".into(),
+        );
+        let row = |id: &str, label: &str| ManagementEntry {
+            id: id.into(),
+            label: label.into(),
+            detail: Vec::new(),
+            enabled: Some(true),
+            states: Vec::new(),
+            actions: vec![ActionKind::Toggle],
+            remove_verb: RemoveVerb::Remove,
+            document: None,
+            run: None,
+        };
+        let area = Area::Models {
+            provider_id: "a".into(),
+        };
+        let mut panel = ManagementPanel::new(area.clone(), None);
+        panel.set_result(&ManagementReply {
+            request: ManagementRequest {
+                area: area.clone(),
+                action: ManagementAction::List,
+            },
+            result: ManagementResult::View {
+                view: Box::new(ManagementView {
+                    groups: vec![ManagementGroup {
+                        heading: "catalog".into(),
+                        entries: vec![row("flash", "Flash")],
+                    }],
+                    ..ManagementView::default()
+                }),
+                note: None,
+            },
+        });
+        app.prompt = Some(Prompt::Management(Box::new(panel)));
+        app.apply(Update::Management(ManagementReply {
+            request: ManagementRequest {
+                area: Area::Models {
+                    provider_id: "b".into(),
+                },
+                action: ManagementAction::Toggle {
+                    id: "other".into(),
+                    enabled: false,
+                },
+            },
+            result: ManagementResult::View {
+                view: Box::new(ManagementView {
+                    groups: vec![ManagementGroup {
+                        heading: "catalog".into(),
+                        entries: vec![row("other", "Other")],
+                    }],
+                    ..ManagementView::default()
+                }),
+                note: Some("Disabled other.".into()),
+            },
+        }));
+        let shown = match &app.prompt {
+            Some(Prompt::Management(panel)) => panel.render(80, 20, &theme.palette).join(" "),
+            _ => panic!("the panel for the first Provider stays open"),
+        };
+        assert!(shown.contains("Flash"), "{shown}");
+        assert!(!shown.contains("Other"), "{shown}");
+        let (text, _) = app.notice.clone().unwrap();
+        assert_eq!(text, "Disabled other.");
     }
 
     /// A run whose owner answer carries an escape sequence and a newline
@@ -10058,7 +10142,7 @@ mod tests {
         assert!(text.contains("Your text is kept in"), "{text}");
         assert!(
             app.kept_draft(
-                Area::Skills,
+                &Area::Skills,
                 &WriteTarget::Entry {
                     id: "job-1".into(),
                     revision: "1".into(),
@@ -10068,7 +10152,7 @@ mod tests {
             "an edit never reopens a run's draft"
         );
         let (target, kept, seed) = app
-            .kept_draft(Area::Skills, &WriteTarget::Run { id: "job-1".into() })
+            .kept_draft(&Area::Skills, &WriteTarget::Run { id: "job-1".into() })
             .expect("the run key reopens the draft");
         assert_eq!(target, WriteTarget::Run { id: "job-1".into() });
         assert_eq!(

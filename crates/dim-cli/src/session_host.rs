@@ -2949,6 +2949,7 @@ impl Worker {
             .map(|model| (model.provider_id.clone(), model.model_id.clone()));
         Ok(ModelList {
             models,
+            manage: self.client.supports(&["provider.management"]),
             current,
             empty,
             limits,

@@ -21,7 +21,7 @@ use crate::client::Client;
 use crate::mcp::{Auth, Catalog, Server};
 use crate::model::session::{
     ActionKind, EntryDocument, EntryState, ManagementAction, ManagementDetail, ManagementEntry,
-    ManagementView,
+    ManagementView, RemoveVerb,
 };
 use crate::sanitize::safe_line;
 use crate::ui::i18n::{t, tf};
@@ -996,6 +996,7 @@ pub(super) async fn view(
                     enabled: Some(server.enabled),
                     states,
                     actions: offers(server, document.is_some(), available),
+                    remove_verb: RemoveVerb::Remove,
                     document,
                     run: None,
                 },
@@ -1003,6 +1004,7 @@ pub(super) async fn view(
         }
     }
     ManagementView {
+        title: None,
         revision: None,
         document: None,
         create: Some(create()),
