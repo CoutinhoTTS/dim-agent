@@ -443,8 +443,9 @@ Writes follow [Execution settings](#execution-settings):
 - the adapter keeps the revision it read with the draft, and the revision is not a field the user
   types;
 - a conflict writes nothing and shows the error; the area is read again, the draft's link to the
-  stale revision is dropped, and the next edit opens the stored document. It never retries
-  automatically and never overwrites a newer document;
+  stale revision is dropped, and the next edit opens the stored document. A read that fails after
+  the conflict still drops that link and says why the area is not drawn, and the next read retries
+  it. It never retries automatically and never overwrites a newer document;
 - reload discards the draft and reads again;
 - a conflict message states the owner's fact — what changed, and that nothing was written — and
   leaves where the text is to the surface that holds it: the panel says what the next edit or add

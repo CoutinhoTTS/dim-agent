@@ -921,6 +921,45 @@ fn scheduled_set_reports_a_conflict_without_the_panels_sentences() {
     assert!(!stderr.contains("Your next add"), "{stderr}");
 }
 
+/// A conflict whose re-read fails is still a conflict: the command says
+/// what changed, why the area cannot be shown, and where the text is.
+#[test]
+fn scheduled_set_reports_a_conflict_when_the_re_read_fails() {
+    let home = Home::new();
+    let path = home.0.join("job.json");
+    fs::write(&path, serde_json::to_string(&edited_document()).unwrap()).unwrap();
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
+        let request = wire.read("schedule.list");
+        wire.reply(&request, jobs(true));
+        let request = wire.read("schedule.save");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"The job changed; read it before updating",
+            "data":{"appError":"schedule_conflict"}}}));
+        // The conflict wrote nothing; the read that would show the jobs fails.
+        let request = wire.read("schedule.list");
+        read_failed(wire, &request);
+    });
+    let output = home
+        .command()
+        .args(["scheduled", "set", "job-1"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("The job changed since it was read; nothing was written."),
+        "{stderr}"
+    );
+    assert!(stderr.contains("the scheduler is unavailable"), "{stderr}");
+    assert!(stderr.contains("Your text is kept in"), "{stderr}");
+}
+
 /// `scheduled edit ID` opens the job's own document in the editor and
 /// writes it at the revision the listing reported.
 #[test]
