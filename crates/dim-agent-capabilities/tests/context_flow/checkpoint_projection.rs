@@ -1684,3 +1684,63 @@ async fn a_streamed_checkpoint_stops_at_an_empty_page() {
         "the read stops at the first empty page"
     );
 }
+
+/// A checkpoint stream whose `resume` is not the cut event's own position is
+/// refused, where its existing error answers: the restored read would start
+/// after the cut and lose the entries between them.
+#[tokio::test]
+async fn a_streamed_checkpoint_refuses_a_resume_that_is_not_its_cut() {
+    let store = Arc::new(MemoryTimelineStore::default());
+    let key = TimelineKey {
+        session_id: "resume".into(),
+        branch_id: "main".into(),
+    };
+    store
+        .create_session(&key.session_id, &SessionConfig::default())
+        .await
+        .unwrap();
+    let timeline = Timeline::new(Ctx::root().unwrap(), key, vec![], store);
+    let hello = input(&timeline, "hello");
+    let cut = timeline
+        .append(
+            EventKind::InputConsumed(InputConsumedData {
+                input_id: hello.id.clone(),
+            })
+            .into(),
+        )
+        .unwrap();
+    step(&timeline, "one", "r1", &["a", "b"]);
+    let through = timeline.sequence();
+    let renderer = HistoryRenderer::default();
+    let error = renderer
+        .stream_checkpoint(
+            &timeline,
+            TimelinePosition {
+                branch_id: "main".into(),
+                sequence: through,
+            },
+            through,
+            &cut.id,
+            256,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("compaction cut was not read"),
+        "{error}"
+    );
+    let checkpoint = renderer
+        .stream_checkpoint(
+            &timeline,
+            TimelinePosition {
+                branch_id: "main".into(),
+                sequence: cut.sequence,
+            },
+            through,
+            &cut.id,
+            256,
+        )
+        .await
+        .expect("the cut's own position is accepted");
+    assert_eq!(checkpoint.resume.sequence, cut.sequence);
+}

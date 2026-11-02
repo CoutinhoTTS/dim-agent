@@ -193,7 +193,9 @@ impl HistoryRenderer {
 
     /// Builds the checkpoint for `retain_from` while streaming batches, so a
     /// compaction snapshot does not need the full `ContextHistory`. `resume`
-    /// is the cut's position from the policy order the caller already holds.
+    /// is the cut's position from the policy order the caller already holds,
+    /// and it must be where the cut's own event sits: any other position would
+    /// start the restored read after the cut and lose what lies between.
     pub async fn stream_checkpoint(
         &self,
         timeline: &Timeline,
@@ -220,6 +222,11 @@ impl HistoryRenderer {
             }
             let end = events.last().map_or(start, |event| event.sequence);
             if let Some(index) = events.iter().position(|event| event.id == retain_from) {
+                if events[index].sequence != resume.sequence {
+                    return Err(AgentError::InvalidInput(
+                        "compaction cut was not read".into(),
+                    ));
+                }
                 let mut state = replay(&events[..index], state.as_ref())
                     .map_err(|error| AgentError::fault("History", error))?
                     .state;
