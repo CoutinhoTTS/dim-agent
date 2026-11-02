@@ -122,6 +122,9 @@ mod skills_installation;
 #[path = "transport_flow/web.rs"]
 mod web;
 
+#[path = "transport_flow/skills.rs"]
+mod skills;
+
 #[path = "transport_flow/sessions.rs"]
 mod sessions;
 

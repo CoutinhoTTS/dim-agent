@@ -1,7 +1,7 @@
 use super::{
     CatalogEntry, CatalogVersion, CatalogView, InstallOutcome, PreviewConflict, PreviewShadow,
-    PreviewSkill, RefreshTarget, Replace, SelectedSkill, SkillIssue, SkillPreview, SkillStatus,
-    SkillsError,
+    PreviewSkill, RefreshTarget, Replace, SelectedSkill, SkillIssue, SkillPreview, SkillSource,
+    SkillStatus, SkillsError,
     discovery::{RootKind, RootSnapshot, scan_root},
     install,
 };
@@ -146,14 +146,24 @@ impl SkillsCatalog {
             let snapshot = Self::first_scan(root.clone(), RootKind::Project).await;
             state.projects.insert(root.clone(), snapshot);
         }
-        let roots = std::iter::once(state.user.clone().expect("user root scanned"))
-            .chain(state.plugins.values().map(|(_, snapshot)| snapshot.clone()))
-            .chain(project_root.and_then(|root| state.projects.get(&root).cloned()));
+        let roots =
+            std::iter::once((
+                SkillSource::User,
+                state.user.clone().expect("user root scanned"),
+            ))
+            .chain(state.plugins.iter().map(|(plugin, (_, snapshot))| {
+                (SkillSource::Plugin(plugin.clone()), snapshot.clone())
+            }))
+            .chain(
+                project_root
+                    .and_then(|root| state.projects.get(&root).cloned())
+                    .map(|snapshot| (SkillSource::Project, snapshot)),
+            );
         let mut winners: BTreeMap<String, String> = BTreeMap::new();
         let mut entries = Vec::new();
         let mut issues = Vec::new();
         let settings = state.settings.as_ref().map_err(Clone::clone)?;
-        for snapshot in roots {
+        for (source, snapshot) in roots {
             issues.extend(snapshot.issues.iter().cloned());
             for skill in &snapshot.skills {
                 let status = match winners.get(&skill.name) {
@@ -165,6 +175,7 @@ impl SkillsCatalog {
                 };
                 entries.push(CatalogEntry {
                     definition: skill.clone(),
+                    source: source.clone(),
                     enabled: !settings.disabled.contains(&skill.id),
                     status,
                 });
