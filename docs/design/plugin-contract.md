@@ -117,7 +117,7 @@ R4). This table says what each name Dim defines is for.
 | `sessionIdentity` | `session` | SessionScope | yes | `get()`: `{sessionId, restored}` |
 | `sessionLifecycle` | `session` | SessionScope | yes | `activated`, `closing`, `hold`, `release`: a hold is an id the calling row owns, ended by `release(id)` or that row's unload |
 | `sessionConfig` | `session` | SessionScope | yes | `get()`: the creation-time configuration, the snapshot a tool call carries |
-| `timeline` | `branch` | BranchScope | yes, except `before` | `append` of the part's own domain; the published sequence; the event query (§5.4) |
+| `timeline` | `branch` | BranchScope | yes, except `before` | `append`, the published sequence and the event query (§5.4); the query reaches other languages with its declaration |
 | `dispatcher` | `branch` | BranchScope | yes, `consume`, `listen` and reads; their Rust forms `follow` and `subscribe` are Rust-only | Ordered consumption (§5.2) |
 | `branchLifecycle` | `branch` | BranchScope | yes | `activated`, `closing` |
 | `timelineIdentity` | `branch` | BranchScope | yes | `{sessionId, branchId}` |
@@ -207,10 +207,17 @@ A part reads facts through its branch's `timeline` service with one bounded quer
 | --- | --- |
 | Scope | This branch, or the branch chain: each ancestor up to its cut, root first, then this branch to its head |
 | Position | A sequence range, or a cursor with the sequence the read may go through. A read never returns a fact above the published head, the last fact the branch has published |
-| Kinds and flags | The event kinds it accepts (`domain/name`), and each of the envelope's two context flags (§5.1) that it names. A selection that names no kind accepts every kind, and a flag it does not name constrains nothing |
-| Predicate | One equality: a path of field names inside the event's data, and the value it must equal |
+| Kinds and flags | The event kinds it accepts (`domain/name`), and each of the envelope's two context flags (§5.1) that it names |
+| Predicate | One equality against one JSON scalar. The path is a sequence of field names inside the event's data joined by dots, with no array indexing and no wildcards |
 | Order | Chain position, then sequence |
 | Limit | Nonzero by type, so no read is unbounded. It is a target, not a bound: a reply ends at an atomic batch boundary, so it may be longer than the limit |
+
+A selection that names no kind accepts every kind, and a flag it does not name constrains nothing:
+neither omission is an error. The limit applies to every read, so a caller that wants everything in
+its scope pages the result from the cursor.
+
+The path's spelling is fixed here and not in a binding: there is one form, the one above, and the
+storage translates that form. A binding writes this path syntax and invents no other.
 
 The cursor is opaque. It names a position, not a number: it carries the branch of the last event
 the read returned together with that event's sequence, so the same sequence on a parent and on its
@@ -245,10 +252,10 @@ two shapes must agree on ordering, batch boundaries and cursor meaning, or the d
 where that consumer's move is followed ([ADR 019](../adr/019-event-query.md) D2, D5).
 
 The request and reply are serde data of the `timeline` name
-([How Dim uses rutis §3.2](rutis-usage.md#32-shape)), so the spelling of a scope, a position or a
-data path belongs to a binding: its Rust form is
-[appendix A](rutis-usage.md#appendix-a-rust-binding), and the generated declarations are where the
-other languages read its shape. This section states the query, not its spelling.
+([How Dim uses rutis §3.2](rutis-usage.md#32-shape)), so the spelling of a scope or a position
+belongs to a binding: its Rust form is [appendix A](rutis-usage.md#appendix-a-rust-binding), and the
+generated declarations are where the other languages read its shape. This section states the query, not
+the rest of its spelling.
 
 ## 6. Capability
 
