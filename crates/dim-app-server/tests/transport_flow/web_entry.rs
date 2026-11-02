@@ -412,6 +412,7 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
         "mcp.configuration",
         "mcp.inspect",
         "mcp.test",
+        "mcp.move",
         "mcp.auth.cancel",
         "plugin.list",
         "plugin.install",

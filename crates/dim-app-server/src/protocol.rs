@@ -260,6 +260,7 @@ pub const WEB_MANAGEMENT_METHODS: &[&str] = &[
     "mcp.save",
     "mcp.remove",
     "mcp.set_enabled",
+    "mcp.move",
     "mcp.disconnect",
     "mcp.auth.start",
     "mcp.auth.complete",
