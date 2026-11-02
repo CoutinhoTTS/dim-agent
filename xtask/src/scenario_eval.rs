@@ -3507,6 +3507,41 @@ mod tests {
         );
     }
 
+    /// The report shows the resends the runs made, and no row when no run
+    /// made one.
+    #[test]
+    fn the_report_shows_decline_retries_only_when_a_run_sent_one() {
+        let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
+        let quiet = record(
+            "current",
+            &scenario,
+            &[("reports", ProbeVerdict::Present)],
+            JudgeOutcome::Judged,
+        );
+        let text = report(
+            &instrument(model()),
+            std::slice::from_ref(&scenario),
+            std::slice::from_ref(&quiet),
+        );
+        assert!(!text.contains("| decline retries |"), "{text}");
+        let mut retried = record(
+            "candidate",
+            &scenario,
+            &[("reports", ProbeVerdict::Present)],
+            JudgeOutcome::Judged,
+        );
+        retried.decline_retries = 2;
+        let text = report(
+            &instrument(model()),
+            std::slice::from_ref(&scenario),
+            std::slice::from_ref(&retried),
+        );
+        assert!(
+            text.contains("| decline retries | 2 across all runs |"),
+            "{text}"
+        );
+    }
+
     struct Local;
     impl ResolveModelConnection for Local {
         fn resolve(
@@ -5072,10 +5107,7 @@ mod tests {
         for record in &records {
             assert_eq!(record["stop"], "idle", "{record}");
             assert_eq!(record["judgeOutcome"], "judged", "{record}");
-            assert_eq!(record["declineRetries"], 0, "{record}");
         }
-        // The row is shown only when a run sent a decline again.
-        assert!(!report.contains("| decline retries |"), "{report}");
         for arm in ["current", "candidate"] {
             let requests = fixture.arm(arm);
             assert_eq!(requests.len(), 2, "{arm}: the question and the answer");
@@ -5136,11 +5168,12 @@ mod tests {
             // already says the retry ended it.
             assert_eq!(record["stop"], "idle", "{record}");
             assert_eq!(record["judgeOutcome"], "judged", "{record}");
-            retries += record["declineRetries"]
+            let sent = record["declineRetries"]
                 .as_u64()
                 .expect("a run records its decline retries");
+            assert!(sent > 0, "{record}: the arm sent the decline again");
+            retries += sent;
         }
-        assert!(retries >= 2, "each arm sent the decline again: {retries}");
         assert!(
             report.contains(&format!("| decline retries | {retries} across all runs |")),
             "{report}"
@@ -5242,10 +5275,10 @@ mod tests {
             json!({"error": {"code": -32000, "message": "No ask_user call is waiting for this answer",
                              "data": {"appError": "question_not_pending"}}})
         }
-        /// One `ask_user` `step/tool-call` asking `calls` under `request`; a
-        /// `None` request leaves the `request_id` out, and a `None` call
-        /// leaves its id out.
-        fn question_call(request: Option<&str>, calls: &[Option<&str>]) -> Vec<u8> {
+        /// One `ask_user` `step/tool-call` at `sequence`, asking `calls` under
+        /// `request`; a `None` request leaves the `request_id` out, and a
+        /// `None` call leaves its id out.
+        fn question_call(sequence: u64, request: Option<&str>, calls: &[Option<&str>]) -> Vec<u8> {
             let calls: Vec<Value> = calls
                 .iter()
                 .map(|call| {
@@ -5265,19 +5298,23 @@ mod tests {
                 data["request_id"] = json!(request);
             }
             notice(
-                json!({"type": "step", "name": "tool-call", "id": "e1", "sequence": 1,
-                          "data": data}),
+                json!({"type": "step", "name": "tool-call", "id": format!("e{sequence}"),
+                          "sequence": sequence, "data": data}),
             )
         }
-        /// The `step/tool-result` that closes `call` of `request` with the
-        /// declined answer.
-        fn declined_result(request: &str, call: &str) -> Vec<u8> {
-            notice(json!({"type": "step", "name": "tool-result", "id": "e3",
-                          "sequence": 3,
+        /// The `step/tool-result` that closes the call `question_call` sent at
+        /// `sequence`, numbered two events on from it as a batch's call and
+        /// result are.
+        fn declined_result(sequence: u64, request: &str, call: &str) -> Vec<u8> {
+            let result = sequence + 2;
+            notice(
+                json!({"type": "step", "name": "tool-result", "id": format!("e{result}"),
+                          "sequence": result,
                           "data": {"turn_id": "t1", "request_id": request,
-                                   "call_event_id": "e1",
+                                   "call_event_id": format!("e{sequence}"),
                                    "results": [{"call_id": call, "result": {
-                                       "content": "User declined to answer. Proceed without these answers."}}]}}))
+                                       "content": "User declined to answer. Proceed without these answers."}}]}}),
+            )
         }
 
         let _ = std::fs::remove_dir_all(directory);
@@ -5316,9 +5353,10 @@ mod tests {
                     );
                     declines += 1;
                     // The batch whose `step/tool-result` the peer writes after
-                    // answering this decline: a taken decline settles its own
-                    // call, and a refused one only where the script has the
-                    // Session close the call by other means.
+                    // answering this decline, and the sequence the batch's
+                    // call went out at: a taken decline settles its own call,
+                    // and a refused one only where the script has the Session
+                    // close the call by other means.
                     let closed = match &script {
                         PeerScript::Replies(_) => {
                             let body = replies
@@ -5327,7 +5365,7 @@ mod tests {
                                 .unwrap_or_else(|| json!({"result": {}}));
                             let taken = body.get("result").is_some();
                             write.write_all(&frame(&request, body)).await.unwrap();
-                            taken.then_some("r1")
+                            taken.then_some(("r1", 1))
                         }
                         PeerScript::Late => {
                             let at = *first.get_or_insert_with(Instant::now);
@@ -5345,14 +5383,14 @@ mod tests {
                                     write.write_all(&notice(event)).await.unwrap();
                                 }
                             }
-                            taken.then_some("r1")
+                            taken.then_some(("r1", 1))
                         }
                         PeerScript::Refused => {
                             write
                                 .write_all(&frame(&request, not_pending()))
                                 .await
                                 .unwrap();
-                            (declines == 2).then_some("r1")
+                            (declines == 2).then_some(("r1", 1))
                         }
                         PeerScript::ReusedCallId => match declines {
                             1 => {
@@ -5361,7 +5399,7 @@ mod tests {
                                     .await
                                     .unwrap();
                                 write
-                                    .write_all(&question_call(Some("r2"), &[Some("c1")]))
+                                    .write_all(&question_call(2, Some("r2"), &[Some("c1")]))
                                     .await
                                     .unwrap();
                                 None
@@ -5371,14 +5409,14 @@ mod tests {
                                     .write_all(&frame(&request, not_pending()))
                                     .await
                                     .unwrap();
-                                Some("r1")
+                                Some(("r1", 1))
                             }
                             _ => {
                                 write
                                     .write_all(&frame(&request, json!({"result": {}})))
                                     .await
                                     .unwrap();
-                                Some("r2")
+                                Some(("r2", 2))
                             }
                         },
                         PeerScript::Unkeyed | PeerScript::CallWithoutId => {
@@ -5397,16 +5435,16 @@ mod tests {
                                                       "data": {"appError": "session_reloading"}}}),
                             };
                             write.write_all(&frame(&request, body)).await.unwrap();
-                            (declines == 3).then_some("r1")
+                            (declines == 3).then_some(("r1", 1))
                         }
                     };
-                    if let Some(request) = closed {
+                    if let Some((request, sequence)) = closed {
                         if recorded.settled_at.load(Ordering::SeqCst) == 0 {
                             recorded.settled_at.store(declines, Ordering::SeqCst);
                         }
                         settled = true;
                         write
-                            .write_all(&declined_result(request, "c1"))
+                            .write_all(&declined_result(sequence, request, "c1"))
                             .await
                             .unwrap();
                     }
@@ -5435,7 +5473,7 @@ mod tests {
                         _ => vec![Some("c1")],
                     };
                     write
-                        .write_all(&question_call(request, &calls))
+                        .write_all(&question_call(1, request, &calls))
                         .await
                         .unwrap();
                 }
@@ -5525,6 +5563,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(directory);
         // The budget writes `seconds`, so `idle` is the retry ending the run.
         assert_eq!(driven.stop, "idle", "{:?}", driven.error);
+        assert_eq!(
+            driven.decline_retries, 1,
+            "the retry the quiet period scheduled"
+        );
         assert_eq!(
             reads.declines.lock().unwrap().len(),
             2,
