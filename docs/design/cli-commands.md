@@ -1286,9 +1286,15 @@ bare `/rename` is refused with a `needs <title>` notice and sends nothing, and
 `--clear` is the only form that clears without one. Every form is a command the
 client handles: the text is never queued and never submitted, including while a turn
 runs. The `/resume` list reads `session.catalog` each time it opens, and falls back to
-`session.summaries` on a daemon before the catalog, so it shows the new title; the header
-shows the first message's topic and is unaffected. The
-idle line client reads the same two forms and prints
+`session.summaries` on a daemon before the catalog, so it shows the new title. The
+window title shows the Session's stored title as `DIM | <title>`: it is seeded from the
+`session.attach` record and kept current by `session.notice` records whose `source` is
+`SessionStore` and `kind` is `title`, so the generated title and a rename from any client
+both reach it. A notice is applied only when its `titleRevision` is higher than the one
+the client holds. Until the Session has a title the window title shows the first
+message's topic, and the placeholder `New session` counts as no title in both the window
+title and the `/resume` row. `/new` returns the window title to `DIM`. The idle line
+client reads the same two forms and prints
 `Use /rename TITLE or /rename --clear` for a bare `/rename`.
 
 ### Session deletion and cleanup

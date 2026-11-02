@@ -28567,6 +28567,7 @@
         "path Update::Web",
         "path Update::Withdrawn",
         "path Usage",
+        "path stored_title",
         "use crate::model::session::ACCOUNT_NAMESPACE",
         "use crate::model::session::Account",
         "use crate::model::session::AccountDescriptor",
@@ -28598,7 +28599,8 @@
         "use crate::model::session::SubagentModelPolicy",
         "use crate::model::session::SwitchKind",
         "use crate::model::session::Update",
-        "use crate::model::session::Usage"
+        "use crate::model::session::Usage",
+        "use crate::model::session::stored_title"
       ]
     },
     {
@@ -33296,8 +33298,10 @@
         "path Command",
         "path Command::ListSessions",
         "path SessionItem",
+        "path stored_title",
         "use crate::model::session::Command",
-        "use crate::model::session::SessionItem"
+        "use crate::model::session::SessionItem",
+        "use crate::model::session::stored_title"
       ]
     },
     {

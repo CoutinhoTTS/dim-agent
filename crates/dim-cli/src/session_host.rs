@@ -26,7 +26,7 @@ use crate::model::session::{
     ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider, OauthEvent, OauthStart,
     PluginItem, PluginReply, ProviderAction, ProviderEntry, RuntimeAction, RuntimeItem,
     RuntimesError, SandboxBackend, SessionItem, SessionPort, SubagentModelPolicy, SwitchKind,
-    Update, Usage,
+    Update, Usage, stored_title,
 };
 use crate::model::view::{
     LineState, LineView, SideLine, TaskOutputState, TaskTarget, WorkflowInventory,
@@ -224,6 +224,11 @@ struct Worker {
     client: Client,
     updates: mpsc::Sender<Update>,
     session_id: String,
+    /// The Session's stored title, when it has a real one, and the newest
+    /// `titleRevision` this client has: the attach record's or a later
+    /// SessionStore notice's.
+    session_title: Option<String>,
+    title_revision: u64,
     /// The attached Session's workspace, which the management panels work on.
     /// A server older than the record leaves it unset, and the directory the
     /// client started in stands.
@@ -359,6 +364,8 @@ async fn run(
         client,
         updates: updates.clone(),
         session_id: String::new(),
+        session_title: None,
+        title_revision: 0,
         session_cwd: None,
         parked: String::new(),
         projection: Projection::default(),
@@ -492,6 +499,13 @@ struct Attached {
     /// The Session's workspace; absent from servers older than the record.
     #[serde(default)]
     cwd: Option<String>,
+    /// The Session's stored title; absent from servers older than the title
+    /// fields, and `None` when it has none.
+    #[serde(default)]
+    title: Option<String>,
+    /// The title's revision; 0 on a server that reports none.
+    #[serde(default)]
+    title_revision: u64,
 }
 
 #[derive(Deserialize)]
@@ -810,6 +824,8 @@ impl Worker {
             model_id: model.model_id.clone(),
             model_preferences,
         };
+        self.session_title = stored_title(attached.title.as_deref()).map(str::to_owned);
+        self.title_revision = attached.title_revision;
         self.session_id = session_id.clone();
         self.session_cwd = attached.cwd;
         self.register_ui().await;
@@ -1820,6 +1836,22 @@ impl Worker {
         }
     }
 
+    /// A SessionStore title commit, generated or a rename from any client.
+    /// The newest revision wins, and a title that is only the `New session`
+    /// placeholder is no title. A notice for another Session never reaches
+    /// here: the caller checks the shown Session's id.
+    fn title_notice(&mut self, data: &serde_json::Value) {
+        let Some(revision) = data["titleRevision"].as_u64() else {
+            return;
+        };
+        if revision <= self.title_revision {
+            return;
+        }
+        self.title_revision = revision;
+        self.session_title = stored_title(data["title"].as_str()).map(str::to_owned);
+        self.publish();
+    }
+
     /// `/rename`: sets the shown Session's manual title, or clears it when
     /// `title` is `None`. The text is a command, never an input.
     async fn rename(&mut self, title: Option<String>) {
@@ -2069,6 +2101,13 @@ impl Worker {
                         .remove_approval(&notice.branch_id, &notice.request_id);
                     self.changed();
                 }
+            }
+            "session.notice"
+                if params["sessionId"] == self.session_id
+                    && params["source"] == "SessionStore"
+                    && params["kind"] == "title" =>
+            {
+                self.title_notice(&params["data"]);
             }
             "session.notice"
                 if params["sessionId"] == self.session_id
@@ -3824,6 +3863,7 @@ impl Worker {
         snapshot.focus = self.focus.clone();
         snapshot.main_running = self.projection.running();
         snapshot.main_topic = self.projection.first_message();
+        snapshot.session_title = self.session_title.clone();
         if self.focus != "main" {
             snapshot.approvals = self.projection.approvals();
             snapshot.questions = self.projection.questions();

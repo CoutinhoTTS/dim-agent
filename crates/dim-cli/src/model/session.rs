@@ -935,6 +935,14 @@ pub struct SessionItem {
     pub origin: Option<String>,
 }
 
+/// The Session's stored title, unless it has none: empty, or the
+/// `New session` placeholder an untitled Session carries. The one rule the
+/// `/resume` row and the window title share (`ui::title`).
+pub fn stored_title(title: Option<&str>) -> Option<&str> {
+    let title = title?.trim();
+    (!title.is_empty() && !title.eq_ignore_ascii_case("new session")).then_some(title)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwitchKind {
     New,

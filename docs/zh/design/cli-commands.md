@@ -888,8 +888,13 @@ TITLE 视为缺失，也按同样方式拒绝。
 输入；对空的 `/rename` 回车会得到 `needs <title>` 提示且不发送任何内容，`--clear` 是唯一
 无需标题即可清除的形式。两种形式都是客户端处理的命令：文本从不入队、从不提交，模型回合进行
 中也是如此。`/resume` 列表每次打开都读取 `session.catalog`，在没有该目录的守护进程上退回
-`session.summaries`，因此显示新标题；页头显示的是首条消息的主题，不受影响。空闲的行式客户端
-读取同样的两种形式，对空的 `/rename` 打印 `Use /rename TITLE or /rename --clear`。
+`session.summaries`，因此显示新标题。窗口标题把 Session 存储的标题显示为 `DIM | <标题>`：
+它由 `session.attach` 的回复初始化，并由 `source` 为 `SessionStore`、`kind` 为 `title` 的
+`session.notice` 记录保持更新，因此自动生成的标题和来自任何客户端的重命名都会到达它。
+只有当通知的 `titleRevision` 高于客户端持有的值时才会采用。在 Session 有标题之前，窗口
+标题显示首条消息的主题；占位符 `New session` 在窗口标题和 `/resume` 行中都视为没有标题。
+`/new` 把窗口标题恢复为 `DIM`。空闲的行式客户端读取同样的两种形式，对空的 `/rename` 打印
+`Use /rename TITLE or /rename --clear`。
 
 ### 会话删除与清理
 
