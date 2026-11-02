@@ -4,18 +4,11 @@ import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-const [destination, ...extra] = process.argv.slice(2);
-const update = extra.includes('--update');
-const arguments_ = extra.filter((argument) => argument !== '--update');
-assert(destination && arguments_.length === 0,
-  'Usage: node scripts/stage-plugins.mjs DESTINATION [--update]');
 const repo = path.resolve(import.meta.dirname, '..');
-const output = path.resolve(destination);
 const defaults = path.join(repo, 'runtime/default-plugins.json');
 const { plugins } = JSON.parse(readFileSync(defaults, 'utf8'));
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const registry = process.env.DIMCODE_NPM_REGISTRY ?? 'https://registry.npmjs.org';
-const record = path.join(output, '.stage-plugins.json');
 
 const copy = (source, target) => cpSync(source, target, {
   recursive: true,
@@ -44,16 +37,36 @@ const dependencies = (source) => {
   return hash.digest('hex');
 };
 
+/** True when `candidate` lies strictly inside `parent`. */
+const within = (parent, candidate) => {
+  const relative = path.relative(parent, candidate);
+  return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+};
+
+/** True when a current plugin directory equals, sits inside, or contains `directory`. */
+const occupied = (current, directory) => [...current].some((entry) =>
+  entry === directory || within(directory, entry) || within(entry, directory));
+
+/** Refuses a recorded or configured directory that does not lie inside the stage. */
+const validate = (output, previous) => {
+  const paths = [...Object.entries(plugins).map(([name, dir]) => [name, dir]),
+    ...Object.entries(previous).filter(([, entry]) => entry?.dir).map(([name, entry]) => [name, entry.dir])];
+  for (const [name, dir] of paths) {
+    const resolved = path.resolve(output, dir);
+    assert(within(output, resolved), `The directory for ${name} must lie strictly inside the staging directory: ${resolved}`);
+  }
+};
+
 /** Puts `partial` in place of `target`, restoring `target` if the swap fails. */
-const swap = (partial, target) => {
+const swap = (partial, target, rename) => {
   const backup = `${target}.previous`;
   rmSync(backup, { recursive: true, force: true });
   const existed = existsSync(target);
-  if (existed) renameSync(target, backup);
+  if (existed) rename(target, backup);
   try {
-    renameSync(partial, target);
+    rename(partial, target);
   } catch (error) {
-    if (existed) renameSync(backup, target);
+    if (existed) rename(backup, target);
     throw error;
   }
   rmSync(backup, { recursive: true, force: true });
@@ -70,13 +83,19 @@ const writeAtomically = (file, content) => {
  * plugin's sources again, so an edit takes effect on the next run; `npm ci`
  * runs only for a plugin whose package files hash differs from the one
  * recorded in `.stage-plugins.json`; a plugin that is no longer listed is
- * removed; and each plugin is built beside its previous copy and swapped in
- * only when complete, so every staged plugin is complete at every moment.
- * The record is rewritten after each swap, so it always describes what is on
- * disk. A failure names the plugin, exits non-zero, and leaves the plugins
- * before it updated and the rest as they were.
+ * removed; and each plugin is built beside the live copy, whose dependencies
+ * it copies when they are reused, and swapped in only when complete. The live
+ * copy is never touched before the swap, so every staged plugin is complete
+ * at every moment; the swap renames it aside, puts the replacement in place
+ * and restores it if that fails. The record is rewritten after each swap, so
+ * it always describes what is on disk. A failure names the plugin, exits
+ * non-zero, and leaves the plugins before it updated and the rest as they
+ * were. Recorded directories are validated against the stage before anything
+ * changes, and a directory is removed only when no current plugin uses it.
  */
-function updateStage() {
+export function updateStage(destination, { rename = renameSync } = {}) {
+  const output = path.resolve(destination);
+  const record = path.join(output, '.stage-plugins.json');
   mkdirSync(output, { recursive: true });
   const previous = (() => {
     try {
@@ -86,9 +105,11 @@ function updateStage() {
       return {};
     }
   })();
+  validate(output, previous);
   const entries = { ...previous };
   const writeRecord = () => writeAtomically(record,
     `${JSON.stringify({ schemaVersion: 1, plugins: entries }, null, 2)}\n`);
+  const current = new Set(Object.values(plugins).map((relative) => path.resolve(output, relative)));
   const installed = [];
   for (const [name, relative] of Object.entries(plugins)) {
     const source = path.join(path.dirname(defaults), relative);
@@ -106,25 +127,29 @@ function updateStage() {
       copy(source, partial);
       if (reusable) {
         const modules = path.join(target, 'node_modules');
-        if (existsSync(modules)) renameSync(modules, path.join(partial, 'node_modules'));
+        if (existsSync(modules)) {
+          cpSync(modules, path.join(partial, 'node_modules'), { recursive: true, verbatimSymlinks: true });
+        }
       } else if (code) {
         install(partial, name);
         installed.push(name);
       }
-      swap(partial, target);
+      swap(partial, target, rename);
     } catch (error) {
       rmSync(partial, { recursive: true, force: true });
       throw new Error(`Cannot stage ${name}: ${error.message}`);
     }
-    if (before?.dir && before.dir !== relative) {
-      rmSync(path.join(output, before.dir), { recursive: true, force: true });
+    if (before?.dir) {
+      const old = path.resolve(output, before.dir);
+      if (!occupied(current, old)) rmSync(old, { recursive: true, force: true });
     }
     entries[name] = { hash, dir: relative };
     writeRecord();
   }
   for (const [name, entry] of Object.entries(previous)) {
     if (name in plugins || !entry?.dir) continue;
-    rmSync(path.join(output, entry.dir), { recursive: true, force: true });
+    const old = path.resolve(output, entry.dir);
+    if (!occupied(current, old)) rmSync(old, { recursive: true, force: true });
     delete entries[name];
   }
   writeRecord();
@@ -134,9 +159,8 @@ function updateStage() {
   console.log(`Updated ${Object.keys(plugins).length} default plugins (npm ci: ${installed.length ? installed.join(', ') : 'none'}).`);
 }
 
-if (update) {
-  updateStage();
-} else {
+function freshStage(destination) {
+  const output = path.resolve(destination);
   assert(!existsSync(output), 'Destination already exists');
   try {
     mkdirSync(output, { recursive: true });
@@ -156,3 +180,15 @@ if (update) {
     throw error;
   }
 }
+
+function main() {
+  const [destination, ...extra] = process.argv.slice(2);
+  const update = extra.includes('--update');
+  const arguments_ = extra.filter((argument) => argument !== '--update');
+  assert(destination && arguments_.length === 0,
+    'Usage: node scripts/stage-plugins.mjs DESTINATION [--update]');
+  if (update) updateStage(path.resolve(destination));
+  else freshStage(path.resolve(destination));
+}
+
+if (import.meta.main) main();
