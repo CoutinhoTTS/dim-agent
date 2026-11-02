@@ -27,6 +27,8 @@ mod migration;
 mod permission;
 #[path = "cli_flow/question.rs"]
 mod question;
+#[path = "cli_flow/scheduled.rs"]
+mod scheduled;
 #[path = "cli_flow/server.rs"]
 mod server;
 #[path = "cli_flow/session_management.rs"]

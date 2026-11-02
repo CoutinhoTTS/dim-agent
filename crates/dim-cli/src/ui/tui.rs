@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::management::editor;
+use crate::management::{self, editor};
 use crate::model::session::{
     Area, Command, CompactReply, ContextReading, DIM_OAUTH_ID, DraftPart, ManagementAction,
     ManagementRefusal, ManagementRequest, ManagementResult, RenameReply, SessionPort, SubmitMode,
@@ -32,7 +32,9 @@ use crate::ui::models_panel::ModelsPanel;
 use crate::ui::oauth_view::OauthView;
 use crate::ui::plugins_panel::PluginsPanel;
 use crate::ui::progress::ProgressBar;
-use crate::ui::prompts::{AskUserPrompt, Effect, ExitConfirm, ExitReason, PermissionPrompt};
+use crate::ui::prompts::{
+    AskUserPrompt, Effect, ExitConfirm, ExitReason, PermissionPrompt, WriteTarget,
+};
 use crate::ui::providers_panel::ProvidersPanel;
 use crate::ui::render::fullscreen::Document;
 use crate::ui::render::fullscreen::MouseOutcome;
@@ -218,7 +220,7 @@ fn run_terminal(
             return 1;
         }
     };
-    i18n::set(i18n::saved_locale(&surroundings.home).unwrap_or_else(i18n::system_locale));
+    i18n::set(i18n::interface_locale(&surroundings.home));
     let synchronized = !crate::ui::terminal::in_tmux();
     let notify_terminal = crate::ui::notify::Terminal::from_env();
     let mut status = Reporter::from_env();
@@ -625,15 +627,12 @@ fn run_terminal(
                     title.forget();
                     dirty = true;
                 }
-                Outcome::Edit {
-                    area,
-                    revision,
-                    text,
-                } => {
-                    // A draft a refused edit kept continues in its own file;
-                    // anything else starts from the document the panel read.
-                    let (revision, draft, reopened) = match app.kept_draft(area) {
-                        Some((revision, draft)) => (revision, draft, true),
+                Outcome::Edit { area, target, text } => {
+                    // A draft a refused write kept for this target continues in
+                    // its own file; anything else starts from the document the
+                    // panel read.
+                    let (target, draft, reopened) = match app.kept_draft(area, &target) {
+                        Some((target, draft)) => (target, draft, true),
                         None => {
                             let draft = match editor::Draft::open(&app.home, area, &text) {
                                 Ok(draft) => draft,
@@ -645,7 +644,7 @@ fn run_terminal(
                                     continue;
                                 }
                             };
-                            (revision, draft, false)
+                            (target, draft, false)
                         }
                     };
                     let mut command = editor::command(draft.path());
@@ -658,7 +657,7 @@ fn run_terminal(
                             return code;
                         }
                     };
-                    app.write_draft(area, revision, draft, reopened, program, ran);
+                    app.write_draft(area, target, draft, reopened, program, ran);
                     app.request_reflow();
                     status.forget();
                     progress.forget();
@@ -721,11 +720,11 @@ enum Outcome {
     SwitchMode,
     /// `/suspend`: give the terminal to the shell until the job continues.
     Suspend,
-    /// A management panel's edit: the document's text and the revision it
-    /// was read at, for the external editor.
+    /// A management panel's edit: the document's text and what its write
+    /// becomes, for the external editor.
     Edit {
         area: Area,
-        revision: String,
+        target: WriteTarget,
         text: String,
     },
     /// `/web`: flip the daemon-owned Web entry switch without leaving.
@@ -942,21 +941,47 @@ struct App {
     fork_confirm: Option<ForkAsk>,
     /// The picked message, set in the fork's composer once it is attached.
     fork_draft: Option<String>,
-    /// A management area's draft while the editor runs and until its write
-    /// comes back: a refused write keeps it, so the edit key reopens the
-    /// user's text.
-    management_edit: Option<ManagementDraft>,
+    /// A management area's drafts while the editor runs and until their write
+    /// comes back: a refused write keeps its own, so the edit key of the
+    /// target it was taken for reopens the user's text.
+    management_edits: Vec<ManagementDraft>,
+    /// The entry a management action the panel sent names, with the label the
+    /// panel showed then: the panel may close before the reply lands.
+    management_named: Option<(Area, ManagementAction, Option<String>)>,
     /// Queued messages withdrawn for the draft, by input id, until the host
     /// confirms each withdrawal; a confirmed one goes into the draft.
     recovering: Vec<(String, String)>,
 }
 
 /// A management area's draft of one document: the text the editor was
-/// given, and the revision it was read at, which its write expects.
+/// given, and the target whose write expects it. One target holds at most
+/// one draft, and another target's draft is never replaced by it.
 struct ManagementDraft {
     area: Area,
-    revision: String,
+    target: WriteTarget,
     draft: editor::Draft,
+}
+
+/// What a management reply says beyond its view: the owner's answer, or an
+/// applied action's own line.
+fn reported_note(result: &ManagementResult) -> Option<&str> {
+    match result {
+        ManagementResult::View { note, .. } => note.as_deref(),
+        ManagementResult::Applied { note, .. } => note.as_deref(),
+        ManagementResult::Detail(_) | ManagementResult::Refused(_) => None,
+    }
+}
+
+/// The notice a management reply leaves: the line the action reports and,
+/// when the read after it failed, why. The owner writes both parts — a
+/// job's name, a run's state — so they are made safe, and kept to one line,
+/// at the one place that joins them.
+fn management_notice(line: &str, read_error: Option<&str>) -> String {
+    let line = crate::sanitize::safe_line(line);
+    match read_error {
+        Some(error) => format!("{line} {}", crate::sanitize::safe_line(error)),
+        None => line,
+    }
 }
 
 /// Where a line the user is drafting opens.
@@ -1123,7 +1148,8 @@ impl App {
             line_draft: None,
             fork_confirm: None,
             fork_draft: None,
-            management_edit: None,
+            management_edits: Vec::new(),
+            management_named: None,
             recovering: Vec::new(),
         }
     }
@@ -1723,86 +1749,134 @@ impl App {
                 }
             }
             Update::Management(reply) => {
-                let save = matches!(reply.request.action, ManagementAction::Save { .. });
-                // Only a reload of the draft's own area discards it. Every
-                // other reply — a toggle, a read, another area's reply —
-                // leaves the kept text and the revision it came from for the
-                // edit key; a revision the owner no longer honors answers
-                // the next write with a conflict.
-                if reply.request.action == ManagementAction::Reload
-                    && self
-                        .management_edit
-                        .as_ref()
-                        .is_some_and(|kept| kept.area == reply.request.area)
-                {
-                    self.management_edit = None;
+                // The panel may have closed since it sent the action; this is
+                // the entry's label from when it did.
+                let named = self.take_named(&reply.request);
+                let creating = matches!(reply.request.action, ManagementAction::Add { .. });
+                let write =
+                    creating || matches!(reply.request.action, ManagementAction::Save { .. });
+                let reload = reply.request.action == ManagementAction::Reload;
+                // Only a reload of the area discards its drafts. Every other
+                // reply — a toggle, a read, another area's reply — leaves the
+                // kept text and the revision it came from for the edit key; a
+                // revision the owner no longer honors answers the next write
+                // with a conflict.
+                if reload {
+                    self.management_edits
+                        .retain(|kept| kept.area != reply.request.area);
                 }
-                if let Some(Prompt::Management(panel)) = &mut self.prompt {
+                // One write is in flight at a time, and its reply settles only
+                // the draft of the target it was sent for.
+                let settled = if write {
+                    self.take_draft(&reply.request)
+                } else {
+                    None
+                };
+                // A reply belongs to a panel only when that panel manages the
+                // reply's area: another area's panel is as absent as a closed
+                // one, and the notice still reports what the action came to.
+                let same_area = matches!(
+                    &self.prompt,
+                    Some(Prompt::Management(panel)) if panel.area() == reply.request.area
+                );
+                if same_area {
+                    let Some(Prompt::Management(panel)) = &mut self.prompt else {
+                        unreachable!("the matched prompt is a management panel")
+                    };
                     panel.set_result(&reply);
                     // The write took it: the file is no longer the user's
                     // text. That holds when only the read that reports the
                     // area failed, since the change itself was made. A
                     // refused write keeps the file and says where it is;
-                    // after a conflict the area was read again, so the link
-                    // to the stale revision goes and the next edit opens
-                    // the current document.
-                    if save {
-                        match (&reply.result, self.management_edit.take()) {
-                            (
-                                ManagementResult::View(_) | ManagementResult::Applied { .. },
-                                Some(kept),
-                            ) => kept.draft.remove(),
-                            (
-                                ManagementResult::Refused(ManagementRefusal::Conflict { .. }),
-                                Some(kept),
-                            ) => {
-                                panel.kept(&kept.draft.path().display().to_string());
+                    // after a conflict on an edit the area was read again, so
+                    // the link to the stale revision goes and the next edit
+                    // opens the current document. A conflict on a create has
+                    // no revision to lose: the next add opens the user's text.
+                    if let Some(settled) = settled {
+                        match &reply.result {
+                            ManagementResult::Refused(ManagementRefusal::Conflict { .. })
+                                if creating =>
+                            {
+                                panel.conflicted(
+                                    reply.request.area,
+                                    true,
+                                    &settled.draft.path().display().to_string(),
+                                );
+                                self.hold_draft(settled);
                             }
-                            (ManagementResult::Refused(_), Some(kept)) => {
-                                panel.kept(&kept.draft.path().display().to_string());
-                                self.management_edit = Some(kept);
+                            ManagementResult::Refused(ManagementRefusal::Conflict { .. }) => {
+                                panel.conflicted(
+                                    reply.request.area,
+                                    false,
+                                    &settled.draft.path().display().to_string(),
+                                );
                             }
-                            (_, None) => {}
+                            ManagementResult::Refused(_) => {
+                                panel.kept(
+                                    reply.request.area,
+                                    &settled.draft.path().display().to_string(),
+                                );
+                                self.hold_draft(settled);
+                            }
+                            _ => settled.draft.remove(),
                         }
                     }
-                } else if save {
+                } else if write {
                     // Esc closed the panel while the write was in flight;
                     // the reply still settles the draft and says what it
                     // came to.
-                    match (&reply.result, self.management_edit.take()) {
-                        (ManagementResult::View(_), Some(kept)) => {
-                            kept.draft.remove();
-                            self.set_notice(t("Saved.").to_owned());
-                        }
-                        (ManagementResult::Applied { read_error }, Some(kept)) => {
-                            kept.draft.remove();
-                            self.set_notice(format!("{} {read_error}", t("Saved.")));
-                        }
-                        (ManagementResult::Refused(error), Some(kept)) => {
+                    match (&reply.result, settled) {
+                        (ManagementResult::Refused(error), Some(settled)) => {
                             let where_it_is = tf(
                                 "Your text is kept in {path}.",
-                                &[("path", &kept.draft.path().display().to_string())],
+                                &[("path", &settled.draft.path().display().to_string())],
                             );
                             self.set_notice(format!("{error} {where_it_is}"));
-                            // A conflict drops the link, as it does with the
-                            // panel open; a refusal keeps it, so the edit key
-                            // reopens this text at its revision.
-                            if let ManagementResult::Refused(ManagementRefusal::Refused(_)) =
-                                &reply.result
+                            // A conflict on an edit drops the link, as it does
+                            // with the panel open; a create has no revision to
+                            // lose, and a refusal keeps it either way.
+                            if creating
+                                || matches!(
+                                    &reply.result,
+                                    ManagementResult::Refused(ManagementRefusal::Refused(_))
+                                )
                             {
-                                self.management_edit = Some(kept);
+                                self.hold_draft(settled);
                             }
                         }
                         (ManagementResult::Refused(error), None) => {
                             self.set_notice(error.to_string())
                         }
-                        (ManagementResult::View(_) | ManagementResult::Applied { .. }, None) => {}
+                        (result, Some(settled)) => {
+                            settled.draft.remove();
+                            // The reply's own note, else the line its action
+                            // reports; never a line that names only "saved".
+                            let note = reported_note(result).map_or_else(
+                                || {
+                                    management::applied_line(
+                                        &reply.request.action,
+                                        named.as_deref(),
+                                    )
+                                },
+                                str::to_owned,
+                            );
+                            let read_error = match result {
+                                ManagementResult::Applied { read_error, .. } => {
+                                    Some(read_error.as_str())
+                                }
+                                _ => None,
+                            };
+                            self.set_notice(management_notice(&note, read_error));
+                        }
+                        (_, None) => {}
                     }
-                } else if reply.request.action == ManagementAction::Reload {
+                } else if reload {
                     match &reply.result {
-                        ManagementResult::View(view) => {
-                            let text =
-                                crate::ui::management_panel::reloaded(reply.request.area, view);
+                        ManagementResult::View { view, .. } => {
+                            let text = crate::ui::management_panel::reloaded(
+                                reply.request.area,
+                                view.as_ref(),
+                            );
                             self.reports.push(Block::Status {
                                 text,
                                 tone: Tone::Muted,
@@ -1811,11 +1885,35 @@ impl App {
                         // The owner rescanned; only the read of the result
                         // failed, so the rescan stands and the read is what
                         // the notice reports after it.
-                        ManagementResult::Applied { read_error } => {
-                            self.set_notice(format!("{} {read_error}", t("Reloaded.")))
+                        ManagementResult::Applied { note, read_error } => {
+                            let line = note.clone().unwrap_or_else(|| {
+                                management::applied_line(&reply.request.action, None)
+                            });
+                            self.set_notice(management_notice(&line, Some(read_error)))
                         }
                         ManagementResult::Refused(error) => self.set_notice(error.to_string()),
+                        // A reload is not an inspect: the adapter answers it
+                        // with the area or a refusal, never a detail.
+                        ManagementResult::Detail(_) => {}
                     }
+                } else if let Some(note) = reported_note(&reply.result) {
+                    // An action that opened no draft, such as a run, still
+                    // reports what the owner answered.
+                    let read_error = match &reply.result {
+                        ManagementResult::Applied { read_error, .. } => Some(read_error.as_str()),
+                        _ => None,
+                    };
+                    self.set_notice(management_notice(note, read_error));
+                } else if let ManagementResult::Applied {
+                    note: None,
+                    read_error,
+                } = &reply.result
+                {
+                    // The panel is gone and the owner named nothing beyond the
+                    // view: the entry's label is the one it held when it sent
+                    // the action.
+                    let line = management::applied_line(&reply.request.action, named.as_deref());
+                    self.set_notice(management_notice(&line, Some(read_error)));
                 }
             }
             Update::Login(account) => {
@@ -2753,7 +2851,9 @@ impl App {
             }
             Effect::LanguageApply(locale) => {
                 self.prompt = None;
-                i18n::set(locale.unwrap_or_else(i18n::system_locale));
+                let active = locale.unwrap_or_else(i18n::system_locale);
+                i18n::set(active);
+                self.host.send(Command::SetLocale(active.code()));
                 let saved = match locale {
                     Some(locale) => {
                         crate::ui::config::write(&self.home, i18n::LOCALE_KEY, locale.code().into())
@@ -2798,17 +2898,12 @@ impl App {
             }
             Effect::Provider(action) => self.host.send(Command::Provider(action)),
             Effect::Plugin(action) => self.host.send(Command::Plugin(action)),
-            Effect::Management(request) => self.host.send(Command::Management(request)),
-            Effect::EditManagement {
-                area,
-                revision,
-                text,
-            } => {
-                return Outcome::Edit {
-                    area,
-                    revision,
-                    text,
-                };
+            Effect::Management(request) => {
+                self.remember_named(&request);
+                self.host.send(Command::Management(request));
+            }
+            Effect::EditManagement { area, target, text } => {
+                return Outcome::Edit { area, target, text };
             }
             Effect::OauthStart(start) => self.host.send(Command::OauthStart(start)),
             Effect::OauthCancel => self.host.send(Command::OauthCancel),
@@ -3124,20 +3219,74 @@ impl App {
         }
     }
 
-    /// The draft a refused edit kept for `area`, if its text is still
+    /// The draft a refused write kept for `target`, if its text is still
     /// there: the editor reopens it as it is, so an edit that continues
     /// keeps working in its own file, at the revision that text came from.
-    fn kept_draft(&mut self, area: Area) -> Option<(String, editor::Draft)> {
-        let kept = self.management_edit.as_ref()?;
-        if kept.area != area {
-            return None;
-        }
-        let kept = self.management_edit.take()?;
+    /// Another target's kept draft is none of this target's business.
+    fn kept_draft(
+        &mut self,
+        area: Area,
+        target: &WriteTarget,
+    ) -> Option<(WriteTarget, editor::Draft)> {
+        let at = self
+            .management_edits
+            .iter()
+            .position(|kept| kept.area == area && kept.target.same_target(target))?;
+        let kept = self.management_edits.remove(at);
         if kept.draft.text().is_err() {
-            self.management_edit = Some(kept);
+            self.management_edits.push(kept);
             return None;
         }
-        Some((kept.revision, kept.draft))
+        Some((kept.target, kept.draft))
+    }
+
+    /// Records the label the open panel shows for the entry `request` names,
+    /// which the notice owes the user when the panel closes before the reply.
+    fn remember_named(&mut self, request: &ManagementRequest) {
+        let Some(Prompt::Management(panel)) = &self.prompt else {
+            return;
+        };
+        self.management_named = Some((
+            request.area,
+            request.action.clone(),
+            panel.label_of(&request.action),
+        ));
+    }
+
+    /// The label the panel held for the entry this reply names, when the
+    /// panel sent the action and then closed.
+    fn take_named(&mut self, request: &ManagementRequest) -> Option<String> {
+        let same = self
+            .management_named
+            .as_ref()
+            .is_some_and(|(area, action, _)| *area == request.area && *action == request.action);
+        if same {
+            self.management_named.take().and_then(|(_, _, name)| name)
+        } else {
+            None
+        }
+    }
+
+    /// Takes the draft the reply's request was sent for, leaving every other
+    /// target's kept draft where it is.
+    fn take_draft(&mut self, request: &ManagementRequest) -> Option<ManagementDraft> {
+        let at = self.management_edits.iter().position(|kept| {
+            kept.area == request.area && kept.target.is_written_by(&request.action)
+        })?;
+        Some(self.management_edits.remove(at))
+    }
+
+    /// Holds a draft under its target: one target keeps one draft, and the
+    /// file the newest text replaces is no longer linked.
+    fn hold_draft(&mut self, kept: ManagementDraft) {
+        while let Some(at) = self
+            .management_edits
+            .iter()
+            .position(|held| held.area == kept.area && held.target.same_target(&kept.target))
+        {
+            self.management_edits.remove(at).draft.remove();
+        }
+        self.management_edits.push(kept);
     }
 
     /// Says why an edit could not go on, in the panel or as a notice when
@@ -3150,25 +3299,31 @@ impl App {
         }
     }
 
-    /// Keeps a draft file and the revision it came from, and says where the
+    /// Keeps a draft file and the target it was taken for, and says where the
     /// user's text is.
-    fn keep_draft(&mut self, area: Area, revision: String, draft: editor::Draft, message: String) {
+    fn keep_draft(
+        &mut self,
+        area: Area,
+        target: WriteTarget,
+        draft: editor::Draft,
+        message: String,
+    ) {
         self.failed(message);
-        self.management_edit = Some(ManagementDraft {
+        self.hold_draft(ManagementDraft {
             area,
-            revision,
+            target,
             draft,
         });
     }
 
     /// What the external editor left: a non-zero exit and an unreadable or
     /// unparseable draft write nothing and keep their file, the unchanged
-    /// document writes nothing, and a new document is written with the
-    /// revision the panel read.
+    /// document writes nothing, and a document is written with the revision
+    /// the panel read, or created when the draft is a new entry.
     fn write_draft(
         &mut self,
         area: Area,
-        revision: String,
+        target: WriteTarget,
         draft: editor::Draft,
         reopened: bool,
         program: String,
@@ -3182,7 +3337,7 @@ impl App {
                 // document to write; the file keeps it, as a refusal does.
                 self.keep_draft(
                     area,
-                    revision,
+                    target,
                     draft,
                     format!(
                         "{} Nothing was written. Your text is kept in {path}.",
@@ -3198,7 +3353,7 @@ impl App {
                 if reopened {
                     self.keep_draft(
                         area,
-                        revision,
+                        target,
                         draft,
                         format!("{message} Your text is kept in {path}."),
                     );
@@ -3213,7 +3368,7 @@ impl App {
         enum Next {
             Keep,
             Unchanged,
-            Save(serde_json::Value),
+            Write(serde_json::Value),
         }
         let next = {
             let Some(Prompt::Management(panel)) = &mut self.prompt else {
@@ -3225,44 +3380,50 @@ impl App {
             }) {
                 Err(error) => {
                     panel.failed(error);
-                    panel.kept(&path);
+                    panel.kept(area, &path);
                     Next::Keep
                 }
-                Ok(document) if panel.document() == Some(&document) => {
+                Ok(document) if panel.document(&target) == Some(&document) => {
                     panel.unchanged();
                     Next::Unchanged
                 }
-                Ok(document) => Next::Save(document),
+                Ok(document) => Next::Write(document),
             }
         };
         match next {
-            Next::Keep => {
-                self.management_edit = Some(ManagementDraft {
-                    area,
-                    revision,
-                    draft,
-                })
-            }
+            Next::Keep => self.hold_draft(ManagementDraft {
+                area,
+                target,
+                draft,
+            }),
             Next::Unchanged => {
-                self.management_edit = None;
                 draft.remove();
             }
-            Next::Save(document) => {
+            Next::Write(document) => {
                 if let Some(Prompt::Management(panel)) = &mut self.prompt {
                     panel.saving();
                 }
-                self.management_edit = Some(ManagementDraft {
-                    area,
-                    revision: revision.clone(),
-                    draft,
-                });
-                self.host.send(Command::Management(ManagementRequest {
-                    area,
-                    action: ManagementAction::Save {
-                        expected_revision: revision,
+                let action = match &target {
+                    WriteTarget::Create => ManagementAction::Add { document },
+                    WriteTarget::Area { revision } => ManagementAction::Save {
+                        id: None,
+                        expected_revision: revision.clone(),
                         document,
                     },
-                }));
+                    WriteTarget::Entry { id, revision } => ManagementAction::Save {
+                        id: Some(id.clone()),
+                        expected_revision: revision.clone(),
+                        document,
+                    },
+                };
+                self.hold_draft(ManagementDraft {
+                    area,
+                    target,
+                    draft,
+                });
+                let request = ManagementRequest { area, action };
+                self.remember_named(&request);
+                self.host.send(Command::Management(request));
             }
         }
     }
@@ -3466,6 +3627,10 @@ impl App {
             }
             "hooks" => {
                 self.open_management(Area::Hooks);
+                Outcome::Continue
+            }
+            "scheduled" => {
+                self.open_management(Area::Scheduled);
                 Outcome::Continue
             }
             "connect" => {
@@ -8747,19 +8912,14 @@ mod tests {
     fn a_save_reply_without_its_panel_still_settles_the_draft() {
         use crate::model::session::{ManagementReply, ManagementView};
         fn view() -> ManagementView {
-            ManagementView {
-                revision: None,
-                document: None,
-                actions: Vec::new(),
-                groups: Vec::new(),
-                issues: Vec::new(),
-            }
+            ManagementView::default()
         }
         fn save_reply(result: ManagementResult) -> Update {
             Update::Management(ManagementReply {
                 request: ManagementRequest {
                     area: Area::Hooks,
                     action: ManagementAction::Save {
+                        id: None,
                         expected_revision: "user:1".into(),
                         document: serde_json::json!({}),
                     },
@@ -8777,13 +8937,15 @@ mod tests {
             "/w".into(),
         );
         let draft = |app: &mut App| {
-            app.management_edit = Some(ManagementDraft {
+            app.hold_draft(ManagementDraft {
                 area: Area::Hooks,
-                revision: "user:1".into(),
+                target: WriteTarget::Area {
+                    revision: "user:1".into(),
+                },
                 draft: editor::Draft::open(root.path(), Area::Hooks, "{}").unwrap(),
             });
-            app.management_edit
-                .as_ref()
+            app.management_edits
+                .last()
                 .unwrap()
                 .draft
                 .path()
@@ -8791,24 +8953,73 @@ mod tests {
         };
         // Written: the file goes and the outcome is a notice.
         let path = draft(&mut app);
-        app.apply(save_reply(ManagementResult::View(view())));
+        app.apply(save_reply(ManagementResult::View {
+            view: Box::new(view()),
+            note: None,
+        }));
         assert!(!path.exists(), "the written draft is removed");
         assert_eq!(
             app.notice.as_ref().map(|(text, _)| text.as_str()),
             Some("Saved.")
         );
-        assert!(app.management_edit.is_none());
+        assert!(app.management_edits.is_empty());
         // Written, and only the read after it failed: the write still took
         // the text, so the file goes too and the notice says what failed.
         let path = draft(&mut app);
         app.apply(save_reply(ManagementResult::Applied {
+            note: None,
             read_error: "catalog unavailable".into(),
         }));
         assert!(!path.exists(), "an applied write keeps no draft");
         let (text, _) = app.notice.clone().unwrap();
         assert_eq!(text, "Saved. catalog unavailable");
         assert!(!text.contains("kept in"), "{text}");
-        assert!(app.management_edit.is_none());
+        assert!(app.management_edits.is_empty());
+        // A create's own answer is the notice, not a fixed "Saved.".
+        app.management_edits.push(ManagementDraft {
+            area: Area::Scheduled,
+            target: WriteTarget::Create,
+            draft: editor::Draft::open(root.path(), Area::Scheduled, "{}").unwrap(),
+        });
+        let path = app
+            .management_edits
+            .last()
+            .unwrap()
+            .draft
+            .path()
+            .to_path_buf();
+        app.apply(Update::Management(ManagementReply {
+            request: ManagementRequest {
+                area: Area::Scheduled,
+                action: ManagementAction::Add {
+                    document: serde_json::json!({}),
+                },
+            },
+            result: ManagementResult::View {
+                view: Box::new(view()),
+                note: Some("Added digest.".into()),
+            },
+        }));
+        assert!(!path.exists(), "the created draft is removed");
+        assert_eq!(
+            app.notice.as_ref().map(|(text, _)| text.as_str()),
+            Some("Added digest.")
+        );
+        // A run opened no draft; its answer is reported too.
+        app.apply(Update::Management(ManagementReply {
+            request: ManagementRequest {
+                area: Area::Scheduled,
+                action: ManagementAction::Run { id: "job-1".into() },
+            },
+            result: ManagementResult::View {
+                view: Box::new(view()),
+                note: Some("Run job-1: skipped (overlap).".into()),
+            },
+        }));
+        assert_eq!(
+            app.notice.as_ref().map(|(text, _)| text.as_str()),
+            Some("Run job-1: skipped (overlap).")
+        );
         // Refused: the file stays, the notice names it, and the link keeps
         // the revision the draft came from.
         let path = draft(&mut app);
@@ -8819,8 +9030,13 @@ mod tests {
         let (text, _) = app.notice.clone().unwrap();
         assert!(text.contains("nope"), "{text}");
         assert!(text.contains(&path.display().to_string()), "{text}");
-        let kept = app.management_edit.as_ref().expect("the link stays");
-        assert_eq!(kept.revision, "user:1");
+        let kept = app.management_edits.first().expect("the link stays");
+        assert_eq!(
+            kept.target,
+            WriteTarget::Area {
+                revision: "user:1".into()
+            }
+        );
         assert_eq!(kept.draft.path(), path.as_path());
         // A conflict keeps the file and names it, and drops the link.
         let path = draft(&mut app);
@@ -8834,6 +9050,222 @@ mod tests {
         let (text, _) = app.notice.clone().unwrap();
         assert!(text.contains("The user document changed"), "{text}");
         assert!(text.contains(&path.display().to_string()), "{text}");
-        assert!(app.management_edit.is_none(), "a conflict drops the link");
+        assert!(app.management_edits.is_empty(), "a conflict drops the link");
+    }
+
+    /// A toggle sent from a panel that closes before the reply names the
+    /// entry by the label the panel held when it sent the action.
+    #[test]
+    fn a_toggle_without_its_panel_names_the_entrys_label() {
+        use crate::model::session::{
+            ActionKind, ManagementEntry, ManagementGroup, ManagementReply, ManagementView,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            root.path().join("home"),
+            "/w".into(),
+        );
+        let mut panel = ManagementPanel::new(Area::Skills);
+        panel.set_result(&ManagementReply {
+            request: ManagementRequest {
+                area: Area::Skills,
+                action: ManagementAction::List,
+            },
+            result: ManagementResult::View {
+                view: Box::new(ManagementView {
+                    groups: vec![ManagementGroup {
+                        heading: "user".into(),
+                        entries: vec![ManagementEntry {
+                            id: "user:commit".into(),
+                            label: "commit".into(),
+                            detail: Vec::new(),
+                            enabled: true,
+                            states: Vec::new(),
+                            actions: vec![ActionKind::Toggle],
+                            document: None,
+                        }],
+                    }],
+                    ..ManagementView::default()
+                }),
+                note: None,
+            },
+        });
+        app.prompt = Some(Prompt::Management(panel));
+        let request = ManagementRequest {
+            area: Area::Skills,
+            action: ManagementAction::Toggle {
+                id: "user:commit".into(),
+                enabled: false,
+            },
+        };
+        // What every panel send does before the command goes out.
+        app.remember_named(&request);
+        // Esc closes the panel while the toggle is in flight.
+        app.prompt = None;
+        app.apply(Update::Management(ManagementReply {
+            request,
+            result: ManagementResult::Applied {
+                note: None,
+                read_error: "catalog unavailable".into(),
+            },
+        }));
+        let (text, _) = app.notice.clone().unwrap();
+        assert_eq!(text, "Disabled commit. catalog unavailable");
+    }
+
+    /// A run whose owner answer carries an escape sequence and a newline
+    /// reaches the status row on one line, without the escape.
+    #[test]
+    fn a_closed_panel_run_keeps_the_owners_answer_on_one_line() {
+        use crate::model::session::{ManagementReply, ManagementView};
+        let root = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            root.path().join("home"),
+            "/w".into(),
+        );
+        app.apply(Update::Management(ManagementReply {
+            request: ManagementRequest {
+                area: Area::Scheduled,
+                action: ManagementAction::Run { id: "job-1".into() },
+            },
+            result: ManagementResult::View {
+                view: Box::new(ManagementView::default()),
+                note: Some("Run daily\u{1b}[31m: skipped\n(overlap).".into()),
+            },
+        }));
+        let (text, _) = app.notice.clone().unwrap();
+        assert_eq!(text, "Run daily: skipped (overlap).");
+        assert!(
+            !text.contains('\u{1b}') && !text.contains('\n') && !text.contains('\r'),
+            "{text:?}"
+        );
+    }
+
+    /// A reply for one area does not write its message into another area's
+    /// panel that opened while the write was in flight: the notice reports
+    /// it, and the open panel keeps its own state.
+    #[test]
+    fn another_areas_panel_keeps_its_own_message() {
+        use crate::model::session::ManagementReply;
+        let root = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            root.path().join("home"),
+            "/w".into(),
+        );
+        // The Scheduler's panel sent a create, then Esc closed it; the
+        // Skills panel opened before the reply landed.
+        app.hold_draft(ManagementDraft {
+            area: Area::Scheduled,
+            target: WriteTarget::Create,
+            draft: editor::Draft::open(root.path(), Area::Scheduled, "{}").unwrap(),
+        });
+        let path = app
+            .management_edits
+            .last()
+            .unwrap()
+            .draft
+            .path()
+            .display()
+            .to_string();
+        app.prompt = Some(Prompt::Management(ManagementPanel::new(Area::Skills)));
+        app.apply(Update::Management(ManagementReply {
+            request: ManagementRequest {
+                area: Area::Scheduled,
+                action: ManagementAction::Add {
+                    document: serde_json::Value::Null,
+                },
+            },
+            result: ManagementResult::Refused(ManagementRefusal::Refused("nope".into())),
+        }));
+        let shown = match &app.prompt {
+            Some(Prompt::Management(panel)) => panel.render(80, 20, &theme.palette).join(" "),
+            _ => panic!("the Skills panel stays open"),
+        };
+        assert!(!shown.contains("nope"), "{shown}");
+        assert!(!shown.contains(&path), "{shown}");
+        assert!(!shown.contains("Your text is kept in"), "{shown}");
+        let (text, _) = app.notice.clone().unwrap();
+        assert!(text.contains("nope"), "{text}");
+        assert!(text.contains(&path), "{text}");
+        assert!(app.management_edits.first().unwrap().draft.path().exists());
+    }
+
+    /// A create the owner refuses, or a conflict on one, keeps the draft
+    /// file and its link: a create has no revision to lose, so the next
+    /// Ctrl+N reopens the user's text, with the panel open or closed.
+    #[test]
+    fn a_create_reply_keeps_the_draft_and_its_link() {
+        use crate::model::session::{ManagementReply, ManagementView};
+        fn create_reply(result: ManagementResult) -> Update {
+            Update::Management(ManagementReply {
+                request: ManagementRequest {
+                    area: Area::Scheduled,
+                    action: ManagementAction::Add {
+                        document: serde_json::json!({}),
+                    },
+                },
+                result,
+            })
+        }
+        fn refused() -> ManagementResult {
+            ManagementResult::Refused(ManagementRefusal::Refused("nope".into()))
+        }
+        fn conflict() -> ManagementResult {
+            ManagementResult::Refused(ManagementRefusal::Conflict {
+                message: "The jobs changed since they were read.".into(),
+                view: Ok(Box::new(ManagementView::default())),
+            })
+        }
+        let root = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            root.path().join("home"),
+            "/w".into(),
+        );
+        let draft = |app: &mut App| {
+            app.hold_draft(ManagementDraft {
+                area: Area::Scheduled,
+                target: WriteTarget::Create,
+                draft: editor::Draft::open(root.path(), Area::Scheduled, "{}").unwrap(),
+            });
+            app.management_edits
+                .last()
+                .unwrap()
+                .draft
+                .path()
+                .to_path_buf()
+        };
+        // Esc closed the panel while the create was in flight.
+        for result in [refused(), conflict()] {
+            let path = draft(&mut app);
+            app.apply(create_reply(result));
+            assert!(path.exists(), "a create keeps its file: {path:?}");
+            let kept = app.management_edits.first().expect("the link stays");
+            assert_eq!(kept.draft.path(), path.as_path());
+        }
+        // The panel is open: the file and the link stay for the next Ctrl+N.
+        for result in [refused(), conflict()] {
+            app.prompt = Some(Prompt::Management(ManagementPanel::new(Area::Scheduled)));
+            let path = draft(&mut app);
+            app.apply(create_reply(result));
+            assert!(path.exists(), "a create keeps its file: {path:?}");
+            let kept = app.management_edits.first().expect("the link stays");
+            assert_eq!(kept.draft.path(), path.as_path());
+        }
     }
 }

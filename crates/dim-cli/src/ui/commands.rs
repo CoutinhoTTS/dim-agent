@@ -317,6 +317,13 @@ pub const COMMANDS: &[Command] = &[
         Needs::Nothing,
     ),
     slash(
+        "scheduled",
+        "model",
+        "list scheduled jobs, pause, resume, run or remove one",
+        &["schedule"],
+        Needs::Nothing,
+    ),
+    slash(
         "reload-skills",
         "model",
         "rescan the Skills of this workspace",

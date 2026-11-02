@@ -277,9 +277,11 @@ Reset 要求确认后把两个布尔值都写为 false。Off 可保留无效的�
 
 两个界面使用同一个领域适配器。`dimcode hooks list|enable|disable` 保持现有输出与退出码，只有来源的状态行与面板共用同一措辞；`dimcode hooks edit` 与 `dimcode hooks set PATH` 经同一个适配器写入。
 
+管理文字在两个界面上都按界面语言生成。面板的文字从下一次回复起跟随 `/language`，`dimcode <area>` 使用已保存的语言，没有保存时使用系统的语言。
+
 ### 适配器
 
-适配器经客户端连接与守护进程通信，所以子命令不需要 Session。它在边界处把所有者的回复转成同一个客户端视图，执行该领域的动作，并拒绝守护进程没有公布其方法的动作，给出「守护进程不支持」错误。它从不回退到文件、别的方法或本机环境。
+适配器经客户端连接与守护进程通信，所以子命令不需要 Session。它在边界处把所有者的回复转成同一个客户端视图，执行该领域的动作，并拒绝守护进程没有公布其方法的动作，给出「守护进程不支持」错误。守护进程没有公布读取方法时，拒绝只指出领域；公布了读取但没有该种类的方法时，拒绝指出种类：`This daemon lists scheduled jobs but cannot remove them.` 它从不回退到文件、别的方法或本机环境。
 
 客户端不推断方法没有报告的东西。视图需要回复里没有的事实时，由生产者报告：`skills.catalog` 报告每个条目的 `source`，`hooks.catalog` 报告用户文档及其 revision。
 
@@ -319,20 +321,31 @@ Reset 要求确认后把两个布尔值都写为 false。Off 可保留无效的�
 | run | Ctrl+T | 该领域的具名操作，例如 test、run now 或 start。 |
 | inspect | Tab | 只读的详情视图。 |
 
-Esc 关闭面板。动作键要么是 Ctrl 组合键，要么是筛选从不接收的键，因为筛选会接收所有普通字母。作用于领域本身的种类属于领域的视图而不是某个条目——目前只有 reload——所以它不需要选中项：无论是否选中条目，键提示都会列出它，读取失败后 Ctrl+R 会重新读取该领域。这几个界面最先承载的领域用 toggle、reload 和 edit；之后的领域按需加入它用到的种类的代码，引入该种类的领域设计在此表中写下它。
+Esc 关闭面板。动作键要么是 Ctrl 组合键，要么是筛选从不接收的键，因为筛选会接收所有普通字母。作用于领域本身的种类属于领域的视图而不是某个条目——reload，以及新建条目的 add——所以它不需要选中项：无论是否选中条目，键提示都会列出它，读取失败后 Ctrl+R 会重新读取该领域。最先承载的两个领域用 toggle、reload 和 edit。Scheduler 领域引入 add、remove、run 和 inspect，客户端写的就是这四个种类；之后的领域只需加入自己的适配器以及它所用种类调用的方法，并在此表中写下它新增的种类。
+
+底部边框放不下的键提示会画在朴素底边之上的几行里，在 ` · ` 分隔处换行；比一行还宽的部件按显示宽度换行，任何键和动作都不会被截掉。这些行与页脚一样从列表中占用空间，所以任何宽度下每个键都可见，删除确认也不例外。
+
+- add 用外部编辑器打开适配器给出的新建条目文档——所有者的创建形态，填入示例值——并以领域的创建方法写入。文档没有改动时不写入；被拒绝时保留草稿，下次 Ctrl+N 重新打开用户的文本，与 Ctrl+E 对编辑的处理一致。冲突时也同样保留：新建没有 revision，丢弃草稿与过期 revision 的关联只是编辑的规则，不适用于新建。`dimcode <area> add PATH`（`-` 表示 stdin）是不经编辑器的同一次写入。
+- remove 先在键提示里询问：键提示变为 `Remove <label>? Enter confirm · Esc cancel`，除 Enter 外的任何键都取消且什么都不改。Enter 调用领域的删除方法，然后重新读取该领域。`dimcode <area> remove ID` 不提问直接删除，因为命令行上输入的 id 就是意图，与 `dimcode logout PROVIDER` 不提问直接退出一致。
+- run 对所选条目调用领域的具名操作，然后重新读取该领域，消息报告所有者的答复——所有者跳过的一次运行会说明原因。需要参数的操作是该领域自己的步骤，不属于这个种类。
+- inspect 向适配器索取条目的详情：一个标题和若干行，而不是一个视图。面板用它替代列表显示，方向键与 PageUp/PageDown 滚动，Esc 带着保留的选中项回到列表，再按一次 Esc 关闭面板。`dimcode <area> inspect ID` 打印同样的行，或该领域自己的动词，如果它的设计另有规定。
+
+文档按条目分存的领域，其条目为它自己的文档提供 edit：此时 Save 动作携带该条目的 id，适配器保留它与草稿一起读到的 revision。
+
+保留的草稿属于它被取走时对应的写入目标：领域的文档、某个条目的文档，或一次新建。某个目标的编辑键只重新打开该目标自己的保留草稿，并带着它的文本来源的那个 revision；另一个目标的编辑打开它自己的文档，不动保留的草稿；也只有草稿自身写入的回复才会结算该草稿。
 
 ### 写入
 
 写入遵循[执行设置](#执行设置)：
 
 - 适配器保存它与草稿一起读到的 revision，revision 不是用户输入的字段；
-- 冲突时什么都不写并显示错误；随后重新读取该领域，丢弃草稿与过期 revision 的关联，下次编辑打开已存储的文档。它从不自动重试，也从不覆盖更新的文档；
+- 冲突时什么都不写并显示错误；随后重新读取该领域，丢弃草稿与过期 revision 的关联，下次编辑打开已存储的文档。冲突后的读取失败同样丢弃该关联，并说明为何不绘制该领域；下一次读取会重试。它从不自动重试，也从不覆盖更新的文档；
 - 重新加载丢弃草稿并重新读取；
-- 因冲突而未写入的编辑不会静默丢失：消息说明用户文本所在的文件；
+- 冲突消息只陈述所有者的事实——什么变了、什么都没写——把用户文本在哪里留给持有它的界面：面板说明下一次编辑或新建会怎样处理保留的文本，并指出其文件；命令行指出保存文本的文件（包括来自 stdin 的输入）并以 1 退出；
 - 与更新文档无关的拒绝——文本解析失败，或所有者拒绝该文本——保留草稿的 revision，所以编辑键会带着用户的文本再次打开并再次写入；
 - 与草稿无关的回复——toggle、读取、其他领域的回复——同样保留草稿及其 revision；只有草稿自身的保存发生冲突、它所属领域重新加载，或草稿自身结算时才丢弃这一关联；
 - 一个动作算不算写入，由它背后的方法决定：toggle、save 与 Skills 的 reload（`skills.refresh`），这些方法所有者都声明为 mutating；Hooks 的 reload 是读取，因为它在 `hooks.catalog` 之前不调用任何方法；
-- 守护进程已接受的写入按已完成报告：其后的读取失败在动作之后作为读取失败报告，绝不算拒绝或冲突。CLI 先打印动作那一行，再在标准错误上打印读取错误并以 0 退出；Skills 的 toggle 那一行写 id，因为名字来自读取；Hooks 的 toggle 写工作区，因为 toggle 就是项目来源；而单独的读取失败仍然是失败。面板显示动作的消息和读取错误，在下一次读取前不保留视图，并按成功结算草稿：删除其文件并丢弃其关联；
+- 守护进程已接受的写入按已完成报告：其后的读取失败在动作之后作为读取失败报告，绝不算拒绝或冲突。CLI 先打印动作那一行，再在标准错误上打印读取错误并以 0 退出；Skills 与 Scheduler 的 toggle 按随后的读取命名条目，读取失败时写 id，因为名字来自读取；Hooks 的 toggle 写工作区，因为 toggle 就是项目来源；而单独的读取失败仍然是失败。面板显示动作的消息和读取错误，在下一次读取前不保留视图，并按成功结算草稿：删除其文件并丢弃其关联。已应用的动作即使其后的读取失败，也保留所有者的回答；
 - 读取和写入期间禁止修改。
 
 ### 外部编辑器
@@ -361,7 +374,7 @@ Esc 关闭面板。动作键要么是 Ctrl 组合键，要么是筛选从不接�
    │
    ├─ Enter ──► Command { area, Toggle { id, enabled } } ──► skills.set_enabled ──► skills.catalog
    │                                                                                （再次给出视图）
-   └─ Ctrl+E ──► 外部编辑器 ──► Command { area, Save { expectedRevision, document } }
+   └─ Ctrl+E ──► 外部编辑器 ──► Command { area, Save { id?, expectedRevision, document } }
                                 ──► hooks.save ──► hooks.catalog
 
 dimcode skills enable ID ──────────────────────────────► 同一个适配器，用自己的连接
@@ -373,6 +386,38 @@ dimcode hooks set PATH   ──────────────────�
 Skills（#814）：`/skills` 面板与 `dimcode skills list|enable|disable|reload`，经 `skills.catalog`、`skills.set_enabled` 与 `skills.refresh`；`/reload-skills` 不打开面板，直接运行 reload 动作并报告结果。条目按 id 启用或停用，所以 toggle 不需要自己的 revision。安装和删除 Skill 包仍归插件安装（[总览](overview.md#附录-d-cli-层)）所有。
 
 Hooks（#809）：`/hooks` 面板与 `dimcode hooks list|enable|disable|edit|set PATH`。面板把每个来源列为一个带状态的条目；toggle 经 `hooks.set_enabled` 启用或停用项目来源（项目来源初始为停用，只有用户可以启用它）；edit 用编辑器打开用户文档，并以 `hooks.save` 写入，即 Settings 来源 `hooks` 的 CAS 写入。`dimcode hooks set PATH`（`-` 表示 stdin）是不经编辑器的同一次写入；revision 过期时两者都把用户文本留在 `<home>/edit/` 下它自己的文件里。用户来源提供 edit、不提供 toggle，因为它始终生效；插件来源两者都不提供，详情说明所属插件。
+
+### Scheduler 领域
+
+Scheduler（#815）：`/scheduled` 面板，`/schedule` 在两种模式下都是它的别名，以及 `dimcode scheduled list|enable ID|disable ID|edit ID|set ID PATH|add PATH|remove ID|run ID|history ID`，经 `schedule.list`、`schedule.save`、`schedule.delete`、`schedule.set_enabled`、`schedule.run_now` 与 `schedule.history`（[Scheduler §A.3](plugins/Scheduler.md#a3-管理方法)）。每个任务是条目：名称是标签，调度、下次窗口与上次结果分别是详情。所有者无法使用其调度的任务标记为无效，详情带上所有者的消息；已停用的任务说明没有下次窗口。所有者不报告分组，所以任务共用 `jobs` 一个分组。
+
+任务的文档就是所有者写入的那条记录；客户端只改动 `schedule.save` 接受的字段——`name`、`schedule`、`prompt`、`cwd`、`model`、`mode`、`policy`、`max_run_minutes`、`enabled`、`session_id` 与 `agent_id`——并把 id 放在 Save 动作上、把任务的 revision 作为草稿读取时的 revision。`schedule.save` 是合并到已存任务上的补丁，所以一次编辑只写入草稿改动的成员：适配器重新读取该任务，草稿的 revision 不再等于任务的就拒绝，然后带着 id 与 revision 只发送改动的成员。没有改动任何可编辑成员的草稿不写入；草稿删除的成员无法清除，因为补丁没有 null：写入在发送前就被拒绝，并指出该成员。例外是 `mode` 变为 `create` 时被删除的 `session_id`，由所有者自己清除。revision 过期就是 `schedule_conflict`，即类型化的冲突：什么都不写，重新读取任务，下次编辑打开当前记录。`created_by`、`policy_cap` 与 `enabled_at` 由所有者推导，客户端从不发送。新条目从所有者的创建形态开始——一个名称、一个 `every` 示例调度、一个提示词与会话的工作区——以不带 revision 的 `schedule.save` 写入。`inspect` 就是 `history`：任务最近的运行，最新的在前，带所有者记录的状态。
+
+```text
+╭─ Scheduler ──────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ >                                                                                                                    │
+│                                                                                                                      │
+│   jobs                                                                                                               │
+│ › nightly-build   enabled                                                                                            │
+│   release         disabled  invalid                                                                                  │
+│                                                                                                                      │
+│   every 60 minutes                                                                                                   │
+│   Next run 2026-11-02T09:00:00.000Z.                                                                                 │
+│   Last run completed at 2026-11-01T09:00:12.000Z.                                                                    │
+╰───── Enter toggle · Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Ctrl+T run · Tab inspect · Esc close ─╯
+```
+
+Ctrl+T 立即运行所选任务，并报告所有者的答复——`launching`，或运行被跳过的原因；Tab 用任务的历史替代列表显示：
+
+```text
+╭─ Recent runs of nightly-build ─────────────────────────────╮
+│ 2026-11-01T09:00:12.000Z  completed                        │
+│ 2026-11-01T08:00:05.000Z  skipped (overlap)                │
+│ 2026-10-31T09:00:03.000Z  completed                        │
+╰───────────────────────────────────── ↑↓ scroll · Esc back ─╯
+```
+
+`dimcode scheduled add PATH`（`-` 表示 stdin）是不经编辑器的创建；`dimcode scheduled history ID` 打印详情显示的那些行；`dimcode scheduled remove ID` 不经面板的确认直接删除。
 
 ## 命令
 
@@ -400,6 +445,15 @@ Hooks（#809）：`/hooks` 面板与 `dimcode hooks list|enable|disable|edit|set
 | `dimcode hooks edit` | 用 `$VISUAL`、`$EDITOR` 或平台默认编辑器打开用户 Hook 文档，并以 `hooks.catalog` 报告的 revision 经 `hooks.save` 写回；交互式编辑需要终端。 |
 | `dimcode hooks set PATH` | 从 `PATH`（`-` 表示 stdin）读取用户 Hook 文档并写入，用写入前紧邻读到的 revision；内容没有变化时不写入。 |
 | `/hooks` | 打开会话所在工作区的 Hooks 面板（[管理界面](#管理界面)）：每个来源一个条目，项目来源提供 toggle，用户文档提供 edit。 |
+| `dimcode scheduled list` | 经 `schedule.list` 列出 Scheduler 持有的任务（[Scheduler](plugins/Scheduler.md#a3-管理方法)）：每个任务的 id、名称、计划、状态、下一次窗口与上次结果，然后是计划无法被 owner 使用的任务。 |
+| `dimcode scheduled enable\|disable ID` | 经 `schedule.set_enabled` 启用或暂停单个任务，然后再次报告任务。 |
+| `dimcode scheduled edit ID` | 用 `$VISUAL`、`$EDITOR` 或平台默认编辑器打开单个任务的文档，并以列表报告的 revision 经 `schedule.save` 写回；交互式编辑需要终端。 |
+| `dimcode scheduled set ID PATH` | 从 `PATH`（`-` 表示 stdin）读取单个任务的文档并写入，用写入前紧邻读到的 revision；内容没有变化时不写入。 |
+| `dimcode scheduled add PATH` | 从 `PATH`（`-` 表示 stdin）读取文档，不经 revision 经 `schedule.save` 创建任务：id、`created_by` 与 `policy_cap` 由 owner 推导。 |
+| `dimcode scheduled remove ID` | 不经确认，经 `schedule.delete` 删除单个任务：命令行上的 id 就是意图。 |
+| `dimcode scheduled run ID` | 经 `schedule.run_now` 立即运行单个任务，并报告 owner 返回的内容，或它跳过这次运行的原因。 |
+| `dimcode scheduled history ID` | 经 `schedule.history` 打印单个任务最近的运行，最新的在前，并带上每次运行的状态与时间。 |
+| `/scheduled`、`/schedule` | 打开 Scheduler 面板（[管理界面](#管理界面)）：每个任务一个条目，带计划、下一次窗口与上次结果，以及 toggle、edit、add、remove、run 与 inspect 种类；Scheduler 中 inspect 的动词是 history。任务属于主机，不属于会话或工作区；只有新建任务的默认 `cwd` 来自会话。 |
 | `dimcode login [PROVIDER] [--directory URL] [--device] [--redirect-uri URI]` | 启动被描述账号的浏览器或设备签到（[提供方账号](#提供方账号)）；不给 PROVIDER 时列出被描述的账号。 |
 | `dimcode account PROVIDER` | 打印被描述账号的非机密状态。 |
 | `dimcode logout PROVIDER` | 让被描述的账号退出。 |

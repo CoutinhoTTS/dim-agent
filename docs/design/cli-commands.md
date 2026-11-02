@@ -339,12 +339,17 @@ Both surfaces use the same area adapter. `dimcode hooks list|enable|disable` kee
 exit codes, except that a source's state line is worded once for the panel and the command;
 `dimcode hooks edit` and `dimcode hooks set PATH` write through the same adapter.
 
+Management text is composed in the interface language on both surfaces. The panel's text follows
+`/language` from the next reply, and `dimcode <area>` uses the saved language, else the system's.
+
 ### The adapter
 
 An adapter talks to the daemon through the client connection, so a subcommand needs no Session.
 It turns its owner's reply into one client view at that boundary, it performs the area's actions,
 and it refuses an action whose methods the daemon does not advertise, with an unsupported-daemon
-error. It never falls back to a file, to another method or to the host's own environment.
+error. That refusal names the area when the daemon does not serve its read, and names the kind
+when it serves the read without the kind's method: `This daemon lists scheduled jobs but cannot
+remove them.` It never falls back to a file, to another method or to the host's own environment.
 
 The client infers nothing the methods do not report. A view that needs a fact the reply does not
 carry gets that fact from the producer: `skills.catalog` reports each entry's `source`, and
@@ -397,10 +402,42 @@ lists the area's kinds plus the selected entry's kinds, in the table's order.
 
 Esc closes the panel. An action key is a Ctrl chord, or a key the filter never takes, because
 the filter takes every plain letter. A kind that acts on the area itself belongs to the area's
-view rather than to one entry — today only reload — so it needs no selection: the hint lists it
-whether or not an entry is selected, and Ctrl+R reads the area again after a failed read. The
-areas these surfaces first carry use toggle, reload and edit; a later area adds the code of the
-kinds it needs, and the design of the area that introduces one names it here.
+view rather than to one entry — reload, and add, which creates one — so it needs no selection:
+the hint lists it whether or not an entry is selected, and Ctrl+R reads the area again after a
+failed read. The first two areas use toggle, reload and edit. The Scheduler area introduces
+add, remove, run and inspect, and the client's kinds are what it writes; a later area adds its
+adapter and the methods its kinds call, and names here the kinds it adds.
+
+A hint the bottom border cannot hold is drawn as rows above a plain bottom border, wrapped at
+the ` · ` separators; a part wider than a row wraps across rows by display width, so no key or
+action is ever cut. The rows take their space from the list like the footer's, so every key
+stays visible at any width, the remove confirmation included.
+
+- add opens the external editor on a new-entry document that the adapter supplies — the owner's
+  create shape, filled with example values — and writes it with the area's create method. An
+  unchanged document writes nothing, and a refusal keeps the draft, which the next Ctrl+N
+  reopens, as Ctrl+E does for an edit. A conflict keeps it too: a create has no revision, so
+  dropping the draft's link to a stale revision is an edit's rule, not a create's.
+  `dimcode <area> add PATH` (`-` for stdin) is the same write without an editor.
+- remove asks in the hint first: it becomes `Remove <label>? Enter confirm · Esc cancel`, and
+  every key but Enter cancels without changing anything. Enter sends the area's delete method
+  and reads the area again. `dimcode <area> remove ID` deletes without a prompt, because the id
+  typed on the command line is the intent, as `dimcode logout PROVIDER` signs out without one.
+- run sends the area's named operation for the selected entry, reads the area again, and its
+  message reports what the owner answered — a run the owner skipped says why. An operation that
+  takes parameters is the area's own step, not this kind's.
+- inspect asks the adapter for the entry's detail: a title and lines, not a view. The panel
+  shows it in place of the list, the arrows and PageUp/PageDown scroll it, Esc returns to the
+  list with the selection kept, and a second Esc closes the panel. `dimcode <area> inspect ID`
+  prints the same lines, or the area's own verb where its design names one.
+
+An entry of an area whose documents are per entry offers edit for its own document: the Save
+action then carries the entry's id, and the adapter keeps the revision it read with the draft.
+
+A kept draft belongs to the write target it was taken for: the area's document, one entry's
+document, or a create. The edit key of a target reopens only that target's kept draft, at the
+revision its text came from; another target's edit opens its own document and leaves the kept
+draft where it is, and only the reply to a draft's own write settles that draft.
 
 ### Writes
 
@@ -409,11 +446,14 @@ Writes follow [Execution settings](#execution-settings):
 - the adapter keeps the revision it read with the draft, and the revision is not a field the user
   types;
 - a conflict writes nothing and shows the error; the area is read again, the draft's link to the
-  stale revision is dropped, and the next edit opens the stored document. It never retries
-  automatically and never overwrites a newer document;
+  stale revision is dropped, and the next edit opens the stored document. A read that fails after
+  the conflict still drops that link and says why the area is not drawn, and the next read retries
+  it. It never retries automatically and never overwrites a newer document;
 - reload discards the draft and reads again;
-- an edit the conflict prevented is not lost silently: the message names the file that holds the
-  user's text;
+- a conflict message states the owner's fact — what changed, and that nothing was written — and
+  leaves where the text is to the surface that holds it: the panel says what the next edit or add
+  does with the kept text and names its file, and the command line names the file that holds the
+  text, a stdin input included, and exits 1;
 - a refusal that does not involve a newer document — text that does not parse, or one the owner
   refuses — keeps the draft's revision, so the edit key reopens the user's text and writes it
   again;
@@ -425,11 +465,13 @@ Writes follow [Execution settings](#execution-settings):
   since it calls nothing before `hooks.catalog`;
 - a write the daemon accepted is reported as done: a failure of the read that follows is
   reported after the action, as a read failure, never as a refusal or a conflict. The CLI prints
-  the action's line, then the read error on standard error, and exits 0; a Skills toggle's line
-  names the id, since the read is what supplies the name, and a Hooks toggle names the workspace,
-  since the toggle is the project source; a read on its own that fails is still a failure. The
-  panel shows the action's message and the read error, keeps no view until the next
-  read, and settles the draft as on success: its file is removed and its link dropped;
+  the action's line, then the read error on standard error, and exits 0; a Skills or Scheduler
+  toggle names the entry from the read that follows it, and the id when that read failed, since
+  the read is what supplies the name; a Hooks toggle names the workspace, since the toggle is the
+  project source; a read on its own that fails is still a failure. The panel shows the action's
+  message and the read error, keeps no view until the next read, and settles the draft as on
+  success: its file is removed and its link dropped. An applied action keeps the owner's answer
+  even when the read after it fails;
 - loading and writing disable mutation.
 
 ### The external editor
@@ -476,7 +518,7 @@ Panel  ◄───────────────────{ area, view 
    │
    ├─ Enter ──► Command { area, Toggle { id, enabled } } ──► skills.set_enabled ──► skills.catalog
    │                                                                                (the view again)
-   └─ Ctrl+E ──► the external editor ──► Command { area, Save { expectedRevision, document } }
+   └─ Ctrl+E ──► the external editor ──► Command { area, Save { id?, expectedRevision, document } }
                                           ──► hooks.save ──► hooks.catalog
 
 dimcode skills enable ID ──────────────────────────────► the same adapter, over its own connection
@@ -499,6 +541,62 @@ of the Settings source `hooks`. `dimcode hooks set PATH` (`-` for stdin) is the 
 an editor, and either one keeps the user's text in its own file under `<home>/edit/` when the
 revision is stale. The user source offers edit and no toggle, because it is always in effect; a
 plugin's source offers neither, and its detail names the plugin.
+
+### The Scheduler area
+
+Scheduler (#815): the `/scheduled` panel, `/schedule` its alias in both modes, and `dimcode
+scheduled list|enable ID|disable ID|edit ID|set ID PATH|add PATH|remove ID|run ID|history ID`
+over `schedule.list`, `schedule.save`, `schedule.delete`, `schedule.set_enabled`,
+`schedule.run_now` and `schedule.history` ([Scheduler §A.3](plugins/Scheduler.md#a3-management-methods)).
+Every job is an entry: its name is the label, and its schedule, next window and last outcome are
+its detail. A job whose schedule the owner cannot use is marked invalid and its detail carries the
+owner's message; a job the scheduler holds while it is disabled says it has no next window. The
+owner reports no grouping, so the jobs share one heading, `jobs`.
+
+A job's document is the record the owner wrote; the client changes only the fields `schedule.save`
+takes — `name`, `schedule`, `prompt`, `cwd`, `model`, `mode`, `policy`, `max_run_minutes`,
+`enabled`, `session_id` and `agent_id` — and carries the id on the Save action and the job's
+revision as the revision the draft was read at. `schedule.save` is a patch merged over the stored
+job, so an edit writes only the members the draft changed: the adapter reads the job again,
+refuses a draft whose revision is no longer the job's, and sends the changed members with the id
+and the revision. A draft that changes no editable member writes nothing, and a member the draft
+deletes cannot be cleared because the patch has no null: the write is refused before it is sent
+and names the member. The exception is a `session_id` whose `mode` becomes `create`, which the
+owner clears itself. A stale revision is `schedule_conflict`, the
+typed conflict: nothing is written, the jobs are read again, and the next edit opens the current
+record. `created_by`, `policy_cap` and `enabled_at` are the owner's to derive and are never sent.
+A new entry starts from the owner's create shape — a name, an example `every` schedule, a prompt
+and the Session's workspace — and writes with `schedule.save` without a revision. `inspect` is
+`history`: the job's recent runs, newest first, with the state the owner recorded.
+
+```text
+╭─ Scheduler ──────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ >                                                                                                                    │
+│                                                                                                                      │
+│   jobs                                                                                                               │
+│ › nightly-build   enabled                                                                                            │
+│   release         disabled  invalid                                                                                  │
+│                                                                                                                      │
+│   every 60 minutes                                                                                                   │
+│   Next run 2026-11-02T09:00:00.000Z.                                                                                 │
+│   Last run completed at 2026-11-01T09:00:12.000Z.                                                                    │
+╰───── Enter toggle · Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Ctrl+T run · Tab inspect · Esc close ─╯
+```
+
+Ctrl+T runs the selected job now and reports what the owner answered — `launching`, or the reason
+the run was skipped — and Tab shows the job's history in place of the list:
+
+```text
+╭─ Recent runs of nightly-build ─────────────────────────────╮
+│ 2026-11-01T09:00:12.000Z  completed                        │
+│ 2026-11-01T08:00:05.000Z  skipped (overlap)                │
+│ 2026-10-31T09:00:03.000Z  completed                        │
+╰───────────────────────────────────── ↑↓ scroll · Esc back ─╯
+```
+
+`dimcode scheduled add PATH` (`-` for stdin) is the create without an editor, `dimcode scheduled
+history ID` prints the lines the detail shows, and `dimcode scheduled remove ID` deletes without
+the panel's confirmation.
 
 ## Commands
 
@@ -530,6 +628,15 @@ plugin's source offers neither, and its detail names the plugin.
 | `dimcode hooks edit` | Open the user's hook document in `$VISUAL`, `$EDITOR` or the platform default, and write it over `hooks.save` with the revision `hooks.catalog` reported; an interactive edit needs a terminal. |
 | `dimcode hooks set PATH` | Write the user's hook document from `PATH`, or from stdin for `-`, with the revision read immediately before the write; unchanged text writes nothing. |
 | `/hooks` | Open the Hooks panel of the Session's workspace ([management surfaces](#management-surfaces)): a source per entry, the project's toggle and the user document's edit. |
+| `dimcode scheduled list` | List the jobs the Scheduler holds over `schedule.list` ([Scheduler](plugins/Scheduler.md#a3-management-methods)): each job's id, name, schedule, state, next window and last outcome, then the jobs whose schedule the owner cannot use. |
+| `dimcode scheduled enable\|disable ID` | Enable or pause one job over `schedule.set_enabled`, then report the jobs again. |
+| `dimcode scheduled edit ID` | Open one job's document in `$VISUAL`, `$EDITOR` or the platform default, and write it over `schedule.save` with the revision the listing reported; an interactive edit needs a terminal. |
+| `dimcode scheduled set ID PATH` | Write one job's document from `PATH`, or from stdin for `-`, with the revision read immediately before the write; unchanged text writes nothing. |
+| `dimcode scheduled add PATH` | Create a job from `PATH`, or from stdin for `-`, over `schedule.save` without a revision: the owner derives the id, `created_by` and `policy_cap`. |
+| `dimcode scheduled remove ID` | Delete one job over `schedule.delete` without a prompt: the id on the command line is the intent. |
+| `dimcode scheduled run ID` | Run one job now over `schedule.run_now` and report what the owner returned, or why it skipped the run. |
+| `dimcode scheduled history ID` | Print one job's recent runs over `schedule.history`, newest first, with each run's state and time. |
+| `/scheduled`, `/schedule` | Open the Scheduler panel ([management surfaces](#management-surfaces)): a job per entry with its schedule, next window and last outcome, and the toggle, edit, add, remove, run and inspect kinds; the Scheduler's verb for inspect is history. Jobs are the host's, not the Session's or workspace's; only a new job's default `cwd` comes from the Session. |
 | `dimcode login [PROVIDER] [--directory URL] [--device] [--redirect-uri URI]` | Start the described account's browser or device sign-in ([Provider accounts](#provider-accounts)); without PROVIDER, list the described accounts. |
 | `dimcode account PROVIDER` | Print the described account's non-secret state. |
 | `dimcode logout PROVIDER` | Sign the described account out. |

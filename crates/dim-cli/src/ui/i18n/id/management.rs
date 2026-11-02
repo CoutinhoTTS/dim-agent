@@ -6,6 +6,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Issues" => "Masalah",
         "sources" => "Sumber",
         "skills" => "Skill",
+        "hooks" => "hook",
+        "scheduled jobs" => "tugas terjadwal",
         "enabled" => "aktif",
         "shadowed by {name}" => "tertutup oleh {name}",
         "Reloaded." => "Dimuat ulang.",
@@ -17,6 +19,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Hooks" => "Hooks",
         "invalid" => "tidak valid",
         "Saved." => "Disimpan.",
+        "Saved {name}." => "{name} disimpan.",
         "No change." => "Tidak ada perubahan.",
         "Your text is kept in {path}." => "Teks Anda tersimpan di {path}.",
         "The user's own document; always in effect." => "Dokumen milik pengguna; selalu berlaku.",
@@ -27,9 +30,74 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Enter toggle" => "Enter alih",
         "Ctrl+E edit" => "Ctrl+E edit",
+        "Ctrl+N add" => "Ctrl+N tambah",
         "Ctrl+R reload" => "Ctrl+R muat ulang",
-        "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
-            "Dokumen pengguna berubah sejak dibaca; tidak ada yang ditulis. Edit berikutnya membuka dokumen saat ini."
+        "Ctrl+T run" => "Ctrl+T jalankan",
+        "Ctrl+X remove" => "Ctrl+X hapus",
+        "Tab inspect" => "Tab periksa",
+        "Remove {name}? Enter confirm · Esc cancel" => {
+            "Hapus {name}? Enter konfirmasi · Esc batal"
+        }
+        "↑↓ scroll · Esc back" => "↑↓ gulir · Esc kembali",
+        "Added." => "Ditambahkan.",
+        "Removed {name}." => "{name} dihapus.",
+        "Ran {name}." => "{name} dijalankan.",
+        "The user document changed since it was read; nothing was written." => {
+            "Dokumen pengguna berubah sejak dibaca; tidak ada yang ditulis."
+        }
+        "The job changed since it was read; nothing was written." => {
+            "Tugas berubah sejak dibaca; tidak ada yang ditulis."
+        }
+        "The jobs changed since they were read; nothing was written." => {
+            "Tugas berubah sejak dibaca; tidak ada yang ditulis."
+        }
+        "Your next edit opens the current document." => "Edit berikutnya membuka dokumen saat ini.",
+        "Your next add reopens your text." => "Tambah berikutnya membuka kembali teks Anda.",
+        "Scheduler" => "Penjadwal",
+        "jobs" => "tugas",
+        "Added {name}." => "{name} ditambahkan.",
+        "Run {name}: {outcome}." => "{name} dijalankan: {outcome}.",
+        "Recent runs of {name}" => "Eksekusi terbaru {name}",
+        "No run yet." => "Belum ada eksekusi.",
+        "No next run." => "Tidak ada eksekusi berikutnya.",
+        "Next run {instant}." => "Eksekusi berikutnya {instant}.",
+        "Last run {outcome} at {instant}." => "Eksekusi terakhir {outcome} pada {instant}.",
+        "every {minutes} minutes" => "setiap {minutes} menit",
+        "at {instant}" => "pada {instant}",
+        "cron {expression}" => "cron {expression}",
+        "cron {expression} in {zone}" => "cron {expression} di {zone}",
+        "The job changed since it was read; nothing was removed." => {
+            "Tugas berubah sejak dibaca; tidak ada yang dihapus."
+        }
+        "The Scheduler has no area document." => "Penjadwal tidak memiliki dokumen area.",
+        "No scheduled job has that id." => "Tidak ada tugas terjadwal dengan id itu.",
+        "This daemon cannot manage {area}." => "Tidak dapat mengelola {area}.",
+        "This daemon lists {area} but cannot toggle them." => {
+            "Daemon ini menampilkan {area}, tetapi tidak dapat mengalihkannya."
+        }
+        "This daemon lists {area} but cannot edit them." => {
+            "Daemon ini menampilkan {area}, tetapi tidak dapat mengeditnya."
+        }
+        "This daemon lists {area} but cannot reload them." => {
+            "Daemon ini menampilkan {area}, tetapi tidak dapat memuat ulang daftarnya."
+        }
+        "This daemon lists {area} but cannot add them." => {
+            "Daemon ini menampilkan {area}, tetapi tidak dapat menambahnya."
+        }
+        "This daemon lists {area} but cannot remove them." => {
+            "Daemon ini menampilkan {area}, tetapi tidak dapat menghapusnya."
+        }
+        "This daemon lists {area} but cannot run them." => {
+            "Daemon ini menampilkan {area}, tetapi tidak dapat menjalankannya."
+        }
+        "This daemon lists {area} but cannot inspect them." => {
+            "Daemon ini menampilkan {area}, tetapi tidak dapat melihat detail atau riwayatnya."
+        }
+        "The document deleted {field}, which the owner cannot clear; nothing was written." => {
+            "Dokumen menghapus {field}, yang tidak dapat dibersihkan pemilik; tidak ada yang ditulis."
+        }
+        "The document changes no field; nothing was written." => {
+            "Dokumen tidak mengubah bidang apa pun; tidak ada yang ditulis."
         }
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "Pengaturan hook ruang kerja ini berubah sejak dibaca; tidak ada yang ditulis."
