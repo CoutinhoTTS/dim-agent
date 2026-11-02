@@ -26,6 +26,22 @@ omitted from the menu. The menu only lists slash commands: the view actions for
 picking an earlier message and scrolling to the top or bottom are also omitted;
 `Tab`, `Home` and `End` retain their bindings.
 
+The menu fits the available terminal columns and rows in both modes. Command
+names take priority over descriptions and shortcut labels; a shortcut that
+would crowd out its command name is omitted from the row, without changing
+the binding. On short screens, fewer commands are shown and the window follows
+the selection. Scrollback keeps the command draft visible above the menu and
+omits the menu title and footer when necessary; fullscreen keeps its palette
+query and selection above the composer. Category grouping and ordering do not
+change with terminal size.
+
+At 8–10 terminal rows, live controls take priority over the usual history
+reservation: either renderer can use up to eight rows for the live region,
+limited by terminal height. Fullscreen reduces the composer's empty padding
+and the palette's query padding before overlapping either input. The draft
+editor scrolls within the remaining rows and keeps its caret visible without
+discarding text. Taller terminals retain their usual history reservation.
+
 ```text
 Commands
   app     /exit        exit
@@ -36,6 +52,18 @@ Commands
 / + Enter          -> /exit (completion only)
 /exit + Enter      -> exit
 /permissions + Enter -> permission controls
+```
+
+```text
+Fullscreen, 8 rows             Scrollback, 8 rows
++- Command Palette -------+
+| >                       |   +- input -----------------+
+| app /exit               |   | > /                     |
++-------------------------+   +-------------------------+
+                              +-------------------------+
++- input -----------------+   | app /exit               |
+|                         |   +-------------------------+
++-------------------------+   AGENT
 ```
 
 ## Run keys and queue
@@ -1078,6 +1106,24 @@ provider editor or Session deletion/fork. `dimcode export` is the
 request is a `model/call` line in it; the request snapshot filters of the
 feature list are not implemented.
 
+## Update dialog
+
+The existing update dialog uses the same actions in fullscreen and scrollback.
+It fits the available columns and rows: long version, command and error text
+wraps, with Up/Down scrolling when needed. The title and action row remain
+visible. If the actions do not fit on one row, show the focused action and its
+index; Left/Right and Tab/BackTab still cycle all actions, Enter confirms and
+Esc closes. Wide terminals retain the existing confirmation layout when it fits.
+
+```text
++- Update available --------+
+| Version 0.12.0-alpha.124  |
+| is available (you have   |
+| > Later 3/3              |
+| Left/Right Tab Enter Esc |
++----------- Up/Down 1-2/7-+
+```
+
 ## Terminal interaction
 
 ```text
@@ -1760,6 +1806,10 @@ is typed (replacing the chosen label in a single choice) and clearing it uncheck
 while editing, Esc leaves the editor keeping the text and Enter keeps it and moves to
 the next question. Outside the editor, Esc declines the whole call. Display sanitization
 never changes the labels sent to the owner. The composer's draft is preserved.
+
+When the question tabs do not fit on one row, show only the current tab's label
+and its position, including the Confirm tab. Tab/Shift+Tab and Left/Right keep
+their existing switching behavior; tab labels cannot overflow the prompt border.
 
 A pending question does not block commands. While its free-text answer is not being
 edited, `/`, Ctrl+O and Ctrl+P open the command palette over it, drawn where that mode
