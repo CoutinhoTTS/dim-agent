@@ -372,6 +372,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // sessions_panel.rs
         "Sessions" => "セッション",
         "Sessions · This workspace" => "セッション · このワークスペース",
+        "Sessions · This repository" => "セッション · このリポジトリ",
         "Sessions · All workspaces" => "セッション · すべてのワークスペース",
         "No saved sessions in this workspace. Ctrl+S shows more." => {
             "このワークスペースに保存済みセッションはありません。Ctrl+S で他のワークスペースを表示します。"

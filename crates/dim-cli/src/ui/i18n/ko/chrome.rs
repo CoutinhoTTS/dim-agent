@@ -360,6 +360,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // sessions_panel.rs
         "Sessions" => "세션",
         "Sessions · This workspace" => "세션 · 이 워크스페이스",
+        "Sessions · This repository" => "세션 · 이 저장소",
         "Sessions · All workspaces" => "세션 · 모든 워크스페이스",
         "No saved sessions in this workspace. Ctrl+S shows more." => {
             "이 워크스페이스에 저장된 세션 없음. Ctrl+S로 더 보기."

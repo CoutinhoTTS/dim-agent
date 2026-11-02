@@ -757,7 +757,7 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 | `dimcode session delete SESSION` | 永久删除该 Session 及存储为它保留的一切；不弹出确认。 |
 | `dimcode session cleanup (--older-than DURATION\|--keep N) [--yes]` | 列出某个选择器命中的 Session，确认后删除。 |
 | `/rename TITLE` 或 `/rename --clear` | 设置或清除所显示 Session 的手动标题；该文本是命令，永不成为模型输入。 |
-| `/resume` | 在当前工作区上打开 Session 选择面板（[`/resume` 选择面板](#resume-选择面板)）；`Ctrl+S` 放宽到所有工作区。 |
+| `/resume` | 在当前工作区上打开 Session 选择面板（[`/resume` 选择面板](#resume-选择面板)）；`Ctrl+S` 依次循环当前工作区、提供时的当前仓库与所有工作区。 |
 | `/export markdown PATH` 或 `/export json PATH` | 交互客户端空闲时把当前主分支导出到文件。 |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | 不经守护进程，把 Session 的完整 Timeline 写成带版本的 JSONL（[Timeline 导出](appserver/timeline-export.md)）；未给输出路径时写到 stdout。 |
 | `dimcode daemon vacuum [--database PATH]` | 用 SQLite `VACUUM` 重写离线原生库，回收已删除 Session 留下的页，并打印操作前后的大小（[存储格式](appserver/native-storage-format.md#sqlite-运行参数与空间回收)）；守护进程持库时失败，也不创建或升级库。 |
@@ -874,7 +874,7 @@ Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
 
 `/resume` 打开在 `dimcode` 启动时的工作区上：`--cwd` 指定的目录，经过规范化，也就是
 `session.create` 为在那里创建的 Session 记录的工作区。列表只含恰好属于该工作区的已存 Session，
-最新在前，每次打开都从这里开始。`Ctrl+S` 把列表放宽到所有工作区，再回到当前工作区，标题写明
+最新在前，每次打开都从这里开始。`Ctrl+S` 依次循环当前工作区、当前仓库与所有工作区，标题写明
 当前范围。过滤框保留输入框的 `Ctrl+A` 与 `Ctrl+W`，`Tab` 向下移动选择。
 
 ```text
@@ -884,6 +884,16 @@ Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
 │                                                                              │
 │   Fix the failing test       3h ago                                          │
 │   Update the catalog design  1d ago                                          │
+╰───────────────────── Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close ─╯
+```
+
+```text
+╭─ Sessions · This repository ─────────────────────────────────────────────────╮
+│                                                                              │
+│ >                                                                            │
+│                                                                              │
+│   Fix the failing test       3h ago · ~/src/app/web                          │
+│   Update the catalog design  1d ago · ~/src/app-fix/web                      │
 ╰───────────────────── Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close ─╯
 ```
 
@@ -898,6 +908,10 @@ Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
 ```
 
 - 切换范围像一次新的查询：取消尚未完成的读取、丢掉游标、重新读第一页；查询保留，并在新范围内生效。
+- 当前仓库包含启动工作区，以及它所在 git 仓库每个 worktree 中同一个相对目录；选择面板打开时在后台用
+  `git rev-parse` 与 `git worktree list --porcelain` 读取。第一页不等 git，两次读取共用一个两秒的时限；
+  git 失败或不回答时该范围不出现，也不提示。只有当集合多于一个条目，并且守护进程读取一组工作区
+  （`session.catalog.workspaces`）或经 `session.summaries` 列目录时，才提供这个范围。bare worktree 不加入。
 - 在当前工作区范围之外，每行先写更新于多久之前，再写它所属的工作区，主目录写作 `~`。标签最多占一半
   宽度，时间在最前，因此被截断的是长路径。
 - 当前工作区范围、没有 Session 且没有查询时，列表显示 `No saved sessions in this workspace. Ctrl+S shows more.`；

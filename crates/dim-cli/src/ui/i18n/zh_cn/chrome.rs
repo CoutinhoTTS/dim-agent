@@ -333,6 +333,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
 
         "Sessions" => "会话",
         "Sessions · This workspace" => "会话 · 当前工作区",
+        "Sessions · This repository" => "会话 · 当前仓库",
         "Sessions · All workspaces" => "会话 · 所有工作区",
         "No saved sessions in this workspace. Ctrl+S shows more." => {
             "当前工作区没有已保存的会话。Ctrl+S 查看更多。"

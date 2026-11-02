@@ -565,3 +565,450 @@ fn a_cold_ui_leaf_submits_its_first_message_with_a_large_native_catalog() {
     assert!(terminal.wait().success());
     http.join().unwrap();
 }
+
+/// A scratch git repository under `parent`, holding `sub/`, and when
+/// `worktrees` is set a linked worktree of it that also holds `sub/`.
+fn scratch_repository(
+    parent: &std::path::Path,
+    worktrees: bool,
+) -> (std::path::PathBuf, Option<std::path::PathBuf>) {
+    let repo = parent.join("repo");
+    std::fs::create_dir_all(repo.join("sub")).unwrap();
+    let git = |cwd: &std::path::Path, args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "Initial",
+        ],
+    );
+    if !worktrees {
+        return (repo, None);
+    }
+    let linked = parent.join("linked");
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked",
+            linked.to_str().unwrap(),
+        ],
+    );
+    std::fs::create_dir_all(linked.join("sub")).unwrap();
+    (repo, Some(linked))
+}
+
+/// A short scratch directory for one flow, removed with everything the flow
+/// created under it when the test ends, as `Home` removes its own.
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new() -> Self {
+        let path = std::path::PathBuf::from("/tmp")
+            .join(format!("dim-r-{}", &uuid::Uuid::new_v4().to_string()[..8]));
+        std::fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        daemon_cleanup::remove_directory(&self.0);
+    }
+}
+
+/// A `git` that runs the real one, and after a `worktree` call writes
+/// `marker`, so the daemon replies to the first page only once the repository
+/// set has been read. Returns the PATH value that puts it first.
+fn gated_git(directory: &std::path::Path, marker: &std::path::Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let git = directory.join("git");
+    let real = real_git();
+    std::fs::write(
+        &git,
+        format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = worktree ]; then\n    {real} \"$@\"\n    status=$?\n    : > {}\n    exit $status\n  fi\ndone\nexec {real} \"$@\"\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+    format!(
+        "{}:{}",
+        directory.display(),
+        std::env::var("PATH").unwrap_or_default()
+    )
+}
+
+/// Waits until `path` exists, with the harness's patience.
+fn wait_for(path: &std::path::Path, what: &str) {
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while !path.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// The real git, for a script that only slows some invocations.
+#[cfg(unix)]
+fn real_git() -> String {
+    if std::path::Path::new("/usr/bin/git").exists() {
+        return "/usr/bin/git".into();
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join("git");
+        if candidate.is_file() {
+            return candidate.to_string_lossy().into_owned();
+        }
+    }
+    "git".into()
+}
+
+/// The scope key cycles this workspace, this repository and all workspaces,
+/// and the repository read names the same relative directory in each worktree.
+#[test]
+fn tui_resume_cycles_through_the_repository_worktrees() {
+    let home = Home::new();
+    let scratch = Scratch::new();
+    let (repo, linked) = scratch_repository(scratch.path(), true);
+    let workspace = std::fs::canonicalize(repo.join("sub")).unwrap();
+    let workspace = workspace.to_str().unwrap().to_owned();
+    let linked = std::fs::canonicalize(linked.unwrap().join("sub")).unwrap();
+    let linked = linked.to_str().unwrap().to_owned();
+    let linked_shown = linked.clone();
+    let mine = workspace.clone();
+    let marker = scratch.path().join("worktree-read");
+    let path = gated_git(scratch.path(), &marker);
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["session.catalog", "session.catalog.workspaces"]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        wire.no_context();
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let first = wire.read("session.catalog");
+        assert_eq!(first["params"]["cwd"], json!(mine), "{first}");
+        // The set is read in a background task: reply to the page only after
+        // the worktree read returns, so the set reaches the panel first.
+        wait_for(&marker, "the repository read");
+        wire.reply(
+            &first,
+            json!({"sessions":[{"sessionId":"mine","cwd":mine,"preview":"mine preview","model":{"providerId":"test","modelId":"model"},"updatedAt":5}]}),
+        );
+        let repository = wire.read("session.catalog");
+        let mut got: Vec<String> = repository["params"]["cwd"]
+            .as_array()
+            .expect("a set of workspaces")
+            .iter()
+            .map(|value| value.as_str().unwrap().to_owned())
+            .collect();
+        got.sort();
+        let mut want = vec![mine.clone(), linked.clone()];
+        want.sort();
+        assert_eq!(got, want, "{repository}");
+        wire.reply(
+            &repository,
+            json!({"sessions":[{"sessionId":"linked","cwd":linked,"preview":"linked preview","model":{"providerId":"test","modelId":"model"},"updatedAt":4}]}),
+        );
+        let all = wire.read("session.catalog");
+        assert!(all["params"].get("cwd").is_none(), "{all}");
+        wire.reply(&all, json!({"sessions":[]}));
+        let back = wire.read("session.catalog");
+        assert_eq!(back["params"]["cwd"], json!(mine), "{back}");
+        wire.reply(&back, json!({"sessions":[]}));
+        no_catalog(wire);
+    });
+    let mut command = home.command();
+    command.args(["--cwd", &workspace]);
+    command.env("PATH", &path);
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / model");
+    terminal.write(b"/resume\r");
+    terminal.until("mine preview");
+    terminal.write(b"\x13");
+    terminal.until("Sessions · This repository");
+    terminal.until("linked preview");
+    terminal.until(&linked_shown);
+    terminal.write(b"\x13");
+    terminal.until("Sessions · All workspaces");
+    terminal.write(b"\x13");
+    terminal.until("Sessions · This workspace");
+    terminal.write(b"\x1b[27u");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+/// The summaries fallback applies the repository scope to the rows it
+/// receives: the launch workspace and the same directory in each linked
+/// worktree, not another workspace.
+#[test]
+fn tui_resume_keeps_the_repository_rows_on_the_summaries_fallback() {
+    let home = Home::new();
+    let scratch = Scratch::new();
+    let (repo, linked) = scratch_repository(scratch.path(), true);
+    let workspace = std::fs::canonicalize(repo.join("sub")).unwrap();
+    let workspace = workspace.to_str().unwrap().to_owned();
+    let linked = std::fs::canonicalize(linked.unwrap().join("sub")).unwrap();
+    let linked = linked.to_str().unwrap().to_owned();
+    let linked_shown = linked.clone();
+    let mine = workspace.clone();
+    let marker = scratch.path().join("worktree-read");
+    let path = gated_git(scratch.path(), &marker);
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        wire.no_context();
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let rows = json!([
+            {"sessionId":"mine","cwd":mine,"preview":"mine preview","model":{"providerId":"test","modelId":"model"},"updatedAt":5},
+            {"sessionId":"linked","cwd":linked,"preview":"linked preview","model":{"providerId":"test","modelId":"model"},"updatedAt":4},
+            {"sessionId":"other","cwd":"/elsewhere/project","preview":"other preview","model":{"providerId":"test","modelId":"model"},"updatedAt":3}
+        ]);
+        let first = wire.read("session.summaries");
+        // The set is read in a background task: reply to the page only after
+        // the worktree read returns, so the set reaches the panel first.
+        wait_for(&marker, "the repository read");
+        wire.reply(&first, rows.clone());
+        let repository = wire.read("session.summaries");
+        wire.reply(&repository, rows);
+        no_catalog(wire);
+    });
+    let mut command = home.command();
+    command.args(["--cwd", &workspace]);
+    command.env("PATH", &path);
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / model");
+    terminal.write(b"/resume\r");
+    terminal.until("mine preview");
+    assert!(
+        !terminal.transcript.contains("linked preview")
+            && !terminal.transcript.contains("other preview"),
+        "the workspace scope listed another workspace: {}",
+        terminal.transcript
+    );
+    terminal.write(b"\x13");
+    terminal.until("Sessions · This repository");
+    terminal.until("linked preview");
+    terminal.until(&linked_shown);
+    assert!(
+        !terminal.transcript.contains("other preview"),
+        "the repository scope listed another workspace: {}",
+        terminal.transcript
+    );
+    terminal.write(b"\x1b[27u");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+#[test]
+fn tui_resume_skips_the_repository_scope_without_a_second_worktree() {
+    let home = Home::new();
+    let (repo, _) = scratch_repository(&home.0, false);
+    let workspace = std::fs::canonicalize(repo.join("sub")).unwrap();
+    let workspace = workspace.to_str().unwrap().to_owned();
+    let mine = workspace.clone();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["session.catalog", "session.catalog.workspaces"]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        wire.no_context();
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let first = wire.read("session.catalog");
+        assert_eq!(first["params"]["cwd"], json!(mine));
+        wire.reply(&first, json!({"sessions":[]}));
+        let all = wire.read("session.catalog");
+        assert!(all["params"].get("cwd").is_none(), "{all}");
+        wire.reply(&all, json!({"sessions":[]}));
+        no_catalog(wire);
+    });
+    let mut command = home.command();
+    command.args(["--cwd", &workspace]);
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / model");
+    terminal.write(b"/resume\r");
+    terminal.until("No saved sessions in this workspace. Ctrl+S shows more.");
+    terminal.write(b"\x13");
+    terminal.until("Sessions · All workspaces");
+    assert!(
+        !terminal.transcript.contains("Sessions · This repository"),
+        "one worktree offers no repository scope: {}",
+        terminal.transcript
+    );
+    terminal.write(b"\x1b[27u");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+/// A git that hangs cannot hold the first page: the picker draws the
+/// workspace at once, and the scope key widens the list while the read runs.
+#[cfg(unix)]
+#[test]
+fn tui_resume_draws_the_workspace_while_a_slow_git_runs() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = Home::new();
+    let workspace = std::fs::canonicalize(&home.0).unwrap();
+    let workspace = workspace.to_str().unwrap().to_owned();
+    let fake = Scratch::new();
+    let git = fake.path().join("git");
+    let real = real_git();
+    std::fs::write(
+        &git,
+        format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    --show-toplevel|worktree) exec sleep 30 ;;\n  esac\ndone\nexec {real} \"$@\"\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mine = workspace.clone();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["session.catalog", "session.catalog.workspaces"]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        wire.no_context();
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let first = wire.read("session.catalog");
+        assert_eq!(first["params"]["cwd"], json!(mine), "{first}");
+        wire.reply(
+            &first,
+            json!({"sessions":[{"sessionId":"mine","cwd":mine,"preview":"mine preview","model":{"providerId":"test","modelId":"model"},"updatedAt":5}]}),
+        );
+        let all = wire.read("session.catalog");
+        assert!(all["params"].get("cwd").is_none(), "{all}");
+        wire.reply(&all, json!({"sessions":[]}));
+        no_catalog(wire);
+    });
+    let mut command = home.command();
+    command.args(["--cwd", &workspace]);
+    command.env(
+        "PATH",
+        format!(
+            "{}:{}",
+            fake.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    );
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / model");
+    terminal.write(b"/resume\r");
+    terminal.until("mine preview");
+    terminal.write(b"\x13");
+    terminal.until("Sessions · All workspaces");
+    terminal.write(b"\x1b[27u");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+#[test]
+fn tui_resume_skips_the_repository_scope_a_daemon_cannot_read() {
+    let home = Home::new();
+    let (repo, linked) = scratch_repository(&home.0, true);
+    let workspace = std::fs::canonicalize(repo.join("sub")).unwrap();
+    let workspace = workspace.to_str().unwrap().to_owned();
+    let mine = workspace.clone();
+    assert!(linked.is_some(), "the worktree exists");
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["session.catalog"]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        wire.no_context();
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let first = wire.read("session.catalog");
+        assert_eq!(first["params"]["cwd"], json!(mine));
+        wire.reply(&first, json!({"sessions":[]}));
+        let all = wire.read("session.catalog");
+        assert!(
+            all["params"].get("cwd").is_none(),
+            "a daemon without the set is asked for every workspace: {all}"
+        );
+        wire.reply(&all, json!({"sessions":[]}));
+        no_catalog(wire);
+    });
+    let mut command = home.command();
+    command.args(["--cwd", &workspace]);
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / model");
+    terminal.write(b"/resume\r");
+    terminal.until("No saved sessions in this workspace. Ctrl+S shows more.");
+    terminal.write(b"\x13");
+    terminal.until("Sessions · All workspaces");
+    terminal.write(b"\x1b[27u");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}

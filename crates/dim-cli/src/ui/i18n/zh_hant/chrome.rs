@@ -344,6 +344,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // sessions_panel.rs
         "Sessions" => "工作階段",
         "Sessions · This workspace" => "工作階段 · 目前工作區",
+        "Sessions · This repository" => "工作階段 · 目前儲存庫",
         "Sessions · All workspaces" => "工作階段 · 所有工作區",
         "No saved sessions in this workspace. Ctrl+S shows more." => {
             "目前工作區沒有已儲存的工作階段。Ctrl+S 顯示更多。"

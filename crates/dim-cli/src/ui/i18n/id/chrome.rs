@@ -392,6 +392,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // sessions_panel.rs
         "Sessions" => "Sesi",
         "Sessions · This workspace" => "Sesi · Workspace ini",
+        "Sessions · This repository" => "Sesi · Repositori ini",
         "Sessions · All workspaces" => "Sesi · Semua workspace",
         "No saved sessions in this workspace. Ctrl+S shows more." => {
             "Belum ada sesi tersimpan di workspace ini. Ctrl+S menampilkan lebih banyak."

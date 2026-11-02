@@ -91,10 +91,12 @@ impl SubmitMode {
     }
 }
 
-/// What `/resume` lists: the launch workspace, or every workspace.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What `/resume` lists: the launch workspace, the same directory in its
+/// repository's worktrees, or every workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionsScope {
     Workspace,
+    Repository(Vec<String>),
     All,
 }
 
@@ -201,6 +203,8 @@ pub enum Command {
     NewSession,
     /// Switch to a stored session.
     Resume(String),
+    /// Find the launch workspace's repository worktrees, once per picker open.
+    FindRepository,
     /// List stored sessions (newest first), in `scope`.
     ListSessions {
         id: String,
@@ -1045,6 +1049,9 @@ pub enum Update {
         paged: bool,
         result: Result<(Vec<SessionItem>, Option<String>), String>,
     },
+    /// The workspaces the picker may offer as its repository scope: more than
+    /// one, found once per picker open.
+    RepositoryWorkspaces(Vec<String>),
     /// A command failed without ending the session.
     Notice(String),
     /// A newer version the user has not skipped, once per start.

@@ -110,7 +110,7 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 
 | Capability | CLI | Web | Source |
 | --- | --- | --- | --- |
-| New, resume, Session list | done; `/resume` opens on this workspace and `Ctrl+S` widens it to every workspace. It labels each row by creation origin and hides ACP Sessions unless the preference says otherwise | done (grouped by directory) | [Session classification](appserver/session-classification.md), [CLI commands](cli-commands.md#the-resume-picker) |
+| New, resume, Session list | done; `/resume` opens on this workspace and `Ctrl+S` cycles it, this repository's worktrees when offered, and every workspace. It labels each row by creation origin and hides ACP Sessions unless the preference says otherwise | done (grouped by directory) | [Session classification](appserver/session-classification.md), [CLI commands](cli-commands.md#the-resume-picker) |
 | Export conversation | done in the line client and `dimcode session export`; inside the terminal UIs: none | — | [CLI commands](cli-commands.md) |
 | `/timeline` and message actions | done in the TUI; it also replaces `/history`'s paging | — | [Timeline UI §4.6](timeline-ui.md#46-timeline-jumping-to-a-message) |
 | Titles | automatic: done (optional SessionTitle package); manual rename: designed | — | [SessionTitle](plugins/SessionTitle.md) |

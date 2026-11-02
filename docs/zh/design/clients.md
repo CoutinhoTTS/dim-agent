@@ -77,7 +77,7 @@ CLI 要求协议 v3，以及 `session.create` 和 `session.history` 两项功能
 
 | 能力 | CLI | Web | 来源 |
 | --- | --- | --- | --- |
-| 新建、恢复、Session 列表 | 已实现；`/resume` 打开时只列当前工作区，`Ctrl+S` 可放宽到所有工作区 | 已实现（按目录分组） | [CLI 命令](cli-commands.md#resume-选择面板) |
+| 新建、恢复、Session 列表 | 已实现；`/resume` 打开时只列当前工作区，`Ctrl+S` 依次循环当前工作区、提供时的当前仓库 worktree 与所有工作区 | 已实现（按目录分组） | [CLI 命令](cli-commands.md#resume-选择面板) |
 | 导出对话 | 行模式客户端和 `dimcode session export` 已实现；终端界面内：无 | — | [CLI 命令](cli-commands.md) |
 | `/timeline` 与消息操作 | TUI 已实现；它同时取代了 `/history` 的翻页 | — | [Timeline UI §4.6](timeline-ui.md#46-timeline跳到某条消息) |
 | 标题 | 自动生成：已实现（可选的 SessionTitle 包）；手动重命名：已设计 | — | [SessionTitle](plugins/SessionTitle.md) |

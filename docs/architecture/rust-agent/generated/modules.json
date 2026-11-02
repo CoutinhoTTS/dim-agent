@@ -4680,7 +4680,8 @@
       "parent": "dim_cli::ui",
       "file": "crates/dim-cli/src/ui/sessions_panel.rs",
       "unexpandedMacros": [
-        "format"
+        "format",
+        "matches"
       ]
     },
     {
@@ -28461,6 +28462,7 @@
         "path Command::Compact",
         "path Command::Configure",
         "path Command::EndLine",
+        "path Command::FindRepository",
         "path Command::FocusLine",
         "path Command::Fork",
         "path Command::Goal",
@@ -28559,6 +28561,7 @@
         "path SessionPort",
         "path SessionsScope",
         "path SessionsScope::All",
+        "path SessionsScope::Repository",
         "path SessionsScope::Workspace",
         "path SubagentModelPolicy",
         "path SwitchKind",
@@ -28590,6 +28593,7 @@
         "path Update::Ready",
         "path Update::Renamed",
         "path Update::Report",
+        "path Update::RepositoryWorkspaces",
         "path Update::Runtimes",
         "path Update::Sessions",
         "path Update::ShellDone",
@@ -33340,6 +33344,7 @@
         "path SessionItem",
         "path SessionsScope",
         "path SessionsScope::All",
+        "path SessionsScope::Repository",
         "path SessionsScope::Workspace",
         "path stored_title",
         "use crate::model::session::Command",
@@ -35140,6 +35145,7 @@
         "path Command::Compact",
         "path Command::Configure",
         "path Command::EndLine",
+        "path Command::FindRepository",
         "path Command::FocusLine",
         "path Command::Fork",
         "path Command::Goal",
@@ -35242,6 +35248,7 @@
         "path Update::Ready",
         "path Update::Renamed",
         "path Update::Report",
+        "path Update::RepositoryWorkspaces",
         "path Update::Runtimes",
         "path Update::Sessions",
         "path Update::ShellDone",

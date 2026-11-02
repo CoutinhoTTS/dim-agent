@@ -361,6 +361,7 @@ mod tests {
         for (code, lookup) in tables() {
             for key in [
                 "Sessions · This workspace",
+                "Sessions · This repository",
                 "Sessions · All workspaces",
                 "No saved sessions in this workspace. Ctrl+S shows more.",
             ] {

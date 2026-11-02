@@ -1730,6 +1730,11 @@ impl App {
                     panel.page(&id, paged, result);
                 }
             }
+            Update::RepositoryWorkspaces(workspaces) => {
+                if let Some(Prompt::Sessions(panel)) = &mut self.prompt {
+                    panel.repository(workspaces);
+                }
+            }
             Update::Toast(text) => self.set_notice(text),
             Update::Report { text, warning } => self.reports.push(Block::Status {
                 text,
@@ -3751,6 +3756,7 @@ impl App {
                 self.open_prompt(Prompt::Sessions(SessionsPanel::new(
                     crate::ui::config::saved_show_acp(&self.home),
                 )));
+                self.host.send(Command::FindRepository);
                 self.sync_sessions();
                 Outcome::Continue
             }

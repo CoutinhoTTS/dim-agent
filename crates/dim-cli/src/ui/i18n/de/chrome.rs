@@ -400,6 +400,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // sessions_panel.rs
         "Sessions" => "Sessions",
         "Sessions · This workspace" => "Sessions · Dieser Arbeitsbereich",
+        "Sessions · This repository" => "Sessions · Dieses Repository",
         "Sessions · All workspaces" => "Sessions · Alle Arbeitsbereiche",
         "No saved sessions in this workspace. Ctrl+S shows more." => {
             "Noch keine gespeicherten Sessions in diesem Arbeitsbereich. Ctrl+S zeigt mehr."

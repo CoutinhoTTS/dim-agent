@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 const HINT: &str = "Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close";
 const TITLE_WORKSPACE: &str = "Sessions · This workspace";
+const TITLE_REPOSITORY: &str = "Sessions · This repository";
 const TITLE_ALL: &str = "Sessions · All workspaces";
 const EMPTY_WORKSPACE: &str = "No saved sessions in this workspace. Ctrl+S shows more.";
 
@@ -24,6 +25,9 @@ pub struct SessionsPanel {
     next_cursor: Option<String>,
     show_acp: bool,
     scope: SessionsScope,
+    /// The launch workspace's repository workspaces, when the daemon can read
+    /// a set and it holds more than one; the scope is offered while it does.
+    repository: Option<Vec<String>>,
 }
 
 impl SessionsPanel {
@@ -36,6 +40,7 @@ impl SessionsPanel {
             next_cursor: None,
             show_acp,
             scope: SessionsScope::Workspace,
+            repository: None,
             list: ListPanel::new(
                 TITLE_WORKSPACE,
                 HINT,
@@ -51,7 +56,7 @@ impl SessionsPanel {
         if self.paged.is_none() {
             self.paged = Some(false);
         }
-        let workspaces = self.scope == SessionsScope::All;
+        let workspaces = self.names_workspaces();
         self.list
             .set_items(items.map(|items| session_rows(items, workspaces)), None);
     }
@@ -73,7 +78,7 @@ impl SessionsPanel {
                 self.next_cursor = next_cursor;
                 if self.append {
                     self.list
-                        .append_items(session_rows(items, self.scope == SessionsScope::All));
+                        .append_items(session_rows(items, self.names_workspaces()));
                 } else {
                     self.set_items(Ok(items));
                 }
@@ -101,8 +106,14 @@ impl SessionsPanel {
             query: self.list.query().trim().to_owned(),
             cursor: if reset { None } else { self.next_cursor.take() },
             show_acp: self.show_acp,
-            scope: self.scope,
+            scope: self.scope.clone(),
         })
+    }
+
+    /// The launch workspace's repository set arrived: the scope joins the
+    /// cycle, without touching the read already under way.
+    pub fn repository(&mut self, workspaces: Vec<String>) {
+        self.repository = Some(workspaces);
     }
 
     pub fn refresh(&mut self) {
@@ -125,15 +136,28 @@ impl SessionsPanel {
         self.filter_changed();
     }
 
+    fn names_workspaces(&self) -> bool {
+        !matches!(self.scope, SessionsScope::Workspace)
+    }
+
+    fn next_scope(&self) -> SessionsScope {
+        match &self.scope {
+            SessionsScope::Workspace => match &self.repository {
+                Some(workspaces) => SessionsScope::Repository(workspaces.clone()),
+                None => SessionsScope::All,
+            },
+            SessionsScope::Repository(_) => SessionsScope::All,
+            SessionsScope::All => SessionsScope::Workspace,
+        }
+    }
+
     /// Ctrl+S widens and narrows the list like a new query: the scope
     /// changes and the first page is read again.
     fn cycle_scope(&mut self) {
-        self.scope = match self.scope {
-            SessionsScope::Workspace => SessionsScope::All,
-            SessionsScope::All => SessionsScope::Workspace,
-        };
-        let (title, empty) = match self.scope {
+        self.scope = self.next_scope();
+        let (title, empty) = match &self.scope {
             SessionsScope::Workspace => (TITLE_WORKSPACE, EMPTY_WORKSPACE),
+            SessionsScope::Repository(_) => (TITLE_REPOSITORY, "No saved sessions yet."),
             SessionsScope::All => (TITLE_ALL, "No saved sessions yet."),
         };
         self.list.set_title(t(title));

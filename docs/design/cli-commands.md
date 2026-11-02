@@ -1145,7 +1145,7 @@ whole rule as one quoted argument, so global options stay unambiguous.
 | `dimcode session delete SESSION` | Permanently delete the Session and everything the store keeps for it; there is no prompt. |
 | `dimcode session cleanup (--older-than DURATION\|--keep N) [--yes]` | Show the Sessions one selector matches, then delete them after confirmation. |
 | `/rename TITLE` or `/rename --clear` | Set, or clear, the shown Session's manual title; the text is a command and never becomes model input. |
-| `/resume` | Open the Sessions picker on this workspace ([the `/resume` picker](#the-resume-picker)); `Ctrl+S` widens it to every workspace. |
+| `/resume` | Open the Sessions picker on this workspace ([the `/resume` picker](#the-resume-picker)); `Ctrl+S` cycles this workspace, this repository when offered, and every workspace. |
 | `/export markdown PATH` or `/export json PATH` | Export the current main branch to a file while the interactive client is idle. |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | Write the Session's whole Timeline as versioned JSONL without a daemon ([Timeline export](appserver/timeline-export.md)); write to stdout when no output path is supplied. |
 | `dimcode daemon vacuum [--database PATH]` | Rewrite an offline native store with SQLite `VACUUM` to reclaim the pages deleted Sessions left, and print its size before and after ([storage format](appserver/native-storage-format.md#sqlite-运行参数与空间回收)); it fails while a daemon owns the database and never creates or upgrades one. |
@@ -1288,9 +1288,9 @@ Subcommands do not create a plugin command registry.
 `--cwd` names, canonicalized, which is also the workspace `session.create`
 records for a Session it creates there. The list holds the stored Sessions of
 exactly that workspace, newest first, and every open starts there. `Ctrl+S`
-widens the list to every workspace and back to this one, and the title names the
-scope shown. The filter keeps the composer's `Ctrl+A` and `Ctrl+W`, and `Tab`
-moves the selection down.
+cycles this workspace, this repository and all workspaces, and the title names
+the scope shown. The filter keeps the composer's `Ctrl+A` and `Ctrl+W`, and
+`Tab` moves the selection down.
 
 ```text
 ╭─ Sessions · This workspace ──────────────────────────────────────────────────╮
@@ -1299,6 +1299,16 @@ moves the selection down.
 │                                                                              │
 │   Fix the failing test       3h ago                                          │
 │   Update the catalog design  1d ago                                          │
+╰───────────────────── Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close ─╯
+```
+
+```text
+╭─ Sessions · This repository ─────────────────────────────────────────────────╮
+│                                                                              │
+│ >                                                                            │
+│                                                                              │
+│   Fix the failing test       3h ago · ~/src/app/web                          │
+│   Update the catalog design  1d ago · ~/src/app-fix/web                      │
 ╰───────────────────── Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close ─╯
 ```
 
@@ -1315,6 +1325,14 @@ moves the selection down.
 - A scope change works like a new query: it cancels the pending read, drops the
   cursor and reads the first page again; the query stays and applies within the
   new scope.
+- This repository holds the launch workspace and the same relative directory in
+  every worktree of its git repository, read with `git rev-parse` and
+  `git worktree list --porcelain` in the background when the picker opens. The
+  first page does not wait for git, and both reads share a two-second bound; a
+  git that fails or does not answer leaves the scope out, without a notice. It
+  is offered only when the set holds more than one entry and the daemon reads a
+  set of workspaces (`session.catalog.workspaces`) or lists through
+  `session.summaries`. A bare worktree adds nothing.
 - Outside this workspace's scope every row leads with its update time and then
   names its workspace, with the home directory written `~`. The label takes at
   most half the row, and the time comes first, so a long path is what gets cut.
