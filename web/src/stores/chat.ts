@@ -5,7 +5,7 @@ import { Projection, type TimelineRow } from "../projection"
 import { Lines, type LineView } from "../lines"
 import { ConnectionLost, RpcError } from "../rpc/client"
 import type { Goal, GoalCall } from "../goal"
-import { MAIN_BRANCH, type ApprovalDecision, type ApprovalRequest, type DraftAttachments, type FileCandidate, type ModelId, type Notification, type PendingQuestion, type PermissionPreset, type QueuedInput, type QuestionAnswer, type SessionEvent, type UserInput, type WithdrawResult } from "../rpc/protocol"
+import { MAIN_BRANCH, type ApprovalDecision, type ApprovalRequest, type DraftAttachments, type FileCandidate, type ModelId, type Notification, type PendingQuestion, type PermissionChange, type PermissionPolicy, type QueuedInput, type QuestionAnswer, type SessionEvent, type UserInput, type WithdrawResult } from "../rpc/protocol"
 import { readRevision, readRules } from "../rpc/general-settings"
 import { ProtocolError, readAck, readAttachmentPath, readBranchCreate, readCompactResult, readConfigurationOutcome, readContextUsage, readFileCandidates, readForkedSessionId, readHistory, readModelUpdate, readMemberApproval, readPermissionState, readPermissionVersion, readSessionMethods, readWithdrawResult } from "../rpc/read"
 import { useConnectionStore } from "./connection"
@@ -44,8 +44,8 @@ export type SessionView = {
   questions: PendingQuestion[]
   /** The method names this Session serves (`session.methods`); empty when the daemon offers no table. */
   methods: readonly string[]
-  /** The preset of `main`: read after the history loads, then kept current by `permission/changed`. */
-  permission: PermissionPreset | undefined
+  /** The policy of `main`: read after history loads, then kept current by `permission/changed`. */
+  permission: PermissionPolicy | undefined
   /** The main line's goal, folded from its events. */
   goal: Goal | undefined
   /** Messages queued on the main line while it runs, oldest first. */
@@ -293,7 +293,7 @@ export const useChatStore = defineStore("chat", () => {
     const stream = ensureBranch(channel, branchId)
     if (!stream.projection.apply(event)) return
     if (event.content.kind === "branch-create") ensureBranch(channel, event.content.branchId)
-    if (branchId === MAIN_BRANCH && event.content.kind === "permission-changed") channel.view.permission = event.content.preset
+    if (branchId === MAIN_BRANCH && event.content.kind === "permission-changed") channel.view.permission = event.content.policy
     changed(channel)
   }
 
@@ -584,31 +584,35 @@ export const useChatStore = defineStore("chat", () => {
     return client().call("session.input.withdraw", { sessionId, branchId: MAIN_BRANCH, inputId, ...(steer === undefined ? {} : { steer }) }, readWithdrawResult)
   }
 
-  /** The preset of `main`, or undefined when the Session serves no permission method or the read fails. */
-  async function sessionPermission(sessionId: string): Promise<PermissionPreset | undefined> {
+  /** The policy of `main`, or undefined when the Session serves no permission method or the read fails. */
+  async function sessionPermission(sessionId: string): Promise<PermissionPolicy | undefined> {
     if (!useConnectionStore().supports("session.permission.get")) return undefined
     return client().call("session.permission.get", { sessionId, branchId: MAIN_BRANCH }, readPermissionState)
-      .then((state) => state.policy.preset, () => undefined)
+      .then((state) => state.policy, () => undefined)
   }
 
-  /** Switches the preset of `main` from its current policy; a version conflict writes nothing and reports the change. */
-  async function setPermission(sessionId: string, preset: PermissionPreset): Promise<PermissionOutcome> {
+  /** Changes one explicit permission dimension, preserving all other fields; a conflict refreshes the policy without retrying. */
+  async function setPermission(sessionId: string, change: PermissionChange): Promise<PermissionOutcome> {
     const state = await client().call("session.permission.get", { sessionId, branchId: MAIN_BRANCH }, readPermissionState)
     const view = views[sessionId]
-    if (view !== undefined) view.permission = state.policy.preset
-    if (state.policy.preset === preset) return "unchanged"
+    if (view !== undefined) view.permission = state.policy
+    if (state.policy[change.field] === change.value) return "unchanged"
+    const policy = { ...state.policy, [change.field]: change.value }
     try {
       await client().call("session.permission.update", {
         sessionId,
         branchId: MAIN_BRANCH,
         expectedVersion: state.version,
-        policy: { ...state.policy, preset },
+        policy,
       }, readPermissionVersion)
     } catch (cause) {
-      if (cause instanceof RpcError && cause.appError === "permission_conflict") return "conflict"
+      if (cause instanceof RpcError && cause.appError === "permission_conflict") {
+        if (view !== undefined) view.permission = await sessionPermission(sessionId)
+        return "conflict"
+      }
       throw cause
     }
-    if (view !== undefined) view.permission = preset
+    if (view !== undefined) view.permission = policy
     return "updated"
   }
 

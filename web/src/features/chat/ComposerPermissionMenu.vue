@@ -1,37 +1,37 @@
 <script setup lang="ts">
-import { ref } from "vue"
+import { computed, ref } from "vue"
+import { RouterLink } from "vue-router"
 import { useI18n } from "vue-i18n"
-import { Check, Shield, ShieldCheck, Zap } from "lucide-vue-next"
+import { Check, Shield } from "lucide-vue-next"
 import ConfirmDialog from "../../components/ConfirmDialog.vue"
-import type { PermissionPreset } from "../../rpc/protocol"
+import type { FileAccess, PermissionChange, PermissionPolicy, ToolApproval } from "../../rpc/protocol"
 
-/**
- * The session's permission preset, changed from the composer as dim-agent's
- * tool permission selector does: three presets with what each one allows, and
- * a confirmation before full access lifts the workspace limit.
- */
-const props = defineProps<{ preset: PermissionPreset | undefined }>()
-const emit = defineEmits<{ select: [preset: PermissionPreset] }>()
+/** Independent Session permission controls; process isolation stays in its existing settings. */
+const props = defineProps<{ policy: PermissionPolicy | undefined }>()
+const emit = defineEmits<{ select: [change: PermissionChange] }>()
 const { t } = useI18n()
 const details = ref<HTMLDetailsElement>()
 const confirm = ref<InstanceType<typeof ConfirmDialog>>()
 
-const OPTIONS = [
-  { preset: "read-only", icon: Shield, label: "composer.permission.readOnly", description: "composer.permission.readOnlyDescription" },
-  { preset: "workspace-write", icon: ShieldCheck, label: "composer.permission.workspaceWrite", description: "composer.permission.workspaceWriteDescription" },
-  { preset: "full-access", icon: Zap, label: "composer.permission.fullAccess", description: "composer.permission.fullAccessDescription" },
-] as const
+const FILES: FileAccess[] = ["read-only", "workspace-read-write", "unrestricted"]
+const TOOLS: ToolApproval[] = ["ask", "bypass"]
+const fileAccess = computed(() => {
+  const policy = props.policy
+  if (policy === undefined) return undefined
+  return policy.fileAccess ?? ({ "read-only": "read-only", "workspace-write": "workspace-read-write", "full-access": "unrestricted" } as const)[policy.preset]
+})
+const toolApproval = computed(() => props.policy?.toolApproval ?? (props.policy?.preset === "full-access" ? "bypass" : undefined))
+const toolLabel = computed(() => toolApproval.value === undefined ? t("composer.permission.legacy") : t(`composer.permission.tool.${toolApproval.value}`))
 
-function current() {
-  return OPTIONS.find((option) => option.preset === props.preset)
-}
-
-async function choose(preset: PermissionPreset): Promise<void> {
-  details.value?.removeAttribute("open")
-  if (preset === "full-access" && props.preset !== "full-access") {
-    if (!await confirm.value?.open(t("composer.permission.fullAccessConfirm"), { confirmLabel: t("composer.permission.fullAccess") })) return
+async function choose(change: PermissionChange): Promise<void> {
+  if (props.policy === undefined) return
+  const widensFiles = change.field === "fileAccess" && change.value === "unrestricted" && fileAccess.value !== "unrestricted"
+  const bypassesTools = change.field === "toolApproval" && change.value === "bypass" && toolApproval.value !== "bypass"
+  if (widensFiles || bypassesTools) {
+    const message = widensFiles ? "composer.permission.unrestrictedConfirm" : "composer.permission.bypassConfirm"
+    if (!await confirm.value?.open(t(message))) return
   }
-  emit("select", preset)
+  emit("select", change)
 }
 
 function open(): void {
@@ -44,25 +44,29 @@ defineExpose({ open })
 <template>
   <details ref="details" class="composer-popover permission-menu">
     <summary class="ui-button permission-trigger" data-variant="ghost" data-size="sm" :aria-label="t('composer.permission.label')">
-      <component :is="current()?.icon ?? Shield" :size="14" aria-hidden="true" />
-      <span class="permission-trigger-label">{{ current() ? t(current()!.label) : t("composer.permission.label") }}</span>
+      <Shield :size="14" aria-hidden="true" />
+      <span class="permission-trigger-label">{{ policy && fileAccess ? `${t(`composer.permission.file.${fileAccess}`)} · ${toolLabel}` : t("composer.permission.label") }}</span>
     </summary>
     <div class="composer-popover-content ui-popover permission-content" data-width="lg">
-      <button
-        v-for="option in OPTIONS"
-        :key="option.preset"
-        type="button"
-        class="ui-menu-item permission-option"
-        :aria-current="option.preset === preset"
-        @click="choose(option.preset)"
-      >
-        <component :is="option.icon" :size="14" aria-hidden="true" />
-        <span class="permission-option-text">
-          <span>{{ t(option.label) }}</span>
-          <small>{{ t(option.description) }}</small>
-        </span>
-        <Check v-if="option.preset === preset" :size="14" aria-hidden="true" />
-      </button>
+      <fieldset class="permission-group" :disabled="!policy">
+        <legend>{{ t("composer.permission.fileAccess") }}</legend>
+        <button v-for="value in FILES" :key="value" type="button" class="ui-menu-item permission-option" :aria-pressed="value === fileAccess" @click="choose({ field: 'fileAccess', value })">
+          <span class="permission-option-text"><span>{{ t(`composer.permission.file.${value}`) }}</span><small>{{ t(`composer.permission.fileDescription.${value}`) }}</small></span>
+          <Check v-if="value === fileAccess" :size="14" aria-hidden="true" />
+        </button>
+      </fieldset>
+      <fieldset class="permission-group" :disabled="!policy">
+        <legend>{{ t("composer.permission.toolApproval") }}</legend>
+        <p v-if="policy && toolApproval === undefined" class="permission-note">{{ t(`composer.permission.legacy.${policy.preset}`) }}</p>
+        <button v-for="value in TOOLS" :key="value" type="button" class="ui-menu-item permission-option" :aria-pressed="value === toolApproval" @click="choose({ field: 'toolApproval', value })">
+          <span class="permission-option-text"><span>{{ t(`composer.permission.tool.${value}`) }}</span><small>{{ t(`composer.permission.toolDescription.${value}`) }}</small></span>
+          <Check v-if="value === toolApproval" :size="14" aria-hidden="true" />
+        </button>
+      </fieldset>
+      <p v-if="policy?.allowedTools.length" class="permission-note">{{ t("composer.permission.allowedTools") }}: {{ policy.allowedTools.join(', ') }}</p>
+      <p v-if="policy?.disallowedTools.length" class="permission-note">{{ t("composer.permission.disallowedTools") }}: {{ policy.disallowedTools.join(', ') }}</p>
+      <p class="permission-note">{{ t("composer.permission.independent") }}</p>
+      <RouterLink class="ui-menu-item" :to="{ name: 'settings-permissions' }">{{ t("composer.permission.processIsolation") }}</RouterLink>
     </div>
     <ConfirmDialog ref="confirm" />
   </details>
@@ -70,8 +74,12 @@ defineExpose({ open })
 
 <style scoped>
 .permission-trigger { gap: var(--space-1); }
-.permission-content { display: grid; gap: var(--space-1); }
+.permission-trigger-label { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.permission-content { display: grid; gap: var(--space-2); max-height: 70dvh; overflow-y: auto; }
+.permission-group { min-width: 0; margin: 0; padding: 0; border: 0; }
+.permission-group legend { padding: var(--space-1) var(--space-2); font-size: var(--text-xs); font-weight: 600; }
 .permission-option { display: flex; width: 100%; align-items: flex-start; gap: var(--space-2); text-align: left; }
 .permission-option-text { display: grid; min-width: 0; flex: 1; gap: 2px; }
 .permission-option small { color: var(--muted-foreground); font-size: var(--text-xs); }
+.permission-note { margin: 0; padding: var(--space-1) var(--space-2); color: var(--muted-foreground); font-size: var(--text-xs); overflow-wrap: anywhere; }
 </style>

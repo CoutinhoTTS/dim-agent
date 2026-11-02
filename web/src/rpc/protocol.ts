@@ -100,11 +100,15 @@ export type FileCandidate = { relativePath: string; absolutePath: string; dir: b
 /** The session permission presets, named as the server's `PermissionPreset` serializes them. */
 export type PermissionPreset = "read-only" | "workspace-write" | "full-access"
 
-/** The policy of `main`: its preset, and the overrides and tool lists that stay as they are. */
+export type FileAccess = "read-only" | "workspace-read-write" | "unrestricted"
+export type ToolApproval = "ask" | "bypass"
+export type PermissionChange = { field: "fileAccess"; value: FileAccess } | { field: "toolApproval"; value: ToolApproval }
+
+/** The policy of `main`, including independent overrides and explicit tool exceptions. */
 export type PermissionPolicy = {
   preset: PermissionPreset
-  fileAccess?: string
-  toolApproval?: string
+  fileAccess?: FileAccess
+  toolApproval?: ToolApproval
   allowedTools: string[]
   disallowedTools: string[]
 }
@@ -124,7 +128,7 @@ export type EventContent =
   | { kind: "source-input"; text: string; mode?: string; blocks: RawBlock[] }
   | { kind: "input-applied"; inputId: string }
   | { kind: "input-deleted"; inputId: string }
-  | { kind: "permission-changed"; preset: PermissionPreset }
+  | { kind: "permission-changed"; policy: PermissionPolicy }
   | { kind: "branch-start" }
   | { kind: "session-forked" }
   | { kind: "branch-create"; branchId: string; at: number | undefined; prompt: string; source: BranchSource }

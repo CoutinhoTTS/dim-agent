@@ -3,7 +3,7 @@ import { computed, nextTick, onMounted, ref, useId, watch } from "vue"
 import { useRoute, useRouter } from "vue-router"
 import { useI18n } from "vue-i18n"
 import { ArrowUp, Square, X } from "lucide-vue-next"
-import type { DraftAttachments, FileCandidate, ImageBlock, ModelId, PermissionPreset } from "../../rpc/protocol"
+import type { DraftAttachments, FileCandidate, ImageBlock, ModelId, PermissionChange, PermissionPolicy } from "../../rpc/protocol"
 import { linkMentions, mentionTrigger, type FileMention, type MentionTrigger } from "../../mentions"
 import { useModelsStore } from "../../stores/models"
 import { useSessionsStore } from "../../stores/sessions"
@@ -41,8 +41,8 @@ const props = withDefaults(defineProps<{
   storesPastes?: boolean
   /** Finds the files an `@` mention offers for a query; absent where the Session serves no file search. */
   searchFiles?: (query: string) => Promise<FileCandidate[]>
-  /** The session's permission preset and how to change it; absent where the session serves no permission methods. */
-  permission?: { preset: PermissionPreset | undefined; select: (preset: PermissionPreset) => Promise<void> }
+  /** The Session policy and its independent controls; absent where permission methods are unavailable. */
+  permission?: { policy: PermissionPolicy | undefined; select: (change: PermissionChange) => Promise<void> }
   stop?: () => Promise<void>
   selectModel: (model: ModelId) => Promise<void> | void
   /** The narrower line panel: no model menu, less vertical chrome. */
@@ -459,7 +459,7 @@ defineExpose({ focus: () => field.value?.focus(), quote })
       />
       <footer class="composer-toolbar">
         <div class="composer-tool-group">
-          <ComposerPermissionMenu v-if="permission && variant !== 'panel'" ref="permissionMenu" :preset="permission.preset" @select="permission.select" />
+          <ComposerPermissionMenu v-if="permission && variant !== 'panel'" ref="permissionMenu" :policy="permission.policy" @select="permission.select" />
         </div>
         <div class="composer-run-group">
           <ComposerModelMenu v-if="variant !== 'panel'" ref="modelMenu" :model="model" :selectable="modelSelectable" :disabled="changingModel" @select="onModel" />

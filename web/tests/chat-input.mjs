@@ -4,14 +4,15 @@ import { registerHooks, stripTypeScriptTypes } from "node:module"
 import test from "node:test"
 import { compileScript, parse } from "vue/compiler-sfc"
 import { createRenderer, nextTick, reactive } from "vue"
+import { createPinia, setActivePinia } from "pinia"
 
 globalThis.Document = class {}
 globalThis.ShadowRoot = class {}
 
-const components = /\/(ChatPage|LineConversation|ComposerPanel|QuestionPrompt)\.vue$/
+const components = /\/(ChatPage|LineConversation|ComposerPanel|ComposerPermissionMenu|ConfirmDialog|QuestionPrompt)\.vue$/
 registerHooks({
   resolve(specifier, context, next) {
-    if (specifier.startsWith("../../stores/")) {
+    if (specifier.startsWith("../../stores/") || (context.parentURL?.endsWith("/stores/chat.ts") && ["./connection", "./sessions", "./ui"].includes(specifier))) {
       const store = specifier.split("/").at(-1)
       const name = `use${store[0].toUpperCase()}${store.slice(1)}Store`
       const source = `export const ${name}=()=>globalThis.chatInputStores.${store}; export const workspaceName=x=>x`
@@ -36,10 +37,14 @@ registerHooks({
 const { default: ChatPage } = await import("../src/features/chat/ChatPage.vue")
 const { default: LineConversation } = await import("../src/features/lines/LineConversation.vue")
 const { default: ComposerPanel } = await import("../src/features/chat/ComposerPanel.vue")
+const { useChatStore } = await import("../src/stores/chat.ts")
+const { readNotification } = await import("../src/rpc/read.ts")
+const { RpcError } = await import("../src/rpc/client.ts")
 const node = (type, text = "") => ({
   type, text, children: [], props: {}, parent: undefined, style: {}, value: "", scrollHeight: 40,
   addEventListener() {}, focus() {}, getRootNode() { return {} },
   setSelectionRange(start) { this.selectionStart = start },
+  showModal() { this.props.open = true }, close() { this.props.open = false },
 })
 const renderer = createRenderer({
   createElement: node, createText: (text) => node("text", text), createComment: (text) => node("comment", text),
@@ -68,7 +73,7 @@ const question = (branchId, callId, multiSelect = false) => ({
   questions: [{ id: "1", question: `Choose ${callId}`, options: [{ label: "Alpha" }, { label: "Beta" }], multiSelect, allowCustom: true }],
 })
 
-function mount(t, branchId, questions = [], component) {
+function mount(t, branchId, questions = [], component, stores = {}) {
   const replies = [], submissions = []
   const view = reactive({
     status: "ready", rows: [], running: true, stopping: false, sessionRunning: true,
@@ -91,6 +96,7 @@ function mount(t, branchId, questions = [], component) {
     sessions: { byId: new Map() },
     toast: { push() {} },
     ui: { shellMode: "wide", approvalKeyboard: () => false },
+    ...stores,
   }
   const root = node("root")
   const app = renderer.createApp(component ?? (branchId === "main" ? ChatPage : LineConversation), {
@@ -102,6 +108,99 @@ function mount(t, branchId, questions = [], component) {
   t.after(() => app.unmount())
   return { root, view, replies, submissions }
 }
+
+async function permissionSession(t, policy) {
+  setActivePinia(createPinia())
+  const chat = useChatStore()
+  t.after(() => chat.$dispose())
+  const server = { policy, version: 3, updates: [], failure: undefined }
+  const connection = {
+    supports: () => true,
+    client: { async call(method, params, read) {
+      if (method === "session.attach") return read({})
+      if (method === "session.methods") return read({ methods: ["session.permission.get", "session.permission.update"].map((name) => ({ name })) })
+      if (method === "session.history") return read({ events: [], through: 0, nextAfter: 0, done: true })
+      if (method === "session.permission.get") return read({ policy: server.policy, version: server.version })
+      assert.equal(method, "session.permission.update")
+      server.updates.push(structuredClone(params))
+      if (server.failure) throw server.failure()
+      assert.equal(params.expectedVersion, server.version)
+      server.policy = structuredClone(params.policy)
+      return read({ version: ++server.version })
+    } },
+  }
+  const { root } = mount(t, "main", [], undefined, { chat, connection })
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  const option = (label) => all(root).find((element) => element.type === "button" && element.children.some((child) => child.children.some((span) => text(span) === label)))
+  return { root, chat, server, option }
+}
+
+test("permission controls narrow and widen only the selected dimension, retaining explicit exceptions", async (t) => {
+  const initial = { preset: "read-only", fileAccess: "unrestricted", toolApproval: "bypass", allowedTools: ["read"], disallowedTools: ["exec"] }
+  const { root, chat, server, option } = await permissionSession(t, initial)
+  const confirmation = () => all(root).find((element) => element.type === "dialog" && element.props.open)
+  assert.equal(option("composer.permission.file.unrestricted").props["aria-pressed"], true)
+  assert.equal(option("composer.permission.tool.bypass").props["aria-pressed"], true)
+  assert.match(text(root), /composer.permission.allowedTools: read/)
+  assert.match(text(root), /composer.permission.disallowedTools: exec/)
+  await click(option("composer.permission.file.read-only")); await flush()
+  assert.deepEqual(server.policy, { ...initial, fileAccess: "read-only" })
+  assert.deepEqual(chat.views.session.permission, server.policy)
+  assert.equal(option("composer.permission.file.read-only").props["aria-pressed"], true)
+  assert.equal(option("composer.permission.tool.bypass").props["aria-pressed"], true)
+  const cancelled = click(option("composer.permission.file.unrestricted"))
+  await flush()
+  await click(button(confirmation(), "cancel")); await cancelled; await flush()
+  assert.equal(server.updates.length, 1)
+  const widening = click(option("composer.permission.file.unrestricted"))
+  await flush()
+  await click(button(confirmation(), "confirm")); await widening; await flush()
+  assert.deepEqual(server.policy, initial)
+  await click(option("composer.permission.file.read-only")); await flush()
+  await click(option("composer.permission.tool.ask")); await flush()
+  assert.deepEqual(server.policy, { ...initial, fileAccess: "read-only", toolApproval: "ask" })
+  const bypassing = click(option("composer.permission.tool.bypass"))
+  await flush()
+  await click(button(confirmation(), "confirm")); await bypassing; await flush()
+  assert.deepEqual(server.policy, { ...initial, fileAccess: "read-only" })
+  assert(server.updates.every((update) => update.sessionId === "session" && update.branchId === "main"))
+})
+
+test("legacy policies stay distinct from Ask; live changes, conflicts and unsupported updates never widen silently", async (t) => {
+  for (const preset of ["read-only", "workspace-write"]) {
+    const initial = { preset, allowedTools: [], disallowedTools: ["exec"] }
+    const { root, chat, server, option } = await permissionSession(t, initial)
+    assert.match(text(root), new RegExp(`composer.permission.legacy.${preset}`))
+    assert.equal(option("composer.permission.tool.ask").props["aria-pressed"], false)
+    await click(option("composer.permission.file.read-only")); await flush()
+    assert.deepEqual(server.policy, { ...initial, fileAccess: "read-only" })
+    assert.equal(Object.hasOwn(server.policy, "toolApproval"), false)
+    await click(option("composer.permission.tool.ask")); await flush()
+    assert.deepEqual(server.policy, { ...initial, fileAccess: "read-only", toolApproval: "ask" })
+    const remote = { ...initial, fileAccess: "unrestricted", toolApproval: "ask" }
+    chat.receive(readNotification("session.event", { sessionId: "session", branchId: "main", event: { id: "remote", sequence: 1, create_at: 1, type: "permission", name: "changed", data: { policy: remote } } }))
+    await new Promise((resolve) => setTimeout(resolve, 20)); await flush()
+    assert.deepEqual(chat.views.session.permission, remote)
+    assert.equal(option("composer.permission.file.unrestricted").props["aria-pressed"], true)
+    server.policy = { ...initial, fileAccess: "read-only", toolApproval: "ask" }
+    const concurrent = { ...initial, fileAccess: "unrestricted", toolApproval: "bypass", allowedTools: ["read"] }
+    server.failure = () => {
+      server.policy = concurrent
+      server.version++
+      return new RpcError(-32000, "changed elsewhere", "permission_conflict")
+    }
+    const beforeConflict = server.updates.length
+    assert.equal(await chat.setPermission("session", { field: "fileAccess", value: "workspace-read-write" }), "conflict")
+    assert.equal(server.updates.length, beforeConflict + 1, "a conflict refreshes without retrying the write")
+    assert.deepEqual(chat.views.session.permission, concurrent)
+    server.failure = () => new RpcError(-32602, "unknown fileAccess", undefined)
+    const before = server.updates.length
+    await assert.rejects(chat.setPermission("session", { field: "fileAccess", value: "workspace-read-write" }), /unknown fileAccess/)
+    assert.equal(server.updates.length, before + 1, "an unsupported override must not fall back to a preset write")
+    assert.deepEqual(chat.views.session.permission, server.policy)
+  }
+})
 
 for (const branchId of ["main", "worker"]) {
   test(`${branchId}: all calls of a question batch can be answered before settlement`, async (t) => {

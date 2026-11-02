@@ -10,6 +10,7 @@ import type {
   CompactResult,
   ContextUsage,
   FileCandidate,
+  PermissionPolicy,
   PermissionPreset,
   PermissionState,
   MemberApprovalDetail,
@@ -197,27 +198,30 @@ function readPreset(value: unknown, at: string): PermissionPreset {
   return fail(at, "a permission preset")
 }
 
+function readPermissionPolicy(value: unknown, at: string): PermissionPolicy {
+  const policy = obj(value, at)
+  const fileAccess = optStr(policy, "fileAccess", at)
+  const toolApproval = optStr(policy, "toolApproval", at)
+  if (fileAccess !== undefined && fileAccess !== "read-only" && fileAccess !== "workspace-read-write" && fileAccess !== "unrestricted") fail(`${at}.fileAccess`, "a file access policy")
+  if (toolApproval !== undefined && toolApproval !== "ask" && toolApproval !== "bypass") fail(`${at}.toolApproval`, "a tool approval policy")
+  const list = (key: string) => arr(policy[key], `${at}.${key}`).map((item, index) => {
+    if (typeof item !== "string") fail(`${at}.${key}[${index}]`, "a string")
+    return item
+  })
+  return {
+    preset: readPreset(policy.preset, `${at}.preset`),
+    ...(fileAccess === undefined ? {} : { fileAccess }),
+    ...(toolApproval === undefined ? {} : { toolApproval }),
+    allowedTools: list("allowedTools"),
+    disallowedTools: list("disallowedTools"),
+  }
+}
+
 /** `session.permission.get`: the policy of `main` and the version a change must expect. */
 export function readPermissionState(value: unknown): PermissionState {
   const at = "session.permission.get"
   const source = obj(value, at)
-  const policy = obj(source.policy, `${at}.policy`)
-  const fileAccess = optStr(policy, "fileAccess", `${at}.policy`)
-  const toolApproval = optStr(policy, "toolApproval", `${at}.policy`)
-  const list = (key: string) => arr(policy[key], `${at}.policy.${key}`).map((item, index) => {
-    if (typeof item !== "string") fail(`${at}.policy.${key}[${index}]`, "a string")
-    return item
-  })
-  return {
-    version: num(source, "version", at),
-    policy: {
-      preset: readPreset(policy.preset, `${at}.policy.preset`),
-      ...(fileAccess === undefined ? {} : { fileAccess }),
-      ...(toolApproval === undefined ? {} : { toolApproval }),
-      allowedTools: list("allowedTools"),
-      disallowedTools: list("disallowedTools"),
-    },
-  }
+  return { version: num(source, "version", at), policy: readPermissionPolicy(source.policy, `${at}.policy`) }
 }
 
 /** `session.permission.update`: the version the new policy is stored under. */
@@ -402,7 +406,7 @@ function content(type: string, name: string, data: Json, at: string): EventConte
     case "input/applied":
       return { kind: "input-applied", inputId: str(data, "input_id", at) }
     case "permission/changed":
-      return { kind: "permission-changed", preset: readPreset(obj(data.policy, `${at}.policy`).preset, `${at}.policy.preset`) }
+      return { kind: "permission-changed", policy: readPermissionPolicy(data.policy, `${at}.policy`) }
     case "input/deleted":
       return { kind: "input-deleted", inputId: str(data, "input_id", at) }
     case "branch/start":
