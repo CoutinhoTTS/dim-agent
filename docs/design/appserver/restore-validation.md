@@ -42,7 +42,7 @@ process wrote nothing but its own atomic batches in between.
   acceptance; the rest of the restore — branch opening, capability rebuild, the `branch/resume`
   append, MCP and skill startup — is unchanged and belongs to [#713](https://github.com/arcships/dim/issues/713)
   and [#588](https://github.com/arcships/dim/issues/588).
-- **Unchanged.** Storage format 29, schema, rows, frozen fixtures, protocol, services, the
+- **Unchanged.** Storage format 30, schema, rows, frozen fixtures, protocol, services, the
   `TimelineStore` signatures, capability rebuild, export (which keeps its full pass), and the
   in-memory store.
 
@@ -55,7 +55,7 @@ A restore starts at `Agent::restore_session`
 config, then `Agent::create` receives `SessionStart::Restore` and calls `store.branches(id)`
 ([agent.rs:174](../../../crates/dim-agent-runtime/src/agent.rs#L174)) before it builds anything. For
 the native store that is `validate_session`
-([timeline.rs:3275](../../../crates/dim-app-server/src/storage/timeline.rs#L3275)):
+([timeline.rs:3329](../../../crates/dim-app-server/src/storage/timeline.rs#L3329)):
 
 ```text
 store.branches(id)  — one connection hold: the directory
@@ -107,15 +107,15 @@ The argument for reuse rests on the store's writer and on the database lease:
 
 | Fact | Where |
 | --- | --- |
-| One process owns the database for writing: `SqliteStorage::open` takes a file lease, and a second open fails with "another process owns the SQLite database" | [sqlite.rs:423](../../../crates/dim-app-server/src/storage/sqlite.rs#L423) |
-| The export opens read-only without a lease and only reads | [sqlite.rs:556](../../../crates/dim-app-server/src/storage/sqlite.rs#L556) |
-| Appends go through the store's one writer thread, which commits each round in one SQLite transaction and only then publishes; a failed round is rolled back or fails the Session | [timeline.rs:226](../../../crates/dim-app-server/src/storage/timeline.rs#L226), [timeline.rs:445](../../../crates/dim-app-server/src/storage/timeline.rs#L445), [timeline-storage §3](../../architecture/rust-agent/timeline-storage.md#3-写入与发布), [§6](../../architecture/rust-agent/timeline-storage.md#6-故障) |
+| One process owns the database for writing: `SqliteStorage::open` takes a file lease, and a second open fails with "another process owns the SQLite database" | [sqlite.rs:446](../../../crates/dim-app-server/src/storage/sqlite.rs#L446) |
+| The export opens read-only without a lease and only reads | [sqlite.rs:591](../../../crates/dim-app-server/src/storage/sqlite.rs#L591) |
+| Appends go through the store's one writer thread, which commits each round in one SQLite transaction and only then publishes; a failed round is rolled back or fails the Session | [timeline.rs:227](../../../crates/dim-app-server/src/storage/timeline.rs#L227), [timeline.rs:446](../../../crates/dim-app-server/src/storage/timeline.rs#L446), [timeline-storage §3](../../architecture/rust-agent/timeline-storage.md#3-写入与发布), [§6](../../architecture/rust-agent/timeline-storage.md#6-故障) |
 | A Session id has at most one live load per store, and callers serialize closing and restoring it | [timeline_store.rs:108](../../../crates/dim-agent-runtime/src/timeline_store.rs#L108) |
-| `create_session` writes the Session row and the `main` directory in one transaction; `branch/create` writes the event and the child directory in the same batch | [timeline.rs:1890](../../../crates/dim-app-server/src/storage/timeline.rs#L1890), [timeline.rs:2730](../../../crates/dim-app-server/src/storage/timeline.rs#L2730), [timeline.rs:2139](../../../crates/dim-app-server/src/storage/timeline.rs#L2139) |
-| `rollback_session` sends the delete; `rollback_creation` removes every row of a newly created Session, and `session.delete` uses it | [timeline.rs:2754](../../../crates/dim-app-server/src/storage/timeline.rs#L2754), [timeline.rs:898](../../../crates/dim-app-server/src/storage/timeline.rs#L898), [timeline.rs:1644](../../../crates/dim-app-server/src/storage/timeline.rs#L1644) |
-| `release_session` drains the Session's prior appends and clears its failure state without deleting history | [timeline.rs:2778](../../../crates/dim-app-server/src/storage/timeline.rs#L2778) |
+| `create_session` writes the Session row and the `main` directory in one transaction; `branch/create` writes the event and the child directory in the same batch | [timeline.rs:1932](../../../crates/dim-app-server/src/storage/timeline.rs#L1932), [timeline.rs:2784](../../../crates/dim-app-server/src/storage/timeline.rs#L2784), [timeline.rs:2193](../../../crates/dim-app-server/src/storage/timeline.rs#L2193) |
+| `rollback_session` sends the delete; `rollback_creation` removes every row of a newly created Session, and `session.delete` uses it | [timeline.rs:2808](../../../crates/dim-app-server/src/storage/timeline.rs#L2808), [timeline.rs:900](../../../crates/dim-app-server/src/storage/timeline.rs#L900), [timeline.rs:1682](../../../crates/dim-app-server/src/storage/timeline.rs#L1682) |
+| `release_session` drains the Session's prior appends and clears its failure state without deleting history | [timeline.rs:2832](../../../crates/dim-app-server/src/storage/timeline.rs#L2832) |
 | `save_snapshot` writes `timeline_snapshots` outside the writer, but restore validation does not read snapshot state; `latest_snapshot` checks its anchor when it is read | [native-storage-format.md §可丢弃恢复快照](native-storage-format.md#可丢弃恢复快照) |
-| `agent_sessions.config` is written only with the Session (create, fork copy); no runtime call updates it | [timeline.rs:1890](../../../crates/dim-app-server/src/storage/timeline.rs#L1890), [timeline.rs:1664](../../../crates/dim-app-server/src/storage/timeline.rs#L1664) |
+| `agent_sessions.config` is written only with the Session (create, fork copy); no runtime call updates it | [timeline.rs:1932](../../../crates/dim-app-server/src/storage/timeline.rs#L1932), [timeline.rs:1702](../../../crates/dim-app-server/src/storage/timeline.rs#L1702) |
 
 So, within one store generation, every mutation of a Session's Timeline is a transaction this process
 wrote, or a whole-Session create/rollback/delete. The directory is a complete summary of those
@@ -247,7 +247,7 @@ exactly today's validation errors.
 
 None of the following changes:
 
-- the format version (29), the schema, any table, column, index or row, and the frozen fixtures
+- the format version (30), the schema, any table, column, index or row, and the frozen fixtures
   ([native-storage-format.md](native-storage-format.md));
 - the protocol, a method, a reply field, an event kind, a service or a configuration value;
 - `TimelineStore`'s signatures and its other implementations; the in-memory store keeps computing its
@@ -340,7 +340,7 @@ The applicable rules:
 1. **Reuse and miss.** In `tests/storage_flow.rs`, on a disposable database: create a Session, append
    events, call `branches` (full pass), then `release_session`; damage an event row in a way only the
    event pass checks (a batch boundary in the body, as the existing
-   [`recovery_rejects_corrupt_records_and_preserves_them`](../../../crates/dim-app-server/tests/storage_flow.rs#L2271)
+   [`recovery_rejects_corrupt_records_and_preserves_them`](../../../crates/dim-app-server/tests/storage_flow.rs#L2413)
    does, or the event-id index); `branches` returns the same branches and heads — the pass did not
    run. Then append a valid event through the store (the head changes) and `branches` fails with the
    existing validation error — the pass ran.
@@ -406,8 +406,9 @@ With the implementation:
   first restore of a Session in a process validates fully; a later restore reuses the result while
   the directory and every branch head are unchanged, and the record is process memory of the store,
   dropped with it.
-- [native-storage-format.md](native-storage-format.md) "读取校验": no change; the invariants it
-  states are unchanged, only when they run is narrower.
+- [native-storage-format.md](native-storage-format.md) "读取校验": the failure statement is limited to
+  the full pass — a restore whose directory is unchanged does not re-read events or content — and links
+  here; the invariants it states are unchanged, only when they run is narrower.
 - `TimelineStore::branches`: the permission sentence of §10.
 
 ## 15. Related issues
