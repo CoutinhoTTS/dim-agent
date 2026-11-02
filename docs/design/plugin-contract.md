@@ -209,7 +209,7 @@ A part reads facts through its branch's `timeline` service with one bounded quer
 | Position | A sequence range, or a cursor with the sequence the read may go through. A read never returns a fact above the published head, the last fact the branch has published |
 | Kinds and flags | The event kinds it accepts (`domain/name`), and each of the envelope's two context flags (§5.1) that it names |
 | Predicate | One equality against one JSON scalar. The path is a sequence of field names inside the event's data joined by dots, with no array indexing and no wildcards |
-| Order | Chain position, then sequence |
+| Direction and order | The caller chooses the end a page is taken from: ascending (oldest first) or descending (newest first). A reply is always ordered by chain position, then sequence, ascending, so a consumer folds a page directly; the direction decides only which end of the remaining range the page comes from |
 | Limit | Nonzero by type, so no read is unbounded. It is a target, not a bound: a reply ends at an atomic batch boundary, so it may be longer than the limit |
 
 A selection that names no kind accepts every kind, and a flag it does not name constrains nothing:
@@ -219,10 +219,12 @@ its scope pages the result from the cursor.
 The path's spelling is fixed here and not in a binding: there is one form, the one above, and the
 storage translates that form. A binding writes this path syntax and invents no other.
 
-The cursor is opaque. It names a position, not a number: it carries the branch of the last event
-the read returned together with that event's sequence, so the same sequence on a parent and on its
-child are different positions. A cursor always ends an atomic batch, so a read never splits one.
-The reply is the events and the next cursor.
+The cursor is opaque. It names a position, not a number: it carries the branch together with a
+sequence, so the same sequence on a parent and on its child are different positions. The cursor
+never splits an atomic batch: an ascending page does not end inside one, and a descending page does
+not start inside one. After an ascending page the cursor continues strictly after the last event
+returned; after a descending page, strictly before the oldest event returned. The reply is the
+events and the next cursor.
 
 The query returns facts; it does not fold, project or aggregate them. What a part folds from facts
 is its own state and stays with it ([ADR 002](../adr/002-plugin-scope.md) D1). A part that needs a
@@ -231,7 +233,7 @@ whole prefix reads pages and folds them itself.
 | Input | Result |
 | --- | --- |
 | A position past the published head | Invalid input |
-| A cursor that does not end an atomic batch | Invalid input |
+| A cursor that does not name an atomic batch boundary | Invalid input |
 | A cursor that names a branch the read's scope does not cover | Invalid input |
 | A kind or a data path the store does not know | No rows; not an error |
 
@@ -254,8 +256,8 @@ where that consumer's move is followed ([ADR 019](../adr/019-event-query.md) D2,
 The request and reply are serde data of the `timeline` name
 ([How Dim uses rutis §3.2](rutis-usage.md#32-shape)), so the spelling of a scope or a position
 belongs to a binding: its Rust form is [appendix A](rutis-usage.md#appendix-a-rust-binding), and the
-generated declarations are where the other languages read its shape. This section states the query, not
-the rest of its spelling.
+generated declarations are where the other languages read its shape. This section states the query,
+not the rest of its spelling.
 
 ## 6. Capability
 
