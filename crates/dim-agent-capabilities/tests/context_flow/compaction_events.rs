@@ -4,14 +4,10 @@ use std::sync::Mutex;
 
 #[tokio::test]
 async fn snapshot_codecs_preserve_completed_compaction_even_when_saving_fails() {
-    for mode in ["builder-failure", "encoder-failure", "custom"] {
+    for mode in ["encoder-failure", "custom"] {
         let store = Arc::new(MemoryTimelineStore::default());
         let mut renderer = HistoryRenderer::default();
         match mode {
-            "builder-failure" => {
-                renderer.checkpoint =
-                    CheckpointBuilder::Custom(|_, _| Err("snapshot builder unavailable".into()))
-            }
             "encoder-failure" => {
                 renderer.encode_checkpoint = |_, _| Err("snapshot encoder unavailable".into())
             }
@@ -232,7 +228,7 @@ impl DynPlugin for RewriteCompaction {
                         Edit::None => {}
                         Edit::Summary | Edit::FirstCursor | Edit::Completed => {
                             let retain_from = if matches!(edit, Edit::FirstCursor) {
-                                history[1].source.clone()
+                                history[1].event_id.clone()
                             } else {
                                 context.events.last().unwrap().id.clone()
                             };
@@ -402,6 +398,7 @@ async fn committed_cursor_preserves_the_history_after_its_cutoff() {
             .history("main", Some(compaction.through))
             .await
             .unwrap(),
+        "main",
     )
     .unwrap();
     let ContextCompactionResult::Completed {
@@ -412,7 +409,7 @@ async fn committed_cursor_preserves_the_history_after_its_cutoff() {
     else {
         panic!("expected compaction")
     };
-    assert_eq!(retain_from, &history[1].source);
+    assert_eq!(retain_from, &history[1].event_id);
     let expected: Vec<_> = replacement
         .iter()
         .cloned()

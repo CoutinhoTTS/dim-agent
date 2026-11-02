@@ -2,8 +2,7 @@ use dim_agent_capabilities::{
     adapters::{DefaultPrepareModelPlugin, EchoModel, MockTools},
     defaults,
     history::{
-        CheckpointBuilder, HistoryEntry, HistoryRender, HistoryRenderer, project_context_history,
-        project_history, projection_checkpoint, summary_message,
+        HistoryEntry, HistoryRenderer, project_context_history, project_history, summary_message,
     },
     host::*,
 };
@@ -110,7 +109,7 @@ impl CompactionStrategy for Context {
                         MessageContent::Text(_) => false,
                     })
                     .unwrap();
-                input.history[call + 1].source.clone()
+                input.history[call + 1].event_id.clone()
             } else {
                 match input.cut() {
                     Some(cut) => cut.retain_from.clone(),
@@ -321,43 +320,6 @@ fn external_history(events: &ContextHistory) -> std::result::Result<Vec<HistoryE
     Ok(history)
 }
 
-#[tokio::test]
-async fn external_pure_history_renderer_drives_the_final_request_and_context_budget() {
-    let agent = MinimalHost::start(&builder_with_context(
-        Arc::new(EchoModel),
-        HistoryRenderer {
-            render: HistoryRender::Custom(external_history),
-            ..HistoryRenderer::default()
-        },
-        Context::default(),
-    ))
-    .await
-    .unwrap();
-    let session = agent
-        .create_session(SessionConfig::default())
-        .await
-        .unwrap();
-    session
-        .submit("original".into(), InputMode::Queue, "main")
-        .await
-        .unwrap();
-    session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
-    assert!(events.iter().any(
-        |event| matches!(&event.kind, EventKind::InputMessage(data) if matches!(
-            data.user.as_ref().map(|user| user.content.as_slice()),
-            Some([ContentBlock::Text { text }]) if text == "original"
-        ))
-    ));
-    assert!(events.iter().any(|event| matches!(&event.kind, EventKind::ModelCall(data) if data.request.messages == vec![Arc::new(Message::text(Role::User, "External: original"))])));
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(&event.kind, EventKind::ContextBudget(_)))
-    );
-    assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta == "Echo: External: original")));
-    agent.close().await.unwrap();
-}
 /// The first call sends nothing until it is cancelled; later calls echo.
 /// Every request is recorded.
 #[derive(Default)]
@@ -475,7 +437,7 @@ async fn a_steer_before_any_model_output_ends_the_request_and_continues_the_turn
                 .iter()
                 .all(|message| message.role != Role::Assistant)
         );
-        dim_agent_capabilities::history::validate_history_boundary(&events).unwrap();
+        dim_agent_capabilities::history::validate_history_boundary(&events, "main").unwrap();
         agent.close().await.unwrap();
     })
     .await
@@ -995,6 +957,7 @@ impl ModelDriver for UsageModel {
         })
     }
 }
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn provider_usage_baseline_counts_only_new_history_after_a_matching_request() {
     tokio::time::timeout(Duration::from_secs(10), async {

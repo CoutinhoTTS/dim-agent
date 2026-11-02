@@ -1,5 +1,7 @@
 use crate::{BoxFuture, BranchRecord, Result, SessionConfig, TimelineTrace};
-use dim_agent_types::{AgentEvent, ContextCompactionResult, EventKind, RecoverySnapshot};
+use dim_agent_types::{
+    AgentEvent, ContextCompactionResult, EventKind, RecoverySnapshot, TimelinePosition,
+};
 use std::{ops::RangeInclusive, sync::Arc};
 
 /// Storage address of one Timeline inside an Agent's shared store.
@@ -13,7 +15,14 @@ pub struct TimelineKey {
 #[derive(Debug, Clone, Default)]
 pub struct PolicyFacts {
     pub through: u64,
-    pub events: Vec<Arc<AgentEvent>>,
+    /// Root first, then sequence: the branch chain's order.
+    pub events: Vec<PolicyEvent>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PolicyEvent {
+    pub position: TimelinePosition,
+    pub event: Arc<AgentEvent>,
 }
 
 impl PolicyFacts {
@@ -24,10 +33,18 @@ impl PolicyFacts {
             events: context
                 .events
                 .iter()
-                .filter(|event| policy_event(event))
-                .cloned()
+                .zip(context.positions.iter())
+                .filter(|(event, _)| policy_event(event))
+                .map(|(event, position)| PolicyEvent {
+                    position: position.clone(),
+                    event: event.clone(),
+                })
                 .collect(),
         }
+    }
+    /// The facts' events without their positions.
+    pub fn arcs(&self) -> Vec<Arc<AgentEvent>> {
+        self.events.iter().map(|fact| fact.event.clone()).collect()
     }
 }
 
@@ -47,6 +64,8 @@ pub struct PolicyWindow {
 #[derive(Debug, Clone, Default)]
 pub struct PolicyOrder {
     pub through: u64,
+    /// Branch chain from root to the current branch; positions compare by it.
+    pub branches: Vec<String>,
     pub events: Vec<PolicyOrderEvent>,
 }
 
@@ -57,6 +76,8 @@ pub struct PolicyOrderEvent {
     pub sequence: u64,
     pub turn_start: bool,
     pub compaction_start: Option<u64>,
+    /// The branch's last event at its fixed cut: the cut that replaces everything.
+    pub boundary: bool,
 }
 
 fn window_event(event: &AgentEvent) -> bool {
@@ -195,6 +216,105 @@ pub trait TimelineStore: Send + Sync + 'static {
             Ok(records)
         })
     }
+    /// The events of one kind up to `through`.
+    fn events_of_kind<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        kind: &'a str,
+        through: u64,
+    ) -> BoxFuture<'a, Result<Vec<Arc<AgentEvent>>>> {
+        Box::pin(async move {
+            let records = self.read(key, 1..=through).await?;
+            Ok(records
+                .into_iter()
+                .map(|record| record.event)
+                .filter(|event| event.kind.key() == kind)
+                .collect())
+        })
+    }
+    /// The event with this id, if the store holds it.
+    fn event_by_id<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<Arc<AgentEvent>>>> {
+        Box::pin(async move {
+            let records = self.read(key, 1..=u64::MAX).await?;
+            Ok(records
+                .into_iter()
+                .map(|record| record.event)
+                .find(|event| event.id == id))
+        })
+    }
+    /// The event at `sequence`, even when an atomic batch crosses it: the read
+    /// runs to the branch head, which is a batch boundary, and picks the last
+    /// event at or before the cut.
+    fn last_event<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> BoxFuture<'a, Result<Option<Arc<AgentEvent>>>> {
+        Box::pin(async move {
+            let head = self.head(key).await?;
+            if head == 0 {
+                return Ok(None);
+            }
+            let records = self.read(key, 1..=head).await?;
+            Ok(records
+                .into_iter()
+                .map(|record| record.event)
+                .rfind(|event| event.sequence <= sequence))
+        })
+    }
+    /// Reads the rows this projection consumes: rows whose render or state
+    /// switch is set. Stores may filter before decoding; the default reads the
+    /// prefix and keeps the flagged kinds.
+    fn read_context<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        from: u64,
+        through: u64,
+    ) -> BoxFuture<'a, Result<Vec<StoredEvent>>> {
+        Box::pin(async move {
+            if from == 0 || from > through {
+                return Ok(Vec::new());
+            }
+            let records = self.read(key, from..=through).await?;
+            Ok(records
+                .into_iter()
+                .filter(|record| {
+                    let (render, state) = record.event.kind.context_flags();
+                    render || state
+                })
+                .collect())
+        })
+    }
+    /// Reads one page of the rows this projection consumes: at most `limit`
+    /// events after `after`, extended to the batch boundary of the last one.
+    /// The default reads the tail and trims in memory.
+    fn read_context_page<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        after: u64,
+        limit: usize,
+        through: u64,
+    ) -> BoxFuture<'a, Result<Vec<StoredEvent>>> {
+        Box::pin(async move {
+            if after > through || limit == 0 {
+                return Ok(Vec::new());
+            }
+            let records = self.read_context(key, after.max(1), through).await?;
+            let mut records: Vec<_> = records
+                .into_iter()
+                .filter(|record| record.event.sequence > after)
+                .collect();
+            if let Some(record) = records.get(limit - 1) {
+                let end = record.batch_end;
+                records.retain(|record| record.event.sequence <= end);
+            }
+            Ok(records)
+        })
+    }
     /// Reads complete batches after a batch-boundary cursor at a fixed head
     /// for a caller that does not use stored requests: a `context/prepare`
     /// or `model/call` record holds its request without its messages,
@@ -315,7 +435,13 @@ pub trait TimelineStore: Send + Sync + 'static {
                             })
                             || consumed.iter().any(|id| record.event.id == *id)
                     })
-                    .map(|record| record.event)
+                    .map(|record| PolicyEvent {
+                        position: TimelinePosition {
+                            branch_id: key.branch_id.clone(),
+                            sequence: record.event.sequence,
+                        },
+                        event: record.event,
+                    })
                     .collect(),
             })
         })
@@ -330,21 +456,27 @@ pub trait TimelineStore: Send + Sync + 'static {
         Box::pin(async move {
             let records = self.read(key, 1..=through).await?;
             let branch_id = key.branch_id.clone();
+            let mut events: Vec<PolicyOrderEvent> = records
+                .into_iter()
+                .map(|record| PolicyOrderEvent {
+                    turn_start: matches!(&record.event.kind, EventKind::TurnStart(_)),
+                    compaction_start: match &record.event.kind {
+                        EventKind::ContextCompactionStart(data) => Some(data.through),
+                        _ => None,
+                    },
+                    boundary: false,
+                    id: record.event.id.clone(),
+                    branch_id: branch_id.clone(),
+                    sequence: record.event.sequence,
+                })
+                .collect();
+            if let Some(last) = events.last_mut() {
+                last.boundary = true;
+            }
             Ok(PolicyOrder {
                 through,
-                events: records
-                    .into_iter()
-                    .map(|record| PolicyOrderEvent {
-                        turn_start: matches!(&record.event.kind, EventKind::TurnStart(_)),
-                        compaction_start: match &record.event.kind {
-                            EventKind::ContextCompactionStart(data) => Some(data.through),
-                            _ => None,
-                        },
-                        id: record.event.id.clone(),
-                        branch_id: branch_id.clone(),
-                        sequence: record.event.sequence,
-                    })
-                    .collect(),
+                branches: vec![branch_id],
+                events,
             })
         })
     }

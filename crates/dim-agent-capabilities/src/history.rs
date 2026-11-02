@@ -15,7 +15,9 @@ pub struct HistoryEntry {
     pub baseline: Arc<[ContextBaselineEntry]>,
     /// Id of the Timeline event that placed this entry; compaction cuts are
     /// event ids, so they do not depend on the entry id scheme.
-    pub source: String,
+    pub event_id: String,
+    /// Position of that event: the Timeline primary key's two columns.
+    pub position: TimelinePosition,
 }
 
 /// A stateless transformation of a fixed event prefix. Implementations must be
@@ -25,59 +27,11 @@ pub type BuildProjectionCheckpoint =
     fn(&ContextHistory, &str) -> Result<ProjectionCheckpoint, String>;
 pub type EncodeProjectionCheckpoint =
     fn(&RecoverySnapshot, &ProjectionCheckpoint) -> Result<String, String>;
-/// Which history renderer the renderer has.
-///
-/// Only [`HistoryRender::Projection`] may take the streamed render:
-/// `rendered_stream` rebuilds entries with the built-in projection, so a
-/// replaced renderer renders the full context instead.
-pub enum HistoryRender {
-    /// The built-in renderer, `project_context_history`.
-    Projection,
-    /// A replaced renderer; the stream cannot reproduce it.
-    Custom(RenderHistory),
-}
-impl HistoryRender {
-    pub fn project(&self, context: &ContextHistory) -> Result<Vec<HistoryEntry>, String> {
-        match self {
-            Self::Projection => project_context_history(context),
-            Self::Custom(render) => render(context),
-        }
-    }
-
-    pub(crate) fn is_builtin(&self) -> bool {
-        matches!(self, Self::Projection)
-    }
-}
-/// Which checkpoint builder the renderer has.
-///
-/// Only [`CheckpointBuilder::Projection`] may take the streamed snapshot: the
-/// streamed path builds `ProjectionCheckpoint` state with the built-in replay,
-/// so a replaced builder builds its snapshot from the full context instead.
-pub enum CheckpointBuilder {
-    /// The built-in replay, `projection_checkpoint`.
-    Projection,
-    /// A replaced builder; its state cannot be rebuilt from a stream.
-    Custom(BuildProjectionCheckpoint),
-}
-impl CheckpointBuilder {
-    fn build(
-        &self,
-        context: &ContextHistory,
-        retain_from: &str,
-    ) -> Result<ProjectionCheckpoint, String> {
-        match self {
-            Self::Projection => projection_checkpoint(context, retain_from),
-            Self::Custom(build) => build(context, retain_from),
-        }
-    }
-
-    pub(crate) fn is_builtin(&self) -> bool {
-        matches!(self, Self::Projection)
-    }
-}
 pub struct HistoryRenderer {
-    pub render: HistoryRender,
-    pub checkpoint: CheckpointBuilder,
+    /// Explicit readers only; the prepare path always folds with the default
+    /// projection.
+    pub render: RenderHistory,
+    pub checkpoint: BuildProjectionCheckpoint,
     /// Identifies the saved projection semantics, independently of store format.
     pub checkpoint_interpreter: &'static str,
     /// Paired codec owned by the interpreter. The encoder receives snapshot
@@ -148,8 +102,8 @@ fn decode_checkpoint(
 impl Default for HistoryRenderer {
     fn default() -> Self {
         Self {
-            render: HistoryRender::Projection,
-            checkpoint: CheckpointBuilder::Projection,
+            render: project_context_history,
+            checkpoint: projection_checkpoint,
             checkpoint_interpreter: "dim/context-projection/v3",
             encode_checkpoint,
             decode_checkpoint,
@@ -165,7 +119,7 @@ impl HistoryRenderer {
         retain_from: &str,
         anchor: &AgentEvent,
     ) -> Result<RecoverySnapshot, String> {
-        let checkpoint = self.checkpoint.build(context, retain_from)?;
+        let checkpoint = (self.checkpoint)(context, retain_from)?;
         let mut snapshot = RecoverySnapshot {
             sequence: anchor.sequence,
             event_id: anchor.id.clone(),
@@ -191,57 +145,88 @@ impl HistoryRenderer {
         Ok(snapshot)
     }
 
-    /// Builds the checkpoint for `retain_from` while streaming batches, so a
-    /// compaction snapshot does not need the full `ContextHistory`. `resume`
-    /// is the cut's position from the policy order the caller already holds,
-    /// and it must be where the cut's own event sits: any other position would
-    /// start the restored read after the cut and lose what lies between.
+    /// Builds the checkpoint for `retain_from` by folding the fixed prefix up
+    /// to that event. Used once per completed compaction to save its snapshot.
     pub async fn stream_checkpoint(
         &self,
         timeline: &Timeline,
-        resume: dim_agent_types::TimelinePosition,
         through: u64,
         retain_from: &str,
         batch: u64,
     ) -> dim_agent_runtime::Result<ProjectionCheckpoint> {
-        if !timeline.ancestors().is_empty() || batch == 0 {
+        if batch == 0 {
             return Err(AgentError::InvalidInput(
-                "streamed checkpoint needs a local branch".into(),
+                "a stream needs a positive batch size".into(),
             ));
         }
-        let mut state: Option<ProjectionCheckpointState> = None;
-        let mut start = 1;
-        while start <= through {
-            let events = timeline
-                .stored_page(start.saturating_sub(1), batch as usize, through)
-                .await?;
-            if events.is_empty() {
-                return Err(AgentError::InvalidInput(
-                    "compaction cut was not read".into(),
-                ));
-            }
-            let end = events.last().map_or(start, |event| event.sequence);
-            if let Some(index) = events.iter().position(|event| event.id == retain_from) {
-                if events[index].sequence != resume.sequence {
-                    return Err(AgentError::InvalidInput(
-                        "compaction cut was not read".into(),
-                    ));
+        let segments = timeline.segments(through)?;
+        let Some(cut) = timeline.event_position(retain_from).await? else {
+            return Err(AgentError::InvalidInput(
+                "Compaction cut is outside the branch chain".into(),
+            ));
+        };
+        let boundary = segments
+            .iter()
+            .position(|(branch, _)| *branch == cut.branch_id)
+            .ok_or_else(|| {
+                AgentError::fault(
+                    "History",
+                    "Compaction cut is outside the branch chain".to_owned(),
+                )
+            })?;
+        let checkpoint = timeline
+            .checkpoint(through, self.checkpoint_interpreter, self.decode_checkpoint)
+            .await?;
+        let (first, start, mut state) = match &checkpoint {
+            Some(checkpoint) => {
+                let index = segments
+                    .iter()
+                    .position(|(branch, _)| *branch == checkpoint.resume.branch_id);
+                let before = index.is_some_and(|index| {
+                    index < boundary
+                        || (index == boundary && checkpoint.resume.sequence < cut.sequence)
+                });
+                match index {
+                    Some(index) if before => (
+                        index,
+                        checkpoint.resume.sequence,
+                        Some(checkpoint.state.clone()),
+                    ),
+                    _ => (0, 1, None),
                 }
-                let mut state = replay(&events[..index], state.as_ref())
-                    .map_err(|error| AgentError::fault("History", error))?
-                    .state;
-                state.retain_from = retain_from.to_owned();
-                return Ok(ProjectionCheckpoint { resume, state });
             }
-            state = Some(
-                project_batch(&events, state.as_ref())
-                    .map_err(|error| AgentError::fault("History", error))?
-                    .state,
-            );
-            start = end + 1;
+            None => (0, 1, None),
+        };
+        for (index, (branch, end)) in segments.iter().enumerate().skip(first) {
+            let mut cursor = if index == first { start } else { 1 };
+            while cursor <= *end {
+                let events = timeline
+                    .stored_context_page_in(branch, cursor.saturating_sub(1), batch as usize, *end)
+                    .await?;
+                if events.is_empty() {
+                    break;
+                }
+                let fold = events
+                    .iter()
+                    .position(|event| branch == &cut.branch_id && event.sequence >= cut.sequence)
+                    .unwrap_or(events.len());
+                let positions = planned(&events[..fold], branch);
+                state = Some(
+                    replay(&events[..fold], state.as_ref(), &positions)
+                        .map_err(|error| AgentError::fault("History", error))?
+                        .state,
+                );
+                if fold < events.len() {
+                    let mut state = state.unwrap_or_default();
+                    state.retain_from = retain_from.to_owned();
+                    return Ok(ProjectionCheckpoint { resume: cut, state });
+                }
+                let last = events.last().map_or(cursor, |event| event.sequence);
+                cursor = last + 1;
+            }
         }
         Err(AgentError::InvalidInput(
-            "compaction cut was not read".into(),
+            "Compaction cut is outside the branch chain".into(),
         ))
     }
 
@@ -257,7 +242,7 @@ impl HistoryRenderer {
         let context = timeline
             .context_with_checkpoint(through, self.checkpoint_interpreter, self.decode_checkpoint)
             .await?;
-        if context.checkpoint.is_some() && self.render.project(&context).is_err() {
+        if context.checkpoint.is_some() && (self.render)(&context).is_err() {
             return timeline.context(through).await;
         }
         Ok(context)
@@ -276,95 +261,135 @@ impl HistoryRenderer {
         let context = timeline
             .context_with_checkpoint(through, self.checkpoint_interpreter, self.decode_checkpoint)
             .await?;
-        match self.render.project(&context) {
+        match (self.render)(&context) {
             Ok(history) => Ok((context, history)),
             Err(_) if context.checkpoint.is_some() => {
                 let context = timeline.context(through).await?;
-                let history = self
-                    .render
-                    .project(&context)
-                    .map_err(|error| AgentError::fault("History", error))?;
+                let history =
+                    (self.render)(&context).map_err(|error| AgentError::fault("History", error))?;
                 Ok((context, history))
             }
             Err(error) => Err(AgentError::fault("History", error)),
         }
     }
 
-    /// Streams a branch in batches and returns only the projection. `fallback`
-    /// means the caller must use the full `rendered_context` path (ancestry,
-    /// a cut the stream cannot follow, or an empty range).
+    /// Streams the branch chain in batches and returns only the projection.
     pub async fn rendered_stream(
         &self,
         timeline: &Timeline,
         through: u64,
         batch: u64,
     ) -> dim_agent_runtime::Result<StreamedContext> {
-        let ancestors = timeline.ancestors();
-        if !ancestors.is_empty() {
-            return Ok(StreamedContext::fallback());
-        }
         if batch == 0 {
-            return Ok(StreamedContext::fallback());
+            return Err(AgentError::InvalidInput(
+                "a stream needs a positive batch size".into(),
+            ));
         }
-        if !self.render.is_builtin() {
-            return Ok(StreamedContext::fallback());
-        }
-        let order = timeline.policy_order(through).await?.events;
-        let mut state = None;
+        let policy_order = timeline.policy_order(through).await?;
+        let checkpoint = timeline
+            .checkpoint(through, self.checkpoint_interpreter, self.decode_checkpoint)
+            .await?;
+        let segments = timeline.segments(through)?;
+        let (first, resume) = match &checkpoint {
+            Some(checkpoint) => segments
+                .iter()
+                .position(|(branch, _)| *branch == checkpoint.resume.branch_id)
+                .map(|index| (index, checkpoint.resume.sequence))
+                .ok_or_else(|| {
+                    AgentError::fault(
+                        "History",
+                        "Checkpoint resume is outside the branch chain".to_owned(),
+                    )
+                })?,
+            None => (0, 1),
+        };
+        let mut state = checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.state.clone());
         let mut history = Vec::new();
         let mut compaction = None;
-        let mut cut_in_effect = None;
-        let mut start = 1;
-        while start <= through {
-            let events = timeline
-                .stored_page(start.saturating_sub(1), batch as usize, through)
-                .await?;
-            if events.is_empty() {
-                return Ok(StreamedContext::fallback());
-            }
-            let end = events.last().map_or(start, |event| event.sequence);
-            let projected = project_batch(&events, state.as_ref())
-                .map_err(|error| AgentError::fault("History", error))?;
-            history.extend(projected.history);
-            if projected.compacted
-                && let Some(event) = &projected.compaction
-                && let EventKind::ContextCompaction(data) = &event.kind
-                && let ContextCompactionResult::Completed { retain_from, .. } = &data.outcome
-            {
-                let Some(cut) = order
-                    .iter()
-                    .position(|event| event.id == retain_from.as_str())
-                else {
-                    return Ok(StreamedContext::fallback());
-                };
-                if cut_in_effect.is_some_and(|previous| cut < previous) {
-                    return Ok(StreamedContext::fallback());
+        let mut cut_in_effect: Option<(Option<usize>, u64)> = None;
+        let mut compaction_cut: Option<dim_agent_types::TimelinePosition> = None;
+        for (index, (branch, cut)) in segments.iter().enumerate().skip(first) {
+            let mut cursor = if index == first { resume } else { 1 };
+            while cursor <= *cut {
+                let events = timeline
+                    .stored_context_page_in(branch, cursor.saturating_sub(1), batch as usize, *cut)
+                    .await?;
+                if events.is_empty() {
+                    break;
                 }
-                cut_in_effect = Some(cut);
-                let kept = history
-                    .iter()
-                    .position(|entry| {
-                        order
-                            .iter()
-                            .position(|event| event.id == entry.source)
-                            .is_some_and(|index| index >= cut)
-                    })
-                    .unwrap_or(history.len());
-                history.drain(..kept);
+                let end = events.last().map_or(cursor, |event| event.sequence);
+                let projected = project_batch(&events, state.as_ref(), branch)
+                    .map_err(|error| AgentError::fault("History", error))?;
+                history.extend(projected.history);
+                let rank = |branch: &str| segments.iter().position(|(name, _)| name == branch);
+                for event in events.iter() {
+                    let EventKind::ContextCompaction(data) = &event.kind else {
+                        continue;
+                    };
+                    let ContextCompactionResult::Completed { retain_from, .. } = &data.outcome
+                    else {
+                        continue;
+                    };
+                    let cut = timeline.event_position(retain_from).await?.ok_or_else(|| {
+                        AgentError::fault(
+                            "History",
+                            "Compaction cut is outside the stream".to_owned(),
+                        )
+                    })?;
+                    let Some(end) = segments
+                        .iter()
+                        .find(|(name, _)| name == &cut.branch_id)
+                        .map(|(_, end)| *end)
+                    else {
+                        return Err(AgentError::fault(
+                            "History",
+                            "Compaction cut is outside the stream".to_owned(),
+                        ));
+                    };
+                    if cut.sequence > end {
+                        return Err(AgentError::fault(
+                            "History",
+                            "Compaction cut is outside the stream".to_owned(),
+                        ));
+                    }
+                    let at = (rank(&cut.branch_id), cut.sequence);
+                    if cut_in_effect.is_some_and(|previous| at < previous) {
+                        return Err(AgentError::fault(
+                            "History",
+                            "Compaction cut precedes the cut in effect".to_owned(),
+                        ));
+                    }
+                    cut_in_effect = Some(at);
+                    compaction_cut = Some(cut.clone());
+                    let kept = history
+                        .iter()
+                        .position(|entry| {
+                            (rank(&entry.position.branch_id), entry.position.sequence) >= at
+                        })
+                        .unwrap_or(history.len());
+                    history.drain(..kept);
+                }
+                compaction = projected.compaction.or(compaction);
+                state = Some(projected.state);
+                cursor = end + 1;
             }
-            compaction = projected.compaction.or(compaction);
-            state = Some(projected.state);
-            start = end + 1;
         }
         let state = state.unwrap_or_default();
         Ok(StreamedContext {
             history,
             configuration: state.configuration,
             prompt: PromptSnapshot::from_checkpoint(&state.prompts).revision,
-            ancestry: ancestors.into_iter().map(|(branch, _)| branch).collect(),
-            order,
+            ancestry: timeline
+                .ancestors()
+                .into_iter()
+                .map(|(branch, _)| branch)
+                .collect(),
+            order: policy_order.events,
             compaction,
-            fallback: false,
+            branches: segments.iter().map(|(branch, _)| branch.clone()).collect(),
+            compaction_cut,
         })
     }
 }
@@ -378,22 +403,11 @@ pub struct StreamedContext {
     pub ancestry: Vec<String>,
     pub order: Vec<dim_agent_runtime::PolicyOrderEvent>,
     pub compaction: Option<Arc<AgentEvent>>,
-    /// The caller must use the full `rendered_context` path.
-    pub fallback: bool,
-}
-
-impl StreamedContext {
-    fn fallback() -> Self {
-        Self {
-            history: Vec::new(),
-            configuration: None,
-            prompt: None,
-            ancestry: Vec::new(),
-            order: Vec::new(),
-            compaction: None,
-            fallback: true,
-        }
-    }
+    /// Root first, the segments the stream read.
+    pub branches: Vec<String>,
+    /// The position of the cut in effect, which need not be an event the
+    /// policy order carries.
+    pub compaction_cut: Option<dim_agent_types::TimelinePosition>,
 }
 
 /// Read the shared prompt/input/output projection using its supported cache.
@@ -487,14 +501,27 @@ pub(crate) fn user_message(user: &UserInput) -> Message {
     }
 }
 
-pub fn project_history(events: &[Arc<AgentEvent>]) -> Result<Vec<HistoryEntry>, String> {
-    replay(events, None).map(|projection| projection.history)
+pub fn project_history(
+    events: &[Arc<AgentEvent>],
+    branch: &str,
+) -> Result<Vec<HistoryEntry>, String> {
+    replay(events, None, &planned(events, branch)).map(|projection| projection.history)
+}
+
+fn planned(events: &[Arc<AgentEvent>], branch: &str) -> Vec<TimelinePosition> {
+    events
+        .iter()
+        .map(|event| TimelinePosition {
+            branch_id: branch.to_owned(),
+            sequence: event.sequence,
+        })
+        .collect()
 }
 
 /// Verifies that a fixed prefix can be inherited without splitting a causal
 /// model/tool block or leaving a consumed input without its source.
-pub fn validate_history_boundary(events: &[Arc<AgentEvent>]) -> Result<(), String> {
-    boundary(&replay(events, None)?.state)
+pub fn validate_history_boundary(events: &[Arc<AgentEvent>], branch: &str) -> Result<(), String> {
+    boundary(&replay(events, None, &planned(events, branch))?.state)
 }
 
 /// Every started call has its closing result and no model output is open.
@@ -527,8 +554,10 @@ pub struct ProjectedBatch {
 pub fn project_batch(
     events: &[Arc<AgentEvent>],
     initial: Option<&ProjectionCheckpointState>,
+    branch: &str,
 ) -> Result<ProjectedBatch, String> {
-    let mut projection = replay(events, initial)?;
+    let positions = planned(events, branch);
+    let projection = replay(events, initial, &positions)?;
     let compaction = events.iter().rev().find(|event| {
         matches!(
             &event.kind,
@@ -536,35 +565,6 @@ pub fn project_batch(
                 if matches!(data.outcome, ContextCompactionResult::Completed { .. })
         )
     });
-    if let Some(event) = compaction
-        && let EventKind::ContextCompaction(data) = &event.kind
-        && let ContextCompactionResult::Completed { retain_from, .. } = &data.outcome
-    {
-        let order: HashMap<&str, usize> = events
-            .iter()
-            .enumerate()
-            .map(|(index, event)| (event.id.as_str(), index))
-            .collect();
-        let Some(cut) = order.get(retain_from.as_str()).copied() else {
-            return Ok(ProjectedBatch {
-                history: projection.history,
-                state: projection.state,
-                compacted: true,
-                compaction: compaction.cloned(),
-            });
-        };
-        let kept = projection
-            .history
-            .iter()
-            .position(|entry| {
-                order
-                    .get(entry.source.as_str())
-                    .is_some_and(|index| *index >= cut)
-            })
-            .unwrap_or(projection.history.len());
-        projection.history.drain(..kept);
-        projection.state.retain_from = retain_from.clone();
-    }
     Ok(ProjectedBatch {
         history: projection.history,
         state: projection.state,
@@ -576,6 +576,7 @@ pub fn project_batch(
 fn replay(
     events: &[Arc<AgentEvent>],
     initial: Option<&ProjectionCheckpointState>,
+    positions: &[TimelinePosition],
 ) -> Result<Projection, String> {
     let restored = initial.cloned().unwrap_or_default();
     let mut inputs: HashMap<String, InputMessageData> = restored.inputs.into_iter().collect();
@@ -735,7 +736,10 @@ fn replay(
             _ => {}
         }
         for entry in &mut history[previous_length..] {
-            entry.source.clone_from(&event.id);
+            entry.event_id.clone_from(&event.id);
+            if let Some(position) = positions.get(event_index) {
+                entry.position.clone_from(position);
+            }
         }
         origins.extend(std::iter::repeat_n(
             event_index,
@@ -816,14 +820,14 @@ pub(crate) fn retained_entry(
         .iter()
         .position(|entry| {
             order
-                .get(entry.source.as_str())
+                .get(entry.event_id.as_str())
                 .is_some_and(|index| *index >= cut)
         })
         .unwrap_or(history.len()))
 }
 
 pub fn project_context_history(context: &ContextHistory) -> Result<Vec<HistoryEntry>, String> {
-    let mut history = replay(&context.events, initial_state(context))?.history;
+    let mut history = replay(&context.events, initial_state(context), &context.positions)?.history;
     if let Some(ContextCompactionData {
         outcome: ContextCompactionResult::Completed { retain_from, .. },
         ..
@@ -909,7 +913,7 @@ pub fn projection_checkpoint(
     context: &ContextHistory,
     retain_from: &str,
 ) -> Result<ProjectionCheckpoint, String> {
-    let projection = replay(&context.events, initial_state(context))?;
+    let projection = replay(&context.events, initial_state(context), &context.positions)?;
     let kept = retained_entry(context, &projection.history, retain_from)?;
     let resume = projection
         .origins
@@ -921,7 +925,12 @@ pub fn projection_checkpoint(
         .get(resume)
         .cloned()
         .ok_or_else(|| "Compaction checkpoint has no resume event.".to_owned())?;
-    let mut state = replay(&context.events[..resume], initial_state(context))?.state;
+    let mut state = replay(
+        &context.events[..resume],
+        initial_state(context),
+        &context.positions[..resume],
+    )?
+    .state;
     state.retain_from = retain_from.to_owned();
     Ok(ProjectionCheckpoint {
         resume: position,
@@ -930,7 +939,7 @@ pub fn projection_checkpoint(
 }
 
 pub fn validate_context_boundary(context: &ContextHistory) -> Result<(), String> {
-    boundary(&replay(&context.events, initial_state(context))?.state)
+    boundary(&replay(&context.events, initial_state(context), &context.positions)?.state)
 }
 
 fn assistant(
@@ -974,7 +983,11 @@ fn entry(
         message: Arc::new(message),
         tool_context,
         baseline,
-        source: String::new(),
+        event_id: String::new(),
+        position: TimelinePosition {
+            branch_id: String::new(),
+            sequence: 0,
+        },
     }
 }
 
@@ -1068,8 +1081,8 @@ fn digest_line(entry: &ToolEffect) -> String {
     }
 }
 
-pub fn project_messages(events: &[Arc<AgentEvent>]) -> Result<Vec<Message>, String> {
-    Ok(project_history(events)?
+pub fn project_messages(events: &[Arc<AgentEvent>], branch: &str) -> Result<Vec<Message>, String> {
+    Ok(project_history(events, branch)?
         .into_iter()
         .map(|entry| Arc::unwrap_or_clone(entry.message))
         .collect())
