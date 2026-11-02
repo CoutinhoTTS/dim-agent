@@ -9,17 +9,19 @@ use dim_agent_capabilities::{
     file_storage::FileStoragePlugin,
     host::{
         AuxiliaryErrorCode, AuxiliaryModelHost, AuxiliaryRequest, AwsCredentials, BedrockAuth,
-        ModelChunk, ModelConnection, ModelHost, ModelStopReason, ProviderConnectionResolver,
+        HostError, HostErrorKind, ModelChunk, ModelConnection, ModelHost, ModelStopReason,
+        ProviderConnectionResolver, SelectableModelsHost,
     },
 };
 use dim_agent_runtime::{Names, names::ServiceCatalog};
 use dim_agent_types::{Message, ModelId, ModelRequest, Role};
 use dim_app_server::{
     managed_provider::ManagedProvidersPlugin,
-    model_catalog::{BundledCatalog, ModelEntry},
+    model_catalog::{BundledCatalog, ModelEntry, ModelStatus},
     provider::{
         ConnectionInput, CreateProvider, CredentialUpdate, LegacyRow, ModelPreferences,
-        ProviderError, ProviderPlugin, ProviderService, StaticAuth, convert_legacy_provider,
+        ProviderError, ProviderPlugin, ProviderService, StaticAuth, StaticProviderRecord,
+        StoredSelectionError, convert_legacy_provider, parse_static, stored_selection,
     },
     storage::SqliteStoragePlugin,
 };
@@ -30,10 +32,23 @@ use rutis_loader::resolve::Build;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, LazyLock, Mutex, OnceLock},
 };
 use tokio_util::sync::CancellationToken;
+
+fn preference_update(
+    preferences: ModelPreferences,
+) -> dim_app_server::protocol::ModelPreferenceUpdate {
+    dim_app_server::protocol::ModelPreferenceUpdate {
+        reasoning_effort: preferences
+            .reasoning_effort
+            .map(dim_app_server::protocol::PreferenceUpdate::Value),
+        service_tier: preferences
+            .service_tier
+            .map(dim_app_server::protocol::PreferenceUpdate::Value),
+    }
+}
 
 #[derive(Clone, Debug)]
 struct Seen {
@@ -228,6 +243,18 @@ fn target(provider: &str) -> ModelId {
         provider_id: provider.into(),
         model_id: "same".into(),
     }
+}
+
+fn stored_record(home: &Path, provider_id: &str) -> StaticProviderRecord {
+    let db = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+    let (version, body): (u32, String) = db
+        .query_row(
+            "SELECT version,record FROM providers WHERE provider_id=?1",
+            [provider_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    parse_static(provider_id, version, &body).unwrap()
 }
 
 #[tokio::test]
@@ -560,19 +587,50 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
                 )
                 .await
                 .unwrap();
+            // A same-origin 307 is followed on the request's own network, and
+            // the target serves the stream.
             let before = direct.lock().unwrap().len();
+            let before_proxied = proxied.lock().unwrap().len();
             let connection = resolver
                 .0
                 .resolve(request.clone(), cancel.clone())
                 .await
                 .unwrap();
-            assert!(
-                host.0
-                    .invoke(request, connection.connection, cancel.clone())
-                    .await
-                    .is_err()
+            let mut output = host
+                .0
+                .invoke(request, connection.connection, cancel.clone())
+                .await
+                .unwrap();
+            let (mut text, mut failed, mut stopped) = (String::new(), false, false);
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while let Some(chunk) = output.next().await {
+                    match chunk {
+                        Ok(ModelChunk::Text(value)) => text.push_str(&value),
+                        Ok(ModelChunk::MessageStop { .. }) => stopped = true,
+                        Err(_) => failed = true,
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(text, "network reply");
+            assert!(stopped && !failed);
+            let seen = direct.lock().unwrap();
+            let paths: Vec<_> = seen[before..]
+                .iter()
+                .map(|(uri, _)| uri.path().to_owned())
+                .collect();
+            assert_eq!(
+                paths,
+                ["/redirect/v1/chat/completions", "/v1/chat/completions"]
             );
-            assert_eq!(direct.lock().unwrap().len(), before + 1);
+            for (_, headers) in &seen[before..] {
+                assert_eq!(headers["authorization"], "Bearer model-secret");
+                assert!(!headers.contains_key("proxy-authorization"));
+            }
+            drop(seen);
+            assert_eq!(proxied.lock().unwrap().len(), before_proxied);
         }
         root.shutdown().await.unwrap();
     }
@@ -1105,6 +1163,323 @@ async fn an_undeclared_model_limit_is_refused_until_a_source_declares_it() {
     );
     assert_eq!(redeclared.models[0].missing_limits, Vec::<String>::new());
     root.shutdown().await.unwrap();
+    server.abort();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test]
+async fn selectable_models_match_execution_and_hide_unavailable_models() {
+    use axum::http::{StatusCode, Uri};
+    use tokio::sync::{mpsc, oneshot};
+    type Exchange = (Uri, oneshot::Sender<(StatusCode, Json<Value>)>);
+    let (send, mut requests) = mpsc::channel::<Exchange>(4);
+    let app = Router::new().fallback(move |uri: Uri| {
+        let send = send.clone();
+        async move {
+            let (reply, _response) = oneshot::channel();
+            send.send((uri, reply)).await.unwrap();
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({})))
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let home = std::env::temp_dir().join(format!("provider-selectable-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.canonicalize().unwrap();
+    let root = Ctx::root().unwrap();
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
+    root.plugin(FileStoragePlugin::new(vec![home.clone()]));
+    root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
+    root.plugin(ManagedProvidersPlugin);
+    root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_agent_aimux::AimuxPlugin);
+    let view = root.plugin(provider_part(ProviderPlugin::new));
+    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+        .await
+        .unwrap();
+    let provider = root.get::<ProviderService>().unwrap();
+    let selectable = root.get::<SelectableModelsHost>().unwrap();
+    let cancel = CancellationToken::new();
+    let bundled = BundledCatalog::load().unwrap();
+    const MINE: &str = "00000000-0000-4000-8000-000000000030";
+    const OFF: &str = "00000000-0000-4000-8000-000000000031";
+    const ROUTELESS: &str = "00000000-0000-4000-8000-000000000032";
+    const NOCRED: &str = "00000000-0000-4000-8000-000000000033";
+    let mut unavailable = model("unavailable", 1000);
+    unavailable.status = ModelStatus::Unavailable;
+    let mut image = model("image", 1000);
+    image.capabilities.modalities = vec!["image".into()];
+    let mut nonchat = model("nonchat", 1000);
+    nonchat.metadata =
+        Some(serde_json::from_value(json!({"raw":{"type":"image-generation"}})).unwrap());
+    let narrow: ModelEntry = serde_json::from_value(json!({
+        "modelId":"narrow", "displayName":"narrow", "status":"active",
+        "capabilities":{"modalities":["text"],"toolCalling":true,"streaming":true,
+            "structuredOutput":true,"vision":false,"audio":false,"reasoning":false}
+    }))
+    .unwrap();
+    let mut mine = input(
+        MINE,
+        &format!("{base}/v1"),
+        StaticAuth::Bearer,
+        Some("selectable-key"),
+        "selectable",
+        1000,
+    );
+    mine.models = vec![
+        model("text", 1000),
+        model("served", 1000),
+        unavailable,
+        image,
+        nonchat,
+        narrow,
+    ];
+    let created = provider.create(mine, &cancel).await.unwrap();
+    let updated = provider
+        .set_enabled_models(
+            MINE.into(),
+            created.version.unwrap(),
+            vec![
+                "served".into(),
+                "unavailable".into(),
+                "image".into(),
+                "nonchat".into(),
+                "narrow".into(),
+            ],
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let mut off = input(
+        OFF,
+        &format!("{base}/v1"),
+        StaticAuth::Bearer,
+        Some("selectable-key"),
+        "off",
+        1000,
+    );
+    off.enabled = false;
+    provider.create(off, &cancel).await.unwrap();
+    let mut nocred = input(
+        NOCRED,
+        &format!("{base}/v1"),
+        StaticAuth::Bearer,
+        None,
+        "nocred",
+        1000,
+    );
+    nocred.enabled = false;
+    provider.create(nocred, &cancel).await.unwrap();
+    let mut route = input(ROUTELESS, &base, StaticAuth::Anonymous, None, "route", 1000);
+    route.connection.driver_kind = "new-api-router".into();
+    let mut no_route = model("image-only", 1000);
+    no_route.metadata =
+        Some(serde_json::from_value(json!({"raw":{"endpointType":"image-generation"}})).unwrap());
+    route.models = vec![no_route];
+    provider.create(route, &cancel).await.unwrap();
+
+    let first = selectable.0.selectable(cancel.clone()).await.unwrap();
+    let mine: Vec<_> = first
+        .iter()
+        .filter(|model| model.target.provider_id == MINE)
+        .collect();
+    let ids: Vec<&str> = mine
+        .iter()
+        .map(|model| model.target.model_id.as_str())
+        .collect();
+    assert_eq!(ids, ["served"], "{ids:?}");
+    assert!(
+        !first
+            .iter()
+            .any(|model| model.target.provider_id == OFF || model.target.provider_id == ROUTELESS),
+        "{first:?}"
+    );
+    let catalog = provider
+        .catalog_for(MINE.into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(catalog.disabled_model_ids, ["text"]);
+    for (id, reason) in [
+        ("unavailable", "provider_unavailable"),
+        ("image", "provider_unavailable"),
+        ("nonchat", "provider_unavailable"),
+        ("narrow", "limits_undeclared"),
+    ] {
+        let model = catalog.models.iter().find(|model| model.id == id).unwrap();
+        assert_eq!(model.unavailable_reason.as_deref(), Some(reason), "{id}");
+    }
+    let declared = catalog
+        .models
+        .iter()
+        .find(|model| model.id == "served")
+        .unwrap();
+    assert!(declared.unavailable_reason.is_none());
+    assert!(declared.missing_limits.is_empty());
+    assert_eq!(
+        mine[0].capabilities.modalities,
+        declared.capabilities.modalities
+    );
+    assert_eq!(
+        Some(mine[0].capabilities.context_window),
+        declared.capabilities.context_window
+    );
+    for model in &first {
+        provider
+            .configuration(
+                Some(model.target.clone()),
+                None,
+                ModelPreferences::default(),
+                &cancel,
+            )
+            .await
+            .unwrap();
+    }
+    for excluded in ["text", "unavailable", "image", "nonchat", "narrow"] {
+        let error = provider
+            .configuration(
+                Some(ModelId {
+                    provider_id: MINE.into(),
+                    model_id: excluded.into(),
+                }),
+                None,
+                ModelPreferences::default(),
+                &cancel,
+            )
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.to_string(),
+            "Explicit model is unavailable",
+            "{excluded}"
+        );
+    }
+    let mine_record = stored_record(&home, MINE);
+    assert_eq!(
+        stored_selection(&bundled, MINE, &mine_record, "missing"),
+        Err(StoredSelectionError::NotFound)
+    );
+    assert!(
+        provider
+            .configuration(
+                Some(ModelId {
+                    provider_id: MINE.into(),
+                    model_id: "missing".into(),
+                }),
+                None,
+                ModelPreferences::default(),
+                &cancel,
+            )
+            .await
+            .is_err()
+    );
+    assert!(matches!(
+        stored_selection(&bundled, MINE, &mine_record, "text"),
+        Err(StoredSelectionError::Unavailable { disabled: true, .. })
+    ));
+    for model_id in ["served", "unavailable", "image", "nonchat", "narrow"] {
+        let offline = stored_selection(&bundled, MINE, &mine_record, model_id);
+        let execution = provider
+            .configuration(
+                Some(ModelId {
+                    provider_id: MINE.into(),
+                    model_id: model_id.into(),
+                }),
+                None,
+                ModelPreferences::default(),
+                &cancel,
+            )
+            .await;
+        match (&offline, &execution) {
+            (Ok(stored), Ok(selection)) => {
+                assert_eq!(
+                    Some(&stored.snapshot),
+                    selection.capability_snapshot.as_ref(),
+                    "{model_id}"
+                );
+                assert_eq!(
+                    Some(stored.protocol),
+                    catalog
+                        .models
+                        .iter()
+                        .find(|model| model.id == model_id)
+                        .and_then(|model| model.endpoint),
+                    "{model_id}"
+                );
+            }
+            (Err(_), Err(_)) => {}
+            (offline, execution) => {
+                panic!("stored/execution disagree for {model_id}: {offline:?} {execution:?}")
+            }
+        }
+    }
+    for (provider_id, model_id) in [(OFF, "same"), (ROUTELESS, "image-only"), (NOCRED, "same")] {
+        let record = stored_record(&home, provider_id);
+        let offline = stored_selection(&bundled, provider_id, &record, model_id);
+        let execution = provider
+            .configuration(
+                Some(ModelId {
+                    provider_id: provider_id.into(),
+                    model_id: model_id.into(),
+                }),
+                None,
+                ModelPreferences::default(),
+                &cancel,
+            )
+            .await;
+        assert!(offline.is_err(), "{provider_id} {offline:?}");
+        assert!(execution.is_err(), "{provider_id} {execution:?}");
+    }
+    let managed = stored_record(&home, "openai-codex");
+    assert_eq!(
+        stored_selection(&bundled, "openai-codex", &managed, "gpt-5"),
+        Err(StoredSelectionError::AccountOwned)
+    );
+    assert!(
+        requests.try_recv().is_err(),
+        "the read made a provider request"
+    );
+    provider
+        .set_enabled_models(MINE.into(), updated.version, vec!["text".into()], &cancel)
+        .await
+        .unwrap();
+    let second = selectable.0.selectable(cancel.clone()).await.unwrap();
+    let second_ids: Vec<&str> = second
+        .iter()
+        .filter(|model| model.target.provider_id == MINE)
+        .map(|model| model.target.model_id.as_str())
+        .collect();
+    assert_eq!(second_ids, ["text"]);
+    assert_eq!(ids, ["served"], "the earlier reply must not change");
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert!(matches!(
+        selectable.0.selectable(cancelled).await,
+        Err(HostError::Cancelled(_))
+    ));
+    root.shutdown().await.unwrap();
+    let error = selectable
+        .0
+        .selectable(CancellationToken::new())
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(
+            error,
+            HostError::Failed {
+                kind: HostErrorKind::OwnerClosed,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
     server.abort();
     std::fs::remove_dir_all(home).unwrap();
 }
@@ -3026,6 +3401,7 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
     let resolver = root.get::<ProviderConnectionResolver>().unwrap();
     let host = root.get::<ModelHost>().unwrap();
     let cancel = CancellationToken::new();
+    let bundled = BundledCatalog::load().unwrap();
     for (index, (driver, model_id, suffix, max_field, app_code)) in [
         (
             "custom",
@@ -3164,6 +3540,8 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
                 .insert("Authorization".into(), "Bearer fixture-secret".into());
         }
         provider.create(input, &cancel).await.unwrap();
+        let record = stored_record(&home, &id);
+        let stored = stored_selection(&bundled, &id, &record, model_id).unwrap();
         let target = ModelId {
             provider_id: id.clone(),
             model_id: model_id.into(),
@@ -3198,6 +3576,19 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
             )
             .await
             .unwrap();
+        assert_eq!(
+            Some(&stored.snapshot),
+            selection.capability_snapshot.as_ref(),
+            "{model_id}"
+        );
+        assert_eq!(
+            stored.protocol,
+            serde_json::from_value(
+                selection.metadata.as_ref().unwrap().extensions["providerProtocol"].clone()
+            )
+            .unwrap(),
+            "{model_id}"
+        );
         if index == 0 {
             let unchanged = provider
                 .apply_preferences(
@@ -3210,7 +3601,7 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
                         tools: None,
                         tool_sources: vec![],
                     },
-                    ModelPreferences::default(),
+                    &dim_app_server::protocol::ModelPreferenceUpdate::default(),
                     &cancel,
                 )
                 .await
@@ -3229,10 +3620,10 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
                     tools: None,
                     tool_sources: vec![],
                 },
-                ModelPreferences {
+                &preference_update(ModelPreferences {
                     reasoning_effort: Some("low".into()),
                     ..Default::default()
-                },
+                }),
                 &cancel,
             )
             .await
@@ -3372,6 +3763,7 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
         .join(uuid::Uuid::new_v4().to_string());
     std::fs::create_dir_all(&home).unwrap();
     let mut saved_version = 0;
+    let bundled = BundledCatalog::load().unwrap();
     for restart in [false, true] {
         let root = Ctx::root().unwrap();
         root.plugin(
@@ -3477,13 +3869,27 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
             let selection = provider
                 .configuration(Some(target), None, ModelPreferences::default(), &cancel)
                 .await;
+            let record = stored_record(&home, &id);
+            let stored = stored_selection(&bundled, &id, &record, model_id);
             let Some(suffix) = suffix else {
                 assert!(catalog.models[0].unavailable_reason.is_some(), "{model_id}");
                 assert!(selection.is_err(), "{model_id}");
+                assert!(stored.is_err(), "{model_id} {stored:?}");
                 continue;
             };
             assert!(catalog.models[0].unavailable_reason.is_none(), "{model_id}");
             let selection = selection.unwrap();
+            let stored = stored.unwrap();
+            assert_eq!(
+                Some(&stored.snapshot),
+                selection.capability_snapshot.as_ref(),
+                "{model_id}"
+            );
+            assert_eq!(
+                Some(stored.protocol),
+                catalog.models[0].endpoint,
+                "{model_id}"
+            );
             assert_eq!(
                 selection.metadata.as_ref().unwrap().extensions["providerProtocol"],
                 json!(catalog.models[0].endpoint.unwrap())
@@ -3601,13 +4007,13 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
                 };
                 assert!(
                     provider
-                        .apply_preferences(&current, ModelPreferences::default(), &cancel)
+                        .apply_preferences(&current, &dim_app_server::protocol::ModelPreferenceUpdate::default(), &cancel)
                         .await
                         .is_err()
                 );
                 current.metadata = None;
                 let unstamped = provider
-                    .apply_preferences(&current, ModelPreferences::default(), &cancel)
+                    .apply_preferences(&current, &dim_app_server::protocol::ModelPreferenceUpdate::default(), &cancel)
                     .await
                     .unwrap();
                 assert!(
@@ -3651,7 +4057,7 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
                 current.metadata = selected.metadata;
                 assert!(
                     provider
-                        .apply_preferences(&current, ModelPreferences::default(), &cancel)
+                        .apply_preferences(&current, &dim_app_server::protocol::ModelPreferenceUpdate::default(), &cancel)
                         .await
                         .is_ok()
                 );
@@ -6916,7 +7322,7 @@ async fn an_unreadable_recorded_protocol_rejects_a_preference_update() {
         ..Default::default()
     };
     let error = provider
-        .apply_preferences(&current, effort.clone(), &cancel)
+        .apply_preferences(&current, &preference_update(effort.clone()), &cancel)
         .await
         .unwrap_err();
     assert!(error.to_string().contains("Model route changed"), "{error}");
@@ -6928,7 +7334,7 @@ async fn an_unreadable_recorded_protocol_rejects_a_preference_update() {
         ..current
     };
     provider
-        .apply_preferences(&current, effort, &cancel)
+        .apply_preferences(&current, &preference_update(effort), &cancel)
         .await
         .unwrap();
     root.shutdown().await.unwrap();

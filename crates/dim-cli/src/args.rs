@@ -2,6 +2,10 @@ use crate::{Result, export::Format, permission};
 use dim_agent_types::PermissionPreset;
 use std::path::PathBuf;
 
+/// What `--server` must name, shared by every error about the value it
+/// supplies.
+pub(crate) const SERVER_REQUIREMENT: &str = "--server must name a standalone dim-app-server binary";
+
 pub const HELP: &str = "dimcode [OPTIONS]\n\n\
 Pure Rust scrollback client. With redirected stdin, run one prompt and exit.\n\n\
 Commands:\n\
@@ -31,9 +35,15 @@ Commands:\n\
   mcp enable ID                    Enable an MCP server shown by mcp list\n\
   mcp disable ID                   Disable it; an unlisted ID withdraws only\n\
                                    this workspace's stored enablement\n\
+  skills list                      List Skills, their sources and states\n\
+  skills enable|disable ID         Turn one Skill on or off\n\
+  skills reload                    Rescan this workspace's Skills\n\
   hooks list                       List hook handlers, their sources and states\n\
   hooks enable                     Run this workspace's .dimcode/hooks.json\n\
   hooks disable                    Stop running this workspace's hooks\n\
+  hooks edit                       Edit the user's hook document\n\
+  hooks set PATH                   Write the user's hook document from PATH,\n\
+                                   or from stdin for -\n\
   recording [on|off]               Record model requests to the home's\n\
                                    model-log/recordings.jsonl; prompts, code\n\
                                    and tool output are written there\n\
@@ -48,6 +58,9 @@ Commands:\n\
   runtime list                     List the plugin runtimes and their state\n\
   runtime install node|python      Turn a plugin runtime on and acquire it\n\
   daemon stop                      Gracefully stop an existing daemon\n\
+  daemon vacuum [--database PATH]  Rewrite an offline database to reclaim\n\
+                                   space; --database defaults to the home's\n\
+                                   rust/dimcode.sqlite\n\
   migration [run|inspect] [--source OLD_HOME]\n\
                                    Import or inspect Global and CN separately;\n\
                                    Global stays in ~/.dim, CN in ~/.dimcode;\n\
@@ -67,7 +80,9 @@ Options:\n\
   --cwd PATH                       Workspace (default: current directory)\n\
   --no-tui                         Line client instead of the terminal UI\n\
   --fullscreen | --scrollback      Terminal UI mode; append 'default' to save it\n\
-  --server PATH                    App Server binary (default: this executable)\n\
+  --server PATH                    Run a standalone dim-app-server binary;\n\
+                                   the default runs this executable's\n\
+                                   app-server subcommand\n\
   --model-config PATH              Explicit API-key model configuration\n\
   --provider ID --model ID         Model selection for a new session\n\
   --permission PRESET              read-only, workspace-write or full-access for a\n\
@@ -120,6 +135,10 @@ pub enum Action {
         output: Option<PathBuf>,
         database: Option<PathBuf>,
     },
+    /// `daemon vacuum`: rewrite an offline database to reclaim space (#600).
+    DaemonVacuum {
+        database: Option<PathBuf>,
+    },
     /// `login [PROVIDER]`: without one, list the described accounts.
     Login(Option<String>),
     Account(String),
@@ -132,9 +151,15 @@ pub enum Action {
         id: String,
         enabled: bool,
     },
-    HooksList,
-    HooksEnable {
-        enabled: bool,
+    /// `<area> ...`: one request to a management area's owner.
+    Management(crate::model::session::ManagementRequest),
+    /// `<area> edit`: the area's document in the external editor.
+    ManagementEdit(crate::model::session::Area),
+    /// `<area> set PATH`: the area's document from a file, or from stdin for
+    /// `-`.
+    ManagementSet {
+        area: crate::model::session::Area,
+        path: std::path::PathBuf,
     },
     /// `recording [on|off]`: the daemon's model request record.
     Recording {
@@ -317,8 +342,10 @@ impl Options {
                     }
                 }
                 "--database" => {
-                    let Action::Timeline { database, .. } = &mut options.action else {
-                        return Err("--database requires export".into());
+                    let database = match &mut options.action {
+                        Action::Timeline { database, .. } => database,
+                        Action::DaemonVacuum { database } => database,
+                        _ => return Err("--database requires export or daemon vacuum".into()),
                     };
                     if database.replace(PathBuf::from(value(&mut args)?)).is_some() {
                         return Err("Supply the database path only once".into());
@@ -483,13 +510,54 @@ impl Options {
                         }
                     };
                 }
-                "hooks" if matches!(options.action, Action::Chat) => {
-                    options.action = match value(&mut args)?.as_str() {
-                        "list" => Action::HooksList,
-                        command @ ("enable" | "disable") => Action::HooksEnable {
+                "skills" if matches!(options.action, Action::Chat) => {
+                    use crate::model::session::{Area, ManagementAction, ManagementRequest};
+                    let verb = value(&mut args)?;
+                    let action = match verb.as_str() {
+                        "list" => ManagementAction::List,
+                        "reload" => ManagementAction::Reload,
+                        command @ ("enable" | "disable") => ManagementAction::Toggle {
+                            id: value(&mut args)?,
                             enabled: command == "enable",
                         },
-                        _ => return Err("Use hooks list, hooks enable or hooks disable".into()),
+                        _ => {
+                            return Err(
+                                "Use skills list, skills enable ID, skills disable ID or skills reload"
+                                    .into(),
+                            );
+                        }
+                    };
+                    options.action = Action::Management(ManagementRequest {
+                        area: Area::Skills,
+                        action,
+                    });
+                }
+                "hooks" if matches!(options.action, Action::Chat) => {
+                    use crate::model::session::{Area, ManagementAction, ManagementRequest};
+                    let verb = value(&mut args)?;
+                    options.action = match verb.as_str() {
+                        "list" => Action::Management(ManagementRequest {
+                            area: Area::Hooks,
+                            action: ManagementAction::List,
+                        }),
+                        command @ ("enable" | "disable") => Action::Management(ManagementRequest {
+                            area: Area::Hooks,
+                            action: ManagementAction::Toggle {
+                                id: crate::management::hooks::PROJECT.to_owned(),
+                                enabled: command == "enable",
+                            },
+                        }),
+                        "edit" => Action::ManagementEdit(Area::Hooks),
+                        "set" => Action::ManagementSet {
+                            area: Area::Hooks,
+                            path: value(&mut args)?.into(),
+                        },
+                        _ => {
+                            return Err(
+                                "Use hooks list, hooks enable, hooks disable, hooks edit or hooks set PATH"
+                                    .into(),
+                            );
+                        }
                     };
                 }
                 "recording" if matches!(options.action, Action::Chat) => {
@@ -549,10 +617,13 @@ impl Options {
                     }
                 }
                 "daemon" if matches!(options.action, Action::Chat) => {
-                    if value(&mut args)? != "stop" {
-                        return Err("Use daemon stop".into());
-                    }
-                    options.action = Action::DaemonStop;
+                    options.action = match value(&mut args)?.as_str() {
+                        "stop" => Action::DaemonStop,
+                        "vacuum" => Action::DaemonVacuum { database: None },
+                        _ => {
+                            return Err("Use daemon stop or daemon vacuum [--database PATH]".into());
+                        }
+                    };
                 }
                 "login" | "account" | "logout" | "models"
                     if matches!(options.action, Action::Chat) =>
@@ -671,13 +742,26 @@ impl Options {
         if matches!(options.action, Action::DaemonStop) {
             return Ok(options);
         }
-        for path in [&mut options.model_config, &mut options.server]
-            .into_iter()
-            .flatten()
-        {
+        if let Some(path) = &mut options.server {
+            *path = std::fs::canonicalize(&*path).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    format!("{SERVER_REQUIREMENT}; {} does not exist", path.display())
+                } else {
+                    format!("{SERVER_REQUIREMENT}; {}: {error}", path.display())
+                }
+            })?;
+            if !path.is_file() {
+                return Err(format!(
+                    "{SERVER_REQUIREMENT}; {} is not a regular file",
+                    path.display()
+                )
+                .into());
+            }
+        }
+        if let Some(path) = &mut options.model_config {
             *path = std::fs::canonicalize(&*path)?;
             if !path.is_file() {
-                return Err("--server and --model-config must name regular files".into());
+                return Err("--model-config must name a regular file".into());
             }
         }
         Ok(options)

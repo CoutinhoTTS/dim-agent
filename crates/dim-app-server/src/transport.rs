@@ -695,6 +695,7 @@ async fn run_connection(
                                         if hub.config().database_path.is_some() {
                                             methods.push("session.catalog");
                                             methods.push("session.catalog.cancel");
+                                            methods.push("session.catalog.origins");
                                         }
                                         methods
                                     } else {
@@ -711,9 +712,11 @@ async fn run_connection(
                                             "session.model.progress",
                                             "session.methods",
                                             "session.branch_end",
+                                            "session.create.origin",
                                         ]);
                                         if hub.config().database_path.is_some() {
                                             features.push("session.fork");
+                                            features.push("session.history.latestTurn");
                                         }
                                     }
                                     if trusted && hub.config().local_execution() {

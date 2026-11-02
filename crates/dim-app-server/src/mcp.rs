@@ -11,7 +11,10 @@ mod session;
 mod temporary;
 pub(crate) use publication::Publication;
 pub use publication::{McpApplication, McpOwner, McpPublication};
-pub use session::{McpSession, McpSessionPlugin, McpSessionState, McpSourceState, install};
+pub use session::{
+    McpAppCallResult, McpAppError, McpSession, McpSessionPlugin, McpSessionState, McpSourceState,
+    McpWidgetResult, install,
+};
 
 use crate::settings::{BusinessDocument, SettingsError, SettingsScope, SettingsService};
 use config::{
@@ -108,6 +111,98 @@ pub struct McpEditableEntry {
     pub enabled: bool,
 }
 
+/// The terminal outcome of one probe. `mcp.test` exercises a configuration
+/// with a disposable connection and reports what happened rather than failing
+/// the call.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpProbe {
+    pub status: ProbeStatus,
+    /// Milliseconds from opening the disposable connection to this outcome,
+    /// excluding cleanup.
+    pub latency_ms: u64,
+    /// Every discovered tool, or `null` unless the probe connected.
+    pub tools: Option<Vec<server::McpTool>>,
+    /// The refusal is a credential Dim held and the server rejected, not one
+    /// Dim lacks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expired: Option<bool>,
+    /// The scopes a `403 insufficient_scope` named while discovering.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missing_scopes: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<ProbeReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProbeStatus {
+    Connected,
+    AuthRequired,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProbeReason {
+    Timeout,
+    Unavailable,
+    Response,
+    Cleanup,
+}
+
+impl McpProbe {
+    fn base(status: ProbeStatus, latency: std::time::Duration) -> Self {
+        Self {
+            status,
+            latency_ms: latency.as_millis() as u64,
+            tools: None,
+            expired: None,
+            missing_scopes: None,
+            reason: None,
+            message: None,
+        }
+    }
+    fn connected(tools: Vec<server::McpTool>, latency: std::time::Duration) -> Self {
+        Self {
+            tools: Some(tools),
+            ..Self::base(ProbeStatus::Connected, latency)
+        }
+    }
+    fn failed(
+        reason: ProbeReason,
+        error: server::McpServerError,
+        latency: std::time::Duration,
+    ) -> Self {
+        Self {
+            reason: Some(reason),
+            message: Some(McpError::Server(error).to_string()),
+            ..Self::base(ProbeStatus::Failed, latency)
+        }
+    }
+    /// The server answered, and its answer ends the probe.
+    fn ended(error: server::McpServerError, latency: std::time::Duration) -> Self {
+        match error {
+            server::McpServerError::AuthRequired { expired } => Self {
+                expired: Some(expired),
+                ..Self::base(ProbeStatus::AuthRequired, latency)
+            },
+            server::McpServerError::InsufficientScope(scopes) => Self {
+                missing_scopes: Some(scopes.split_whitespace().map(str::to_owned).collect()),
+                ..Self::base(ProbeStatus::AuthRequired, latency)
+            },
+            server::McpServerError::Timeout => Self::failed(ProbeReason::Timeout, error, latency),
+            server::McpServerError::InvalidResponse(_) => {
+                Self::failed(ProbeReason::Response, error, latency)
+            }
+            server::McpServerError::Cleanup => Self::failed(ProbeReason::Cleanup, error, latency),
+            _ => Self::failed(ProbeReason::Unavailable, error, latency),
+        }
+    }
+}
+
 /// Source CAS tokens are distinct from connection and tool-source versions.
 /// Sources are read independently, not in a cross-source transaction.
 pub struct McpCatalog {
@@ -141,6 +236,16 @@ impl McpConnection {
     pub fn state(&self) -> server::McpServerState {
         self.service.state()
     }
+    /// The connection generation this lease names; a new one starts whenever
+    /// the server establishes a connection.
+    pub fn generation(&self) -> u64 {
+        self.service.generation()
+    }
+    /// The tools of this generation's last complete discovery, including the
+    /// ones no model sees.
+    pub fn discovered(&self) -> Option<Vec<server::McpTool>> {
+        self.service.discovered()
+    }
     /// The generation was retired because its entry was disabled or removed,
     /// not because the connection failed.
     pub fn withdrawn(&self) -> bool {
@@ -166,6 +271,21 @@ impl McpConnection {
         cancel: &CancellationToken,
     ) -> server::Result<dim_agent_types::ToolResult> {
         self.service.call(name, arguments, cancel).await
+    }
+    pub async fn call_result(
+        &self,
+        name: String,
+        arguments: dim_agent_types::JsonObject,
+        cancel: &CancellationToken,
+    ) -> std::result::Result<server::McpCall, server::ViewFailure> {
+        self.service.call_result(name, arguments, cancel).await
+    }
+    pub async fn resource(
+        &self,
+        uri: String,
+        cancel: &CancellationToken,
+    ) -> std::result::Result<server::McpResource, server::ViewFailure> {
+        self.service.resource(uri, cancel).await
     }
 }
 impl Drop for McpConnection {
@@ -536,11 +656,12 @@ impl McpService {
         id: String,
         configuration: McpServerSettings,
         cancel: &CancellationToken,
-    ) -> Result<Vec<server::McpTool>> {
+    ) -> Result<McpProbe> {
         self.run(cancel, move |_, cancel| async move {
             let key = Key::<McpServer>::dynamic(format!("mcp-test:{}", uuid::Uuid::new_v4()))
                 .instance(ctx.instance());
             let plugin = server::McpServerPlugin::new(&id, configuration, key.clone())?;
+            let started = std::time::Instant::now();
             let view = ctx.plugin(plugin);
             let operation = async {
                 tokio::select! {
@@ -551,13 +672,26 @@ impl McpService {
                 let service = ctx.get_at(&key).ok_or(McpError::Unavailable)?;
                 service.tools(&cancel).await.map_err(McpError::from)
             };
-            let result = tokio::time::timeout(std::time::Duration::from_secs(30), operation)
-                .await
-                .unwrap_or(Err(McpServerError::Timeout.into()));
+            let outcome = tokio::time::timeout(PROBE_DEADLINE, operation).await;
+            let latency = started.elapsed();
+            let probe = match outcome {
+                Ok(Ok(tools)) => Ok(McpProbe::connected(tools, latency)),
+                Ok(Err(McpError::Server(error))) => Ok(McpProbe::ended(error, latency)),
+                Ok(Err(error)) => Err(error),
+                Err(_deadline) => Ok(McpProbe::failed(
+                    ProbeReason::Timeout,
+                    server::McpServerError::Timeout,
+                    latency,
+                )),
+            };
             if view.shutdown().await.is_err() || view.state().error.is_some() {
-                return Err(McpServerError::Cleanup.into());
+                return Ok(McpProbe::failed(
+                    ProbeReason::Cleanup,
+                    server::McpServerError::Cleanup,
+                    latency,
+                ));
             }
-            result
+            probe
         })
         .await
     }
@@ -650,6 +784,10 @@ async fn enablement(
             .unwrap_or_default(),
     }
 }
+
+/// A probe gives one disposable connection this long to initialize and list
+/// every tool page.
+const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Writes one change to its source and returns the source's revision.
 async fn write(

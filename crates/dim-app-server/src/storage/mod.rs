@@ -14,8 +14,10 @@ pub use export::export_timeline;
 #[cfg(feature = "testing")]
 pub use metadata::testing;
 pub use metadata::{MetadataError, SessionMetadata, Title, TitleFields, TitleSource};
-pub use sqlite::{FORMAT as STORE_FORMAT, SqliteStorage, SqliteStoragePlugin};
-pub use timeline::{SessionStore, SessionStorePlugin, SqliteTimelineStore};
+pub use sqlite::{
+    FORMAT as STORE_FORMAT, SqliteStorage, SqliteStoragePlugin, Vacuumed, vacuum_store,
+};
+pub use timeline::{SessionStore, SessionStorePlugin, SqliteTimelineStore, TurnWindow};
 
 /// The directory below the database directory where WorkspaceTools keeps each
 /// Session's command output, `command-output/<sessionId>/`. The daemon gives

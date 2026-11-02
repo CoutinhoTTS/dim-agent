@@ -42,6 +42,9 @@ mod branch_end;
 #[path = "transport_flow/tree.rs"]
 mod tree;
 
+#[path = "transport_flow/history_window.rs"]
+mod history_window;
+
 #[path = "transport_flow/reload.rs"]
 mod reload;
 
@@ -116,6 +119,9 @@ mod session_typescript;
 mod settings_methods;
 #[path = "transport_flow/web.rs"]
 mod web;
+
+#[path = "transport_flow/skills.rs"]
+mod skills;
 
 #[path = "transport_flow/sessions.rs"]
 mod sessions;

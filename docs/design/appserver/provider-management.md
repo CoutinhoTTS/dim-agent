@@ -21,6 +21,8 @@ Desktop and CLI use one App Server contract for
 | Accounts/usage | Existing login/logout/usage owners and errors; no static-provider usage settings |
 | Multiple clients | Record CAS and rereads on open or after own writes; no pushed notices |
 | Legacy import | Explicit read-only import with origin mapping, per-entry results and unchanged source bytes |
+| Stored selection | One side-effect-free projection of an admitted static record and an explicit model ID; a data-boundary consumer reuses Provider's route, descriptor and selectability instead of rebuilding a catalog (§3.7) |
+| Process owners | One read of the models Provider would serve, with model and provider IDs and declared capabilities; a routing owner uses it instead of duplicating availability (§3.6) |
 
 Source contracts: [Provider owner](../../../crates/dim-app-server/src/provider.rs),
 [management methods](../../../crates/dim-app-server/src/provider/management.rs),
@@ -42,6 +44,8 @@ with its existing owner; management never writes another owner's state.
 | Surface | Consumers and change |
 | --- | --- |
 | `managementMethods`, process, namespace `provider` | Local v3 Desktop/CLI and trusted process callers; §3 extends this existing namespace |
+| Provider module boundary `stored_selection` (Rust) | Native data-boundary consumers such as Migration; §3.7 adds one pure function over an admitted record, not an RPC, host port or management method |
+| Provider host port `SelectableModelsHost` (core `dim-agent-capabilities`), provided by Provider | In-process owners that route by model capability (Modality); §3.6 adds one read, not a management method or RPC method |
 | Existing `account`, `account.codex`, `account.grok` namespaces | Existing account operations; no new account method, event or managed host capability |
 | `ProviderConnectionResolver`, `ModelSelectionHost` | Provider implements catalog/route decisions through existing types; no new core port |
 | `auxiliaryModel.complete` | Existing caller-selected S4 contract, unchanged |
@@ -429,6 +433,219 @@ written before it: a listed model keeps the item it came from in
 `metadata.raw`, so a limit that item declares stays a declaration even when the
 stored entry does not mark it, and only a limit no source declares is deleted.
 
+### 3.6 Selectable models for process owners
+
+A process owner that routes work by model capability cannot keep its own copy of
+Provider's availability rules. Provider owns one side-effect-free read of the
+models it would serve, with the identifiers and declared capabilities a routing
+decision needs. This read is a process host port, not a management method: it is
+not on the `provider` namespace, is not served over RPC, and does not change
+`provider.catalog`.
+
+**Why a port rather than a method on `ProviderService`.** A consumer plugin lives
+in its own crate, and `xtask check` rejects a dependency on `dim-app-server`, the
+composition layer, so the consumer cannot name `ProviderService`. The port and its
+data type live in `dim-agent-capabilities`, which Provider and the consumer both
+depend on; registering it as a process name lets the consumer declare
+`Keyed<SelectableModelsHost>` and the catalog resolve it. The dependency points
+from the extension to the core, as [ADR 002 D3](../../adr/002-plugin-scope.md)
+requires, and Provider keeps the implementation, the catalog and the rules.
+
+**Contract (language-neutral).** A process host port, no instance key, provided
+by Provider: operation `selectableModels`, asynchronous, request `{}`, reply
+`{models: ModelCapabilitySnapshot[]}`. The element is the existing
+`ModelCapabilitySnapshot` — `{target: {providerId, modelId}, capabilities:
+ModelCapabilities, reasoning?, serviceTier?}` — not a new model type: it already
+carries the model and provider identifiers and the declared capabilities, and it
+is the descriptor execution adopts. A selectable model always declares both
+limits (§3.5), so the existing `capability_snapshot` conversion always succeeds.
+The caller passes its cancellation token; cancelling it cancels the read and
+returns `Cancelled`.
+
+**Rules it applies.** The candidates are the providers default resolution
+considers: every account provider the managed package advertises and every static
+provider `provider.list` returns. Each model comes from the same per-provider
+catalog read as `provider.catalog` (`catalog_for`), so bundled substitution,
+descriptor overrides, user models, routes, disables and account state are the ones
+execution sees. A model is included only when the existing
+`ProviderCatalog::selectable` accepts it: `unavailableReason` is absent and its ID
+is not in `disabledModelIds`. That reason already covers every exclusion: a model
+with `ModelStatus::Unavailable`, a model that declares no `text` modality, a
+non-chat model on a driver other than `new-api-router`, a disabled Provider
+record, a model with no route, a signed-out account, a missing static credential,
+and an undeclared limit (`limits_undeclared`). The read adds no second predicate.
+A model appears only if `select`, `configuration`, `apply_preferences`, the
+per-request check and `auxiliaryModel` accept it at the same read. Execution
+remains authoritative: a later write can make a model unselectable, and the
+consumer passes the ID back to Provider, which re-checks.
+
+This read is not [#560](https://github.com/arcships/dim/issues/560)'s validation
+contract. That contract (§3.7) takes an admitted persisted static record and an explicit
+model ID and answers whether that selection can execute; this read takes no input and
+enumerates what is available now. Both are defined on the same catalog and selectability
+predicate, so they cannot disagree about a model.
+
+**Snapshot and consistency.** One call reads each provider once. No transaction
+spans providers, there is no version and no cache: a concurrent `provider.*` write
+may be visible for some providers and not others, and the next call returns the
+new state. It makes no live request: it never refreshes or lists a provider
+endpoint, and it writes no record, selection or preference. It uses the same
+account-status read as `provider.catalog`. The reply is derived; a consumer must
+not persist it or treat it as an adopted snapshot. Adoption stays with model
+selection, which resolves a configuration once.
+
+**Errors.** The read has no error code of its own; it returns Provider's existing
+errors: `Cancelled` when the caller cancels the token it passed, `Failed` with
+`HostErrorKind::OwnerClosed` while Provider unloads, and `Failed` when Provider
+storage cannot be read. A provider whose own record or account status cannot be
+read is omitted, as default resolution omits it; it never hides the others and the
+read returns no per-provider error list. A caller that needs a provider's
+diagnostic uses `provider.list` or `provider.management`.
+
+**Consumers.** Modality computes each operation's options and its automatic
+default from this read: it intersects these IDs with the operations its collected
+adapters declare and reports "no adapter for the configured model" when the
+configured model is absent. It does not call `provider.catalog` and keeps no
+availability predicate of its own. The reply carries IDs and capabilities only,
+not a display name: a client that renders an option joins the ID with the model
+list of `provider.catalog` or `provider.management`, and Modality copies no name.
+Provider gains no per-consumer key, setting or filter: the read has no input, so a
+caller that wants one provider filters the reply.
+
+**What does not change.** `provider.catalog`, `provider.management`,
+`provider.select`, model selection, adoption, preferences and their errors; the
+client protocol and `PROTOCOL_VERSION`; persistence and its format; Timeline,
+Dispatcher, callbacks, Session and branch parts; and the driver, route and
+non-chat rules. The read adds no state, cache, notification, crate or module.
+
+**Rust binding.** The port is defined in `crates/dim-agent-capabilities/src/host.rs`
+beside `ModelSelectionHost`. Provider provides it in `ProviderPlugin::apply`, and
+the App Server catalog registers it as the Rust-only name `selectableModelsHost`
+(no cross-language binding before
+[#4](https://github.com/arcships/dim/issues/4)):
+
+```rust
+pub trait SelectableModels: Send + Sync + 'static {
+    fn selectable(
+        &self,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, Vec<ModelCapabilitySnapshot>>;
+}
+pub struct SelectableModelsHost(pub Arc<dyn SelectableModels>);
+```
+
+The owner implementation is `ProviderService::selectable_models`; `ProductResolver`
+delegates to it. A consumer declares `Keyed<SelectableModelsHost>` in its `Deps`;
+no consumer reads `ProviderService` directly. A non-Rust consumer reaches the port
+by name when the runtime-services-by-name requirement
+([#4](https://github.com/arcships/dim/issues/4)) is delivered; that requirement is
+raised once in [Modality §9](../plugins/Modality.md#9-requirements-raised-to-mechanism-owners)
+and is not raised again here.
+
+### 3.7 Offline validation of a stored selection
+
+A consumer that reads Provider's persisted native records must decide whether an explicit
+provider/model selection can execute without starting Provider or making a live request.
+Migration's provider step is the first such consumer. Provider owns that judgment for an
+admitted static record, and it exposes it as one side-effect-free projection rather than
+letting the consumer rebuild routes, descriptors or availability rules. The contract
+receives the native record; it imports no legacy row, migration receipt or task state, and
+it reads no store, account status or network.
+
+**Contract.** A synchronous Provider module function with no I/O and no cancellation:
+
+| Part | Value |
+| --- | --- |
+| Input | `providerId`; the admitted `StaticProviderRecord` returned by `parse_static` or `convert_legacy_provider`; the explicit `modelId`; and the bundled catalog the caller loaded |
+| Reply | `{protocol: ModelProtocol, snapshot: ModelCapabilitySnapshot}` |
+| Errors | `account_owned` when the record's credential authority is not `static`; `not_found` when the effective catalog has no such model; `unavailable {reason: string \| null, disabled: boolean, missingLimits: string[]}` when the existing `ProviderCatalog::selectable` refuses a present model |
+
+The reply is the effective descriptor execution adopts: `snapshot` is the existing
+`ModelCapabilitySnapshot`, whose `target` carries the provider and model identity, and
+`protocol` the effective route. A consumer that needs only a yes/no answer ignores the
+fields. The contract does not apply saved `ModelPreferences`, choose a default model or
+create the route stamp; those belong to adoption, which still resolves through
+`configuration`. The record's precondition is the admitted type's: its
+routes were derived by Provider's parser under the current driver and New API rules, so
+this function does not re-parse the record, re-validate its fields or re-derive its routes.
+It adds no second admission path.
+
+**Rules it applies.** It builds the same per-provider catalog as `provider.catalog` and
+`catalog_for` (`static_catalog`) and accepts a model only through the existing
+`ProviderCatalog::selectable`. The effective descriptor — bundled substitution, descriptor
+overrides, user models and declared limits — is the same one that catalog projects, and
+the existing reason covers every exclusion: `ModelStatus::Unavailable`, no `text`
+modality, a non-chat model on a driver other than `new-api-router`, a disabled Provider
+record, no route (unsupported, missing or ambiguous New API endpoint), an unsupported
+driver, a missing static credential and an undeclared limit. Disabled model IDs are the
+catalog's `disabledModelIds`, not another list. The route is the catalog entry's
+`endpoint`, derived by `drivers::routes`/`new_api::routes` at admission; no second route
+matcher is added. `capability_snapshot` produces the declared descriptor, so the
+projection and execution cannot disagree about limits, reasoning or service tier. The
+refusal detail is read from that same catalog entry after `selectable` refuses; it does not
+decide acceptance.
+
+The contract rejects an `account_owned` record before building its catalog. A managed
+record's current catalog, credentials and routes belong to its account owner and are not
+contained in the persisted static record, so executing it requires that owner's read, not
+this offline judgment. Static records are the contract's input; the account owner's
+catalog remains authoritative for managed models.
+
+**Relation to §3.6.** The selectable-model read is a process host port with no input. It
+enumerates what Provider would serve now, including managed account catalogs, and returns
+capability snapshots for routing. This contract takes one persisted static record and one
+explicit model, reads no account or store, and returns the route with the snapshot. They
+share `static_catalog`, `ProviderCatalog::selectable` and `capability_snapshot`; for a
+stored static-authority record both can see, a target appears in the §3.6 reply exactly
+when this contract accepts it. The two differ in scope, not in rules: §3.6 answers "what
+is available now", this contract answers "can this stored selection execute". Neither is
+a management method or an RPC.
+
+**Consumer and migration.** Migration reads the target record with Provider's parser and
+converts legacy selections through Provider's frozen selection conversion. That conversion
+is the only offline judgment and currently uses Provider's private catalog predicate; this
+contract is its public form, and the conversion calls it. Migration keeps its legacy
+decoding, conversion, writes and receipts, and owns no route matcher, availability
+predicate or catalog construction. The contract therefore serves any native record consumer
+without a migration-specific owner API, callback or RPC.
+
+**Compatibility.** The contract is a Rust module boundary over an already-admitted type,
+not a rutis service, RPC or management method. It adds no service name, generated graph
+entry, crate dependency, persistence or `PROTOCOL_VERSION` change. Legacy import outcomes
+and rejection text are unchanged because the selection conversion maps any refusal to its
+existing reason, and an accepted selection writes the same provider and model IDs. The
+reply carries no credential, header, proxy or secret reference; the record input is the
+same one Provider's parser already holds.
+
+**Rust binding.** The only binding is the Provider module function, exported from
+`dim_app_server::provider`. There is no cross-language consumer: the input is the admitted
+record type, which carries the credential reference, so it is not exposed as a named
+service.
+
+```rust
+pub struct StoredSelection {
+    pub protocol: ModelProtocol,
+    pub snapshot: ModelCapabilitySnapshot,
+}
+
+pub enum StoredSelectionError {
+    AccountOwned,
+    NotFound,
+    Unavailable {
+        reason: Option<String>,
+        disabled: bool,
+        missing_limits: Vec<String>,
+    },
+}
+
+pub fn stored_selection(
+    bundled: &BundledCatalog,
+    provider_id: &str,
+    record: &StaticProviderRecord,
+    model_id: &str,
+) -> Result<StoredSelection, StoredSelectionError>;
+```
+
 ## 4. Client integration
 
 ```text
@@ -688,6 +905,8 @@ not reported. Source bytes remain unchanged.
 | Probe | Unsaved discovery, current-record draft merge without a version check, validated new host with stored credential, failure/timeout/unload without writes, stale reply discarded, no client-cancel claim |
 | Preferences | Independent set/clear and restart; empty/unsupported values use typed errors while malformed patches use boundary errors; exact target with preferences; unavailable target fails without fallback; untargeted F3 and consumer choices unchanged |
 | Model limits | A probed model the descriptor leaves without a limit is listed with `missingLimits`, refused by selection, adoption and preferences, and becomes selectable with its declared window in the adopted snapshot after the CLI declares both; a bundled match stays declared; a managed model without limits keeps its reason instead of a substitute window; the model-file profile still refuses an entry that lacks either value |
+| Selectable read | The read equals the set `select`/`configuration` accept at the same snapshot for the same providers; a disabled model, a disabled Provider, an unavailable model, a model with no `text` modality, a non-chat model on another driver, a route-less model and a signed-out account are absent while their Provider still answers; each returned `capabilities.modalities` equals the catalog model's declared set; a model with an undeclared limit is absent rather than making the read fail; managed and static providers both appear; a mock endpoint receives no request; a write changes the next read and not an earlier reply; cancelling the token and Provider close use the existing errors |
+| Stored selection | For one admitted static record and bundled catalog, `stored_selection` accepts exactly the model IDs `select`/`configuration` accept and returns the same protocol and adopted capabilities; fixed drivers and New API explicit, inferred, unsupported and ambiguous routes; missing, disabled, unavailable, non-text, disabled-Provider, missing-credential and undeclared-limit models are refused; an account-owned record is refused; a mock endpoint receives no request; the Migration provider/selection flow and `provider.import_legacy` report the same outcomes through the shared contract |
 | Accounts | Existing login/logout/usage; managed same-account refresh preserves preferences, descriptor overrides and disables, while a different-account refresh clears all three; actual advertised-method versus missing-package-method behavior, unchanged Usage DTO, no static usage config |
 | Concurrency/recovery | Two-client typed CAS conflicts on new and retained writes; lost create reply recovered by canonical UUID; noncanonical create IDs fail while existing non-UUID IDs still work with other methods; repeated create conflicts; read errors preserve healthy entries/drafts |
 | Storage/import | New record read and rewritten by old v19 code including reseed; bundled upgrade collides with a user-added builtin model: Provider activates, that record/definition/fingerprint/version remain unchanged, other records update and management reports the collision; explicit deletion keeps a restart-required diagnostic until startup applies the new definition; deleting a disabled user model clears its stale disable so the new bundled model is enabled; a user model created with a disappeared default's ID starts enabled without that default's descriptor override, preferences or endpoint override; valid/invalid/repeated imports and source preservation in disposable databases |
@@ -711,15 +930,15 @@ disposable database; see [the storage contract](native-storage-format.md#329-格
 | §4.4 | No Provider branch in core/Rpc/Dispatcher |
 | §4.5 | Owned related selections/models/preferences/routes commit together; existing adoption remains atomic |
 | §4.6 | Management data does not enter model context; only existing adoption paths change configuration |
-| §4.7 | Accounts use public methods; other owners' references are not rewritten |
-| §4.8 | §5 raises no mechanism requirement; existing metadata and v19 top-level JSON suffice |
+| §4.7 | Accounts use public methods; Modality reads selectable models through §3.6's core host port; Migration uses §3.7's Provider-owned judgment; other owners' references are not rewritten |
+| §4.8 | §5 raises no mechanism requirement; existing metadata and v19 top-level JSON suffice; §3.6 and §3.7 add no requirement, and a non-Rust consumer uses [#4](https://github.com/arcships/dim/issues/4) already raised by Modality |
 | §4.9 | No new Timeline event or pushed process notification |
 | §1 | Extend the existing process Provider; no Capability or wiring plugin |
 | ADR 002 D1 | Process records belong to Provider; adopted branch state to its owner; drafts to clients |
 | ADR 002 D2 | Reuse namespaces/resolver; no management plugin or second registry |
-| ADR 002 D3 | Optional account failure affects its own operations; no core dependency |
+| ADR 002 D3 | Optional account failure affects its own operations; no core dependency; §3.7 is a Provider module function |
 | ADR 002 D4 | Business configuration is owner state; updates do not reload |
-| ADR 002 D5 | §3 names fields, methods, mutability, interruption and errors independently of Rust bindings |
+| ADR 002 D5 | §3 names fields, methods, mutability, interruption and errors independently of Rust bindings; §3.6 states the process read in neutral form, and its core host port is the binding a consumer declares; §3.7 is a Rust-only module boundary because its input is Provider's admitted record with a credential reference and it has no cross-language consumer |
 
 ## 9. Ablation review
 
@@ -731,6 +950,17 @@ it executable. The route stamp preserves the adopted protocol meaning using
 existing metadata. A declared limit needs no new state: the marker and match the
 catalog already records say whether a value exists, an absent value carries its
 absence in the catalog type, and the reason is derived at the projection, so no
-parallel model list, no second catalog and no `limits` entity is added. No
-notification, version-history service, template entity, credential abstraction or
-second client configuration store is needed.
+parallel model list, no second catalog and no `limits` entity is added. The
+selectable-model read adds no state, cache, event or model type: it applies the
+existing `ProviderCatalog::selectable` to the same per-provider catalog and returns
+the existing `ModelCapabilitySnapshot`, so there is no second availability
+predicate or parallel catalog. The stored-selection contract likewise adds no
+state, store or account read, cache or predicate: it builds the existing catalog,
+applies the existing predicate, and returns the existing adopted snapshot with the
+route execution already derives. A named reply type is required because the route
+and snapshot are the public shape; returning the catalog or a client DTO would
+expose more and still need the same judgment. No migration-side predicate or
+catalog construction is added, so the selection conversion calls this contract
+instead of a legacy-only private judgment. No notification, version-history
+service, template entity, credential abstraction or second client configuration
+store is needed.

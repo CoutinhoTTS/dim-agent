@@ -50,7 +50,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::Path,
     sync::{Arc, Mutex},
     time::Duration,
@@ -195,6 +195,27 @@ fn capability_snapshot(
         reasoning: model.metadata.as_ref().and_then(|m| m.reasoning.clone()),
         service_tier: model.metadata.as_ref().and_then(|m| m.service_tier.clone()),
     })
+}
+
+/// The effective route and adopted descriptor of an admitted static selection.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredSelection {
+    pub protocol: ModelProtocol,
+    pub snapshot: ModelCapabilitySnapshot,
+}
+
+#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
+pub enum StoredSelectionError {
+    #[error("Managed provider selection belongs to its account owner")]
+    AccountOwned,
+    #[error("Model was not found")]
+    NotFound,
+    #[error("Model is unavailable")]
+    Unavailable {
+        reason: Option<String>,
+        disabled: bool,
+        missing_limits: Vec<String>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -921,6 +942,48 @@ fn static_catalog(
     }
 }
 
+/// The selection an admitted static record would execute, or why it cannot.
+/// The caller supplies the record and bundled catalog; this reads no store,
+/// account state or network and adds no second route or selectability rule.
+pub fn stored_selection(
+    bundled: &BundledCatalog,
+    provider_id: &str,
+    record: &StaticProviderRecord,
+    model_id: &str,
+) -> Result<StoredSelection, StoredSelectionError> {
+    if record.credential_authority != CredentialAuthority::Static {
+        return Err(StoredSelectionError::AccountOwned);
+    }
+    let catalog = static_catalog(bundled, provider_id, record, true);
+    let model = catalog
+        .models
+        .iter()
+        .find(|model| model.id == model_id)
+        .ok_or(StoredSelectionError::NotFound)?;
+    let Some(selectable) = catalog.selectable(model_id) else {
+        return Err(StoredSelectionError::Unavailable {
+            reason: model.unavailable_reason.clone(),
+            disabled: catalog.disabled_model_ids.iter().any(|id| id == model_id),
+            missing_limits: model.missing_limits.clone(),
+        });
+    };
+    let unavailable = StoredSelectionError::Unavailable {
+        reason: Some("provider_unavailable".into()),
+        disabled: false,
+        missing_limits: selectable.missing_limits.clone(),
+    };
+    let protocol = selectable.endpoint.ok_or_else(|| unavailable.clone())?;
+    let snapshot = capability_snapshot(
+        selectable,
+        ModelId {
+            provider_id: provider_id.into(),
+            model_id: model_id.into(),
+        },
+    )
+    .map_err(|_| unavailable)?;
+    Ok(StoredSelection { protocol, snapshot })
+}
+
 fn seeded(provider: &CatalogProvider) -> bool {
     matches!(provider.auth.kind.as_str(), "api_key" | "aws_bedrock")
         || managed_authority(&provider.provider_id) != CredentialAuthority::Static
@@ -1421,6 +1484,53 @@ impl ProviderService {
         Ok(list)
     }
 
+    /// Every model execution would accept, one snapshot per provider.
+    pub async fn selectable_models(
+        self: &Arc<Self>,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<ModelCapabilitySnapshot>, HostError> {
+        self.check(cancel)?;
+        let mut providers: BTreeSet<String> = self
+            .oauth
+            .providers(cancel)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|provider| provider.provider_id)
+            .collect();
+        providers.extend(
+            self.list(cancel)
+                .await?
+                .providers
+                .into_iter()
+                .map(|provider| provider.provider_id),
+        );
+        let mut models = Vec::new();
+        for provider_id in providers {
+            let catalog = match self.catalog_for(provider_id.clone(), cancel).await {
+                Ok(Some(catalog)) => catalog,
+                Ok(None) | Err(_) => continue,
+            };
+            for model in &catalog.models {
+                let Some(model) = catalog.selectable(&model.id) else {
+                    continue;
+                };
+                models.push(
+                    capability_snapshot(
+                        model,
+                        ModelId {
+                            provider_id: provider_id.clone(),
+                            model_id: model.id.clone(),
+                        },
+                    )
+                    .map_err(|error| failure(error.to_string()))?,
+                );
+            }
+        }
+        self.check(cancel)?;
+        Ok(models)
+    }
+
     pub async fn delete_static(
         self: &Arc<Self>,
         provider_id: String,
@@ -1788,11 +1898,12 @@ impl ProviderService {
         }))
     }
 
-    /// Applies supplied preferences to the adopted model without reselecting defaults.
+    /// Applies a preference patch to the adopted model without reselecting
+    /// defaults. A cleared field takes the model's declared configuration.
     pub async fn apply_preferences(
         self: &Arc<Self>,
         current: &dim_agent_types::ModelConfiguration,
-        preferences: ModelPreferences,
+        update: &crate::protocol::ModelPreferenceUpdate,
         cancel: &CancellationToken,
     ) -> Result<ModelSelection, HostError> {
         self.check(cancel)?;
@@ -1817,7 +1928,13 @@ impl ProviderService {
                 "Model route changed; select the model again",
             ));
         }
-        let base = current.config.clone().unwrap_or_default();
+        let mut base = current.config.clone().unwrap_or_default();
+        if update.clears_reasoning() {
+            preferences::restore_reasoning(&mut base, &model.config, protocol);
+        }
+        if update.clears_service_tier() {
+            preferences::restore_service_tier(&mut base, &model.config, protocol);
+        }
         let snapshot = capability_snapshot(
             model,
             ModelId {
@@ -1826,13 +1943,19 @@ impl ProviderService {
             },
         )
         .map_err(|error| failure(error.to_string()))?;
-        let config =
-            preferences::configure(&preferences, &snapshot, protocol, &base).map_err(failure)?;
+        let config = preferences::configure(&update.values(), &snapshot, protocol, &base)
+            .map_err(failure)?;
+        let unchanged = current
+            .config
+            .as_ref()
+            .map_or(config == ModelConfig::default(), |current| {
+                current == &config
+            });
         Ok(ModelSelection {
             provider_id: current.provider_id.clone(),
             model_id: current.model_id.clone(),
             capability_snapshot: current.capability_snapshot.clone(),
-            config: if config == base {
+            config: if unchanged {
                 current.config.clone()
             } else {
                 Some(config)
@@ -2073,6 +2196,15 @@ impl ResolveModelSelection for ProductResolver {
                 )
                 .await
         })
+    }
+}
+impl SelectableModels for ProductResolver {
+    fn selectable(
+        &self,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, Vec<ModelCapabilitySnapshot>> {
+        let owner = self.0.clone();
+        Box::pin(async move { owner.selectable_models(&cancel).await })
     }
 }
 struct ManagedRecovery {
@@ -2329,7 +2461,8 @@ impl DynPlugin for ProviderPlugin {
             })?;
             let resolver = Arc::new(ProductResolver(service.clone()));
             ctx.provide(ProviderConnectionResolver(resolver.clone()))?;
-            ctx.provide(ModelSelectionHost(resolver))?;
+            ctx.provide(ModelSelectionHost(resolver.clone()))?;
+            ctx.provide(SelectableModelsHost(resolver))?;
             let auxiliary = Arc::new(auxiliary::AuxiliaryModel {
                 owner: service.clone(),
                 host,

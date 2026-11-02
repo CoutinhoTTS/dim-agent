@@ -469,6 +469,11 @@ finally:
         )
         .await;
     assert_ok(&tested);
+    assert_eq!(tested["result"]["status"], "connected", "{tested}");
+    assert!(
+        tested["result"]["latencyMs"].as_u64().is_some(),
+        "a probe reports the latency of its attempt: {tested}"
+    );
     assert_eq!(tested["result"]["tools"][0]["name"], "inspect");
     assert_eq!(
         tested["result"]["tools"][0]["description"],
@@ -501,11 +506,26 @@ finally:
     assert_eq!(inspected["result"]["connections"], json!([]));
     assert!(!inspected.to_string().contains("probe-secret-value"));
     let failed = client.rpc("mcp.test", json!({"source":"user","id":"probe","patch":{"command":"missing-probe-secret-command"}})).await;
-    assert_eq!(failed["error"]["data"]["appError"], "mcp_unavailable");
+    assert_ok(&failed);
+    assert_eq!(failed["result"]["status"], "failed", "{failed}");
+    assert_eq!(failed["result"]["reason"], "unavailable", "{failed}");
+    assert!(failed["result"]["tools"].is_null(), "{failed}");
+    assert!(
+        failed["result"]["message"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()),
+        "a failed probe explains itself: {failed}"
+    );
+    assert!(
+        failed["result"]["latencyMs"].as_u64().is_some(),
+        "a failed probe reports its latency: {failed}"
+    );
     assert!(!failed.to_string().contains("missing-probe-secret-command"));
     std::fs::remove_file(marker.with_extension("closed")).unwrap();
     let failed = client.rpc("mcp.test", json!({"source":"user","id":"probe","patch":{"args":["-u","-c",script,marker,"fail-discovery"]}})).await;
-    assert_eq!(failed["error"]["data"]["appError"], "mcp_unavailable");
+    assert_ok(&failed);
+    assert_eq!(failed["result"]["status"], "failed", "{failed}");
+    assert!(failed["result"]["tools"].is_null(), "{failed}");
     assert!(!failed.to_string().contains("discovery-secret-failure"));
     assert!(
         marker.with_extension("closed").exists(),
@@ -513,9 +533,11 @@ finally:
     );
     std::fs::remove_file(marker.with_extension("closed")).unwrap();
     let refused = client.rpc("mcp.test", json!({"source":"user","id":"probe","patch":{"args":["-u","-c",script,marker,"bad-schema"]}})).await;
-    assert_eq!(refused["error"]["data"]["appError"], "mcp_unavailable");
+    assert_ok(&refused);
+    assert_eq!(refused["result"]["status"], "failed", "{refused}");
+    assert_eq!(refused["result"]["reason"], "response", "{refused}");
     assert_eq!(
-        refused["error"]["message"],
+        refused["result"]["message"],
         "invalid MCP server response: tool broken: inputSchema.properties.x.type[1]: unknown variant `file`, expected one of `object`, `array`, `string`, `number`, `integer`, `boolean`, `null`"
     );
     assert!(
@@ -540,6 +562,27 @@ finally:
     );
     let refused = client.rpc("mcp.test", json!({"source":"project","id":"new","cwd":home.join("project"),"configuration":configuration})).await;
     assert_eq!(refused["error"]["data"]["appError"], "invalid_params");
+    for (request, expected) in [
+        (
+            json!({"source":"user","id":" ","configuration":configuration}),
+            "invalid_params",
+        ),
+        (json!({"source":"user","id":"absent"}), "mcp_unknown_server"),
+        (
+            json!({"source":"plugin","id":"kit:docs","patch":{"command":"other"}}),
+            "invalid_params",
+        ),
+        (
+            json!({"source":"user","id":"probe","patch":{"url":"https://example.invalid"}}),
+            "invalid_params",
+        ),
+    ] {
+        let refused = client.rpc("mcp.test", request).await;
+        assert_eq!(
+            refused["error"]["data"]["appError"], expected,
+            "a request refused before contact stays an error: {refused}"
+        );
+    }
     let catalog = client
         .rpc("mcp.catalog", json!({"cwd":home.join("project")}))
         .await;
@@ -1711,6 +1754,10 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
         json!({"modelId":"beta"}),
         json!({"providerId":null,"modelId":null}),
         json!({"modelPreferences":{"reasoningEffort":"unsupported"}}),
+        json!({"modelPreferences":{"reasoningEffort":null}}),
+        json!({"modelPreferences":{"reasoningEffort":{"action":"set"}}}),
+        json!({"modelPreferences":{"reasoningEffort":{"action":"clear","value":"high"}}}),
+        json!({"modelPreferences":{"reasoningEffort":{"action":"nope"}}}),
     ] {
         let mut request = branch.clone();
         request
@@ -2004,6 +2051,91 @@ async fn the_configured_view_reads_back_the_adopted_model_preferences() {
         adopted
     );
 
+    // The attach reply names the adopted model and values, not the creation
+    // configuration.
+    let attached = client
+        .rpc("session.attach", json!({"sessionId":session_id}))
+        .await;
+    assert_eq!(attached["result"]["model"]["modelId"], "reasoning");
+    assert_eq!(
+        attached["result"]["modelPreferences"], adopted,
+        "{attached}"
+    );
+
+    // Clearing one field keeps the other.
+    assert_ok(
+        &client
+            .rpc(
+                "session.model.update",
+                json!({"sessionId":session_id,"branchId":"main",
+                    "modelPreferences":{"reasoningEffort":{"action":"clear"}}}),
+            )
+            .await,
+    );
+    let tier_only = json!({"serviceTier":"priority"});
+    assert_eq!(
+        configured(&mut client, &session_id).await["model_preferences"],
+        tier_only
+    );
+    let attached = client
+        .rpc("session.attach", json!({"sessionId":session_id}))
+        .await;
+    assert_eq!(
+        attached["result"]["modelPreferences"], tier_only,
+        "{attached}"
+    );
+
+    // Repeating the clear changes nothing and publishes no new configured fact.
+    let revision = configured(&mut client, &session_id).await["revision"].clone();
+    let repeated = client
+        .rpc(
+            "session.model.update",
+            json!({"sessionId":session_id,"branchId":"main",
+                "modelPreferences":{"reasoningEffort":{"action":"clear"}}}),
+        )
+        .await;
+    assert_eq!(repeated["result"]["outcome"], "unchanged", "{repeated}");
+    let data = configured(&mut client, &session_id).await;
+    assert_eq!(data["revision"], revision);
+    assert_eq!(data["model_preferences"], tier_only);
+
+    // A set beside a clear in one request applies both.
+    assert_ok(
+        &client
+            .rpc(
+                "session.model.update",
+                json!({"sessionId":session_id,"branchId":"main",
+                    "modelPreferences":{"reasoningEffort":"low",
+                        "serviceTier":{"action":"clear"}}}),
+            )
+            .await,
+    );
+    assert_eq!(
+        configured(&mut client, &session_id).await["model_preferences"],
+        json!({"reasoningEffort":"low"})
+    );
+
+    // Clearing the other field leaves no value, and the attach reply agrees.
+    assert_ok(
+        &client
+            .rpc(
+                "session.model.update",
+                json!({"sessionId":session_id,"branchId":"main",
+                    "modelPreferences":{"reasoningEffort":{"action":"clear"}}}),
+            )
+            .await,
+    );
+    let data = configured(&mut client, &session_id).await;
+    assert!(data.get("model_preferences").is_none(), "{data}");
+    let attached = client
+        .rpc("session.attach", json!({"sessionId":session_id}))
+        .await;
+    assert!(
+        attached["result"].get("modelPreferences").is_none(),
+        "{attached}"
+    );
+    assert_eq!(attached["result"]["model"]["modelId"], "reasoning");
+
     // A model whose configuration carries no preference shows no field.
     assert_ok(
         &client
@@ -2017,6 +2149,17 @@ async fn the_configured_view_reads_back_the_adopted_model_preferences() {
     let data = configured(&mut client, &session_id).await;
     assert_eq!(data["model_id"], "plain");
     assert!(data.get("model_preferences").is_none(), "{data}");
+    let attached = client
+        .rpc("session.attach", json!({"sessionId":session_id}))
+        .await;
+    assert_eq!(
+        attached["result"]["model"]["modelId"], "plain",
+        "{attached}"
+    );
+    assert!(
+        attached["result"].get("modelPreferences").is_none(),
+        "{attached}"
+    );
 
     server.shutdown();
     server.join().await.unwrap();
@@ -2395,4 +2538,263 @@ async fn model_progress_follows_a_reloaded_provider() {
     assert_eq!(notice["params"]["text"], "after reload");
     server.shutdown();
     server.join().await.unwrap();
+}
+
+/// An in-process MCP server that declares a widget tool, an app-only tool and
+/// a model-only tool, and serves the `ui://` document.
+struct Apps {
+    calls: std::sync::Mutex<Vec<String>>,
+}
+async fn apps_rpc(
+    axum::extract::State(apps): axum::extract::State<Arc<Apps>>,
+    axum::Json(body): axum::Json<Value>,
+) -> axum::response::Response {
+    use axum::{http::StatusCode, response::IntoResponse};
+    let Some(id) = body.get("id") else {
+        return StatusCode::ACCEPTED.into_response();
+    };
+    let result = match body["method"].as_str().unwrap() {
+        "initialize" => {
+            json!({"protocolVersion":"2025-03-26","capabilities":{"tools":{"listChanged":true}},"serverInfo":{"name":"apps","version":"1"}})
+        }
+        "tools/list" => json!({"tools":[
+            {"name":"chart","description":"Render a counter","inputSchema":{"type":"object"},"_meta":{"ui":{"resourceUri":"ui://widget/counter.html"}}},
+            {"name":"refresh","description":"Refresh the view","inputSchema":{"type":"object"},"_meta":{"ui":{"visibility":["app"]}}},
+            {"name":"summary","description":"Summarize","inputSchema":{"type":"object"},"_meta":{"ui":{"visibility":["model"]}}}
+        ]}),
+        "resources/read" => {
+            let uri = body["params"]["uri"].as_str().unwrap();
+            json!({"contents":[{"uri":uri,"mimeType":"text/html;profile=mcp-app","text":"<p>counter</p>","_meta":{"ui":{"prefersBorder":true}}}]})
+        }
+        "tools/call" => {
+            let name = body["params"]["name"].as_str().unwrap();
+            apps.calls.lock().unwrap().push(name.into());
+            if name == "refresh" {
+                json!({"isError":true,"content":[{"type":"text","text":"refresh failed"}]})
+            } else {
+                json!({"content":[{"type":"text","text":"chart-ok"}],"structuredContent":{"step":2},"_meta":{"widget":"chart"}})
+            }
+        }
+        other => panic!("unexpected method: {other}: {body}"),
+    };
+    let mut response = axum::Json(json!({"jsonrpc":"2.0","id":id,"result":result})).into_response();
+    response
+        .headers_mut()
+        .insert("mcp-session-id", "fixture".parse().unwrap());
+    response
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_app_methods_are_session_built_ins_that_json_rpc_serves() {
+    use dim_agent_types::EventKind;
+
+    let apps = Arc::new(Apps {
+        calls: std::sync::Mutex::default(),
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let stop = CancellationToken::new();
+    let server_task = tokio::spawn(
+        axum::serve(
+            listener,
+            axum::Router::new()
+                .route(
+                    "/mcp",
+                    axum::routing::post(apps_rpc)
+                        .delete(|| async { axum::http::StatusCode::NO_CONTENT }),
+                )
+                .with_state(apps.clone()),
+        )
+        .with_graceful_shutdown(stop.clone().cancelled_owned())
+        .into_future(),
+    );
+
+    let home = std::path::PathBuf::from("/tmp").join(format!("da-{}", uuid::Uuid::new_v4()));
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    for method in ["session.mcp.app.widget", "session.mcp.app.call"] {
+        assert!(
+            client.features.as_array().unwrap().contains(&json!(method)),
+            "{method} is advertised where its sibling session.mcp is"
+        );
+    }
+    let mut bare = Client::new_version(&server, true, 3).await;
+    assert!(
+        !bare
+            .features
+            .as_array()
+            .unwrap()
+            .contains(&json!("session.mcp.app.call")),
+        "the bare WebSocket is served no execution method"
+    );
+    for (method, params) in [
+        (
+            "session.mcp.app.widget",
+            json!({"sessionId":"nowhere","tool":"mcp_x"}),
+        ),
+        (
+            "session.mcp.app.call",
+            json!({"sessionId":"nowhere","server":"docs","tool":"chart","arguments":{}}),
+        ),
+    ] {
+        assert_eq!(
+            bare.rpc(method, params).await["error"]["data"]["appError"],
+            "local_transport_required",
+            "{method} on the bare WebSocket"
+        );
+    }
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":work})).await;
+    assert_ok(&catalog);
+    assert_ok(
+        &client
+            .rpc(
+                "mcp.save",
+                json!({"source":"user","id":"docs","expectedVersion":catalog["result"]["userRevision"],
+                    "configuration":{"type":"http","url":url}}),
+            )
+            .await,
+    );
+    let provider = "018ec73f-0000-7000-8000-000000000003";
+    assert_ok(
+        &client
+            .rpc(
+                "provider.create",
+                json!({"providerId":provider,"displayName":"Fixture",
+                    "connection":{"driverKind":"openai-compatible","baseUrl":"https://model.example/v1",
+                        "auth":{"type":"bearer"},"credential":{"action":"set","value":"fixture-access"}},
+                    "models":[{"modelId":"plain","displayName":"plain","status":"active",
+                        "capabilities":dim_agent_types::CatalogCapabilities::with_limits(32_000, 4_096)}],
+                    "enabled":true}),
+            )
+            .await,
+    );
+    let created = client
+        .rpc(
+            "session.create",
+            json!({"cwd":work,"model":{"provider":provider,"modelId":"plain"}}),
+        )
+        .await;
+    assert_ok(&created);
+    let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
+    loop {
+        let notice = client.notice("session.mcp.state").await;
+        if notice["params"]["servers"][0]["state"] == "ready" {
+            break;
+        }
+    }
+    let session = server.agent().unwrap().get_session(&sid).unwrap();
+    let permission = client
+        .rpc(
+            "session.permission.get",
+            json!({"sessionId":sid,"branchId":"main"}),
+        )
+        .await;
+    assert_eq!(permission["result"]["policy"]["preset"], "read-only");
+
+    assert_eq!(
+        client
+            .rpc(
+                "session.mcp.app.call",
+                json!({"sessionId":sid,"server":"docs","tool":"chart"})
+            )
+            .await["error"]["data"]["appError"],
+        "invalid_params",
+        "a missing field is refused at the boundary"
+    );
+    assert_eq!(
+        client
+            .rpc(
+                "session.mcp.app.widget",
+                json!({"sessionId":sid,"tool":"mcp_nowhere_absent"})
+            )
+            .await["error"]["data"]["appError"],
+        "mcp_app_absent"
+    );
+    assert_eq!(
+        client
+            .rpc(
+                "session.mcp.app.call",
+                json!({"sessionId":sid,"server":"other","tool":"chart","arguments":{}})
+            )
+            .await["error"]["data"]["appError"],
+        "mcp_unknown_server",
+        "a view calls only an entry of its own Session"
+    );
+    assert_eq!(
+        client
+            .rpc(
+                "session.mcp.app.call",
+                json!({"sessionId":sid,"server":"docs","tool":"missing","arguments":{}})
+            )
+            .await["error"]["data"]["appError"],
+        "mcp_app_absent",
+        "a tool another entry declares is not this entry's"
+    );
+    assert_eq!(
+        client
+            .rpc(
+                "session.mcp.app.call",
+                json!({"sessionId":sid,"server":"docs","tool":"summary","arguments":{}})
+            )
+            .await["error"]["data"]["appError"],
+        "mcp_app_not_callable"
+    );
+
+    let call = client
+        .rpc(
+            "session.mcp.app.call",
+            json!({"sessionId":sid,"server":"docs","tool":"chart","arguments":{"step":2}}),
+        )
+        .await;
+    assert_ok(&call);
+    assert_eq!(call["result"]["content"][0]["text"], "chart-ok");
+    assert_eq!(call["result"]["structuredContent"], json!({"step":2}));
+    assert_eq!(call["result"]["meta"], json!({"widget":"chart"}));
+    assert_eq!(call["result"]["isError"], Value::Null);
+    let failed = client
+        .rpc(
+            "session.mcp.app.call",
+            json!({"sessionId":sid,"server":"docs","tool":"refresh","arguments":{}}),
+        )
+        .await;
+    assert_ok(&failed);
+    assert_eq!(
+        failed["result"]["isError"],
+        json!(true),
+        "the server's own failure is the call's answer, not an error"
+    );
+    assert!(
+        !call.to_string().contains("127.0.0.1"),
+        "no endpoint in a reply"
+    );
+
+    let events = session.history("main", None).await.unwrap();
+    assert!(
+        events.iter().all(|event| !matches!(
+            event.kind,
+            EventKind::ToolCall(_) | EventKind::ToolStart(_) | EventKind::ToolResult(_)
+        )),
+        "a view's call writes no Timeline fact"
+    );
+    assert_eq!(
+        apps.calls.lock().unwrap().as_slice(),
+        ["chart", "refresh"],
+        "the daemon sent only the calls a view made, in a read-only Session"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    stop.cancel();
+    server_task.await.unwrap().unwrap();
+    std::fs::remove_dir_all(home).unwrap();
 }

@@ -126,6 +126,8 @@ pub enum Call {
     PromptRefresh(BranchRequest),
     SessionMcp(SessionId),
     McpRefresh(SessionId),
+    McpAppWidget(McpAppWidget),
+    McpAppCall(McpAppCall),
     SessionMethods(SessionId),
     WebOpen(WebOpen),
     WebToggle(WebOpen),
@@ -151,6 +153,8 @@ impl Call {
                 | Self::PromptRefresh(_)
                 | Self::SessionMcp(_)
                 | Self::McpRefresh(_)
+                | Self::McpAppWidget(_)
+                | Self::McpAppCall(_)
         )
     }
     /// Methods that open and report the local web entry; local transport only.
@@ -266,7 +270,7 @@ pub const WEB_MANAGEMENT_METHODS: &[&str] = &[
 
 pub const WEB_SETTINGS_SOURCES: &[&str] = &["model-log", "execution"];
 
-pub const LOCAL_EXECUTION_METHODS: [&str; 8] = [
+pub const LOCAL_EXECUTION_METHODS: [&str; 10] = [
     "session.permission.get",
     "session.permission.update",
     "session.exec.stop",
@@ -275,6 +279,8 @@ pub const LOCAL_EXECUTION_METHODS: [&str; 8] = [
     "session.prompt.refresh",
     "session.mcp",
     "session.mcp.refresh",
+    "session.mcp.app.widget",
+    "session.mcp.app.call",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -301,6 +307,24 @@ pub struct McpRejection {
     pub reason: String,
 }
 
+/// `session.mcp.app.widget`: the mount read starts from the published tool
+/// name a `tool/call` fact carries (MCP Apps D4).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpAppWidget {
+    pub session_id: String,
+    pub tool: String,
+}
+/// `session.mcp.app.call`: the server's own tool name in the entry the view
+/// was mounted from (MCP Apps §4.2).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpAppCall {
+    pub session_id: String,
+    pub server: String,
+    pub tool: String,
+    pub arguments: JsonObject,
+}
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BranchRequest {
@@ -333,7 +357,92 @@ pub struct UpdateModel {
     #[serde(default, deserialize_with = "optional_non_null")]
     pub model_id: Option<String>,
     #[serde(default)]
-    pub model_preferences: crate::provider::ModelPreferences,
+    pub model_preferences: ModelPreferenceUpdate,
+}
+
+/// One field of a Session preference update: a value sets it and
+/// `{action:"clear"}` removes the Session's value.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum PreferenceUpdate {
+    Value(String),
+    Clear(ClearPreference),
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClearPreference {
+    action: ClearAction,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ClearAction {
+    Clear,
+}
+
+impl ClearPreference {
+    fn is_clear(&self) -> bool {
+        matches!(self.action, ClearAction::Clear)
+    }
+}
+
+/// The per-field patch `session.model.update` accepts. An omitted field keeps
+/// its adopted value; a clear contributes no value.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelPreferenceUpdate {
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub reasoning_effort: Option<PreferenceUpdate>,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub service_tier: Option<PreferenceUpdate>,
+}
+
+impl ModelPreferenceUpdate {
+    pub fn is_empty(&self) -> bool {
+        self.reasoning_effort.is_none() && self.service_tier.is_none()
+    }
+
+    /// The values to apply; a cleared field contributes none.
+    pub fn values(&self) -> crate::provider::ModelPreferences {
+        crate::provider::ModelPreferences {
+            reasoning_effort: self
+                .reasoning_effort
+                .as_ref()
+                .and_then(PreferenceUpdate::value)
+                .cloned(),
+            service_tier: self
+                .service_tier
+                .as_ref()
+                .and_then(PreferenceUpdate::value)
+                .cloned(),
+        }
+    }
+
+    pub fn clears_reasoning(&self) -> bool {
+        self.reasoning_effort
+            .as_ref()
+            .is_some_and(PreferenceUpdate::is_clear)
+    }
+
+    pub fn clears_service_tier(&self) -> bool {
+        self.service_tier
+            .as_ref()
+            .is_some_and(PreferenceUpdate::is_clear)
+    }
+}
+
+impl PreferenceUpdate {
+    fn value(&self) -> Option<&String> {
+        match self {
+            Self::Value(value) => Some(value),
+            Self::Clear(_) => None,
+        }
+    }
+
+    fn is_clear(&self) -> bool {
+        matches!(self, Self::Clear(clear) if clear.is_clear())
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -414,6 +523,10 @@ pub struct Create {
     /// unknown fields.
     #[serde(default, deserialize_with = "optional_non_null")]
     pub interactive: Option<bool>,
+    /// The creation origin the client declares: `client` when absent, or
+    /// `acp` from an editor (#557). Any other value is refused at the boundary.
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub origin: Option<SessionOrigin>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -445,6 +558,12 @@ pub struct Catalog {
     pub cwd: Option<String>,
     #[serde(default)]
     pub with_preview: bool,
+    /// Whether Sessions whose origin is `internal` are listed (#557).
+    #[serde(default)]
+    pub with_internal: bool,
+    /// Whether Sessions whose origin is `acp` are listed (#557).
+    #[serde(default)]
+    pub with_acp_sessions: bool,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -506,12 +625,19 @@ pub struct History {
     pub session_id: String,
     #[serde(default, deserialize_with = "optional_non_null")]
     pub branch_id: Option<String>,
-    #[serde(deserialize_with = "cursor")]
-    pub after: u64,
-    #[serde(deserialize_with = "page_limit")]
-    pub limit: usize,
+    #[serde(default, deserialize_with = "optional_cursor")]
+    pub after: Option<u64>,
+    #[serde(default, deserialize_with = "optional_page_limit")]
+    pub limit: Option<usize>,
     #[serde(default, deserialize_with = "optional_cursor")]
     pub through: Option<u64>,
+    /// The newest turn at or below `through`, newest page first
+    /// (session-history-window §4.2).
+    #[serde(default)]
+    pub latest_turn: bool,
+    /// Exclusive upper cursor of a backward page.
+    #[serde(default, deserialize_with = "optional_cursor")]
+    pub before: Option<u64>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -673,6 +799,8 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "session.prompt.refresh" => Call::PromptRefresh(params(raw_params)?),
             "session.mcp" => Call::SessionMcp(params(raw_params)?),
             "session.mcp.refresh" => Call::McpRefresh(params(raw_params)?),
+            "session.mcp.app.widget" => Call::McpAppWidget(params(raw_params)?),
+            "session.mcp.app.call" => Call::McpAppCall(params(raw_params)?),
             "session.methods" => Call::SessionMethods(params(raw_params)?),
             "web.open" => Call::WebOpen(params(raw_params)?),
             "web.toggle" => Call::WebToggle(params(raw_params)?),
@@ -896,6 +1024,36 @@ pub struct ForkResult {
     pub session_id: String,
     pub sequence: u64,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionOrigin {
+    Client,
+    Acp,
+    Internal,
+    Unknown,
+}
+impl SessionOrigin {
+    /// The value the stored Session record holds for this origin.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Client => "client",
+            Self::Acp => "acp",
+            Self::Internal => "internal",
+            Self::Unknown => "unknown",
+        }
+    }
+    /// The origin a stored value names; `None` for a value this build does not
+    /// know, which the column's `CHECK` and the store's format gate keep out.
+    pub fn from_stored(value: &str) -> Option<Self> {
+        match value {
+            "client" => Some(Self::Client),
+            "acp" => Some(Self::Acp),
+            "internal" => Some(Self::Internal),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+}
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionInfo {
@@ -908,6 +1066,13 @@ pub struct SessionInfo {
     pub attached_clients: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
+    /// The Session's creation origin; protocol v3 with a native store (#557).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<SessionOrigin>,
+    /// The leader Session a Collaboration member belongs to; absent when the
+    /// store records none (#557).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
     /// `title`, `titleSource` and `titleRevision` from SessionStore (S5b);
     /// protocol v3 only.
     #[serde(flatten)]
@@ -965,8 +1130,10 @@ pub enum Reply {
     Create(CreateResult),
     Fork(ForkResult),
     List(Vec<SessionInfo>),
-    /// The attached Session's directory record, as `session.list` gives it,
-    /// plus the preferences its adopted configuration sends.
+    /// The attached Session's directory record, with `model` and
+    /// `modelPreferences` from its latest adopted configuration, falling back
+    /// to the creation one; `session.list` items keep the creation model until
+    /// #795.
     Attach(AttachResult),
     Summaries(Vec<SessionSummary>),
     Catalog(CatalogResult),
@@ -983,6 +1150,8 @@ pub enum Reply {
     ModelUpdate(ModelUpdateResult),
     Configuration(ConfigurationResult),
     McpState(McpStateResult),
+    McpWidget(crate::mcp::McpWidgetResult),
+    McpAppCall(crate::mcp::McpAppCallResult),
     SessionMethods(SessionMethodsResult),
     WebOpened(WebOpened),
     WebToggled(WebToggled),
@@ -1133,6 +1302,12 @@ fn page_limit<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<usize
         return Err(serde::de::Error::custom("Expected a positive page limit"));
     }
     usize::try_from(value).map_err(serde::de::Error::custom)
+}
+
+fn optional_page_limit<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<usize>, D::Error> {
+    page_limit(deserializer).map(Some)
 }
 
 fn submission_id<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
