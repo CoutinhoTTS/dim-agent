@@ -332,8 +332,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "pick an earlier message to edit or quote" => {
             "escolher mensagem anterior para editar ou citar"
         }
-        "collapse or expand tool details, thoughts and compaction summaries" => {
-            "recolher/expandir detalhes de ferramentas, pensamentos e resumos de compactação"
+        "collapse or expand tool details and compaction summaries" => {
+            "recolher/expandir detalhes de ferramentas e resumos de compactação"
         }
         "switch between fullscreen and scrollback" => {
             "alternar entre ecrã inteiro e histórico do terminal"

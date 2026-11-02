@@ -326,8 +326,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "nach oben scrollen",
         "scroll to the bottom" => "nach unten scrollen",
         "pick an earlier message to edit or quote" => "frühere Nachricht bearbeiten oder zitieren",
-        "collapse or expand tool details, thoughts and compaction summaries" => {
-            "Werkzeugdetails, Gedanken und Komprimierungszusammenfassungen ein-/ausklappen"
+        "collapse or expand tool details and compaction summaries" => {
+            "Werkzeugdetails und Komprimierungszusammenfassungen ein-/ausklappen"
         }
         "switch between fullscreen and scrollback" => "Vollbild/Scrollback wechseln",
         "switch theme" => "Theme wechseln",

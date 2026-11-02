@@ -271,8 +271,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "滚动到顶部",
         "scroll to the bottom" => "滚动到底部",
         "pick an earlier message to edit or quote" => "选择较早的消息进行编辑或引用",
-        "collapse or expand tool details, thoughts and compaction summaries" => {
-            "折叠或展开工具详情、思考与压缩摘要"
+        "collapse or expand tool details and compaction summaries" => {
+            "折叠或展开工具详情与压缩摘要"
         }
         "switch between fullscreen and scrollback" => "在全屏和回滚界面之间切换",
         "switch theme" => "切换主题",
