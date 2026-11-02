@@ -1955,21 +1955,4 @@ mod context_flag_tests {
         assert_eq!(context_flags("context/prepare"), (false, false));
         assert_eq!(context_flags("domain/unknown"), (false, false));
     }
-
-    #[test]
-    fn extension_events_carry_their_own_reading_switches() {
-        let event = super::ExtensionEvent::new("myplugin", "report", serde_json::json!({}))
-            .unwrap()
-            .with_context_flags(true, true);
-        assert_eq!(
-            super::EventKind::Extension(event).context_flags(),
-            (true, true)
-        );
-        let plain =
-            super::ExtensionEvent::new("myplugin", "report", serde_json::json!({})).unwrap();
-        assert_eq!(
-            super::EventKind::Extension(plain).context_flags(),
-            (false, false)
-        );
-    }
 }

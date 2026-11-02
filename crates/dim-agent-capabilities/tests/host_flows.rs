@@ -1217,6 +1217,11 @@ async fn an_idle_append_starts_no_turn_and_joins_the_next_one() {
         assert!(events.iter().any(|event| matches!(&event.kind,
             EventKind::InputApplied(data) if data.input_id == appended.id && data.mode == Some(InputMode::Append))));
         assert!(!events.iter().any(|event| matches!(event.kind, EventKind::TurnStart(_))));
+        assert_eq!(
+            session.get::<InputSnapshot>("main").unwrap().unwrap().queued,
+            1,
+            "the appended input waits for a driving turn"
+        );
         session.submit("go".into(), InputMode::Queue, "main").await.unwrap();
         session.idle("main").await.unwrap();
         let requests = requests.lock().unwrap().clone();

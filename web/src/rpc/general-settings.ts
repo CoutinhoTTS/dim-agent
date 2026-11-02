@@ -211,10 +211,10 @@ export function readMcpConfiguration(value: unknown): McpConfiguration {
   const oauth = source.oauth === null ? undefined : object(source.oauth)
   return { type, endpoint: string(source.endpoint), headerNames: array(source.headerNames, string), authConfigured: boolean(source.authConfigured), oauthConfigured: boolean(source.oauthConfigured), oauth: oauth === undefined ? undefined : { clientId: optionalString(oauth.clientId), callbackPort: oauth.callbackPort === null ? undefined : number(oauth.callbackPort), scopes: optionalString(oauth.scopes), metadataConfigured: boolean(oauth.metadataConfigured) } }
 }
-export type McpEditableEntry = { revision: string | undefined; enabled: boolean; configuration: McpConfiguration }
+export type McpEditableEntry = { revision: string | undefined; enabled: boolean; secretsInUserScope: boolean; configuration: McpConfiguration }
 export function readMcpEditableEntry(value: unknown): McpEditableEntry {
   const source = object(value)
-  return { revision: optionalString(source.revision), enabled: boolean(source.enabled), configuration: readMcpConfiguration(source.configuration) }
+  return { revision: optionalString(source.revision), enabled: boolean(source.enabled), secretsInUserScope: source.secretsInUserScope === true, configuration: readMcpConfiguration(source.configuration) }
 }
 export type McpTool = { name: string; description: string | undefined }
 function readMcpTool(value: unknown): McpTool {

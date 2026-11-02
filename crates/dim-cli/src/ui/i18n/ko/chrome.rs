@@ -226,6 +226,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Connected {provider}" => "{provider} 연결됨",
         "Opened {url}" => "{url} 열림",
         "Tool details not saved: {error}" => "도구 상세 저장 실패: {error}",
+        "Thinking details not saved: {error}" => "생각 상세 저장 실패: {error}",
         "/{name} needs a session — send a message first" => {
             "/{name}에는 세션 필요 — 먼저 메시지 전송"
         }
@@ -289,8 +290,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "맨 위로 스크롤",
         "scroll to the bottom" => "맨 아래로 스크롤",
         "pick an earlier message to edit or quote" => "편집/인용할 이전 메시지 선택",
-        "collapse or expand tool details, thoughts and compaction summaries" => {
-            "도구 상세·생각·압축 요약 접기/펼치기"
+        "collapse or expand tool details and compaction summaries" => {
+            "도구 상세 및 압축 요약 접기/펼치기"
         }
         "switch between fullscreen and scrollback" => "전체 화면/스크롤백 전환",
         "switch theme" => "테마 전환",
@@ -334,6 +335,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "fullscreen" => "전체 화면",
         "scrollback" => "스크롤백",
         "Tool details" => "도구 상세",
+        "Thinking details" => "생각 상세",
         "expanded" => "펼침",
         "collapsed" => "접힘",
         "Mouse (fullscreen)" => "마우스 (전체 화면)",
@@ -490,8 +492,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "follow or change the shown line's goal" => "표시된 라인의 목표 추적 또는 변경",
         "◎ goal active" => "◎ 목표 진행 중",
         "◎ goal paused" => "◎ 목표 일시정지",
-        "Kept verbatim" => "원문 그대로 유지",
-        "Tool effects" => "도구 작업 기록",
         "insufficient space: {parts}" => "공간 부족: {parts}",
         "system prompt" => "시스템 프롬프트",
         "tools" => "도구",

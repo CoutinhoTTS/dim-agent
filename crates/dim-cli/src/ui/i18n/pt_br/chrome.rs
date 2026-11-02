@@ -256,6 +256,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Connected {provider}" => "{provider} conectado",
         "Opened {url}" => "{url} aberto",
         "Tool details not saved: {error}" => "Detalhes de ferramentas não salvos: {error}",
+        "Thinking details not saved: {error}" => "Detalhes de raciocínio não salvos: {error}",
         "/{name} needs a session — send a message first" => {
             "/{name} requer sessão — envie uma mensagem antes"
         }
@@ -325,8 +326,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "pick an earlier message to edit or quote" => {
             "escolher mensagem anterior para editar ou citar"
         }
-        "collapse or expand tool details, thoughts and compaction summaries" => {
-            "recolher/expandir detalhes de ferramentas, pensamentos e resumos de compactação"
+        "collapse or expand tool details and compaction summaries" => {
+            "recolher/expandir detalhes de ferramentas e resumos de compactação"
         }
         "switch between fullscreen and scrollback" => "alternar entre tela cheia e scrollback",
         "switch theme" => "trocar tema",
@@ -370,6 +371,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "fullscreen" => "tela cheia",
         "scrollback" => "scrollback",
         "Tool details" => "Detalhes de ferramentas",
+        "Thinking details" => "Detalhes de raciocínio",
         "expanded" => "expandido",
         "collapsed" => "recolhido",
         "Mouse (fullscreen)" => "Mouse (tela cheia)",
@@ -530,8 +532,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "follow or change the shown line's goal" => "seguir ou alterar o objetivo da linha exibida",
         "◎ goal active" => "◎ objetivo ativo",
         "◎ goal paused" => "◎ objetivo pausado",
-        "Kept verbatim" => "Mantido literalmente",
-        "Tool effects" => "Ações das ferramentas",
         "insufficient space: {parts}" => "espaço insuficiente: {parts}",
         "system prompt" => "prompt do sistema",
         "tools" => "ferramentas",

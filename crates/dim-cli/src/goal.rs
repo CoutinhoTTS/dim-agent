@@ -582,17 +582,6 @@ mod tests {
     }
 
     #[test]
-    fn a_set_by_an_evaluator_names_the_judge() {
-        let mut fold = Fold::default();
-        fold.apply(&input(
-            10,
-            json!([{"type":"raw","key":OBJECTIVE_KEY,"text":
-                "<dim-goal kind=\"goal\" op=\"set\" judge=\"evaluator\" branch=\"main\">\nObjective:\nShip it\n\nGoal.\n</dim-goal>"}]),
-        ));
-        assert!(fold.goal().unwrap().evaluator);
-    }
-
-    #[test]
     fn an_escaped_objective_reads_back_verbatim() {
         let mut fold = Fold::default();
         fold.apply(&input(
@@ -650,7 +639,13 @@ mod tests {
     #[test]
     fn an_evaluator_judged_goal_keeps_its_judge_through_an_edit() {
         let mut fold = Fold::default();
-        fold.apply(&evaluator_set(10));
+        // The set may arrive as the objective part alone, with no status
+        // block of its own.
+        fold.apply(&input(
+            10,
+            json!([{"type":"raw","key":OBJECTIVE_KEY,"text":
+                "<dim-goal kind=\"goal\" op=\"set\" judge=\"evaluator\" branch=\"main\">\nObjective:\nShip it\n\nGoal.\n</dim-goal>"}]),
+        ));
         assert!(fold.goal().unwrap().evaluator);
         fold.apply(&change(11, "edit", OBJECTIVE_KEY, "", false));
         assert_eq!(fold.goal().unwrap().objective, "Objective 11");

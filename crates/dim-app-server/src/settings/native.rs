@@ -53,7 +53,7 @@ impl SettingsService {
             self.updates.spawn(async move {
                 let stored = format.clone();
                 if let Some((_, snapshot)) = db
-                    .run(move |connection| Ok(read(connection, &*stored)))
+                    .run_read(move |connection| Ok(read(connection, &*stored)))
                     .await
                     .map_err(|_| SettingsError::Persistence)??
                 {

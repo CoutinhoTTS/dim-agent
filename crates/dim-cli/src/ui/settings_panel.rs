@@ -12,6 +12,7 @@
 //! │   Language               简体中文 ›           │
 //! │   Startup UI form        fullscreen          │
 //! │   Tool details           collapsed           │
+//! │   Thinking details       collapsed           │
 //! │   Mouse                  on                  │
 //! │   Notify when agent ...  on                  │
 //! │   Show ACP sessions      off                 │
@@ -35,6 +36,7 @@ pub struct Values {
     pub language: String,
     pub fullscreen_default: bool,
     pub tools_expanded: bool,
+    pub thinking_expanded: bool,
     pub mouse: bool,
     pub notify: bool,
     pub acp_sessions: bool,
@@ -49,6 +51,7 @@ pub enum Setting {
     Language,
     StartupForm,
     ToolDetails,
+    ThinkingDetails,
     Mouse,
     Notify,
     AcpSessions,
@@ -57,11 +60,12 @@ pub enum Setting {
     Isolation,
 }
 
-const ROWS: [(Setting, &str); 10] = [
+const ROWS: [(Setting, &str); 11] = [
     (Setting::Theme, "theme"),
     (Setting::Language, "language"),
     (Setting::StartupForm, "startup-form"),
     (Setting::ToolDetails, "tool-details"),
+    (Setting::ThinkingDetails, "thinking-details"),
     (Setting::Mouse, "mouse"),
     (Setting::Notify, "notify"),
     (Setting::AcpSessions, "acp-sessions"),
@@ -85,7 +89,12 @@ impl Setting {
     fn switch(self) -> bool {
         matches!(
             self,
-            Self::StartupForm | Self::ToolDetails | Self::Mouse | Self::Notify | Self::AcpSessions
+            Self::StartupForm
+                | Self::ToolDetails
+                | Self::ThinkingDetails
+                | Self::Mouse
+                | Self::Notify
+                | Self::AcpSessions
         )
     }
 }
@@ -119,6 +128,16 @@ impl SettingsPanel {
                 Setting::ToolDetails,
                 "Tool details",
                 if values.tools_expanded {
+                    t("expanded")
+                } else {
+                    t("collapsed")
+                }
+                .to_owned(),
+            ),
+            row(
+                Setting::ThinkingDetails,
+                "Thinking details",
+                if values.thinking_expanded {
                     t("expanded")
                 } else {
                     t("collapsed")

@@ -1378,7 +1378,7 @@ impl ProviderService {
         let bundled = self.bundled.clone();
         self.owned(cancel, move |_| {
             Box::pin(async move {
-                db.run(move |connection| {
+                db.run_read(move |connection| {
                     Ok(read_static(connection, &provider_id)?
                         .map(|record| static_catalog(&bundled, &provider_id, &record, available)))
                 })
@@ -1477,7 +1477,7 @@ impl ProviderService {
     ) -> Result<ProviderList, HostError> {
         let db = self.db.clone();
         let bundled = self.bundled.clone();
-        let mut list = self.owned(cancel, move |_| Box::pin(async move { db.run(move |connection| {
+        let mut list = self.owned(cancel, move |_| Box::pin(async move { db.run_read(move |connection| {
             let mut query = connection.prepare("SELECT provider_id,version,record FROM providers ORDER BY provider_id").map_err(storage)?;
             let rows = query.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, String>(2)?))).map_err(storage)?;
             let mut result = ProviderList { providers: Vec::new(), errors: Vec::new() };
@@ -1664,7 +1664,7 @@ impl ProviderService {
         let bundled = self.bundled.clone();
         self.owned(cancel, move |_| {
             Box::pin(async move {
-                db.run(move |c| {
+                db.run_read(move |c| {
                     Ok(read_catalog(c, &provider_id)?
                         .filter(|r| account.account.is_some() && same_account(&r.account, &account))
                         .map(|r| r.catalog(&bundled)))
@@ -1690,7 +1690,7 @@ impl ProviderService {
         let expected_version = self
             .owned(cancel, move |_| {
                 Box::pin(async move {
-                    db.run(move |connection| {
+                    db.run_read(move |connection| {
                         Ok(read_catalog(connection, &id)?.map(|record| record.version))
                     })
                     .await
@@ -1769,7 +1769,7 @@ impl ProviderService {
         let db = self.db.clone();
         self.owned(cancel, move |_cancel| {
             Box::pin(async move {
-                db.run(move |connection| {
+                db.run_read(move |connection| {
                     connection
                         .query_row(
                             "SELECT provider_id, model_id, version FROM provider_selections WHERE scope=?1",
@@ -2024,7 +2024,7 @@ impl ResolveModelConnection for ProductResolver {
                     .0
                     .owned(&cancel, move |_| {
                         Box::pin(async move {
-                            db.run(move |connection| read_static(connection, &provider_id))
+                            db.run_read(move |connection| read_static(connection, &provider_id))
                                 .await
                                 .map_err(failure)
                         })

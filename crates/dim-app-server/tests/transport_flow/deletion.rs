@@ -8,12 +8,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 /// Tables that hold rows of a Session, in the order a delete clears them.
-const SESSION_TABLES: [&str; 9] = [
+const SESSION_TABLES: [&str; 11] = [
     "session_file_owners",
     "timeline_snapshots",
     "timeline_events",
     "timeline_branches",
     "timeline_content",
+    "session_grants",
+    "session_output_owners",
     "session_metadata",
     "session_catalog",
     "session_owners",
@@ -170,7 +172,32 @@ async fn delete_closes_a_running_session_and_removes_what_it_stored() {
     std::fs::write(store.output(&sid).join("task/exec.log"), b"output").unwrap();
     std::fs::create_dir_all(store.output(&kept)).unwrap();
     let file = store.own_file(&sid);
-    assert!(!store.rows(&sid).is_empty());
+    {
+        let connection = store.connection();
+        connection
+            .execute(
+                "INSERT INTO session_grants (session_id, path, kind, mode) \
+                 VALUES (?1, '/tmp/granted.txt', 'file', 'read')",
+                [&sid],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO session_output_owners (session_id, path) VALUES (?1, ?2)",
+                rusqlite::params![
+                    &sid,
+                    store.output(&sid).join("task/exec.log").to_str().unwrap()
+                ],
+            )
+            .unwrap();
+    }
+    let stored = store.rows(&sid);
+    for table in ["session_grants", "session_output_owners"] {
+        assert!(
+            stored.contains(&(table, 1i64)),
+            "{table} is not seeded: {stored:?}"
+        );
+    }
 
     let mut other = Client::new_version(&server, false, 3).await;
     assert_ok(&other.rpc("session.delete", json!({"sessionId":sid})).await);

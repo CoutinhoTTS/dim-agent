@@ -250,6 +250,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Connected {provider}" => "{provider} connecté",
         "Opened {url}" => "{url} ouvert",
         "Tool details not saved: {error}" => "Détails non enregistrés: {error}",
+        "Thinking details not saved: {error}" => "Détails de réflexion non enregistrés: {error}",
         "/{name} needs a session — send a message first" => {
             "/{name} requiert une session — envoyer d'abord un message"
         }
@@ -321,8 +322,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "défiler en haut",
         "scroll to the bottom" => "défiler en bas",
         "pick an earlier message to edit or quote" => "choisir un message à modifier ou citer",
-        "collapse or expand tool details, thoughts and compaction summaries" => {
-            "replier/déplier outils, réflexions et résumés de compression"
+        "collapse or expand tool details and compaction summaries" => {
+            "replier/déplier les détails des outils et les résumés de compression"
         }
         "switch between fullscreen and scrollback" => "basculer plein écran / défilement",
         "switch theme" => "changer de thème",
@@ -366,6 +367,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "fullscreen" => "plein écran",
         "scrollback" => "défilement",
         "Tool details" => "Détails d'outils",
+        "Thinking details" => "Détails de réflexion",
         "expanded" => "dépliés",
         "collapsed" => "repliés",
         "Mouse (fullscreen)" => "Souris (plein écran)",
@@ -530,8 +532,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "◎ goal active" => "◎ objectif actif",
         "◎ goal paused" => "◎ objectif en pause",
-        "Kept verbatim" => "Conservé tel quel",
-        "Tool effects" => "Actions des outils",
         "insufficient space: {parts}" => "espace insuffisant: {parts}",
         "system prompt" => "invite système",
         "tools" => "outils",
