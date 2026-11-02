@@ -1161,7 +1161,7 @@ an area with no run action never names `Ctrl+T`. An action key is a Ctrl chord, 
 filter never takes, because the filter takes every plain letter. The hint names the area's
 kinds plus the selected entry's, on the bottom border or, when that cannot hold it, in rows
 above the border wrapped by width so no key or action is cut; reload and add act on the area, so
-they work with no entry selected — reload retries a failed read, and add opens on an empty area.
+they work with no entry selected: reload retries a failed read, and add opens on an empty area.
 A remove asks first, `Remove LABEL? Enter confirm · Esc cancel`, and any other key cancels;
 `dimcode <area> remove ID` takes the id on the command line as the intent and does not ask.
 Inspect replaces the list with the title and lines the owner returned and scrolls them with the
@@ -1171,13 +1171,11 @@ client started in; the Scheduler's jobs are the host's, and only a new job's `cw
 the Session. A panel holds no area's vocabulary: an area's entries, kinds, documents and detail
 arrive from its adapter.
 
-Three areas use it, over the same kinds: Skills (`/skills`, `dimcode skills ...`) lists
-and toggles, Hooks (`/hooks`, `dimcode hooks ...`) adds the user document's edit, and the
-Scheduler (`/scheduled`, `/schedule`, `dimcode scheduled ...`) is the area that introduces add,
-remove, run and inspect — a job per entry from `schedule.list`, with `schedule.set_enabled`,
-`schedule.save` for the edit and the create, `schedule.delete`, `schedule.run_now` and
-`schedule.history`. Its subcommands are `dimcode scheduled list`, `enable ID`, `disable ID`,
-`edit ID`, `set ID PATH`, `add PATH`, `remove ID`, `run ID` and `history ID`.
+The areas below use it, over the same kinds:
+
+- Skills (`/skills`, `dimcode skills ...`) lists and toggles skills.
+- Hooks (`/hooks`, `dimcode hooks ...`) adds the user document's edit.
+- The Scheduler (`/scheduled`, `/schedule`, `dimcode scheduled ...`) introduces add, remove, run and inspect, a job per entry from `schedule.list`, with `schedule.set_enabled`, `schedule.save` for the edit and the create, `schedule.delete`, `schedule.run_now` and `schedule.history`. Its subcommands are `dimcode scheduled list`, `enable ID`, `disable ID`, `edit ID`, `set ID PATH`, `add PATH`, `remove ID`, `run ID` and `history ID`.
 
 The external editor is `$VISUAL`, then `$EDITOR`, then `vi` (`notepad` on Windows), run on Unix
 through `sh -c '<editor> "$@"' <editor> <file>` as git does, so a quoted path with a space
