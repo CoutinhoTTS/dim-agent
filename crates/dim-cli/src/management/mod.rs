@@ -14,6 +14,7 @@
 
 pub mod editor;
 pub mod hooks;
+pub mod permissions;
 pub mod scheduler;
 pub mod skills;
 
@@ -81,11 +82,23 @@ const SCHEDULED: Methods = Methods {
     ],
 };
 
+const PERMISSIONS: Methods = Methods {
+    catalog: "permission.rules",
+    manages: "command rules",
+    kinds: &[
+        // A reload re-reads the rules, so it needs no rescan method.
+        (ActionKind::Reload, "permission.rules"),
+        (ActionKind::Add, "permission.set_rules"),
+        (ActionKind::Remove, "permission.set_rules"),
+    ],
+};
+
 fn methods_of(area: Area) -> &'static Methods {
     match area {
         Area::Skills => &SKILLS,
         Area::Hooks => &HOOKS,
         Area::Scheduled => &SCHEDULED,
+        Area::Permissions => &PERMISSIONS,
     }
 }
 
@@ -323,6 +336,21 @@ pub async fn apply(
                 ManagementResult::Refused(ManagementRefusal::Conflict {
                     message,
                     view: catalog.map(|catalog| Box::new(scheduler::view(&catalog, &actions, cwd))),
+                })
+            }
+        },
+        Area::Permissions => match permissions::apply(client, &request.action).await {
+            Ok(permissions::Answer::Rules { rules, note }) => ManagementResult::View {
+                view: Box::new(permissions::view(&rules, &actions)),
+                note,
+            },
+            Err(permissions::Failure::Refused(message)) => {
+                ManagementResult::Refused(ManagementRefusal::Refused(message))
+            }
+            Err(permissions::Failure::Conflict { message, rules }) => {
+                ManagementResult::Refused(ManagementRefusal::Conflict {
+                    message,
+                    view: Ok(Box::new(permissions::view(&rules, &actions))),
                 })
             }
         },

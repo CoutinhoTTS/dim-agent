@@ -8,6 +8,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "skills" => "スキル",
         "hooks" => "フック",
         "scheduled jobs" => "スケジュール済みジョブ",
+        "command rules" => "コマンドルール",
         "enabled" => "有効",
         "shadowed by {name}" => "{name} が優先",
         "Reloaded." => "再読み込みしました。",
@@ -16,6 +17,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Reloaded {area}: {entries} entries, {disabled} disabled." => {
             "{area} を再読み込みしました：{entries} 件、{disabled} 件が無効。"
         }
+        "Reloaded {area}: {entries} entries." => "{area} を再読み込みしました：{entries} 件。",
         "Hooks" => "フック",
         "invalid" => "無効",
         "Saved." => "保存しました。",
@@ -105,6 +107,37 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "このワークスペースのフック設定は読み取り後に変更されています。今回は何も書き込んでいません。"
+        }
+        "Command rules" => "コマンドルール",
+        "user" => "ユーザー",
+        "Matches only this command." => "このコマンドだけに一致します。",
+        "Matches commands whose first words are these." => {
+            "先頭の語がこれと一致するコマンドに一致します。"
+        }
+        "Allows a simple command that would otherwise ask." => {
+            "本来確認される単純なコマンドを許可します。"
+        }
+        "Denies the command under every preset." => {
+            "すべてのプリセットでこのコマンドを拒否します。"
+        }
+        "Applies in every Session, in every workspace." => {
+            "すべてのセッション、すべてのワークスペースで適用されます。"
+        }
+        "Rule added: {rule}." => "ルールを追加しました：{rule}。",
+        "Rule already present: {rule}." => "ルールは既に存在します：{rule}。",
+        "Rule removed: {rule}." => "ルールを削除しました：{rule}。",
+        "That command rule is no longer listed; nothing was removed." => {
+            "そのコマンドルールは一覧にありません。何も削除されていません。"
+        }
+        "Command rules changed since they were read; nothing was removed." => {
+            "コマンドルールは読み込み後に変更されました。何も削除されていません。"
+        }
+        "A command rule is DECISION MATCH COMMAND, such as deny prefix git push." => {
+            "コマンドルールは DECISION MATCH COMMAND の形式で、例：deny prefix git push。"
+        }
+        "Command: {command}" => "コマンド: {command}",
+        "Use the line prompt or dimcode permissions." => {
+            "行内プロンプトまたは dimcode permissions で使用してください。"
         }
         _ => return None,
     })

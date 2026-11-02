@@ -886,7 +886,9 @@ struct App {
     /// The `/settings` row a picker was opened from: closing the picker
     /// goes back to it.
     settings_return: Option<Setting>,
-    isolation_return_permissions: bool,
+    /// A surface was opened from the Permissions page: closing it goes back
+    /// to the page, as Process isolation and Command rules do.
+    permissions_return: bool,
     /// Fullscreen reads the mouse (`tuiMouseMode`); off leaves selection
     /// and the wheel to the terminal.
     pub mouse: bool,
@@ -1123,7 +1125,7 @@ impl App {
             service_tiers: false,
             jump: None,
             settings_return: None,
-            isolation_return_permissions: false,
+            permissions_return: false,
             mouse,
             notify,
             notifications: Vec::new(),
@@ -2808,6 +2810,12 @@ impl App {
                     &self.permission_policy,
                 )));
             }
+            Effect::OpenArea { area, note } => {
+                // A surface opened from the Permissions page returns there on
+                // Esc; any other caller opens with no return.
+                self.permissions_return = matches!(self.prompt, Some(Prompt::Approvals(_)));
+                self.open_management(area, note);
+            }
             Effect::StopTask {
                 session_id,
                 projection_id,
@@ -2877,7 +2885,7 @@ impl App {
                 self.setting(setting);
                 if from_permissions {
                     self.settings_return = None;
-                    self.isolation_return_permissions = true;
+                    self.permissions_return = true;
                 }
             }
             Effect::ThemePreview(id) => self.paint_theme(&id),
@@ -2975,7 +2983,7 @@ impl App {
                 policy,
             }),
         }
-        if self.prompt.is_none() && std::mem::take(&mut self.isolation_return_permissions) {
+        if self.prompt.is_none() && std::mem::take(&mut self.permissions_return) {
             self.open_prompt(Prompt::Approvals(ApprovalsPanel::new(
                 &self.permission_policy,
             )));
@@ -3429,8 +3437,8 @@ impl App {
     }
 
     /// `/<area>` opens the management panel of `area`, which reads it.
-    fn open_management(&mut self, area: Area) {
-        self.open_prompt(Prompt::Management(ManagementPanel::new(area)));
+    fn open_management(&mut self, area: Area, note: Option<String>) {
+        self.open_prompt(Prompt::Management(ManagementPanel::new(area, note)));
         self.host.send(Command::Management(ManagementRequest {
             area,
             action: ManagementAction::List,
@@ -3606,8 +3614,19 @@ impl App {
                 Outcome::Continue
             }
             "permissions" | "approvals" | "approval" => {
-                let panel = ApprovalsPanel::new(&self.permission_policy);
-                self.open_prompt(Prompt::Approvals(panel));
+                // Arguments belong to the line prompt and to `dimcode
+                // permissions`; the terminal UI's surface is the rule panel,
+                // which opens holding where they work instead of ignoring
+                // them, and says it until the user's first key there.
+                if args.trim().is_empty() {
+                    let panel = ApprovalsPanel::new(&self.permission_policy);
+                    self.open_prompt(Prompt::Approvals(panel));
+                } else {
+                    self.open_management(
+                        Area::Permissions,
+                        Some(t("Use the line prompt or dimcode permissions.").to_owned()),
+                    );
+                }
                 Outcome::Continue
             }
             "plugins" => {
@@ -3615,7 +3634,7 @@ impl App {
                 Outcome::Continue
             }
             "skills" => {
-                self.open_management(Area::Skills);
+                self.open_management(Area::Skills, None);
                 Outcome::Continue
             }
             "reload-skills" => {
@@ -3626,11 +3645,11 @@ impl App {
                 Outcome::Continue
             }
             "hooks" => {
-                self.open_management(Area::Hooks);
+                self.open_management(Area::Hooks, None);
                 Outcome::Continue
             }
             "scheduled" => {
-                self.open_management(Area::Scheduled);
+                self.open_management(Area::Scheduled, None);
                 Outcome::Continue
             }
             "connect" => {
@@ -9069,7 +9088,7 @@ mod tests {
             root.path().join("home"),
             "/w".into(),
         );
-        let mut panel = ManagementPanel::new(Area::Skills);
+        let mut panel = ManagementPanel::new(Area::Skills, None);
         panel.set_result(&ManagementReply {
             request: ManagementRequest {
                 area: Area::Skills,
@@ -9083,7 +9102,7 @@ mod tests {
                             id: "user:commit".into(),
                             label: "commit".into(),
                             detail: Vec::new(),
-                            enabled: true,
+                            enabled: Some(true),
                             states: Vec::new(),
                             actions: vec![ActionKind::Toggle],
                             document: None,
@@ -9179,7 +9198,7 @@ mod tests {
             .path()
             .display()
             .to_string();
-        app.prompt = Some(Prompt::Management(ManagementPanel::new(Area::Skills)));
+        app.prompt = Some(Prompt::Management(ManagementPanel::new(Area::Skills, None)));
         app.apply(Update::Management(ManagementReply {
             request: ManagementRequest {
                 area: Area::Scheduled,
@@ -9260,7 +9279,10 @@ mod tests {
         }
         // The panel is open: the file and the link stay for the next Ctrl+N.
         for result in [refused(), conflict()] {
-            app.prompt = Some(Prompt::Management(ManagementPanel::new(Area::Scheduled)));
+            app.prompt = Some(Prompt::Management(ManagementPanel::new(
+                Area::Scheduled,
+                None,
+            )));
             let path = draft(&mut app);
             app.apply(create_reply(result));
             assert!(path.exists(), "a create keeps its file: {path:?}");
