@@ -31,6 +31,8 @@ mod question;
 mod server;
 #[path = "cli_flow/session_management.rs"]
 mod session_management;
+#[path = "cli_flow/skills.rs"]
+mod skills;
 #[path = "cli_flow/tasks.rs"]
 mod tasks;
 
