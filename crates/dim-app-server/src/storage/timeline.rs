@@ -3893,6 +3893,52 @@ pub(super) async fn validate_session(
 }
 
 #[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_waits_for_a_copy_whose_waiter_was_aborted() {
+    let directory = std::env::temp_dir().join(format!("dim-copy-close-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let db = SqliteStorage::open(directory.join("dimcode.sqlite")).unwrap();
+    let (entered, ready) = tokio::sync::oneshot::channel();
+    let (release, blocked) = std::sync::mpsc::channel();
+    let copying = {
+        let db = db.clone();
+        tokio::spawn(async move {
+            db.run_copy(move |connection| {
+                let _ = entered.send(());
+                blocked
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("the copy is released");
+                connection
+                    .execute_batch("PRAGMA user_version = 77")
+                    .map_err(error)
+            })
+            .await
+        })
+    };
+    ready.await.unwrap();
+    copying.abort();
+    let _ = copying.await;
+    let closing = {
+        let db = db.clone();
+        tokio::spawn(async move { db.close().await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !closing.is_finished(),
+        "close returned while the aborted copy was still running"
+    );
+    release.send(()).unwrap();
+    closing.await.unwrap().unwrap();
+    let connection = Connection::open(directory.join("dimcode.sqlite")).unwrap();
+    let version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 77, "the copy committed before close returned");
+    drop(connection);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[cfg(test)]
 #[tokio::test]
 async fn a_read_sees_the_last_commit_while_a_write_transaction_is_open() {
     let directory =

@@ -819,9 +819,10 @@ impl SqliteStorage {
         self: &Arc<Self>,
         operation: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        let _admitted = self.admit()?;
+        let admitted = self.admit()?;
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
+            let _admitted = admitted;
             let mut connection = Connection::open(&path).map_err(storage)?;
             connection.busy_handler(Some(busy)).map_err(storage)?;
             connection
