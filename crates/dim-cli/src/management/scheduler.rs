@@ -458,7 +458,7 @@ pub(super) fn view(catalog: &Catalog, available: &[ActionKind], cwd: &Path) -> M
                 id: job.id.clone(),
                 label: job.name.clone(),
                 detail: detail_lines(job),
-                enabled: job.enabled,
+                enabled: Some(job.enabled),
                 states,
                 actions: super::entry_kinds(available),
                 document: Some(EntryDocument {

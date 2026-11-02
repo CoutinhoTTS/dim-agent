@@ -238,7 +238,8 @@ impl Agent {
     }
     /// Checks how the live assembly is written, over one diagnostics snapshot:
     /// for every Session and branch this Agent hosts, that its profile's
-    /// required rows and the plugins below them are `Active`, that no plugin
+    /// required rows and the required views its scope handed, with the plugins
+    /// below them, are `Active`, that no plugin
     /// reads an external service it does not declare, that every declared read
     /// is among the reader's resolved dependencies, and that no scoped service
     /// is provided without an instance key. Each plugin is checked once, by the
@@ -283,7 +284,8 @@ impl Agent {
                 .filter_map(|info| session.0.tree.get(&info.id))
                 .collect();
             /// One scope of a Session: its view, the loader row ids its
-            /// profile requires, the required parts it mounted and the branch.
+            /// profile requires, the required views creation awaited and the
+            /// branch.
             type Scope<'a> = (
                 &'a FiberView,
                 &'a [String],
@@ -291,12 +293,12 @@ impl Agent {
                 Option<&'a str>,
             );
             let mut scopes: Vec<Scope> =
-                vec![(&session.0.view, &loaded.required[..], &loaded.parts, None)];
+                vec![(&session.0.view, &loaded.required[..], &loaded.awaited, None)];
             for branch in &branches {
                 scopes.push((
                     branch.0.scope_view(),
                     branch.0.required_rows(),
-                    branch.0.required_parts(),
+                    branch.0.awaited(),
                     Some(branch.id()),
                 ));
             }
@@ -387,6 +389,17 @@ impl Agent {
             AgentError::aggregate(errors)
         })
     }
+}
+/// What uses a Session: an owner of accepted detached work holding it, or a
+/// line with a turn running or work its dispatch has not reached.
+/// [`Session::in_use`] reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InUse {
+    /// A [`SessionHold`] exists.
+    Held,
+    /// A line has a turn running, or accepted work its dispatch has not
+    /// reached. A line that failed or is closing has neither.
+    Running,
 }
 #[derive(Clone)]
 pub struct Session(Arc<SessionInner>);
@@ -680,6 +693,26 @@ impl Session {
     pub fn closed(&self) -> BoxFuture<'static, Result<()>> {
         self.0.close.wait()
     }
+    /// What uses this Session, or `None` when nothing does: a [`SessionHold`],
+    /// or a line with a turn running or work its dispatch has not reached. A
+    /// line that failed or is closing keeps nothing. A query that freezes,
+    /// refuses and unloads nothing; [`Self::unload_if_idle`] takes its own,
+    /// stricter reading under each branch's commit lock before it releases
+    /// the instance.
+    pub fn in_use(&self) -> Option<InUse> {
+        if self.0.owner.lifecycle.held() {
+            return Some(InUse::Held);
+        }
+        self.branches()
+            .into_iter()
+            .any(|info| {
+                self.0
+                    .tree
+                    .get(&info.id)
+                    .is_none_or(|branch| branch.0.is_running())
+            })
+            .then_some(InUse::Running)
+    }
     /// The host must exclude new uses while checking and releasing an instance.
     /// Idle release records no stop events and emits no business close notice.
     /// Every branch is checked while its commit lock is held; only when all
@@ -695,7 +728,7 @@ impl Session {
         if self.is_closing()
             || self.failure().is_some()
             || self.0.owner.assembly.ephemeral_store.is_some()
-            || lifecycle.held()
+            || self.in_use().is_some()
         {
             return Ok(false);
         }

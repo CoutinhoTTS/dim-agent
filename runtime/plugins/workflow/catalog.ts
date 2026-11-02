@@ -1,6 +1,6 @@
 import { stringify } from 'yaml'
 import type { Settings, WorkflowFiles, WorkflowFilesErrorThrown, WorkflowRoot } from '../../../npm/plugin.js'
-import { decodeDefinition, decodeFile, issues, withinDefinitionLimit, WorkflowError, type Definition, type Source, type WorkflowSettings } from './definition.ts'
+import { decodeDefinition, decodeFile, issues, payloadBytes, withinDefinitionLimit, WorkflowError, type Definition, type Source, type WorkflowSettings } from './definition.ts'
 import type { SaveRequest } from './requests.ts'
 
 export interface DefinitionEntry {
@@ -30,7 +30,7 @@ export class Catalog {
     const document = snapshot.value.document as unknown as WorkflowSettings
     const entries: DefinitionEntry[] = Object.entries(document.definitions).map(([name, definition]) => ({
       name, definition, source: 'user', enabled: true,
-      issues: withinDefinitionLimit(definition) ? issues(definition, name) : ['Definition exceeds 16 MiB'],
+      issues: withinDefinitionLimit(definition) ? issues(definition, name) : ['Definition exceeds 1 MiB'],
     }))
     const projects = await this.settings.projects({})
     if (!projects.ok) throw new WorkflowError('definition_source_failed', projects.error.message)
@@ -92,11 +92,15 @@ export class Catalog {
       const snapshot = await this.settings.read({ source: 'workflow', scope: 'user' })
       if (!snapshot.ok) throw new WorkflowError('definition_source_failed', snapshot.error.message)
       const document = snapshot.value.document as unknown as WorkflowSettings
+      const next = { ...document, definitions: { ...document.definitions, [definition.name]: definition } }
+      if (Buffer.byteLength(JSON.stringify(next)) > payloadBytes) {
+        throw new WorkflowError('invalid_definition', 'User definitions exceed the 8 MiB frame payload')
+      }
       const saved = await this.settings.update({ source: 'workflow', scope: 'user',
         // The caller's revision is the document this write replaces; a
         // create has none, so the read above is the caller.
         expectedRevision: request.expectedRevision ?? snapshot.value.revision,
-        document: { ...document, definitions: { ...document.definitions, [definition.name]: definition } },
+        document: next,
       })
       if (!saved.ok) throw new WorkflowError(saved.error.code, saved.error.message)
     } else {

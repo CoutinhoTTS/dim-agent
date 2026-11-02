@@ -591,7 +591,7 @@ pub(super) fn view(listing: &Listing, available: &[ActionKind], cwd: &Path) -> M
                 id: id_of(entry),
                 label: entry.name.clone(),
                 detail: detail_lines(entry, cwd),
-                enabled: entry.enabled,
+                enabled: Some(entry.enabled),
                 states,
                 actions: kinds(entry)
                     .iter()

@@ -32,5 +32,5 @@ export const management = {
 }
 export type SaveRequest = z.infer<typeof management.save>
 export type RunRequest = z.infer<typeof toolRequest> & { caller: Caller }
-export type RunReply = { content: string; structured: JsonObject } | { code: string; message: string }
+export type RunReply = { content: string; structured?: JsonObject } | { code: string; message: string }
 export interface WorkflowRuns { call(request: RunRequest): Promise<RunReply> }
