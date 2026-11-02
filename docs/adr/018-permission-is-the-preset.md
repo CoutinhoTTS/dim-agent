@@ -38,8 +38,10 @@ on permission.
 
 ### D3. The two overrides are removed, and this type stops rejecting unknown keys
 
-`PermissionPolicy` loses `fileAccess` and `toolApproval`. Admission follows the preset and nothing
-else, and a record that does not name a preset takes the default.
+`PermissionPolicy` loses `fileAccess` and `toolApproval`. The preset is the policy of record: an
+override refined it for one client's panel and was never an authority of its own. Admission
+follows the preset, and a record that does not name one takes the default; a Session that ran
+under a stricter override runs by its preset from here on.
 
 The type also loses `deny_unknown_fields`. A record written before this decision carries the two
 keys, and strict parsing would refuse it; with the attribute gone the keys are unknown and are
@@ -49,24 +51,14 @@ misspelling in this type no longer fails to parse, so a typo in a policy reads a
 This is a breaking format decision, not a silent reinterpretation: client options, tests and
 ADR 017 in the current alpha still write the keys, and this decision stops reading their meaning.
 
-### D4. A stored limit that no longer exists is stated, not dropped
-
-Where a stored policy is read — Session configuration, `permission/changed`, a job's cap — the
-reader compares the ignored keys with what the preset implies. When the ignored value was
-stricter than the preset, the client says so and asks for a preset instead of starting the
-Session under wider authority.
-
-That comparison is the only place the old names appear, and it exists because
-[003](003-approval-scope.md) and [009](009-permission-decides.md) forbid widening authority
-without saying so. It produces a notice and a choice; it does not map a value back to a preset.
-
-### D5. Cap and containment compare presets and tool lists only
+### D4. Cap and containment compare presets and tool lists
 
 Scheduler's `cap`, `within` and `effective` and Workflow's launch cap keep their authority
 comparison, expressed in the presets they still have: the lower preset wins, allowed tools are the
-ones both sides allow, disallowed tools are the union. The dimension comparison — `fileRank`, the
-derived approval, and the `schedule_invalid` case for explicit Ask under a legacy read-only bound —
-disappears with the fields. `schedule_invalid` keeps its other validation of a job.
+ones both sides allow, disallowed tools are the union. The implementation drops the dimension
+comparison — `fileRank`, the derived approval, the schema properties, and the `schedule_invalid`
+case for explicit Ask under a legacy read-only bound. `schedule_invalid` keeps its other
+validation of a job.
 
 ## Consequences
 
@@ -77,11 +69,12 @@ disappears with the fields. `schedule_invalid` keeps its other validation of a j
   override as a user choice.
 - Clients stop rendering and writing the two overrides; a value they send under those names is
   ignored like any unknown field.
-- A Session whose stored policy named a stricter override is not started under the wider preset
-  without a notice (D4); once the user picks a preset, the record holds that preset alone.
+- A Session that ran under a stricter override admits by its preset. That follows from the preset
+  being the policy of record, and it is stated here rather than treated as a defect.
 - Policy parsing in this type no longer rejects unknown keys, which also removes typo detection
   there. Other types keep `deny_unknown_fields`.
-- The preset keeps its exact legacy meaning, so nothing about admission changes.
+- The preset keeps its exact legacy meaning. Admission changes only for a record that carried an
+  override disagreeing with its preset, which now admits by the preset.
 
 ## Non-goals
 
