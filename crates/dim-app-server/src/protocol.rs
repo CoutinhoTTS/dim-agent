@@ -242,6 +242,8 @@ pub const WEB_MANAGEMENT_METHODS: &[&str] = &[
     "permission.set_rules",
     "collaboration.model_policy",
     "collaboration.set_model_policy",
+    "modality.capabilities",
+    "modality.configure",
     "host.exec_shell.get",
     "host.exec_shell.update",
     "host.execution.backend",
