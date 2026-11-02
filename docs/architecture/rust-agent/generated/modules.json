@@ -25566,6 +25566,7 @@
         "path Rules",
         "path permission::add_rule",
         "path permission::describe",
+        "path permission::parse_rule_words",
         "path permission::remove_rule",
         "path permission::rule",
         "path permission::rules",
@@ -26298,14 +26299,8 @@
       "from": "dim_cli::permission_command",
       "to": "dim_agent_types::permission",
       "references": [
-        "path CommandMatch::Exact",
-        "path CommandMatch::Prefix",
-        "path CommandRuleDecision::Allow",
-        "path CommandRuleDecision::Deny",
         "path PermissionPreset",
         "path PermissionPreset::FullAccess",
-        "use dim_agent_types::CommandMatch",
-        "use dim_agent_types::CommandRuleDecision",
         "use dim_agent_types::PermissionPreset"
       ]
     },
@@ -26354,6 +26349,7 @@
         "path permission::describe",
         "path permission::name",
         "path permission::parse_preset",
+        "path permission::parse_rule_words",
         "path permission::read",
         "path permission::remove_rule",
         "path permission::rule",

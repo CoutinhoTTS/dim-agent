@@ -27,25 +27,11 @@ fn rule_id(rule: &CommandRule) -> String {
 
 /// The rule `id` names, checked as the line prompt's add checks one.
 fn parse_rule(id: &str) -> Result<CommandRule, Failure> {
-    let mut words = id.split_whitespace();
-    let (Some(decision), Some(matching)) = (words.next(), words.next()) else {
+    let words: Vec<&str> = id.split_whitespace().collect();
+    let Some((decision, matching, command)) = permission::parse_rule_words(&words) else {
         return Err(named_rule());
     };
-    let command: Vec<&str> = words.collect();
-    let decision = match decision {
-        "allow" => CommandRuleDecision::Allow,
-        "deny" => CommandRuleDecision::Deny,
-        _ => return Err(named_rule()),
-    };
-    let matching = match matching {
-        "exact" => CommandMatch::Exact,
-        "prefix" => CommandMatch::Prefix,
-        _ => return Err(named_rule()),
-    };
-    if command.is_empty() {
-        return Err(named_rule());
-    }
-    permission::rule(&command.join(" "), matching, decision)
+    permission::rule(&command, matching, decision)
         .map_err(|error| Failure::Refused(error.to_string()))
 }
 
@@ -178,7 +164,9 @@ pub(super) fn view(rules: &Rules, actions: &[ActionKind]) -> ManagementView {
         );
     }
     ManagementView {
-        revision: Some(rules.revision.clone()),
+        // Nothing in this area writes at the view's revision: the one write
+        // replaces the whole list, and a remove re-reads before it.
+        revision: None,
         // The owner's one write replaces the whole list; an area-level edit
         // would be a whole-list editor, which only the Web page is.
         document: None,

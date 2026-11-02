@@ -343,6 +343,31 @@ pub fn same_rule(one: &CommandRule, other: &CommandRule) -> bool {
             .eq(other.command.split_whitespace())
 }
 
+/// The decision, the match and the command of a rule written as
+/// `DECISION MATCH COMMAND`, or `None` when the words do not spell one.
+///
+/// [`decision_name`] and [`match_name`] write the words this reads, so a
+/// match kind or a decision is named once and parses here. The command is
+/// only spelled back: [`rule`] is what accepts or refuses it.
+pub fn parse_rule_words(words: &[&str]) -> Option<(CommandRuleDecision, CommandMatch, String)> {
+    let (decision, rest) = words.split_first()?;
+    let (matching, command) = rest.split_first()?;
+    let decision = match *decision {
+        "allow" => CommandRuleDecision::Allow,
+        "deny" => CommandRuleDecision::Deny,
+        _ => return None,
+    };
+    let matching = match *matching {
+        "exact" => CommandMatch::Exact,
+        "prefix" => CommandMatch::Prefix,
+        _ => return None,
+    };
+    if command.is_empty() {
+        return None;
+    }
+    Some((decision, matching, command.join(" ")))
+}
+
 /// The list with `rule` appended, or `None` when an equal rule exists.
 fn with_rule(rules: &[CommandRule], rule: &CommandRule) -> Option<Vec<CommandRule>> {
     let present = rules.iter().any(|existing| same_rule(existing, rule));
