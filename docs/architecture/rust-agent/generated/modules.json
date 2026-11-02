@@ -3098,7 +3098,8 @@
       "unexpandedMacros": [
         "format",
         "json",
-        "matches"
+        "matches",
+        "write"
       ]
     },
     {
@@ -3196,7 +3197,8 @@
       "parent": "dim_cli::model",
       "file": "crates/dim-cli/src/model/session.rs",
       "unexpandedMacros": [
-        "matches"
+        "matches",
+        "write"
       ]
     },
     {
@@ -25642,6 +25644,7 @@
         "path hooks::Failure::ReadFailed",
         "path hooks::apply",
         "path hooks::catalog",
+        "path hooks::state_line",
         "use crate::management::hooks"
       ]
     },

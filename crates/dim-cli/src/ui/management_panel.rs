@@ -83,7 +83,7 @@ pub const STRINGS: &[&str] = &[
     "Disabled {name}.",
     "Reloaded {area}: {entries} entries, {disabled} disabled.",
     "The user's own document; always in effect.",
-    "No .dimcode/hooks.json in this workspace.",
+    "There is no hooks file there.",
     "Owned by plugin {plugin}.",
     "The user document turns every hook off (disableAllHooks).",
     "The user document changed since it was read; nothing was written.",
@@ -200,15 +200,12 @@ impl ManagementPanel {
             }
             ManagementResult::Applied { note, read_error } => {
                 // The action was done, so its own line stands; what failed is
-                // the read, which the footer reports once, wrapped. No view
-                // is kept until the next read.
+                // the read, which the footer reports once, wrapped.
                 let name = entry_name(self.view.as_ref(), None, &reply.request.action);
-                self.view = None;
                 self.message = Some(Ok(note.clone().unwrap_or_else(|| {
                     management::applied_line(&reply.request.action, name.as_deref())
                 })));
-                self.read_error = Some(read_error.clone());
-                self.list.loading();
+                self.lost_view(read_error);
             }
             ManagementResult::Refused(ManagementRefusal::Refused(error)) => {
                 self.message = Some(Err(error.clone()));
@@ -219,12 +216,26 @@ impl ManagementPanel {
                 }
             }
             ManagementResult::Refused(ManagementRefusal::Conflict { message, view }) => {
-                // The owner wrote nothing; this is the document as it now is.
+                // The owner wrote nothing. A read that failed leaves no view,
+                // so the next read retries the area; the link to the stale
+                // revision is dropped on every conflict either way.
                 self.message = Some(Err(message.clone()));
-                self.set_view((**view).clone());
+                match view {
+                    Ok(view) => self.set_view((**view).clone()),
+                    Err(error) => self.lost_view(error),
+                }
             }
         }
         self.refresh_hint();
+    }
+
+    /// The area is not shown until the next read: the reply that could not
+    /// report it says why, and Ctrl+R reads again. The view goes, so nothing
+    /// stale is acted on.
+    fn lost_view(&mut self, error: &str) {
+        self.view = None;
+        self.read_error = Some(error.to_owned());
+        self.list.loading();
     }
 
     fn set_view(&mut self, view: ManagementView) {
@@ -409,14 +420,21 @@ impl ManagementPanel {
             return Effect::None;
         }
         if key.code == KeyCode::Char('r') && key.mods.contains(Modifiers::CTRL) {
-            // A panel with nothing to act on still retries its read.
-            if self.view.is_some() && !self.offers(ActionKind::Reload) {
-                return Effect::None;
-            }
+            // With a view the key is the area's reload, when it has one;
+            // with none it repeats the read that failed, without asking the
+            // owner to rescan anything.
+            let action = if self.view.is_some() {
+                if !self.offers(ActionKind::Reload) {
+                    return Effect::None;
+                }
+                ManagementAction::Reload
+            } else {
+                ManagementAction::List
+            };
             self.busy = true;
             return Effect::Management(ManagementRequest {
                 area: self.area,
-                action: ManagementAction::Reload,
+                action,
             });
         }
         // Ctrl holds the actions off the filter, which takes every plain
@@ -1114,8 +1132,8 @@ mod tests {
         );
     }
 
-    /// Reload belongs to the area: it works on an empty area and after a
-    /// failed read, where no entry is selected to offer it.
+    /// Reload belongs to the area: it works on an empty area where no entry
+    /// is selected to offer it, and after a failed read Ctrl+R reads again.
     #[test]
     fn reload_works_on_an_empty_area_and_after_a_failed_read() {
         let mut panel = ManagementPanel::new(Area::Skills);
@@ -1150,8 +1168,8 @@ mod tests {
         assert!(text.contains("This daemon cannot manage skills."), "{text}");
         assert!(text.contains("Ctrl+R reload"), "{text}");
         match panel.handle_key(ctrl('r')) {
-            Effect::Management(request) => assert_eq!(request.action, ManagementAction::Reload),
-            _ => panic!("expected a reload"),
+            Effect::Management(request) => assert_eq!(request.action, ManagementAction::List),
+            _ => panic!("expected a read"),
         }
     }
 
@@ -1169,12 +1187,12 @@ mod tests {
             },
             ManagementResult::Refused(ManagementRefusal::Conflict {
                 message: "The user document changed since it was read.".into(),
-                view: Box::new(ManagementView {
+                view: Ok(Box::new(ManagementView {
                     revision: Some("user:2".into()),
                     document: Some(serde_json::json!({"hooks": {}})),
                     actions: vec![ActionKind::Reload],
                     ..hooks_view()
-                }),
+                })),
             }),
         ));
         let text = shown(&panel, 72, 20).join(" ");
@@ -1213,7 +1231,7 @@ mod tests {
                 ManagementResult::Refused(ManagementRefusal::Conflict {
                     message: "The user document changed since it was read; nothing was written."
                         .into(),
-                    view: Box::new(hooks_view()),
+                    view: Ok(Box::new(hooks_view())),
                 }),
             ));
             panel.conflicted(Area::Hooks, creating, "/home/u/edit/hooks-1.json");

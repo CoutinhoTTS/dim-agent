@@ -279,7 +279,7 @@ pub async fn apply(
             Err(hooks::Failure::Conflict { message, catalog }) => {
                 ManagementResult::Refused(ManagementRefusal::Conflict {
                     message,
-                    view: Box::new(hooks::view(&catalog, &actions)),
+                    view: catalog.map(|catalog| Box::new(hooks::view(&catalog, &actions))),
                 })
             }
         },
@@ -299,7 +299,7 @@ pub async fn apply(
             Err(scheduler::Failure::Conflict { message, catalog }) => {
                 ManagementResult::Refused(ManagementRefusal::Conflict {
                     message,
-                    view: Box::new(scheduler::view(&catalog, &actions, cwd)),
+                    view: Ok(Box::new(scheduler::view(&catalog, &actions, cwd))),
                 })
             }
         },

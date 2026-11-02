@@ -9023,7 +9023,7 @@ mod tests {
         app.apply(save_reply(ManagementResult::Refused(
             ManagementRefusal::Conflict {
                 message: "The user document changed since it was read.".into(),
-                view: Box::new(view()),
+                view: Ok(Box::new(view())),
             },
         )));
         assert!(path.exists(), "the conflicted draft stays");
@@ -9205,7 +9205,7 @@ mod tests {
         fn conflict() -> ManagementResult {
             ManagementResult::Refused(ManagementRefusal::Conflict {
                 message: "The jobs changed since they were read.".into(),
-                view: Box::new(ManagementView::default()),
+                view: Ok(Box::new(ManagementView::default())),
             })
         }
         let root = tempfile::tempdir().unwrap();

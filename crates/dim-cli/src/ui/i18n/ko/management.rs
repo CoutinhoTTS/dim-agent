@@ -23,9 +23,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "No change." => "변경 사항이 없습니다.",
         "Your text is kept in {path}." => "작성한 내용은 {path}에 보관됩니다.",
         "The user's own document; always in effect." => "사용자 자신의 문서이며 항상 적용됩니다.",
-        "No .dimcode/hooks.json in this workspace." => {
-            "이 작업 공간에 .dimcode/hooks.json이 없습니다."
-        }
+        "There is no hooks file there." => "거기에 훅 파일이 없습니다.",
         "Owned by plugin {plugin}." => "플러그인 {plugin} 소유입니다.",
         "The user document turns every hook off (disableAllHooks)." => {
             "사용자 문서가 모든 훅을 끕니다(disableAllHooks)."
