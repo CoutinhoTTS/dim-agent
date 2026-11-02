@@ -1,5 +1,78 @@
-use dim_agent_capabilities::host::{ModelProtocol, reasoning_config};
+use dim_agent_capabilities::host::{ModelProtocol, adopted_preferences, reasoning_config};
 use dim_agent_types::*;
+
+/// The base configuration an adoption starts from: the model's declared
+/// configuration with the catalog's own defaults applied.
+///
+/// `docs/design/appserver/provider-management.md` §3.3 says omitted
+/// preferences "still start at catalog defaults", and
+/// `docs/design/model-configuration.md` says a cleared field carries "the
+/// value an explicit adoption of the same model with no preference for that
+/// field would carry". The declared reasoning effort and service tier are
+/// therefore part of that base, applied through the same mapping an explicit
+/// preference uses, so the adopted configuration, every read and every
+/// request agree on the value.
+///
+/// A declared default applies only when the model declares the control: the
+/// effort is one of the picker's `effortOptions` (or `none` beside a
+/// reasoning-off declaration), the tier is supported and listed, and the
+/// protocol can express the value. Otherwise the base comes back unchanged.
+/// Unlike an explicit preference, a default never makes an adoption fail.
+pub(super) fn catalog_defaults(
+    base: &ModelConfig,
+    snapshot: &ModelCapabilitySnapshot,
+    protocol: ModelProtocol,
+) -> ModelConfig {
+    let mut config = base.clone();
+    let adopted = adopted_preferences(&config, protocol);
+    if adopted
+        .as_ref()
+        .is_none_or(|adopted| adopted.reasoning_effort.is_none())
+        && let Some(effort) = declared_effort(snapshot)
+        && let Ok(applied) = reasoning_config(&config, snapshot, protocol, &effort)
+    {
+        config = applied;
+    }
+    if adopted
+        .as_ref()
+        .is_none_or(|adopted| adopted.service_tier.is_none())
+        && let Some(tier) = declared_service_tier(snapshot)
+    {
+        let preferences = ModelPreferences {
+            reasoning_effort: None,
+            service_tier: Some(tier),
+        };
+        if let Ok(applied) = configure(&preferences, snapshot, protocol, &config) {
+            config = applied;
+        }
+    }
+    config
+}
+
+/// The model's declared default effort, when the picker would offer it.
+fn declared_effort(snapshot: &ModelCapabilitySnapshot) -> Option<String> {
+    let reasoning = snapshot.reasoning.as_ref()?;
+    if !reasoning.supported || !snapshot.capabilities.reasoning {
+        return None;
+    }
+    let effort = reasoning.effort.as_ref()?;
+    let mut options = reasoning.effort_options.clone().unwrap_or_default();
+    if reasoning.off.is_some() && !options.iter().any(|option| option == "none") {
+        options.push("none".into());
+    }
+    options
+        .iter()
+        .any(|option| option == effort)
+        .then(|| effort.clone())
+}
+
+/// The model's declared default service tier, when its declaration lists it.
+fn declared_service_tier(snapshot: &ModelCapabilitySnapshot) -> Option<String> {
+    let tier = snapshot.service_tier.as_ref()?;
+    let default = tier.default.as_ref()?;
+    (tier.supported && !default.is_empty() && tier.options.contains(default))
+        .then(|| default.clone())
+}
 
 /// Applies preferences to a copy of `base`, validating them against the
 /// model's declared capabilities.
@@ -266,6 +339,166 @@ mod tests {
         let mut config = ModelConfig::default();
         restore_reasoning(&mut config, &declared, ModelProtocol::Anthropic);
         assert_eq!(config, ModelConfig::default());
+    }
+
+    fn declared_snapshot(
+        reasoning: Option<ModelReasoning>,
+        service_tier: Option<ModelServiceTier>,
+    ) -> ModelCapabilitySnapshot {
+        ModelCapabilitySnapshot {
+            target: ModelId {
+                provider_id: "provider".into(),
+                model_id: "model".into(),
+            },
+            capabilities: ModelCapabilities {
+                reasoning: reasoning.as_ref().is_some_and(|value| value.supported),
+                ..ModelCapabilities::with_limits(32_000, 4_096)
+            },
+            reasoning,
+            service_tier,
+        }
+    }
+
+    fn effort(effort: &str, options: &[&str], off: Option<ReasoningOff>) -> ModelReasoning {
+        ModelReasoning {
+            supported: true,
+            effort: Some(effort.into()),
+            effort_options: Some(options.iter().map(|option| option.to_string()).collect()),
+            off,
+            ..Default::default()
+        }
+    }
+
+    /// The catalog's declared default effort is part of the base an adoption
+    /// starts from, so every read and the request agree without a preference.
+    #[test]
+    fn a_declared_default_effort_starts_an_adoption() {
+        let snapshot = declared_snapshot(Some(effort("high", &["low", "high"], None)), None);
+        let config = catalog_defaults(&ModelConfig::default(), &snapshot, ModelProtocol::Anthropic);
+        assert_eq!(
+            config.reasoning.as_ref().unwrap().effort.as_deref(),
+            Some("high")
+        );
+    }
+
+    /// The picker's gate: a default outside the offered efforts is not a
+    /// value the model declares, so the base stays as it was.
+    #[test]
+    fn a_default_outside_the_offered_efforts_is_ignored() {
+        let snapshot = declared_snapshot(Some(effort("high", &["low"], None)), None);
+        assert_eq!(
+            catalog_defaults(&ModelConfig::default(), &snapshot, ModelProtocol::Anthropic),
+            ModelConfig::default()
+        );
+    }
+
+    /// `none` is a declared default only beside a reasoning-off declaration,
+    /// and the declaration this protocol cannot express keeps the base.
+    #[test]
+    fn a_declared_default_none_needs_an_expressible_off_declaration() {
+        let disabled = ReasoningOff::ThinkingType {
+            value: "disabled".into(),
+        };
+        let snapshot = declared_snapshot(Some(effort("none", &["low"], Some(disabled))), None);
+        let config = catalog_defaults(&ModelConfig::default(), &snapshot, ModelProtocol::Anthropic);
+        assert_eq!(
+            adopted_preferences(&config, ModelProtocol::Anthropic),
+            Some(ModelPreferences {
+                reasoning_effort: Some("none".into()),
+                service_tier: None,
+            })
+        );
+
+        let kwargs = ReasoningOff::ChatTemplateKwargs {
+            keys: vec!["thinking".into()],
+        };
+        let off = declared_snapshot(Some(effort("none", &["low"], Some(kwargs))), None);
+        assert_eq!(
+            catalog_defaults(&ModelConfig::default(), &off, ModelProtocol::Anthropic),
+            ModelConfig::default()
+        );
+    }
+
+    /// A protocol that cannot express an effort, and a model that does not
+    /// declare reasoning, adopt the base unchanged: a default never fails.
+    #[test]
+    fn a_default_the_protocol_cannot_express_is_ignored() {
+        let snapshot = declared_snapshot(Some(effort("high", &["low", "high"], None)), None);
+        assert_eq!(
+            catalog_defaults(&ModelConfig::default(), &snapshot, ModelProtocol::Bedrock),
+            ModelConfig::default()
+        );
+        let mut undeclared = snapshot.clone();
+        undeclared.capabilities.reasoning = false;
+        assert_eq!(
+            catalog_defaults(
+                &ModelConfig::default(),
+                &undeclared,
+                ModelProtocol::Anthropic
+            ),
+            ModelConfig::default()
+        );
+    }
+
+    /// A base that already carries an effort keeps it; only a base that
+    /// carries none starts at the declared default.
+    #[test]
+    fn an_adopted_effort_is_never_replaced_by_a_default() {
+        let base = ModelConfig {
+            reasoning: Some(ProviderReasoningConfig {
+                effort: Some("low".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let snapshot = declared_snapshot(Some(effort("high", &["low", "high"], None)), None);
+        assert_eq!(
+            catalog_defaults(&base, &snapshot, ModelProtocol::Anthropic),
+            base
+        );
+    }
+
+    /// The declared default service tier follows the same rule as an explicit
+    /// preference, and a tier the declaration does not list is ignored.
+    #[test]
+    fn a_declared_default_service_tier_is_applied() {
+        let tier = ModelServiceTier {
+            supported: true,
+            default: Some("priority".into()),
+            options: vec!["priority".into(), "default".into()],
+        };
+        let declared = declared_snapshot(None, Some(tier.clone()));
+        let config = catalog_defaults(
+            &ModelConfig::default(),
+            &declared,
+            ModelProtocol::OpenaiCompatible,
+        );
+        assert_eq!(
+            config
+                .provider_options
+                .as_ref()
+                .unwrap()
+                .openai_compatible
+                .as_ref()
+                .unwrap()
+                .service_tier
+                .as_deref(),
+            Some("priority")
+        );
+
+        let unlisted = ModelServiceTier {
+            default: Some("flex".into()),
+            ..tier
+        };
+        let declared = declared_snapshot(None, Some(unlisted));
+        assert_eq!(
+            catalog_defaults(
+                &ModelConfig::default(),
+                &declared,
+                ModelProtocol::OpenaiCompatible
+            ),
+            ModelConfig::default()
+        );
     }
 
     /// A clear reports the values the model declares, as a `--model-config`

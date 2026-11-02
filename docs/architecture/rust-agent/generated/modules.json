@@ -2368,7 +2368,8 @@
       "parent": "dim_app_server::provider::preferences",
       "file": "crates/dim-app-server/src/provider/preferences.rs",
       "unexpandedMacros": [
-        "assert_eq"
+        "assert_eq",
+        "vec"
       ]
     },
     {
@@ -21561,6 +21562,7 @@
       "references": [
         "mod preferences",
         "path preferences",
+        "path preferences::catalog_defaults",
         "path preferences::configure",
         "path preferences::restore_reasoning",
         "path preferences::restore_service_tier"
@@ -22092,8 +22094,10 @@
         "path ModelProtocol::OpenaiResponses",
         "path ModelProtocol::Xai",
         "path ModelProtocol::XaiResponses",
+        "path adopted_preferences",
         "path reasoning_config",
         "use dim_agent_capabilities::host::ModelProtocol",
+        "use dim_agent_capabilities::host::adopted_preferences",
         "use dim_agent_capabilities::host::reasoning_config"
       ]
     },
@@ -22134,19 +22138,35 @@
       "references": [
         "path AnthropicProviderOptions",
         "path CompatibleThinking",
+        "path ModelCapabilities",
+        "path ModelCapabilities::with_limits",
+        "path ModelCapabilitySnapshot",
         "path ModelConfig",
         "path ModelConfig::default",
+        "path ModelReasoning",
+        "path ModelServiceTier",
         "path OpenAiCompatibleProviderOptions",
         "path ProviderOptions",
         "path ProviderReasoningConfig",
+        "path ReasoningOff",
+        "path ReasoningOff::ChatTemplateKwargs",
+        "path ReasoningOff::ThinkingType",
         "path SummaryStyle::Auto",
         "path ThinkingType::Disabled"
       ]
     },
     {
       "from": "dim_app_server::provider::preferences::tests",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path ModelId"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::preferences::tests",
       "to": "dim_app_server::provider::preferences",
       "references": [
+        "path catalog_defaults",
         "path restore_reasoning",
         "path restore_service_tier"
       ]
