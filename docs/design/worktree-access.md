@@ -67,9 +67,9 @@ Resolved target
 第一次需要发现时，才读取原工作区的 Git 身份，并在本次 Session 装载期间保留。原工作区
 不是 Git 工作树时，不根据遇到的第一个外部仓库反向建立授权来源。
 
-仓库身份采用规范化后的公共 Git 目录，不采用 remote URL、仓库名或分支名。候选目录须为
-该仓库的有效工作树，并核对工作树根目录与 Git 元数据的实际关联。主工作树与 linked
-worktree 均可参与，bare 仓库没有可继承的工作目录；独立 clone 和其他仓库的 submodule
+仓库身份采用规范化后的公共 Git 目录，不采用 remote URL、仓库名或分支名。候选目录须位于
+该仓库的有效工作树内，由 Git 解析其根目录，并核对根目录与 Git 元数据的实际关联。
+主工作树与 linked worktree 均可参与，bare 仓库没有可继承的工作目录；独立 clone 和其他仓库的 submodule
 不因 URL、对象或历史相同而获得权限。一次发现只读取来源和候选目录自身需要的元数据。
 
 原工作区覆盖整个来源工作树时，目标 worktree 的根目录获得同等工作区范围。如果原工作区
@@ -81,15 +81,20 @@ worktree 均可参与，bare 仓库没有可继承的工作目录；独立 clone
 | `/repo/packages/a` | `/repo-wt/packages/a/src/x.rs` | `/repo-wt/packages/a` |
 | `/repo/packages/a` | `/repo-wt/packages/b/x.rs` | 无；保留原有审批 |
 
-实际目标及映射后的范围均遵循 [文件路径解析契约](../architecture/rust-agent/plugins/Permission.md#write-targets-without-the-facts)。
-比较路径组件；worktree 内指向范围外的符号链接不获得范围内权限。映射子树本身经符号
-链接落到目标 worktree 外时，也不自动授权。来源、候选或映射关系无法确认时不猜测范围。
+来源工作区、两个 worktree 根目录及实际目标遵循
+[文件路径解析契约](../architecture/rust-agent/plugins/Permission.md#write-targets-without-the-facts)。
+以规范化后的来源工作区相对于来源根目录的路径组件确定映射前缀，再将该前缀接到规范化后
+的目标根目录；不通过解析目标侧的符号链接改变这个前缀。实际目标相对于目标根目录的路径
+组件必须以该前缀开头。从目标根目录到映射子树的任一组件经符号链接重定向时，不发布该
+映射范围，即使重定向仍在同一 worktree 内。映射范围内的链接也不能把实际目标带到固定
+前缀外。来源、候选或映射关系无法确认时不猜测范围。
 
 ## 3. Session 内存与生命周期
 
 目录识别及其缓存属于 Session，所有分支共用一份；Permission 仍由每个调用分支按其已派发
-的当前策略决定。缓存保存仓库身份、worktree 根目录、可继承的规范目录及目录身份，
-不保存 `Allow`、权限预设或已经批准的工具调用。
+的当前策略决定。缓存保存仓库身份、worktree 根目录及其宿主目录身份、可继承的固定路径
+前缀；前缀可以尚不存在，目录身份检查针对已确认的根。不保存 `Allow`、权限预设或已经
+批准的工具调用。
 
 - 成功后按根目录覆盖子树。识别 `/repo-wt/src/a.rs` 后，同一可继承根下的 `tests/b.rs`
   不再查询 Git，也不再次写入同一使用关联。
@@ -199,7 +204,7 @@ exec cwd=/repo-wt        -> Known root     -> Existing command approval
 - **Existing mechanisms:** 只改变 cwd 不改变沙箱；关掉隔离或选择 Full access 会扩大其他
   权限，不能代表继承工作区权限。
 - **Needed:** 进程调用所有者在准备前按需确认显式 cwd；HostPlatform 消费宿主已确认的目录
-  范围，为新进程按当前文件访问规则构造相应边界，不接受模型直接指定额外授权根。
+  范围，为新进程按当前隔离边界规则构造相应边界，不接受模型直接指定额外授权根。
 - **Ordering impact:** 识别和审批在进程启动前完成；准备失败不启动进程，不重放启动副作用，
   已运行进程保持原边界。没有确认的目录不因命令文本、网络开关或普通 exec 批准而被挂载。
 - **Owner / issue:** WorkspaceTools、ShellSession、HostPlatform；[#911](https://github.com/arcships/dim/issues/911)。
@@ -243,6 +248,8 @@ Session/branch 门面、rutis 或 loader。CLI 与 Web 共用宿主判定，不�
    仍可给出不同决定；收紧为只读后不能继续写。
 3. 非 Git 目录、独立 clone、其他仓库 submodule、原工作区之外的映射子树、符号链接逃逸、
    不可验证的元数据均不扩大范围；新建文件和不存在的中间目录使用最近存在的父目录识别。
+   来源工作区为 `/repo/packages/a` 时，目标的 `packages/a` 或其祖先链接到同一 worktree
+   内的其他子树或根目录，也不发布映射范围；普通的 `/repo-wt/packages/a/new/x.rs` 仍可识别。
 4. Git 不可用、探测超时、取消、Session 关闭、持久保存失败均不发布半完成范围；失败后保留
    原有审批能力。根删除或替换后失效；同位置新建合法 worktree 可再次按需确认。
 5. native store 重启保留使用关联，但恢复后的首次访问重新核验；fork 没有继承的确认或关联。
