@@ -288,8 +288,6 @@ struct Pass<'a> {
     /// The index in the view's history where `history` starts.
     offset: usize,
     cuts: &'a [CompactionCut],
-    /// The order `cuts` were chosen from: it carries every cut position.
-    order: &'a PolicyOrder,
 }
 
 impl Pass<'_> {
@@ -315,7 +313,7 @@ impl Pass<'_> {
             return Err("Compaction cut lies inside the retained tail.");
         }
         let pinned = pinned_inputs(self.view, Some(window), self.turn, &retain_from, self.model);
-        let digest = digest_entries(self.view, window, self.order, self.model);
+        let digest = digest_entries(self.view, window, self.model);
         let message = digest
             .as_ref()
             .map(|digest| digest_message(&digest.entries, digest.dropped));
@@ -806,7 +804,6 @@ impl ContextPolicy {
                     history: &view.history,
                     offset: 0,
                     cuts: &cuts,
-                    order: &policy_order,
                 },
                 first_input,
                 &cancel,
@@ -842,7 +839,6 @@ impl ContextPolicy {
                                     history: &redo.history,
                                     offset: composed.kept,
                                     cuts: &redo.cuts,
-                                    order: &policy_order,
                                 },
                                 input(
                                     redo.history.clone(),
@@ -1396,7 +1392,6 @@ fn group_pins(messages: &[Message], ids: Option<&[String]>) -> Vec<Pin> {
 fn digest_entries(
     view: &View,
     window: &PolicyWindow,
-    order: &PolicyOrder,
     model: &dyn ContextModel,
 ) -> Option<DigestEntries> {
     // The compaction in effect is the latest completed record of the view,
@@ -1432,26 +1427,22 @@ fn digest_entries(
             }
             None => (Vec::new(), false),
         };
-        // A full context places every event, tool results included. A
-        // streamed one carries the policy anchors and the cut positions, so
-        // the step's own order places the cut; a tool result neither order
-        // places counts as after it.
-        let events: &[PolicyOrderEvent] = match view.context.full() {
-            Some(_) => &view.context.order,
-            None => &order.events,
-        };
-        let cut_index = events.iter().position(|event| event.id == window.cut);
-        for event in &window.tool_results {
-            let after_cut = cut_index.map_or(event.sequence > window.cut_sequence, |cut| {
-                events
-                    .iter()
-                    .position(|ordered| ordered.id == event.id)
-                    .is_none_or(|index| index >= cut)
+        // The window places the cut and every tool result by chain position: it
+        // merges ancestor and current-branch results, so raw sequences do not
+        // order them. A result at or after the cut is not part of it.
+        let rank = |branch: &str| view.context.branches.iter().position(|name| name == branch);
+        let cut = window
+            .cut_position
+            .as_ref()
+            .map(|cut| (rank(&cut.branch_id), cut.sequence));
+        for result in &window.tool_results {
+            let after_cut = cut.is_none_or(|cut| {
+                (rank(&result.position.branch_id), result.position.sequence) >= cut
             });
             if after_cut {
                 continue;
             }
-            let EventKind::ToolResult(data) = &event.kind else {
+            let EventKind::ToolResult(data) = &result.event.kind else {
                 continue;
             };
             for result in &data.results {

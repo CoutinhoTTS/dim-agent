@@ -1027,7 +1027,6 @@ impl Timeline {
             .policy_window(&self.0.key, through, turn_id, cut)
             .await?;
         let current = std::mem::take(&mut window.tool_results);
-        let mut cut_sequence = window.cut_sequence;
         for (branch, segment_through) in &self.0.ancestors {
             if *segment_through == 0 {
                 continue;
@@ -1041,8 +1040,8 @@ impl Timeline {
                 .store
                 .policy_window(&key, *segment_through, turn_id, cut)
                 .await?;
-            if cut_sequence == 0 {
-                cut_sequence = ancestor.cut_sequence;
+            if window.cut_position.is_none() {
+                window.cut_position = ancestor.cut_position;
             }
             if !window.events.iter().any(|event| event.id == cut) {
                 window.events.extend(
@@ -1053,18 +1052,25 @@ impl Timeline {
                         .cloned(),
                 );
             }
-            for event in ancestor.tool_results {
-                if !window.tool_results.iter().any(|seen| seen.id == event.id) {
-                    window.tool_results.push(event);
+            for result in ancestor.tool_results {
+                if !window
+                    .tool_results
+                    .iter()
+                    .any(|seen| seen.event.id == result.event.id)
+                {
+                    window.tool_results.push(result);
                 }
             }
         }
-        for event in current {
-            if !window.tool_results.iter().any(|seen| seen.id == event.id) {
-                window.tool_results.push(event);
+        for result in current {
+            if !window
+                .tool_results
+                .iter()
+                .any(|seen| seen.event.id == result.event.id)
+            {
+                window.tool_results.push(result);
             }
         }
-        window.cut_sequence = cut_sequence;
         Ok(window)
     }
     /// The latest interpreter-compatible checkpoint at `through`, if one is

@@ -3325,20 +3325,30 @@ impl TimelineStore for SqliteTimelineStore {
                 .filter(|event| event.sequence <= through)
             {
                 if is_tool_result(&event) {
-                    tool_results.push(event.clone());
+                    tool_results.push(PolicyEvent {
+                        position: TimelinePosition {
+                            branch_id: branch.clone(),
+                            sequence: event.sequence,
+                        },
+                        event: event.clone(),
+                    });
                 }
                 if event.id == cut || is_window_event(&event) {
                     events.push(event);
                 }
             }
-            let cut_sequence = events
-                .iter()
-                .find(|event| event.id == cut)
-                .map_or(0, |event| event.sequence);
+            let cut_position =
+                events
+                    .iter()
+                    .find(|event| event.id == cut)
+                    .map(|event| TimelinePosition {
+                        branch_id: branch.clone(),
+                        sequence: event.sequence,
+                    });
             Ok(PolicyWindow {
                 through,
                 cut: cut.to_owned(),
-                cut_sequence,
+                cut_position,
                 events,
                 tool_results,
             })

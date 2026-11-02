@@ -54,9 +54,13 @@ impl PolicyFacts {
 pub struct PolicyWindow {
     pub through: u64,
     pub cut: String,
-    pub cut_sequence: u64,
+    /// The cut's own chain position, when the window read found its row.
+    pub cut_position: Option<TimelinePosition>,
     pub events: Vec<Arc<AgentEvent>>,
-    pub tool_results: Vec<Arc<AgentEvent>>,
+    /// The `step/tool-result` events from the previous cut on, each with the
+    /// branch and sequence that place it before or after the new cut: a
+    /// window merges ancestor and current-branch results.
+    pub tool_results: Vec<PolicyEvent>,
 }
 
 /// The event ids and turn starts a compaction needs to enumerate legal cuts,
@@ -536,15 +540,22 @@ pub trait TimelineStore: Send + Sync + 'static {
             });
             let mut events = Vec::new();
             let mut tool_results = Vec::new();
-            let mut cut_sequence = 0u64;
+            let mut cut_position = None;
             for record in records {
+                let position = TimelinePosition {
+                    branch_id: key.branch_id.clone(),
+                    sequence: record.event.sequence,
+                };
                 if matches!(&record.event.kind, EventKind::ToolResult(_))
                     && previous_sequence.is_none_or(|cut| record.event.sequence >= cut)
                 {
-                    tool_results.push(record.event.clone());
+                    tool_results.push(PolicyEvent {
+                        position: position.clone(),
+                        event: record.event.clone(),
+                    });
                 }
                 if record.event.id == cut {
-                    cut_sequence = record.event.sequence;
+                    cut_position = Some(position);
                 }
                 if record.event.id == cut || window_event(&record.event) {
                     events.push(record.event);
@@ -553,7 +564,7 @@ pub trait TimelineStore: Send + Sync + 'static {
             Ok(PolicyWindow {
                 through,
                 cut: cut.to_owned(),
-                cut_sequence,
+                cut_position,
                 events,
                 tool_results,
             })
