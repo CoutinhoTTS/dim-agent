@@ -9,7 +9,7 @@ SessionStore 为每个 Session 保存一个标题和一个按 Session 计数的�
 - **数据。** 一个修订号计数（0 表示从未写过），以及无标题或标题 `{text, source}`，`source` 为 `auto` 或 `manual`。清除时保留计数，所以修订号不会重复。
 - **写入。** `setTitle {sessionId, expectedRevision, title | null}` 提交修订号 `expectedRevision + 1`，或者失败为 `conflict`、`not_found`、`storage`。调用即交接：除非 SessionStore 正在关闭，它在收到调用时接纳写入，并由自己了结；放弃调用只会丢掉回复。
 - **通知。** 每次提交后发出 `{source: "SessionStore", kind: "title", data: {title, titleSource, titleRevision}}`，按提交顺序。
-- **列表。** 协议 v3 的 `session.list` 与 `session.summaries` 条目带 `title`、`titleSource`、`titleRevision`。
+- **列表。** 协议 v3 的 `session.summaries` 条目带 `title`、`titleSource`、`titleRevision`。
 - **绑定。** 进程服务 `sessionMetadata`（`read`、`setTitle`）由 SessionStore 提供，经既有服务目录到达 TypeScript，与 `sessions`、`settings` 相同。
 - **生命周期。** 删除在 S5c 的删除事务里移除标题；分叉不复制标题（SessionTitle A7）；重启后标题保留。读写标题从不装载 Session。
 - **格式。** 原生存储 v16：新增一张表，从 v15 原地升级；v13 经由 v15 的那一步升级。
@@ -31,7 +31,7 @@ SessionStore 为每个 Session 保存一个标题和一个按 Session 计数的�
                                               |                                        ^
  Session 频道 session/<id>  <-----------------+  Notice {SessionStore, title, data}     |
    |                                                                                   |
-   v                                    Rpc：session.list / session.summaries ---------+
+   v                                    Rpc：session.summaries ------------------------+
  Rpc 订阅（v3）                           SessionStore 的目录查询联结标题行
    -> session.notice {sessionId, source, kind, data}
 ```
@@ -40,7 +40,7 @@ SessionStore 为每个 Session 保存一个标题和一个按 Session 计数的�
 | --- | --- | --- |
 | SessionStore（[timeline.rs](../../../../crates/dim-app-server/src/storage/timeline.rs)、[metadata.rs](../../../../crates/dim-app-server/src/storage/metadata.rs)） | 进程 | `metadata` 与 `set_title`、标题写入者、`sessionMetadata` 服务；删除和创建回滚移除标题行；目录查询读取它 |
 | SqliteStorage（[sqlite.rs](../../../../crates/dim-app-server/src/storage/sqlite.rs)） | 进程 | v16 结构及其升级步骤 |
-| Rpc（[protocol.rs](../../../../crates/dim-app-server/src/protocol.rs)、[connection.rs](../../../../crates/dim-app-server/src/connection.rs)）与 Agents 的目录读取（[agents.rs](../../../../crates/dim-app-server/src/agents.rs)） | 进程 | v3 列表字段 |
+| Rpc（[protocol.rs](../../../../crates/dim-app-server/src/protocol.rs)、[connection.rs](../../../../crates/dim-app-server/src/connection.rs)） | 进程 | v3 列表字段 |
 | 服务目录（[lib.rs](../../../../crates/dim-app-server/src/lib.rs)） | 进程 | `register_shared("sessionMetadata")`，一行，与 S2 为 `sessions` 所做的相同 |
 | Session 广播、Rpc 通知转发 | Session、进程 | 不变（C6） |
 
@@ -136,7 +136,7 @@ Rust 使用方用 `ctx.get::<SessionStore>()` 取得 `SessionStore`，调用 `me
 
 ## 8. Session 列表
 
-协议 v3 的 `session.list` 与 `session.summaries` 条目增加三个字段：
+协议 v3 的 `session.summaries` 条目增加三个字段：
 
 | 字段 | 值 |
 | --- | --- |
@@ -145,13 +145,13 @@ Rust 使用方用 `ctx.get::<SessionStore>()` 取得 `SessionStore`，调用 `me
 | `titleRevision` | 读取条目时的修订号；从未写过时为 0 |
 
 - SessionStore 的目录查询在同一次 SQL 读取里联结标题行，列表不会按 Session 逐个读取。没有原生存储的守护进程没有标题，它的 v3 条目显示 `null`、`null`、`0`。
-- v1 与 v2 的条目不带这些字段。它们的回复形状已冻结，也从不收到标题通知（[C6 D5](session-notices.md#10-决定)）。
+- v1 与 v2 客户端没有 Session 列表，也从不收到标题通知（[C6 D5](session-notices.md#10-决定)）。
 - **为什么列表带修订号。** 列表可能在一次提交之前读取，却在同一连接上晚于这次提交的通知到达客户端。客户端保留 `titleRevision` 较高的那个。C6 依赖这一点："由所有者的修订号去重"（[C6 §5](session-notices.md#5-rpc-转发)）。
 - 客户端在附加之后读取列表；之后的每次变更都以通知到达（C6 §5）。
 
 Rpc 从不调用 `setTitle`，也不新增方法。各错误到达客户端的方式：
 
-| SessionStore | `session.list` / `session.summaries` | `session.rename`（[SessionTitle A.1](../plugins/SessionTitle.md#a1-sessionrename)） |
+| SessionStore | `session.summaries` | `session.rename`（[SessionTitle A.1](../plugins/SessionTitle.md#a1-sessionrename)） |
 | --- | --- | --- |
 | `storage` | 目录读取照旧失败 | `storage_failed` |
 | `not_found` | 该 Session 不在列表中 | `session_not_found` |
@@ -273,7 +273,7 @@ CREATE TABLE session_metadata (session_id TEXT NOT NULL PRIMARY KEY REFERENCES a
 4. 读写从未创建或已删除的 Session：`not_found`。
 5. 事务失败（一次性库上的失败触发器）：`storage`，没有通知，状态不变；之后按同一修订号写入能提交。
 6. 调用方等待回复后又放弃它，而写入停在事务之前：该 `setTitle` 仍然提交，并且恰好宣布一次（交接，§6）。
-7. v3 的 `session.list` 与 `session.summaries` 带 `title`、`titleSource`、`titleRevision`；v2 的列表不带。
+7. v3 的 `session.summaries` 带 `title`、`titleSource`、`titleRevision`；v2 没有 Session 列表。
 8. 标题在重启后保留，Session 未装载时也能读写；分叉从无标题、修订号 0 开始；删除移除该行。
 9. 空库建为 v16。一次性的 v15 与 v13 库原地升级为精确的 v16 结构，所有业务行不变，并报告一次升级；标记不符的 v16 结构、升级到一半的库与更旧的结构被拒绝并保留。
 10. 在 Node 中运行的 TypeScript Session 部分注入 `sessionMetadata`，读写标题，附加的客户端收到通知（`node_` 测试，由 CI 的 Node 步骤运行）。
@@ -292,7 +292,7 @@ CREATE TABLE session_metadata (session_id TEXT NOT NULL PRIMARY KEY REFERENCES a
 | D4 | 一个进程级的标题写入者；`notify` 在它之内、提交之后运行 | 按 Session 加锁；在数据库锁内 `notify`；只依赖修订号 | 标题写得很少，一个写入者没有代价。监听方代码从不在数据库锁内运行。只依赖修订号会让客户端看到乱序的通知 |
 | D5 | 通知 `data` 为 `{title, titleSource, titleRevision}` | A.2 的 `{sessionId, title, titleSource, revision}` | 频道已经代表 Session（C6 D4）；列表条目和通知用同一组字段，客户端合并时无需映射 |
 | D6 | v3 列表条目带 `titleRevision` | 只带 `title` 与 `titleSource` | 没有它，客户端无法给列表回复和通知排序（§8） |
-| D7 | 列表字段只用于协议 v3 | 所有协议版本 | v1 与 v2 已冻结，也收不到标题通知 |
+| D7 | 列表字段只用于协议 v3 | 所有协议版本 | v1 与 v2 没有 Session 列表，也收不到标题通知 |
 | D8 | 服务 `sessionMetadata`，方法 `read` 与 `setTitle`；Rust 保留 `metadata` 与 `set_title` | A.2 的方法名 `metadata` | `sessionMetadata.metadata` 重复；`read` 与 `settings.read` 一致 |
 | D9 | 错误 `conflict`、`not_found`、`storage` 作为数据；格式错误的调用是桥接错误 | 像 `sessions` 那样的 `rejected` 代码 | 三个代码是写入的结果；格式错误是编程错误，与 `settings` 相同 |
 | D10 | 存储里没有的 Session 返回 `not_found` | `session_closed` | 维护者的决定；这是 SessionStore 的用语，SessionTitle 把它映射为 `session_not_found` |

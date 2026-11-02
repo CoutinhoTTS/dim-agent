@@ -460,7 +460,7 @@ async fn assert_launched(client: &mut Client, agent: &Agent, reply: &Value, expe
             policy: policy(expected),
         }
     );
-    let listed = client.rpc("session.list", json!({})).await;
+    let listed = client.rpc("session.summaries", json!({})).await;
     assert!(
         listed["result"]
             .as_array()

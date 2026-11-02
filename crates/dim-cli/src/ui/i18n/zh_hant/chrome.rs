@@ -286,7 +286,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "configure tool approvals" => "設定工具核准",
         "choose ask or full access" => "選擇詢問或完整存取",
         "open settings" => "開啟設定",
-        "suspend to the shell" => "暫停到 Shell",
         "exit" => "離開",
 
         // composer/palette.rs
@@ -358,7 +357,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "No matching models." => "沒有相符的模型。",
         "current" => "目前",
         "Edit models" => "編輯模型",
-        "Editing models is not available yet" => "尚不支援編輯模型",
         "{provider}: 1 model unavailable · dimcode models {id}" => {
             "{provider}：1 個模型無法使用 · dimcode models {id}"
         }

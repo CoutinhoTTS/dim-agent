@@ -78,7 +78,7 @@ flowchart LR
   META -->|"标题通知"| SB
   ST -->|"使用时读取"| Settings
   Rpc -->|"session.rename 经 Session 分派"| ST
-  Rpc -->|"session.list 读取标题字段"| META
+  Rpc -->|"session.summaries 读取标题字段"| META
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
@@ -203,7 +203,7 @@ revision 检查就是复检：手动标题总是胜出。
 | --- | --- | --- |
 | `session.rename {sessionId, title \| null}` | `sessionMethods` 命名空间 `session.rename` | 设置或清除手动标题 |
 | `session-title` 来源：`enabled`、`maxLength`、`model` | 业务配置（Settings 来源） | 关闭生成；标题长度；生成标题用的模型（未设置：Session 的模型） |
-| v3 `session.list`/`session.summaries` 中的 `title`、`titleSource`、`titleRevision` | 从 SessionStore 读取的 Rpc 协议字段（[S5b §8](../appserver/session-title-metadata.md#8-session-列表)） | 展示；修订号用于给列表和通知排序 |
+| v3 `session.summaries` 中的 `title`、`titleSource`、`titleRevision` | 从 SessionStore 读取的 Rpc 协议字段（[S5b §8](../appserver/session-title-metadata.md#8-session-列表)） | 展示；修订号用于给列表和通知排序 |
 | 标题通知，`data: {title, titleSource, titleRevision}` | SessionStore 发出的 Session 广播通知（C6 记录，§9；[S5b §7](../appserver/session-title-metadata.md#7-标题通知)） | 已订阅的客户端实时更新标题 |
 
 ## 7. 安全
@@ -240,9 +240,9 @@ SessionTitle 使用这些已交付合同。
 | 项目 | 内容 |
 | --- | --- |
 | 被哪条规则挡住 | 原则 §4 第 9 条和第 4 条：SessionStore 标题这样的进程级状态不能进 Timeline，但客户端需要实时看到标题变更；已交付的 C6 `Notice` 记录承载这些提交后的变更（[session_broadcast.rs](../../../../crates/dim-agent-capabilities/src/session_broadcast.rs)）。 |
-| 考虑过的现有机制 | `session/titled` Timeline 事件（把进程状态放进 Timeline；总体设计 §7 已否决）；客户端轮询 `session.list`（不能实时更新）；标题专用频道（业务专用端口，违反第 8 条）。 |
+| 考虑过的现有机制 | `session/titled` Timeline 事件（把进程状态放进 Timeline；总体设计 §7 已否决）；客户端轮询 `session.summaries`（不能实时更新）；标题专用频道（业务专用端口，违反第 8 条）。 |
 | 需要的通用能力 | Session 广播频道上的通知记录 `{source, kind, data}`，由该 Session 进程级状态的所有者在变更提交后发出；不带业务含义。标题通知就是这条记录，`source: "SessionStore"`、`kind: "title"`、`data: {title, titleSource, titleRevision}`（[S5b §7](../appserver/session-title-metadata.md#7-标题通知)）。Rpc 把这条记录原样转发为 `session.notice`，并加上频道的 `sessionId`（[C6 D4](../appserver/session-notices.md#10-决定)），所以 `data` 不重复它。 |
-| 对序号、批次、中断、重载的影响 | 没有序号，不属于批次；不重放：重新订阅的客户端通过所有者的查询（`session.list`）读取当前状态；不受中断影响；发出方重载只会让通知停止。 |
+| 对序号、批次、中断、重载的影响 | 没有序号，不属于批次；不重放：重新订阅的客户端通过所有者的查询（`session.summaries`）读取当前状态；不受中断影响；发出方重载只会让通知停止。 |
 | 由谁实现，对应 issue | 运行时 C6 [#49](https://github.com/arcships/dim/issues/49)，在 [#85](https://github.com/arcships/dim/pull/85) 实现：记录、`session_broadcast::notify` 和 Rpc 的 `session.notice`（[Session 广播通知](../appserver/session-notices.md)）。SessionStore 发出标题通知（[S5b](../appserver/session-title-metadata.md)，即[总体设计附录 B.2](../overview.md#b2-app-server-进程插件) 中的补充）。 |
 
 **#4：无。** 观察沿用 Session 服务和 Session 通道；历史、Settings、`sessionMetadata` 和辅助模型均为进程服务。SessionTitle 不注入分支服务。
@@ -335,7 +335,7 @@ Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`�
 
 ## 附录 D. 验收
 
-经配置的可选 C4 行、`session.create`/`session.submit`、`session.rename`、`session.list`、
+经配置的可选 C4 行、`session.create`/`session.submit`、`session.rename`、`session.summaries`、
 `settings.read/update` 与伪造辅助模型的流程测试：
 
 1. 用既有模型夹具保持 main turn 未结束。交互式 leader Session 的第一条 `session.submit` 在采用后启动生成，并在该受控 turn 仍运行时产生 `auto` 标题；请求只含系统文本和该输入文本，一条通知到达订阅客户端。标题完成早于 turn 结束不是生产时序保证。
@@ -366,7 +366,7 @@ A1–A12 是首版实现采用的策略。
 | A8 | 不含文本的第一条用户输入不产生自动标题 | 决定：标题取自第一条用户输入 | 使用后续输入或占位符 |
 | A9 | 生成等待输入被采用（`input/applied`）；被删除的输入从不产生标题 | 维护者决定 | 被删除的文本可能发给辅助模型 |
 | A10 | “用户输入”指操作者输入：在交互式 leader Session 中，即带 `user` 内容的输入，因为 Collaboration、Goal 和 ShellInput 只写 raw 块（Scheduler 与 Workflow 的输入带 `user` 内容，但运行在非交互 Session 中，SessionTitle 不为其命名） | 判断 | 来源写入的输入可能为 Session 命名 |
-| A11 | SessionStore 用 Session 广播通知宣布标题变更；未订阅的客户端在下一次 `session.list` 时看到变更 | 原则 §4 第 9 条 | 客户端轮询 `session.list` |
+| A11 | SessionStore 用 Session 广播通知宣布标题变更；未订阅的客户端在下一次 `session.summaries` 时看到变更 | 原则 §4 第 9 条 | 客户端轮询 `session.summaries` |
 | A12 | 仅用户作用域文件 session-title.json，不合并项目来源；原生 Settings 记录 user/session-title | 既有 S8b 原行来源机制，A.3 | 不同来源/作用域须明确确认 |
 
 ## 附录 F. 待对齐问题

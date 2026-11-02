@@ -5,6 +5,11 @@ and [context_policy.rs](../../../../crates/dim-agent-capabilities/src/context_po
 Prepares a fixed-source model request, enforces context policy and provides the
 atomic ConfigurationPublisher used by Prompt.
 
+An estimate above the input budget triggers compaction within preparation, before
+publishing a model call, under [ContextCompaction §5.3](../../../design/plugins/ContextCompaction.md#53-one-compaction-path-contextpolicy).
+Successful local budget recovery publishes no failed model result. A recovery that
+cannot fit the request fails terminally without requesting another recovery.
+
 ## Dependencies
 
 | Service | Purpose |

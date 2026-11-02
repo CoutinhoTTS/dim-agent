@@ -29,7 +29,7 @@ async fn catalog_pages_and_searches_a_large_dormant_store_without_reading_histor
         if index < 300 {
             let event = json!({"encoding":"event","record":{"event":{"id":format!("input-{index}"),"sequence":1,"create_at":1000+index,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":format!("preview {index}")}]}}},"refs":null,"trace":null,"batch_end":1}});
             tx.execute(
-                "INSERT INTO timeline_events VALUES (?1,'main',1,1,'input/message',?2,?3)",
+                "INSERT INTO timeline_events VALUES (?1,'main',1,1,'input/message',?2,?3,0,0)",
                 params![id, event.to_string(), format!("input-{index}")],
             )
             .unwrap();
@@ -397,18 +397,6 @@ async fn catalog_reports_creation_origins_and_filters_the_hidden_classes() {
     assert_eq!(found(&child)["origin"], "internal");
     assert_eq!(found(&acp)["origin"], "acp");
     assert_eq!(found(&conversation)["origin"], "client");
-
-    let mut older = Client::new_version(&server, false, 2).await;
-    assert_ok(&older.rpc("session.create", create(json!([]))).await);
-    let listed = older.rpc("session.list", json!({})).await;
-    assert_ok(&listed);
-    let rows = listed["result"].as_array().unwrap();
-    assert!(!rows.is_empty(), "{listed}");
-    assert!(
-        rows.iter()
-            .all(|row| row.get("origin").is_none() && row.get("parentSessionId").is_none()),
-        "{listed}"
-    );
 
     let cursor = client
         .rpc("session.catalog", json!({"limit":1,"withAcpSessions":true}))

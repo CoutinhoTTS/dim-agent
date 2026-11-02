@@ -71,6 +71,10 @@ pub(crate) struct PolicyContext {
     compaction: Option<ContextCompactionData>,
     order: Vec<PolicyOrderEvent>,
     full: Option<ContextHistory>,
+    /// Root first: how positions compare across branches.
+    branches: Vec<String>,
+    /// The position of the in-effect cut, when the stream resolved it.
+    compaction_cut: Option<TimelinePosition>,
 }
 
 impl PolicyContext {
@@ -93,13 +97,22 @@ impl PolicyContext {
                     EventKind::ContextCompactionStart(data) => Some(data.through),
                     _ => None,
                 },
+                boundary: index + 1 == context.events.len(),
             })
             .collect();
+        let mut branches: Vec<String> = Vec::new();
+        for position in &context.positions {
+            if !branches.contains(&position.branch_id) {
+                branches.push(position.branch_id.clone());
+            }
+        }
         Self {
             configuration,
             compaction,
             order,
             full: Some(context),
+            branches,
+            compaction_cut: None,
         }
     }
 
@@ -116,6 +129,8 @@ impl PolicyContext {
             compaction,
             order: streamed.order.clone(),
             full: None,
+            branches: streamed.branches.clone(),
+            compaction_cut: streamed.compaction_cut.clone(),
         }
     }
 
@@ -144,19 +159,31 @@ impl PolicyContext {
     }
 
     pub fn retained_entry(&self, history: &[HistoryEntry], cut: &str) -> Result<usize, String> {
-        let cut = self
+        if let Some(index) = history.iter().position(|entry| entry.event_id == cut) {
+            return Ok(index);
+        }
+        let rank = |branch: &str| self.branches.iter().position(|name| name == branch);
+        if let Some(position) = &self.compaction_cut
+            && self.compaction.as_ref().is_some_and(|data| {
+                matches!(&data.outcome,
+                    ContextCompactionResult::Completed { retain_from, .. } if retain_from == cut)
+            })
+        {
+            let at = (rank(&position.branch_id), position.sequence);
+            return Ok(history
+                .iter()
+                .position(|entry| (rank(&entry.position.branch_id), entry.position.sequence) >= at)
+                .unwrap_or(history.len()));
+        }
+        let event = self
             .order
             .iter()
-            .position(|event| event.id == cut)
+            .find(|event| event.id == cut)
             .ok_or_else(|| format!("Compaction cut {cut} is outside the policy order"))?;
+        let at = (rank(&event.branch_id), event.sequence);
         Ok(history
             .iter()
-            .position(|entry| {
-                self.order
-                    .iter()
-                    .position(|event| event.id == entry.source)
-                    .is_some_and(|index| index >= cut)
-            })
+            .position(|entry| (rank(&entry.position.branch_id), entry.position.sequence) >= at)
             .unwrap_or(history.len()))
     }
 
@@ -402,7 +429,7 @@ impl ContextPolicy {
                 request.clone(),
             ),
         };
-        let mut events = facts.events.clone();
+        let mut events = facts.arcs();
         events.extend(reusable);
         Ok(View {
             request,
@@ -489,7 +516,17 @@ impl ContextPolicy {
             .policy_order(source.through)
             .await
             .map_err(|error| HostError::failed(error.to_string()))?;
-        if source.recovery.is_none()
+        let provider_budget = source.recovery.clone().or_else(|| {
+            (estimate.input > input_budget(model.as_ref())).then(|| ProviderOutputBudgetFacts {
+                input_tokens: estimate.input,
+                context_window: model.context_window(),
+                requested_max_tokens: model.output_tokens(),
+                allowed_max_tokens: (model.context_window() - estimate.input).max(0.),
+                ratio: 1.,
+            })
+        });
+        let recovery = provider_budget.is_some();
+        if !recovery
             && (estimate.input < model.threshold_tokens()
                 || !regrown(&view, &policy_order, model.as_ref()))
         {
@@ -500,11 +537,12 @@ impl ContextPolicy {
             request_id: Some(source.request_id.clone()),
             command: None,
             through: source.through,
-            trigger: match source.recovery {
-                Some(_) => CompactionTrigger::ProviderOutputBudgetExhausted,
-                None => CompactionTrigger::Threshold,
+            trigger: if recovery {
+                CompactionTrigger::ProviderOutputBudgetExhausted
+            } else {
+                CompactionTrigger::Threshold
             },
-            provider_budget: source.recovery.clone(),
+            provider_budget,
         };
         let compacted = self
             .compact_step(
@@ -524,27 +562,20 @@ impl ContextPolicy {
             (_, Some(request)) => {
                 let request = request?;
                 let input = model.count_tokens(&request);
-                if source.recovery.is_some() && input > input_budget(model.as_ref()) {
-                    return Err(recovery_overflow(
-                        &data.outcome,
-                        input,
-                        model.as_ref(),
-                        &view,
-                    ));
+                if recovery && input > input_budget(model.as_ref()) {
+                    return Err(recovery_overflow(&data.outcome, model.as_ref(), &view));
                 }
                 Ok((request, input))
             }
             (ContextCompactionResult::Cancelled { reason }, _) => {
                 Err(HostError::Cancelled(reason.clone()))
             }
-            (ContextCompactionResult::Failed { error, .. }, _) if source.recovery.is_some() => {
+            (ContextCompactionResult::Failed { error, .. }, _) if recovery => {
                 Err(HostError::failed(error.clone()))
             }
-            (ContextCompactionResult::Skipped { reason, .. }, _) if source.recovery.is_some() => {
-                Err(HostError::failed(format!(
-                    "Context recovery could not compact: {reason}"
-                )))
-            }
+            (ContextCompactionResult::Skipped { reason, .. }, _) if recovery => Err(
+                HostError::failed(format!("Context recovery could not compact: {reason}")),
+            ),
             _ => Ok((view.prepared, estimate.input)),
         }
     }
@@ -705,9 +736,7 @@ impl ContextPolicy {
                     None,
                 ),
             };
-            return self
-                .commit(step, view, model, start, outcome, &policy_order)
-                .await;
+            return self.commit(step, view, model, start, outcome).await;
         }
         let first = self
             .pass(
@@ -833,8 +862,7 @@ impl ContextPolicy {
             },
             StepOutcome::Cancelled { reason } => ContextCompactionResult::Cancelled { reason },
         };
-        self.commit(step, view, model, start, outcome, &policy_order)
-            .await
+        self.commit(step, view, model, start, outcome).await
     }
 
     /// Whether the entries a compaction at `cut` removes — less the pinned
@@ -880,7 +908,6 @@ impl ContextPolicy {
         model: Arc<dyn ContextModel>,
         start: Arc<AgentEvent>,
         outcome: ContextCompactionResult,
-        policy_order: &PolicyOrder,
     ) -> Result<Compacted, HostError> {
         let fact = self
             .timeline
@@ -926,36 +953,13 @@ impl ContextPolicy {
             let saved = async {
                 let snapshot = match view.context.full() {
                     Some(context) => Some(self.history.snapshot(context, retain_from, &fact)?),
-                    None if self.history.checkpoint.is_builtin() => {
-                        let resume = policy_order
-                            .events
-                            .iter()
-                            .find(|event| event.id == *retain_from)
-                            .map(|event| TimelinePosition {
-                                branch_id: event.branch_id.clone(),
-                                sequence: event.sequence,
-                            })
-                            .ok_or_else(|| "compaction cut is outside the branch".to_owned())?;
+                    None => {
                         let checkpoint = self
                             .history
-                            .stream_checkpoint(
-                                &self.timeline,
-                                resume,
-                                view.facts.through,
-                                retain_from,
-                                256,
-                            )
+                            .stream_checkpoint(&self.timeline, view.facts.through, retain_from, 256)
                             .await
                             .map_err(|error| error.to_string())?;
                         Some(self.history.snapshot_from_checkpoint(&checkpoint, &fact)?)
-                    }
-                    None => {
-                        let (context, _) = self
-                            .history
-                            .rendered_context(&self.timeline, view.facts.through)
-                            .await
-                            .map_err(|error| error.to_string())?;
-                        Some(self.history.snapshot(&context, retain_from, &fact)?)
                     }
                 };
                 let Some(snapshot) = snapshot else {
@@ -1083,7 +1087,7 @@ impl ContextPolicy {
                     .policy_facts(self.timeline.committed(), "")
                     .await
                     .map_err(|error| HostError::failed(error.to_string()))?;
-                self.estimate(&request, model.as_ref(), &facts.events)?
+                self.estimate(&request, model.as_ref(), &facts.arcs())?
                     .input
             }
         };
@@ -1257,7 +1261,9 @@ struct Pinned {
 /// (ContextCompaction §5.3, §5.9).
 struct CarriedPins {
     pins: Vec<Pin>,
-    from: u64,
+    /// The event id and sequence of the in-effect compaction's cut.
+    from: String,
+    sequence: u64,
 }
 
 impl CarriedPins {
@@ -1274,8 +1280,18 @@ impl CarriedPins {
         });
         let ids = ids.filter(|ids| ids.len() == pinned.len());
         let pins = group_pins(pinned, ids);
-        let from = view.context.sequence(retain_from).unwrap_or(0);
-        Self { pins, from }
+        let sequence = view
+            .history
+            .iter()
+            .find(|entry| entry.event_id == retain_from)
+            .map(|entry| entry.position.sequence)
+            .or_else(|| view.context.sequence(retain_from))
+            .unwrap_or(0);
+        Self {
+            pins,
+            from: retain_from.to_owned(),
+            sequence,
+        }
     }
 }
 
@@ -1505,11 +1521,15 @@ fn pinned_inputs(
     let start = events[..cut].iter().rposition(
         |event| matches!(&event.kind, EventKind::TurnStart(data) if data.turn_id == turn_id),
     );
-    let carried_from = carried.map(|carried| {
+    let carried_from = carried.and_then(|carried| {
         events
             .iter()
-            .position(|event| event.sequence >= carried.from)
-            .unwrap_or(cut)
+            .position(|event| event.id == carried.from)
+            .or_else(|| {
+                events
+                    .iter()
+                    .position(|event| event.sequence >= carried.sequence)
+            })
     });
     let from = match (carried_from, start) {
         (Some(carried), Some(start)) => carried.max(start + 1),
@@ -1683,27 +1703,21 @@ fn regrown(view: &View, order: &PolicyOrder, model: &dyn ContextModel) -> bool {
         return true;
     };
     let branch = &order.events[start].branch_id;
-    let boundary = order.events[..start]
-        .iter()
-        .rposition(|event| event.branch_id == *branch && event.sequence <= through);
-    let positions: HashMap<&str, usize> = order
-        .events
-        .iter()
-        .enumerate()
-        .map(|(index, event)| (event.id.as_str(), index))
-        .collect();
+    let rank = |branch: &str| order.branches.iter().position(|name| name == branch);
+    let boundary = rank(branch);
     let count = |messages: Vec<Message>| model.count_tokens(&ModelRequest::new("", "", messages));
     let empty = count(Vec::new());
     let new: f64 = view
         .history
         .iter()
-        .filter(|entry| {
-            positions
-                .get(entry.source.as_str())
-                .is_some_and(|index| match boundary {
-                    Some(boundary) => *index > boundary,
-                    None => true,
-                })
+        .filter(|entry| match rank(&entry.position.branch_id) {
+            Some(index) => match boundary {
+                Some(boundary) => {
+                    index > boundary || (index == boundary && entry.position.sequence > through)
+                }
+                None => true,
+            },
+            None => true,
         })
         .map(|entry| count(vec![entry.message.as_ref().clone()]) - empty)
         .sum();
@@ -1873,12 +1887,7 @@ fn replanned(
         .map_or(first.replacement.len(), |parts| parts.strategy as usize)
         .min(first.replacement.len());
     let limit = rule.limit(history, &cuts, rule.tokens(&first.replacement[..strategy]))?;
-    let order = |id: &str| policy_order.events.iter().position(|event| event.id == id);
-    let later = match (order(&cuts[limit].retain_from), order(&first.retain_from)) {
-        (Some(later), Some(first)) => later > first,
-        _ => false,
-    };
-    if !later {
+    if cuts[limit].entry == 0 {
         return None;
     }
     for cut in &mut cuts[..=limit] {
@@ -1987,15 +1996,10 @@ fn insufficient_space(
     Some(InsufficientSpace { parts: marked })
 }
 
-/// The error of a recovery compaction whose request still does not fit:
-/// budget facts, and a message naming what keeps it there — the resident
-/// parts by the mark's naming rule, or, when they fit, the entries the last
-/// event placed (ContextCompaction §5.3). The mark itself now covers every
-/// result over the bound, so this asks the resident parts against `B`
-/// directly.
+/// A terminal recovery error naming the resident parts or uncuttable
+/// entries that still exceed the input budget (ContextCompaction §5.3).
 fn recovery_overflow(
     outcome: &ContextCompactionResult,
-    input: f64,
     model: &dyn ContextModel,
     view: &View,
 ) -> HostError {
@@ -2030,19 +2034,7 @@ fn recovery_overflow(
         }
         _ => "Context recovery could not fit the request.".into(),
     };
-    HostError::Failed {
-        kind: crate::host::HostErrorKind::Other,
-        message,
-        budget: Some(ProviderOutputBudgetFacts {
-            input_tokens: input,
-            context_window: model.context_window(),
-            requested_max_tokens: model.output_tokens(),
-            allowed_max_tokens: (model.context_window() - input).max(0.),
-            ratio: 1.,
-        }),
-        model: None,
-        presentation: None,
-    }
+    HostError::failed(message)
 }
 
 /// Every event boundary that replaces at least one entry without separating
@@ -2050,37 +2042,33 @@ fn recovery_overflow(
 /// place entries and the boundary's own last event (replacing everything),
 /// in order. None is marked within the retention limit yet.
 fn legal_cuts(order: &PolicyOrder, history: &[HistoryEntry]) -> Vec<CompactionCut> {
-    let sources: HashMap<&str, ()> = history
-        .iter()
-        .map(|entry| (entry.source.as_str(), ()))
-        .collect();
-    let mut kept = 0;
-    let positions: HashMap<&str, usize> = order
+    let rank = |branch: &str| order.branches.iter().position(|name| name == branch);
+    let position = |branch: &str, sequence: u64| (rank(branch).unwrap_or(usize::MAX), sequence);
+    let mut candidates: Vec<((usize, u64), String)> = order
         .events
         .iter()
-        .enumerate()
-        .map(|(index, event)| (event.id.as_str(), index))
+        .filter(|event| event.turn_start || event.boundary)
+        .map(|event| (position(&event.branch_id, event.sequence), event.id.clone()))
+        .chain(history.iter().map(|entry| {
+            (
+                position(&entry.position.branch_id, entry.position.sequence),
+                entry.event_id.clone(),
+            )
+        }))
         .collect();
+    candidates.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    candidates.dedup_by(|a, b| a.1 == b.1);
     let mut cuts = Vec::new();
-    for (index, event) in order.events.iter().enumerate() {
-        if !event.turn_start
-            && !sources.contains_key(event.id.as_str())
-            && index + 1 != order.events.len()
-        {
-            continue;
-        }
-        while kept < history.len()
-            && positions
-                .get(history[kept].source.as_str())
-                .is_some_and(|source| *source < index)
-        {
-            kept += 1;
-        }
+    for (at, id) in candidates {
+        let kept = history
+            .iter()
+            .filter(|entry| position(&entry.position.branch_id, entry.position.sequence) < at)
+            .count();
         if kept == 0 || !separates_nothing(history, kept) {
             continue;
         }
         cuts.push(CompactionCut {
-            retain_from: event.id.clone(),
+            retain_from: id,
             entry: kept,
             within_limit: false,
         });

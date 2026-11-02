@@ -40,7 +40,7 @@ It does not own:
   the [native storage format](native-storage-format.md#556-v23-格式决定) decides those;
 - the classification fields, their defaults and their presentation — [Session classification](session-classification.md);
 - the picker's interaction and the project/all switch — the client that adds them (§6);
-- `session.list`, `session.attach`, and how a client sorts or presents rows.
+- `session.attach`, and how a client sorts or presents rows.
 
 ## 3. Own contract
 
@@ -50,18 +50,18 @@ It does not own:
 
 | Item | Rule |
 | --- | --- |
-| Kind | Rpc built-in. Agents answers it from the catalog projection, joined with the `agent_sessions` rows and the title metadata, as it answers the directory read; Rpc validates the envelope |
+| Kind | Rpc built-in. Agents answers it from the catalog projection, joined with the `agent_sessions` rows and the title metadata; Rpc validates the envelope |
 | Protocol | v3. v1 and v2 reply `unknown_method` ("Method requires protocol v3"), as they do for `session.summaries` |
 | Discovery | `hello.features` lists it only while a native store is open, the condition `session.fork` uses, so a client that does not see it keeps using `session.summaries`. Without a store there is no projection to page, and `session.summaries` answers from the loaded Sessions as today (§3.3) |
 | `limit` | 1 to 200, default 50. A larger one is rejected, not clamped, as `history`'s `limit` is |
 | `cursor` | Opaque. It encodes the last returned row's `(updatedAt, sessionId)` and a digest of the request's `query`, `cwd`, `withPreview`, `withInternal` and `withAcpSessions`; it pages by keyset, and a client echoes it back unchanged. It is not a Session id |
 | Order | `updatedAt` descending, then `sessionId` ascending |
-| `query` | Case-insensitive, literal substring match over the four fields the picker searches today — the Session id, the workspace, the model id and the preview — plus the title and the provider id, which its search text never holds. At query time a SQL function the store registers on its connection lowercases the query and each field with `str::to_lowercase`, the picker's fold; the match is `instr(fold(field), fold(query)) > 0` field by field, so it is literal and `%` and `_` match only themselves. It is applied in the catalog query before the page boundary. The model is read from the stored Session config, the value `session.list` reports, so the query decodes no event |
+| `query` | Case-insensitive, literal substring match over the four fields the picker searches today — the Session id, the workspace, the model id and the preview — plus the title and the provider id, which its search text never holds. At query time a SQL function the store registers on its connection lowercases the query and each field with `str::to_lowercase`, the picker's fold; the match is `instr(fold(field), fold(query)) > 0` field by field, so it is literal and `%` and `_` match only themselves. It is applied in the catalog query before the page boundary. The model is read from the stored Session config, the value `session.summaries` reports, so the query decodes no event |
 | `cwd` | Exact match on the workspace, applied before the page boundary |
 | `withPreview` | Boolean, default `false`. `true` keeps only rows whose preview is not NULL, applied before the page boundary, so a client that hides preview-less rows receives a full page of rows it shows; the projection's partial index over previews keeps that read bounded ([native storage format](native-storage-format.md#556-v23-格式决定)) |
 | `withInternal` | Boolean, default `false`. `true` lists the Sessions whose origin is `internal`; `false` drops them, applied before the page boundary. What the class means and who writes it: [Session classification](session-classification.md#35-catalog-visibility) |
 | `withAcpSessions` | Boolean, default `false`. `true` lists the Sessions whose origin is `acp`; `false` drops them, applied before the page boundary. A Session of an unknown origin (`unknown`) is always listed |
-| Reply | `SessionSummary` entries, the shape `session.summaries` returns: the fields of a `session.list` record — `origin` and `parentSessionId` among them ([Session classification](session-classification.md#33-reported-fields)) — with `preview`, `updatedAt` and `closed`, false here because this query leaves closed Sessions out (§3.3). `nextCursor` is absent on the last page |
+| Reply | `SessionSummary` entries, the shape `session.summaries` returns: a `SessionInfo` record — `origin` and `parentSessionId` among its fields ([Session classification](session-classification.md#33-reported-fields)) — with `preview`, `updatedAt` and `closed`, false here because this query leaves closed Sessions out (§3.3). `nextCursor` is absent on the last page |
 
 A `cursor` that does not decode, or whose digest does not match the request's `query`, `cwd`, `withPreview`,
 `withInternal` and `withAcpSessions`, is rejected as `invalid_params` rather than treated as the first page, so a client
@@ -126,7 +126,7 @@ separate, visible change to what `session.summaries` lists.
 
 A catalog read never loads, restores or starts a Session: the projection answers the stored fields, so a listing costs
 no model, tool or MCP startup. `running` and `attachedClients` come from the process's in-memory state, as
-`session.list` reads them: an unloaded Session reads as not running, and neither field is stored, so reading them
+`session.summaries` reads them: an unloaded Session reads as not running, and neither field is stored, so reading them
 takes no lease and loads nothing.
 
 ### 3.5 Catalog filters (#557)
@@ -166,8 +166,8 @@ Timeline: the catalog is display data for a picker, which
 | Stored Session record (`agent_sessions`) | The creation origin and the leader link of every listed Session, read from the row the query joins, and the filter of §3.5 ([Session classification](session-classification.md#31-the-origin)) |
 | [Title metadata](session-title-metadata.md) | The stored title of a Session, joined for display and for `query`, never read from a Session |
 | `hello.features` (App Server) | The method list a client discovers the catalog through: the catalog is listed under the conditions that list `session.summaries`, plus the native-store condition `session.fork` also requires |
-| Agents' directory | The protocol-version and agent filtering the catalog applies, as `session.list` applies it |
-| Agents' index and the connection hub | The live `running` and `attachedClients` of the listed Sessions, read from the process's state without a lease, as `session.list` reads them |
+| Agents' catalog read | The protocol-version and agent filtering the catalog applies, as `session.summaries` applies it |
+| Agents' index and the connection hub | The live `running` and `attachedClients` of the listed Sessions, read from the process's state without a lease, as `session.summaries` reads them |
 
 No Session facade call, no lease and no other plugin service is used.
 
@@ -245,7 +245,7 @@ page boundary, and the picker's first page does not use it. The gap is recorded 
 | §4 rule 4 (no business meaning in core) | No core change; the projection is SessionStore's business row |
 | §4 rule 5 (batch) | The row is written in SessionStore's existing batch transaction; the catalog adds no batch and no event |
 | §4 rule 6 (model context) | Unchanged: no event, so no context path |
-| §4 rule 7 (public events and services) | Agents answers from SessionStore's stored rows, as `session.list` does; Rpc reaches neither the store nor another plugin's state directly |
+| §4 rule 7 (public events and services) | Agents answers from SessionStore's stored rows, as `session.summaries` does; Rpc reaches neither the store nor another plugin's state directly |
 | §4 rule 8 (infrastructure unchanged) | The Timeline, Dispatcher, event envelope and format, assembly and the Session facade are unchanged. The store gains a derived table and no event, by the storage page's own format decision |
 | §4 rule 9 (only facts later decisions use enter the Timeline) | The catalog is picker display data, so it stays out of the Timeline; no event is added |
 | ADR 002 D2 (no wiring module) | No new plugin: Rpc's built-in and Agents' existing directory answer it |

@@ -287,6 +287,24 @@ async fn recovery_compares_the_provider_baseline_estimate_with_the_input_budget(
                 session.idle("main").await.unwrap();
             }
             let events = session.history("main", None).await.unwrap();
+            assert!(
+                events.iter().all(|event| !matches!(
+                    &event.kind,
+                    EventKind::ModelOutputEnd(ModelOutputEndData {
+                        outcome: ModelOutputOutcome::Failed { .. },
+                        ..
+                    })
+                )),
+                "local budget recovery must not publish an intermediate failure"
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event.kind, EventKind::ContextPrepare(_)))
+                    .count(),
+                2,
+                "local budget recovery stays in the original preparation"
+            );
             let budget = events
                 .iter()
                 .filter_map(|event| match &event.kind {
@@ -497,10 +515,6 @@ async fn a_compaction_whose_resident_parts_exceed_half_the_budget_is_marked() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_summary_that_overshoots_the_budget_fails_the_recovery_request() {
-    // A summary that overshoots its planned size still completes (§5.2), so
-    // a recovery compaction can leave the request over `B`. The turn then
-    // fails with the recovery error naming the summary, no second compaction
-    // runs, and the failed request carries the budget facts (§5.3).
     let budget = 8_192. - 2_048.;
     let agent = MinimalHost::start(&builder_with_context(
         Arc::new(EchoModel),
@@ -569,10 +583,18 @@ async fn a_summary_that_overshoots_the_budget_fails_the_recovery_request() {
         failed.contains("Context recovery could not fit"),
         "{failed}"
     );
-    let facts = facts.expect("the failed request carries the budget facts");
-    assert_eq!(facts.context_window, 8_192.);
-    assert_eq!(facts.requested_max_tokens, 2_048.);
-    assert!(facts.input_tokens > budget, "{facts:?}");
+    assert!(
+        facts.is_none(),
+        "terminal recovery failure must not request another recovery"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::ModelOutputEnd(_)))
+            .count(),
+        1,
+        "only the terminal recovery failure is published"
+    );
     agent.close().await.unwrap();
 }
 
@@ -635,7 +657,7 @@ async fn a_child_branch_regrows_from_its_own_history() {
         .unwrap();
     session.idle(&child).await.unwrap();
     session
-        .submit("c".repeat(1_500), InputMode::Queue, &child)
+        .submit("c".repeat(1_000), InputMode::Queue, &child)
         .await
         .unwrap();
     session.idle(&child).await.unwrap();
@@ -670,8 +692,8 @@ async fn a_child_branch_regrows_from_its_own_history() {
         })
         .expect("the child's preparation");
     assert!(
-        budget >= 3_000.,
-        "the estimate reaches the threshold: {budget}"
+        (3_000.0..=4_032.0).contains(&budget),
+        "the estimate reaches the threshold within the input budget: {budget}"
     );
     agent.close().await.unwrap();
 }

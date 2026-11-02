@@ -53,7 +53,7 @@ decision by an LLM. `agent` means the existing request/profile selection behavio
 | Persist and edit policy | Native `BusinessDocument`, `SettingsService::read/update`, source CAS and owner management methods, as used by `permission_rules.rs` |
 | Start/restore and retain members | Existing Agents/Collaboration Session creation, usage holds and cleanup, including idle unloading |
 
-Do not use `leader.config().model` or `session.list` as the adopted leader model:
+Do not use `leader.config().model` or `session.summaries` as the adopted leader model:
 they describe creation configuration rather than a subsequent F3 adoption.
 The inherited selection consists only of the existing `ModelSelection` fields:
 provider/model IDs, capability snapshot, model config and Provider-owned selection
@@ -199,6 +199,10 @@ no write. A failed/empty fixed-model listing leaves the existing policy intact.
 Hosts without the advertised management methods omit this action; no legacy or
 in-memory write fallback is added. No independent settings screen or second
 command route is required for this TUI scope.
+
+The picker's `Edit models` row opens the models management area for the Provider
+its row names, and is absent from a daemon that does not advertise
+`provider.management` ([CLI commands](cli-commands.md#the-models-area)).
 
 ## 6. Implementation and acceptance
 

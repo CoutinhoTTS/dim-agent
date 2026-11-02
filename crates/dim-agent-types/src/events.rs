@@ -1081,6 +1081,8 @@ pub struct ExtensionEvent {
     key: String,
     split: usize,
     data: serde_json::Value,
+    context_render: bool,
+    context_state: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1088,6 +1090,10 @@ struct ExtensionWire {
     r#type: String,
     name: String,
     data: serde_json::Value,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    context_render: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    context_state: bool,
 }
 
 impl ExtensionEvent {
@@ -1113,6 +1119,8 @@ impl ExtensionEvent {
             split: domain.len(),
             key: format!("{domain}/{name}"),
             data,
+            context_render: false,
+            context_state: false,
         })
     }
     pub fn domain(&self) -> &str {
@@ -1127,12 +1135,26 @@ impl ExtensionEvent {
     pub fn data(&self) -> &serde_json::Value {
         &self.data
     }
+    pub fn context_render(&self) -> bool {
+        self.context_render
+    }
+    pub fn context_state(&self) -> bool {
+        self.context_state
+    }
+    /// The reading switches are the producer's: the core neither derives nor
+    /// overrides them for an extension event.
+    pub fn with_context_flags(mut self, context_render: bool, context_state: bool) -> Self {
+        self.context_render = context_render;
+        self.context_state = context_state;
+        self
+    }
 }
 
 impl TryFrom<ExtensionWire> for ExtensionEvent {
     type Error = String;
     fn try_from(wire: ExtensionWire) -> Result<Self, String> {
         Self::new(wire.r#type, wire.name, wire.data)
+            .map(|event| event.with_context_flags(wire.context_render, wire.context_state))
     }
 }
 
@@ -1142,11 +1164,63 @@ impl From<ExtensionEvent> for ExtensionWire {
             r#type: event.domain().into(),
             name: event.name().into(),
             data: event.data,
+            context_render: event.context_render,
+            context_state: event.context_state,
         }
     }
 }
 
+/// Event keys whose rows the default projection consumes for rendering.
+pub const CONTEXT_RENDER_KEYS: &[&str] = &[
+    "input/consumed",
+    "context/compaction",
+    "step/thinking",
+    "step/text",
+    "step/tool-use-start",
+    "step/tool-use",
+    "step/model-content",
+    "step/model-output-end",
+    "step/tool-result",
+];
+
+/// Event keys whose rows the default projection consumes for checkpoint state.
+pub const CONTEXT_STATE_KEYS: &[&str] = &[
+    "input/message",
+    "input/consumed",
+    "context/configured",
+    "context/compaction",
+    "branch/start",
+    "prompt/changed",
+    "turn/start",
+    "turn/end",
+    "context/scope",
+    "step/model-start",
+    "step/thinking",
+    "step/text",
+    "step/tool-use-start",
+    "step/tool-use",
+    "step/model-content",
+    "step/model-output-end",
+    "step/tool-result",
+];
+
+/// The two reading switches for a core event key. Extension events are not
+/// looked up here: their producer writes both switches on the event.
+pub fn context_flags(key: &str) -> (bool, bool) {
+    (
+        CONTEXT_RENDER_KEYS.contains(&key),
+        CONTEXT_STATE_KEYS.contains(&key),
+    )
+}
+
 impl EventKind {
+    pub fn context_flags(&self) -> (bool, bool) {
+        match self {
+            Self::Extension(event) => (event.context_render(), event.context_state()),
+            _ => context_flags(self.key()),
+        }
+    }
+
     pub fn key(&self) -> &str {
         match self {
             Self::InputMessage(_) => "input/message",
@@ -1439,6 +1513,7 @@ impl<'de> de::Visitor<'de> for EventVisitor {
     fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<EventKind, A::Error> {
         use de::Error;
         let (mut domain, mut name, mut data) = (None::<String>, None, None);
+        let (mut context_render, mut context_state) = (false, false);
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
                 "type" if domain.is_none() => {
@@ -1462,10 +1537,17 @@ impl<'de> de::Visitor<'de> for EventVisitor {
                 }
                 "name" if name.is_none() => name = Some(map.next_value::<String>()?),
                 "data" if data.is_none() => data = Some(map.next_value::<serde_json::Value>()?),
+                "context_render" => context_render = map.next_value::<bool>()?,
+                "context_state" => context_state = map.next_value::<bool>()?,
                 "type" => return Err(A::Error::duplicate_field("type")),
                 "name" => return Err(A::Error::duplicate_field("name")),
                 "data" => return Err(A::Error::duplicate_field("data")),
-                _ => return Err(A::Error::unknown_field(&key, &["type", "name", "data"])),
+                _ => {
+                    return Err(A::Error::unknown_field(
+                        &key,
+                        &["type", "name", "data", "context_render", "context_state"],
+                    ));
+                }
             }
         }
         ExtensionEvent::new(
@@ -1473,6 +1555,7 @@ impl<'de> de::Visitor<'de> for EventVisitor {
             name.ok_or_else(|| A::Error::missing_field("name"))?,
             data.ok_or_else(|| A::Error::missing_field("data"))?,
         )
+        .map(|event| event.with_context_flags(context_render, context_state))
         .map(EventKind::Extension)
         .map_err(A::Error::custom)
     }
@@ -1846,8 +1929,47 @@ impl Serialize for EventKind {
                 state.serialize_field("type", event.domain())?;
                 state.serialize_field("name", event.name())?;
                 state.serialize_field("data", event.data())?;
+                if event.context_render() {
+                    state.serialize_field("context_render", &true)?;
+                }
+                if event.context_state() {
+                    state.serialize_field("context_state", &true)?;
+                }
             }
         }
         state.end()
+    }
+}
+
+#[cfg(test)]
+mod context_flag_tests {
+    use super::context_flags;
+
+    #[test]
+    fn reading_switches_follow_the_default_projection() {
+        assert_eq!(context_flags("input/consumed"), (true, true));
+        assert_eq!(context_flags("step/text"), (true, true));
+        assert_eq!(context_flags("step/tool-result"), (true, true));
+        assert_eq!(context_flags("prompt/changed"), (false, true));
+        assert_eq!(context_flags("model/call"), (false, false));
+        assert_eq!(context_flags("context/prepare"), (false, false));
+        assert_eq!(context_flags("domain/unknown"), (false, false));
+    }
+
+    #[test]
+    fn extension_events_carry_their_own_reading_switches() {
+        let event = super::ExtensionEvent::new("myplugin", "report", serde_json::json!({}))
+            .unwrap()
+            .with_context_flags(true, true);
+        assert_eq!(
+            super::EventKind::Extension(event).context_flags(),
+            (true, true)
+        );
+        let plain =
+            super::ExtensionEvent::new("myplugin", "report", serde_json::json!({})).unwrap();
+        assert_eq!(
+            super::EventKind::Extension(plain).context_flags(),
+            (false, false)
+        );
     }
 }

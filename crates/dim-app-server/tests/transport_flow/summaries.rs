@@ -2,7 +2,7 @@ use super::*;
 use dim_agent_types::{InputBlock, InputMessageData};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn summaries_are_v3_filtered_bounded_and_leave_list_strict() {
+async fn summaries_are_v3_filtered_and_bounded() {
     let server = launch(Arc::new(MockTools), ServerConfig::default()).await;
     let mut client = Client::new_version(&server, false, 3).await;
     assert!(
@@ -127,16 +127,6 @@ async fn summaries_are_v3_filtered_bounded_and_leave_list_strict() {
         .find(|row| row["sessionId"] == bounded_id)
         .unwrap();
     assert!(bounded_row.get("preview").is_none());
-
-    let list = client.rpc("session.list", json!({})).await;
-    assert_ok(&list);
-    assert!(
-        list["result"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|row| { row.get("preview").is_none() && row.get("updatedAt").is_none() })
-    );
 
     let agent = client.rpc("agent.create", json!({})).await;
     let agent_id = agent["result"]["agentId"].as_str().unwrap();

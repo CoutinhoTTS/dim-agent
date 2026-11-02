@@ -283,7 +283,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "configure tool approvals" => "配置工具审批",
         "choose ask or full access" => "选择询问或完全访问",
         "open settings" => "打开设置",
-        "suspend to the shell" => "挂起到 Shell",
         "exit" => "退出应用",
 
         "Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
@@ -346,7 +345,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "No matching models." => "无匹配的模型。",
         "current" => "当前",
         "Edit models" => "编辑模型",
-        "Editing models is not available yet" => "暂不支持编辑模型",
         "{provider}: 1 model unavailable · dimcode models {id}" => {
             "{provider}：1 个模型不可用 · dimcode models {id}"
         }

@@ -14,6 +14,8 @@
 
 pub mod editor;
 pub mod hooks;
+pub mod models;
+
 pub mod mcp;
 
 pub mod permissions;
@@ -115,6 +117,21 @@ const SCHEDULED: Methods = Methods {
     ],
 };
 
+/// One Provider's models. The reload names the read, not the rescan: the
+/// adapter asks for a rescan itself when the Provider offers one.
+const MODELS: Methods = Methods {
+    catalog: "provider.management",
+    manages: "models",
+    kinds: &[
+        (ActionKind::Toggle, &["provider.models.set_enabled"]),
+        (ActionKind::Edit, &["provider.models.edit"]),
+        (ActionKind::Reload, &["provider.management"]),
+        (ActionKind::Add, &["provider.models.create"]),
+        (ActionKind::Remove, &["provider.models.delete"]),
+        (ActionKind::Inspect, &["provider.management"]),
+    ],
+};
+
 const PERMISSIONS: Methods = Methods {
     catalog: "permission.rules",
     manages: "command rules",
@@ -126,12 +143,13 @@ const PERMISSIONS: Methods = Methods {
     ],
 };
 
-fn methods_of(area: Area) -> &'static Methods {
+fn methods_of(area: &Area) -> &'static Methods {
     match area {
         Area::Skills => &SKILLS,
         Area::Hooks => &HOOKS,
         Area::Mcp => &MCP,
         Area::Scheduled => &SCHEDULED,
+        Area::Models { .. } => &MODELS,
         Area::Workflow => &WORKFLOW,
         Area::Permissions => &PERMISSIONS,
     }
@@ -176,7 +194,7 @@ pub(super) fn entry_kinds(available: &[ActionKind]) -> Vec<ActionKind> {
 
 /// The action kinds the daemon can serve for `area`, in the order a panel
 /// offers them. An area the daemon cannot read offers none.
-pub fn actions(client: &Client, area: Area) -> Vec<ActionKind> {
+pub fn actions(client: &Client, area: &Area) -> Vec<ActionKind> {
     let methods = methods_of(area);
     if !client.supports(&[methods.catalog]) {
         return Vec::new();
@@ -194,13 +212,13 @@ pub fn actions(client: &Client, area: Area) -> Vec<ActionKind> {
 /// another method or the host's own environment.
 pub fn supported(client: &Client, request: &ManagementRequest) -> Result<(), String> {
     match kind(&request.action) {
-        Some(kind) => supports_kind(client, request.area, kind),
+        Some(kind) => supports_kind(client, &request.area, kind),
         None => {
-            let methods = methods_of(request.area);
+            let methods = methods_of(&request.area);
             if client.supports(&[methods.catalog]) {
                 Ok(())
             } else {
-                Err(unsupported(request.area, None))
+                Err(unsupported(&request.area, None))
             }
         }
     }
@@ -209,7 +227,7 @@ pub fn supported(client: &Client, request: &ManagementRequest) -> Result<(), Str
 /// Refuses a kind the daemon cannot serve for `area`: the area's sentence
 /// when the read is missing, and the kind's when the read is served without
 /// the kind's method, for a surface that checks before it gathers anything.
-pub fn supports_kind(client: &Client, area: Area, kind: ActionKind) -> Result<(), String> {
+pub fn supports_kind(client: &Client, area: &Area, kind: ActionKind) -> Result<(), String> {
     let methods = methods_of(area);
     if !client.supports(&[methods.catalog]) {
         return Err(unsupported(area, None));
@@ -224,7 +242,7 @@ pub fn supports_kind(client: &Client, area: Area, kind: ActionKind) -> Result<()
 /// serve its read, and the kind's own sentence when it serves the read
 /// without the kind's method. `manages` is always a plural noun phrase, so
 /// "them" holds for every area, and each sentence is translated whole.
-pub(crate) fn unsupported(area: Area, kind: Option<ActionKind>) -> String {
+pub(crate) fn unsupported(area: &Area, kind: Option<ActionKind>) -> String {
     let methods = methods_of(area);
     let Some(kind) = kind else {
         return tf(
@@ -329,8 +347,8 @@ pub async fn apply(
     if let Err(error) = supported(client, request) {
         return ManagementResult::Refused(ManagementRefusal::Refused(error));
     }
-    let actions = actions(client, request.area);
-    match request.area {
+    let actions = actions(client, &request.area);
+    match &request.area {
         Area::Skills => match skills::apply(client, &request.action, cwd).await {
             skills::Outcome::Catalog(catalog) => ManagementResult::View {
                 view: Box::new(skills::view(&catalog, &actions)),
@@ -430,6 +448,28 @@ pub async fn apply(
                 })
             }
         },
+        Area::Models { provider_id } => {
+            match models::apply(client, provider_id, &request.action).await {
+                Ok(models::Answer::Provider { provider, note }) => ManagementResult::View {
+                    view: Box::new(models::view(&provider, &actions)),
+                    note,
+                },
+                Ok(models::Answer::Detail(detail)) => ManagementResult::Detail(detail),
+                Err(models::Failure::ReadFailed { note, error }) => ManagementResult::Applied {
+                    note,
+                    read_error: error,
+                },
+                Err(models::Failure::Refused(message)) => {
+                    ManagementResult::Refused(ManagementRefusal::Refused(message))
+                }
+                Err(models::Failure::Conflict { message, provider }) => {
+                    ManagementResult::Refused(ManagementRefusal::Conflict {
+                        message,
+                        view: provider.map(|provider| Box::new(models::view(&provider, &actions))),
+                    })
+                }
+            }
+        }
         Area::Permissions => match permissions::apply(client, &request.action).await {
             Ok(permissions::Answer::Rules { rules, note }) => ManagementResult::View {
                 view: Box::new(permissions::view(&rules, &actions)),
