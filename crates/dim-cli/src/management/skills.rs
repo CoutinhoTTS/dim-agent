@@ -126,6 +126,7 @@ pub(super) fn view(catalog: &Catalog, actions: &[ActionKind]) -> ManagementView 
                 actions: super::entry_kinds(actions),
                 remove_verb: RemoveVerb::Remove,
                 document: None,
+                run: None,
             },
         );
     }

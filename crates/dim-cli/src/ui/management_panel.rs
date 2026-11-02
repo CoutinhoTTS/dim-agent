@@ -68,6 +68,7 @@ pub const STRINGS: &[&str] = &[
     "command rules",
     "scheduled jobs",
     "models",
+    "workflow definitions",
     "jobs",
     "enabled",
     "disabled",
@@ -112,6 +113,8 @@ pub const STRINGS: &[&str] = &[
     "The job changed since it was read; nothing was removed.",
     "The Scheduler has no area document.",
     "No scheduled job has that id.",
+    "A scheduled job's run takes no input document.",
+    "An MCP server's test takes no input document.",
     "The document changes no field; nothing was written.",
     "The document deleted {field}, which the owner cannot clear; nothing was written.",
     "This daemon cannot manage {area}.",
@@ -173,6 +176,28 @@ pub const STRINGS: &[&str] = &[
     "no",
     "not supported",
     "supported",
+    "Workflow",
+    "Saved {name}.",
+    "Saved {name}. It stays disabled until you enable it.",
+    "The definitions changed since they were read; nothing was written.",
+    "A definition's name is its key; add it to save it under another name.",
+    "No project definition is named {name}.",
+    "No workflow definition is named {name}.",
+    "Saved in the user workflow source; always enabled.",
+    "Starts only after you enable it.",
+    "Defined by package {package}.",
+    "{name} — {description} (required)",
+    "{name} — {description}",
+    "{name} — required",
+    "{name} — default: {default}",
+    "and {count} more",
+    "Recent runs",
+    "A workflow definition is saved as an object with a source and a document.",
+    "A definition is saved to the user source or the project source.",
+    "Started {name}: {run_id}.",
+    "Parameters are a JSON object of strings.",
+    "The list reached its size limit; later definitions are not shown.",
+    "No workflow definition named {name} is in the list, which reached its size limit.",
     "MCP",
     "MCP servers",
     "Ctrl+T test",
@@ -256,6 +281,12 @@ pub struct ManagementPanel {
     /// Why the read that follows an applied action failed: the action was
     /// done, and the area is not reported.
     read_error: Option<String>,
+    /// The panel opens in its create editor: its first view opens the
+    /// editor on the area's create document, as Ctrl+N would, and any other
+    /// reply drops the step.
+    creating: bool,
+    /// The editor the panel asked for without a key, for the event loop.
+    effect: Option<Effect>,
 }
 
 /// A detail in place of the list, with the rows it starts at.
@@ -304,7 +335,17 @@ impl ManagementPanel {
             message: None,
             opening,
             read_error: None,
+            creating: false,
+            effect: None,
         }
+    }
+
+    /// A panel a command opened in its create editor, as `/workflow:save`
+    /// opens it: the first view opens the editor on the create document.
+    pub fn opening_create(area: Area) -> Self {
+        let mut panel = Self::new(area, None);
+        panel.creating = true;
+        panel
     }
 
     /// The reply to this panel's request.
@@ -315,6 +356,10 @@ impl ManagementPanel {
         self.busy = false;
         self.confirming = None;
         self.read_error = None;
+        // The create step is spent on the first view, and any other reply
+        // drops it.
+        let opening = self.view.is_none();
+        let creating = std::mem::take(&mut self.creating);
         match &reply.result {
             ManagementResult::View { view, note } => {
                 let view = &**view;
@@ -330,6 +375,9 @@ impl ManagementPanel {
                     })),
                 };
                 self.set_view(view.clone());
+                if creating && opening {
+                    self.open_create();
+                }
             }
             ManagementResult::Detail(detail) => {
                 self.detail = Some(ShownDetail::new(detail.clone()));
@@ -364,6 +412,28 @@ impl ManagementPanel {
             }
         }
         self.refresh_hint();
+    }
+
+    /// Opens the create editor now that the first view is here: what Ctrl+N
+    /// produces, or the kind's sentence when the view offers no add.
+    fn open_create(&mut self) {
+        if !self.offers(ActionKind::Add) {
+            self.message = Some(Err(crate::management::unsupported(
+                &self.area,
+                Some(ActionKind::Add),
+            )));
+            return;
+        }
+        let effect = self.add();
+        if matches!(effect, Effect::EditManagement { .. }) {
+            self.effect = Some(effect);
+        }
+    }
+
+    /// The editor the panel asked for without a key, for the event loop to
+    /// run now that the reply which asked is applied.
+    pub fn take_effect(&mut self) -> Option<Effect> {
+        self.effect.take()
     }
 
     /// The area is not shown until the next read: the reply that could not
@@ -484,6 +554,9 @@ impl ManagementPanel {
                 .document
                 .as_ref()
                 .map(|document| &document.document),
+            // A run document is the operation's input itself: it is always
+            // sent, even when the text did not change.
+            WriteTarget::Run { .. } => None,
         }
     }
 
@@ -593,7 +666,7 @@ impl ManagementPanel {
             return self.remove();
         }
         if key.code == KeyCode::Char('t') && key.mods.contains(Modifiers::CTRL) {
-            return self.send_entry(ActionKind::Run, |id| ManagementAction::Run { id });
+            return self.run();
         }
         if key.code == KeyCode::Tab {
             // Tab moves the list in other panels; here it opens the entry.
@@ -655,6 +728,34 @@ impl ManagementPanel {
         };
         detail.top.set(top);
         Effect::None
+    }
+
+    /// The area's operation on the selected entry. An entry that carries the
+    /// operation's input document opens the editor on it first; otherwise
+    /// the operation is sent at once.
+    fn run(&mut self) -> Effect {
+        let Some(entry) = self.selected() else {
+            return Effect::None;
+        };
+        if !entry.actions.contains(&ActionKind::Run) {
+            return Effect::None;
+        }
+        let id = entry.id.clone();
+        let document = entry.run.clone();
+        match document {
+            Some(document) => self.open_editor(WriteTarget::Run { id }, &document),
+            None => {
+                self.busy = true;
+                Effect::Management(ManagementRequest {
+                    area: self.area.clone(),
+                    action: ManagementAction::Run {
+                        id,
+                        document: None,
+                        seed: None,
+                    },
+                })
+            }
+        }
     }
 
     /// Asks for the selected entry's detail, which the adapter answers in
@@ -739,10 +840,14 @@ impl ManagementPanel {
             return Effect::None;
         };
         self.busy = true;
+        // A run's document is the seed its later edits are measured
+        // against; the other targets have nothing to measure.
+        let seed = matches!(target, WriteTarget::Run { .. }).then(|| document.clone());
         Effect::EditManagement {
             area: self.area.clone(),
             target,
             text: format!("{json}\n"),
+            seed,
         }
     }
 
@@ -858,6 +963,7 @@ fn title(area: &Area) -> &'static str {
         Area::Mcp => "MCP",
         Area::Scheduled => "Scheduler",
         Area::Models { .. } => "Models",
+        Area::Workflow => "Workflow",
         Area::Permissions => "Command rules",
     }
 }
@@ -989,6 +1095,7 @@ mod tests {
             actions,
             remove_verb: RemoveVerb::Remove,
             document: None,
+            run: None,
         }
     }
 
@@ -1300,6 +1407,7 @@ mod tests {
                         actions: vec![ActionKind::Edit],
                         remove_verb: RemoveVerb::Remove,
                         document: None,
+                        run: None,
                     },
                     ManagementEntry {
                         id: "plugin:kit".into(),
@@ -1310,6 +1418,7 @@ mod tests {
                         actions: vec![],
                         remove_verb: RemoveVerb::Remove,
                         document: None,
+                        run: None,
                     },
                 ],
             }],
@@ -1335,8 +1444,14 @@ mod tests {
         let text = shown(&panel, 72, 20).join("\n");
         assert!(text.contains("read-only  invalid"), "{text}");
         match panel.handle_key(ctrl('e')) {
-            Effect::EditManagement { area, target, text } => {
+            Effect::EditManagement {
+                area,
+                target,
+                text,
+                seed,
+            } => {
                 assert_eq!(area, Area::Hooks);
+                assert_eq!(seed, None, "an area document has no seed");
                 assert_eq!(
                     target,
                     WriteTarget::Area {
@@ -1576,6 +1691,7 @@ mod tests {
                             revision: "3".into(),
                             document: serde_json::json!({"name": "nightly"}),
                         }),
+                        run: None,
                     },
                     ManagementEntry {
                         id: "job-2".into(),
@@ -1589,6 +1705,7 @@ mod tests {
                             revision: "7".into(),
                             document: serde_json::json!({"name": "release"}),
                         }),
+                        run: None,
                     },
                 ],
             }],
@@ -1821,9 +1938,15 @@ mod tests {
             "{text}"
         );
         match panel.handle_key(ctrl('n')) {
-            Effect::EditManagement { area, target, text } => {
+            Effect::EditManagement {
+                area,
+                target,
+                text,
+                seed,
+            } => {
                 assert_eq!(area, Area::Skills);
                 assert_eq!(target, WriteTarget::Create);
+                assert_eq!(seed, None, "a create document has no seed");
                 assert_eq!(
                     serde_json::from_str::<serde_json::Value>(&text).unwrap(),
                     serde_json::json!({"name": "example"})
@@ -1879,13 +2002,24 @@ mod tests {
         let mut panel = opened_catalogue();
         match panel.handle_key(ctrl('t')) {
             Effect::Management(request) => {
-                assert_eq!(request.action, ManagementAction::Run { id: "job-1".into() })
+                assert_eq!(
+                    request.action,
+                    ManagementAction::Run {
+                        id: "job-1".into(),
+                        document: None,
+                        seed: None,
+                    }
+                )
             }
             _ => panic!("expected a run"),
         }
         panel.set_result(&reply(
             Area::Skills,
-            ManagementAction::Run { id: "job-1".into() },
+            ManagementAction::Run {
+                id: "job-1".into(),
+                document: None,
+                seed: None,
+            },
             ManagementResult::View {
                 view: Box::new(catalogue()),
                 note: Some("Run nightly: skipped (overlap).".into()),
@@ -1893,6 +2027,37 @@ mod tests {
         ));
         let text = shown(&panel, 100, 20).join(" ");
         assert!(text.contains("Run nightly: skipped (overlap)."), "{text}");
+    }
+
+    /// An entry that carries its operation's input document opens the editor
+    /// on it first, with the entry's id as the run target.
+    #[test]
+    fn run_opens_the_editor_on_an_entrys_input_document() {
+        let mut view = catalogue();
+        view.groups[0].entries[0].run = Some(serde_json::json!({"target": "", "style": "concise"}));
+        let mut panel = ManagementPanel::new(Area::Skills, None);
+        panel.set_result(&view_reply(Area::Skills, ManagementAction::List, view));
+        match panel.handle_key(ctrl('t')) {
+            Effect::EditManagement {
+                area,
+                target,
+                text,
+                seed,
+            } => {
+                assert_eq!(area, Area::Skills);
+                assert_eq!(target, WriteTarget::Run { id: "job-1".into() });
+                assert_eq!(
+                    seed,
+                    Some(serde_json::json!({"target": "", "style": "concise"})),
+                    "the run's editor carries the document it opened with"
+                );
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+                    serde_json::json!({"target": "", "style": "concise"})
+                );
+            }
+            _ => panic!("expected the run's editor"),
+        }
     }
 
     /// A remove names the entry the area no longer reports.
@@ -1968,7 +2133,11 @@ mod tests {
         panel.handle_key(ctrl('t'));
         panel.set_result(&reply(
             Area::Skills,
-            ManagementAction::Run { id: "job-1".into() },
+            ManagementAction::Run {
+                id: "job-1".into(),
+                document: None,
+                seed: None,
+            },
             ManagementResult::Applied {
                 note: Some("Run nightly: skipped (overlap).".into()),
                 read_error: "the scheduler is unavailable".into(),
@@ -1996,7 +2165,11 @@ mod tests {
         let mut panel = ManagementPanel::new(Area::Skills, None);
         panel.set_result(&reply(
             Area::Skills,
-            ManagementAction::Run { id: "job-1".into() },
+            ManagementAction::Run {
+                id: "job-1".into(),
+                document: None,
+                seed: None,
+            },
             ManagementResult::View {
                 view: Box::new(view),
                 note: Some("Run nightly\u{1b}[2J.".into()),
@@ -2052,7 +2225,14 @@ mod tests {
         match panel.handle_key(ctrl('t')) {
             Effect::Management(request) => {
                 assert_eq!(request.area, Area::Mcp);
-                assert_eq!(request.action, ManagementAction::Run { id: "docs".into() });
+                assert_eq!(
+                    request.action,
+                    ManagementAction::Run {
+                        id: "docs".into(),
+                        document: None,
+                        seed: None,
+                    }
+                );
             }
             _ => panic!("expected a run"),
         }

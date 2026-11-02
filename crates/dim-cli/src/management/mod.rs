@@ -21,6 +21,7 @@ pub mod mcp;
 pub mod permissions;
 pub mod scheduler;
 pub mod skills;
+pub mod workflow;
 
 use std::path::Path;
 
@@ -31,11 +32,13 @@ use crate::model::session::{
 };
 use crate::ui::i18n::{self, t, tf};
 
-/// One area's management methods: the read that reports the area, the
+/// One area's management methods: the read that reports the area, every
 /// method behind each kind it has, and the name the area goes by.
 struct Methods {
     catalog: &'static str,
-    kinds: &'static [(ActionKind, &'static str)],
+    /// Each kind and every method it calls. A kind is offered only when all
+    /// of them are advertised.
+    kinds: &'static [(ActionKind, &'static [&'static str])],
     /// What the area manages, as the unsupported sentences name it: a
     /// plural noun phrase behind "This daemon cannot manage ..." and the
     /// subject of "This daemon lists ... but cannot ... them.".
@@ -43,11 +46,11 @@ struct Methods {
 }
 
 impl Methods {
-    fn method(&self, kind: ActionKind) -> Option<&'static str> {
+    fn methods(&self, kind: ActionKind) -> Option<&'static [&'static str]> {
         self.kinds
             .iter()
             .find(|(has, _)| *has == kind)
-            .map(|(_, method)| *method)
+            .map(|(_, methods)| *methods)
     }
 }
 
@@ -55,8 +58,8 @@ const SKILLS: Methods = Methods {
     catalog: "skills.catalog",
     manages: "skills",
     kinds: &[
-        (ActionKind::Toggle, "skills.set_enabled"),
-        (ActionKind::Reload, "skills.refresh"),
+        (ActionKind::Toggle, &["skills.set_enabled"]),
+        (ActionKind::Reload, &["skills.refresh"]),
     ],
 };
 
@@ -64,10 +67,23 @@ const HOOKS: Methods = Methods {
     catalog: "hooks.catalog",
     manages: "hooks",
     kinds: &[
-        (ActionKind::Toggle, "hooks.set_enabled"),
-        (ActionKind::Edit, "hooks.save"),
+        (ActionKind::Toggle, &["hooks.set_enabled"]),
+        (ActionKind::Edit, &["hooks.save"]),
         // A reload re-reads the document, so it needs no rescan method.
-        (ActionKind::Reload, "hooks.catalog"),
+        (ActionKind::Reload, &["hooks.catalog"]),
+    ],
+};
+
+const WORKFLOW: Methods = Methods {
+    catalog: "workflow.list",
+    manages: "workflow definitions",
+    kinds: &[
+        (ActionKind::Toggle, &["settings.read", "settings.update"]),
+        (ActionKind::Edit, &["settings.read", "workflow.save"]),
+        (ActionKind::Reload, &["workflow.list"]),
+        (ActionKind::Add, &["workflow.save"]),
+        (ActionKind::Run, &["workflow.start"]),
+        (ActionKind::Inspect, &["workflow.status"]),
     ],
 };
 
@@ -75,14 +91,14 @@ const MCP: Methods = Methods {
     catalog: "mcp.catalog",
     manages: "MCP servers",
     kinds: &[
-        (ActionKind::Toggle, "mcp.set_enabled"),
-        (ActionKind::Edit, "mcp.update"),
+        (ActionKind::Toggle, &["mcp.set_enabled"]),
+        (ActionKind::Edit, &["mcp.update"]),
         // A reload re-reads every Settings source; the catalog call does it.
-        (ActionKind::Reload, "mcp.catalog"),
-        (ActionKind::Add, "mcp.save"),
-        (ActionKind::Remove, "mcp.remove"),
-        (ActionKind::Run, "mcp.test"),
-        (ActionKind::Inspect, "mcp.inspect"),
+        (ActionKind::Reload, &["mcp.catalog"]),
+        (ActionKind::Add, &["mcp.save"]),
+        (ActionKind::Remove, &["mcp.remove"]),
+        (ActionKind::Run, &["mcp.test"]),
+        (ActionKind::Inspect, &["mcp.inspect"]),
     ],
 };
 
@@ -90,14 +106,14 @@ const SCHEDULED: Methods = Methods {
     catalog: "schedule.list",
     manages: "scheduled jobs",
     kinds: &[
-        (ActionKind::Toggle, "schedule.set_enabled"),
-        (ActionKind::Edit, "schedule.save"),
+        (ActionKind::Toggle, &["schedule.set_enabled"]),
+        (ActionKind::Edit, &["schedule.save"]),
         // A reload re-reads the jobs, so it needs no rescan method.
-        (ActionKind::Reload, "schedule.list"),
-        (ActionKind::Add, "schedule.save"),
-        (ActionKind::Remove, "schedule.delete"),
-        (ActionKind::Run, "schedule.run_now"),
-        (ActionKind::Inspect, "schedule.history"),
+        (ActionKind::Reload, &["schedule.list"]),
+        (ActionKind::Add, &["schedule.save"]),
+        (ActionKind::Remove, &["schedule.delete"]),
+        (ActionKind::Run, &["schedule.run_now"]),
+        (ActionKind::Inspect, &["schedule.history"]),
     ],
 };
 
@@ -107,12 +123,12 @@ const MODELS: Methods = Methods {
     catalog: "provider.management",
     manages: "models",
     kinds: &[
-        (ActionKind::Toggle, "provider.models.set_enabled"),
-        (ActionKind::Edit, "provider.models.edit"),
-        (ActionKind::Reload, "provider.management"),
-        (ActionKind::Add, "provider.models.create"),
-        (ActionKind::Remove, "provider.models.delete"),
-        (ActionKind::Inspect, "provider.management"),
+        (ActionKind::Toggle, &["provider.models.set_enabled"]),
+        (ActionKind::Edit, &["provider.models.edit"]),
+        (ActionKind::Reload, &["provider.management"]),
+        (ActionKind::Add, &["provider.models.create"]),
+        (ActionKind::Remove, &["provider.models.delete"]),
+        (ActionKind::Inspect, &["provider.management"]),
     ],
 };
 
@@ -121,9 +137,9 @@ const PERMISSIONS: Methods = Methods {
     manages: "command rules",
     kinds: &[
         // A reload re-reads the rules, so it needs no rescan method.
-        (ActionKind::Reload, "permission.rules"),
-        (ActionKind::Add, "permission.set_rules"),
-        (ActionKind::Remove, "permission.set_rules"),
+        (ActionKind::Reload, &["permission.rules"]),
+        (ActionKind::Add, &["permission.set_rules"]),
+        (ActionKind::Remove, &["permission.set_rules"]),
     ],
 };
 
@@ -134,6 +150,7 @@ fn methods_of(area: &Area) -> &'static Methods {
         Area::Mcp => &MCP,
         Area::Scheduled => &SCHEDULED,
         Area::Models { .. } => &MODELS,
+        Area::Workflow => &WORKFLOW,
         Area::Permissions => &PERMISSIONS,
     }
 }
@@ -185,7 +202,7 @@ pub fn actions(client: &Client, area: &Area) -> Vec<ActionKind> {
     methods
         .kinds
         .iter()
-        .filter(|(_, method)| client.supports(&[method]))
+        .filter(|(_, needed)| client.supports(needed))
         .map(|(kind, _)| *kind)
         .collect()
 }
@@ -215,8 +232,8 @@ pub fn supports_kind(client: &Client, area: &Area, kind: ActionKind) -> Result<(
     if !client.supports(&[methods.catalog]) {
         return Err(unsupported(area, None));
     }
-    match methods.method(kind) {
-        Some(method) if client.supports(&[method]) => Ok(()),
+    match methods.methods(kind) {
+        Some(needed) if client.supports(needed) => Ok(()),
         _ => Err(unsupported(area, Some(kind))),
     }
 }
@@ -225,7 +242,7 @@ pub fn supports_kind(client: &Client, area: &Area, kind: ActionKind) -> Result<(
 /// serve its read, and the kind's own sentence when it serves the read
 /// without the kind's method. `manages` is always a plural noun phrase, so
 /// "them" holds for every area, and each sentence is translated whole.
-fn unsupported(area: &Area, kind: Option<ActionKind>) -> String {
+pub(crate) fn unsupported(area: &Area, kind: Option<ActionKind>) -> String {
     let methods = methods_of(area);
     let Some(kind) = kind else {
         return tf(
@@ -257,7 +274,7 @@ pub fn named_id(action: &ManagementAction) -> Option<&str> {
     match action {
         ManagementAction::Toggle { id, .. }
         | ManagementAction::Remove { id }
-        | ManagementAction::Run { id }
+        | ManagementAction::Run { id, .. }
         | ManagementAction::Save { id: Some(id), .. } => Some(id),
         _ => None,
     }
@@ -294,13 +311,21 @@ pub fn applied_line(action: &ManagementAction, name: Option<&str>) -> String {
         ManagementAction::Remove { id } => tf("Removed {name}.", &[("name", name.unwrap_or(id))]),
         ManagementAction::Reload => t("Reloaded.").to_owned(),
         ManagementAction::Add { .. } => t("Added.").to_owned(),
-        ManagementAction::Run { id } => tf("Ran {name}.", &[("name", name.unwrap_or(id))]),
+        ManagementAction::Run { id, .. } => tf("Ran {name}.", &[("name", name.unwrap_or(id))]),
         // A read applies nothing: the adapters answer with one only after an
         // action of the kinds above.
         ManagementAction::List | ManagementAction::Inspect { .. } => {
             unreachable!("a read does not report an applied action")
         }
     }
+}
+
+/// The Session and the line whose panel issued a request: what a run started
+/// from the panel reports to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionLine {
+    pub session_id: String,
+    pub branch_id: String,
 }
 
 /// Sets the language management text is composed in, from a locale code
@@ -317,6 +342,7 @@ pub async fn apply(
     client: &mut Client,
     request: &ManagementRequest,
     cwd: &Path,
+    line: Option<&SessionLine>,
 ) -> ManagementResult {
     if let Err(error) = supported(client, request) {
         return ManagementResult::Refused(ManagementRefusal::Refused(error));
@@ -352,6 +378,26 @@ pub async fn apply(
                 ManagementResult::Refused(ManagementRefusal::Conflict {
                     message,
                     view: catalog.map(|catalog| Box::new(hooks::view(&catalog, &actions))),
+                })
+            }
+        },
+        Area::Workflow => match workflow::apply(client, &request.action, cwd, line).await {
+            Ok(workflow::Answer::Definitions { listing, note }) => ManagementResult::View {
+                view: Box::new(workflow::view(&listing, &actions, cwd)),
+                note,
+            },
+            Ok(workflow::Answer::Detail(detail)) => ManagementResult::Detail(detail),
+            Err(workflow::Failure::ReadFailed { note, error }) => ManagementResult::Applied {
+                note,
+                read_error: error,
+            },
+            Err(workflow::Failure::Refused(message)) => {
+                ManagementResult::Refused(ManagementRefusal::Refused(message))
+            }
+            Err(workflow::Failure::Conflict { message, listing }) => {
+                ManagementResult::Refused(ManagementRefusal::Conflict {
+                    message,
+                    view: listing.map(|listing| Box::new(workflow::view(&listing, &actions, cwd))),
                 })
             }
         },

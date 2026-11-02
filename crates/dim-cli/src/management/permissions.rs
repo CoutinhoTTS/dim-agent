@@ -163,6 +163,7 @@ pub(super) fn view(rules: &Rules, actions: &[ActionKind]) -> ManagementView {
                 actions: super::entry_kinds(actions),
                 remove_verb: RemoveVerb::Remove,
                 document: None,
+                run: None,
             },
         );
     }

@@ -221,6 +221,7 @@ pub(super) fn view(catalog: &Catalog, available: &[ActionKind]) -> ManagementVie
                     .collect(),
                 remove_verb: RemoveVerb::Remove,
                 document: None,
+                run: None,
             },
         );
     }

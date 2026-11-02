@@ -1248,6 +1248,7 @@ The areas below use it, over the same kinds:
 
 - MCP (`/mcp`, `dimcode mcp ...`) lists the effective catalog with `mcp.set_enabled`, reads each entry's `mcp.configuration` for its detail and its patch, writes `mcp.update`, creates with `mcp.save`, deletes with `mcp.remove`, and shows `mcp.test` and `mcp.inspect` as details. Its subcommands are `dimcode mcp list`, `add PATH`, `edit ID`, `set ID PATH`, `remove ID`, `test ID` and `inspect ID`.
 - Command rules (`/permissions`'s Command rules row, `dimcode permissions ...`) is a rule per entry from `permission.rules` with `Ctrl+R`, `Ctrl+N` and `Ctrl+X`, writing through `permission.set_rules`; its subcommands are `dimcode permissions list`, `add PATH` and `remove 'DECISION MATCH COMMAND'`.
+- Workflow (`/workflow`, `dimcode workflow ...`) lists the workspace's definitions with their source and state, toggles a project definition through the user document that holds its enablement, edits and adds user definitions over `workflow.save`, starts a definition with its parameters and inspects its recent runs. Its subcommands are `dimcode workflow list`, `enable NAME`, `disable NAME`, `edit NAME`, `set NAME PATH`, `add PATH`, `start NAME [PATH]` and `history NAME`; `/workflow:save` opens the panel in its create editor.
 
 The external editor is `$VISUAL`, then `$EDITOR`, then `vi` (`notepad` on Windows), run on Unix
 through `sh -c '<editor> "$@"' <editor> <file>` as git does, so a quoted path with a space

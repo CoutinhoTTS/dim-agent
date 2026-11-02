@@ -661,6 +661,7 @@ fn entry(
         states,
         actions: kinds,
         remove_verb,
+        run: None,
         document: version.map(|version| EntryDocument {
             revision: version.to_string(),
             document: edit_template(provider, model),
