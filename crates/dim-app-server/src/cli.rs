@@ -31,27 +31,123 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
 /// A daemon outlives the process that started it, so it must not keep that
 /// process's descriptors: a launcher's pipe would never reach EOF while the
 /// daemon runs. Descriptors 0-2 are the stdio the launcher chose.
+///
+/// Linux closes the whole range in one call. When that call is unavailable
+/// the descriptors are listed, which is the only path on the other Unix
+/// systems; when no listing can be read either, the range is closed one
+/// descriptor at a time, up to the process's descriptor limit. Every path
+/// closes every inherited descriptor; the last resort uses a fixed cap only
+/// when no limit is known.
 #[cfg(unix)]
 fn close_inherited_descriptors() {
-    // The listing is collected before anything is closed: it names its own
-    // directory descriptor too, which the read releases and which then
-    // fails to close with EBADF.
-    let descriptors = match std::fs::read_dir("/dev/fd") {
-        Ok(entries) => entries
+    #[cfg(target_os = "linux")]
+    if close_range_above_standard_error() {
+        return;
+    }
+    if close_enumerated_descriptors() {
+        return;
+    }
+    close_bounded_descriptors();
+}
+
+/// `close_range(3, ~0U, 0)`, false when the kernel or libc does not have it.
+#[cfg(target_os = "linux")]
+fn close_range_above_standard_error() -> bool {
+    // `libc` declares the function for GNU targets only, so the other Linux
+    // environments call the kernel's own entry point for it.
+    #[cfg(target_env = "gnu")]
+    // SAFETY: the range covers descriptors this process owns and closing
+    // them is what the call does.
+    let closed = unsafe { libc::close_range(3, libc::c_uint::MAX, 0) };
+    #[cfg(not(target_env = "gnu"))]
+    // SAFETY: as above; the arguments are the function's unsigned int range.
+    let closed = unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            3 as libc::c_long,
+            libc::c_uint::MAX as libc::c_long,
+            0 as libc::c_long,
+        ) as libc::c_int
+    };
+    closed == 0
+}
+
+/// Closes what a descriptor listing names, false when none can be read.
+#[cfg(unix)]
+fn close_enumerated_descriptors() -> bool {
+    #[cfg(target_os = "linux")]
+    let directories = ["/proc/self/fd", "/dev/fd"];
+    #[cfg(not(target_os = "linux"))]
+    let directories = ["/dev/fd"];
+    for directory in directories {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        // The listing is collected before anything is closed: it names its
+        // own directory descriptor too, which the read releases and which
+        // then fails to close with EBADF.
+        let descriptors = entries
             .filter_map(|entry| entry.ok())
             .filter_map(|entry| entry.file_name().to_str()?.parse::<i32>().ok())
             .filter(|descriptor| *descriptor > 2)
-            .collect::<Vec<_>>(),
-        Err(error) => {
-            eprintln!("Could not list /dev/fd: {error}; inherited descriptors stay open");
-            return;
+            .collect::<Vec<_>>();
+        for descriptor in descriptors {
+            // SAFETY: close is async-signal-safe and the descriptor belongs
+            // to this process; EBADF means it was already released.
+            unsafe { libc::close(descriptor) };
         }
-    };
-    for descriptor in descriptors {
-        // SAFETY: close is async-signal-safe and the descriptor belongs to
-        // this process; EBADF means it was already released.
+        return true;
+    }
+    false
+}
+
+/// Closes 3 up to the process's descriptor limit, the last resort when no
+/// listing can be read. Every descriptor past the ones in use fails with
+/// EBADF.
+#[cfg(unix)]
+fn close_bounded_descriptors() {
+    let (bound, source) = descriptor_bound();
+    eprintln!(
+        "Could not list this process's inherited descriptors; closing 3 up to {bound} ({source})"
+    );
+    for descriptor in 3..bound {
+        // SAFETY: as above.
         unsafe { libc::close(descriptor) };
     }
+}
+
+/// The descriptor number the bounded loop stops before, and the limit that
+/// gave it: the soft limit, else the hard limit, else `_SC_OPEN_MAX`, else
+/// the fixed cap for a process that knows no limit.
+#[cfg(unix)]
+fn descriptor_bound() -> (libc::c_int, &'static str) {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit writes only into the struct given to it.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0 {
+        if let Some(bound) = descriptor_limit(limit.rlim_cur) {
+            return (bound, "soft limit");
+        }
+        if let Some(bound) = descriptor_limit(limit.rlim_max) {
+            return (bound, "hard limit");
+        }
+    }
+    // SAFETY: sysconf reads no memory the caller owns.
+    let open_max = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
+    if open_max > 0 && open_max <= libc::c_int::MAX as libc::c_long {
+        return (open_max as libc::c_int, "_SC_OPEN_MAX");
+    }
+    (65_536, "fixed cap")
+}
+
+/// A descriptor limit as a bound for the loop, `None` when it is unlimited
+/// or larger than the loop's counter.
+#[cfg(unix)]
+fn descriptor_limit(limit: libc::rlim_t) -> Option<libc::c_int> {
+    (limit != libc::RLIM_INFINITY && limit <= libc::c_int::MAX as libc::rlim_t)
+        .then_some(limit as libc::c_int)
 }
 
 /// Reads a development model configuration, `--model-config PATH`, as the
