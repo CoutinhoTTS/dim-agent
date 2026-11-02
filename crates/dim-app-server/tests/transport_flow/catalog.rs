@@ -398,18 +398,6 @@ async fn catalog_reports_creation_origins_and_filters_the_hidden_classes() {
     assert_eq!(found(&acp)["origin"], "acp");
     assert_eq!(found(&conversation)["origin"], "client");
 
-    let mut older = Client::new_version(&server, false, 2).await;
-    assert_ok(&older.rpc("session.create", create(json!([]))).await);
-    let listed = older.rpc("session.list", json!({})).await;
-    assert_ok(&listed);
-    let rows = listed["result"].as_array().unwrap();
-    assert!(!rows.is_empty(), "{listed}");
-    assert!(
-        rows.iter()
-            .all(|row| row.get("origin").is_none() && row.get("parentSessionId").is_none()),
-        "{listed}"
-    );
-
     let cursor = client
         .rpc("session.catalog", json!({"limit":1,"withAcpSessions":true}))
         .await;

@@ -15,7 +15,9 @@ use serde_json::Value;
 use crate::Result;
 use crate::args::Options;
 use crate::client::Client;
-use crate::management::{self, editor, hooks, mcp, permissions, scheduler, skills, workflow};
+use crate::management::{
+    self, editor, hooks, mcp, models, permissions, scheduler, skills, workflow,
+};
 use crate::mcp_command::print_report;
 use crate::model::session::{
     ActionKind, Area, ManagementAction, ManagementRequest, ManagementResult,
@@ -30,11 +32,12 @@ pub async fn run(
     options: &Options,
     request: &ManagementRequest,
 ) -> Result<i32> {
-    match request.area {
+    match &request.area {
         Area::Skills => run_skills(client, options, request).await,
         Area::Hooks => run_hooks(client, options, request).await,
         Area::Mcp => run_mcp(client, options, request).await,
         Area::Scheduled => run_scheduled(client, request).await,
+        Area::Models { provider_id } => run_models(client, provider_id, request).await,
         Area::Workflow => run_workflow(client, options, request).await,
         Area::Permissions => run_permissions(client, request).await,
     }
@@ -61,12 +64,12 @@ pub async fn edit(
         .into());
     }
     // Refuse a write the daemon cannot serve before the user edits.
-    management::supports_kind(client, area, ActionKind::Edit)?;
-    let (revision, document) = read(client, options, area, id.as_deref()).await?;
+    management::supports_kind(client, &area, ActionKind::Edit)?;
+    let (revision, document) = read(client, options, &area, id.as_deref()).await?;
     let text = serde_json::to_string_pretty(&document)
         .map(|text| format!("{text}\n"))
         .map_err(|error| error.to_string())?;
-    let draft = editor::Draft::open(&options.home, area, &text)?;
+    let draft = editor::Draft::open(&options.home, area.clone(), &text)?;
     let kept = draft.path().display().to_string();
     let mut command = editor::command(draft.path());
     let program = command.get_program().to_string_lossy().into_owned();
@@ -119,13 +122,13 @@ pub async fn set(
 ) -> Result<i32> {
     // Refuse a write the daemon cannot serve before the input can hold the
     // call: the same check `edit` makes before it opens the editor.
-    management::supports_kind(client, area, ActionKind::Edit)?;
+    management::supports_kind(client, &area, ActionKind::Edit)?;
     // The input first and the revision second, so the revision is read
     // immediately before the write however long the input takes.
     let text = read_text(path)?;
-    let (revision, stored) = read(client, options, area, id.as_deref()).await?;
+    let (revision, stored) = read(client, options, &area, id.as_deref()).await?;
     if path == Path::new("-") {
-        let draft = editor::Draft::open(&options.home, area, &text)?;
+        let draft = editor::Draft::open(&options.home, area.clone(), &text)?;
         let kept = draft.path().display().to_string();
         let outcome = write(
             client,
@@ -165,10 +168,10 @@ pub async fn set(
 pub async fn add(client: &mut Client, options: &Options, area: Area, path: &Path) -> Result<i32> {
     // Refuse a create the daemon cannot serve before the input can hold the
     // call, as `set` does.
-    management::supports_kind(client, area, ActionKind::Add)?;
+    management::supports_kind(client, &area, ActionKind::Add)?;
     let text = read_text(path)?;
     if path == Path::new("-") {
-        let draft = editor::Draft::open(&options.home, area, &text)?;
+        let draft = editor::Draft::open(&options.home, area.clone(), &text)?;
         let kept = draft.path().display().to_string();
         let outcome = create(client, options, area, &text, &kept).await;
         if outcome.is_ok() {
@@ -192,7 +195,7 @@ pub async fn start(
 ) -> Result<i32> {
     // Refuse a start the daemon cannot serve before the input can hold the
     // call, as `add` does.
-    management::supports_kind(client, area, ActionKind::Run)?;
+    management::supports_kind(client, &area, ActionKind::Run)?;
     let document = match path {
         Some(path) => {
             let text = read_text(path)?;
@@ -230,19 +233,34 @@ fn read_text(path: &Path) -> Result<String> {
 async fn read(
     client: &mut Client,
     options: &Options,
-    area: Area,
+    area: &Area,
     id: Option<&str>,
 ) -> Result<(String, Value)> {
     management::supported(
         client,
         &ManagementRequest {
-            area,
+            area: area.clone(),
             action: ManagementAction::List,
         },
     )?;
     let cwd = options.cwd.to_string_lossy();
     match area {
         Area::Skills => Err("A Skill has no document to edit.".to_owned().into()),
+        Area::Models { provider_id } => {
+            let Some(id) = id else {
+                return Err("models edit and set take a model id.".to_owned().into());
+            };
+            let provider = models::read(client, provider_id)
+                .await
+                .map_err(|failure| failure.to_string())?;
+            let version = provider
+                .version
+                .ok_or("The provider has no model catalog to edit.")?;
+            let model = provider
+                .model(id)
+                .ok_or_else(|| format!("No model has that id: {id}"))?;
+            Ok((version.to_string(), models::edit_template(&provider, model)))
+        }
         Area::Hooks => {
             let catalog = hooks::catalog(client, &cwd).await?;
             let document = catalog
@@ -338,7 +356,7 @@ async fn write(client: &mut Client, options: &Options, draft: &Draft) -> Result<
         return Ok(0);
     }
     let request = ManagementRequest {
-        area: draft.area,
+        area: draft.area.clone(),
         action: ManagementAction::Save {
             id: draft.id.clone(),
             expected_revision: draft.revision.clone(),
@@ -536,6 +554,42 @@ async fn run_scheduled(client: &mut Client, request: &ManagementRequest) -> Resu
             // names it, except where the owner's own answer stands.
             let line = note.unwrap_or_else(|| management::applied_line(&request.action, None));
             print_report(vec![safe_line(&line)], vec![error])
+        }
+        Err(error) => return Err(error.to_string().into()),
+    }
+    Ok(0)
+}
+
+/// `models ...`: one Provider's models, printed as its owner answers.
+async fn run_models(
+    client: &mut Client,
+    provider_id: &str,
+    request: &ManagementRequest,
+) -> Result<i32> {
+    management::supported(client, request)?;
+    match models::apply(client, provider_id, &request.action).await {
+        Ok(models::Answer::Detail(detail)) => {
+            // The owner names models and states reasons: what it wrote is
+            // made safe before it reaches the terminal.
+            let lines = detail.lines.iter().map(|line| safe(line)).collect();
+            print_report(lines, Vec::new());
+        }
+        Ok(models::Answer::Provider { provider, note }) => {
+            // The re-read names the entry: its label from the fresh view,
+            // with the id only when that view has no such entry.
+            let line = note.unwrap_or_else(|| {
+                let actions = management::actions(client, &request.area);
+                let view = models::view(&provider, &actions);
+                let name = management::entry_name(&view, &request.action);
+                management::applied_line(&request.action, name)
+            });
+            print_report(vec![safe_line(&line)], Vec::new());
+        }
+        // The action was applied; only the report after it failed. Its line
+        // names what the user asked for, and the exit stays 0.
+        Err(models::Failure::ReadFailed { note, error }) => {
+            let line = note.unwrap_or_else(|| management::applied_line(&request.action, None));
+            print_report(vec![safe_line(&line)], vec![error]);
         }
         Err(error) => return Err(error.to_string().into()),
     }

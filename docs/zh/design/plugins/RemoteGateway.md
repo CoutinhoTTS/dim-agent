@@ -94,7 +94,7 @@ sequenceDiagram
   T->>RG: 认证升级请求
   RG-->>T: allow、device_id
   T->>R: 连接，ConnectionEntry 带 deviceId
-  D->>R: hello v3、session.list、session.attach
+  D->>R: hello v3、session.summaries、session.attach
 ```
 
 邀约为一次性使用，在写入记录之前即被消耗；令牌只以哈希形式存储。

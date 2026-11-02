@@ -156,7 +156,7 @@ are Rust methods over the native store, not services: only Agents calls them.
    and drops the slot once nothing else holds it ([idle unload §6.4](idle-unload.md#64-admission-slots)). A caller
    still waiting at the gate finds the slot closed, and a later one finds S with no owner and no rows: `acquire`
    answers `session_closed` either way. A delete that fails before step 4 releases the gate instead. A Session it
-   closed stays as `session.close` leaves it: its rows remain, `session.list` omits it, it does not load again in
+   closed stays as `session.close` leaves it: its rows remain, `session.summaries` omits it, it does not load again in
    this process, and a retry deletes it; after a restart it loads. A Session it did not close loads on its next use
    (§16 D5).
 
@@ -190,7 +190,7 @@ A delete does not remove:
   transaction commits, so it could announce a delete that then fails. The protocol has no list notification for a
   new Session either, so none is added for a removed one.
 - After the reply, `session.attach`, Session methods and `session.fork` on S fail `session_closed`, and
-  `session.list` and `session.summaries` omit it.
+  `session.summaries` omits it.
 - The connection that sends the delete may itself be attached to S. It gets the notices, then the reply.
 
 ### 3.5 Idempotence and errors
@@ -328,7 +328,7 @@ would rewrite facts other owners wrote. To continue a child branch's work, a cli
 the Session.
 
 Rejected: copying a child's ancestor chain under the same branch ids and continuing on the copy of the child. The
-fork's conversation would then not be its `main`, which clients, `session.list` and SessionTitle read.
+fork's conversation would then not be its `main`, which clients, `session.summaries` and SessionTitle read.
 
 ### 6.3 What a fork copies
 
@@ -653,7 +653,7 @@ stop would deadlock that reload, and delaying release would let a later member i
 ## 15. Acceptance (flow tests)
 
 1. Delete a loaded Session with a running turn while a client is attached: the client gets `session.closed`, the reply
-   is `{deleted: true}`, `session.list` omits the Session and `session.attach` fails `session_closed`. No row with its id remains
+   is `{deleted: true}`, `session.summaries` omits the Session and `session.attach` fails `session_closed`. No row with its id remains
    in any table, `command-output/<id>/` is gone, and its Session files are removed by the sweep. A second delete
    replies `{deleted: false}`.
 2. Delete an unloaded Session, and one whose rows fail validation: both reply `{deleted: true}` and leave no row.

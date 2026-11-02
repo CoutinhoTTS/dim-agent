@@ -22,7 +22,7 @@ Issue：[#556](https://github.com/arcships/dim/issues/556)，要求有界的 `/r
 - 投影的表、索引、写入事务、删除与分叉维护、升级回填——这些由[原生存储格式](../../../design/appserver/native-storage-format.md#556-v23-格式决定)决定；
 - 分类字段、它们的缺省值与呈现——[#557](https://github.com/arcships/dim/issues/557)；
 - 选择面板的交互与 project/all 开关——加入它们的那个客户端（§6）；
-- `session.list`、`session.attach`，以及客户端如何排序或呈现行。
+- `session.attach`，以及客户端如何排序或呈现行。
 
 ## 3. 自有合同
 
@@ -38,10 +38,10 @@ Issue：[#556](https://github.com/arcships/dim/issues/556)，要求有界的 `/r
 | `limit` | 1 到 200，缺省 50。更大的值被拒绝而不是截断，与 `history` 的 `limit` 相同 |
 | `cursor` | 不透明。它编码上一行返回的 `(updatedAt, sessionId)` 与请求的 `query`、`cwd`、`withPreview` 的摘要，按键集分页；调用方原样回传，它不是 Session ID |
 | 顺序 | `updatedAt` 降序，再 `sessionId` 升序 |
-| `query` | 对今天选择面板搜索的四个字段——Session ID、工作区、model ID 与预览——加上它的搜索文本从不持有的标题与 provider ID，做大小写不敏感的字面子串匹配。查询时由一个存储注册在连接上的 SQL 函数按 `str::to_lowercase` 把查询与每个字段做 Unicode 小写化（与选择面板相同的折叠）；匹配是逐字段的 `instr(fold(field), fold(query)) > 0`，因此是字面的，`%` 与 `_` 只匹配它们本身。它在目录查询里、页边界之前应用。模型取自存储的 Session 配置，即 `session.list` 报告的值，因此查询不解码任何事件 |
+| `query` | 对今天选择面板搜索的四个字段——Session ID、工作区、model ID 与预览——加上它的搜索文本从不持有的标题与 provider ID，做大小写不敏感的字面子串匹配。查询时由一个存储注册在连接上的 SQL 函数按 `str::to_lowercase` 把查询与每个字段做 Unicode 小写化（与选择面板相同的折叠）；匹配是逐字段的 `instr(fold(field), fold(query)) > 0`，因此是字面的，`%` 与 `_` 只匹配它们本身。它在目录查询里、页边界之前应用。模型取自存储的 Session 配置，即 `session.summaries` 报告的值，因此查询不解码任何事件 |
 | `cwd` | 工作区精确匹配，在页边界之前应用 |
 | `withPreview` | 布尔，缺省 `false`。`true` 只保留预览不为 NULL 的行，在页边界之前应用，因此隐藏无预览行的客户端拿到的是整页它显示的行；投影按预览建的局部索引让这条读取保持有界（[原生存储格式](../../../design/appserver/native-storage-format.md#556-v23-格式决定)） |
-| 回复 | `SessionSummary` 条目，即 `session.summaries` 返回的形态：`session.list` 记录的字段加上 `preview`、`updatedAt` 与 `closed`，后者在这里恒为 false，因为这条查询不列出已关闭的 Session（§3.3）。最后一页不带 `nextCursor` |
+| 回复 | `SessionSummary` 条目，即 `session.summaries` 返回的形态：`SessionInfo` 记录的字段加上 `preview`、`updatedAt` 与 `closed`，后者在这里恒为 false，因为这条查询不列出已关闭的 Session（§3.3）。最后一页不带 `nextCursor` |
 
 读不出的 `cursor`，或摘要与请求的 `query`、`cwd`、`withPreview` 不符的 `cursor`，被拒绝为 `invalid_params`，而不是当作第一页，客户端因此不会在不知不觉中从头再读一遍目录，也不会用另一组过滤的键接着分页。游标不带库的标记：来自另一个库的目录的游标无法分辨，也不需要分辨，因为它只按同一个顺序定位一个键。
 
@@ -61,7 +61,7 @@ Issue：[#556](https://github.com/arcships/dim/issues/556)，要求有界的 `/r
 
 ### 3.4 无租约
 
-目录读取从不装载、恢复或启动 Session：存储的字段由投影回答，因此列目录不花任何模型、工具或 MCP 启动。`running` 与 `attachedClients` 取自进程的内存状态，与 `session.list` 相同：已卸载的 Session 读作未运行，两个字段都不落盘，因此读取它们不取租约、也不装载任何东西。
+目录读取从不装载、恢复或启动 Session：存储的字段由投影回答，因此列目录不花任何模型、工具或 MCP 启动。`running` 与 `attachedClients` 取自进程的内存状态，与 `session.summaries` 相同：已卸载的 Session 读作未运行，两个字段都不落盘，因此读取它们不取租约、也不装载任何东西。
 
 ### 3.5 目录过滤（#557）
 
@@ -84,8 +84,8 @@ Issue：[#556](https://github.com/arcships/dim/issues/556)，要求有界的 `/r
 | SessionStore 目录投影 | 每个 Session 一行，带最后活动时间、预览与工作区：创建事务以创建时间和空预览写下它，之后每个 `main` 批次的事务维护它，不存在的 Session 没有行。这一行从创建起就与 `agent_sessions` 一一对应，因此新 Session 的列出与今天的 `session.summaries` 相同 |
 | [标题元数据](session-title-metadata.md) | 存储的标题，用于显示与 `query`，从不从 Session 读取 |
 | `hello.features`（App Server） | 客户端发现目录所用的方法清单：目录在列出 `session.summaries` 的条件下列出，再加上 `session.fork` 同样要求的原生存储条件 |
-| Agents 的目录 | 目录应用的协议版本与 Agent 过滤，与 `session.list` 相同 |
-| Agents 的索引与连接 hub | 列出 Session 的实时 `running` 与 `attachedClients`，从进程状态读取、不取租约，与 `session.list` 相同 |
+| Agents 的目录 | 目录应用的协议版本与 Agent 过滤，与 `session.summaries` 相同 |
+| Agents 的索引与连接 hub | 列出 Session 的实时 `running` 与 `attachedClients`，从进程状态读取、不取租约，与 `session.summaries` 相同 |
 
 不调用 Session 门面、不取租约、不使用其他插件服务。
 
@@ -139,7 +139,7 @@ project/all 开关是另一个客户端决定：`cwd` 为本合同为它而存�
 | §4 第 4 条（核心不带业务含义） | 不改核心；投影是 SessionStore 的业务行 |
 | §4 第 5 条（批次） | 行写进 SessionStore 已有的批次事务；目录不加批次、不加事件 |
 | §4 第 6 条（模型上下文） | 不变：没有事件，因此没有上下文路径 |
-| §4 第 7 条（公开事件与服务） | Agents 从 SessionStore 存储的行回答，与 `session.list` 相同；Rpc 不直接访问存储或别的插件的状态 |
+| §4 第 7 条（公开事件与服务） | Agents 从 SessionStore 存储的行回答，与 `session.summaries` 相同；Rpc 不直接访问存储或别的插件的状态 |
 | §4 第 8 条（基础设施不变） | Timeline、Dispatcher、事件信封与格式、装配、Session 门面都不变。存储按存储页自己的格式决定新增一张派生表和零个事件 |
 | §4 第 9 条（只有后续决定要用的事实才进 Timeline） | 目录是选择面板的显示数据，因此留在 Timeline 之外；不新增事件 |
 | ADR 002 D2（不设接线模块） | 不新增插件：由 Rpc 的内建方法与 Agents 已有的目录回答 |

@@ -582,8 +582,9 @@ impl Projection {
                 if let ModelOutputOutcome::Failed {
                     error,
                     presentation,
-                    ..
+                    budget,
                 } = &data.outcome
+                    && (budget.is_none() || presentation.is_some())
                 {
                     let message = presentation
                         .as_ref()
@@ -796,7 +797,8 @@ impl Projection {
         &self.tasks
     }
 
-    /// The first message the user sent: the window title's topic.
+    /// The first message the user sent: the window title's topic until the
+    /// Session has a stored title (`ui::title`).
     pub fn first_message(&self) -> Option<String> {
         self.rows
             .iter()

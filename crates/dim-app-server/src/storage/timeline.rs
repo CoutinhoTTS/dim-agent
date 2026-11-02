@@ -1031,20 +1031,6 @@ impl SessionStore {
     pub fn timeline_store(&self) -> Arc<dyn TimelineStore> {
         self.timeline.clone()
     }
-    pub async fn sessions(&self) -> Result<Vec<String>> {
-        self.timeline
-            .db
-            .run(|connection| {
-                connection
-                    .prepare("SELECT session_id FROM agent_sessions ORDER BY session_id")
-                    .map_err(error)?
-                    .query_map([], |row| row.get(0))
-                    .map_err(error)?
-                    .collect::<rusqlite::Result<_>>()
-                    .map_err(error)
-            })
-            .await
-    }
     /// Adds a canonical user grant for `session_id`. The caller resolves
     /// `path`; a write grant is not downgraded by a later read grant, and a
     /// read grant may become write.
@@ -1151,80 +1137,6 @@ impl SessionStore {
             .owned_paths(session_id.to_owned())
             .await
             .map_err(error)
-    }
-    /// Directory-only reads never validate or decode Timeline events. Each
-    /// record carries its title metadata, read in the same query.
-    pub async fn directory(
-        &self,
-        agent: Option<String>,
-        version: u32,
-        cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<Vec<crate::protocol::SessionInfo>> {
-        self.timeline
-            .db
-            .run_cancellable(cancel, move |connection| {
-                let filter = if agent.is_some() {
-                    " AND o.agent_id=?2"
-                } else {
-                    ""
-                };
-                let sql = format!(
-                    "SELECT s.session_id, s.config, s.created_at_ms, b.sequence, o.agent_id, \
-                 m.revision, m.title, m.title_source, s.origin, s.leader_session_id \
-                 FROM session_owners o JOIN agent_sessions s USING(session_id) \
-                 JOIN timeline_branches b ON b.session_id=s.session_id AND b.branch_id='main' \
-                 LEFT JOIN session_metadata m ON m.session_id=s.session_id \
-                 WHERE o.protocol_version=?1{filter} ORDER BY s.session_id"
-                );
-                let mut query = connection.prepare(&sql).map_err(error)?;
-                let mut parameters = vec![rusqlite::types::Value::Integer(i64::from(version))];
-                if let Some(agent) = agent {
-                    parameters.push(agent.into());
-                }
-                let mut rows = query
-                    .query(rusqlite::params_from_iter(parameters))
-                    .map_err(error)?;
-                let mut result = vec![];
-                while let Some(row) = rows.next().map_err(error)? {
-                    let id: String = row.get(0).map_err(error)?;
-                    let parsed = (|| -> Result<_> {
-                        let config: String = row.get(1).map_err(error)?;
-                        let config: SessionConfig = serde_json::from_str(&config).map_err(error)?;
-                        let (origin, parent) = if version >= 3 {
-                            (
-                                Some(stored_origin(row, 8)?),
-                                row.get::<_, Option<String>>(9).map_err(error)?,
-                            )
-                        } else {
-                            (None, None)
-                        };
-                        Ok(crate::protocol::SessionInfo {
-                            session_id: id.clone(),
-                            cwd: config.cwd,
-                            model: dim_agent_types::ModelId {
-                                provider_id: config.model.provider_id,
-                                model_id: config.model.model_id,
-                            },
-                            created_at: read_sequence(row, 2).map_err(error)?,
-                            sequence: read_sequence(row, 3).map_err(error)?,
-                            running: false,
-                            attached_clients: 0,
-                            agent_id: Some(row.get(4).map_err(error)?),
-                            origin,
-                            parent_session_id: parent,
-                            title: Some(metadata::decode(row, 5).map_err(error)?.into()),
-                        })
-                    })();
-                    match parsed {
-                        Ok(record) => result.push(record),
-                        Err(error) => {
-                            tracing::error!(session_id=%id, %error, "Invalid Session directory")
-                        }
-                    }
-                }
-                Ok(result)
-            })
-            .await
     }
     /// One Session's stored creation origin and leader link, for an attach
     /// reply (#557): one row of `agent_sessions`, no config decode, no history

@@ -298,24 +298,29 @@ pub enum Command {
 
 /// One management area: an owner's management methods, drawn by the native
 /// client through the area's adapter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Area {
     Skills,
     Hooks,
     Mcp,
     Scheduled,
+    /// One Provider's models: the Provider is the area's scope.
+    Models {
+        provider_id: String,
+    },
     Workflow,
     Permissions,
 }
 
 impl Area {
     /// The slash command and the subcommand stem of the area.
-    pub fn name(self) -> &'static str {
+    pub fn name(&self) -> &'static str {
         match self {
             Self::Skills => "skills",
             Self::Hooks => "hooks",
             Self::Mcp => "mcp",
             Self::Scheduled => "scheduled",
+            Self::Models { .. } => "models",
             Self::Workflow => "workflow",
             Self::Permissions => "permissions",
         }
@@ -323,8 +328,11 @@ impl Area {
 
     /// Whether the area's documents are per entry, so `edit` and `set` name
     /// one, rather than one document for the area.
-    pub fn per_entry(self) -> bool {
-        matches!(self, Self::Scheduled | Self::Mcp | Self::Workflow)
+    pub fn per_entry(&self) -> bool {
+        matches!(
+            self,
+            Self::Scheduled | Self::Mcp | Self::Models { .. } | Self::Workflow
+        )
     }
 }
 
@@ -378,6 +386,9 @@ pub struct ManagementRequest {
 /// The client infers nothing here: every fact comes from the owner's reply.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ManagementView {
+    /// The title a scoped area's panel shows in place of the area's name;
+    /// `None` draws the area's name.
+    pub title: Option<String>,
     /// The revision the next write takes.
     pub revision: Option<String>,
     /// The area's document, when its owner reports one the client can edit.
@@ -418,12 +429,24 @@ pub struct ManagementEntry {
     /// What the row names besides on and off.
     pub states: Vec<EntryState>,
     pub actions: Vec<ActionKind>,
+    /// The verb the remove confirmation and outcome use.
+    pub remove_verb: RemoveVerb,
     /// The entry's own document, for an area whose documents are per entry
     /// and whose entries offer edit.
     pub document: Option<EntryDocument>,
     /// The operation's input document when the run kind takes one: the panel
     /// opens the editor on it before the run. `None` sends the run at once.
     pub run: Option<serde_json::Value>,
+}
+
+/// What a remove does, for the confirmation and the outcome wording.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RemoveVerb {
+    /// Take the entry out of the area.
+    #[default]
+    Remove,
+    /// Return the entry to its owner's default.
+    Reset,
 }
 
 /// One entry's document and the revision a write of it takes.
@@ -441,6 +464,8 @@ pub enum EntryState {
     Invalid,
     /// Another entry of the same name takes precedence.
     Shadowed { by: String },
+    /// The owner cannot use it as it is; the entry's detail says why.
+    Unavailable,
     /// The owner does not let the client write the entry; the entry's detail
     /// says why.
     ReadOnly,
@@ -884,6 +909,9 @@ pub enum ModelPolicyUpdate {
 #[derive(Debug, Clone, Default)]
 pub struct ModelList {
     pub models: Vec<ModelItem>,
+    /// Whether the daemon manages Providers through `provider.management`:
+    /// the picker offers a Provider's models for editing only when it does.
+    pub manage: bool,
     pub current: Option<(String, String)>,
     /// The usable providers that offer no selectable model, with why, so the
     /// picker can name them.
@@ -905,6 +933,14 @@ pub struct SessionItem {
     /// The creation origin the daemon reports (`client`, `acp`, `internal`,
     /// `unknown`); absent from a daemon that does not report one.
     pub origin: Option<String>,
+}
+
+/// The Session's stored title, unless it has none: empty, or the
+/// `New session` placeholder an untitled Session carries. The one rule the
+/// `/resume` row and the window title share (`ui::title`).
+pub fn stored_title(title: Option<&str>) -> Option<&str> {
+    let title = title?.trim();
+    (!title.is_empty() && !title.eq_ignore_ascii_case("new session")).then_some(title)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

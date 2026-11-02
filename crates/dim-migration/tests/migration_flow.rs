@@ -794,7 +794,7 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
         client_name: "migration-test",
     };
     let mut client = Client::connect(&connection).await.unwrap();
-    let listed: Value = client.typed("session.list", json!({})).await.unwrap();
+    let listed: Value = client.typed("session.summaries", json!({})).await.unwrap();
     assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
     let page: Value = client
         .typed("session.catalog", json!({"query":id,"withPreview":true}))

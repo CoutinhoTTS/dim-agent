@@ -100,7 +100,7 @@ impl Client {
             .await;
         created["sessionId"].as_str().unwrap().to_owned()
     }
-    /// The ids `method` (`session.list` or `session.summaries`) lists.
+    /// The ids `session.summaries` lists.
     async fn listed(&mut self, method: &str) -> Vec<String> {
         let mut ids: Vec<String> = self
             .ok(method, json!({}))
@@ -171,11 +171,10 @@ async fn slots_stay_bounded_by_loaded_sessions_and_kept_closes() {
     }
     ids.sort();
     assert_eq!((index.session_count(), slots(&index)), (N, (N, 0)));
-    assert_eq!(client.listed("session.list").await, ids);
+    assert_eq!(client.listed("session.summaries").await, ids);
 
     settle(&index, &mut marks, 0).await;
     assert_eq!(slots(&index), (0, 0));
-    assert_eq!(client.listed("session.list").await, ids);
     assert_eq!(client.listed("session.summaries").await, ids);
     assert_eq!(slots(&index), (0, 0));
 
@@ -199,7 +198,7 @@ async fn slots_stay_bounded_by_loaded_sessions_and_kept_closes() {
     index.unload_idle(&mut marks).await;
     assert_eq!(slots(&index), (N / 3, N / 3));
 
-    assert_eq!(client.listed("session.list").await, unloaded);
+    assert_eq!(client.listed("session.summaries").await, unloaded);
     for id in closed {
         assert_eq!(
             client.app_error("session.attach", id).await,
@@ -225,7 +224,7 @@ async fn slots_stay_bounded_by_loaded_sessions_and_kept_closes() {
         client.ok("session.delete", json!({"sessionId":id})).await;
     }
     assert_eq!(slots(&index), (0, 0));
-    assert_eq!(client.listed("session.list").await, unloaded);
+    assert_eq!(client.listed("session.summaries").await, unloaded);
     drop(client);
     server.shutdown();
     server.join().await.unwrap();

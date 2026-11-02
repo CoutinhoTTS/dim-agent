@@ -1486,7 +1486,7 @@ async fn node_workflow_stop_and_reload_settle_held_consumed_and_completed_work()
                 .iter()
                 .filter(|event| matches!(&event.kind, EventKind::StopInterrupt(_)))
                 .count();
-            let sessions = client.rpc("session.list", json!({})).await;
+            let sessions = client.rpc("session.summaries", json!({})).await;
             assert_ok(&sessions);
             let probe = client.rpc("workflowprobe.status", json!({})).await;
             assert_ok(&probe);
@@ -1515,7 +1515,7 @@ async fn node_workflow_stop_and_reload_settle_held_consumed_and_completed_work()
             .unwrap();
             assert_eq!(report_count(&starter, id.as_str().unwrap()).await, 1);
             assert_eq!(
-                client.rpc("session.list", json!({})).await["result"]
+                client.rpc("session.summaries", json!({})).await["result"]
                     .as_array()
                     .unwrap()
                     .len(),
@@ -2010,7 +2010,7 @@ async fn native_retention(fault: &str) {
     })
     .await
     .unwrap();
-    let listed = client.rpc("session.list", json!({})).await;
+    let listed = client.rpc("session.summaries", json!({})).await;
     assert!(
         listed["result"]
             .as_array()

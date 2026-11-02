@@ -28,6 +28,7 @@ use crate::management;
 use crate::model::session::{
     ActionKind, Area, EntryState, ManagementAction, ManagementDetail, ManagementEntry,
     ManagementRefusal, ManagementReply, ManagementRequest, ManagementResult, ManagementView,
+    RemoveVerb,
 };
 use crate::sanitize::{safe, safe_line};
 use crate::ui::i18n::{t, tf};
@@ -55,6 +56,7 @@ pub const STRINGS: &[&str] = &[
     "Ctrl+X remove",
     "Tab inspect",
     "Remove {name}? Enter confirm · Esc cancel",
+    "Reset {name}? Enter confirm · Esc cancel",
     "↑↓ scroll · Esc back",
     "Loading...",
     "No entries.",
@@ -65,11 +67,13 @@ pub const STRINGS: &[&str] = &[
     "hooks",
     "command rules",
     "scheduled jobs",
+    "models",
     "workflow definitions",
     "jobs",
     "enabled",
     "disabled",
     "invalid",
+    "unavailable",
     "read-only",
     "shadowed by {name}",
     "Working...",
@@ -78,6 +82,7 @@ pub const STRINGS: &[&str] = &[
     "Saved {name}.",
     "Added.",
     "Removed {name}.",
+    "Reset {name} to its catalog entry.",
     "Ran {name}.",
     "No change.",
     "Your text is kept in {path}.",
@@ -121,6 +126,56 @@ pub const STRINGS: &[&str] = &[
     "This daemon lists {area} but cannot run them.",
     "This daemon lists {area} but cannot inspect them.",
     "This workspace's hook settings changed since they were read; nothing was written.",
+    "Models",
+    "catalog",
+    "overrides",
+    "added",
+    "Models · {name}",
+    "undeclared",
+    "Context window {window} · max output {output}",
+    "Endpoint {endpoint}",
+    "Endpoint {endpoint} · override {value}",
+    "The provider reports it unavailable.",
+    "Limits undeclared; edit the model to declare them.",
+    "Sign in to the account to use its models.",
+    "The signed-in account changed; reload to list its models.",
+    "The provider has no catalog yet.",
+    "The provider listed no models.",
+    "Listed {count} models.",
+    "Refreshed the models.",
+    "Could not list models: {error}. Showing the stored list.",
+    "The signed-in account changed; the refresh cleared preferences, overrides and disables.",
+    "The models changed since they were read; nothing was removed.",
+    "The models changed since they were read; nothing was written.",
+    "No provider has that id.",
+    "{name} is unavailable ({reason}); its enablement is kept as it is.",
+    "No model has that id.",
+    "This model cannot be removed.",
+    "A Provider's models have no area document.",
+    "Models have no run operation.",
+    "The document is not an object; nothing was written.",
+    "The document changes no editable field; nothing was written.",
+    "The model document names no model.",
+    "The provider has no model catalog to write.",
+    "ID {id}",
+    "Source {source}",
+    "Status {status}",
+    "Tools {value}",
+    "Vision {value}",
+    "Reasoning {value}",
+    "Modalities {list}",
+    "Description {text}",
+    "Release date {date}",
+    "Pricing {value}",
+    "Rate limit {value}",
+    "Matched provider {id}",
+    "Matched model {id}",
+    "Match strategy {strategy}",
+    "Capability overrides {fields}",
+    "yes",
+    "no",
+    "not supported",
+    "supported",
     "Workflow",
     "Saved {name}.",
     "Saved {name}. It stays disabled until you enable it.",
@@ -261,11 +316,13 @@ impl ManagementPanel {
     /// The line stands where the answers stand, but the opening read does
     /// not replace it: only the user's first key here does.
     pub fn new(area: Area, opening: Option<String>) -> Self {
+        let title = title(&area);
+        let initial_hint = hint(&area, &[]);
         Self {
             area,
             list: ListPanel::new(
-                title(area),
-                hint(area, &[]),
+                title,
+                initial_hint,
                 "Loading...",
                 "No entries.",
                 "No matching entry.",
@@ -362,7 +419,7 @@ impl ManagementPanel {
     fn open_create(&mut self) {
         if !self.offers(ActionKind::Add) {
             self.message = Some(Err(crate::management::unsupported(
-                self.area,
+                &self.area,
                 Some(ActionKind::Add),
             )));
             return;
@@ -389,6 +446,9 @@ impl ManagementPanel {
     }
 
     fn set_view(&mut self, view: ManagementView) {
+        if let Some(title) = &view.title {
+            self.list.set_title(safe(title));
+        }
         let items = items(&view);
         let selected = self.list.selected_id();
         self.list.set_items(Ok(items), selected.as_deref());
@@ -418,8 +478,8 @@ impl ManagementPanel {
 
     /// The area the panel manages: a reply for another area belongs to the
     /// surface, not here.
-    pub fn area(&self) -> Area {
-        self.area
+    pub fn area(&self) -> &Area {
+        &self.area
     }
 
     fn selected(&self) -> Option<&ManagementEntry> {
@@ -444,14 +504,15 @@ impl ManagementPanel {
 
     fn refresh_hint(&mut self) {
         if let Some(id) = &self.confirming {
-            let label = self
+            let (label, verb) = self
                 .entry(id)
-                .map(|entry| safe_line(&entry.label))
-                .unwrap_or_else(|| safe_line(id));
-            self.list.set_hint(tf(
-                "Remove {name}? Enter confirm · Esc cancel",
-                &[("name", &label)],
-            ));
+                .map(|entry| (safe_line(&entry.label), entry.remove_verb))
+                .unwrap_or_else(|| (safe_line(id), RemoveVerb::default()));
+            let prompt = match verb {
+                RemoveVerb::Remove => "Remove {name}? Enter confirm · Esc cancel",
+                RemoveVerb::Reset => "Reset {name}? Enter confirm · Esc cancel",
+            };
+            self.list.set_hint(tf(prompt, &[("name", &label)]));
             return;
         }
         if self.detail.is_some() {
@@ -466,7 +527,7 @@ impl ManagementPanel {
         if let Some(entry) = self.selected() {
             kinds.extend(entry.actions.iter().copied());
         }
-        self.list.set_hint(hint(self.area, &kinds));
+        self.list.set_hint(hint(&self.area, &kinds));
     }
 
     /// The editor has the terminal: the panel takes no key until the draft
@@ -507,8 +568,8 @@ impl ManagementPanel {
 
     /// A draft was written but the owner kept the stored document: the
     /// message names where the user's text still is.
-    pub fn kept(&mut self, area: Area, path: &str) {
-        if area != self.area {
+    pub fn kept(&mut self, area: &Area, path: &str) {
+        if area != &self.area {
             return;
         }
         self.keep_text(path, &[]);
@@ -516,8 +577,8 @@ impl ManagementPanel {
 
     /// A conflict kept the user's text: the message names what the next
     /// attempt does with it and where the text is.
-    pub fn conflicted(&mut self, area: Area, creating: bool, path: &str) {
-        if area != self.area {
+    pub fn conflicted(&mut self, area: &Area, creating: bool, path: &str) {
+        if area != &self.area {
             return;
         }
         let next = if creating {
@@ -559,7 +620,7 @@ impl ManagementPanel {
             }
             self.busy = true;
             return Effect::Management(ManagementRequest {
-                area: self.area,
+                area: self.area.clone(),
                 action: ManagementAction::Remove { id },
             });
         }
@@ -589,7 +650,7 @@ impl ManagementPanel {
             };
             self.busy = true;
             return Effect::Management(ManagementRequest {
-                area: self.area,
+                area: self.area.clone(),
                 action,
             });
         }
@@ -636,7 +697,7 @@ impl ManagementPanel {
             return Effect::None;
         };
         let request = ManagementRequest {
-            area: self.area,
+            area: self.area.clone(),
             action: ManagementAction::Toggle {
                 id: entry.id.clone(),
                 enabled: !enabled,
@@ -686,7 +747,7 @@ impl ManagementPanel {
             None => {
                 self.busy = true;
                 Effect::Management(ManagementRequest {
-                    area: self.area,
+                    area: self.area.clone(),
                     action: ManagementAction::Run {
                         id,
                         document: None,
@@ -711,7 +772,7 @@ impl ManagementPanel {
             return Effect::None;
         }
         let request = ManagementRequest {
-            area: self.area,
+            area: self.area.clone(),
             action: action(entry.id.clone()),
         };
         self.busy = true;
@@ -783,7 +844,7 @@ impl ManagementPanel {
         // against; the other targets have nothing to measure.
         let seed = matches!(target, WriteTarget::Run { .. }).then(|| document.clone());
         Effect::EditManagement {
-            area: self.area,
+            area: self.area.clone(),
             target,
             text: format!("{json}\n"),
             seed,
@@ -859,7 +920,7 @@ fn render_detail(detail: &ShownDetail, width: usize, rows: usize, p: &Palette) -
 
 /// What a reload with no panel reports: the area's size, then what its owner
 /// could not use.
-pub fn reloaded(area: Area, view: &ManagementView) -> String {
+pub fn reloaded(area: &Area, view: &ManagementView) -> String {
     let entries: Vec<&ManagementEntry> = view
         .groups
         .iter()
@@ -895,12 +956,13 @@ pub fn reloaded(area: Area, view: &ManagementView) -> String {
 
 /// The panel title of `area`, in English: the list translates it as it
 /// draws.
-fn title(area: Area) -> &'static str {
+fn title(area: &Area) -> &'static str {
     match area {
         Area::Skills => "Skills",
         Area::Hooks => "Hooks",
         Area::Mcp => "MCP",
         Area::Scheduled => "Scheduler",
+        Area::Models { .. } => "Models",
         Area::Workflow => "Workflow",
         Area::Permissions => "Command rules",
     }
@@ -908,21 +970,21 @@ fn title(area: Area) -> &'static str {
 
 /// One label per kind, in the actions table's order; an area that names its
 /// run kind's operation uses that word instead of `run`.
-fn label(area: Area, kind: ActionKind) -> &'static str {
+fn label(area: &Area, kind: ActionKind) -> &'static str {
     match kind {
         ActionKind::Toggle => "Enter toggle",
         ActionKind::Edit => "Ctrl+E edit",
         ActionKind::Reload => "Ctrl+R reload",
         ActionKind::Add => "Ctrl+N add",
         ActionKind::Remove => "Ctrl+X remove",
-        ActionKind::Run if area == Area::Mcp => "Ctrl+T test",
+        ActionKind::Run if matches!(area, Area::Mcp) => "Ctrl+T test",
         ActionKind::Run => "Ctrl+T run",
         ActionKind::Inspect => "Tab inspect",
     }
 }
 
 /// The keys the area and the selected entry offer, as one hint.
-fn hint(area: Area, kinds: &[ActionKind]) -> String {
+fn hint(area: &Area, kinds: &[ActionKind]) -> String {
     let mut parts: Vec<&str> = [
         ActionKind::Toggle,
         ActionKind::Edit,
@@ -979,6 +1041,7 @@ fn states(entry: &ManagementEntry) -> Vec<String> {
         states.push(match state {
             EntryState::Invalid => t("invalid").to_owned(),
             EntryState::Shadowed { by } => tf("shadowed by {name}", &[("name", by)]),
+            EntryState::Unavailable => t("unavailable").to_owned(),
             EntryState::ReadOnly => t("read-only").to_owned(),
         });
     }
@@ -1030,6 +1093,7 @@ mod tests {
             enabled,
             states,
             actions,
+            remove_verb: RemoveVerb::Remove,
             document: None,
             run: None,
         }
@@ -1037,6 +1101,7 @@ mod tests {
 
     fn view() -> ManagementView {
         ManagementView {
+            title: None,
             revision: None,
             document: None,
             create: None,
@@ -1254,6 +1319,7 @@ mod tests {
             Area::Permissions,
             ManagementAction::List,
             ManagementView {
+                title: None,
                 revision: Some("r1".into()),
                 document: None,
                 create: Some(serde_json::json!({
@@ -1324,6 +1390,7 @@ mod tests {
     /// read-only, and an unreadable source says it is invalid.
     fn hooks_view() -> ManagementView {
         ManagementView {
+            title: None,
             revision: Some("user:1".into()),
             document: Some(serde_json::json!({"hooks": {}})),
             create: None,
@@ -1338,6 +1405,7 @@ mod tests {
                         enabled: Some(true),
                         states: Vec::new(),
                         actions: vec![ActionKind::Edit],
+                        remove_verb: RemoveVerb::Remove,
                         document: None,
                         run: None,
                     },
@@ -1348,6 +1416,7 @@ mod tests {
                         enabled: Some(true),
                         states: vec![EntryState::ReadOnly, EntryState::Invalid],
                         actions: vec![],
+                        remove_verb: RemoveVerb::Remove,
                         document: None,
                         run: None,
                     },
@@ -1404,7 +1473,7 @@ mod tests {
         ));
         panel.saving();
         assert!(shown(&panel, 72, 20).join("\n").contains("Working..."));
-        panel.kept(Area::Hooks, "/home/u/edit/hooks.json");
+        panel.kept(&Area::Hooks, "/home/u/edit/hooks.json");
         let text = shown(&panel, 72, 20).join(" ");
         assert!(
             text.contains("Your text is kept in /home/u/edit/hooks.json."),
@@ -1432,7 +1501,7 @@ mod tests {
         let mut panel = ManagementPanel::new(Area::Hooks, None);
         panel.set_result(&view_reply(Area::Hooks, ManagementAction::List, view));
         assert!(matches!(panel.handle_key(ctrl('e')), Effect::None));
-        let text = reloaded(Area::Hooks, &hooks_view());
+        let text = reloaded(&Area::Hooks, &hooks_view());
         assert!(
             text.starts_with("Reloaded Hooks: 2 entries, 0 disabled."),
             "{text}"
@@ -1458,12 +1527,12 @@ mod tests {
             ..ManagementView::default()
         };
         assert_eq!(
-            reloaded(Area::Permissions, &rules),
+            reloaded(&Area::Permissions, &rules),
             "Reloaded Command rules: 1 entries."
         );
         // An empty area has no entry that could be on or off either.
         assert_eq!(
-            reloaded(Area::Skills, &ManagementView::default()),
+            reloaded(&Area::Skills, &ManagementView::default()),
             "Reloaded Skills: 0 entries."
         );
     }
@@ -1524,6 +1593,7 @@ mod tests {
             ManagementResult::Refused(ManagementRefusal::Conflict {
                 message: "The user document changed since it was read.".into(),
                 view: Ok(Box::new(ManagementView {
+                    title: None,
                     revision: Some("user:2".into()),
                     document: Some(serde_json::json!({"hooks": {}})),
                     actions: vec![ActionKind::Reload],
@@ -1536,7 +1606,7 @@ mod tests {
             text.contains("The user document changed since it was read."),
             "{text}"
         );
-        panel.kept(Area::Hooks, "/home/u/edit/hooks-1.json");
+        panel.kept(&Area::Hooks, "/home/u/edit/hooks-1.json");
         let text = shown(&panel, 72, 20).join(" ");
         assert!(text.contains("Your text is kept in"), "{text}");
         assert!(text.contains("hooks-1.json"), "{text}");
@@ -1570,7 +1640,7 @@ mod tests {
                     view: Ok(Box::new(hooks_view())),
                 }),
             ));
-            panel.conflicted(Area::Hooks, creating, "/home/u/edit/hooks-1.json");
+            panel.conflicted(&Area::Hooks, creating, "/home/u/edit/hooks-1.json");
             let text = shown(&panel, 72, 20).join(" ");
             assert!(text.contains(sentence), "{text}");
             assert!(text.contains("Your text is kept in"), "{text}");
@@ -1595,6 +1665,7 @@ mod tests {
     /// An area whose entries offer every kind, as the Scheduler's jobs do.
     fn catalogue() -> ManagementView {
         ManagementView {
+            title: None,
             revision: None,
             document: None,
             create: Some(serde_json::json!({"name": "example"})),
@@ -1615,6 +1686,7 @@ mod tests {
                             ActionKind::Run,
                             ActionKind::Inspect,
                         ],
+                        remove_verb: RemoveVerb::Remove,
                         document: Some(EntryDocument {
                             revision: "3".into(),
                             document: serde_json::json!({"name": "nightly"}),
@@ -1628,6 +1700,7 @@ mod tests {
                         enabled: Some(false),
                         states: vec![EntryState::Invalid],
                         actions: vec![ActionKind::Toggle],
+                        remove_verb: RemoveVerb::Remove,
                         document: Some(EntryDocument {
                             revision: "7".into(),
                             document: serde_json::json!({"name": "release"}),
@@ -1683,6 +1756,66 @@ mod tests {
             ),
             _ => panic!("expected a remove"),
         }
+    }
+
+    /// A remove asks with the verb its entry reports, and its outcome says
+    /// the same; either verb sends one remove request.
+    #[test]
+    fn a_remove_says_reset_when_the_entry_reports_reset() {
+        let mut view = catalogue();
+        view.groups[0].entries[0].remove_verb = RemoveVerb::Reset;
+        let mut panel = ManagementPanel::new(Area::Skills, None);
+        panel.set_result(&view_reply(
+            Area::Skills,
+            ManagementAction::List,
+            view.clone(),
+        ));
+        assert!(matches!(panel.handle_key(ctrl('x')), Effect::None));
+        let text = shown(&panel, 120, 20).join("\n");
+        assert!(
+            text.contains("Reset nightly? Enter confirm · Esc cancel"),
+            "{text}"
+        );
+        assert!(!text.contains("Remove nightly?"), "{text}");
+        match panel.handle_key(key(KeyCode::Enter)) {
+            Effect::Management(request) => assert_eq!(
+                request.action,
+                ManagementAction::Remove { id: "job-1".into() }
+            ),
+            _ => panic!("expected a remove"),
+        }
+        let mut after = view;
+        after.groups[0].entries.retain(|entry| entry.id != "job-1");
+        // The adapter answers the reset's own line, from the read the write
+        // was made at: it put the catalog entry back rather than removing
+        // anything. The panel reports the owner's answer as it stands.
+        panel.set_result(&reply(
+            Area::Skills,
+            ManagementAction::Remove { id: "job-1".into() },
+            ManagementResult::View {
+                view: Box::new(after),
+                note: Some("Reset nightly to its catalog entry.".into()),
+            },
+        ));
+        let text = shown(&panel, 120, 20).join(" ");
+        assert!(
+            text.contains("Reset nightly to its catalog entry."),
+            "{text}"
+        );
+        assert!(!text.contains("Removed nightly."), "{text}");
+    }
+
+    /// A row whose owner reports it unavailable says so beside its state.
+    #[test]
+    fn an_entry_whose_owner_reports_it_unavailable_says_so() {
+        let mut view = catalogue();
+        view.groups[0].entries[0]
+            .states
+            .push(EntryState::Unavailable);
+        let mut panel = ManagementPanel::new(Area::Skills, None);
+        panel.set_result(&view_reply(Area::Skills, ManagementAction::List, view));
+        let text = shown(&panel, 120, 20).join("\n");
+        assert!(text.contains("enabled  unavailable"), "{text}");
     }
 
     /// Tab and Ctrl+X are the panel's even while the filter holds text: the
@@ -2064,6 +2197,7 @@ mod tests {
     #[test]
     fn the_mcp_panel_names_its_run_kind_test() {
         let view = ManagementView {
+            title: None,
             revision: None,
             document: None,
             create: Some(serde_json::json!({})),

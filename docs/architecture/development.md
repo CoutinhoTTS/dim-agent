@@ -8,7 +8,7 @@ The repository root `./dev` builds the native CLI and App Server with locked Car
 | --- | --- |
 | `./dev --model-config PATH [CLI arguments]` | Incrementally build both Rust binaries, normally stop the development daemon, then run the new CLI with the configured provider |
 | `./dev [CLI arguments]` | Use the model configuration selected in `.env.dev` or the inherited environment |
-| `./dev migration` | Import Global `.dim/v2` into `.dim` and CN `.dimcode/v2` into `.dimcode` separately, showing progress and results; do not inject the chat development home or restart a daemon |
+| `./dev migration` | Follow the built version's [migration routing](../design/cli-commands.md#migration-interaction), showing progress and results; do not inject the chat development home or restart a daemon |
 | `./dev restart [CLI arguments]` | Perform the same build and restart flow explicitly |
 | `./dev stop` | Stop an existing development daemon without building or starting one |
 | `./dev check` | Run explicit formatting and compilation checks; tests do not run on startup |
@@ -29,7 +29,7 @@ The account's OAuth client IDs never enter the repository. `dimcode` reads `DIM_
 
 ## CLI and daemon lifecycle
 
-`dimcode models PROVIDER [--refresh]` uses the catalog/refresh RPCs and prints model IDs and availability without credential information. `--provider` and `--model` select a model for a new session.
+`dimcode models PROVIDER [--refresh]` uses the catalog/refresh RPCs and prints model IDs and availability without credential information; its `enable`, `disable`, `edit`, `set`, `add`, `remove` and `inspect` verbs manage the same Provider's models through `provider.management` and the `provider.models.*` writes. `--provider` and `--model` select a model for a new session.
 
 `dimcode daemon stop` connects only to an existing authenticated endpoint for the selected home. No endpoint means successful completion without creating a daemon. Shutdown uses the normal server settlement path, waits for process/endpoint closure with a bounded timeout and never force-kills a process. The developer launcher uses this command before loading a new build. Account and session files are retained across restart.
 
