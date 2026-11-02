@@ -52,12 +52,12 @@ It does not own:
 | --- | --- |
 | Kind | Rpc built-in. Agents answers it from the catalog projection, joined with the `agent_sessions` rows and the title metadata; Rpc validates the envelope |
 | Protocol | v3. v1 and v2 reply `unknown_method` ("Method requires protocol v3"), as they do for `session.summaries` |
-| Discovery | `hello.features` lists it only while a native store is open, the condition `session.fork` uses, so a client that does not see it keeps using `session.summaries`. Without a store there is no projection to page, and `session.summaries` answers from the loaded Sessions as today (§3.3) |
+| Discovery | `hello.features` lists it only while a native store is open, the condition `session.fork` uses, so a client that does not see it keeps using `session.summaries`. Without a store there is no projection to page, and `session.summaries` answers from the loaded Sessions as today (§3.3). `session.catalog.workspaces` is listed beside it, under the same condition, and tells a client that `cwd` accepts a set |
 | `limit` | 1 to 200, default 50. A larger one is rejected, not clamped, as `history`'s `limit` is |
-| `cursor` | Opaque. It encodes the last returned row's `(updatedAt, sessionId)` and a digest of the request's `query`, `cwd`, `withPreview`, `withInternal` and `withAcpSessions`; it pages by keyset, and a client echoes it back unchanged. It is not a Session id |
+| `cursor` | Opaque. It encodes the last returned row's `(updatedAt, sessionId)` and a digest of the request's `query`, `cwd`, `withPreview`, `withInternal` and `withAcpSessions`; it pages by keyset, and a client echoes it back unchanged. `cwd` enters the digest as its canonical set: `"a"` and `["a"]` are one filter, and so are `["a","b"]` and `["b","a"]`. It is not a Session id |
 | Order | `updatedAt` descending, then `sessionId` ascending |
 | `query` | Case-insensitive, literal substring match over the four fields the picker searches today — the Session id, the workspace, the model id and the preview — plus the title and the provider id, which its search text never holds. At query time a SQL function the store registers on its connection lowercases the query and each field with `str::to_lowercase`, the picker's fold; the match is `instr(fold(field), fold(query)) > 0` field by field, so it is literal and `%` and `_` match only themselves. It is applied in the catalog query before the page boundary. The model is read from the stored Session config, the value `session.summaries` reports, so the query decodes no event |
-| `cwd` | Exact match on the workspace, applied before the page boundary |
+| `cwd` | Exact match on the workspace, applied before the page boundary. A string selects one workspace; a non-empty array of strings selects any of them, deduplicated and held in path order. An empty array, or an element that is not a string, is refused `invalid_params` |
 | `withPreview` | Boolean, default `false`. `true` keeps only rows whose preview is not NULL, applied before the page boundary, so a client that hides preview-less rows receives a full page of rows it shows; the projection's partial index over previews keeps that read bounded ([native storage format](native-storage-format.md#556-v23-格式决定)) |
 | `withInternal` | Boolean, default `false`. `true` lists the Sessions whose origin is `internal`; `false` drops them, applied before the page boundary. What the class means and who writes it: [Session classification](session-classification.md#35-catalog-visibility) |
 | `withAcpSessions` | Boolean, default `false`. `true` lists the Sessions whose origin is `acp`; `false` drops them, applied before the page boundary. A Session of an unknown origin (`unknown`) is always listed |
@@ -65,7 +65,9 @@ It does not own:
 
 A `cursor` that does not decode, or whose digest does not match the request's `query`, `cwd`, `withPreview`,
 `withInternal` and `withAcpSessions`, is rejected as `invalid_params` rather than treated as the first page, so a client
-cannot silently read the catalog from the start again, or continue one filter set by the key of another. A cursor is not
+cannot silently read the catalog from the start again, or continue one filter set by the key of another. `cwd`
+compares there as its canonical set: a one-element list and a single workspace are the same filter, and so are two
+orders of one set. A cursor is not
 tagged with a store: one taken from another store's catalog cannot be told apart, and needs no check, because it only
 positions a keyset in the same order.
 
@@ -85,7 +87,9 @@ The order is the projection's activity time, newest first, with the Session id b
 contiguous run of one total order and the same store always pages the same way. The cursor is the last row's key, not
 a position: a Session that becomes active between two pages moves to the first page, and the later pages neither
 repeat nor skip any other Session. It also carries the filters it was taken under (§3.1), so a page boundary can be
-continued only by the same `query`, `cwd`, `withPreview`, `withInternal` and `withAcpSessions`.
+continued only by the same `query`, `cwd`, `withPreview`, `withInternal` and `withAcpSessions`. A set of workspaces
+pages across its Sessions in that one order; its cursor continues under the same set in any order, and under no other
+set or single workspace. A single workspace's cursor continues under that workspace written as a one-element list.
 
 ### 3.3 `session.summaries`
 
@@ -265,6 +269,13 @@ page boundary. The CLI's `/resume` owns its scopes and the key that cycles them
 - A page with `withPreview` returns `limit` rows even when many preview-less Sessions precede them in the order.
 - A cursor returned for one combination of `query`, `cwd`, `withPreview`, `withInternal` and `withAcpSessions` is
   rejected as `invalid_params` when replayed with another.
+- A page with a two-workspace `cwd` lists both workspaces' Sessions in the stated order, and paging with a small
+  `limit` crosses from one workspace into the other.
+- A cursor taken under a `cwd` set is accepted under the same set in another order, and refused under any other set or
+  single workspace; a cursor taken under a single workspace is accepted under that workspace written as a one-element
+  list.
+- An empty `cwd` array, and an array with an element that is not a string, are refused `invalid_params`.
+- A daemon with a native store advertises `session.catalog.workspaces` beside `session.catalog`.
 - A page holds rows of the classes it asked for: with 60 internal Sessions newer than 50 conversations, a 50-row page
   with `withInternal` off holds 50 conversations, and paging returns the rest exactly once; `withAcpSessions` behaves
   the same for ACP rows, and `unknown` rows are always listed.

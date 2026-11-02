@@ -34,22 +34,22 @@ Issue：[#556](https://github.com/arcships/dim/issues/556)，要求有界的 `/r
 | --- | --- |
 | 形态 | Rpc 内建方法。Agents 像回答目录读取那样，从目录投影联结 `agent_sessions` 行与标题元数据来回答；Rpc 校验信封 |
 | 协议 | v3。v1 与 v2 回复 `unknown_method`（"Method requires protocol v3"），与 `session.summaries` 相同 |
-| 发现 | `hello.features` 只在原生存储打开时列出它，条件与 `session.fork` 相同，因此看不到它的客户端继续用 `session.summaries`。没有存储就没有可读取的投影，`session.summaries` 与今天一样从已装载的 Session 回答（§3.3） |
+| 发现 | `hello.features` 只在原生存储打开时列出它，条件与 `session.fork` 相同，因此看不到它的客户端继续用 `session.summaries`。没有存储就没有可读取的投影，`session.summaries` 与今天一样从已装载的 Session 回答（§3.3）。`session.catalog.workspaces` 在同一条件下与它并列列出，告诉客户端 `cwd` 接受一个集合 |
 | `limit` | 1 到 200，缺省 50。更大的值被拒绝而不是截断，与 `history` 的 `limit` 相同 |
-| `cursor` | 不透明。它编码上一行返回的 `(updatedAt, sessionId)` 与请求的 `query`、`cwd`、`withPreview` 的摘要，按键集分页；调用方原样回传，它不是 Session ID |
+| `cursor` | 不透明。它编码上一行返回的 `(updatedAt, sessionId)` 与请求的 `query`、`cwd`、`withPreview` 的摘要，按键集分页；调用方原样回传，它不是 Session ID。`cwd` 以它的规范集合进入摘要：`"a"` 与 `["a"]` 是同一种过滤，`["a","b"]` 与 `["b","a"]` 也是 |
 | 顺序 | `updatedAt` 降序，再 `sessionId` 升序 |
 | `query` | 对今天选择面板搜索的四个字段——Session ID、工作区、model ID 与预览——加上它的搜索文本从不持有的标题与 provider ID，做大小写不敏感的字面子串匹配。查询时由一个存储注册在连接上的 SQL 函数按 `str::to_lowercase` 把查询与每个字段做 Unicode 小写化（与选择面板相同的折叠）；匹配是逐字段的 `instr(fold(field), fold(query)) > 0`，因此是字面的，`%` 与 `_` 只匹配它们本身。它在目录查询里、页边界之前应用。模型取自存储的 Session 配置，即 `session.summaries` 报告的值，因此查询不解码任何事件 |
-| `cwd` | 工作区精确匹配，在页边界之前应用 |
+| `cwd` | 工作区精确匹配，在页边界之前应用。字符串选择一个工作区；非空的字符串数组选择其中任意一个，去重并按路径顺序持有。空数组，或含非字符串元素的数组，被拒绝为 `invalid_params` |
 | `withPreview` | 布尔，缺省 `false`。`true` 只保留预览不为 NULL 的行，在页边界之前应用，因此隐藏无预览行的客户端拿到的是整页它显示的行；投影按预览建的局部索引让这条读取保持有界（[原生存储格式](../../../design/appserver/native-storage-format.md#556-v23-格式决定)） |
 | 回复 | `SessionSummary` 条目，即 `session.summaries` 返回的形态：`SessionInfo` 记录的字段加上 `preview`、`updatedAt` 与 `closed`，后者在这里恒为 false，因为这条查询不列出已关闭的 Session（§3.3）。最后一页不带 `nextCursor` |
 
-读不出的 `cursor`，或摘要与请求的 `query`、`cwd`、`withPreview` 不符的 `cursor`，被拒绝为 `invalid_params`，而不是当作第一页，客户端因此不会在不知不觉中从头再读一遍目录，也不会用另一组过滤的键接着分页。游标不带库的标记：来自另一个库的目录的游标无法分辨，也不需要分辨，因为它只按同一个顺序定位一个键。
+读不出的 `cursor`，或摘要与请求的 `query`、`cwd`、`withPreview` 不符的 `cursor`，被拒绝为 `invalid_params`，而不是当作第一页，客户端因此不会在不知不觉中从头再读一遍目录，也不会用另一组过滤的键接着分页。`cwd` 在那里按它的规范集合比较：单元素数组与单个工作区是同一种过滤，同一个集合的两种顺序也是。游标不带库的标记：来自另一个库的目录的游标无法分辨，也不需要分辨，因为它只按同一个顺序定位一个键。
 
 很少命中的搜索扫描目录的行：过滤只读投影、存储的标题与存储的模型，不解码任何事件。注册这个函数需要 rusqlite 的 `functions` feature，而不是新的依赖。折叠在查询时进行，因此没有折叠值落盘，也没有折叠值需要与标题或模型保持同步。
 
 ### 3.2 顺序、游标与分页
 
-顺序是投影的活动时间，最新在前，Session ID 决定并列的次序，因此一页是某个全序里连续的一段，同一个库总是以同样的方式分页。游标是上一行的键而不是位置：两页之间变得活跃的 Session 移到第一页，后续页既不重复也不跳过任何其他 Session。它还带着取得它时的过滤（§3.1），因此一条页边界只能由同样的 `query`、`cwd` 与 `withPreview` 接着读。
+顺序是投影的活动时间，最新在前，Session ID 决定并列的次序，因此一页是某个全序里连续的一段，同一个库总是以同样的方式分页。游标是上一行的键而不是位置：两页之间变得活跃的 Session 移到第一页，后续页既不重复也不跳过任何其他 Session。它还带着取得它时的过滤（§3.1），因此一条页边界只能由同样的 `query`、`cwd` 与 `withPreview` 接着读。一组工作区按同一个顺序跨它的 Session 分页；它的游标在同一集合的任意顺序下继续可用，在其他集合或单个工作区下都不继续。单个工作区的游标在该工作区写成一个元素的数组时继续可用。
 
 ### 3.3 `session.summaries`
 
@@ -153,6 +153,10 @@ Issue：[#556](https://github.com/arcships/dim/issues/556)，要求有界的 `/r
 - `query` 里的 `%` 或 `_` 只匹配该字符本身。
 - 带 `withPreview` 的一页即使前面有许多无预览的 Session，也返回 `limit` 行。
 - 为一种 `query`、`cwd`、`withPreview` 组合取得的游标，换另一种重放时被拒绝为 `invalid_params`。
+- 带两个工作区 `cwd` 的一页按声明的顺序列出两个工作区的 Session，小的 `limit` 分页会从一个工作区跨到另一个。
+- 为一个 `cwd` 集合取得的游标在同一集合的另一种顺序下被接受，在其他集合或单个工作区下被拒绝；为一个工作区取得的游标在该工作区写成一个元素的数组时被接受。
+- 空的 `cwd` 数组，以及含非字符串元素的数组，被拒绝为 `invalid_params`。
+- 有原生存储的守护进程在 `session.catalog` 旁列出 `session.catalog.workspaces`。
 - 创建后从未写入的 Session 从创建起就列出，`updatedAt` 等于创建时间、没有预览，与今天的 `session.summaries` 相同。
 - 预览保持按批次完整的窗口与最终性：紧接序号 256 之后、位于承载 256 的那个批次里的用户输入就是预览，实时与回填后都如此；第一条用户消息在起始于序号 256 之后的批次里的 Session 列出时没有预览；第一条用户消息只有图片的 Session 也列出为没有预览，之后的消息不会填它。
 - 没有原生存储的守护进程不列出 `session.catalog`，其 `session.summaries` 与今天一样从已装载的 Session 回答。
