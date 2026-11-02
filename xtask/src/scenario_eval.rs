@@ -545,6 +545,8 @@ fn write_report(
         judge_temperature_unrecorded: 0,
         judge_asked_runs: 0,
         judge_reasks: 0,
+        decline_retries: 0,
+        decline_retries_unrecorded: 0,
     };
     let measured = instrument.clone();
     for record in records {
@@ -768,8 +770,10 @@ struct SavedRun {
     /// `None` in a record written before the runner wrote this fact.
     #[serde(default)]
     temperature_dropped: Option<bool>,
+    /// How many declines the runner sent again; `None` in a record written
+    /// before the runner recorded it.
     #[serde(default)]
-    decline_retries: u32,
+    decline_retries: Option<u32>,
     #[serde(default)]
     probes: Vec<SavedProbe>,
 }
@@ -1499,8 +1503,9 @@ struct RunRecord {
     /// for every run it makes, and `None` when a report reads a record from
     /// before this fact was written.
     temperature_dropped: Option<bool>,
-    /// How many declines the runner sent again after `question_not_pending`.
-    decline_retries: u32,
+    /// How many declines the runner sent again after `question_not_pending`;
+    /// `None` in a record written before the runner recorded it.
+    decline_retries: Option<u32>,
     probes: Vec<ProbeRecord>,
 }
 impl RunRecord {
@@ -1701,7 +1706,7 @@ async fn run_once(
         judge_reasks: finished.judging.reasks,
         judge_calls: finished.judging.calls,
         temperature_dropped: Some(finished.judging.temperature_dropped),
-        decline_retries: driven.decline_retries,
+        decline_retries: Some(driven.decline_retries),
         probes: finished.judging.probes,
     })
 }
@@ -3010,6 +3015,11 @@ struct Instrument {
     judge_asked_runs: usize,
     /// How many re-asks the judge was asked for over every run.
     judge_reasks: usize,
+    /// How many declines the runner sent again over every run.
+    decline_retries: usize,
+    /// Runs whose record does not say how many declines the runner sent
+    /// again: a record from before the runner wrote it.
+    decline_retries_unrecorded: usize,
 }
 impl Instrument {
     /// The instrument before any run: the texts under test with each
@@ -3034,6 +3044,8 @@ impl Instrument {
             judge_temperature_unrecorded: 0,
             judge_asked_runs: 0,
             judge_reasks: 0,
+            decline_retries: 0,
+            decline_retries_unrecorded: 0,
         }
     }
     /// Adds one run's measurement. The configurations and the window are the
@@ -3059,6 +3071,10 @@ impl Instrument {
         }
         self.judge_asked_runs += usize::from(asked);
         self.judge_reasks += record.judge_reasks as usize;
+        match record.decline_retries {
+            Some(retries) => self.decline_retries += retries as usize,
+            None => self.decline_retries_unrecorded += 1,
+        }
     }
 }
 
@@ -3146,9 +3162,18 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
     if let Some(sources) = &instrument.sources {
         text += &format!("| sources | {} |\n", sources.row());
     }
-    let decline_retries: u32 = records.iter().map(|record| record.decline_retries).sum();
-    if decline_retries > 0 {
-        text += &format!("| decline retries | {decline_retries} across all runs |\n");
+    if instrument.decline_retries > 0 || instrument.decline_retries_unrecorded > 0 {
+        let mut row = format!(
+            "| decline retries | {} across all runs",
+            instrument.decline_retries
+        );
+        if instrument.decline_retries_unrecorded > 0 {
+            row += &format!(
+                "; not recorded for {} runs",
+                instrument.decline_retries_unrecorded
+            );
+        }
+        text += &format!("{row} |\n");
     }
     if same_family(&instrument.model, &instrument.judge) {
         text += "| judge limitation | the judge is the model's own family; the measurement is limited by that |\n";
@@ -3367,7 +3392,7 @@ mod tests {
             judge_reasks: 0,
             judge_calls: Vec::new(),
             temperature_dropped: Some(false),
-            decline_retries: 0,
+            decline_retries: Some(0),
             probes: verdicts
                 .iter()
                 .map(|(id, verdict)| ProbeRecord {
@@ -3412,6 +3437,8 @@ mod tests {
             judge_temperature_unrecorded: 0,
             judge_asked_runs: 0,
             judge_reasks: 0,
+            decline_retries: 0,
+            decline_retries_unrecorded: 0,
         }
     }
 
@@ -4688,8 +4715,10 @@ mod tests {
             &[("reports", ProbeVerdict::Present)],
             JudgeOutcome::Judged,
         );
+        let mut measured = instrument(model());
+        measured.merge(&quiet, instrument(model()));
         let text = report(
-            &instrument(model()),
+            &measured,
             std::slice::from_ref(&scenario),
             std::slice::from_ref(&quiet),
         );
@@ -4700,9 +4729,11 @@ mod tests {
             &[("reports", ProbeVerdict::Present)],
             JudgeOutcome::Judged,
         );
-        retried.decline_retries = 2;
+        retried.decline_retries = Some(2);
+        let mut measured = instrument(model());
+        measured.merge(&retried, instrument(model()));
         let text = report(
-            &instrument(model()),
+            &measured,
             std::slice::from_ref(&scenario),
             std::slice::from_ref(&retried),
         );
@@ -5220,7 +5251,7 @@ mod tests {
             json!({"arm": "current", "scenario": "case", "run": 1, "session": null,
                    "stop": "idle", "turns": 3, "window": 24000.0, "durationMs": 1.0,
                    "failed": false, "judgeOutcome": "judged", "error": null,
-                   "judgeError": null, "judgeReasks": 0}),
+                   "judgeError": null, "judgeReasks": 0, "declineRetries": 3}),
             json!({"arm": "candidate", "scenario": "case", "run": 0, "session": null,
                    "stop": "error", "turns": 0, "window": null, "durationMs": 1.0,
                    "failed": true, "judgeOutcome": "not_asked",
@@ -5254,6 +5285,10 @@ mod tests {
             !report.contains("| text |"),
             "no saved run records the texts under test: {report}"
         );
+        assert!(
+            report.contains("| decline retries | 3 across all runs; not recorded for 2 runs |"),
+            "a saved run written before the runner counted declines is not read as none: {report}"
+        );
         assert_eq!(
             std::fs::read_to_string(source.join("runs.jsonl")).unwrap(),
             jsonl,
@@ -5263,6 +5298,16 @@ mod tests {
         let records = fixture.records(&out);
         assert_eq!(records.len(), 3, "one record per selected run");
         let previously_unjudged = &records[0];
+        assert_eq!(
+            previously_unjudged["declineRetries"],
+            Value::Null,
+            "a re-judged run keeps an unrecorded count unrecorded: {previously_unjudged}"
+        );
+        assert_eq!(
+            records[1]["declineRetries"], 3,
+            "a re-judged run keeps the count its source recorded: {}",
+            records[1]
+        );
         assert_eq!(
             previously_unjudged["arm"], "current",
             "{previously_unjudged}"
@@ -5412,6 +5457,48 @@ mod tests {
             "every run of both sources is kept: {records:?}"
         );
         assert!(out.join("scenario.md").exists());
+    }
+
+    /// A report over saved runs counts the declines their records carry and
+    /// says how many records carry none: a record written before the runner
+    /// counted them is not read as no declines.
+    #[test]
+    fn a_pool_report_counts_runs_that_did_not_record_decline_retries() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-decline-retries-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let runs = [
+            json!({"arm": "current", "scenario": "case", "run": 0, "session": null,
+                   "stop": "idle", "turns": 2, "window": 8000.0, "durationMs": 1.0,
+                   "failed": false, "judgeOutcome": "judged", "error": null,
+                   "judgeError": null, "judgeReasks": 0, "declineRetries": 2,
+                   "probes": [{"id": "ran", "kind": "must_show",
+                               "verdict": "present", "quote": null}]}),
+            json!({"arm": "candidate", "scenario": "case", "run": 0, "session": null,
+                   "stop": "idle", "turns": 2, "window": 8000.0, "durationMs": 1.0,
+                   "failed": false, "judgeOutcome": "judged", "error": null,
+                   "judgeError": null, "judgeReasks": 0,
+                   "probes": [{"id": "ran", "kind": "must_show",
+                               "verdict": "present", "quote": null}]}),
+        ];
+        let jsonl: String = runs.iter().map(|record| format!("{record}\n")).collect();
+        std::fs::write(directory.join("runs.jsonl"), &jsonl).unwrap();
+        let scenarios = vec![scenario(vec![probe("ran", ProbeKind::MustShow)])];
+        let records = read_pooled_runs(&directory, &scenarios).unwrap();
+        let mut instrument = instrument(model());
+        let measured = instrument.clone();
+        for record in &records {
+            instrument.merge(record, measured.clone());
+        }
+        let text = report(&instrument, &scenarios, &records);
+        assert!(
+            text.contains("| decline retries | 2 across all runs; not recorded for 1 runs |"),
+            "{text}"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// A pooled run's probes keep the kind their source recorded: a probe
