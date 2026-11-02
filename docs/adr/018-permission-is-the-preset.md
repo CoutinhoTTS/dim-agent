@@ -53,8 +53,8 @@ ADR 017 in the current alpha still write the keys, and this decision stops readi
 
 The documents that embed a policy follow the same rule: a Scheduler job's stored policy and a
 Workflow run's recorded cap load with the removed keys ignored, are not rewritten on read, and are
-written back without them. Their schemas stop rejecting a key they do not name, for the same
-reason this type does.
+written back without them. Only that policy object stops rejecting a key it does not name; the job
+and run documents around it stay strict, so a typo anywhere else is still an error.
 
 ### D4. Cap and containment compare presets and tool lists
 
@@ -77,8 +77,9 @@ validation of a job.
 - A record without an override keeps its exact legacy admission. A Session that ran under an
   override admitting less than its preset now admits by its preset, which follows from the preset
   being the policy of record rather than a defect.
-- Policy parsing no longer rejects unknown keys — in this type and in the plugin documents that
-  embed it — which also removes typo detection there. Other types keep `deny_unknown_fields`.
+- Policy parsing no longer rejects unknown keys — in this type and in the policy object embedded by
+  the plugin documents — which removes typo detection there. Other types keep
+  `deny_unknown_fields`, and the documents around an embedded policy stay strict.
 
 ## Non-goals
 
