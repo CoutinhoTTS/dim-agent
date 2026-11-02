@@ -559,7 +559,7 @@ canonical workspace and id. Its record is the withheld part of one project entry
   "entries": {
     "/canonical/workspace": {
       "github": {
-        "generation": "4d1c…",
+        "$generation": "4d1c…",
         "args": ["--stdio"],
         "env": {"TOKEN": "…"},
         "headers": {"Authorization": "…"},
@@ -618,7 +618,7 @@ The document is:
   "entries": {
     "/canonical/workspace": {
       "github": {
-        "generation": "4d1c…",
+        "$generation": "4d1c…",
         "args": ["--stdio"],
         "env": {"TOKEN": "…"},
         "headers": {"Authorization": "…"},
@@ -642,8 +642,11 @@ entry is validated again as a whole before use.
 Every write of a record assigns it a fresh opaque `generation`. It is the record's identity, not
 a value: a removal deletes the record only while its generation still matches the one captured
 before the removal, so a replacement with equal withheld values is a different record and is kept.
-No client method returns it. A file written before the generation existed reads with an empty
-generation, which a removal then matches only as that empty value.
+No client method returns it. The member is `$generation`, a reserved name: an entry's own members
+never use it, because the record flattens those members into `extra` and a `$generation` there is
+refused at the Settings boundary. A record written before the generation existed, or one whose
+`generation` member is an ordinary entry extra, reads with an empty `$generation`, which a removal
+then matches only as that empty value.
 
 The key is the canonical workspace path at move time, the same key `mcp-projects` uses; the two
 documents are independent (one holds enablement, the other hidden values) and both are written by

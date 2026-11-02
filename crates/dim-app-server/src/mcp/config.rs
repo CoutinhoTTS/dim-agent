@@ -225,8 +225,13 @@ impl BusinessDocument for McpSecrets {
 pub struct McpSecretEntry {
     /// The record's generation, renewed on every write. A removal deletes the
     /// record only while it still carries the generation it captured, so a
-    /// replacement with equal values keeps its own record.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    /// replacement with equal values keeps its own record. The reserved name
+    /// keeps it out of the entry members flattened into `extra`.
+    #[serde(
+        rename = "$generation",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
     pub generation: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
@@ -254,6 +259,9 @@ impl McpSecretEntry {
             && self.extra.is_empty()
     }
     fn validate(&self) -> Result<()> {
+        if self.extra.contains_key("$generation") {
+            return Err(SettingsError::Invalid("reserved MCP secret overlay field"));
+        }
         if self
             .env
             .as_ref()
@@ -585,6 +593,7 @@ impl BusinessDocument for McpSettings {
                             | "auth"
                             | "transport"
                             | "oauth"
+                            | "$generation"
                     )
                 })
             {
@@ -804,4 +813,43 @@ pub(crate) fn effective(
         }
     }
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn an_entry_member_named_generation_keeps_its_own_name() {
+        let record = McpSecretEntry {
+            generation: "g".into(),
+            extra: BTreeMap::from([("generation".into(), json!("custom"))]),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&record).unwrap();
+        assert_eq!(value["$generation"], "g");
+        assert_eq!(value["generation"], "custom");
+        assert_eq!(
+            serde_json::to_value(serde_json::from_value::<McpSecretEntry>(value).unwrap()).unwrap(),
+            serde_json::to_value(&record).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_reserved_generation_member_is_refused() {
+        let document: McpSettings = serde_json::from_value(json!({
+            "mcpServers": {
+                "collision": {"type": "stdio", "command": "server", "$generation": "g"}
+            }
+        }))
+        .unwrap();
+        assert!(document.validate().is_err());
+
+        let record = McpSecretEntry {
+            extra: BTreeMap::from([("$generation".into(), json!("g"))]),
+            ..Default::default()
+        };
+        assert!(record.validate().is_err());
+    }
 }
