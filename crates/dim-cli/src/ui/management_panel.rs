@@ -24,6 +24,7 @@
 
 use std::cell::Cell;
 
+use crate::management;
 use crate::model::session::{
     ActionKind, Area, EntryState, ManagementAction, ManagementDetail, ManagementEntry,
     ManagementRefusal, ManagementReply, ManagementRequest, ManagementResult, ManagementView,
@@ -63,6 +64,10 @@ pub const STRINGS: &[&str] = &[
     "Issues",
     "sources",
     "skills",
+    "hooks",
+    "scheduled jobs",
+    "models",
+    "jobs",
     "enabled",
     "disabled",
     "invalid",
@@ -72,6 +77,7 @@ pub const STRINGS: &[&str] = &[
     "Working...",
     "Reloaded.",
     "Saved.",
+    "Saved {name}.",
     "Added.",
     "Removed {name}.",
     "Reset {name} to its catalog entry.",
@@ -82,7 +88,7 @@ pub const STRINGS: &[&str] = &[
     "Disabled {name}.",
     "Reloaded {area}: {entries} entries, {disabled} disabled.",
     "The user's own document; always in effect.",
-    "No .dimcode/hooks.json in this workspace.",
+    "There is no hooks file there.",
     "Owned by plugin {plugin}.",
     "The user document turns every hook off (disableAllHooks).",
     "The user document changed since it was read; nothing was written.",
@@ -104,6 +110,16 @@ pub const STRINGS: &[&str] = &[
     "The job changed since it was read; nothing was removed.",
     "The Scheduler has no area document.",
     "No scheduled job has that id.",
+    "The document changes no field; nothing was written.",
+    "The document deleted {field}, which the owner cannot clear; nothing was written.",
+    "This daemon cannot manage {area}.",
+    "This daemon lists {area} but cannot toggle them.",
+    "This daemon lists {area} but cannot edit them.",
+    "This daemon lists {area} but cannot reload them.",
+    "This daemon lists {area} but cannot add them.",
+    "This daemon lists {area} but cannot remove them.",
+    "This daemon lists {area} but cannot run them.",
+    "This daemon lists {area} but cannot inspect them.",
     "This workspace's hook settings changed since they were read; nothing was written.",
     "Models",
     "catalog",
@@ -153,7 +169,7 @@ pub const STRINGS: &[&str] = &[
     "Capability overrides {fields}",
     "yes",
     "no",
-    "off",
+    "not supported",
     "supported",
 ];
 
@@ -228,6 +244,7 @@ impl ManagementPanel {
         match &reply.result {
             ManagementResult::View { view, note } => {
                 let view = &**view;
+                let name = entry_name(Some(view), self.view.as_ref(), &reply.request.action);
                 // The read that opens a panel says nothing; every later
                 // answer names what it did.
                 self.message = match (&reply.request.action, self.view.is_some()) {
@@ -235,7 +252,7 @@ impl ManagementPanel {
                     (ManagementAction::List, true) => Some(Ok(t("Reloaded.").to_owned())),
                     (action, _) => Some(Ok(match note {
                         Some(note) => note.clone(),
-                        None => outcome(action, view, self.view.as_ref()),
+                        None => management::applied_line(action, name.as_deref()),
                     })),
                 };
                 self.set_view(view.clone());
@@ -246,12 +263,12 @@ impl ManagementPanel {
             }
             ManagementResult::Applied { note, read_error } => {
                 // The action was done, so its own line stands; what failed is
-                // the read, which the footer reports once, wrapped. No view
-                // is kept until the next read.
-                self.view = None;
-                self.message = Some(Ok(note.clone()));
-                self.read_error = Some(read_error.clone());
-                self.list.loading();
+                // the read, which the footer reports once, wrapped.
+                let name = entry_name(self.view.as_ref(), None, &reply.request.action);
+                self.message = Some(Ok(note.clone().unwrap_or_else(|| {
+                    management::applied_line(&reply.request.action, name.as_deref())
+                })));
+                self.lost_view(read_error);
             }
             ManagementResult::Refused(ManagementRefusal::Refused(error)) => {
                 self.message = Some(Err(error.clone()));
@@ -262,12 +279,26 @@ impl ManagementPanel {
                 }
             }
             ManagementResult::Refused(ManagementRefusal::Conflict { message, view }) => {
-                // The owner wrote nothing; this is the document as it now is.
+                // The owner wrote nothing. A read that failed leaves no view,
+                // so the next read retries the area; the link to the stale
+                // revision is dropped on every conflict either way.
                 self.message = Some(Err(message.clone()));
-                self.set_view((**view).clone());
+                match view {
+                    Ok(view) => self.set_view((**view).clone()),
+                    Err(error) => self.lost_view(error),
+                }
             }
         }
         self.refresh_hint();
+    }
+
+    /// The area is not shown until the next read: the reply that could not
+    /// report it says why, and Ctrl+R reads again. The view goes, so nothing
+    /// stale is acted on.
+    fn lost_view(&mut self, error: &str) {
+        self.view = None;
+        self.read_error = Some(error.to_owned());
+        self.list.loading();
     }
 
     fn set_view(&mut self, view: ManagementView) {
@@ -293,6 +324,18 @@ impl ManagementPanel {
             .iter()
             .flat_map(|group| &group.entries)
             .find(|entry| entry.id == id)
+    }
+
+    /// The label of the entry `action` names, from the view the panel shows:
+    /// what a surface names the entry by once the panel is gone.
+    pub fn label_of(&self, action: &ManagementAction) -> Option<String> {
+        entry_name(self.view.as_ref(), None, action)
+    }
+
+    /// The area the panel manages: a reply for another area belongs to the
+    /// surface, not here.
+    pub fn area(&self) -> &Area {
+        &self.area
     }
 
     fn selected(&self) -> Option<&ManagementEntry> {
@@ -378,13 +421,19 @@ impl ManagementPanel {
 
     /// A draft was written but the owner kept the stored document: the
     /// message names where the user's text still is.
-    pub fn kept(&mut self, path: &str) {
+    pub fn kept(&mut self, area: &Area, path: &str) {
+        if area != &self.area {
+            return;
+        }
         self.keep_text(path, &[]);
     }
 
     /// A conflict kept the user's text: the message names what the next
     /// attempt does with it and where the text is.
-    pub fn conflicted(&mut self, creating: bool, path: &str) {
+    pub fn conflicted(&mut self, area: &Area, creating: bool, path: &str) {
+        if area != &self.area {
+            return;
+        }
         let next = if creating {
             t("Your next add reopens your text.")
         } else {
@@ -438,14 +487,21 @@ impl ManagementPanel {
             return Effect::None;
         }
         if key.code == KeyCode::Char('r') && key.mods.contains(Modifiers::CTRL) {
-            // A panel with nothing to act on still retries its read.
-            if self.view.is_some() && !self.offers(ActionKind::Reload) {
-                return Effect::None;
-            }
+            // With a view the key is the area's reload, when it has one;
+            // with none it repeats the read that failed, without asking the
+            // owner to rescan anything.
+            let action = if self.view.is_some() {
+                if !self.offers(ActionKind::Reload) {
+                    return Effect::None;
+                }
+                ManagementAction::Reload
+            } else {
+                ManagementAction::List
+            };
             self.busy = true;
             return Effect::Management(ManagementRequest {
                 area: self.area.clone(),
-                action: ManagementAction::Reload,
+                action,
             });
         }
         // Ctrl holds the actions off the filter, which takes every plain
@@ -775,52 +831,19 @@ fn states(entry: &ManagementEntry) -> Vec<String> {
     states
 }
 
-/// The notice a successful change leaves. `previous` names an entry an
-/// action removed, which the area no longer reports.
-fn outcome(
-    action: &ManagementAction,
-    view: &ManagementView,
+/// The label of the entry `action` names, from the views the panel holds:
+/// the one the reply brought, then the one it showed before the write. An
+/// entry an action removed is gone from the fresh view, so the older one
+/// names it.
+fn entry_name(
+    view: Option<&ManagementView>,
     previous: Option<&ManagementView>,
-) -> String {
-    let name = |id: &str| {
-        std::iter::once(view)
-            .chain(previous)
-            .flat_map(|view| &view.groups)
-            .flat_map(|group| &group.entries)
-            .find(|entry| entry.id == id)
-            .map(|entry| entry.label.clone())
-            .unwrap_or_else(|| id.to_owned())
-    };
-    let removed_verb = |id: &str| {
-        previous
-            .into_iter()
-            .chain(std::iter::once(view))
-            .flat_map(|view| &view.groups)
-            .flat_map(|group| &group.entries)
-            .find(|entry| entry.id == id)
-            .map(|entry| entry.remove_verb)
-            .unwrap_or_default()
-    };
-    match action {
-        ManagementAction::Toggle { id, enabled } => tf(
-            if *enabled {
-                "Enabled {name}."
-            } else {
-                "Disabled {name}."
-            },
-            &[("name", &name(id))],
-        ),
-        ManagementAction::Save { .. } => t("Saved.").to_owned(),
-        ManagementAction::Add { .. } => t("Added.").to_owned(),
-        ManagementAction::Remove { id } => match removed_verb(id) {
-            RemoveVerb::Remove => tf("Removed {name}.", &[("name", &name(id))]),
-            RemoveVerb::Reset => tf("Reset {name} to its catalog entry.", &[("name", &name(id))]),
-        },
-        ManagementAction::Run { id } => tf("Ran {name}.", &[("name", &name(id))]),
-        ManagementAction::List | ManagementAction::Reload => t("Reloaded.").to_owned(),
-        // An inspect answers with a detail, never with a view to name.
-        ManagementAction::Inspect { .. } => unreachable!("an inspect answers with a detail"),
-    }
+    action: &ManagementAction,
+) -> Option<String> {
+    view.into_iter()
+        .chain(previous)
+        .find_map(|view| management::entry_name(view, action))
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -1059,13 +1082,13 @@ mod tests {
             Area::Skills,
             ManagementAction::List,
             ManagementResult::Refused(ManagementRefusal::Refused(
-                "This daemon cannot manage Skills.".into(),
+                "This daemon cannot manage skills.".into(),
             )),
         ));
         assert!(
             shown(&panel, 60, 10)
                 .join(" ")
-                .contains("This daemon cannot manage Skills.")
+                .contains("This daemon cannot manage skills.")
         );
     }
 
@@ -1148,7 +1171,7 @@ mod tests {
         ));
         panel.saving();
         assert!(shown(&panel, 72, 20).join("\n").contains("Working..."));
-        panel.kept("/home/u/edit/hooks.json");
+        panel.kept(&Area::Hooks, "/home/u/edit/hooks.json");
         let text = shown(&panel, 72, 20).join(" ");
         assert!(
             text.contains("Your text is kept in /home/u/edit/hooks.json."),
@@ -1183,8 +1206,8 @@ mod tests {
         );
     }
 
-    /// Reload belongs to the area: it works on an empty area and after a
-    /// failed read, where no entry is selected to offer it.
+    /// Reload belongs to the area: it works on an empty area where no entry
+    /// is selected to offer it, and after a failed read Ctrl+R reads again.
     #[test]
     fn reload_works_on_an_empty_area_and_after_a_failed_read() {
         let mut panel = ManagementPanel::new(Area::Skills);
@@ -1212,15 +1235,15 @@ mod tests {
             Area::Skills,
             ManagementAction::List,
             ManagementResult::Refused(ManagementRefusal::Refused(
-                "This daemon cannot manage Skills.".into(),
+                "This daemon cannot manage skills.".into(),
             )),
         ));
         let text = shown(&panel, 60, 12).join("\n");
-        assert!(text.contains("This daemon cannot manage Skills."), "{text}");
+        assert!(text.contains("This daemon cannot manage skills."), "{text}");
         assert!(text.contains("Ctrl+R reload"), "{text}");
         match panel.handle_key(ctrl('r')) {
-            Effect::Management(request) => assert_eq!(request.action, ManagementAction::Reload),
-            _ => panic!("expected a reload"),
+            Effect::Management(request) => assert_eq!(request.action, ManagementAction::List),
+            _ => panic!("expected a read"),
         }
     }
 
@@ -1238,13 +1261,13 @@ mod tests {
             },
             ManagementResult::Refused(ManagementRefusal::Conflict {
                 message: "The user document changed since it was read.".into(),
-                view: Box::new(ManagementView {
+                view: Ok(Box::new(ManagementView {
                     title: None,
                     revision: Some("user:2".into()),
                     document: Some(serde_json::json!({"hooks": {}})),
                     actions: vec![ActionKind::Reload],
                     ..hooks_view()
-                }),
+                })),
             }),
         ));
         let text = shown(&panel, 72, 20).join(" ");
@@ -1252,7 +1275,7 @@ mod tests {
             text.contains("The user document changed since it was read."),
             "{text}"
         );
-        panel.kept("/home/u/edit/hooks-1.json");
+        panel.kept(&Area::Hooks, "/home/u/edit/hooks-1.json");
         let text = shown(&panel, 72, 20).join(" ");
         assert!(text.contains("Your text is kept in"), "{text}");
         assert!(text.contains("hooks-1.json"), "{text}");
@@ -1283,10 +1306,10 @@ mod tests {
                 ManagementResult::Refused(ManagementRefusal::Conflict {
                     message: "The user document changed since it was read; nothing was written."
                         .into(),
-                    view: Box::new(hooks_view()),
+                    view: Ok(Box::new(hooks_view())),
                 }),
             ));
-            panel.conflicted(creating, "/home/u/edit/hooks-1.json");
+            panel.conflicted(&Area::Hooks, creating, "/home/u/edit/hooks-1.json");
             let text = shown(&panel, 72, 20).join(" ");
             assert!(text.contains(sentence), "{text}");
             assert!(text.contains("Your text is kept in"), "{text}");
@@ -1430,10 +1453,16 @@ mod tests {
         }
         let mut after = view;
         after.groups[0].entries.retain(|entry| entry.id != "job-1");
-        panel.set_result(&view_reply(
+        // The adapter answers the reset's own line, from the read the write
+        // was made at: it put the catalog entry back rather than removing
+        // anything. The panel reports the owner's answer as it stands.
+        panel.set_result(&reply(
             Area::Skills,
             ManagementAction::Remove { id: "job-1".into() },
-            after,
+            ManagementResult::View {
+                view: Box::new(after),
+                note: Some("Reset nightly to its catalog entry.".into()),
+            },
         ));
         let text = shown(&panel, 120, 20).join(" ");
         assert!(
@@ -1679,17 +1708,40 @@ mod tests {
             Area::Skills,
             ManagementAction::Remove { id: "job-1".into() },
             ManagementResult::Applied {
-                note: "Removed job-1.".into(),
+                note: None,
                 read_error: "the scheduler is unavailable".into(),
             },
         ));
         let text = shown(&panel, 100, 20).join("\n");
-        assert!(text.contains("Removed job-1."), "{text}");
+        assert!(text.contains("Removed nightly."), "{text}");
+        assert!(!text.contains("Removed job-1."), "{text}");
         assert_eq!(
             text.matches("the scheduler is unavailable").count(),
             1,
             "the read error is drawn once: {text}"
         );
+    }
+
+    /// A toggle whose read-back failed names the entry by the label the
+    /// panel holds, not by the id the action was sent with.
+    #[test]
+    fn an_applied_toggle_names_the_entrys_label() {
+        let mut panel = opened_catalogue();
+        panel.handle_key(key(KeyCode::Enter));
+        panel.set_result(&reply(
+            Area::Skills,
+            ManagementAction::Toggle {
+                id: "job-1".into(),
+                enabled: false,
+            },
+            ManagementResult::Applied {
+                note: None,
+                read_error: "the scheduler is unavailable".into(),
+            },
+        ));
+        let text = shown(&panel, 100, 20).join("\n");
+        assert!(text.contains("Disabled nightly."), "{text}");
+        assert!(!text.contains("Disabled job-1."), "{text}");
     }
 
     /// A run whose read-back fails keeps the owner's answer, and the read
@@ -1702,7 +1754,7 @@ mod tests {
             Area::Skills,
             ManagementAction::Run { id: "job-1".into() },
             ManagementResult::Applied {
-                note: "Run nightly: skipped (overlap).".into(),
+                note: Some("Run nightly: skipped (overlap).".into()),
                 read_error: "the scheduler is unavailable".into(),
             },
         ));

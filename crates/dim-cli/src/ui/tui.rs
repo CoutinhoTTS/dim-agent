@@ -220,7 +220,7 @@ fn run_terminal(
             return 1;
         }
     };
-    i18n::set(i18n::saved_locale(&surroundings.home).unwrap_or_else(i18n::system_locale));
+    i18n::set(i18n::interface_locale(&surroundings.home));
     let synchronized = !crate::ui::terminal::in_tmux();
     let notify_terminal = crate::ui::notify::Terminal::from_env();
     let mut status = Reporter::from_env();
@@ -945,6 +945,9 @@ struct App {
     /// comes back: a refused write keeps its own, so the edit key of the
     /// target it was taken for reopens the user's text.
     management_edits: Vec<ManagementDraft>,
+    /// The entry a management action the panel sent names, with the label the
+    /// panel showed then: the panel may close before the reply lands.
+    management_named: Option<(Area, ManagementAction, Option<String>)>,
     /// Queued messages withdrawn for the draft, by input id, until the host
     /// confirms each withdrawal; a confirmed one goes into the draft.
     recovering: Vec<(String, String)>,
@@ -964,8 +967,20 @@ struct ManagementDraft {
 fn reported_note(result: &ManagementResult) -> Option<&str> {
     match result {
         ManagementResult::View { note, .. } => note.as_deref(),
-        ManagementResult::Applied { note, .. } => Some(note),
+        ManagementResult::Applied { note, .. } => note.as_deref(),
         ManagementResult::Detail(_) | ManagementResult::Refused(_) => None,
+    }
+}
+
+/// The notice a management reply leaves: the line the action reports and,
+/// when the read after it failed, why. The owner writes both parts — a
+/// job's name, a run's state — so they are made safe, and kept to one line,
+/// at the one place that joins them.
+fn management_notice(line: &str, read_error: Option<&str>) -> String {
+    let line = crate::sanitize::safe_line(line);
+    match read_error {
+        Some(error) => format!("{line} {}", crate::sanitize::safe_line(error)),
+        None => line,
     }
 }
 
@@ -1134,6 +1149,7 @@ impl App {
             fork_confirm: None,
             fork_draft: None,
             management_edits: Vec::new(),
+            management_named: None,
             recovering: Vec::new(),
         }
     }
@@ -1733,6 +1749,9 @@ impl App {
                 }
             }
             Update::Management(reply) => {
+                // The panel may have closed since it sent the action; this is
+                // the entry's label from when it did.
+                let named = self.take_named(&reply.request);
                 let creating = matches!(reply.request.action, ManagementAction::Add { .. });
                 let write =
                     creating || matches!(reply.request.action, ManagementAction::Save { .. });
@@ -1753,7 +1772,17 @@ impl App {
                 } else {
                     None
                 };
-                if let Some(Prompt::Management(panel)) = &mut self.prompt {
+                // A reply belongs to a panel only when that panel manages the
+                // reply's area: another area's panel is as absent as a closed
+                // one, and the notice still reports what the action came to.
+                let same_area = matches!(
+                    &self.prompt,
+                    Some(Prompt::Management(panel)) if panel.area() == &reply.request.area
+                );
+                if same_area {
+                    let Some(Prompt::Management(panel)) = &mut self.prompt else {
+                        unreachable!("the matched prompt is a management panel")
+                    };
                     panel.set_result(&reply);
                     // The write took it: the file is no longer the user's
                     // text. That holds when only the read that reports the
@@ -1768,15 +1797,25 @@ impl App {
                             ManagementResult::Refused(ManagementRefusal::Conflict { .. })
                                 if creating =>
                             {
-                                panel.conflicted(true, &settled.draft.path().display().to_string());
+                                panel.conflicted(
+                                    &reply.request.area,
+                                    true,
+                                    &settled.draft.path().display().to_string(),
+                                );
                                 self.hold_draft(settled);
                             }
                             ManagementResult::Refused(ManagementRefusal::Conflict { .. }) => {
-                                panel
-                                    .conflicted(false, &settled.draft.path().display().to_string());
+                                panel.conflicted(
+                                    &reply.request.area,
+                                    false,
+                                    &settled.draft.path().display().to_string(),
+                                );
                             }
                             ManagementResult::Refused(_) => {
-                                panel.kept(&settled.draft.path().display().to_string());
+                                panel.kept(
+                                    &reply.request.area,
+                                    &settled.draft.path().display().to_string(),
+                                );
                                 self.hold_draft(settled);
                             }
                             _ => settled.draft.remove(),
@@ -1813,16 +1852,21 @@ impl App {
                             // The reply's own note, else the line its action
                             // reports; never a line that names only "saved".
                             let note = reported_note(result).map_or_else(
-                                || management::applied_line(&reply.request),
+                                || {
+                                    management::applied_line(
+                                        &reply.request.action,
+                                        named.as_deref(),
+                                    )
+                                },
                                 str::to_owned,
                             );
-                            let notice = match result {
+                            let read_error = match result {
                                 ManagementResult::Applied { read_error, .. } => {
-                                    format!("{note} {read_error}")
+                                    Some(read_error.as_str())
                                 }
-                                _ => note,
+                                _ => None,
                             };
-                            self.set_notice(notice);
+                            self.set_notice(management_notice(&note, read_error));
                         }
                         (_, None) => {}
                     }
@@ -1842,7 +1886,10 @@ impl App {
                         // failed, so the rescan stands and the read is what
                         // the notice reports after it.
                         ManagementResult::Applied { note, read_error } => {
-                            self.set_notice(format!("{note} {read_error}"))
+                            let line = note.clone().unwrap_or_else(|| {
+                                management::applied_line(&reply.request.action, None)
+                            });
+                            self.set_notice(management_notice(&line, Some(read_error)))
                         }
                         ManagementResult::Refused(error) => self.set_notice(error.to_string()),
                         // A reload is not an inspect: the adapter answers it
@@ -1852,13 +1899,21 @@ impl App {
                 } else if let Some(note) = reported_note(&reply.result) {
                     // An action that opened no draft, such as a run, still
                     // reports what the owner answered.
-                    let notice = match &reply.result {
-                        ManagementResult::Applied { read_error, .. } => {
-                            format!("{note} {read_error}")
-                        }
-                        _ => note.to_owned(),
+                    let read_error = match &reply.result {
+                        ManagementResult::Applied { read_error, .. } => Some(read_error.as_str()),
+                        _ => None,
                     };
-                    self.set_notice(notice);
+                    self.set_notice(management_notice(note, read_error));
+                } else if let ManagementResult::Applied {
+                    note: None,
+                    read_error,
+                } = &reply.result
+                {
+                    // The panel is gone and the owner named nothing beyond the
+                    // view: the entry's label is the one it held when it sent
+                    // the action.
+                    let line = management::applied_line(&reply.request.action, named.as_deref());
+                    self.set_notice(management_notice(&line, Some(read_error)));
                 }
             }
             Update::Login(account) => {
@@ -2786,7 +2841,9 @@ impl App {
             }
             Effect::LanguageApply(locale) => {
                 self.prompt = None;
-                i18n::set(locale.unwrap_or_else(i18n::system_locale));
+                let active = locale.unwrap_or_else(i18n::system_locale);
+                i18n::set(active);
+                self.host.send(Command::SetLocale(active.code()));
                 let saved = match locale {
                     Some(locale) => {
                         crate::ui::config::write(&self.home, i18n::LOCALE_KEY, locale.code().into())
@@ -2831,7 +2888,10 @@ impl App {
             }
             Effect::Provider(action) => self.host.send(Command::Provider(action)),
             Effect::Plugin(action) => self.host.send(Command::Plugin(action)),
-            Effect::Management(request) => self.host.send(Command::Management(request)),
+            Effect::Management(request) => {
+                self.remember_named(&request);
+                self.host.send(Command::Management(request));
+            }
             Effect::EditManagement { area, target, text } => {
                 return Outcome::Edit { area, target, text };
             }
@@ -3171,6 +3231,33 @@ impl App {
         Some((kept.target, kept.draft))
     }
 
+    /// Records the label the open panel shows for the entry `request` names,
+    /// which the notice owes the user when the panel closes before the reply.
+    fn remember_named(&mut self, request: &ManagementRequest) {
+        let Some(Prompt::Management(panel)) = &self.prompt else {
+            return;
+        };
+        self.management_named = Some((
+            request.area.clone(),
+            request.action.clone(),
+            panel.label_of(&request.action),
+        ));
+    }
+
+    /// The label the panel held for the entry this reply names, when the
+    /// panel sent the action and then closed.
+    fn take_named(&mut self, request: &ManagementRequest) -> Option<String> {
+        let same = self
+            .management_named
+            .as_ref()
+            .is_some_and(|(area, action, _)| *area == request.area && *action == request.action);
+        if same {
+            self.management_named.take().and_then(|(_, _, name)| name)
+        } else {
+            None
+        }
+    }
+
     /// Takes the draft the reply's request was sent for, leaving every other
     /// target's kept draft where it is.
     fn take_draft(&mut self, request: &ManagementRequest) -> Option<ManagementDraft> {
@@ -3284,7 +3371,7 @@ impl App {
             }) {
                 Err(error) => {
                     panel.failed(error);
-                    panel.kept(&path);
+                    panel.kept(&area, &path);
                     Next::Keep
                 }
                 Ok(document) if panel.document(&target) == Some(&document) => {
@@ -3325,8 +3412,9 @@ impl App {
                     target,
                     draft,
                 });
-                self.host
-                    .send(Command::Management(ManagementRequest { area, action }));
+                let request = ManagementRequest { area, action };
+                self.remember_named(&request);
+                self.host.send(Command::Management(request));
             }
         }
     }
@@ -8862,7 +8950,7 @@ mod tests {
         // the text, so the file goes too and the notice says what failed.
         let path = draft(&mut app);
         app.apply(save_reply(ManagementResult::Applied {
-            note: "Saved.".into(),
+            note: None,
             read_error: "catalog unavailable".into(),
         }));
         assert!(!path.exists(), "an applied write keeps no draft");
@@ -8938,7 +9026,7 @@ mod tests {
         app.apply(save_reply(ManagementResult::Refused(
             ManagementRefusal::Conflict {
                 message: "The user document changed since it was read.".into(),
-                view: Box::new(view()),
+                view: Ok(Box::new(view())),
             },
         )));
         assert!(path.exists(), "the conflicted draft stays");
@@ -8946,6 +9034,239 @@ mod tests {
         assert!(text.contains("The user document changed"), "{text}");
         assert!(text.contains(&path.display().to_string()), "{text}");
         assert!(app.management_edits.is_empty(), "a conflict drops the link");
+    }
+
+    /// A toggle sent from a panel that closes before the reply names the
+    /// entry by the label the panel held when it sent the action.
+    #[test]
+    fn a_toggle_without_its_panel_names_the_entrys_label() {
+        use crate::model::session::{
+            ActionKind, ManagementEntry, ManagementGroup, ManagementReply, ManagementView,
+            RemoveVerb,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            root.path().join("home"),
+            "/w".into(),
+        );
+        let mut panel = ManagementPanel::new(Area::Skills);
+        panel.set_result(&ManagementReply {
+            request: ManagementRequest {
+                area: Area::Skills,
+                action: ManagementAction::List,
+            },
+            result: ManagementResult::View {
+                view: Box::new(ManagementView {
+                    groups: vec![ManagementGroup {
+                        heading: "user".into(),
+                        entries: vec![ManagementEntry {
+                            id: "user:commit".into(),
+                            label: "commit".into(),
+                            detail: Vec::new(),
+                            enabled: true,
+                            states: Vec::new(),
+                            actions: vec![ActionKind::Toggle],
+                            remove_verb: RemoveVerb::Remove,
+                            document: None,
+                        }],
+                    }],
+                    ..ManagementView::default()
+                }),
+                note: None,
+            },
+        });
+        app.prompt = Some(Prompt::Management(Box::new(panel)));
+        let request = ManagementRequest {
+            area: Area::Skills,
+            action: ManagementAction::Toggle {
+                id: "user:commit".into(),
+                enabled: false,
+            },
+        };
+        // What every panel send does before the command goes out.
+        app.remember_named(&request);
+        // Esc closes the panel while the toggle is in flight.
+        app.prompt = None;
+        app.apply(Update::Management(ManagementReply {
+            request,
+            result: ManagementResult::Applied {
+                note: None,
+                read_error: "catalog unavailable".into(),
+            },
+        }));
+        let (text, _) = app.notice.clone().unwrap();
+        assert_eq!(text, "Disabled commit. catalog unavailable");
+    }
+
+    /// A reply for another Provider's models leaves this panel as it is: the
+    /// panel manages one whole area, Provider scope included, and the notice
+    /// still reports what the action came to.
+    #[test]
+    fn a_reply_for_another_providers_models_leaves_the_panel_as_it_is() {
+        use crate::model::session::{
+            ActionKind, ManagementEntry, ManagementGroup, ManagementReply, ManagementView,
+            RemoveVerb,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            root.path().join("home"),
+            "/w".into(),
+        );
+        let row = |id: &str, label: &str| ManagementEntry {
+            id: id.into(),
+            label: label.into(),
+            detail: Vec::new(),
+            enabled: true,
+            states: Vec::new(),
+            actions: vec![ActionKind::Toggle],
+            remove_verb: RemoveVerb::Remove,
+            document: None,
+        };
+        let area = Area::Models {
+            provider_id: "a".into(),
+        };
+        let mut panel = ManagementPanel::new(area.clone());
+        panel.set_result(&ManagementReply {
+            request: ManagementRequest {
+                area: area.clone(),
+                action: ManagementAction::List,
+            },
+            result: ManagementResult::View {
+                view: Box::new(ManagementView {
+                    groups: vec![ManagementGroup {
+                        heading: "catalog".into(),
+                        entries: vec![row("flash", "Flash")],
+                    }],
+                    ..ManagementView::default()
+                }),
+                note: None,
+            },
+        });
+        app.prompt = Some(Prompt::Management(Box::new(panel)));
+        app.apply(Update::Management(ManagementReply {
+            request: ManagementRequest {
+                area: Area::Models {
+                    provider_id: "b".into(),
+                },
+                action: ManagementAction::Toggle {
+                    id: "other".into(),
+                    enabled: false,
+                },
+            },
+            result: ManagementResult::View {
+                view: Box::new(ManagementView {
+                    groups: vec![ManagementGroup {
+                        heading: "catalog".into(),
+                        entries: vec![row("other", "Other")],
+                    }],
+                    ..ManagementView::default()
+                }),
+                note: Some("Disabled other.".into()),
+            },
+        }));
+        let shown = match &app.prompt {
+            Some(Prompt::Management(panel)) => panel.render(80, 20, &theme.palette).join(" "),
+            _ => panic!("the panel for the first Provider stays open"),
+        };
+        assert!(shown.contains("Flash"), "{shown}");
+        assert!(!shown.contains("Other"), "{shown}");
+        let (text, _) = app.notice.clone().unwrap();
+        assert_eq!(text, "Disabled other.");
+    }
+
+    /// A run whose owner answer carries an escape sequence and a newline
+    /// reaches the status row on one line, without the escape.
+    #[test]
+    fn a_closed_panel_run_keeps_the_owners_answer_on_one_line() {
+        use crate::model::session::{ManagementReply, ManagementView};
+        let root = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            root.path().join("home"),
+            "/w".into(),
+        );
+        app.apply(Update::Management(ManagementReply {
+            request: ManagementRequest {
+                area: Area::Scheduled,
+                action: ManagementAction::Run { id: "job-1".into() },
+            },
+            result: ManagementResult::View {
+                view: Box::new(ManagementView::default()),
+                note: Some("Run daily\u{1b}[31m: skipped\n(overlap).".into()),
+            },
+        }));
+        let (text, _) = app.notice.clone().unwrap();
+        assert_eq!(text, "Run daily: skipped (overlap).");
+        assert!(
+            !text.contains('\u{1b}') && !text.contains('\n') && !text.contains('\r'),
+            "{text:?}"
+        );
+    }
+
+    /// A reply for one area does not write its message into another area's
+    /// panel that opened while the write was in flight: the notice reports
+    /// it, and the open panel keeps its own state.
+    #[test]
+    fn another_areas_panel_keeps_its_own_message() {
+        use crate::model::session::ManagementReply;
+        let root = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            root.path().join("home"),
+            "/w".into(),
+        );
+        // The Scheduler's panel sent a create, then Esc closed it; the
+        // Skills panel opened before the reply landed.
+        app.hold_draft(ManagementDraft {
+            area: Area::Scheduled,
+            target: WriteTarget::Create,
+            draft: editor::Draft::open(root.path(), Area::Scheduled, "{}").unwrap(),
+        });
+        let path = app
+            .management_edits
+            .last()
+            .unwrap()
+            .draft
+            .path()
+            .display()
+            .to_string();
+        app.prompt = Some(Prompt::Management(Box::new(ManagementPanel::new(
+            Area::Skills,
+        ))));
+        app.apply(Update::Management(ManagementReply {
+            request: ManagementRequest {
+                area: Area::Scheduled,
+                action: ManagementAction::Add {
+                    document: serde_json::Value::Null,
+                },
+            },
+            result: ManagementResult::Refused(ManagementRefusal::Refused("nope".into())),
+        }));
+        let shown = match &app.prompt {
+            Some(Prompt::Management(panel)) => panel.render(80, 20, &theme.palette).join(" "),
+            _ => panic!("the Skills panel stays open"),
+        };
+        assert!(!shown.contains("nope"), "{shown}");
+        assert!(!shown.contains(&path), "{shown}");
+        assert!(!shown.contains("Your text is kept in"), "{shown}");
+        let (text, _) = app.notice.clone().unwrap();
+        assert!(text.contains("nope"), "{text}");
+        assert!(text.contains(&path), "{text}");
+        assert!(app.management_edits.first().unwrap().draft.path().exists());
     }
 
     /// A create the owner refuses, or a conflict on one, keeps the draft
@@ -8971,7 +9292,7 @@ mod tests {
         fn conflict() -> ManagementResult {
             ManagementResult::Refused(ManagementRefusal::Conflict {
                 message: "The jobs changed since they were read.".into(),
-                view: Box::new(ManagementView::default()),
+                view: Ok(Box::new(ManagementView::default())),
             })
         }
         let root = tempfile::tempdir().unwrap();

@@ -452,8 +452,8 @@ impl ListPanel {
 }
 
 /// The hint as rows above the bottom border, when the border cannot hold it:
-/// its ` · ` parts joined into rows of the panel's content width, so a part
-/// never splits. A part wider than a row is cut with `…`.
+/// its ` · ` parts joined into rows of the panel's content width. A part
+/// wider than a row wraps across rows, so nothing is cut.
 fn hint_rows(hint: &str, width: usize) -> Option<Vec<String>> {
     // `bordered` puts a hint on the bottom border only while a dash still
     // fits on either side of it.
@@ -463,16 +463,39 @@ fn hint_rows(hint: &str, width: usize) -> Option<Vec<String>> {
     let room = width.saturating_sub(4).max(1);
     let mut rows: Vec<String> = Vec::new();
     for part in hint.split(" · ") {
-        let part = truncate_cells(part, room);
+        let mut lines = wrapped_part(part, room).into_iter();
+        let first = lines.next().unwrap_or_default();
         match rows.last_mut() {
-            Some(row) if visible_width(row) + 3 + visible_width(&part) <= room => {
+            Some(row) if visible_width(row) + 3 + visible_width(&first) <= room => {
                 row.push_str(" · ");
-                row.push_str(&part);
+                row.push_str(&first);
             }
-            _ => rows.push(part),
+            _ => rows.push(first),
         }
+        rows.extend(lines);
     }
     Some(rows)
+}
+
+/// `part` as rows of `room` columns, so no key or action is cut to fit. Its
+/// last two words are the key the part asks for and that key's action, and
+/// they stay on one row.
+fn wrapped_part(part: &str, room: usize) -> Vec<String> {
+    let words: Vec<&str> = part.split(' ').collect();
+    if visible_width(part) <= room || words.len() < 3 {
+        return wrap_words(part, room);
+    }
+    let split = words.len() - 2;
+    let mut rows = wrap_words(&words[..split].join(" "), room);
+    let last = words[split..].join(" ");
+    match rows.last_mut() {
+        Some(row) if visible_width(row) + 1 + visible_width(&last) <= room => {
+            row.push(' ');
+            row.push_str(&last);
+        }
+        _ => rows.push(last),
+    }
+    rows
 }
 
 #[cfg(test)]
@@ -490,6 +513,26 @@ mod tests {
             None,
         );
         panel
+    }
+
+    /// A part wider than a row wraps instead of being cut: the remove
+    /// confirmation keeps its keys and actions at 80 columns, with a long
+    /// name.
+    #[test]
+    fn a_hint_part_wider_than_a_row_wraps_whole() {
+        let name = "a job whose name is exactly sixty cells long to wrap a hint!";
+        let hint = format!("Remove {name}? Enter confirm · Esc cancel");
+        let rows = hint_rows(&hint, 80).unwrap();
+        assert!(rows.iter().all(|row| visible_width(row) <= 76), "{rows:?}");
+        assert!(
+            rows.iter().any(|row| row.contains("Enter confirm")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("Esc cancel")),
+            "{rows:?}"
+        );
+        assert!(!rows.iter().any(|row| row.contains('…')), "{rows:?}");
     }
 
     #[test]

@@ -13,7 +13,7 @@ use super::Groups;
 use crate::client::{Client, app_error};
 use crate::model::session::{
     ActionKind, EntryDocument, EntryState, ManagementAction, ManagementDetail, ManagementEntry,
-    ManagementRequest, ManagementView, RemoveVerb,
+    ManagementView, RemoveVerb,
 };
 use crate::ui::i18n::{t, tf};
 use crate::ui::oauth_view::count;
@@ -169,11 +169,7 @@ pub enum Failure {
     },
     /// The action was applied and the read that reports the area failed: the
     /// change was made, and this is why the area is not shown.
-    ReadFailed {
-        note: Option<String>,
-        removed: Option<RemoveVerb>,
-        error: String,
-    },
+    ReadFailed { note: Option<String>, error: String },
     /// The daemon or the owner refused it: nothing was written.
     Refused(String),
 }
@@ -194,9 +190,9 @@ pub enum Answer {
     /// is more than the catalog.
     Provider {
         provider: Provider,
+        /// The owner's answer when it says more than the view, such as the
+        /// name an add made or what a reset did.
         note: Option<String>,
-        /// The verb a remove applied, when the action was one.
-        removed: Option<RemoveVerb>,
     },
     /// An inspect: one model's descriptor, not a view.
     Detail(ManagementDetail),
@@ -239,7 +235,6 @@ pub async fn apply(
             Ok(Answer::Provider {
                 provider,
                 note: None,
-                removed: None,
             })
         }
         ManagementAction::Reload => reload(client, provider_id).await,
@@ -276,7 +271,6 @@ async fn reload(client: &mut Client, provider_id: &str) -> Result<Answer, Failur
         return Ok(Answer::Provider {
             provider: before,
             note: Some(note),
-            removed: None,
         });
     }
     let (provider, note) = match client
@@ -291,7 +285,7 @@ async fn reload(client: &mut Client, provider_id: &str) -> Result<Answer, Failur
             } else {
                 t("Refreshed the models.").to_owned()
             };
-            let after = read_after(client, provider_id, Some(applied.clone()), None).await?;
+            let after = read_after(client, provider_id, Some(applied.clone())).await?;
             let note = if account_changed {
                 applied
             } else {
@@ -314,7 +308,6 @@ async fn reload(client: &mut Client, provider_id: &str) -> Result<Answer, Failur
     Ok(Answer::Provider {
         provider,
         note: Some(note),
-        removed: None,
     })
 }
 
@@ -369,7 +362,7 @@ async fn toggle(
     if let Err(error) = written {
         return Err(conflict(client, provider_id, &error, version, ConflictKind::Toggle).await);
     }
-    reread(client, provider_id, None, None).await
+    reread(client, provider_id, None).await
 }
 
 /// Removes one model: a user model is deleted and an override is reset to
@@ -389,6 +382,7 @@ async fn remove(client: &mut Client, provider_id: &str, id: &str) -> Result<Answ
             t("This model cannot be removed.").to_owned(),
         ));
     };
+    let label = model.entry.display_name.clone();
     let written = client
         .rpc(
             method,
@@ -398,7 +392,16 @@ async fn remove(client: &mut Client, provider_id: &str, id: &str) -> Result<Answ
     if let Err(error) = written {
         return Err(conflict(client, provider_id, &error, version, ConflictKind::Remove).await);
     }
-    reread(client, provider_id, None, Some(verb)).await
+    // A reset puts the catalog entry back rather than removing anything, so
+    // its line says that, naming the entry from the read the write was made
+    // at.
+    let note = matches!(verb, RemoveVerb::Reset).then(|| {
+        tf(
+            "Reset {name} to its catalog entry.",
+            &[("name", label.as_str())],
+        )
+    });
+    reread(client, provider_id, note).await
 }
 
 /// Writes the fields a draft changed, diffed against the template built from
@@ -457,7 +460,7 @@ async fn edit(
     if let Err(error) = written {
         return Err(conflict(client, provider_id, &error, version, ConflictKind::Edit).await);
     }
-    reread(client, provider_id, None, None).await
+    reread(client, provider_id, None).await
 }
 
 /// Creates one model at the version read immediately before the write.
@@ -480,7 +483,7 @@ async fn add(client: &mut Client, provider_id: &str, document: &Value) -> Result
         return Err(conflict(client, provider_id, &error, version, ConflictKind::Add).await);
     }
     let note = tf("Added {name}.", &[("name", &name)]);
-    reread(client, provider_id, Some(note), None).await
+    reread(client, provider_id, Some(note)).await
 }
 
 /// One model's descriptor, in place of the list.
@@ -492,36 +495,18 @@ async fn detail(client: &mut Client, provider_id: &str, id: &str) -> Result<Answ
     Ok(Answer::Detail(descriptor(model)))
 }
 
-/// The line an applied models action reports, from its request and the verb
-/// the owner's entry gave. It is the shared line, except that a reset says
-/// what it did to the entry: it puts the catalog entry back rather than
-/// removing anything.
-pub fn applied_line(request: &ManagementRequest, removed: Option<RemoveVerb>) -> String {
-    match (&request.action, removed) {
-        (ManagementAction::Remove { id }, Some(RemoveVerb::Reset)) => {
-            tf("Reset {name} to its catalog entry.", &[("name", id)])
-        }
-        _ => super::applied_line(request),
-    }
-}
-
 /// Reads the area after an action the owner accepted: a failed read reports
 /// the action as applied with the action's note, not as a refusal.
 async fn read_after(
     client: &mut Client,
     provider_id: &str,
     note: Option<String>,
-    removed: Option<RemoveVerb>,
 ) -> Result<Provider, Failure> {
     match read(client, provider_id).await {
         Ok(provider) => Ok(provider),
         // The action was applied: only the read that reports the area
         // failed, so the change stands and the owner's answer is kept.
-        Err(Failure::Refused(error)) => Err(Failure::ReadFailed {
-            note,
-            removed,
-            error,
-        }),
+        Err(Failure::Refused(error)) => Err(Failure::ReadFailed { note, error }),
         Err(error) => Err(error),
     }
 }
@@ -531,14 +516,9 @@ async fn reread(
     client: &mut Client,
     provider_id: &str,
     note: Option<String>,
-    removed: Option<RemoveVerb>,
 ) -> Result<Answer, Failure> {
-    let provider = read_after(client, provider_id, note.clone(), removed).await?;
-    Ok(Answer::Provider {
-        provider,
-        note,
-        removed,
-    })
+    let provider = read_after(client, provider_id, note.clone()).await?;
+    Ok(Answer::Provider { provider, note })
 }
 
 fn version(provider: &Provider) -> Result<u32, Failure> {
@@ -769,7 +749,7 @@ fn descriptor(model: &Model) -> ManagementDetail {
         .and_then(|reasoning| reasoning.effort_options.as_deref())
         .unwrap_or_default();
     let reasoning = if !entry.capabilities.reasoning {
-        t("off").to_owned()
+        t("not supported").to_owned()
     } else if efforts.is_empty() {
         t("supported").to_owned()
     } else {

@@ -568,6 +568,8 @@ async fn run_acp(root: &rutis::Ctx, options: &Options, agent_id: Option<String>)
 }
 
 async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
+    // `block_on` polls `act` on this thread, so the thread-local language holds.
+    crate::ui::i18n::set(crate::ui::i18n::interface_locale(&options.home));
     if let Action::Migration(command) = &options.action {
         return migration_command::run(root, &options, command).await;
     }
@@ -661,10 +663,6 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         Action::Account(provider) => login::account(&mut client, provider).await,
         Action::Logout(provider) => login::logout(&mut client, provider).await,
         Action::Models(provider) => {
-            crate::ui::i18n::set(
-                crate::ui::i18n::saved_locale(&options.home)
-                    .unwrap_or_else(crate::ui::i18n::system_locale),
-            );
             if let Some(model) = &options.clear_preferences {
                 session_host::clear_saved_model_preferences(&mut client, provider, model).await?;
                 println!("{}", crate::ui::i18n::t("Saved model preferences cleared"));

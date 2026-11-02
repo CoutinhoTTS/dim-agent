@@ -6,6 +6,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Issues" => "Masalah",
         "sources" => "Sumber",
         "skills" => "Skill",
+        "hooks" => "hook",
+        "scheduled jobs" => "tugas terjadwal",
+        "models" => "model",
         "enabled" => "aktif",
         "shadowed by {name}" => "tertutup oleh {name}",
         "Reloaded." => "Dimuat ulang.",
@@ -21,9 +24,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "No change." => "Tidak ada perubahan.",
         "Your text is kept in {path}." => "Teks Anda tersimpan di {path}.",
         "The user's own document; always in effect." => "Dokumen milik pengguna; selalu berlaku.",
-        "No .dimcode/hooks.json in this workspace." => {
-            "Tidak ada .dimcode/hooks.json di ruang kerja ini."
-        }
+        "There is no hooks file there." => "Tidak ada file hook di sana.",
         "Owned by plugin {plugin}." => "Milik plugin {plugin}.",
         "The user document turns every hook off (disableAllHooks)." => {
             "Dokumen pengguna mematikan semua hook (disableAllHooks)."
@@ -75,6 +76,27 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "The Scheduler has no area document." => "Penjadwal tidak memiliki dokumen area.",
         "No scheduled job has that id." => "Tidak ada tugas terjadwal dengan id itu.",
         "This daemon cannot manage {area}." => "Tidak dapat mengelola {area}.",
+        "This daemon lists {area} but cannot toggle them." => {
+            "Daemon ini menampilkan {area}, tetapi tidak dapat mengalihkannya."
+        }
+        "This daemon lists {area} but cannot edit them." => {
+            "Daemon ini menampilkan {area}, tetapi tidak dapat mengeditnya."
+        }
+        "This daemon lists {area} but cannot reload them." => {
+            "Daemon ini menampilkan {area}, tetapi tidak dapat memuat ulang daftarnya."
+        }
+        "This daemon lists {area} but cannot add them." => {
+            "Daemon ini menampilkan {area}, tetapi tidak dapat menambahnya."
+        }
+        "This daemon lists {area} but cannot remove them." => {
+            "Daemon ini menampilkan {area}, tetapi tidak dapat menghapusnya."
+        }
+        "This daemon lists {area} but cannot run them." => {
+            "Daemon ini menampilkan {area}, tetapi tidak dapat menjalankannya."
+        }
+        "This daemon lists {area} but cannot inspect them." => {
+            "Daemon ini menampilkan {area}, tetapi tidak dapat melihat detail atau riwayatnya."
+        }
         "The document deleted {field}, which the owner cannot clear; nothing was written." => {
             "Dokumen menghapus {field}, yang tidak dapat dibersihkan pemilik; tidak ada yang ditulis."
         }
@@ -154,7 +176,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Capability overrides {fields}" => "Penimpaan kemampuan {fields}",
         "yes" => "ya",
         "no" => "tidak",
-        "off" => "mati",
+        "not supported" => "tidak didukung",
         "supported" => "didukung",
         _ => return None,
     })

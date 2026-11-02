@@ -146,13 +146,15 @@ impl SessionPort for SessionHost {
 
 impl SessionHost {
     /// Runs the session on `client`, the connection the composition root
-    /// took from the client tree.
-    pub fn start(options: Options, client: Client) -> Self {
+    /// took from the client tree, composing management text in `language`,
+    /// the interface's language code.
+    pub fn start(options: Options, client: Client, language: &'static str) -> Self {
         let (commands, command_rx) = unbounded_channel();
         let (update_tx, updates) = mpsc::channel();
         let thread = std::thread::Builder::new()
             .name("dim-session".into())
             .spawn(move || {
+                crate::management::use_language(language);
                 let runtime = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
@@ -1574,6 +1576,7 @@ impl Worker {
                 let result = crate::management::apply(&mut self.client, &request, &cwd).await;
                 self.send(Update::Management(ManagementReply { request, result }));
             }
+            Command::SetLocale(language) => crate::management::use_language(language),
             Command::Configure(text) => {
                 if self.session_id.is_empty() && configure::needs_session(&text) {
                     self.report(NO_SESSION.to_owned(), true);

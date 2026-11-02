@@ -84,11 +84,11 @@ pub async fn apply(client: &mut Client, action: &ManagementAction, cwd: &Path) -
             true
         }
         // The kinds this area has no method for: `management::supported`
-        // refuses them before the adapter runs.
+        // refuses them before the adapter runs, so nothing applied.
         ManagementAction::Save { .. }
         | ManagementAction::Add { .. }
         | ManagementAction::Remove { .. }
-        | ManagementAction::Run { .. } => true,
+        | ManagementAction::Run { .. } => false,
     };
     match catalog(client, &cwd.to_string_lossy()).await {
         Ok(catalog) => Outcome::Catalog(catalog),
