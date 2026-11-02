@@ -5122,6 +5122,7 @@
       "parent": "dim_cli::ui",
       "file": "crates/dim-cli/src/ui/upgrade_dialog.rs",
       "unexpandedMacros": [
+        "format",
         "vec"
       ]
     },
@@ -29188,6 +29189,13 @@
     },
     {
       "from": "dim_cli::ui::composer",
+      "to": "dim_cli::ui::render::screen",
+      "references": [
+        "path crate::ui::render::Overlay"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer",
       "to": "dim_cli::ui::rows",
       "references": [
         "path crate::ui::rows::Kind::Command",
@@ -29223,13 +29231,6 @@
         "use crate::ui::terminal::KeyCode",
         "use crate::ui::terminal::KeyEvent",
         "use crate::ui::terminal::Modifiers"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::composer",
-      "to": "dim_cli::ui::text",
-      "references": [
-        "path crate::ui::text::display_width"
       ]
     },
     {
@@ -29390,6 +29391,14 @@
     },
     {
       "from": "dim_cli::ui::composer::palette",
+      "to": "dim_cli::ui::render::screen",
+      "references": [
+        "path Overlay",
+        "use crate::ui::render::Overlay"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::palette",
       "to": "dim_cli::ui::rows",
       "references": [
         "path Columns::of",
@@ -29411,6 +29420,8 @@
       "from": "dim_cli::ui::composer::palette",
       "to": "dim_cli::ui::text",
       "references": [
+        "path crate::ui::text::display_width",
+        "path truncate_cells",
         "use crate::ui::text::truncate_cells"
       ]
     },
@@ -29527,6 +29538,7 @@
       "references": [
         "path Composer",
         "path Composer::new",
+        "path MAX_INPUT_ROWS",
         "path Outcome::SubmitDraft",
         "path read_planned"
       ]
@@ -32013,6 +32025,7 @@
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path KeyCode",
+        "path KeyCode::BackTab",
         "path KeyCode::Backspace",
         "path KeyCode::Char",
         "path KeyCode::Down",
@@ -32020,6 +32033,7 @@
         "path KeyCode::Esc",
         "path KeyCode::Left",
         "path KeyCode::Right",
+        "path KeyCode::Tab",
         "path KeyEvent",
         "path KeyEvent::new",
         "path Modifiers::NONE"
@@ -32329,6 +32343,13 @@
     },
     {
       "from": "dim_cli::ui::render::fullscreen",
+      "to": "dim_cli::ui::render",
+      "references": [
+        "path super::live_row_budget"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::render::fullscreen",
       "to": "dim_cli::ui::render::fullscreen::tests",
       "references": [
         "mod tests"
@@ -32626,6 +32647,13 @@
         "path ColorMode::TrueColor",
         "use crate::ui::theme::Appearance",
         "use crate::ui::theme::ColorMode"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::render::screen",
+      "to": "dim_cli::ui::render",
+      "references": [
+        "path super::live_row_budget"
       ]
     },
     {
@@ -35166,6 +35194,13 @@
     },
     {
       "from": "dim_cli::ui::tui",
+      "to": "dim_cli::ui::render",
+      "references": [
+        "path crate::ui::render::live_row_budget"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
       "to": "dim_cli::ui::render::fullscreen",
       "references": [
         "path Document",
@@ -35179,6 +35214,7 @@
         "path MouseOutcome::Open",
         "path MouseOutcome::Overlay",
         "path MouseOutcome::Redraw",
+        "path crate::ui::render::fullscreen::MIN_VIEW_ROWS",
         "use crate::ui::render::FullScreen",
         "use crate::ui::render::fullscreen::Document",
         "use crate::ui::render::fullscreen::MouseOutcome"
@@ -35213,6 +35249,7 @@
         "path Frame::default",
         "path Overlay",
         "path Screen::new",
+        "path crate::ui::render::screen::MIN_HISTORY_ROWS",
         "use crate::ui::render::Frame",
         "use crate::ui::render::Overlay",
         "use crate::ui::render::Screen"
@@ -35652,6 +35689,8 @@
         "path Update::Runtimes",
         "path Update::Snapshot",
         "path Update::Switched",
+        "path Update::Upgrade",
+        "path Update::UpgradeInstalled",
         "path Update::UsageReport",
         "path Update::Withdrawn",
         "path crate::model::session::Account",
@@ -35702,6 +35741,8 @@
       "to": "dim_cli::ui::i18n",
       "references": [
         "path i18n::LOCALES",
+        "path i18n::Locale::En",
+        "path i18n::Locale::ZhCn",
         "path i18n::active",
         "path i18n::set",
         "path t"
@@ -35791,6 +35832,7 @@
         "path KeyCode::Esc",
         "path KeyCode::Home",
         "path KeyCode::Left",
+        "path KeyCode::Right",
         "path KeyCode::Tab",
         "path KeyCode::Up",
         "path KeyEvent::new",
@@ -35873,6 +35915,14 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::update",
+      "references": [
+        "path crate::update::Install",
+        "path crate::update::Offer"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_client::question",
       "references": [
         "path crate::question::Call"
@@ -35883,6 +35933,13 @@
       "to": "dim_client::wire",
       "references": [
         "path crate::wire::Event"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::upgrade_dialog",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "path crate::sanitize::safe"
       ]
     },
     {
@@ -35912,8 +35969,16 @@
       "from": "dim_cli::ui::upgrade_dialog",
       "to": "dim_cli::ui::render::panel",
       "references": [
+        "path bordered",
+        "path choices",
         "path confirm_panel",
-        "use crate::ui::render::panel::confirm_panel"
+        "path visible_width",
+        "path wrap_words",
+        "use crate::ui::render::panel::bordered",
+        "use crate::ui::render::panel::choices",
+        "use crate::ui::render::panel::confirm_panel",
+        "use crate::ui::render::panel::visible_width",
+        "use crate::ui::render::panel::wrap_words"
       ]
     },
     {
@@ -35921,14 +35986,32 @@
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path KeyCode::BackTab",
+        "path KeyCode::Down",
         "path KeyCode::Enter",
         "path KeyCode::Esc",
         "path KeyCode::Left",
         "path KeyCode::Right",
         "path KeyCode::Tab",
+        "path KeyCode::Up",
         "path KeyEvent",
         "use crate::ui::terminal::KeyCode",
         "use crate::ui::terminal::KeyEvent"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::upgrade_dialog",
+      "to": "dim_cli::ui::text",
+      "references": [
+        "path truncate_cells",
+        "use crate::ui::text::truncate_cells"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::upgrade_dialog",
+      "to": "dim_cli::ui::theme::ansi",
+      "references": [
+        "path fg",
+        "use crate::ui::theme::ansi::fg"
       ]
     },
     {
