@@ -871,10 +871,94 @@ async fn a_custom_checkpoint_builder_takes_the_full_path() {
     agent.close().await.unwrap();
 }
 
-/// A replaced renderer renders its own entries, takes no streamed render, and
-/// leaves the built-in checkpoint builder's streamed path available.
+/// A built-in checkpoint function declared as a replaced builder takes the
+/// full path: it reads the branch for its snapshot instead of streaming a
+/// page, and stores the snapshot the built-in builder stores.
 #[tokio::test]
-async fn a_custom_render_renders_its_own_entries_and_keeps_the_streamed_checkpoint() {
+async fn a_builtin_function_declared_custom_takes_the_full_path() {
+    let mut runs = Vec::new();
+    for checkpoint in [
+        CheckpointBuilder::Projection,
+        CheckpointBuilder::Custom(projection_checkpoint),
+    ] {
+        let store = Arc::new(CountContextReads::default());
+        let mut builder = builder_with_context(
+            Arc::new(EchoModel),
+            HistoryRenderer {
+                checkpoint,
+                ..HistoryRenderer::default()
+            },
+            Context {
+                threshold: Some(900.),
+                ..Context::default()
+            },
+        );
+        builder.timeline_store(store.clone());
+        let agent = MinimalHost::start(&builder).await.unwrap();
+        let session = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
+        for input in ["x".repeat(1_500), "next".into()] {
+            session
+                .submit(input, InputMode::Queue, "main")
+                .await
+                .unwrap();
+            session.idle("main").await.unwrap();
+        }
+        let pages = store.pages.lock().unwrap().len();
+        let reads = store.ranges.lock().unwrap().len();
+        let history = session.history("main", None).await.unwrap();
+        let fact = history
+            .iter()
+            .rev()
+            .find(|event| {
+                matches!(&event.kind,
+                    EventKind::ContextCompaction(data) if matches!(data.outcome,
+                        ContextCompactionResult::Completed { .. }))
+            })
+            .expect("a completed compaction");
+        let key = TimelineKey {
+            session_id: session.id().into(),
+            branch_id: "main".into(),
+        };
+        let renderer = HistoryRenderer::default();
+        let snapshot = store
+            .memory
+            .latest_snapshot(
+                &key,
+                history.last().unwrap().sequence,
+                renderer.checkpoint_interpreter,
+            )
+            .await
+            .unwrap()
+            .expect("a snapshot");
+        let saved = (renderer.decode_checkpoint)(&snapshot, fact).expect("the snapshot decodes");
+        runs.push((pages, reads, saved.resume.sequence));
+        agent.close().await.unwrap();
+    }
+    let (builtin_pages, builtin_reads, builtin_resume) = runs[0];
+    let (custom_pages, custom_reads, custom_resume) = runs[1];
+    assert_eq!(
+        custom_pages + 1,
+        builtin_pages,
+        "a builder declared custom streams no page for its snapshot"
+    );
+    assert_eq!(
+        custom_reads,
+        builtin_reads + 1,
+        "a builder declared custom reads the branch for its snapshot"
+    );
+    assert_eq!(
+        custom_resume, builtin_resume,
+        "both builders resume at the same event"
+    );
+}
+
+/// A replaced renderer renders its own entries and takes the full
+/// preparation, so its compaction's snapshot is the full context's.
+#[tokio::test]
+async fn a_custom_render_takes_the_full_preparation_and_saves_its_snapshot() {
     let store = Arc::new(CountContextReads::default());
     let mut builder = builder_with_context(
         Arc::new(EchoModel),
@@ -900,6 +984,10 @@ async fn a_custom_render_renders_its_own_entries_and_keeps_the_streamed_checkpoi
             .unwrap();
         session.idle("main").await.unwrap();
     }
+    assert!(
+        store.pages.lock().unwrap().is_empty(),
+        "the custom render never streams, so its snapshot is the full context's"
+    );
     let history = session.history("main", None).await.unwrap();
     let request = history
         .iter()
@@ -925,12 +1013,6 @@ async fn a_custom_render_renders_its_own_entries_and_keeps_the_streamed_checkpoi
                     ContextCompactionResult::Completed { .. }))
         })
         .expect("a completed compaction");
-    let EventKind::ContextCompaction(data) = &fact.kind else {
-        unreachable!()
-    };
-    let ContextCompactionResult::Completed { retain_from, .. } = &data.outcome else {
-        unreachable!()
-    };
     let key = TimelineKey {
         session_id: session.id().into(),
         branch_id: "main".into(),
@@ -948,33 +1030,8 @@ async fn a_custom_render_renders_its_own_entries_and_keeps_the_streamed_checkpoi
         .expect("a snapshot");
     assert!(
         (default.decode_checkpoint)(&snapshot, fact).is_some(),
-        "the compaction's snapshot still decodes"
+        "the compaction's snapshot is the full context's and decodes"
     );
-    let timeline = Timeline::restore(Ctx::root().unwrap(), key, vec![], store.clone())
-        .await
-        .unwrap();
-    let through = timeline.sequence();
-    let order = timeline.policy_order(through).await.unwrap();
-    let position = order
-        .events
-        .iter()
-        .find(|event| event.id == *retain_from)
-        .map(|event| TimelinePosition {
-            branch_id: event.branch_id.clone(),
-            sequence: event.sequence,
-        })
-        .unwrap();
-    let checkpoint = HistoryRenderer {
-        render: HistoryRender::Custom(external_history),
-        ..HistoryRenderer::default()
-    }
-    .stream_checkpoint(&timeline, position, through, retain_from, 256)
-    .await
-    .expect("the built-in builder still streams");
-    assert_eq!(checkpoint.state.retain_from, *retain_from);
-    dim_agent_runtime::core::close_timeline(&timeline)
-        .await
-        .unwrap();
     agent.close().await.unwrap();
 }
 
@@ -1019,12 +1076,12 @@ async fn a_second_compaction_saves_a_snapshot_that_decodes() {
                     ContextCompactionResult::Completed { .. }))
         })
         .collect();
-    assert!(
-        compactions.len() >= 2,
-        "two compactions ran: {}",
-        compactions.len()
+    let first = *compactions.first().expect("a first compaction");
+    let second = *compactions.last().expect("a newest compaction");
+    assert_ne!(
+        first.id, second.id,
+        "the newest compaction is not the first"
     );
-    let (first, second) = (compactions[0], compactions[1]);
     let EventKind::ContextCompaction(data) = &second.kind else {
         unreachable!()
     };
