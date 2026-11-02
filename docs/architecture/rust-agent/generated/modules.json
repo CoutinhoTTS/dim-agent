@@ -34899,6 +34899,20 @@
     },
     {
       "from": "dim_cli::ui::transcript::block::tests",
+      "to": "dim_agent_capabilities::history",
+      "references": [
+        "path dim_agent_capabilities::history::summary_message"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::block::tests",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path dim_agent_types::MessageContent::Text"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::block::tests",
       "to": "dim_cli::model::view",
       "references": [
         "path CompactionState::Completed",
