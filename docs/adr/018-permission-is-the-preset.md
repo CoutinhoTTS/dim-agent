@@ -36,15 +36,21 @@ settings that own them. `/permissions` links to that section instead of hosting 
 needs "this path is allowed without asking" or "run without a sandbox" acts on the sandbox, not
 on permission.
 
-### D3. Stored explicit overrides stay honoured, and are no longer written
+### D3. The two overrides are removed; a stored record's extra fields are ignored
 
-Policies already persisted with `fileAccess` or `toolApproval` keep the meaning ADR 017 D2 gave
-them: the runtime honours them, and a preset write never clears or reinterprets them. New writes
-from a client set the preset only. The fields stay in the type for that reason; nothing new reads
-them as a UI dimension.
+`PermissionPolicy` loses `fileAccess` and `toolApproval`. Admission follows the preset and nothing
+else, and a record that does not name a preset takes the default.
 
-This is deliberate: removing the fields would silently reinterpret stored Session configuration
-and `permission/changed` history, which ADR 017 D2 forbids.
+A stored policy that still carries the two fields is read as if it did not: the fields are
+unknown to the type, are ignored, and are not matched, migrated or reported. There is no mapping
+from a combination back to a preset, because the split existed for one day, no client can act on
+the combinations it allowed, and a mapping would keep the comparison rules alive.
+
+`<home>/config.json`'s `fileAccess` and `toolApproval` keys and the matching command-line options
+are removed the same way: ignored if present.
+
+This is a format decision, not a silent reinterpretation of a supported record: the two fields
+never had a released client, and the preset they were derived from is still in every record.
 
 ### D4. The unrepresentable-combination rule stays where it already lives
 
@@ -59,12 +65,15 @@ No plugin gains a second policy comparison.
 - `/permissions`, the CLI design and the Permission page describe the preset and link to the
   sandbox for the rest; the Permission page stops documenting an independent file-access
   override as a user choice.
-- Clients that already render three controls keep reading the same fields; they stop writing the
-  two overrides.
+- Clients stop rendering and writing the two overrides; a value they send under those names is
+  ignored like any unknown field.
+- A Session whose stored policy named an override that disagrees with its preset now admits by the
+  preset. That is the decision's accepted cost: such a record has no supported client and the
+  preset it came with is the value it started from.
 - The preset keeps its exact legacy meaning, so nothing about admission changes.
 
 ## Non-goals
 
-- Not removing `fileAccess` or `toolApproval` from the persisted type (D3).
+- Not changing what a failed admission does, and not changing Session grants or approvals.
 - Not changing the sandbox's own contract, its opt-in default or its file facts (010, 014).
 - Not changing which calls ask: the preset decides that, as before.
