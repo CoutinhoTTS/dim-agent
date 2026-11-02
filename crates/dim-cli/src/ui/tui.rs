@@ -278,6 +278,25 @@ fn run_terminal(
             app.apply(update);
             dirty = true;
         }
+        // A management panel may ask for the editor with its first view, as
+        // `/workflow:save` opens the add step: the reply arrives here, and
+        // the editor runs through the step the edit key uses.
+        if let Some(Effect::EditManagement {
+            area,
+            target,
+            text,
+            seed,
+        }) = app.take_management_effect()
+        {
+            if let Err(code) = edit_management(&mut app, &mut terminal, area, target, text, seed) {
+                app.host.shutdown();
+                return code;
+            }
+            status.forget();
+            progress.forget();
+            title.forget();
+            dirty = true;
+        }
         if app.shutdown.is_some() && !dirty {
             break 0;
         }
@@ -616,50 +635,18 @@ fn run_terminal(
                     app.set_fullscreen(entering);
                     dirty = true;
                 }
-                Outcome::Suspend => {
-                    if terminal.suspend().is_err() {
-                        let code = terminal.lost();
+                Outcome::Edit {
+                    area,
+                    target,
+                    text,
+                    seed,
+                } => {
+                    if let Err(code) =
+                        edit_management(&mut app, &mut terminal, area, target, text, seed)
+                    {
                         app.host.shutdown();
                         return code;
                     }
-                    app.request_reflow();
-                    status.forget();
-                    progress.forget();
-                    title.forget();
-                    dirty = true;
-                }
-                Outcome::Edit { area, target, text } => {
-                    // A draft a refused write kept for this target continues in
-                    // its own file; anything else starts from the document the
-                    // panel read.
-                    let (target, draft, reopened) = match app.kept_draft(area, &target) {
-                        Some((target, draft)) => (target, draft, true),
-                        None => {
-                            let draft = match editor::Draft::open(&app.home, area, &text) {
-                                Ok(draft) => draft,
-                                Err(error) => {
-                                    if let Some(Prompt::Management(panel)) = &mut app.prompt {
-                                        panel.failed(error);
-                                    }
-                                    dirty = true;
-                                    continue;
-                                }
-                            };
-                            (target, draft, false)
-                        }
-                    };
-                    let mut command = editor::command(draft.path());
-                    let program = command.get_program().to_string_lossy().into_owned();
-                    let ran = match terminal.run_external(&mut command) {
-                        Ok(ran) => ran,
-                        Err(_) => {
-                            let code = terminal.lost();
-                            app.host.shutdown();
-                            return code;
-                        }
-                    };
-                    app.write_draft(area, target, draft, reopened, program, ran);
-                    app.request_reflow();
                     status.forget();
                     progress.forget();
                     title.forget();
@@ -719,20 +706,67 @@ enum Outcome {
     Continue,
     /// `/tui`: switch between the scrollback and fullscreen interfaces.
     SwitchMode,
-    /// `/suspend`: give the terminal to the shell until the job continues.
-    Suspend,
     /// A management panel's edit: the document's text and what its write
     /// becomes, for the external editor.
     Edit {
         area: Area,
         target: WriteTarget,
         text: String,
+        seed: Option<serde_json::Value>,
     },
     /// `/web`: flip the daemon-owned Web entry switch without leaving.
     Web,
     /// Start the updated CLI from this path on the session.
     Restart(PathBuf),
     Exit(i32),
+}
+
+/// Opens the external editor on a management draft and writes what it
+/// leaves. `Err` is the code the terminal lost.
+fn edit_management(
+    app: &mut App,
+    terminal: &mut Terminal,
+    area: Area,
+    target: WriteTarget,
+    text: String,
+    seed: Option<serde_json::Value>,
+) -> std::result::Result<(), i32> {
+    // A draft a refused write kept continues in its own file; anything else
+    // starts from the document the panel read.
+    let (target, draft, seed, reopened) = match app.kept_draft(area, &target) {
+        Some((target, draft, seed)) => (target, draft, seed, true),
+        None => {
+            let draft = match editor::Draft::open(&app.home, area, &text) {
+                Ok(draft) => draft,
+                Err(error) => {
+                    if let Some(Prompt::Management(panel)) = &mut app.prompt {
+                        panel.failed(error);
+                    }
+                    return Ok(());
+                }
+            };
+            (target, draft, seed, false)
+        }
+    };
+    let mut command = editor::command(draft.path());
+    let program = command.get_program().to_string_lossy().into_owned();
+    let ran = match terminal.run_external(&mut command) {
+        Ok(ran) => ran,
+        Err(_) => return Err(terminal.lost()),
+    };
+    app.write_draft(
+        ManagementDraft {
+            area,
+            target,
+            draft,
+            seed,
+        },
+        reopened,
+        program,
+        ran,
+    );
+    app.request_reflow();
+    Ok(())
 }
 
 /// The adopted model as the label draws it: `provider / model`, and the
@@ -963,6 +997,9 @@ struct ManagementDraft {
     area: Area,
     target: WriteTarget,
     draft: editor::Draft,
+    /// The document a run's editor was first opened with: a kept draft
+    /// reopens with this seed, not with the user's edited text.
+    seed: Option<serde_json::Value>,
 }
 
 /// What a management reply says beyond its view: the owner's answer, or an
@@ -1038,7 +1075,7 @@ enum Prompt {
     Providers(Box<ProvidersPanel>),
     Plugins(PluginsPanel),
     Runtime(RuntimePanel),
-    Management(ManagementPanel),
+    Management(Box<ManagementPanel>),
     Login(Box<OauthView>),
     Approvals(ApprovalsPanel),
     Theme(ThemePanel),
@@ -1773,8 +1810,13 @@ impl App {
                 // the entry's label from when it did.
                 let named = self.take_named(&reply.request);
                 let creating = matches!(reply.request.action, ManagementAction::Add { .. });
-                let write =
-                    creating || matches!(reply.request.action, ManagementAction::Save { .. });
+                // A run is a write only when it carried a draft: a run with
+                // no document, as the Scheduler's, settles none.
+                let write = match &reply.request.action {
+                    ManagementAction::Add { .. } | ManagementAction::Save { .. } => true,
+                    ManagementAction::Run { document, .. } => document.is_some(),
+                    _ => false,
+                };
                 let reload = reply.request.action == ManagementAction::Reload;
                 // Only a reload of the area discards its drafts. Every other
                 // reply — a toggle, a read, another area's reply — leaves the
@@ -2934,8 +2976,18 @@ impl App {
                 self.remember_named(&request);
                 self.host.send(Command::Management(request));
             }
-            Effect::EditManagement { area, target, text } => {
-                return Outcome::Edit { area, target, text };
+            Effect::EditManagement {
+                area,
+                target,
+                text,
+                seed,
+            } => {
+                return Outcome::Edit {
+                    area,
+                    target,
+                    text,
+                    seed,
+                };
             }
             Effect::OauthStart(start) => self.host.send(Command::OauthStart(start)),
             Effect::OauthCancel => self.host.send(Command::OauthCancel),
@@ -3259,7 +3311,7 @@ impl App {
         &mut self,
         area: Area,
         target: &WriteTarget,
-    ) -> Option<(WriteTarget, editor::Draft)> {
+    ) -> Option<(WriteTarget, editor::Draft, Option<serde_json::Value>)> {
         let at = self
             .management_edits
             .iter()
@@ -3269,7 +3321,7 @@ impl App {
             self.management_edits.push(kept);
             return None;
         }
-        Some((kept.target, kept.draft))
+        Some((kept.target, kept.draft, kept.seed))
     }
 
     /// Records the label the open panel shows for the entry `request` names,
@@ -3338,6 +3390,7 @@ impl App {
         area: Area,
         target: WriteTarget,
         draft: editor::Draft,
+        seed: Option<serde_json::Value>,
         message: String,
     ) {
         self.failed(message);
@@ -3345,6 +3398,7 @@ impl App {
             area,
             target,
             draft,
+            seed,
         });
     }
 
@@ -3354,13 +3408,17 @@ impl App {
     /// the panel read, or created when the draft is a new entry.
     fn write_draft(
         &mut self,
-        area: Area,
-        target: WriteTarget,
-        draft: editor::Draft,
+        kept: ManagementDraft,
         reopened: bool,
         program: String,
         result: std::io::Result<std::process::ExitStatus>,
     ) {
+        let ManagementDraft {
+            area,
+            target,
+            draft,
+            seed,
+        } = kept;
         let path = draft.path().display().to_string();
         let read = match result {
             Ok(status) if status.success() => draft.text(),
@@ -3371,6 +3429,7 @@ impl App {
                     area,
                     target,
                     draft,
+                    seed,
                     format!(
                         "{} Nothing was written. Your text is kept in {path}.",
                         editor::exited(status)
@@ -3387,6 +3446,7 @@ impl App {
                         area,
                         target,
                         draft,
+                        seed,
                         format!("{message} Your text is kept in {path}."),
                     );
                 } else {
@@ -3427,6 +3487,7 @@ impl App {
                 area,
                 target,
                 draft,
+                seed,
             }),
             Next::Unchanged => {
                 draft.remove();
@@ -3447,11 +3508,17 @@ impl App {
                         expected_revision: revision.clone(),
                         document,
                     },
+                    WriteTarget::Run { id } => ManagementAction::Run {
+                        id: id.clone(),
+                        document: Some(document),
+                        seed: seed.clone(),
+                    },
                 };
                 self.hold_draft(ManagementDraft {
                     area,
                     target,
                     draft,
+                    seed,
                 });
                 let request = ManagementRequest { area, action };
                 self.remember_named(&request);
@@ -3462,11 +3529,34 @@ impl App {
 
     /// `/<area>` opens the management panel of `area`, which reads it.
     fn open_management(&mut self, area: Area, note: Option<String>) {
-        self.open_prompt(Prompt::Management(ManagementPanel::new(area, note)));
+        self.open_prompt(Prompt::Management(Box::new(ManagementPanel::new(
+            area, note,
+        ))));
         self.host.send(Command::Management(ManagementRequest {
             area,
             action: ManagementAction::List,
         }));
+    }
+
+    /// `/workflow:save` opens the panel in its create editor: the first view
+    /// opens the editor on the create document.
+    fn open_management_create(&mut self, area: Area) {
+        self.open_prompt(Prompt::Management(Box::new(
+            ManagementPanel::opening_create(area),
+        )));
+        self.host.send(Command::Management(ManagementRequest {
+            area,
+            action: ManagementAction::List,
+        }));
+    }
+
+    /// The editor a management panel asked for without a key, for the event
+    /// loop to run once the reply that asked is applied.
+    fn take_management_effect(&mut self) -> Option<Effect> {
+        match &mut self.prompt {
+            Some(Prompt::Management(panel)) => panel.take_effect(),
+            _ => None,
+        }
     }
 
     /// `/plugins` opens the list; `/plugins install PATH` installs the
@@ -3619,7 +3709,6 @@ impl App {
                     .send(Command::Configure(text.trim_end().to_owned()));
                 Outcome::Continue
             }
-            "suspend" => Outcome::Suspend,
             "exit" => Outcome::Exit(0),
             "tui" => Outcome::SwitchMode,
             "new" => {
@@ -3725,6 +3814,14 @@ impl App {
             }
             "scheduled" => {
                 self.open_management(Area::Scheduled, None);
+                Outcome::Continue
+            }
+            "workflow" => {
+                self.open_management(Area::Workflow, None);
+                Outcome::Continue
+            }
+            "workflow:save" => {
+                self.open_management_create(Area::Workflow);
                 Outcome::Continue
             }
             "connect" => {
@@ -4050,6 +4147,25 @@ impl App {
             live.extend(panel.into_iter().map(|row| format!("{margin}{row}")));
         }
         frame.anchor = live.len();
+        let live_budget = crate::ui::render::live_row_budget(
+            size.1 as usize,
+            if self.fullscreen {
+                crate::ui::render::fullscreen::MIN_VIEW_ROWS
+            } else {
+                crate::ui::render::screen::MIN_HISTORY_ROWS as usize
+            },
+        );
+        let status_rows = usize::from(!self.fullscreen);
+        let input_budget = live_budget
+            .saturating_sub(
+                3 + status_rows
+                    + if !self.fullscreen && self.composer.palette_open() {
+                        3
+                    } else {
+                        0
+                    },
+            )
+            .max(1);
         live.push(String::new());
         let status = (self.prompt.is_none() && self.running()).then(|| {
             const FRAMES: [&str; 4] = ["·", "•", "●", "•"];
@@ -4072,7 +4188,7 @@ impl App {
                 tf(label, &[("elapsed", &format_elapsed(elapsed))])
             )
         });
-        let inner = cols.saturating_sub(2 * MARGIN + 4).max(1);
+        let inner = cols.saturating_sub(MARGIN + 6).max(1);
         let shell = self.composer.shell();
         let prompt = match shell {
             Some(shell) => format!("{} ", shell.prefix()),
@@ -4113,7 +4229,9 @@ impl App {
             ));
             (0, prompt_width)
         } else {
-            let (input_rows, cursor) = self.composer.render_rows(text_width as u16, p);
+            let (input_rows, cursor) =
+                self.composer
+                    .render_rows(text_width as u16, input_budget, p);
             for (i, row) in input_rows.into_iter().enumerate() {
                 let lead = if i == 0 {
                     fg(prompt, prompt_color)
@@ -4124,8 +4242,11 @@ impl App {
             }
             (cursor.1 as usize, prompt_width + cursor.0 as usize)
         };
-        if self.fullscreen && rows.len() < FULLSCREEN_COMPOSER_ROWS {
-            rows.resize(FULLSCREEN_COMPOSER_ROWS, String::new());
+        if self.fullscreen {
+            let minimum = FULLSCREEN_COMPOSER_ROWS.min((size.1 as usize).saturating_sub(7).max(1));
+            if rows.len() < minimum {
+                rows.resize(minimum, String::new());
+            }
         }
         let box_top = live.len();
         let activity = |label: &str| fg(label, &p.activity);
@@ -4202,8 +4323,8 @@ impl App {
         let panel_rows = if native_selection {
             size.1 as usize
         } else {
-            (size.1 as usize)
-                .saturating_sub(composer_rows + 1 + 4 + 1)
+            live_budget
+                .saturating_sub(composer_rows + 1 + status_rows)
                 .min(18)
         };
         let panel_cursor = |width: usize, height: usize| match &self.prompt {
@@ -4225,6 +4346,8 @@ impl App {
             } else {
                 (size.1 as usize)
                     .saturating_sub(composer_rows + 2 + 2)
+                    .max(6)
+                    .min((size.1 as usize).saturating_sub(composer_rows + 1))
                     .min(OVERLAY_MAX_ROWS)
             };
             let list_width = if native_selection {
@@ -4244,13 +4367,7 @@ impl App {
             frame.overlay = match &self.prompt {
                 _ if palette_overlay => {
                     let width = cols.saturating_sub(4).min(OVERLAY_PALETTE_WIDTH);
-                    let page = budget.saturating_sub(5).clamp(3, 16);
-                    self.composer
-                        .palette_overlay(width, page, p)
-                        .map(|(rows, query)| Overlay {
-                            rows,
-                            cursor: Some((2, (4 + query) as u16)),
-                        })
+                    self.composer.palette_overlay(width, budget, p)
                 }
                 Some(Prompt::Sessions(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Tasks(prompt)) => {
@@ -4276,7 +4393,9 @@ impl App {
         }
         let panel = match &self.prompt {
             _ if frame.overlay.is_some() => None,
-            Some(Prompt::Ask(_)) if command_entry => self.composer.palette_panel(outer, p),
+            Some(Prompt::Ask(_)) if command_entry => {
+                self.composer.palette_panel(outer, panel_rows, p)
+            }
             Some(Prompt::Sessions(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Tasks(prompt)) => {
                 Some(prompt.render(outer, panel_rows, p, &self.markdown))
@@ -4297,12 +4416,12 @@ impl App {
             Some(Prompt::Settings(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Isolation(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Exit(prompt)) => Some(prompt.render(outer, p)),
-            Some(Prompt::Upgrade(prompt)) => Some(prompt.render(outer, p)),
+            Some(Prompt::Upgrade(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Permission(prompt)) => Some(prompt.render_sized(outer, panel_rows, p)),
             Some(Prompt::Ask(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             None => self
                 .composer
-                .palette_panel(outer, p)
+                .palette_panel(outer, panel_rows, p)
                 .or_else(|| self.composer.mention_panel(outer, p))
                 .or(side_below),
         };
@@ -5892,6 +6011,325 @@ fn termux_height_only(previous_columns: u16, size: (u16, u16), termux: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn narrow_composers_display_and_submit_the_whole_draft() {
+        use crate::ui::render::panel::strip_escapes;
+
+        for fullscreen in [false, true] {
+            for cols in [32, 40, 48, 80] {
+                for draft in [
+                    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+                    "检查手机窄屏输入框完整显示中文以及/work/project/crates/dim-cli/src/ui/tui.rs",
+                ] {
+                    let mut drawn = Drawn::new((cols, 24), None, true);
+                    let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+                    drawn.app.host = Box::new(Recorder(sent.clone()));
+                    drawn.app.fullscreen = fullscreen;
+                    drawn.app.composer.set_draft(draft);
+                    let frame = drawn.app.frame(drawn.size);
+                    let shown: String = frame
+                        .live
+                        .iter()
+                        .map(|row| strip_escapes(row))
+                        .filter_map(|row| {
+                            row.strip_prefix(" │ ")
+                                .and_then(|row| row.strip_suffix(" │"))
+                                .map(|row| row.trim().trim_start_matches("› ").to_owned())
+                        })
+                        .collect();
+                    assert_eq!(shown, draft, "{cols} columns, fullscreen={fullscreen}");
+                    drawn.key(KeyCode::Enter);
+                    assert!(
+                        matches!(sent.borrow().last(), Some(Command::Submit(text, _)) if text == draft)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn short_narrow_command_menus_keep_the_query_and_selection_visible() {
+        use crate::ui::render::panel::visible_width;
+
+        for locale in [i18n::Locale::En, i18n::Locale::ZhCn] {
+            i18n::set(locale);
+            for fullscreen in [false, true] {
+                for size in [(32, 8), (40, 10), (32, 12), (40, 12), (48, 24), (80, 24)] {
+                    let mut drawn = Drawn::new(size, None, true);
+                    drawn.app.fullscreen = fullscreen;
+                    drawn.key(KeyCode::Char('/'));
+                    for command in ["/exit", "/keys", "/runtime", "/settings"] {
+                        let frame = drawn.app.frame(size);
+                        let rows = frame.overlay.as_ref().map_or(&frame.live, |o| &o.rows);
+                        let width = frame
+                            .overlay
+                            .as_ref()
+                            .map_or(size.0 as usize, |o| visible_width(&o.rows[0]));
+                        assert!(
+                            rows.iter().all(|row| visible_width(row) <= width),
+                            "{size:?} fullscreen={fullscreen}: {rows:?}"
+                        );
+                        let mut emu =
+                            crate::ui::render::testterm::Emu::new(size.0 as usize, size.1 as usize);
+                        let bytes = if fullscreen {
+                            FullScreen::new(size, true).render(
+                                &frame,
+                                size,
+                                &drawn.app.palette,
+                                &drawn.app,
+                            )
+                        } else {
+                            Screen::new(size, true).render(&frame, size)
+                        };
+                        emu.feed(&bytes);
+                        let text = emu.rows_text().join("\n");
+                        assert!(
+                            text.contains(command),
+                            "{size:?} fullscreen={fullscreen}: {text}"
+                        );
+                        let query = if fullscreen { "> " } else { "› /" };
+                        assert!(text.contains(query), "query visible: {text}");
+                        if fullscreen {
+                            let dock = frame.live.len() - frame.dock;
+                            assert!(
+                                frame.overlay.as_ref().unwrap().rows.len() + dock
+                                    <= size.1 as usize,
+                                "palette fits above composer"
+                            );
+                        }
+                        drawn.key(KeyCode::Down);
+                    }
+                }
+            }
+        }
+        i18n::set(i18n::Locale::En);
+    }
+
+    #[test]
+    fn narrow_update_dialogs_keep_actions_and_full_details_accessible() {
+        use crate::ui::render::panel::visible_width;
+
+        let shown = |drawn: &mut Drawn| {
+            let size = drawn.size;
+            let frame = drawn.app.frame(size);
+            assert!(
+                frame
+                    .live
+                    .iter()
+                    .all(|row| visible_width(row) <= size.0 as usize)
+            );
+            let bytes = if drawn.app.fullscreen {
+                FullScreen::new(size, true).render(&frame, size, &drawn.app.palette, &drawn.app)
+            } else {
+                Screen::new(size, true).render(&frame, size)
+            };
+            let mut emu = crate::ui::render::testterm::Emu::new(size.0 as usize, size.1 as usize);
+            emu.feed(&bytes);
+            let text = emu.rows_text().join("\n").replace('\0', "");
+            for expected in [t("Update available"), "Enter", "Esc", "╰"] {
+                assert!(
+                    text.contains(expected),
+                    "{size:?}: {expected:?} missing: {text}"
+                );
+            }
+            text
+        };
+        for locale in [i18n::Locale::En, i18n::Locale::ZhCn] {
+            i18n::set(locale);
+            for fullscreen in [false, true] {
+                for size in [
+                    (32, 8),
+                    (40, 10),
+                    (32, 12),
+                    (40, 12),
+                    (40, 24),
+                    (48, 24),
+                    (80, 24),
+                ] {
+                    let mut drawn = Drawn::new(size, None, true);
+                    drawn.app.fullscreen = fullscreen;
+                    let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+                    drawn.app.host = Box::new(Recorder(sent.clone()));
+                    let offer = crate::update::Offer {
+                        current: "0.12.0-alpha.123".into(),
+                        version: "0.12.0-alpha.124".into(),
+                        manual: "npm install -g --prefer-online dimcode-alpha@0.12.0-alpha.124"
+                            .into(),
+                        install: Some(crate::update::Install {
+                            version: "0.12.0-alpha.124".into(),
+                            program: "npm".into(),
+                            args: vec![
+                                "install".into(),
+                                "-g".into(),
+                                "dimcode-alpha@0.12.0-alpha.124".into(),
+                            ],
+                            relaunch: "dima".into(),
+                        }),
+                    };
+                    drawn.app.apply(Update::Upgrade(offer.clone()));
+                    for label in ["Update now", "Skip this version", "Later"] {
+                        assert!(shown(&mut drawn).contains(&format!("› {}", t(label))));
+                        drawn.key(KeyCode::Tab);
+                    }
+                    drawn.key(KeyCode::Enter);
+                    assert!(
+                        matches!(sent.borrow().last(), Some(Command::UpgradeInstall(install)) if Some(install) == offer.install.as_ref())
+                    );
+                    assert!(shown(&mut drawn).contains(t("Close")));
+                    drawn.app.apply(Update::UpgradeInstalled {
+                        version: offer.version.clone(),
+                        result: Err("npm EACCES: permission denied in /usr/local/lib/node_modules/dimcode-alpha\n请检查安装目录权限，然后重新尝试 END-OF-ERROR".into()),
+                    });
+                    assert!(
+                        shown(&mut drawn).contains(&tf("Update failed: {error}", &[("error", "")]))
+                    );
+                    for _ in 0..30 {
+                        drawn.key(KeyCode::Down);
+                        shown(&mut drawn);
+                    }
+                    assert!(shown(&mut drawn).contains("END-OF-ERROR"));
+                    drawn.app.apply(Update::UpgradeInstalled {
+                        version: offer.version.clone(),
+                        result: Ok(()),
+                    });
+                    assert!(shown(&mut drawn).contains(&format!("› {}", t("Restart now"))));
+                    drawn.key(KeyCode::Right);
+                    assert!(shown(&mut drawn).contains(&format!("› {}", t("Close"))));
+                    drawn.key(KeyCode::Enter);
+                    assert!(drawn.app.prompt.is_none());
+
+                    drawn.app.apply(Update::Upgrade(crate::update::Offer {
+                        install: None,
+                        ..offer.clone()
+                    }));
+                    let mut details = String::new();
+                    for _ in 0..30 {
+                        details.push_str(&shown(&mut drawn));
+                        drawn.key(KeyCode::Down);
+                    }
+                    let details: String = details
+                        .chars()
+                        .filter(|c| !c.is_whitespace() && *c != '│')
+                        .collect();
+                    assert!(details.contains(&offer.current));
+                    assert!(details.contains("dimcode-alpha@0.12.0-alpha.124"));
+                    drawn.size = (80, 24);
+                    assert!(shown(&mut drawn).contains(&offer.current));
+                    drawn.size = size;
+                    drawn.key(KeyCode::Enter);
+                    assert_eq!(sent.borrow().len(), 1, "only the explicit install is sent");
+                    assert_eq!(
+                        drawn.app.notice.as_ref().unwrap().0,
+                        tf("Skipped {version}.", &[("version", &offer.version)])
+                    );
+                    assert!(drawn.app.prompt.is_none());
+                }
+            }
+        }
+        i18n::set(i18n::Locale::En);
+    }
+
+    #[test]
+    fn localized_update_dialogs_fit_very_narrow_terminals() {
+        use crate::ui::render::panel::visible_width;
+
+        for (locale, _, _) in i18n::LOCALES {
+            i18n::set(locale);
+            for fullscreen in [false, true] {
+                for cols in [24, 28, 32] {
+                    let size = (cols, 12);
+                    let mut drawn = Drawn::new(size, None, true);
+                    drawn.app.fullscreen = fullscreen;
+                    drawn.app.apply(Update::Upgrade(crate::update::Offer {
+                        current: "1.0.0".into(),
+                        version: "2.0.0".into(),
+                        install: None,
+                        manual: "npm install -g dimcode@2.0.0".into(),
+                    }));
+                    let frame = drawn.app.frame(size);
+                    assert!(
+                        frame
+                            .live
+                            .iter()
+                            .all(|row| visible_width(row) <= cols as usize)
+                    );
+                    let bytes = if fullscreen {
+                        FullScreen::new(size, true).render(
+                            &frame,
+                            size,
+                            &drawn.app.palette,
+                            &drawn.app,
+                        )
+                    } else {
+                        Screen::new(size, true).render(&frame, size)
+                    };
+                    let mut emu = crate::ui::render::testterm::Emu::new(cols as usize, 12);
+                    emu.feed(&bytes);
+                    let rows = emu.rows_text();
+                    let title: String = t("Update available").chars().take(4).collect();
+                    assert!(
+                        rows.iter().any(|row| row.trim_start().starts_with("╭─ ")
+                            && row.replace('\0', "").contains(&title)),
+                        "{locale:?} {size:?}: {rows:?}"
+                    );
+                    let text = rows.join("\n");
+                    assert!(text.contains("Enter") && text.contains("Esc"), "{text}");
+                    drawn.key(KeyCode::Esc);
+                    assert!(drawn.app.prompt.is_none());
+                }
+            }
+        }
+        i18n::set(i18n::Locale::En);
+    }
+
+    #[test]
+    fn short_composers_keep_the_caret_and_the_complete_draft() {
+        for fullscreen in [false, true] {
+            let mut drawn = Drawn::new((80, 24), None, true);
+            drawn.app.fullscreen = fullscreen;
+            let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            drawn.app.host = Box::new(Recorder(sent.clone()));
+            let draft = (0..12)
+                .map(|n| format!("line {n:02}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            drawn.app.composer.set_draft(&draft);
+            for (size, up, expected) in [
+                ((80, 24), 0, "line 11"),
+                ((32, 8), 0, "line 11"),
+                ((32, 8), 11, "line 00"),
+                ((40, 10), 0, "line 00"),
+                ((80, 24), 0, "line 00"),
+            ] {
+                drawn.size = size;
+                for _ in 0..up {
+                    drawn
+                        .app
+                        .handle(InputEvent::Key(KeyEvent::new(KeyCode::Up, Modifiers::NONE)));
+                }
+                let frame = drawn.app.frame(size);
+                let bytes = if fullscreen {
+                    FullScreen::new(size, true).render(&frame, size, &drawn.app.palette, &drawn.app)
+                } else {
+                    Screen::new(size, true).render(&frame, size)
+                };
+                let mut emu =
+                    crate::ui::render::testterm::Emu::new(size.0 as usize, size.1 as usize);
+                emu.feed(&bytes);
+                assert!(emu.cursor_visible);
+                assert!(
+                    emu.row(emu.cy).contains(expected),
+                    "{size:?} fullscreen={fullscreen}: {:?}",
+                    emu.rows_text()
+                );
+            }
+            drawn.key(KeyCode::Enter);
+            assert!(
+                matches!(sent.borrow().last(), Some(Command::Submit(text, _)) if text == &draft)
+            );
+        }
+    }
 
     #[test]
     fn composer_tracks_git_switches_in_repositories_and_worktrees() {
@@ -8150,13 +8588,17 @@ mod tests {
     /// round after the first leaves the screen exactly as the first did.
     #[test]
     fn menus_and_questions_never_lift_the_composer_twice() {
-        for (origin, synchronized) in [
-            (None, true),
-            (None, false),
-            (Some(0), true),
-            (Some(3), false),
+        for (size, origin, synchronized) in [
+            ((80, 40), None, true),
+            ((80, 40), None, false),
+            ((80, 40), Some(0), true),
+            ((80, 40), Some(3), false),
+            ((32, 8), None, true),
+            ((32, 8), None, false),
+            ((40, 10), None, true),
+            ((40, 10), None, false),
         ] {
-            let mut drawn = Drawn::new((80, 40), origin, synchronized);
+            let mut drawn = Drawn::new(size, origin, synchronized);
             let start = drawn.anchor();
             let round = |drawn: &mut Drawn| {
                 let scrolled = drawn.scrolled();
@@ -8195,7 +8637,7 @@ mod tests {
                 )
             };
             let first = round(&mut drawn);
-            let label = format!("origin {origin:?} sync {synchronized}");
+            let label = format!("size {size:?} origin {origin:?} sync {synchronized}");
             if origin.is_some() {
                 assert_eq!(first.0, 0, "{label}: room below, nothing scrolls");
                 assert_eq!(
@@ -9183,6 +9625,7 @@ mod tests {
                     revision: "user:1".into(),
                 },
                 draft: editor::Draft::open(root.path(), Area::Hooks, "{}").unwrap(),
+                seed: None,
             });
             app.management_edits
                 .last()
@@ -9220,6 +9663,7 @@ mod tests {
             area: Area::Scheduled,
             target: WriteTarget::Create,
             draft: editor::Draft::open(root.path(), Area::Scheduled, "{}").unwrap(),
+            seed: None,
         });
         let path = app
             .management_edits
@@ -9249,7 +9693,11 @@ mod tests {
         app.apply(Update::Management(ManagementReply {
             request: ManagementRequest {
                 area: Area::Scheduled,
-                action: ManagementAction::Run { id: "job-1".into() },
+                action: ManagementAction::Run {
+                    id: "job-1".into(),
+                    document: None,
+                    seed: None,
+                },
             },
             result: ManagementResult::View {
                 view: Box::new(view()),
@@ -9327,6 +9775,7 @@ mod tests {
                             states: Vec::new(),
                             actions: vec![ActionKind::Toggle],
                             document: None,
+                            run: None,
                         }],
                     }],
                     ..ManagementView::default()
@@ -9334,7 +9783,7 @@ mod tests {
                 note: None,
             },
         });
-        app.prompt = Some(Prompt::Management(panel));
+        app.prompt = Some(Prompt::Management(Box::new(panel)));
         let request = ManagementRequest {
             area: Area::Skills,
             action: ManagementAction::Toggle {
@@ -9374,7 +9823,11 @@ mod tests {
         app.apply(Update::Management(ManagementReply {
             request: ManagementRequest {
                 area: Area::Scheduled,
-                action: ManagementAction::Run { id: "job-1".into() },
+                action: ManagementAction::Run {
+                    id: "job-1".into(),
+                    document: None,
+                    seed: None,
+                },
             },
             result: ManagementResult::View {
                 view: Box::new(ManagementView::default()),
@@ -9410,6 +9863,7 @@ mod tests {
             area: Area::Scheduled,
             target: WriteTarget::Create,
             draft: editor::Draft::open(root.path(), Area::Scheduled, "{}").unwrap(),
+            seed: None,
         });
         let path = app
             .management_edits
@@ -9419,7 +9873,10 @@ mod tests {
             .path()
             .display()
             .to_string();
-        app.prompt = Some(Prompt::Management(ManagementPanel::new(Area::Skills, None)));
+        app.prompt = Some(Prompt::Management(Box::new(ManagementPanel::new(
+            Area::Skills,
+            None,
+        ))));
         app.apply(Update::Management(ManagementReply {
             request: ManagementRequest {
                 area: Area::Scheduled,
@@ -9482,6 +9939,7 @@ mod tests {
                 area: Area::Scheduled,
                 target: WriteTarget::Create,
                 draft: editor::Draft::open(root.path(), Area::Scheduled, "{}").unwrap(),
+                seed: None,
             });
             app.management_edits
                 .last()
@@ -9500,15 +9958,124 @@ mod tests {
         }
         // The panel is open: the file and the link stay for the next Ctrl+N.
         for result in [refused(), conflict()] {
-            app.prompt = Some(Prompt::Management(ManagementPanel::new(
+            app.prompt = Some(Prompt::Management(Box::new(ManagementPanel::new(
                 Area::Scheduled,
                 None,
-            )));
+            ))));
             let path = draft(&mut app);
             app.apply(create_reply(result));
             assert!(path.exists(), "a create keeps its file: {path:?}");
             let kept = app.management_edits.first().expect("the link stays");
             assert_eq!(kept.draft.path(), path.as_path());
         }
+    }
+
+    /// A run's draft is the operation's input: the editor's text is sent
+    /// with the run, a success removes the file, and a refused run keeps it,
+    /// for its own kind only.
+    #[cfg(unix)]
+    #[test]
+    fn a_run_draft_is_sent_with_the_run_and_reopened_only_by_its_own_kind() {
+        use crate::model::session::{ManagementReply, ManagementView};
+        use std::os::unix::process::ExitStatusExt;
+        fn run_reply(result: ManagementResult) -> Update {
+            Update::Management(ManagementReply {
+                request: ManagementRequest {
+                    area: Area::Skills,
+                    action: ManagementAction::Run {
+                        id: "job-1".into(),
+                        document: Some(serde_json::json!({"target": "edited"})),
+                        seed: Some(serde_json::json!({"target": "src"})),
+                    },
+                },
+                result,
+            })
+        }
+        let root = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent.clone())),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            root.path().join("home"),
+            "/w".into(),
+        );
+        let draft =
+            || editor::Draft::open(root.path(), Area::Skills, "{\"target\":\"edited\"}").unwrap();
+        let written = |app: &mut App, draft: editor::Draft| {
+            let path = draft.path().to_path_buf();
+            app.prompt = Some(Prompt::Management(Box::new(ManagementPanel::new(
+                Area::Skills,
+                None,
+            ))));
+            app.write_draft(
+                ManagementDraft {
+                    area: Area::Skills,
+                    target: WriteTarget::Run { id: "job-1".into() },
+                    draft,
+                    seed: Some(serde_json::json!({"target": "src"})),
+                },
+                false,
+                "vi".into(),
+                Ok(std::process::ExitStatus::from_raw(0)),
+            );
+            path
+        };
+        // The text the editor left is the run's document.
+        let path = written(&mut app, draft());
+        assert!(matches!(
+            sent.borrow().last(),
+            Some(Command::Management(ManagementRequest {
+                area: Area::Skills,
+                action: ManagementAction::Run {
+                    id,
+                    document: Some(document),
+                    seed: Some(seed),
+                },
+            })) if id == "job-1"
+                && *document == serde_json::json!({"target": "edited"})
+                && *seed == serde_json::json!({"target": "src"})
+        ));
+        app.apply(run_reply(ManagementResult::View {
+            view: Box::new(ManagementView::default()),
+            note: None,
+        }));
+        assert!(!path.exists(), "a written run removes its draft");
+        assert!(app.management_edits.is_empty());
+        // A refusal keeps the file and the link; Ctrl+T reopens it, Ctrl+E
+        // never does.
+        let path = written(&mut app, draft());
+        app.apply(run_reply(ManagementResult::Refused(
+            ManagementRefusal::Refused("nope".into()),
+        )));
+        assert!(path.exists(), "a refused run keeps its draft");
+        let text = match &app.prompt {
+            Some(Prompt::Management(panel)) => panel.render(100, 20, &app.palette).join(" "),
+            _ => panic!("the panel stays open"),
+        };
+        assert!(text.contains("nope"), "{text}");
+        assert!(text.contains("Your text is kept in"), "{text}");
+        assert!(
+            app.kept_draft(
+                Area::Skills,
+                &WriteTarget::Entry {
+                    id: "job-1".into(),
+                    revision: "1".into(),
+                },
+            )
+            .is_none(),
+            "an edit never reopens a run's draft"
+        );
+        let (target, kept, seed) = app
+            .kept_draft(Area::Skills, &WriteTarget::Run { id: "job-1".into() })
+            .expect("the run key reopens the draft");
+        assert_eq!(target, WriteTarget::Run { id: "job-1".into() });
+        assert_eq!(
+            seed,
+            Some(serde_json::json!({"target": "src"})),
+            "the kept draft keeps the seed it was opened with, not the edited text"
+        );
+        assert_eq!(kept.path(), path.as_path());
     }
 }
