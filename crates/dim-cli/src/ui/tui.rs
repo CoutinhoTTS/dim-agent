@@ -80,7 +80,6 @@ const TOOL_DETAILS_KEY: &str = "tuiToolDetailsExpanded";
 /// the interface; the threshold itself is the one `session.context.usage`
 /// returns (compaction requirements §4).
 const CONTEXT_WARNING_PERCENT: u64 = 90;
-/// Frames are coalesced to roughly 60 Hz.
 /// A resize waits this long after the last size change before it is applied.
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(100);
 /// ...but never longer than this from the first change of a drag.
@@ -91,7 +90,7 @@ const HISTORY_MAX_BLOCKS: usize = 5_000;
 const REWRITE_MAX_ROWS: usize = 10_000;
 /// In-place rewrites fullscreen can catch up on before it lays out again.
 const REWRITE_LOG: usize = 64;
-const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000_u64.div_ceil(240));
 /// How often the loop looks at session updates while input is idle.
 const SESSION_POLL: Duration = Duration::from_millis(40);
 const GIT_BRANCH_POLL: Duration = Duration::from_secs(10);
