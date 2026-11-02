@@ -1082,9 +1082,11 @@ mod tests {
             ManagementView {
                 revision: Some("r1".into()),
                 document: None,
-                create: Some(
-                    serde_json::json!({"command":"cargo test","match":"prefix","decision":"deny"}),
-                ),
+                create: Some(serde_json::json!({
+                    "command": "replace-with-a-command",
+                    "match": "prefix",
+                    "decision": "deny"
+                })),
                 actions: vec![ActionKind::Reload, ActionKind::Add],
                 groups: vec![ManagementGroup {
                     heading: "user".into(),

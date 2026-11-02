@@ -638,10 +638,12 @@ rule's whole content is its label and its two detail lines.
 Add opens the external editor on one rule, the owner's write unit without the revision:
 
 ```json
-{"command": "cargo test", "match": "prefix", "decision": "deny"}
+{"command": "replace-with-a-command", "match": "prefix", "decision": "deny"}
 ```
 
-`deny` with `prefix` is the fail-closed example: a user who edits only the command still denies.
+The command is a placeholder no one keeps, so the template reads as the example it is: the
+shared create rule writes nothing for a document left as it was, and the panel says `No change.`
+`deny` with `prefix` is the fail-closed example: a user who replaces only the command still denies.
 The adapter decodes the document as a command rule and checks it with the line prompt's
 `permission::rule` (word normalization, a non-empty command, no shell separators); the write is
 `permission::add_rule`, the line prompt's own operation: read `permission.rules`, append unless an

@@ -1655,6 +1655,74 @@ fn tui_permissions_panel_adds_and_removes_command_rules() {
     }
 }
 
+/// An editor that leaves the document as it found it, and keeps the copy it
+/// was given.
+fn inplace_editor(home: &Home, seen: &std::path::Path) -> PathBuf {
+    let path = home.0.join("inplace-editor.sh");
+    fs::write(
+        &path,
+        format!("#!/bin/sh\ncp \"$1\" '{}'\n", seen.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// Ctrl+N opens a template nobody would keep, so saving it unchanged is
+/// plainly the example: the panel says `No change.` and nothing is written.
+#[test]
+fn tui_permissions_panel_opens_a_placeholder_template() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let seen = home.0.join("template.json");
+        let program = inplace_editor(&home, &seen);
+        let (shown, wait_shown) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            rules_start(wire);
+            wait_shown.recv_timeout(PATIENCE).unwrap();
+            let request = wire.read("permission.rules");
+            wire.reply(
+                &request,
+                rules_reply("r1", json!([command_rule("deny", "prefix", "git push")])),
+            );
+            let mut line = String::new();
+            while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+                assert!(
+                    !line.contains("\"permission.set_rules\"")
+                        && !line.contains("\"permission.rules\""),
+                    "an unchanged template sends no request: {line}"
+                );
+                line.clear();
+            }
+        });
+        let mut command = home.command();
+        command.env_remove("VISUAL").env("EDITOR", &program);
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("test / model");
+        shown.send(()).unwrap();
+        open_command_rules(&mut terminal);
+        terminal.until("deny prefix git push");
+        terminal.raw(b"\x0e");
+        terminal.until("No change.");
+        let template: Value = serde_json::from_str(&fs::read_to_string(&seen).unwrap()).unwrap();
+        assert_eq!(template["command"], "replace-with-a-command", "{template}");
+        assert_eq!(template["match"], "prefix", "{template}");
+        assert_eq!(template["decision"], "deny", "{template}");
+        // Esc leaves the rule panel for the one the row was opened from.
+        terminal.raw(b"\x1b");
+        thread::sleep(Duration::from_millis(200));
+        terminal.raw(b"\x1b");
+        thread::sleep(Duration::from_millis(200));
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+    }
+}
+
 /// A raced write writes nothing: the panel reports the conflict and shows
 /// the list read when it was found.
 #[test]

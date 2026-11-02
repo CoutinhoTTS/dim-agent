@@ -189,10 +189,16 @@ pub(super) fn view(rules: &Rules, actions: &[ActionKind]) -> ManagementView {
     }
 }
 
-/// What a new rule starts from: the owner's write unit, with the fail-closed
-/// example a user who changes only the command still gets.
+/// What a new rule starts from: the owner's write unit with a command no one
+/// would keep, so a document left as it is reads as the example it is rather
+/// than as a rule the user meant. The other two members are valid values, so
+/// the document decodes and a user who types only the command still denies.
 fn create() -> serde_json::Value {
-    serde_json::json!({"command": "cargo test", "match": "prefix", "decision": "deny"})
+    serde_json::json!({
+        "command": "replace-with-a-command",
+        "match": "prefix",
+        "decision": "deny"
+    })
 }
 
 /// What the selected rule says about itself: how it matches, what it
