@@ -19,17 +19,19 @@ Desktop thread open pays; history paging starts only after the reply.
 - **Measured.** In a release build over a disposable native store, the cold attach of a Session (its
   `main` branch) is 20.2 ms at 1,001 events, 76.7 ms at 5,001 events and 165.0 ms at 10,001 events
   (plain profile, median of five fresh Agents generations). The product assembly without MCP servers
-  or skills is 82.7 ms at 5,005 events and 168.3 ms at 10,017 events. A `product` first restore, which
-  also adds the product capabilities, is 110.2 ms at 5,010 events and 223.4 ms at 10,024 events. Warm
-  attach is 0.13–0.22 ms. At 5k and 10k the restore split is stable: full validation is about 50%, the
-  branch opening's first history read about 38%, the `branch/resume` append about 2%, and
-  Session/branch assembly and scheduling about 7%.
+  or skills is 82.7 ms at 5,005 events and 168.3 ms at 10,017 events. Warm attach is 0.13–0.22 ms. A
+  separate instrumented `restore_cost` run at the same build puts a 5k product first restore at
+  97.6 ms: validation about 45%, the branch opening's first history read about 39%, the
+  `branch/resume` append about 5%, and Session/branch assembly and scheduling about 7%. The attach
+  total and that first-restore total are different scopes, not one series (§3.3).
 - **Decision.** No contract or implementation change in this design. The cold attach cost is linear in
   stored history, both dominant steps are reads of the same immutable events, and the first open must
   validate. #601 removes the repeated validation on a re-acquisition; this design keeps the first
   open's full pass and states a provisional budget. The attach call's own work (Session record, title
-  metadata, listener, approval replay, reply) is constant and small; the product's MCP and skill
-  startup is not in this measurement and remains the open part of the issue's live-daemon numbers.
+  metadata, listener, approval replay, reply) does not read history and the warm path is
+  0.13–0.22 ms, but the cold attach-only span is not isolated by either example and is not used as a
+  trigger. The product's MCP and skill startup is not in this measurement and remains the open part
+  of the issue's live-daemon numbers.
 - **Unchanged.** The `session.attach` reply, its pinned `SessionInfo.sequence`, the live subscription,
   approval replay, leases, idle unload, history paging (#712), restore validation (#601), storage
   format, protocol, events, services and configuration.
@@ -88,19 +90,19 @@ Sizes are the committed event count of `main`; the reported count is the head at
 | Build | `cargo build --release --locked`, `debug-assertions = false` |
 | Machine | AMD Ryzen 9 7945HX, 32 threads, 62 GB RAM, Linux 7.0.0, NVMe |
 | Store | SQLite native format, fresh directory per run, `main` only |
-| Profiles | `plain`: `defaults::install`, `defaults::mock_model_hosts`, `MockTools`; `product`: the product context window, prepare model and summary strategy that `restore_cost product` installs |
+| Profiles | `plain`: `defaults::install`, `defaults::mock_model_hosts`, `MockTools`; `product`: the product context window, prepare model and summary strategy shared by both examples |
 | Cold sample | A new `serve` generation on the same database; new store and Agents generation, Session unloaded; the Unix socket client is already handshaked; the timer starts when the `session.attach` frame is written and ends when its reply is read |
 | Warm sample | The second `session.attach` on the same connection and Session, immediately after the cold one |
-| Repetitions | Five per size, interleaved; median, minimum and maximum reported |
+| Repetitions | Five per size, interleaved; the JSON reports the minimum, median and maximum, and §3.3 shows the median and maximum |
 
 The process is reused across generations, so the OS page cache and the allocator are warm; a real
 daemon start adds its own startup outside the timed call. `attach_cost` covers plain and product
-assembly; `restore_cost` covers the product restore split; neither installs MCP servers or skills,
+assembly; `restore_cost` covers the instrumented first-restore split; neither installs MCP servers or skills,
 and neither depends on the Desktop client.
 
 ### 3.2 Commands
 
-The restore split is measured by `restore_cost`:
+The instrumented first-restore split is measured by `restore_cost`:
 
 ```text
 cargo run --release --locked -p dim-app-server --example restore_cost -- \
@@ -125,14 +127,16 @@ count reported is the head at the first cold attach. The third argument is the r
 `product` serves the product context window, prepare model and summary strategy over the same mock
 model. Neither contacts a provider.
 
-`ATTACH_COST_ROOT` selects the parent of the disposable home; the example creates a fresh UUID
-directory below it, sets it to mode 0700, and removes it at the end. It must not name the product
-home (`~/.dimcode`) or any existing store. The example's `session.submit` carries `branchId: "main"`
-for protocol v3.
+`ATTACH_COST_ROOT` selects the parent of the disposable home. The default is `/tmp`, and the example
+creates `dim-attach-<uuid>` below it, sets mode 0700, and removes it at the end; a root that would make
+the socket path longer than 80 bytes fails before `serve`. The example refuses a root inside
+`~/.dimcode` before creating anything. The example's `session.submit` carries `branchId: "main"` for
+protocol v3.
 
 ### 3.3 Cold attach
 
-Release build at `103d1478`, disposable store, head after growth:
+App Server code at `103d1478` plus the `attach_cost` example in this PR, release build, disposable
+store, head before the first cold attach:
 
 | Profile | Events | Cold attach median | Cold attach max | Warm attach median |
 | --- | ---: | ---: | ---: | ---: |
@@ -143,36 +147,42 @@ Release build at `103d1478`, disposable store, head after growth:
 | product | 5,005 | 82.7 ms | 90.8 ms | 0.14 ms |
 | product | 10,017 | 168.3 ms | 210.9 ms | 0.22 ms |
 
-Warm attach is below a quarter of a millisecond at every size. The plain cold total is in the same
-range as the restore measurement in §3.4 at the same size (about 5 ms more at 1k; at 10k the attach
-run is faster than the `restore_cost` run, whose profile includes the first idle and a different turn
-mix). The attach call itself does not add a history-dependent step. The product rows install the
-product capabilities but no MCP server or skill; that startup is the follow-up in §6.
+Warm attach is below a quarter of a millisecond at every size. The attach table and the restore table
+are not one series. `attach_cost` times only `session.attach`; `restore_cost` times `restore_session`
+plus the first `idle("main")` under a counting global allocator and a forwarding `TimelineStore`
+(`restore_cost.rs`). Both include the restore, but the instrumented restore is measured on a different
+boundary with different overhead, so a smaller attach row is possible and the two totals cannot be
+subtracted. The attach call itself does not add a history-dependent step. The product rows install the
+product capabilities but no MCP server or skill; that startup is the follow-up in §6. Every cold attach
+appends one `branch/resume`, so later repetitions time a store one event larger per prior repetition;
+the table uses the head before the first cold attach.
 
-### 3.4 Restore split
+### 3.4 Instrumented first restore
 
-`restore_cost` first restore of each Session, release build, five repetitions per size. `Validation`
-is the store's `branches` pass; `Opening reads` is the union of the store reads made while the branch
-opens; `branch/resume` is the append until it is published; `Outside store` is the rest (Session and
-branch assembly, capability rebuild, scheduling). Spans can overlap; the rows are medians, so their sum
-is not exactly the total.
+`restore_cost` first restore of each Session at the same App Server code (`103d1478`) plus this PR's
+examples, release build, five repetitions per size. `Validation` is the store's `branches` pass;
+`Opening reads` is the union of the store reads made while the branch opens; `branch/resume` is the
+append until it is published; `Outside store` is the rest (Session and branch assembly, capability
+rebuild, scheduling). Spans can overlap; the rows are medians, so their sum is not exactly the total.
+This table reports the restore's internal share only; it is not the attach's decomposition.
 
 | Mix | Events | First restore | Validation | Opening reads | `branch/resume` | Outside store |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| product | 1,014 | 28.7 ms | 12.2 ms | 8.8 ms | 2.3 ms | 2.9 ms |
-| product | 5,010 | 110.2 ms | 56.6 ms | 42.7 ms | 2.7 ms | 8.0 ms |
+| product | 1,014 | 27.0 ms | 9.5 ms | 7.6 ms | 4.8 ms | 2.2 ms |
+| product | 5,010 | 97.6 ms | 45.3 ms | 38.2 ms | 4.5 ms | 7.1 ms |
 | product | 6,873 | 128.5 ms | 55.6 ms | 54.1 ms | 3.6 ms | 7.8 ms |
-| product | 10,024 | 223.4 ms | 112.3 ms | 85.3 ms | 2.7 ms | 14.7 ms |
-| plain | 1,006 | 15.6 ms | 5.7 ms | 6.3 ms | 2.3 ms | 2.1 ms |
-| plain | 5,006 | 88.1 ms | 44.1 ms | 32.3 ms | 2.4 ms | 6.5 ms |
-| plain | 10,006 | 195.2 ms | 99.2 ms | 67.3 ms | 2.7 ms | 14.3 ms |
+| plain | 1,006 | 25.2 ms | 8.1 ms | 6.7 ms | 4.7 ms | 2.6 ms |
+| plain | 5,006 | 86.5 ms | 37.8 ms | 32.4 ms | 4.9 ms | 8.0 ms |
 
-The 1k/5k/10k first opens were measured on #601's branch (`5680d39d`); the first-open path is unchanged
-from `main`, and a `main` run at `103d1478` reproduced the 1k and 5k shape (product 27.0 ms and 97.6 ms
-median, maxima 36.5 ms and 115.0 ms). The 6,873 row is a `main` run. The split is the same in both:
-validation is about half of the first restore, the opening read about 38%, assembly about 7%, and the
-append about 2%. The product profile adds about 22 ms over plain at 5k (110.2 against 88.1), which is
-the extra capabilities' rebuild, not storage.
+At 5k and 6.9k, validation and the opening read are about 85% of the first restore (validation about
+43–46%, the opening read about 39–42%); the append is 3–5% and the outside-store work 6–7%. The 10k
+first-restore split was not re-run at this build; only the 10k attach total in §3.3 is reported.
+
+The product 5k row is 11.1 ms above plain (97.6 against 86.5). The columns put that difference in
+validation (+7.5 ms) and the opening read (+5.8 ms), not in outside-store rebuild (−0.9 ms). Product
+growth writes larger event bodies (context/prepare and summaries), so product and plain at an equal
+event count are not equal work; the product delta is per-event decode cost, not the capabilities'
+rebuild.
 
 ### 3.5 What the tables do and do not cover
 
@@ -181,10 +191,10 @@ opening and its shared read, `branch/resume`, Session and branch assembly, and t
 subscription.
 
 Not covered: project authorization before the restore, MCP server startup, skill/TypeScript binding,
-a real model call, and a Desktop client. The issue's debug-build attach table (155–925 ms) and the live
-daemon's 0.75–1.9 s are not reproduced by a release build at these sizes; the difference must be one
-of the uncovered steps or a different event mix/machine. The next measurement isolates the product
-startup rather than guessing it (§6).
+a real model call, and a Desktop client. The issue's table is a debug build (155–925 ms) while §3.3 is
+release; the live daemon's 0.75–1.9 s is not reproduced by a release build at these sizes. The
+difference includes the build profile, one of the uncovered steps, or a different event mix/machine.
+The next measurement isolates the product startup rather than guessing it (§6).
 
 ## 4. Why the cost is what it is
 
@@ -213,7 +223,8 @@ shows:
    *second* use pay a restore too, and #601 removes its validation pass; the first use is the one this
    design owns.
 2. The first open must validate. Skipping or deferring that changes when damage is reported and what
-   `session.attach` may answer; #601 D8 and the issue keep it.
+   `session.attach` may answer; the [#601](https://github.com/arcships/dim/issues/601) design keeps it
+   and the issue keeps it.
 3. The two dominant steps are storage reads of immutable events. The opening read is already shared
    across the branch's readers; validation's decode is the only duplicate.
 4. The cost is below a provisional budget on this machine:
@@ -227,8 +238,10 @@ shows:
 | any | warm | 5 ms | 0.13–0.22 ms |
 
 The product rows are `attach_cost product` without MCP servers or skills; the follow-up adds those
-and closes the remaining gap to the issue's live-daemon numbers. The budget is a target for a later
-change, not an acceptance that blocks this design.
+and closes the remaining gap to the issue's live-daemon numbers. The product budgets deliberately
+leave room for that startup (about +80% over the measured product rows), while the plain budgets are
+about +20–30% over their rows. The budget is a target for a later change, not an acceptance that
+blocks this design.
 
 5. No Desktop preload or cache is required: an attached client is a lease holder, and pinning Sessions
    would conflict with idle unload. A preload would move the same work before the user asks for it.
@@ -241,23 +254,28 @@ separate protocol and lifecycle design, not a profile of the restore.
 ## 6. Evidence that would justify a later change
 
 The remaining unknown is the product startup that neither `restore_cost` nor the plain `attach_cost`
-includes. Measure it before changing the restore path:
+includes. The follow-up extends `attach_cost` (or adds an example) to install one MCP server and one
+skill; the current example only takes `plain|product`, sizes and repetitions. Measure it before
+changing the restore path:
 
 | Observation | Conclusion |
 | --- | --- |
-| A product `attach_cost` with one MCP server and one skill, at 5k and 10k, stays within the §5 budget and storage remains about 50% + 38% | Close #713 as measured; no change |
+| The extended product `attach_cost` at 5k and 10k stays within the §5 budget and the two store spans remain about 85% of the instrumented first restore | Close #713 as measured; no change |
 | The product total exceeds the budget and MCP/skill startup is more than half of it | The change belongs to MCP/skills startup, not to attach or the restore path; open it with that owner |
 | The product total exceeds the budget and the storage restore is still the largest step after startup is separated | Implement the candidate in §7 |
-| The attach call's own work (record, title metadata, listener, approval replay) exceeds 20 ms | Optimize that work; it is not history-dependent |
 | The issue's live-daemon 0.75–1.9 s is reproduced | Profile that environment; it is outside the release baseline measured here |
+
+The attach call's own span (Session record, title metadata, listener, approval replay, reply) is not
+isolated by either example; deriving it by subtracting the restore table is invalid across the two
+scopes (§3.3), so it is not a usable trigger until the harness reports it.
 
 A cold attach that is already inside the budget at 1k, 5k and 10k does not justify a read-path change
 whose only effect is to remove one decode.
 
 ## 7. Candidate: validation's decoded events to the opening read
 
-Adopt this candidate only after the §6 product `attach_cost` with one MCP server and one skill at 5k
-and 10k still exceeds the §5 budget and the storage restore is still the largest step. Do not
+Adopt this candidate only after the follow-up's product `attach_cost` with one MCP server and one skill
+at 5k and 10k still exceeds the §5 budget and the storage restore is still the largest step. Do not
 implement it before that measurement. The change is to stop decoding the same committed events twice
 on a cold open.
 
@@ -286,11 +304,21 @@ on a cold open.
   `branches`; the Session still restores and attaches, which shows the read was served from the
   validation copy. The existing corruption and restore flows keep their results.
 
-This candidate removes about 38% of a cold first attach at 5k and 10k (42.7 ms of 110.2 ms and 85.3 ms
-of 223.4 ms), leaving validation and the smaller steps. It does not help a re-acquisition, where #601
-already skips validation and there is no copy to reuse.
+This candidate removes 38.2 ms from the instrumented 97.6 ms first restore at 5k (39% of that restore)
+and 54.1 ms from 128.5 ms at 6.9k (42%). Its share of the attach total (82.7 ms at 5k product) is not
+derived here because the attach-scope split is not measured; if the opening read were the same 38.2 ms,
+it would be about half, but that is not measured. It does not help a re-acquisition, where #601 already
+skips validation and there is no copy to reuse.
 
-## 8. Rule check
+## 8. Requirements raised to mechanism owners
+
+None in this design. If §7 is adopted, the requirement is one sentence to the runtime port owner:
+a `TimelineStore` implementation may keep the events and batch ends a successful validation pass
+already decoded until the next read of that branch, and must drop them when its opening ends. The
+problem, the generic capability, the ordering impact and the verification are in §7; the owner and
+issue are the runtime mechanism owner and [#713](https://github.com/arcships/dim/issues/713).
+
+## 9. Rule check
 
 This is an App Server measurement and a decision about its attach path, not a plugin, capability or
 event design. The applicable rules:
@@ -313,7 +341,7 @@ event design. The applicable rules:
 | ADR 002 D4 (configuration) | None |
 | ADR 002 D5 (language-neutral contracts) | No public contract changes; the candidate is internal |
 
-## 9. Documentation changes
+## 10. Documentation changes
 
 With this design:
 
@@ -325,20 +353,23 @@ With this design:
 
 With the measurement follow-up:
 
-- Add the product `attach_cost` rows with one MCP server and one skill at 1k, 5k and 10k.
+- Extend `attach_cost` (or add an example) to install one MCP server and one skill, and add the
+  product rows at 1k, 5k and 10k.
 - If the candidate in §7 is adopted, update [timeline-storage §4](../../architecture/rust-agent/timeline-storage.md#4-读取)
   for the copy's lifetime and link it from this page. No accepted ADR changes.
 
-## 10. Acceptance and next steps
+## 11. Acceptance and next steps
 
-**This design.** The measurement scenario is defined, the release restore split is measured at 1k, 5k,
-6.9k and 10k, and cold attach is measured at 1k, 5k, 6.9k and 10k in the plain profile. `attach_cost`
-is in this PR and reproduces §3.3. The decision is to keep the first attach as a restore before the
-reply and to set the provisional budget of §5.
+**This design.** The measurement scenario is defined. The attach total is measured at 1k, 5k, 6.9k
+and 10k plain and at 5k/10k product without MCP/skill; the instrumented first-restore split is
+measured at 1k, 5k and 6.9k on the same App Server code. `attach_cost` is in this PR and reproduces
+§3.3. The decision is to keep the first attach as a restore before the reply and to set the
+provisional budget of §5.
 
-**Follow-up measurement.** Run `attach_cost product` with one MCP server and one skill, five
-repetitions at 1k, 5k and 10k, and report the attach total, the restore split, the attach-only span
-and the plugin-startup span. Then:
+**Follow-up measurement.** Extend `attach_cost` (or add an example) to install one MCP server and one
+skill, run it for the product profile at 1k, 5k and 10k, five repetitions, and report the attach
+total, the instrumented first-restore split, and the plugin-startup span. The attach-only span is not
+isolated by the current harness; add it before using it as a trigger. Then:
 
 - within the budget at all sizes: close #713 with this design and the numbers;
 - over the budget for a startup step: open the change with that owner;

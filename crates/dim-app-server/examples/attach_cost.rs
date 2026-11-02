@@ -21,7 +21,10 @@
 //! timed call.
 //!
 //! The home is a fresh directory under `ATTACH_COST_ROOT` (default
-//! `target/attach-cost`), removed at the end.
+//! `/tmp/dim-attach-<uuid>`, a short path for the Unix socket), removed at the
+//! end. Every cold attach appends one `branch/resume`, so later repetitions
+//! time a store one event larger per prior repetition; `events` is the head
+//! before the first cold attach.
 use dim_agent_capabilities::{adapters::MockTools, defaults};
 use dim_agent_runtime::*;
 use dim_app_server::{RunningServer, ServerConfig, serve};
@@ -180,10 +183,27 @@ async fn main() -> std::result::Result<(), Error> {
     if sizes.is_empty() || reps == 0 {
         return Err("expected at least one size and one repetition".into());
     }
-    let directory = std::env::var_os("ATTACH_COST_ROOT")
+    let root = std::env::var_os("ATTACH_COST_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/attach-cost"))
-        .join(uuid::Uuid::new_v4().to_string());
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    let product = std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".dimcode"));
+    if let Some(product) = product {
+        let root = std::path::absolute(&root)?;
+        let product = std::path::absolute(product)?;
+        if root == product || root.starts_with(&product) {
+            return Err(
+                format!("ATTACH_COST_ROOT must not be inside {}", product.display()).into(),
+            );
+        }
+    }
+    let directory = root.join(format!("dim-attach-{}", uuid::Uuid::new_v4()));
+    if directory.as_os_str().len() > 80 {
+        return Err(format!(
+            "disposable home path is too long for a Unix socket: {}",
+            directory.display()
+        )
+        .into());
+    }
     std::fs::create_dir_all(&directory)?;
     #[cfg(unix)]
     {
@@ -266,13 +286,18 @@ async fn main() -> std::result::Result<(), Error> {
         values[values.len() / 2]
     };
     for (events, cold) in cold {
+        let fastest = cold.iter().copied().fold(f64::MAX, f64::min);
         let worst = cold.iter().copied().fold(f64::MIN, f64::max);
+        let warm = warm
+            .remove(&events)
+            .ok_or("missing warm samples for a cold size")?;
         println!(
             "{}",
             json!({"scenario":"attach","mix":mix,"reps":reps,"events":events,
+            "attachMinMs":fastest,
             "attachMedianMs":median(cold),
             "attachMaxMs":worst,
-            "warmAttachMedianMs":median(warm.remove(&events).unwrap_or_default()),
+            "warmAttachMedianMs":median(warm),
             "debugAssertions":cfg!(debug_assertions)})
         );
     }
