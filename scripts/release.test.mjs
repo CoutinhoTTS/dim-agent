@@ -481,6 +481,35 @@ test('a recorded parent directory does not remove the plugins inside it', {skip:
   assert.equal('retired' in after.plugins,false);
 });
 
+test('a platform-specific plugin package is refused for a portable stage', {skip:process.platform==='win32'}, (t)=>{
+  const temporary=fixture(t);
+  const checkout=path.join(temporary,'checkout');
+  mkdirSync(path.join(checkout,'scripts'),{recursive:true});
+  mkdirSync(path.join(checkout,'runtime/plugins/native'),{recursive:true});
+  cpSync(path.join(root,'scripts/stage-plugins.mjs'),path.join(checkout,'scripts/stage-plugins.mjs'));
+  writeFileSync(path.join(checkout,'runtime/default-plugins.json'),`${JSON.stringify({plugins:{native:'plugins/native'}})}\n`);
+  writeFileSync(path.join(checkout,'runtime/plugins/native/package.json'),'{"name":"native"}\n');
+  writeFileSync(path.join(checkout,'runtime/plugins/native/package-lock.json'),`${JSON.stringify({name:'native',lockfileVersion:3,packages:{'node_modules/native-lib':{version:'1.0.0',os:['linux']}}})}\n`);
+  writeFileSync(path.join(checkout,'runtime/plugins/native/index.ts'),'export {};\n');
+  const output=path.join(temporary,'staged');
+  const refused=spawnSync(process.execPath,[path.join(checkout,'scripts/stage-plugins.mjs'),output,'--portable'],{encoding:'utf8'});
+  assert.notEqual(refused.status,0);
+  assert.match(refused.stderr,/native/);
+  assert.match(refused.stderr,/native-lib/);
+  assert.equal(existsSync(output),false);
+});
+
+test('the current default plugins pass the portable check', {skip:process.platform==='win32'}, (t)=>{
+  const temporary=fixture(t);
+  const bin=path.join(temporary,'bin');
+  mkdirSync(bin);
+  writeFileSync(path.join(bin,'npm'),'#!/bin/bash\nmkdir -p "$PWD/node_modules"\nexit 0\n',{mode:0o755});
+  const output=path.join(temporary,'staged');
+  const staged=run('stage-plugins.mjs',[output,'--portable'],{PATH:`${bin}:${process.env.PATH}`});
+  assert.equal(staged.status,0,staged.stderr);
+  assert(existsSync(path.join(output,'default-plugins.json')));
+});
+
 test('stages public native payload, packs it and rejects modified content', {skip:process.platform==='win32'}, (t)=>{
   const temporary=fixture(t);
   const bin=path.join(temporary,'bin');

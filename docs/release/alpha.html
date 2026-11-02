@@ -113,7 +113,7 @@ node scripts/publish-alpha.mjs --platform darwin-arm64  # 只发指定平台（�
     </li>
     <li>
       <strong>打包校验</strong>
-      复用 CI 同一套脚本 <code>stage-plugins.mjs</code>、<code>stage-release.mjs</code>、<code>pack-release.mjs</code>、<code>collect-release.mjs</code>，生成 6 个平台包、<code>dimcode-web</code> 和 <code>dimcode-alpha</code> 包，并校验版本、源提交和 sha256。默认插件只 stage 一次，每个平台包都带同一份 <code>default-plugins.json</code> 和 <code>plugins/</code>。
+      复用 CI 同一套脚本 <code>stage-plugins.mjs</code>、<code>stage-release.mjs</code>、<code>pack-release.mjs</code>、<code>collect-release.mjs</code>，生成 6 个平台包、<code>dimcode-web</code> 和 <code>dimcode-alpha</code> 包，并校验版本、源提交和 sha256。默认插件只 stage 一次（<code>--portable</code> 会在安装前拒绝 lock 里带 <code>os</code>、<code>cpu</code> 或 <code>libc</code> 的插件包），每个平台包都带同一份 <code>default-plugins.json</code> 和 <code>plugins/</code>。
     </li>
     <li>
       <strong>发布 npm</strong>

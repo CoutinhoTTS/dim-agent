@@ -37,6 +37,35 @@ const dependencies = (source) => {
   return hash.digest('hex');
 };
 
+/** Packages in a lock file that restrict their platform, with the field. */
+const platformPackages = (lock) => {
+  const found = [];
+  const visit = (packages) => {
+    for (const [name, meta] of Object.entries(packages ?? {})) {
+      if (!meta || typeof meta !== 'object') continue;
+      for (const field of ['os', 'cpu', 'libc']) {
+        if (meta[field] !== undefined) found.push(`${name} (${field})`);
+      }
+      if (meta.dependencies) visit(meta.dependencies);
+    }
+  };
+  visit(lock.packages);
+  visit(lock.dependencies);
+  return found;
+};
+
+/** Refuses a listed plugin whose lock names a platform-specific package. */
+const assertPortable = () => {
+  for (const [name, relative] of Object.entries(plugins)) {
+    const file = path.join(path.dirname(defaults), relative, 'package-lock.json');
+    if (!existsSync(file)) continue;
+    const platform = platformPackages(JSON.parse(readFileSync(file, 'utf8')));
+    if (platform.length > 0) {
+      throw new Error(`The default plugin ${name} is not portable: package ${platform[0]}`);
+    }
+  }
+};
+
 /** True when `candidate` lies strictly inside `parent`. */
 const within = (parent, candidate) => {
   const relative = path.relative(parent, candidate);
@@ -300,9 +329,11 @@ function freshStage(destination) {
 function main() {
   const [destination, ...extra] = process.argv.slice(2);
   const update = extra.includes('--update');
-  const arguments_ = extra.filter((argument) => argument !== '--update');
+  const portable = extra.includes('--portable');
+  const arguments_ = extra.filter((argument) => argument !== '--update' && argument !== '--portable');
   assert(destination && arguments_.length === 0,
-    'Usage: node scripts/stage-plugins.mjs DESTINATION [--update]');
+    'Usage: node scripts/stage-plugins.mjs DESTINATION [--update] [--portable]');
+  if (portable) assertPortable();
   if (update) updateStage(path.resolve(destination));
   else freshStage(path.resolve(destination));
 }

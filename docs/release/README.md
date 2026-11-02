@@ -190,6 +190,8 @@ NOTICE
 release-manifest.json         # `account` records whether this is the account build
 ```
 
+The alpha publisher stages the plugin tree once on the build host and gives every platform the same copy, as `publish-alpha.mjs` does, so it runs `stage-plugins.mjs --portable`. That refuses, before installing anything, a listed plugin whose `package-lock.json` names a package with `os`, `cpu` or `libc`: one shared tree cannot carry another platform's package. `release.yml` stages on each platform's own runner and does not pass the flag.
+
 `pack-release.mjs` rejects changed staged files, then creates a native tar.gz (Windows zip) and a platform npm tgz from the same payload. It records SHA-256 for both. `collect-release.mjs` requires `release-<platform>` directories for all six targets and `release-web` from `stage-web.mjs`, checks identical source/version/toolchain/account provenance and artifact digests, creates the thin npm wrapper, then validates all seven npm archives without publishing.
 
 ```sh

@@ -111,9 +111,12 @@ try {
     `Only ${(bavail * bsize / 2 ** 30).toFixed(1)} GiB free; a release build needs about 8 GiB`);
   // The default plugins are the same for every platform: stage them once and
   // give every platform's payload the copy, as the release workflow does on
-  // whichever runner builds a platform.
+  // whichever runner builds a platform. --portable refuses a plugin whose
+  // lock names a platform-specific package, which one shared tree cannot
+  // carry for another platform; the release workflow stages per runner and
+  // does not need it.
   const plugins = path.join(staging, 'plugins');
-  run('node', ['scripts/stage-plugins.mjs', plugins]);
+  run('node', ['scripts/stage-plugins.mjs', plugins, '--portable']);
   for (const platform of platforms) {
     const { triple, zig } = targets[platform];
     console.log(`\n▸ ${platform}`);
