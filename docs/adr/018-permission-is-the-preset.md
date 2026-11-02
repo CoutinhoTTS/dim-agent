@@ -31,10 +31,10 @@ than splitting it into dimensions the user cannot act on independently.
 
 ### D2. File scope and process isolation move under the sandbox settings
 
-The path boundary and the process isolation backend appear under Settings > sandbox, beside the
-settings that own them. `/permissions` links to that section instead of hosting it. A user who
-needs "this path is allowed without asking" or "run without a sandbox" acts on the sandbox, not
-on permission.
+The process isolation backend appears under Settings, beside the execution settings that own it.
+`/permissions` links there instead of hosting the control. The path boundary needs no control of
+its own: the preset fixes it, and the one exception a user can grant is a Session grant
+([ADR 012](012-session-grants.md)), which Permission already consults.
 
 ### D3. The two overrides are removed, and this type stops rejecting unknown keys
 
@@ -86,3 +86,14 @@ validation of a job.
 - Not changing what a failed admission does, and not changing Session grants or approvals.
 - Not changing the sandbox's own contract, its opt-in default or its file facts (010, 014).
 - Not changing which calls ask: the preset decides that, as before.
+
+## Supersession
+
+Supersedes [ADR 017](017-independent-permission-controls.md) D3, which put the three controls on one
+panel, and D1's two overrides, which this decision removes. Supersedes ADR 017 D2 for the policy
+type only: a record is read with the removed keys ignored and is not rewritten, so the promise not
+to rewrite stored events and records still holds.
+
+The [Scheduler](../design/plugins/Scheduler.md) and [Workflow](../design/plugins/Workflow.md) pages
+lose the dimension comparison and the stored optional fields with D1 and D4; their full-policy
+comparison is now presets and tool lists.
