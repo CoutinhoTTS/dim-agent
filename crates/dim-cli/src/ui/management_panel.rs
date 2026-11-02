@@ -687,7 +687,11 @@ impl ManagementPanel {
                 self.busy = true;
                 Effect::Management(ManagementRequest {
                     area: self.area,
-                    action: ManagementAction::Run { id, document: None },
+                    action: ManagementAction::Run {
+                        id,
+                        document: None,
+                        seed: None,
+                    },
                 })
             }
         }
@@ -775,10 +779,14 @@ impl ManagementPanel {
             return Effect::None;
         };
         self.busy = true;
+        // A run's document is the seed its later edits are measured
+        // against; the other targets have nothing to measure.
+        let seed = matches!(target, WriteTarget::Run { .. }).then(|| document.clone());
         Effect::EditManagement {
             area: self.area,
             target,
             text: format!("{json}\n"),
+            seed,
         }
     }
 
@@ -1367,8 +1375,14 @@ mod tests {
         let text = shown(&panel, 72, 20).join("\n");
         assert!(text.contains("read-only  invalid"), "{text}");
         match panel.handle_key(ctrl('e')) {
-            Effect::EditManagement { area, target, text } => {
+            Effect::EditManagement {
+                area,
+                target,
+                text,
+                seed,
+            } => {
                 assert_eq!(area, Area::Hooks);
+                assert_eq!(seed, None, "an area document has no seed");
                 assert_eq!(
                     target,
                     WriteTarget::Area {
@@ -1791,9 +1805,15 @@ mod tests {
             "{text}"
         );
         match panel.handle_key(ctrl('n')) {
-            Effect::EditManagement { area, target, text } => {
+            Effect::EditManagement {
+                area,
+                target,
+                text,
+                seed,
+            } => {
                 assert_eq!(area, Area::Skills);
                 assert_eq!(target, WriteTarget::Create);
+                assert_eq!(seed, None, "a create document has no seed");
                 assert_eq!(
                     serde_json::from_str::<serde_json::Value>(&text).unwrap(),
                     serde_json::json!({"name": "example"})
@@ -1853,7 +1873,8 @@ mod tests {
                     request.action,
                     ManagementAction::Run {
                         id: "job-1".into(),
-                        document: None
+                        document: None,
+                        seed: None,
                     }
                 )
             }
@@ -1864,6 +1885,7 @@ mod tests {
             ManagementAction::Run {
                 id: "job-1".into(),
                 document: None,
+                seed: None,
             },
             ManagementResult::View {
                 view: Box::new(catalogue()),
@@ -1883,9 +1905,19 @@ mod tests {
         let mut panel = ManagementPanel::new(Area::Skills, None);
         panel.set_result(&view_reply(Area::Skills, ManagementAction::List, view));
         match panel.handle_key(ctrl('t')) {
-            Effect::EditManagement { area, target, text } => {
+            Effect::EditManagement {
+                area,
+                target,
+                text,
+                seed,
+            } => {
                 assert_eq!(area, Area::Skills);
                 assert_eq!(target, WriteTarget::Run { id: "job-1".into() });
+                assert_eq!(
+                    seed,
+                    Some(serde_json::json!({"target": "", "style": "concise"})),
+                    "the run's editor carries the document it opened with"
+                );
                 assert_eq!(
                     serde_json::from_str::<serde_json::Value>(&text).unwrap(),
                     serde_json::json!({"target": "", "style": "concise"})
@@ -1971,6 +2003,7 @@ mod tests {
             ManagementAction::Run {
                 id: "job-1".into(),
                 document: None,
+                seed: None,
             },
             ManagementResult::Applied {
                 note: Some("Run nightly: skipped (overlap).".into()),
@@ -2002,6 +2035,7 @@ mod tests {
             ManagementAction::Run {
                 id: "job-1".into(),
                 document: None,
+                seed: None,
             },
             ManagementResult::View {
                 view: Box::new(view),
@@ -2062,6 +2096,7 @@ mod tests {
                     ManagementAction::Run {
                         id: "docs".into(),
                         document: None,
+                        seed: None,
                     }
                 );
             }

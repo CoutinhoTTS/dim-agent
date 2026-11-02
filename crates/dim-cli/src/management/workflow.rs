@@ -241,8 +241,9 @@ pub async fn apply(
             // "Saved {name}." from the read that follows, which holds it.
             save(client, id, expected_revision, document, &cwd).await?;
         }
-        ManagementAction::Run { id, document } => {
-            let (name, run_id) = start(client, id, document.as_ref(), &cwd, line).await?;
+        ManagementAction::Run { id, document, seed } => {
+            let (name, run_id) =
+                start(client, id, document.as_ref(), seed.as_ref(), &cwd, line).await?;
             note = Some(tf(
                 "Started {name}: {run_id}.",
                 &[("name", &name), ("run_id", &run_id)],
@@ -458,6 +459,7 @@ async fn start(
     client: &mut Client,
     id: &str,
     document: Option<&Value>,
+    seed: Option<&Value>,
     cwd: &str,
     line: Option<&super::SessionLine>,
 ) -> Result<(String, String), Failure> {
@@ -491,20 +493,7 @@ async fn start(
             document.clone()
         }
     };
-    // A parameter left at the default the listing gave is not sent: the
-    // listed default may be a cut preview, and the owner applies the
-    // definition's own default to a parameter the request leaves out. A
-    // value the user changed is sent as typed.
-    let mut params = params;
-    if let Some(object) = params.as_object_mut() {
-        for parameter in &entry.parameters {
-            if let Some(default) = &parameter.default
-                && object.get(&parameter.name).and_then(Value::as_str) == Some(default.as_str())
-            {
-                object.remove(&parameter.name);
-            }
-        }
-    }
+    let params = sent_params(params, seed);
     let mut request = json!({
         "name": entry.name,
         "source": entry.source,
@@ -706,6 +695,30 @@ fn run_template(entry: &Entry) -> Option<Value> {
     ))
 }
 
+/// The parameters to send for a run. With a seed (the document the panel's
+/// editor opened with), a parameter still at its seed value is left out, so
+/// the owner applies the definition's full default even when the seed held a
+/// cut preview. An empty seed value is the placeholder of a parameter with
+/// no default, not a default, and stays a supplied value. Without a seed the
+/// document came from a file or stdin and is sent as given.
+fn sent_params(params: Value, seed: Option<&Value>) -> Value {
+    let Some(seed) = seed.and_then(Value::as_object) else {
+        return params;
+    };
+    let mut params = params;
+    if let Some(object) = params.as_object_mut() {
+        for (name, seeded) in seed {
+            let Some(seeded) = seeded.as_str().filter(|value| !value.is_empty()) else {
+                continue;
+            };
+            if object.get(name).and_then(Value::as_str) == Some(seeded) {
+                object.remove(name);
+            }
+        }
+    }
+    params
+}
+
 /// What a definition says about itself: its description, its parameters, the
 /// source it is saved in and the issues that make it unusable.
 fn detail_lines(entry: &Entry, cwd: &Path) -> Vec<String> {
@@ -791,4 +804,39 @@ fn create() -> Value {
             ]
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sent_params;
+    use serde_json::json;
+
+    /// The rule's two cases: a value equal to a non-empty seed value is left
+    /// out so the owner applies the definition's full default, while an
+    /// untouched empty placeholder stays a supplied value.
+    #[test]
+    fn a_seeded_document_leaves_only_unchanged_non_empty_values_out() {
+        let seed = json!({
+            "target": "a long default the listing cut …",
+            "style": "",
+            "edited": "old",
+        });
+        let document = json!({
+            "target": "a long default the listing cut …",
+            "style": "",
+            "edited": "new",
+        });
+        assert_eq!(
+            sent_params(document, Some(&seed)),
+            json!({"style": "", "edited": "new"})
+        );
+    }
+
+    /// A document with no seed came from a file or stdin: it is sent as the
+    /// caller wrote it, whatever the listing says.
+    #[test]
+    fn a_document_without_a_seed_is_sent_as_given() {
+        let document = json!({"target": "a long default the listing cut …"});
+        assert_eq!(sent_params(document.clone(), None), document);
+    }
 }

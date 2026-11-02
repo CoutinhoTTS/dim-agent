@@ -719,6 +719,7 @@ impl Options {
                             action: ManagementAction::Run {
                                 id: value(&mut args)?,
                                 document: None,
+                                seed: None,
                             },
                         }),
                         "inspect" => Action::Management(ManagementRequest {
@@ -818,7 +819,11 @@ impl Options {
                             let id = value(&mut args)?;
                             let action = match command {
                                 "remove" => ManagementAction::Remove { id },
-                                "run" => ManagementAction::Run { id, document: None },
+                                "run" => ManagementAction::Run {
+                                    id,
+                                    document: None,
+                                    seed: None,
+                                },
                                 _ => ManagementAction::Inspect { id },
                             };
                             Action::Management(ManagementRequest {

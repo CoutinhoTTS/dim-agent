@@ -177,6 +177,9 @@ pub enum Effect {
         area: crate::model::session::Area,
         target: WriteTarget,
         text: String,
+        /// The document the editor opens with, when the panel has one to
+        /// measure the user's edits against: a run's parameters.
+        seed: Option<serde_json::Value>,
     },
     /// Change a provider (`/connect`).
     Provider(crate::model::session::ProviderAction),

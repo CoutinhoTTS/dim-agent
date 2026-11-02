@@ -812,6 +812,81 @@ fn workflow_start_sends_the_parameters_from_stdin() {
     daemon.join().unwrap();
 }
 
+/// An explicit parameter document is sent as given: a value equal to the
+/// listing's cut preview is still the caller's value. The omission of an
+/// unchanged default belongs to the panel's editor, which knows the document
+/// it opened with.
+#[test]
+fn workflow_start_sends_an_explicit_document_unchanged() {
+    let cut = "a long default the listing cut …";
+    for from_stdin in [true, false] {
+        let home = Home::new();
+        let (project, cwd) = workspace(&home);
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&["workflow.list", "workflow.start", "settings.read"]);
+            let request = wire.read("workflow.list");
+            wire.reply(&request, cut_default());
+            let request = wire.read("workflow.start");
+            assert_eq!(
+                request["params"],
+                json!({
+                    "name": "review-and-fix",
+                    "source": "user",
+                    "cwd": cwd,
+                    "params": {"target": cut},
+                }),
+                "the explicit document is sent as given"
+            );
+            wire.reply(&request, json!({"run_id": "wf-1"}));
+            let request = wire.read("workflow.list");
+            wire.reply(&request, cut_default());
+            let request = wire.read("settings.read");
+            wire.reply(&request, settings());
+            drains(wire);
+        });
+        let document = json!({"target": cut}).to_string();
+        let mut command = home.command();
+        command.arg("--cwd").arg(&project);
+        command.args(["workflow", "start", "review-and-fix"]);
+        let child = if from_stdin {
+            command.arg("-");
+            let mut child = command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(document.as_bytes())
+                .unwrap();
+            child
+        } else {
+            let path = home.0.join("parameters.json");
+            fs::write(&path, &document).unwrap();
+            command
+                .arg(&path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        };
+        let output = wait(child);
+        assert!(
+            output.status.success(),
+            "from stdin {from_stdin}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "Started review-and-fix: wf-1.\n"
+        );
+        daemon.join().unwrap();
+    }
+}
+
 /// An unknown name is refused before the start, and a parameter document the
 /// definition does not describe is refused before it too.
 #[test]

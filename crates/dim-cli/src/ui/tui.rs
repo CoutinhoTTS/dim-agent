@@ -281,8 +281,14 @@ fn run_terminal(
         // A management panel may ask for the editor with its first view, as
         // `/workflow:save` opens the add step: the reply arrives here, and
         // the editor runs through the step the edit key uses.
-        if let Some(Effect::EditManagement { area, target, text }) = app.take_management_effect() {
-            if let Err(code) = edit_management(&mut app, &mut terminal, area, target, text) {
+        if let Some(Effect::EditManagement {
+            area,
+            target,
+            text,
+            seed,
+        }) = app.take_management_effect()
+        {
+            if let Err(code) = edit_management(&mut app, &mut terminal, area, target, text, seed) {
                 app.host.shutdown();
                 return code;
             }
@@ -641,8 +647,14 @@ fn run_terminal(
                     title.forget();
                     dirty = true;
                 }
-                Outcome::Edit { area, target, text } => {
-                    if let Err(code) = edit_management(&mut app, &mut terminal, area, target, text)
+                Outcome::Edit {
+                    area,
+                    target,
+                    text,
+                    seed,
+                } => {
+                    if let Err(code) =
+                        edit_management(&mut app, &mut terminal, area, target, text, seed)
                     {
                         app.host.shutdown();
                         return code;
@@ -714,6 +726,7 @@ enum Outcome {
         area: Area,
         target: WriteTarget,
         text: String,
+        seed: Option<serde_json::Value>,
     },
     /// `/web`: flip the daemon-owned Web entry switch without leaving.
     Web,
@@ -730,11 +743,12 @@ fn edit_management(
     area: Area,
     target: WriteTarget,
     text: String,
+    seed: Option<serde_json::Value>,
 ) -> std::result::Result<(), i32> {
     // A draft a refused write kept continues in its own file; anything else
     // starts from the document the panel read.
-    let (target, draft, reopened) = match app.kept_draft(area, &target) {
-        Some((target, draft)) => (target, draft, true),
+    let (target, draft, seed, reopened) = match app.kept_draft(area, &target) {
+        Some((target, draft, seed)) => (target, draft, seed, true),
         None => {
             let draft = match editor::Draft::open(&app.home, area, &text) {
                 Ok(draft) => draft,
@@ -745,7 +759,7 @@ fn edit_management(
                     return Ok(());
                 }
             };
-            (target, draft, false)
+            (target, draft, seed, false)
         }
     };
     let mut command = editor::command(draft.path());
@@ -754,7 +768,17 @@ fn edit_management(
         Ok(ran) => ran,
         Err(_) => return Err(terminal.lost()),
     };
-    app.write_draft(area, target, draft, reopened, program, ran);
+    app.write_draft(
+        ManagementDraft {
+            area,
+            target,
+            draft,
+            seed,
+        },
+        reopened,
+        program,
+        ran,
+    );
     app.request_reflow();
     Ok(())
 }
@@ -987,6 +1011,9 @@ struct ManagementDraft {
     area: Area,
     target: WriteTarget,
     draft: editor::Draft,
+    /// The document a run's editor was first opened with: a kept draft
+    /// reopens with this seed, not with the user's edited text.
+    seed: Option<serde_json::Value>,
 }
 
 /// What a management reply says beyond its view: the owner's answer, or an
@@ -2963,8 +2990,18 @@ impl App {
                 self.remember_named(&request);
                 self.host.send(Command::Management(request));
             }
-            Effect::EditManagement { area, target, text } => {
-                return Outcome::Edit { area, target, text };
+            Effect::EditManagement {
+                area,
+                target,
+                text,
+                seed,
+            } => {
+                return Outcome::Edit {
+                    area,
+                    target,
+                    text,
+                    seed,
+                };
             }
             Effect::OauthStart(start) => self.host.send(Command::OauthStart(start)),
             Effect::OauthCancel => self.host.send(Command::OauthCancel),
@@ -3288,7 +3325,7 @@ impl App {
         &mut self,
         area: Area,
         target: &WriteTarget,
-    ) -> Option<(WriteTarget, editor::Draft)> {
+    ) -> Option<(WriteTarget, editor::Draft, Option<serde_json::Value>)> {
         let at = self
             .management_edits
             .iter()
@@ -3298,7 +3335,7 @@ impl App {
             self.management_edits.push(kept);
             return None;
         }
-        Some((kept.target, kept.draft))
+        Some((kept.target, kept.draft, kept.seed))
     }
 
     /// Records the label the open panel shows for the entry `request` names,
@@ -3367,6 +3404,7 @@ impl App {
         area: Area,
         target: WriteTarget,
         draft: editor::Draft,
+        seed: Option<serde_json::Value>,
         message: String,
     ) {
         self.failed(message);
@@ -3374,6 +3412,7 @@ impl App {
             area,
             target,
             draft,
+            seed,
         });
     }
 
@@ -3383,13 +3422,17 @@ impl App {
     /// the panel read, or created when the draft is a new entry.
     fn write_draft(
         &mut self,
-        area: Area,
-        target: WriteTarget,
-        draft: editor::Draft,
+        kept: ManagementDraft,
         reopened: bool,
         program: String,
         result: std::io::Result<std::process::ExitStatus>,
     ) {
+        let ManagementDraft {
+            area,
+            target,
+            draft,
+            seed,
+        } = kept;
         let path = draft.path().display().to_string();
         let read = match result {
             Ok(status) if status.success() => draft.text(),
@@ -3400,6 +3443,7 @@ impl App {
                     area,
                     target,
                     draft,
+                    seed,
                     format!(
                         "{} Nothing was written. Your text is kept in {path}.",
                         editor::exited(status)
@@ -3416,6 +3460,7 @@ impl App {
                         area,
                         target,
                         draft,
+                        seed,
                         format!("{message} Your text is kept in {path}."),
                     );
                 } else {
@@ -3456,6 +3501,7 @@ impl App {
                 area,
                 target,
                 draft,
+                seed,
             }),
             Next::Unchanged => {
                 draft.remove();
@@ -3479,12 +3525,14 @@ impl App {
                     WriteTarget::Run { id } => ManagementAction::Run {
                         id: id.clone(),
                         document: Some(document),
+                        seed: seed.clone(),
                     },
                 };
                 self.hold_draft(ManagementDraft {
                     area,
                     target,
                     draft,
+                    seed,
                 });
                 let request = ManagementRequest { area, action };
                 self.remember_named(&request);
@@ -9592,6 +9640,7 @@ mod tests {
                     revision: "user:1".into(),
                 },
                 draft: editor::Draft::open(root.path(), Area::Hooks, "{}").unwrap(),
+                seed: None,
             });
             app.management_edits
                 .last()
@@ -9629,6 +9678,7 @@ mod tests {
             area: Area::Scheduled,
             target: WriteTarget::Create,
             draft: editor::Draft::open(root.path(), Area::Scheduled, "{}").unwrap(),
+            seed: None,
         });
         let path = app
             .management_edits
@@ -9661,6 +9711,7 @@ mod tests {
                 action: ManagementAction::Run {
                     id: "job-1".into(),
                     document: None,
+                    seed: None,
                 },
             },
             result: ManagementResult::View {
@@ -9790,6 +9841,7 @@ mod tests {
                 action: ManagementAction::Run {
                     id: "job-1".into(),
                     document: None,
+                    seed: None,
                 },
             },
             result: ManagementResult::View {
@@ -9826,6 +9878,7 @@ mod tests {
             area: Area::Scheduled,
             target: WriteTarget::Create,
             draft: editor::Draft::open(root.path(), Area::Scheduled, "{}").unwrap(),
+            seed: None,
         });
         let path = app
             .management_edits
@@ -9901,6 +9954,7 @@ mod tests {
                 area: Area::Scheduled,
                 target: WriteTarget::Create,
                 draft: editor::Draft::open(root.path(), Area::Scheduled, "{}").unwrap(),
+                seed: None,
             });
             app.management_edits
                 .last()
@@ -9945,7 +9999,8 @@ mod tests {
                     area: Area::Skills,
                     action: ManagementAction::Run {
                         id: "job-1".into(),
-                        document: Some(serde_json::json!({"target": "src"})),
+                        document: Some(serde_json::json!({"target": "edited"})),
+                        seed: Some(serde_json::json!({"target": "src"})),
                     },
                 },
                 result,
@@ -9962,7 +10017,7 @@ mod tests {
             "/w".into(),
         );
         let draft =
-            || editor::Draft::open(root.path(), Area::Skills, "{\"target\":\"src\"}").unwrap();
+            || editor::Draft::open(root.path(), Area::Skills, "{\"target\":\"edited\"}").unwrap();
         let written = |app: &mut App, draft: editor::Draft| {
             let path = draft.path().to_path_buf();
             app.prompt = Some(Prompt::Management(Box::new(ManagementPanel::new(
@@ -9970,9 +10025,12 @@ mod tests {
                 None,
             ))));
             app.write_draft(
-                Area::Skills,
-                WriteTarget::Run { id: "job-1".into() },
-                draft,
+                ManagementDraft {
+                    area: Area::Skills,
+                    target: WriteTarget::Run { id: "job-1".into() },
+                    draft,
+                    seed: Some(serde_json::json!({"target": "src"})),
+                },
                 false,
                 "vi".into(),
                 Ok(std::process::ExitStatus::from_raw(0)),
@@ -9988,8 +10046,11 @@ mod tests {
                 action: ManagementAction::Run {
                     id,
                     document: Some(document),
+                    seed: Some(seed),
                 },
-            })) if id == "job-1" && *document == serde_json::json!({"target": "src"})
+            })) if id == "job-1"
+                && *document == serde_json::json!({"target": "edited"})
+                && *seed == serde_json::json!({"target": "src"})
         ));
         app.apply(run_reply(ManagementResult::View {
             view: Box::new(ManagementView::default()),
@@ -10021,10 +10082,15 @@ mod tests {
             .is_none(),
             "an edit never reopens a run's draft"
         );
-        let (target, kept) = app
+        let (target, kept, seed) = app
             .kept_draft(Area::Skills, &WriteTarget::Run { id: "job-1".into() })
             .expect("the run key reopens the draft");
         assert_eq!(target, WriteTarget::Run { id: "job-1".into() });
+        assert_eq!(
+            seed,
+            Some(serde_json::json!({"target": "src"})),
+            "the kept draft keeps the seed it was opened with, not the edited text"
+        );
         assert_eq!(kept.path(), path.as_path());
     }
 }

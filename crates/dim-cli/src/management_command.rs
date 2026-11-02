@@ -205,7 +205,13 @@ pub async fn start(
     };
     let request = ManagementRequest {
         area,
-        action: ManagementAction::Run { id, document },
+        action: ManagementAction::Run {
+            id,
+            document,
+            // A file or stdin document is the caller's own: it was never
+            // opened in the panel's editor, so it has no seed.
+            seed: None,
+        },
     };
     run(client, options, &request).await
 }

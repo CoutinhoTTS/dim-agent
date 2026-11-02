@@ -699,7 +699,7 @@ pub async fn apply(
         }
         // A test executes the stored entry and writes nothing the area
         // lists, so it answers with its tools and the area is not re-read.
-        ManagementAction::Run { id, document } => {
+        ManagementAction::Run { id, document, .. } => {
             // No entry carries a test document and neither client sends one.
             if document.is_some() {
                 return Err(Failure::Refused(

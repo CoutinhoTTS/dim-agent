@@ -356,6 +356,11 @@ pub enum ManagementAction {
         id: String,
         /// The parameters the operation takes; `None` sends it at once.
         document: Option<serde_json::Value>,
+        /// The input document the editor was opened with, `None` when the
+        /// document came from elsewhere. The shared layer carries it and
+        /// never reads it: an adapter that knows what it means applies its
+        /// own rule.
+        seed: Option<serde_json::Value>,
     },
     /// Read one entry's detail, in place of the list.
     Inspect { id: String },

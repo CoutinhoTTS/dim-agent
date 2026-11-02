@@ -248,7 +248,7 @@ pub async fn apply(client: &mut Client, action: &ManagementAction) -> Result<Ans
             }
             Answered::Nothing
         }
-        ManagementAction::Run { id, document } => {
+        ManagementAction::Run { id, document, .. } => {
             // No job carries a run document and neither client sends one.
             if document.is_some() {
                 return Err(Failure::Refused(
