@@ -530,7 +530,14 @@ mod tests {
 
     #[test]
     fn a_completed_compaction_draws_only_its_summary_body() {
+        let dim_agent_types::MessageContent::Text(production) =
+            dim_agent_capabilities::history::summary_message("The cache lock moved into a RwLock.")
+                .content
+        else {
+            panic!("summary_message must produce text");
+        };
         for text in [
+            production.as_str(),
             "The cache lock moved into a RwLock.",
             "<dim-summary>\nThe cache lock moved into a RwLock.\n</dim-summary>",
             "<dim-summary>\nThe cache lock moved into a RwLock.",
@@ -540,8 +547,6 @@ mod tests {
             completed.compaction = Some(CompactionView {
                 state: CompactionState::Completed,
                 text: text.into(),
-                digest: Some("<dim-digest>\nwrote src/cache.rs".into()),
-                kept: Some("Try the RwLock before touching the parser.".into()),
                 insufficient: Vec::new(),
             });
             let rows = shared(&[completed]);
@@ -556,6 +561,45 @@ mod tests {
                 compaction_rows(&rows, Detail::Collapsed),
                 ["✓ Context compacted ▸"]
             );
+        }
+        for text in [
+            "Keep <dim-summary> literal.",
+            "End of recorded background. The live conversation governs.",
+            "Background from earlier parts of this session, recorded by a summarizer.",
+        ] {
+            for (content, expected) in [
+                (
+                    dim_agent_types::MessageContent::Text(text.into()),
+                    text.to_owned(),
+                ),
+                (
+                    dim_agent_types::MessageContent::Text(format!(
+                        "<dim-summary>\n{text}\n</dim-summary>"
+                    )),
+                    text.to_owned(),
+                ),
+                (
+                    dim_agent_capabilities::history::summary_message(text).content,
+                    text.replace('<', "&lt;").replace('>', "&gt;"),
+                ),
+            ] {
+                let dim_agent_types::MessageContent::Text(content) = content else {
+                    panic!("summary_message must produce text");
+                };
+                let mut completed = row(RowKind::Compaction, "");
+                completed.compaction = Some(CompactionView {
+                    state: CompactionState::Completed,
+                    text: content,
+                    insufficient: Vec::new(),
+                });
+                let rendered = compaction_rows(&shared(&[completed]), Detail::Expanded);
+                let body = rendered[1..]
+                    .iter()
+                    .map(|line| line.trim_start_matches("▎ "))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                assert_eq!(body, expected);
+            }
         }
     }
 
