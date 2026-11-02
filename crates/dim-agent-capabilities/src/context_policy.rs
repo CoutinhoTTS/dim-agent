@@ -461,6 +461,20 @@ impl ContextPolicy {
         Ok(request)
     }
 
+    /// The event order a compaction step chooses its cuts from: the order
+    /// reads only the turn starts after the retention rule's window.
+    pub async fn policy_order(
+        &self,
+        view: &View,
+        model: &dyn ContextModel,
+        through: u64,
+    ) -> Result<PolicyOrder, HostError> {
+        self.timeline
+            .policy_order(through, cut_window(&view.history, model))
+            .await
+            .map_err(|error| HostError::failed(error.to_string()))
+    }
+
     /// The prepared request and the trigger's estimate of it.
     #[allow(clippy::too_many_arguments)]
     async fn prepare_estimated(
@@ -511,11 +525,6 @@ impl ContextPolicy {
                 .into(),
             )
             .map_err(|e| HostError::failed(e.to_string()))?;
-        let policy_order = self
-            .timeline
-            .policy_order(source.through)
-            .await
-            .map_err(|error| HostError::failed(error.to_string()))?;
         let provider_budget = source.recovery.clone().or_else(|| {
             (estimate.input > input_budget(model.as_ref())).then(|| ProviderOutputBudgetFacts {
                 input_tokens: estimate.input,
@@ -526,10 +535,13 @@ impl ContextPolicy {
             })
         });
         let recovery = provider_budget.is_some();
-        if !recovery
-            && (estimate.input < model.threshold_tokens()
-                || !regrown(&view, &policy_order, model.as_ref()))
-        {
+        if !recovery && estimate.input < model.threshold_tokens() {
+            return Ok((view.prepared, estimate.input));
+        }
+        let policy_order = self
+            .policy_order(&view, model.as_ref(), source.through)
+            .await?;
+        if !recovery && !regrown(&view, &policy_order, model.as_ref()) {
             return Ok((view.prepared, estimate.input));
         }
         let step = CompactionStep {
@@ -601,10 +613,8 @@ impl ContextPolicy {
         let manual = step.trigger == CompactionTrigger::Manual;
         let rule = Retention::new(view, model.as_ref(), turn, manual);
         let policy_order = self
-            .timeline
-            .policy_order(view.facts.through)
-            .await
-            .map_err(|error| HostError::failed(error.to_string()))?;
+            .policy_order(view, model.as_ref(), view.facts.through)
+            .await?;
         let mut cuts = legal_cuts(&policy_order, &view.history);
         let limit = rule.limit(
             &view.history,
@@ -1729,6 +1739,32 @@ fn input_budget(model: &dyn ContextModel) -> f64 {
     (model.context_window() - model.output_tokens()).max(0.)
 }
 
+/// The tokens `history[index..]` counts for every index.
+fn tail_tokens(history: &[HistoryEntry], empty: f64, model: &dyn ContextModel) -> Vec<f64> {
+    let mut tail = vec![0.; history.len() + 1];
+    for (index, entry) in history.iter().enumerate().rev() {
+        let message = ModelRequest::new("", "", vec![entry.message.as_ref().clone()]);
+        tail[index] = tail[index + 1] + model.count_tokens(&message) - empty;
+    }
+    tail
+}
+
+/// The chain position after which a turn start can be the first cut the
+/// retention rule keeps: the last history entry whose retained tail still
+/// exceeds `RETAINED_SHARE` of the input budget. The rule keeps the first cut
+/// whose tail fits `min(RETAINED_SHARE × B, BOUND_SHARE × B − resident)`; a
+/// cut keeping fewer entries keeps a larger tail too, so no cut before this
+/// position can be kept (ContextCompaction §5.3).
+fn cut_window(history: &[HistoryEntry], model: &dyn ContextModel) -> Option<TimelinePosition> {
+    let empty = model.count_tokens(&ModelRequest::new("", "", Vec::new()));
+    let tail = tail_tokens(history, empty, model);
+    let budget = RETAINED_SHARE * input_budget(model);
+    let last = tail[..history.len()]
+        .iter()
+        .rposition(|tokens| *tokens > budget)?;
+    Some(history[last].position.clone())
+}
+
 /// The retention rule of one compaction step (ContextCompaction §5.3): the
 /// request frame and the running turn's pins are fixed for the step, so the
 /// rule measures them once and answers each cut with its resident parts.
@@ -1815,15 +1851,7 @@ impl<'a> Retention<'a> {
         cuts: &[CompactionCut],
         replacement_size: f64,
     ) -> Option<usize> {
-        let count = |messages: Vec<Message>| {
-            self.model
-                .count_tokens(&ModelRequest::new("", "", messages))
-        };
-        let mut tail = vec![0.; history.len() + 1];
-        for (index, entry) in history.iter().enumerate().rev() {
-            tail[index] =
-                tail[index + 1] + count(vec![entry.message.as_ref().clone()]) - self.empty;
-        }
+        let tail = tail_tokens(history, self.empty, self.model);
         let budget = input_budget(self.model);
         let fits = cuts.iter().position(|cut| {
             let resident_tokens = self.resident(history, cut, replacement_size);

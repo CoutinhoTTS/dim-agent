@@ -285,7 +285,7 @@ impl HistoryRenderer {
                 "a stream needs a positive batch size".into(),
             ));
         }
-        let policy_order = timeline.policy_order(through).await?;
+        let policy_order = timeline.policy_order(through, None).await?;
         let checkpoint = timeline
             .checkpoint(through, self.checkpoint_interpreter, self.decode_checkpoint)
             .await?;
@@ -310,6 +310,7 @@ impl HistoryRenderer {
         let mut compaction = None;
         let mut cut_in_effect: Option<(Option<usize>, u64)> = None;
         let mut compaction_cut: Option<dim_agent_types::TimelinePosition> = None;
+        let mut cuts: Vec<(String, dim_agent_types::TimelinePosition)> = Vec::new();
         for (index, (branch, cut)) in segments.iter().enumerate().skip(first) {
             let mut cursor = if index == first { resume } else { 1 };
             while cursor <= *cut {
@@ -363,6 +364,9 @@ impl HistoryRenderer {
                     }
                     cut_in_effect = Some(at);
                     compaction_cut = Some(cut.clone());
+                    if !cuts.iter().any(|(id, _)| id == retain_from) {
+                        cuts.push((retain_from.clone(), cut.clone()));
+                    }
                     let kept = history
                         .iter()
                         .position(|entry| {
@@ -377,6 +381,21 @@ impl HistoryRenderer {
             }
         }
         let state = state.unwrap_or_default();
+        let mut order = policy_order.events;
+        let rank = |branch: &str| segments.iter().position(|(name, _)| name == branch);
+        for (id, position) in cuts {
+            if !order.iter().any(|event| event.id == id) {
+                order.push(dim_agent_runtime::PolicyOrderEvent {
+                    id,
+                    branch_id: position.branch_id,
+                    sequence: position.sequence,
+                    turn_start: false,
+                    compaction_start: None,
+                    boundary: false,
+                });
+            }
+        }
+        order.sort_by_key(|event| (rank(&event.branch_id), event.sequence));
         Ok(StreamedContext {
             history,
             configuration: state.configuration,
@@ -386,7 +405,7 @@ impl HistoryRenderer {
                 .into_iter()
                 .map(|(branch, _)| branch)
                 .collect(),
-            order: policy_order.events,
+            order,
             compaction,
             branches: segments.iter().map(|(branch, _)| branch.clone()).collect(),
             compaction_cut,
@@ -401,12 +420,13 @@ pub struct StreamedContext {
     pub configuration: Option<ContextConfiguredData>,
     pub prompt: Option<PromptReference>,
     pub ancestry: Vec<String>,
+    /// The policy order, extended with each completed compaction's cut so a
+    /// cut id resolves to its position.
     pub order: Vec<dim_agent_runtime::PolicyOrderEvent>,
     pub compaction: Option<Arc<AgentEvent>>,
     /// Root first, the segments the stream read.
     pub branches: Vec<String>,
-    /// The position of the cut in effect, which need not be an event the
-    /// policy order carries.
+    /// The position of the cut in effect.
     pub compaction_cut: Option<dim_agent_types::TimelinePosition>,
 }
 

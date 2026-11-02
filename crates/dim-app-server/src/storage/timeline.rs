@@ -2584,6 +2584,104 @@ fn window_rows(
     Ok(rows)
 }
 
+/// The events of one `policy_order` read: the last turn start, the turn
+/// starts in `turns`, and the last compaction start with its `through`. Only
+/// the compaction start's body is decoded; `timeline_policy_turns` covers the
+/// turn starts, so their rows are never read.
+fn policy_order_events(
+    connection: &Connection,
+    key: &TimelineKey,
+    turns: &RangeInclusive<u64>,
+    through: u64,
+) -> Result<Vec<PolicyOrderEvent>> {
+    let turn = |id: String, sequence: u64| PolicyOrderEvent {
+        id,
+        branch_id: key.branch_id.clone(),
+        sequence,
+        turn_start: true,
+        compaction_start: None,
+        boundary: false,
+    };
+    let start = |id: String, sequence: u64, through: Option<u64>| PolicyOrderEvent {
+        id,
+        branch_id: key.branch_id.clone(),
+        sequence,
+        turn_start: false,
+        compaction_start: through,
+        boundary: false,
+    };
+    let mut events = Vec::new();
+    let from = *turns.start();
+    let to = (*turns.end()).min(through);
+    if from <= to {
+        let mut query = connection
+            .prepare(
+                "SELECT event_id, sequence FROM timeline_events \
+                 WHERE session_id=?1 AND branch_id=?2 AND kind='turn/start' \
+                 AND sequence BETWEEN ?3 AND ?4 AND event_id IS NOT NULL \
+                 ORDER BY sequence",
+            )
+            .map_err(error)?;
+        for row in query
+            .query_map(
+                params![
+                    key.session_id,
+                    key.branch_id,
+                    sql_sequence(from)?,
+                    sql_sequence(to)?
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .map_err(error)?
+        {
+            let (id, sequence) = row.map_err(error)?;
+            events.push(turn(id, sequence_value(sequence)?));
+        }
+    }
+    let last: Option<(String, i64)> = connection
+        .prepare(
+            "SELECT event_id, sequence FROM timeline_events \
+             WHERE session_id=?1 AND branch_id=?2 AND kind='turn/start' \
+             AND sequence<=?3 AND event_id IS NOT NULL \
+             ORDER BY sequence DESC LIMIT 1",
+        )
+        .map_err(error)?
+        .query_row(
+            params![key.session_id, key.branch_id, sql_sequence(through)?],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    if let Some((id, sequence)) = last {
+        let sequence = sequence_value(sequence)?;
+        if !(from <= sequence && sequence <= to) {
+            events.push(turn(id, sequence));
+        }
+    }
+    let anchor: Option<(String, i64, Option<i64>)> = connection
+        .prepare(
+            "SELECT event_id, sequence, \
+             json_extract(body, '$.record.event.data.through') \
+             FROM timeline_events \
+             WHERE session_id=?1 AND branch_id=?2 AND kind='context/compaction-start' \
+             AND sequence<=?3 AND event_id IS NOT NULL \
+             ORDER BY sequence DESC LIMIT 1",
+        )
+        .map_err(error)?
+        .query_row(
+            params![key.session_id, key.branch_id, sql_sequence(through)?],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    if let Some((id, sequence, through)) = anchor {
+        let through = through.map(sequence_value).transpose()?;
+        events.push(start(id, sequence_value(sequence)?, through));
+    }
+    events.sort_by_key(|event| event.sequence);
+    Ok(events)
+}
+
 fn policy_rows(
     connection: &Connection,
     key: &TimelineKey,
@@ -2906,57 +3004,21 @@ impl TimelineStore for SqliteTimelineStore {
     fn policy_order<'a>(
         &'a self,
         key: &'a TimelineKey,
+        turns: RangeInclusive<u64>,
         through: u64,
     ) -> BoxFuture<'a, Result<PolicyOrder>> {
         Box::pin(async move {
-            let rows = {
+            let events = {
                 let guard = self.db.connection.lock().unwrap();
                 let connection = guard
                     .as_ref()
                     .ok_or_else(|| AgentError::Storage("storage connection is closed".into()))?;
-                let mut query = connection
-                    .prepare(
-                        "SELECT event_id, kind, sequence, \
-                         json_extract(body, '$.record.event.data.through') \
-                         FROM timeline_events \
-                         WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3 \
-                         AND event_id IS NOT NULL \
-                         AND kind IN ('turn/start', 'context/compaction-start', 'context/compaction') \
-                         ORDER BY sequence",
-                    )
-                    .map_err(error)?;
-                query
-                    .query_map(
-                        params![key.session_id, key.branch_id, through as i64],
-                        |row| {
-                            Ok((
-                                row.get::<_, String>(0)?,
-                                row.get::<_, String>(1)?,
-                                row.get::<_, i64>(2)?,
-                                row.get::<_, Option<i64>>(3)?,
-                            ))
-                        },
-                    )
-                    .map_err(error)?
-                    .collect::<rusqlite::Result<Vec<_>>>()
-                    .map_err(error)?
+                policy_order_events(connection, key, &turns, through)?
             };
             Ok(PolicyOrder {
                 through,
                 branches: Vec::new(),
-                events: rows
-                    .into_iter()
-                    .map(|(id, kind, sequence, through)| PolicyOrderEvent {
-                        id,
-                        branch_id: key.branch_id.clone(),
-                        sequence: sequence as u64,
-                        turn_start: kind == "turn/start",
-                        compaction_start: (kind == "context/compaction-start")
-                            .then_some(through.map(|value| value as u64))
-                            .flatten(),
-                        boundary: false,
-                    })
-                    .collect(),
+                events,
             })
         })
     }

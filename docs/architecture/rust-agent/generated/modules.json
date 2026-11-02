@@ -2659,7 +2659,6 @@
       "unexpandedMacros": [
         "eprintln",
         "format",
-        "rusqlite::params",
         "tokio::pin",
         "tracing::error"
       ]

@@ -66,6 +66,77 @@ async fn compact_after_small_turns(
     unreachable!()
 }
 
+/// The cut window drops only turn starts the retention rule cannot keep: the
+/// first turn start whose kept tail fits `0.25 × B` stays a legal cut, even
+/// when every entry before it is larger than that share and later turns
+/// follow it (ContextCompaction §5.3).
+#[tokio::test]
+async fn a_cut_on_the_retention_window_boundary_stays_a_legal_cut() {
+    let agent = MinimalHost::start(&builder_with_context(
+        Arc::new(EchoModel),
+        HistoryRenderer::default(),
+        Context {
+            threshold: Some(3_000.),
+            ..Context::default()
+        },
+    ))
+    .await
+    .unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    session
+        .submit("x".repeat(1_200), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let mut events = Vec::new();
+    for index in 0.. {
+        assert!(index < 30, "no automatic compaction");
+        session
+            .submit(format!("small {index}"), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        events = session.history("main", None).await.unwrap();
+        if events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                EventKind::ContextCompaction(ContextCompactionData {
+                    outcome: ContextCompactionResult::Completed { .. },
+                    ..
+                })
+            )
+        }) {
+            break;
+        }
+    }
+    let starts: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
+        .collect();
+    assert!(
+        starts.len() > 2,
+        "a later turn start must follow the cut for the window to matter"
+    );
+    let cut = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextCompaction(ContextCompactionData {
+                outcome: ContextCompactionResult::Completed { retain_from, .. },
+                ..
+            }) => Some(retain_from.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        cut, starts[1].id,
+        "the second turn's start keeps the tail the rule allows"
+    );
+    agent.close().await.unwrap();
+}
+
 fn first_call_after_compaction(events: &[Arc<AgentEvent>]) -> Arc<ModelRequest> {
     let compaction = events
         .iter()

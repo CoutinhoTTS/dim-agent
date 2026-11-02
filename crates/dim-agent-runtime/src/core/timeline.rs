@@ -942,9 +942,15 @@ impl Timeline {
         self.0.store.last_event(key, cut).await
     }
 
-    /// The event order for legal compaction cuts.
+    /// The event order for legal compaction cuts: each segment's boundary, its
+    /// last turn start and its last compaction start at its cut, and the turn
+    /// starts after `turns_from` (`None` keeps every turn start).
     #[service(skip)]
-    pub async fn policy_order(&self, through: u64) -> Result<PolicyOrder> {
+    pub async fn policy_order(
+        &self,
+        through: u64,
+        turns_from: Option<TimelinePosition>,
+    ) -> Result<PolicyOrder> {
         let through = self.through(Some(through))?;
         let segments: Vec<_> = self
             .0
@@ -953,9 +959,13 @@ impl Timeline {
             .cloned()
             .chain(std::iter::once((self.0.key.branch_id.clone(), through)))
             .collect();
+        let rank = |branch: &str| segments.iter().position(|(name, _)| name == branch);
+        let from = turns_from
+            .as_ref()
+            .and_then(|at| rank(&at.branch_id).map(|index| (index, at.sequence)));
         let mut events = Vec::new();
         let mut branches = Vec::new();
-        for (branch, cut) in segments {
+        for (index, (branch, cut)) in segments.into_iter().enumerate() {
             if cut == 0 {
                 continue;
             }
@@ -964,7 +974,13 @@ impl Timeline {
                 branch_id: branch.clone(),
             };
             branches.push(branch.clone());
-            events.extend(self.0.store.policy_order(&key, cut).await?.events);
+            let turns = match from {
+                None => 1..=cut,
+                Some((rank, _)) if index > rank => 1..=cut,
+                Some((rank, sequence)) if index == rank => sequence.saturating_add(1)..=cut,
+                Some(_) => cut.saturating_add(1)..=cut,
+            };
+            events.extend(self.0.store.policy_order(&key, turns, cut).await?.events);
             if let Some(boundary) = self.boundary_event(&key, cut).await? {
                 events.push(PolicyOrderEvent {
                     id: boundary.id.clone(),
