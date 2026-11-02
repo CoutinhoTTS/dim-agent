@@ -1331,7 +1331,6 @@
         "format",
         "matches",
         "thread_local",
-        "unreachable",
         "vec"
       ]
     },

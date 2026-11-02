@@ -247,7 +247,7 @@ export interface TimelineCursor {
 /** Where a query starts. */
 export type TimelineQueryPosition =
   | /** Sequences `start..=end`, both included. `end` defaults to the queried branch's published head and may not exceed it; in a chain read it applies to each branch's own sequence space, to that branch's cut or the end, whichever is lower. */ { kind: "range"; start: number | bigint; end?: number | bigint | null }
-  | /** Continues from `cursor` in the query's direction, through `through`: ascending reads above the cursor through `through`; descending reads below it down through `through`. */ { kind: "cursor"; cursor: TimelineCursor; through: number | bigint }
+  | /** Continues from `cursor` in the query's direction, through `through` when it is named: ascending reads above the cursor through it, and descending reads below the cursor down through it. Without it, every branch is read to its own coverage, an ancestor to its cut and the queried branch to its published head, so pages compose to the read `Range { end: None }` makes. */ { kind: "cursor"; cursor: TimelineCursor; through?: number | bigint | null }
 
 /**
  * The end a page is taken from. A reply is always ordered by chain position
@@ -360,11 +360,12 @@ export interface Timeline {
    * select the facts, and the reply is those facts in chain order and then
    * sequence, ascending, with each event's position and the cursor after
    * them. A chain read is each ancestor to its cut and then this branch to
-   * the position's end, root first; a range applies to each branch's own
-   * sequence space. A descending page is taken from the newest end, and the
-   * reply is ordered ascending all the same. The read never returns a fact
-   * above the published head, and a cursor that names a branch the scope
-   * does not cover is invalid input.
+   * its published head, root first; a range applies to each branch's own
+   * sequence space, and a position without an end means each branch to its
+   * own coverage, so pages compose to the read. A descending page is taken
+   * from the newest end, and the reply is ordered ascending all the same.
+   * The read never returns a fact above a branch's published head, and a
+   * cursor that names a branch the scope does not cover is invalid input.
    * @throws {AgentErrorThrown}
    */
   query(query: TimelineQuery): Promise<TimelineQueryReply>

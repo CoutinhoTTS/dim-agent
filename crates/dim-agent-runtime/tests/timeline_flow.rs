@@ -788,6 +788,48 @@ fn branch_create(branch: &str, at: u64) -> EventDraft {
     .into()
 }
 
+/// `main` with `main_head` facts whose last is the `child` branch create, and
+/// `child` cut at that head with `child_facts` facts.
+async fn chain_with_a_tall_ancestor(main_head: u64, child_facts: u64) -> (Timeline, Timeline) {
+    let store = Arc::new(MemoryTimelineStore::default());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let ctx = Ctx::root().unwrap();
+    let main = Timeline::new(
+        ctx.clone(),
+        TimelineKey {
+            session_id: "session".into(),
+            branch_id: "main".into(),
+        },
+        vec![],
+        store.clone(),
+    );
+    for sequence in 1..=main_head {
+        if sequence == main_head {
+            main.append(branch_create("child", sequence)).unwrap();
+        } else {
+            let id = format!("main-{sequence}");
+            main.append(input(&id).with_id(id)).unwrap();
+        }
+    }
+    let child = Timeline::new(
+        ctx,
+        TimelineKey {
+            session_id: "session".into(),
+            branch_id: "child".into(),
+        },
+        vec![("main".into(), main_head)],
+        store,
+    );
+    for sequence in 1..=child_facts {
+        let id = format!("child-{sequence}");
+        child.append(input(&id).with_id(id)).unwrap();
+    }
+    (main, child)
+}
+
 #[tokio::test]
 async fn a_query_cursor_ends_a_batch_and_its_next_continues_after_it() {
     use dim_agent_runtime::{
@@ -846,7 +888,7 @@ async fn a_query_cursor_ends_a_batch_and_its_next_continues_after_it() {
         .query(dim_agent_runtime::TimelineQuery {
             position: Cursor {
                 cursor: first.next.clone().unwrap(),
-                through: 7,
+                through: Some(7),
             },
             limit: std::num::NonZeroU64::new(2).unwrap(),
             ..branch_query(
@@ -876,7 +918,7 @@ async fn a_query_cursor_ends_a_batch_and_its_next_continues_after_it() {
         .query(dim_agent_runtime::TimelineQuery {
             position: Cursor {
                 cursor: second.next.clone().unwrap(),
-                through: 7,
+                through: Some(7),
             },
             ..branch_query(
                 Branch,
@@ -975,7 +1017,7 @@ async fn a_chain_query_orders_by_chain_position_then_sequence() {
         .query(dim_agent_runtime::TimelineQuery {
             position: Cursor {
                 cursor: first.next.unwrap(),
-                through: 2,
+                through: Some(2),
             },
             ..branch_query(
                 Chain,
@@ -1254,7 +1296,7 @@ async fn a_query_rejects_a_future_position_a_cursor_inside_a_batch_and_a_cursor_
                         branch_id: "main".into(),
                         sequence: batch[0].sequence,
                     },
-                    through: batch[1].sequence,
+                    through: Some(batch[1].sequence),
                 }
             ))
             .await,
@@ -1272,7 +1314,7 @@ async fn a_query_rejects_a_future_position_a_cursor_inside_a_batch_and_a_cursor_
                             branch_id: "main".into(),
                             sequence: 1,
                         },
-                        through: 0,
+                        through: Some(0),
                     }
                 ))
                 .await,
@@ -1349,7 +1391,7 @@ async fn a_descending_page_returns_the_newest_facts_in_ascending_order() {
             direction: Descending,
             position: Cursor {
                 cursor: first.next.unwrap(),
-                through: 1,
+                through: Some(1),
             },
             ..branch_query(
                 Branch,
@@ -1601,6 +1643,221 @@ async fn a_chain_range_applies_to_each_branch_and_defaults_to_the_published_head
     );
 }
 
+#[tokio::test]
+async fn a_paged_chain_read_returns_every_ancestor_fact_once() {
+    use dim_agent_runtime::TimelineQueryPosition::{Cursor, Range};
+    use dim_agent_runtime::TimelineQueryScope::Chain;
+
+    let (_, child) = chain_with_a_tall_ancestor(5, 3).await;
+    let whole = child
+        .query(branch_query(
+            Chain,
+            Range {
+                start: 1,
+                end: None,
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        whole.positions.len(),
+        8,
+        "five ancestor facts and three local ones"
+    );
+
+    let mut position = Range {
+        start: 1,
+        end: None,
+    };
+    let mut paged: Vec<TimelinePosition> = Vec::new();
+    for page in 0..8 {
+        let reply = child
+            .query(dim_agent_runtime::TimelineQuery {
+                position,
+                limit: std::num::NonZeroU64::new(2).unwrap(),
+                ..branch_query(
+                    Chain,
+                    Range {
+                        start: 1,
+                        end: None,
+                    },
+                )
+            })
+            .await
+            .unwrap();
+        paged.extend(reply.positions.iter().cloned());
+        match reply.next {
+            Some(next) => {
+                position = Cursor {
+                    cursor: next,
+                    through: None,
+                }
+            }
+            None => {
+                assert_eq!(page, 3, "four pages cover the whole chain");
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        paged, whole.positions,
+        "the pages compose to the single-page read, every ancestor fact exactly once"
+    );
+}
+
+#[tokio::test]
+async fn a_cursor_on_an_ancestor_is_checked_against_that_ancestor() {
+    use dim_agent_runtime::TimelineQueryPosition::{Cursor, Range};
+    use dim_agent_runtime::TimelineQueryScope::Chain;
+
+    let (_, child) = chain_with_a_tall_ancestor(5, 2).await;
+    let first = child
+        .query(dim_agent_runtime::TimelineQuery {
+            limit: std::num::NonZeroU64::new(3).unwrap(),
+            ..branch_query(
+                Chain,
+                Range {
+                    start: 1,
+                    end: None,
+                },
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        first
+            .positions
+            .iter()
+            .map(|position| (position.branch_id.as_str(), position.sequence))
+            .collect::<Vec<_>>(),
+        [("main", 1), ("main", 2), ("main", 3)]
+    );
+    let cursor = first.next.unwrap();
+
+    let rest = child
+        .query(dim_agent_runtime::TimelineQuery {
+            position: Cursor {
+                cursor,
+                through: Some(7),
+            },
+            ..branch_query(
+                Chain,
+                Range {
+                    start: 1,
+                    end: None,
+                },
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        rest.positions
+            .iter()
+            .map(|position| (position.branch_id.as_str(), position.sequence))
+            .collect::<Vec<_>>(),
+        [("main", 4), ("main", 5), ("child", 1), ("child", 2)],
+        "a through above the ancestor's head is clamped to its cut, not rejected"
+    );
+    assert_eq!(rest.next, None);
+
+    assert!(
+        matches!(
+            child
+                .query(dim_agent_runtime::TimelineQuery {
+                    position: Cursor {
+                        cursor: dim_agent_runtime::TimelineCursor {
+                            branch_id: "main".into(),
+                            sequence: 6,
+                        },
+                        through: None,
+                    },
+                    ..branch_query(
+                        Chain,
+                        Range {
+                            start: 1,
+                            end: None
+                        }
+                    )
+                })
+                .await,
+            Err(AgentError::InvalidInput(_))
+        ),
+        "a cursor past the ancestor's cut is invalid input"
+    );
+}
+
+#[tokio::test]
+async fn the_next_cursor_names_the_effective_end_of_the_segment() {
+    use dim_agent_runtime::TimelineQueryPosition::{Cursor, Range};
+    use dim_agent_runtime::TimelineQueryScope::Chain;
+
+    let (_, child) = chain_with_a_tall_ancestor(5, 2).await;
+    let first = child
+        .query(dim_agent_runtime::TimelineQuery {
+            limit: std::num::NonZeroU64::new(2).unwrap(),
+            ..branch_query(
+                Chain,
+                Range {
+                    start: 1,
+                    end: Some(2),
+                },
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(queried(&first.events), ["main-1", "main-2"]);
+    let cursor = first.next.unwrap();
+    assert_eq!(
+        (cursor.branch_id.as_str(), cursor.sequence),
+        ("main", 2),
+        "the cursor names the segment's range end, not its cut"
+    );
+
+    let rest = child
+        .query(dim_agent_runtime::TimelineQuery {
+            position: Cursor {
+                cursor,
+                through: Some(2),
+            },
+            ..branch_query(
+                Chain,
+                Range {
+                    start: 1,
+                    end: Some(2),
+                },
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(queried(&rest.events), ["child-1", "child-2"]);
+    assert_eq!(rest.next, None);
+}
+
+#[tokio::test]
+async fn a_range_start_above_the_published_head_is_invalid_input() {
+    use dim_agent_runtime::TimelineQueryPosition::Range;
+    use dim_agent_runtime::TimelineQueryScope::{Branch, Chain};
+
+    let (_, child) = chain_with_a_tall_ancestor(5, 2).await;
+    for scope in [Branch, Chain] {
+        assert!(
+            matches!(
+                child
+                    .query(branch_query(
+                        scope,
+                        Range {
+                            start: 3,
+                            end: None
+                        }
+                    ))
+                    .await,
+                Err(AgentError::InvalidInput(_))
+            ),
+            "{scope:?}: a start past the queried branch's head is invalid input"
+        );
+    }
+}
+
 #[test]
 fn the_query_crosses_languages_with_its_serde_shape() {
     use dim_agent_runtime::{
@@ -1614,7 +1871,7 @@ fn the_query_crosses_languages_with_its_serde_shape() {
                 branch_id: "main".into(),
                 sequence: 4,
             },
-            through: 9,
+            through: Some(9),
         },
         direction: dim_agent_runtime::TimelineQueryDirection::Descending,
         kinds: vec!["input/message".into()],

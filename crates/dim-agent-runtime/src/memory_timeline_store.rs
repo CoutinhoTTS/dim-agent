@@ -245,7 +245,9 @@ impl TimelineStore for MemoryTimelineStore {
                             "a query cursor names a committed sequence".into(),
                         ));
                     }
-                    if cursor.sequence > *through || *through > head {
+                    if cursor.sequence > through.unwrap_or(head)
+                        || through.is_some_and(|through| through > head)
+                    {
                         return Err(AgentError::InvalidInput("future Timeline cursor".into()));
                     }
                     (
@@ -254,7 +256,7 @@ impl TimelineStore for MemoryTimelineStore {
                                 "query cursor is past the last sequence".into(),
                             )
                         })?,
-                        *through,
+                        through.unwrap_or(head),
                     )
                 }
                 (
@@ -272,10 +274,10 @@ impl TimelineStore for MemoryTimelineStore {
                             "a query cursor names a committed sequence".into(),
                         ));
                     }
-                    if cursor.sequence > head || *through == 0 {
+                    if cursor.sequence > head || *through == Some(0) {
                         return Err(AgentError::InvalidInput("future Timeline cursor".into()));
                     }
-                    (*through, cursor.sequence - 1)
+                    (through.unwrap_or(1), cursor.sequence - 1)
                 }
             };
             if high > head {

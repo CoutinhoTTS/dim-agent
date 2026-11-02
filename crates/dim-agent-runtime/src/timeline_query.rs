@@ -72,12 +72,16 @@ pub enum TimelineQueryPosition {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         end: Option<u64>,
     },
-    /// Continues from `cursor` in the query's direction, through `through`:
-    /// ascending reads above the cursor through `through`; descending reads
-    /// below it down through `through`.
+    /// Continues from `cursor` in the query's direction, through `through`
+    /// when it is named: ascending reads above the cursor through it, and
+    /// descending reads below the cursor down through it. Without it, every
+    /// branch is read to its own coverage, an ancestor to its cut and the
+    /// queried branch to its published head, so pages compose to the read
+    /// `Range { end: None }` makes.
     Cursor {
         cursor: TimelineCursor,
-        through: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        through: Option<u64>,
     },
 }
 

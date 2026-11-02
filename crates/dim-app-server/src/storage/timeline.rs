@@ -3406,10 +3406,12 @@ impl TimelineStore for SqliteTimelineStore {
                             "a query cursor names a committed sequence".into(),
                         ));
                     }
-                    if query.direction == Ascending && cursor.sequence > *through {
+                    if query.direction == Ascending
+                        && through.is_some_and(|through| cursor.sequence > through)
+                    {
                         return Err(AgentError::InvalidInput("future Timeline cursor".into()));
                     }
-                    if query.direction == Descending && *through == 0 {
+                    if query.direction == Descending && *through == Some(0) {
                         return Err(AgentError::InvalidInput(
                             "timeline sequences start at 1".into(),
                         ));
@@ -3429,8 +3431,10 @@ impl TimelineStore for SqliteTimelineStore {
                             (*start, end.unwrap_or(head))
                         }
                         TimelineQueryPosition::Cursor { cursor, through } => match direction {
-                            Ascending => (cursor.sequence.saturating_add(1), *through),
-                            Descending => (*through, cursor.sequence.saturating_sub(1)),
+                            Ascending => {
+                                (cursor.sequence.saturating_add(1), through.unwrap_or(head))
+                            }
+                            Descending => (through.unwrap_or(1), cursor.sequence.saturating_sub(1)),
                         },
                     };
                     Ok((head, low, high))
