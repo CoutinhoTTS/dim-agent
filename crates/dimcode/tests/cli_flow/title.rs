@@ -169,35 +169,56 @@ fn an_older_or_equal_title_revision_is_ignored() {
 }
 
 #[test]
-fn the_new_session_placeholder_is_no_title() {
+fn stored_titles_are_trimmed_and_placeholders_are_no_title() {
     let home = Home::new();
     let (ready, readiness) = mpsc::channel();
     let (proceed, control) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         open(
             wire,
-            Some(("New session", 1)),
+            Some((" new SESSION ", 1)),
             Some(("first", "first question")),
         );
-        title_notice(wire, "Real title", "manual", 2);
         ready.send(()).unwrap();
-        control.recv_timeout(Duration::from_secs(10)).unwrap();
-        title_notice(wire, "New session", "manual", 3);
+        for (title, revision) in [
+            ("Alpha title", 2),
+            ("New session", 3),
+            ("Beta title", 4),
+            ("   ", 5),
+            ("  Real title  ", 6),
+        ] {
+            control.recv_timeout(Duration::from_secs(10)).unwrap();
+            title_notice(wire, title, "manual", revision);
+        }
         wire.hold();
     });
     let mut terminal = resume(&home);
     terminal.until("\u{1b}]0;DIM | first question\u{7}");
     readiness.recv_timeout(Duration::from_secs(10)).unwrap();
-    terminal.until("\u{1b}]0;DIM | Real title\u{7}");
+    proceed.send(()).unwrap();
+    terminal.until("\u{1b}]0;DIM | Alpha title\u{7}");
+    proceed.send(()).unwrap();
+    terminal.until("\u{1b}]0;DIM | first question\u{7}");
+    proceed.send(()).unwrap();
+    terminal.until("\u{1b}]0;DIM | Beta title\u{7}");
+    let before_blank = terminal.transcript.len();
     proceed.send(()).unwrap();
     terminal.until("\u{1b}]0;DIM | first question\u{7}");
     assert!(
-        !terminal
-            .transcript
-            .contains("\u{1b}]0;DIM | New session\u{7}"),
-        "the placeholder is no title: {}",
+        !terminal.transcript[before_blank..].contains("\u{1b}]0;DIM\u{7}"),
+        "a blank title must fall back to the topic: {}",
         terminal.transcript
     );
+    proceed.send(()).unwrap();
+    terminal.until("\u{1b}]0;DIM | Real title\u{7}");
+    for title in ["New session", "new SESSION"] {
+        let shown = format!("\u{1b}]0;DIM | {title}\u{7}");
+        assert!(
+            !terminal.transcript.contains(&shown),
+            "the window title must never be {shown:?}: {}",
+            terminal.transcript
+        );
+    }
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();

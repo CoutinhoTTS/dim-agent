@@ -1152,18 +1152,3 @@ pub trait SessionPort {
         self.send(Command::Stop);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::stored_title;
-
-    #[test]
-    fn stored_title_is_none_for_blanks_and_the_new_session_placeholder() {
-        assert_eq!(stored_title(Some("Fix the bug")), Some("Fix the bug"));
-        assert_eq!(stored_title(Some("  Fix the bug  ")), Some("Fix the bug"));
-        assert_eq!(stored_title(Some("New session")), None);
-        assert_eq!(stored_title(Some(" new SESSION ")), None);
-        assert_eq!(stored_title(Some("   ")), None);
-        assert_eq!(stored_title(None), None);
-    }
-}
