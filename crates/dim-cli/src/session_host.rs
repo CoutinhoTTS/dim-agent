@@ -25,8 +25,8 @@ use crate::model::session::{
     DIM_OAUTH_ID, DraftPart, EmptyProvider, EmptyReason, ExecutionSnapshot, ManagementReply,
     ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider, OauthEvent, OauthStart,
     PluginItem, PluginReply, ProviderAction, ProviderEntry, RuntimeAction, RuntimeItem,
-    RuntimesError, SandboxBackend, SessionItem, SessionPort, SubagentModelPolicy, SwitchKind,
-    Update, Usage, stored_title,
+    RuntimesError, SandboxBackend, SessionItem, SessionPort, SessionsScope, SubagentModelPolicy,
+    SwitchKind, Update, Usage, stored_title,
 };
 use crate::model::view::{
     LineState, LineView, SideLine, TaskOutputState, TaskTarget, WorkflowInventory,
@@ -256,7 +256,7 @@ struct Worker {
     output: Option<OutputWatch>,
     /// The admitted read can outlive its detail; false discards that old reply.
     output_request: Option<(u64, bool)>,
-    catalog_request: Option<(u64, String, bool)>,
+    catalog_request: Option<(u64, String, bool, SessionsScope)>,
     /// When the next snapshot goes out; set by the first unpublished change.
     publish_at: Option<tokio::time::Instant>,
     /// The `shell.run` in flight: its request id and run id.
@@ -676,7 +676,7 @@ struct CancelNotice {
 
 impl Worker {
     async fn cancel_catalog(&mut self) -> crate::Result<()> {
-        if let Some((request, _, _)) = self.catalog_request.take()
+        if let Some((request, _, _, _)) = self.catalog_request.take()
             && self.client.offers("session.catalog.cancel")
         {
             self.client
@@ -1217,6 +1217,7 @@ impl Worker {
                 query,
                 cursor,
                 show_acp,
+                scope,
             } => {
                 self.cancel_catalog().await?;
                 let paged = self.client.offers("session.catalog");
@@ -1224,6 +1225,9 @@ impl Worker {
                     let mut params = json!({"limit":50,"query":query,"withPreview":true});
                     if show_acp && self.client.offers("session.catalog.origins") {
                         params["withAcpSessions"] = json!(true);
+                    }
+                    if scope == SessionsScope::Workspace {
+                        params["cwd"] = json!(self.options.cwd);
                     }
                     if let Some(cursor) = cursor {
                         params["cursor"] = cursor.into();
@@ -1233,7 +1237,7 @@ impl Worker {
                     ("session.summaries", json!({}))
                 };
                 match self.client.send(method, params).await {
-                    Ok(request) => self.catalog_request = Some((request, id, paged)),
+                    Ok(request) => self.catalog_request = Some((request, id, paged, scope)),
                     Err(error) => self.send(Update::Sessions {
                         id,
                         paged,
@@ -3508,9 +3512,9 @@ impl Worker {
         if self
             .catalog_request
             .as_ref()
-            .is_some_and(|(request, _, _)| *request == id)
+            .is_some_and(|(request, ..)| *request == id)
         {
-            let (_, id, paged) = self
+            let (_, id, paged, scope) = self
                 .catalog_request
                 .take()
                 .expect("matched catalog request");
@@ -3532,6 +3536,11 @@ impl Worker {
                 };
                 if !paged {
                     sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+                    let workspace = self.options.cwd.to_string_lossy();
+                    sessions.retain(|session| match scope {
+                        SessionsScope::Workspace => session.cwd == workspace.as_ref(),
+                        SessionsScope::All => true,
+                    });
                 }
                 Ok((
                     sessions

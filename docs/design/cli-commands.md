@@ -1145,6 +1145,7 @@ whole rule as one quoted argument, so global options stay unambiguous.
 | `dimcode session delete SESSION` | Permanently delete the Session and everything the store keeps for it; there is no prompt. |
 | `dimcode session cleanup (--older-than DURATION\|--keep N) [--yes]` | Show the Sessions one selector matches, then delete them after confirmation. |
 | `/rename TITLE` or `/rename --clear` | Set, or clear, the shown Session's manual title; the text is a command and never becomes model input. |
+| `/resume` | Open the Sessions picker on this workspace ([the `/resume` picker](#the-resume-picker)); `Ctrl+S` widens it to every workspace. |
 | `/export markdown PATH` or `/export json PATH` | Export the current main branch to a file while the interactive client is idle. |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | Write the Session's whole Timeline as versioned JSONL without a daemon ([Timeline export](appserver/timeline-export.md)); write to stdout when no output path is supplied. |
 | `dimcode daemon vacuum [--database PATH]` | Rewrite an offline native store with SQLite `VACUUM` to reclaim the pages deleted Sessions left, and print its size before and after ([storage format](appserver/native-storage-format.md#sqlite-运行参数与空间回收)); it fails while a daemon owns the database and never creates or upgrades one. |
@@ -1281,6 +1282,51 @@ to the prompt without submitting input. `/exit` takes no arguments. Only these
 exact command names are intercepted; other text follows the normal input path.
 Subcommands do not create a plugin command registry.
 
+### The `/resume` picker
+
+`/resume` opens on the workspace `dimcode` was launched in: the directory
+`--cwd` names, canonicalized, which is also the workspace `session.create`
+records for a Session it creates there. The list holds the stored Sessions of
+exactly that workspace, newest first, and every open starts there. `Ctrl+S`
+widens the list to every workspace and back to this one, and the title names the
+scope shown. The filter keeps the composer's `Ctrl+A` and `Ctrl+W`, and `Tab`
+moves the selection down.
+
+```text
+╭─ Sessions · This workspace ──────────────────────────────────────────────────╮
+│                                                                              │
+│ >                                                                            │
+│                                                                              │
+│   Fix the failing test       3h ago                                          │
+│   Update the catalog design  1d ago                                          │
+╰───────────────────── Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close ─╯
+```
+
+```text
+╭─ Sessions · All workspaces ──────────────────────────────────────────────────╮
+│                                                                              │
+│ >                                                                            │
+│                                                                              │
+│   Fix the failing test       3h ago · ~/src/app/web                          │
+│   Update the catalog design  1d ago · ~/src/other                            │
+╰───────────────────── Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close ─╯
+```
+
+- A scope change works like a new query: it cancels the pending read, drops the
+  cursor and reads the first page again; the query stays and applies within the
+  new scope.
+- Outside this workspace's scope every row leads with its update time and then
+  names its workspace, with the home directory written `~`. The label takes at
+  most half the row, and the time comes first, so a long path is what gets cut.
+- With no Sessions and no query, this workspace's scope says `No saved sessions
+  in this workspace. Ctrl+S shows more.`; the other empty and no-match lines
+  stay unchanged.
+- A daemon before `session.catalog` is listed through `session.summaries`, and
+  the client applies the scope to the rows it receives with the same exact
+  match.
+- `dimcode --resume ID` resumes a Session of any workspace, and cleanup selects
+  across every workspace.
+
 ### Session titles
 
 The manual title is the Session's own state: `session.summaries`
@@ -1348,7 +1394,8 @@ selects with one of two selectors and reads both from the `updatedAt` of
 | `--older-than DURATION` | Every Session whose `updatedAt` is at least `DURATION` ago. `DURATION` is a count and a unit `d`, `h` or `m`, such as `30d`. |
 | `--keep N` | The N most recently active Sessions stay; every other Session is selected. |
 
-Cleanup selects only the Sessions `/resume` lists by default
+Cleanup selects across every workspace, not only the one `/resume` opens on: the
+classes it selects are the ones `/resume` lists by default
 ([classification](appserver/session-classification.md#35-catalog-visibility)): origin
 `client` or `unknown`. An `internal` Session is never selected: a member goes with
 its leader's delete and a launched Session belongs to its plugin. An `acp` Session is

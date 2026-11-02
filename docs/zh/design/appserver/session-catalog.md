@@ -21,7 +21,7 @@ Issue：[#556](https://github.com/arcships/dim/issues/556)，要求有界的 `/r
 
 - 投影的表、索引、写入事务、删除与分叉维护、升级回填——这些由[原生存储格式](../../../design/appserver/native-storage-format.md#556-v23-格式决定)决定；
 - 分类字段、它们的缺省值与呈现——[#557](https://github.com/arcships/dim/issues/557)；
-- 选择面板的交互与 project/all 开关——加入它们的那个客户端（§6）；
+- 选择面板的交互与它的工作区范围——加入它们的那个客户端（§6）；
 - `session.attach`，以及客户端如何排序或呈现行。
 
 ## 3. 自有合同
@@ -93,7 +93,7 @@ Issue：[#556](https://github.com/arcships/dim/issues/556)，要求有界的 `/r
 
 `/resume` 背后的选择面板是第一个使用方，本页写明它对客户端的要求；客户端自己的设计拥有它的交互。
 
-- **首页。** 首页是不过滤 `cwd` 的目录：`/resume` 今天列出所有工作区。
+- **首页。** 本合同不限定客户端首页携带的过滤：`cwd` 在页边界之前应用，因此首页就是所选范围要显示的一整页行。客户端在同一个范围的每一页都发送同一个 `cwd`，`/resume` 打开在启动工作区的精确路径上（[CLI 命令](../cli-commands.md#resume-选择面板)）。
 - **分页。** 选择接近已装载行的末尾时取下一页，跨页保持服务端的顺序。它发送 `withPreview`，因为它今天隐藏没有预览的行，于是首页是它显示的整页行，末尾附近的触发始终有行可取。每次冷启动都创建一个可能永远收不到消息的 Session，没有这个过滤，最新的若干行往往正是它隐藏的那些。
 - **搜索。** 过滤以去抖的 `query` 发到服务端，而不是只缩小它已经持有的行；服务端匹配它今天搜索的字段——Session ID、工作区、model ID 与预览——加上标题与 provider ID，用相同的 Unicode 折叠，因此还没取的页上的匹配也会出现。
 - **取消。** 关闭、刷新或替换搜索时，若守护进程公布了 `session.catalog.cancel`，先用它取消未完成的读取，再丢弃本地请求标识。之后的命令不等待过期查询。没有公布取消方法的旧守护进程保留原行为。
@@ -106,7 +106,7 @@ Issue：[#556](https://github.com/arcships/dim/issues/556)，要求有界的 `/r
              new query -> cancel read -> matching first page
 ```
 
-project/all 开关是另一个客户端决定：`cwd` 为本合同为它而存在，并且在页边界之前应用，选择面板的首页不使用它。缺口记录在[客户端](../clients.md#32-session-管理)。
+客户端先列出哪些 Session 是它自己的决定：`cwd` 为本合同为它而存在，并且在页边界之前应用。CLI 的 `/resume` 拥有它的各个范围以及循环切换它们的按键（[CLI 命令](../cli-commands.md#resume-选择面板)）；列出所有工作区的客户端继续不发送 `cwd`。[客户端](../clients.md#32-session-管理)记录每个客户端覆盖到什么。
 
 ## 7. 决定
 

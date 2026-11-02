@@ -91,6 +91,13 @@ impl SubmitMode {
     }
 }
 
+/// What `/resume` lists: the launch workspace, or every workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionsScope {
+    Workspace,
+    All,
+}
+
 pub enum Command {
     Submit(String, SubmitMode),
     /// A draft with pastes to store or content blocks to send.
@@ -194,13 +201,14 @@ pub enum Command {
     NewSession,
     /// Switch to a stored session.
     Resume(String),
-    /// List stored sessions (newest first).
+    /// List stored sessions (newest first), in `scope`.
     ListSessions {
         id: String,
         query: String,
         cursor: Option<String>,
         /// The "Show ACP sessions" preference the picker was opened with.
         show_acp: bool,
+        scope: SessionsScope,
     },
     CloseSessions,
     /// List the models that can be chosen.

@@ -343,7 +343,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
 
         // sessions_panel.rs
         "Sessions" => "工作階段",
-        "Enter open · Ctrl+R refresh · Esc close" => "Enter 開啟 · Ctrl+R 重新整理 · Esc 關閉",
+        "Sessions · This workspace" => "工作階段 · 目前工作區",
+        "Sessions · All workspaces" => "工作階段 · 所有工作區",
+        "No saved sessions in this workspace. Ctrl+S shows more." => {
+            "目前工作區沒有已儲存的工作階段。Ctrl+S 顯示更多。"
+        }
+        "Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close" => {
+            "Enter 開啟 · Ctrl+S 切換範圍 · Ctrl+R 重新整理 · Esc 關閉"
+        }
         "Loading sessions..." => "正在載入工作階段…",
         "No saved sessions yet." => "尚無已儲存的工作階段。",
         "No matching sessions." => "無相符工作階段。",

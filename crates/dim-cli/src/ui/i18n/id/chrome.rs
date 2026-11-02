@@ -391,7 +391,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
 
         // sessions_panel.rs
         "Sessions" => "Sesi",
-        "Enter open · Ctrl+R refresh · Esc close" => "Enter buka · Ctrl+R refresh · Esc tutup",
+        "Sessions · This workspace" => "Sesi · Workspace ini",
+        "Sessions · All workspaces" => "Sesi · Semua workspace",
+        "No saved sessions in this workspace. Ctrl+S shows more." => {
+            "Belum ada sesi tersimpan di workspace ini. Ctrl+S menampilkan lebih banyak."
+        }
+        "Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close" => {
+            "Enter buka · Ctrl+S cakupan · Ctrl+R refresh · Esc tutup"
+        }
         "Loading sessions..." => "Memuat sesi…",
         "No saved sessions yet." => "Belum ada sesi tersimpan.",
         "No matching sessions." => "Tak ada sesi cocok.",

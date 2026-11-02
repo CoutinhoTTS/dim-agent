@@ -39,7 +39,7 @@ It does not own:
 - the projection's table, its indexes, write transaction, delete and fork maintenance, and the upgrade's backfill —
   the [native storage format](native-storage-format.md#556-v23-格式决定) decides those;
 - the classification fields, their defaults and their presentation — [Session classification](session-classification.md);
-- the picker's interaction and the project/all switch — the client that adds them (§6);
+- the picker's interaction and its workspace scopes — the client that adds them (§6);
 - `session.attach`, and how a client sorts or presents rows.
 
 ## 3. Own contract
@@ -176,7 +176,7 @@ No Session facade call, no lease and no other plugin service is used.
 The picker behind `/resume` is the first consumer, and this page states what it requires of a client; the client's
 own design owns its interaction.
 
-- **First page.** The first page is the catalog with no `cwd` filter, because `/resume` lists every workspace today.
+- **First page.** The catalog requires nothing of the filter a client's first page carries: `cwd` applies before the page boundary, so the first page is full of the rows the chosen scope shows. A client sends the same `cwd` with every page of one scope, and `/resume` opens on the launch workspace's exact path ([CLI commands](../cli-commands.md#the-resume-picker)).
 - **Pages.** The picker asks for the next page as the selection nears the end of the loaded rows, and keeps the
   server's order across pages. It sends `withPreview`, because it hides rows without a preview today, so its first
   page is a full page of rows it shows and the trigger near the end always has rows. Every cold launch creates a
@@ -201,9 +201,10 @@ own design owns its interaction.
              new query -> cancel read -> matching first page
 ```
 
-The project/all switch is a separate client decision: `cwd` exists in this contract for it and applies before the
-page boundary, and the picker's first page does not use it. The gap is recorded in
-[Clients](../clients.md#32-session-management).
+Which Sessions a client lists first is its own decision: `cwd` exists in this contract for it and applies before the
+page boundary. The CLI's `/resume` owns its scopes and the key that cycles them
+([CLI commands](../cli-commands.md#the-resume-picker)); a client that lists every workspace keeps sending no `cwd`.
+[Clients](../clients.md#32-session-management) records what each client covers.
 
 ## 7. Decisions
 

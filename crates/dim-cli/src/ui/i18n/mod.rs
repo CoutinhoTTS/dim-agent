@@ -354,6 +354,21 @@ mod tests {
         }
     }
 
+    /// The `/resume` picker's scopes and its empty-workspace line are
+    /// translated in every locale.
+    #[test]
+    fn every_locale_translates_the_resume_picker_strings() {
+        for (code, lookup) in tables() {
+            for key in [
+                "Sessions · This workspace",
+                "Sessions · All workspaces",
+                "No saved sessions in this workspace. Ctrl+S shows more.",
+            ] {
+                assert!(lookup(key).is_some(), "{code} lacks {key:?}");
+            }
+        }
+    }
+
     /// A delegation the server refused before a member existed reads as a
     /// rejected attempt, in every locale; a table that drops a placeholder
     /// would print the refusal's reason or the count nowhere.

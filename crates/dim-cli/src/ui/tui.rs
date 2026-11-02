@@ -5826,14 +5826,7 @@ fn workspace_label(branch: &str) -> String {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
-    let home = std::env::var("HOME").unwrap_or_default();
-    let cwd = match cwd.strip_prefix(&home) {
-        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => {
-            format!("~{rest}")
-        }
-        _ => cwd,
-    };
-    format!("{cwd} ({branch})")
+    format!("{} ({branch})", crate::ui::tilde(&cwd))
 }
 
 fn git_head(cwd: &str) -> Option<PathBuf> {

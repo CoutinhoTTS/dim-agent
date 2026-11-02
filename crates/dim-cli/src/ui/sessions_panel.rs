@@ -1,15 +1,19 @@
 //! The `/resume` picker: a filterable list of stored sessions (port of
 //! `sessionsPanelItems` / `SessionsPanel`).
 
-use crate::model::session::{Command, SessionItem, stored_title};
+use crate::model::session::{Command, SessionItem, SessionsScope, stored_title};
 use crate::ui::i18n::{t, tf};
 use crate::ui::list_panel::{Event, Item, ListPanel};
 use crate::ui::prompts::Effect;
-use crate::ui::terminal::KeyEvent;
+use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
 use crate::ui::theme::Palette;
+use crate::ui::tilde;
 use std::time::{Duration, Instant};
 
-const HINT: &str = "Enter open · Ctrl+R refresh · Esc close";
+const HINT: &str = "Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close";
+const TITLE_WORKSPACE: &str = "Sessions · This workspace";
+const TITLE_ALL: &str = "Sessions · All workspaces";
+const EMPTY_WORKSPACE: &str = "No saved sessions in this workspace. Ctrl+S shows more.";
 
 pub struct SessionsPanel {
     list: ListPanel,
@@ -19,6 +23,7 @@ pub struct SessionsPanel {
     append: bool,
     next_cursor: Option<String>,
     show_acp: bool,
+    scope: SessionsScope,
 }
 
 impl SessionsPanel {
@@ -30,11 +35,12 @@ impl SessionsPanel {
             append: false,
             next_cursor: None,
             show_acp,
+            scope: SessionsScope::Workspace,
             list: ListPanel::new(
-                "Sessions",
+                TITLE_WORKSPACE,
                 HINT,
                 "Loading sessions...",
-                "No saved sessions yet.",
+                EMPTY_WORKSPACE,
                 "No matching sessions.",
                 true,
             ),
@@ -45,7 +51,9 @@ impl SessionsPanel {
         if self.paged.is_none() {
             self.paged = Some(false);
         }
-        self.list.set_items(items.map(session_rows), None);
+        let workspaces = self.scope == SessionsScope::All;
+        self.list
+            .set_items(items.map(|items| session_rows(items, workspaces)), None);
     }
 
     pub fn page(
@@ -64,7 +72,8 @@ impl SessionsPanel {
             Ok((items, next_cursor)) => {
                 self.next_cursor = next_cursor;
                 if self.append {
-                    self.list.append_items(session_rows(items));
+                    self.list
+                        .append_items(session_rows(items, self.scope == SessionsScope::All));
                 } else {
                     self.set_items(Ok(items));
                 }
@@ -92,6 +101,7 @@ impl SessionsPanel {
             query: self.list.query().trim().to_owned(),
             cursor: if reset { None } else { self.next_cursor.take() },
             show_acp: self.show_acp,
+            scope: self.scope,
         })
     }
 
@@ -115,7 +125,26 @@ impl SessionsPanel {
         self.filter_changed();
     }
 
+    /// Ctrl+S widens and narrows the list like a new query: the scope
+    /// changes and the first page is read again.
+    fn cycle_scope(&mut self) {
+        self.scope = match self.scope {
+            SessionsScope::Workspace => SessionsScope::All,
+            SessionsScope::All => SessionsScope::Workspace,
+        };
+        let (title, empty) = match self.scope {
+            SessionsScope::Workspace => (TITLE_WORKSPACE, EMPTY_WORKSPACE),
+            SessionsScope::All => (TITLE_ALL, "No saved sessions yet."),
+        };
+        self.list.set_title(t(title));
+        self.list.set_empty_text(empty);
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
+        if key.code == KeyCode::Char('s') && key.mods.contains(Modifiers::CTRL) {
+            self.cycle_scope();
+            return Effect::Refresh;
+        }
         let before = self.list.query().to_owned();
         let event = self.list.handle_key(key);
         if before != self.list.query() {
@@ -138,17 +167,27 @@ impl SessionsPanel {
     }
 }
 
-fn session_rows(items: Vec<SessionItem>) -> Vec<Item> {
+fn session_rows(items: Vec<SessionItem>, workspaces: bool) -> Vec<Item> {
+    let now = now_ms();
     items
         .iter()
         .map(|item| {
+            let detail = if workspaces {
+                format!(
+                    "{} · {}",
+                    relative_time(item.updated_at, now),
+                    tilde(&item.cwd)
+                )
+            } else {
+                relative_time(item.updated_at, now)
+            };
             let mut row = Item::new(
                 item.id.clone(),
                 match tag(item.origin.as_deref()) {
                     Some(tag) => format!("{tag} {}", label(item)),
                     None => label(item),
                 },
-                relative_time(item.updated_at, now_ms()),
+                detail,
             );
             row.search = search_text(item);
             row

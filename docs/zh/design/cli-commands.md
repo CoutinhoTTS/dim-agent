@@ -757,6 +757,7 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 | `dimcode session delete SESSION` | 永久删除该 Session 及存储为它保留的一切；不弹出确认。 |
 | `dimcode session cleanup (--older-than DURATION\|--keep N) [--yes]` | 列出某个选择器命中的 Session，确认后删除。 |
 | `/rename TITLE` 或 `/rename --clear` | 设置或清除所显示 Session 的手动标题；该文本是命令，永不成为模型输入。 |
+| `/resume` | 在当前工作区上打开 Session 选择面板（[`/resume` 选择面板](#resume-选择面板)）；`Ctrl+S` 放宽到所有工作区。 |
 | `/export markdown PATH` 或 `/export json PATH` | 交互客户端空闲时把当前主分支导出到文件。 |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | 不经守护进程，把 Session 的完整 Timeline 写成带版本的 JSONL（[Timeline 导出](appserver/timeline-export.md)）；未给输出路径时写到 stdout。 |
 | `dimcode daemon vacuum [--database PATH]` | 用 SQLite `VACUUM` 重写离线原生库，回收已删除 Session 留下的页，并打印操作前后的大小（[存储格式](appserver/native-storage-format.md#sqlite-运行参数与空间回收)）；守护进程持库时失败，也不创建或升级库。 |
@@ -869,6 +870,41 @@ Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
 缺少路径或格式不支持时打印用法并回到提示符，不提交输入。`/exit` 不带参数。只拦截这些确切的命令名；
 其他文本走普通输入路径。子命令不建立插件命令注册表。
 
+### `/resume` 选择面板
+
+`/resume` 打开在 `dimcode` 启动时的工作区上：`--cwd` 指定的目录，经过规范化，也就是
+`session.create` 为在那里创建的 Session 记录的工作区。列表只含恰好属于该工作区的已存 Session，
+最新在前，每次打开都从这里开始。`Ctrl+S` 把列表放宽到所有工作区，再回到当前工作区，标题写明
+当前范围。过滤框保留输入框的 `Ctrl+A` 与 `Ctrl+W`，`Tab` 向下移动选择。
+
+```text
+╭─ Sessions · This workspace ──────────────────────────────────────────────────╮
+│                                                                              │
+│ >                                                                            │
+│                                                                              │
+│   Fix the failing test       3h ago                                          │
+│   Update the catalog design  1d ago                                          │
+╰───────────────────── Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close ─╯
+```
+
+```text
+╭─ Sessions · All workspaces ──────────────────────────────────────────────────╮
+│                                                                              │
+│ >                                                                            │
+│                                                                              │
+│   Fix the failing test       3h ago · ~/src/app/web                          │
+│   Update the catalog design  1d ago · ~/src/other                            │
+╰───────────────────── Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close ─╯
+```
+
+- 切换范围像一次新的查询：取消尚未完成的读取、丢掉游标、重新读第一页；查询保留，并在新范围内生效。
+- 在当前工作区范围之外，每行先写更新于多久之前，再写它所属的工作区，主目录写作 `~`。标签最多占一半
+  宽度，时间在最前，因此被截断的是长路径。
+- 当前工作区范围、没有 Session 且没有查询时，列表显示 `No saved sessions in this workspace. Ctrl+S shows more.`；
+  其余空列表与无匹配文案不变。
+- 没有 `session.catalog` 的守护进程经 `session.summaries` 列目录，客户端用同样的精确匹配把范围应用到收到的行上。
+- `dimcode --resume ID` 仍可恢复任何工作区的 Session，清理也在所有工作区范围内选择。
+
 ### 会话标题
 
 手动标题是 Session 自己的状态：`session.summaries` 以 `manual` 来源报告它，
@@ -922,7 +958,8 @@ TITLE 视为缺失，也按同样方式拒绝。
 | `--older-than DURATION` | `updatedAt` 距今至少 `DURATION` 的每个 Session。`DURATION` 是数字加单位 `d`、`h` 或 `m`，例如 `30d`。 |
 | `--keep N` | 保留最近活跃的 N 个 Session；其余全部选中。 |
 
-清理只选 `/resume` 默认列出的 Session
+清理在所有工作区范围内选择，而不只是 `/resume` 打开时所在的那一个：它选的类别就是 `/resume`
+默认列出的那些
 （[分类](../../design/appserver/session-classification.md#35-catalog-visibility)）：来源为 `client` 或 `unknown`。
 `internal` 的 Session
 永远不会被选中：成员随其 leader 的删除一起消失，启动的 Session 属于它的插件。`acp` 的 Session

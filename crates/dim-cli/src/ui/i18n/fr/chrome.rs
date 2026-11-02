@@ -395,8 +395,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
 
         // sessions_panel.rs
         "Sessions" => "Sessions",
-        "Enter open · Ctrl+R refresh · Esc close" => {
-            "Enter ouvrir · Ctrl+R actualiser · Esc fermer"
+        "Sessions · This workspace" => "Sessions · Cet espace de travail",
+        "Sessions · All workspaces" => "Sessions · Tous les espaces de travail",
+        "No saved sessions in this workspace. Ctrl+S shows more." => {
+            "Aucune session enregistrée dans cet espace de travail. Ctrl+S en affiche d'autres."
+        }
+        "Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close" => {
+            "Enter ouvrir · Ctrl+S portée · Ctrl+R actualiser · Esc fermer"
         }
         "Loading sessions..." => "Chargement…",
         "No saved sessions yet." => "Aucune session enregistrée.",

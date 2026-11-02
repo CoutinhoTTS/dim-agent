@@ -7,7 +7,10 @@ fn rows(start: usize, end: usize) -> Value {
 #[test]
 fn tui_resume_catalog_pages_searches_and_closes_without_waiting_for_a_read() {
     let home = Home::new();
+    let workspace = std::fs::canonicalize(&home.0).unwrap();
+    let workspace = workspace.to_str().unwrap().to_owned();
     let (ready, waiting) = std::sync::mpsc::channel();
+    let expected = workspace.clone();
     let daemon=home.daemon(move |wire| {
         wire.hello(&["session.catalog", "session.catalog.cancel"]);
         wire.created();
@@ -19,13 +22,13 @@ fn tui_resume_catalog_pages_searches_and_closes_without_waiting_for_a_read() {
         let providers=wire.read("account.providers");
         wire.reply(&providers,json!([]));
         let first=wire.read("session.catalog");
-        assert_eq!(first["params"],json!({"limit":50,"query":"","withPreview":true}));
+        assert_eq!(first["params"],json!({"limit":50,"query":"","withPreview":true,"cwd":expected}));
         wire.reply(&first,json!({"sessions":rows(0,50),"nextCursor":"second-page"}));
         let second=wire.read("session.catalog");
-        assert_eq!(second["params"],json!({"limit":50,"query":"","withPreview":true,"cursor":"second-page"}));
+        assert_eq!(second["params"],json!({"limit":50,"query":"","withPreview":true,"cwd":expected,"cursor":"second-page"}));
         wire.reply(&second,json!({"sessions":rows(50,100)}));
         let query=wire.read("session.catalog");
-        assert_eq!(query["params"],json!({"limit":50,"query":"ä title","withPreview":true}));
+        assert_eq!(query["params"],json!({"limit":50,"query":"ä title","withPreview":true,"cwd":expected}));
         wire.reply(&query,json!({"sessions":[{"sessionId":"off-page","cwd":"/workspace","title":"off-page result","preview":"different preview","model":{"providerId":"test","modelId":"model"},"updatedAt":2}]}));
         let cleared=wire.read("session.catalog");
         assert_eq!(cleared["params"]["query"],"");
@@ -42,7 +45,9 @@ fn tui_resume_catalog_pages_searches_and_closes_without_waiting_for_a_read() {
         wire.reply(&reopened,json!({"sessions":[{"sessionId":"fresh","cwd":"/workspace","preview":"fresh opening","model":{"providerId":"test","modelId":"model"},"updatedAt":3}]}));
         no_catalog(wire);
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut command = home.command();
+    command.args(["--cwd", &workspace]);
+    let mut terminal = Terminal::launch_tui(command);
     terminal.until("test / model");
     terminal.write(b"/resume\r");
     terminal.until("topic0000");
@@ -72,11 +77,14 @@ fn tui_resume_catalog_pages_searches_and_closes_without_waiting_for_a_read() {
 #[test]
 fn tui_resume_labels_origins_and_shows_acp_sessions_when_asked() {
     let home = Home::new();
+    let workspace = std::fs::canonicalize(&home.0).unwrap();
+    let workspace = workspace.to_str().unwrap().to_owned();
     fs::write(
         home.0.join("config.json"),
         r#"{"locale":"en","showAcpSessions":true}"#,
     )
     .unwrap();
+    let expected = workspace.clone();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[
             "session.catalog",
@@ -97,7 +105,7 @@ fn tui_resume_labels_origins_and_shows_acp_sessions_when_asked() {
         let first = wire.read("session.catalog");
         assert_eq!(
             first["params"],
-            json!({"limit":50,"query":"","withPreview":true,"withAcpSessions":true})
+            json!({"limit":50,"query":"","withPreview":true,"withAcpSessions":true,"cwd":expected})
         );
         wire.reply(
             &first,
@@ -113,12 +121,256 @@ fn tui_resume_labels_origins_and_shows_acp_sessions_when_asked() {
         );
         no_catalog(wire);
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut command = home.command();
+    command.args(["--cwd", &workspace]);
+    let mut terminal = Terminal::launch_tui(command);
     terminal.until("test / model");
     terminal.write(b"/resume\r");
     terminal.until("[Chat] Update cache");
     terminal.until("[ACP ] Editor conversation");
     terminal.until("[Agent] Inspect cache");
+    terminal.write(b"\x1b[27u");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+#[test]
+fn tui_resume_reads_the_launch_workspace_on_every_page() {
+    let home = Home::new();
+    let workspace = std::fs::canonicalize(&home.0).unwrap();
+    let workspace = workspace.to_str().unwrap().to_owned();
+    let expected = workspace.clone();
+    let (paged, next_page) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["session.catalog"]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        wire.no_context();
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let first = wire.read("session.catalog");
+        assert_eq!(first["params"]["cwd"], json!(expected), "{first}");
+        wire.reply(
+            &first,
+            json!({"sessions":rows(0,50),"nextCursor":"second-page"}),
+        );
+        let second = wire.read("session.catalog");
+        assert_eq!(second["params"]["cwd"], json!(expected), "{second}");
+        assert_eq!(second["params"]["cursor"], "second-page");
+        wire.reply(&second, json!({"sessions":rows(50,100)}));
+        paged.send(()).unwrap();
+        no_catalog(wire);
+    });
+    let mut command = home.command();
+    command.args(["--cwd", &workspace]);
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / model");
+    terminal.write(b"/resume\r");
+    terminal.until("topic0000");
+    terminal.write(b"\x1b[F");
+    terminal.until("topic0049");
+    next_page.recv_timeout(PATIENCE).unwrap();
+    terminal.write(b"\x1b[27u");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+/// Ctrl+S widens the picker like a new query: every workspace, with each row
+/// naming the one it lives in.
+#[test]
+fn tui_resume_ctrl_s_widens_to_every_workspace_and_names_the_workspace_of_a_row() {
+    let home = Home::new();
+    let workspace = std::fs::canonicalize(&home.0).unwrap();
+    let workspace = workspace.to_str().unwrap().to_owned();
+    let mine = workspace.clone();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["session.catalog"]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        wire.no_context();
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let first = wire.read("session.catalog");
+        assert_eq!(first["params"]["cwd"], json!(mine), "{first}");
+        wire.reply(
+            &first,
+            json!({"sessions":[{"sessionId":"mine","cwd":mine,"preview":"mine preview","model":{"providerId":"test","modelId":"model"},"updatedAt":5}]}),
+        );
+        let widened = wire.read("session.catalog");
+        assert!(
+            widened["params"].get("cwd").is_none(),
+            "the widened read names no workspace: {widened}"
+        );
+        wire.reply(
+            &widened,
+            json!({"sessions":[
+                {"sessionId":"mine","cwd":mine,"preview":"mine preview","model":{"providerId":"test","modelId":"model"},"updatedAt":5},
+                {"sessionId":"other","cwd":"/elsewhere/project","title":"Other project session","preview":"other preview","model":{"providerId":"test","modelId":"model"},"updatedAt":4}
+            ]}),
+        );
+        no_catalog(wire);
+    });
+    let mut command = home.command();
+    command.args(["--cwd", &workspace]);
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / model");
+    terminal.write(b"/resume\r");
+    terminal.until("mine preview");
+    terminal.write(b"\x13");
+    terminal.until("Sessions · All workspaces");
+    terminal.until("Other project session");
+    terminal.until("/elsewhere/project");
+    terminal.write(b"\x1b[27u");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+#[test]
+fn tui_resume_says_when_the_workspace_has_no_saved_sessions() {
+    let home = Home::new();
+    let workspace = std::fs::canonicalize(&home.0).unwrap();
+    let workspace = workspace.to_str().unwrap().to_owned();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["session.catalog"]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        wire.no_context();
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let first = wire.read("session.catalog");
+        wire.reply(&first, json!({"sessions":[]}));
+        no_catalog(wire);
+    });
+    let mut command = home.command();
+    command.args(["--cwd", &workspace]);
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / model");
+    terminal.write(b"/resume\r");
+    terminal.until("No saved sessions in this workspace. Ctrl+S shows more.");
+    terminal.write(b"\x1b[27u");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+#[test]
+fn tui_resume_searches_inside_the_workspace() {
+    let home = Home::new();
+    let workspace = std::fs::canonicalize(&home.0).unwrap();
+    let workspace = workspace.to_str().unwrap().to_owned();
+    let expected = workspace.clone();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["session.catalog"]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        wire.no_context();
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let first = wire.read("session.catalog");
+        wire.reply(
+            &first,
+            json!({"sessions":[{"sessionId":"plain","cwd":expected,"preview":"plain preview","model":{"providerId":"test","modelId":"model"},"updatedAt":5}]}),
+        );
+        let query = wire.read("session.catalog");
+        assert_eq!(query["params"]["query"], "needle", "{query}");
+        assert_eq!(query["params"]["cwd"], json!(expected), "{query}");
+        wire.reply(
+            &query,
+            json!({"sessions":[{"sessionId":"match","cwd":expected,"preview":"needle result","model":{"providerId":"test","modelId":"model"},"updatedAt":4}]}),
+        );
+        no_catalog(wire);
+    });
+    let mut command = home.command();
+    command.args(["--cwd", &workspace]);
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / model");
+    terminal.write(b"/resume\r");
+    terminal.until("plain preview");
+    terminal.write(b"needle");
+    terminal.until("needle result");
+    terminal.write(b"\x1b[27u");
+    terminal.write(b"\x1b[27u");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+/// A daemon before `session.catalog` is listed through `session.summaries`,
+/// and the client applies the workspace scope to the rows it receives.
+#[test]
+fn tui_resume_hides_other_workspaces_on_the_summaries_fallback() {
+    let home = Home::new();
+    let workspace = std::fs::canonicalize(&home.0).unwrap();
+    let workspace = workspace.to_str().unwrap().to_owned();
+    let mine = workspace.clone();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        wire.no_context();
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let summaries = wire.read("session.summaries");
+        let rows = json!([
+            {"sessionId":"mine","cwd":mine,"preview":"mine preview","model":{"providerId":"test","modelId":"model"},"updatedAt":5},
+            {"sessionId":"other","cwd":"/elsewhere/project","title":"Other workspace session","preview":"other preview","model":{"providerId":"test","modelId":"model"},"updatedAt":4}
+        ]);
+        wire.reply(&summaries, rows.clone());
+        let widened = wire.read("session.summaries");
+        wire.reply(&widened, rows);
+        no_catalog(wire);
+    });
+    let mut command = home.command();
+    command.args(["--cwd", &workspace]);
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / model");
+    terminal.write(b"/resume\r");
+    terminal.until("mine preview");
+    assert!(
+        !terminal.transcript.contains("Other workspace session"),
+        "a Session of another workspace was listed: {}",
+        terminal.transcript
+    );
+    terminal.write(b"\x13");
+    terminal.until("Other workspace session");
     terminal.write(b"\x1b[27u");
     terminal.write(b"/exit\r");
     terminal.until("Bye!");
