@@ -763,9 +763,10 @@ fn branch_query(
     dim_agent_runtime::TimelineQuery {
         scope,
         position,
+        direction: Default::default(),
         kinds: vec![],
-        context_render: None,
-        context_state: None,
+        flags: vec![],
+        event_id: None,
         predicate: None,
         limit: std::num::NonZeroU64::new(16).unwrap(),
     }
@@ -822,7 +823,13 @@ async fn a_query_cursor_ends_a_batch_and_its_next_continues_after_it() {
     let first = timeline
         .query(dim_agent_runtime::TimelineQuery {
             limit: std::num::NonZeroU64::new(1).unwrap(),
-            ..branch_query(Branch, Range { start: 1, end: 7 })
+            ..branch_query(
+                Branch,
+                Range {
+                    start: 1,
+                    end: Some(7),
+                },
+            )
         })
         .await
         .unwrap();
@@ -842,7 +849,13 @@ async fn a_query_cursor_ends_a_batch_and_its_next_continues_after_it() {
                 through: 7,
             },
             limit: std::num::NonZeroU64::new(2).unwrap(),
-            ..branch_query(Branch, Range { start: 1, end: 7 })
+            ..branch_query(
+                Branch,
+                Range {
+                    start: 1,
+                    end: Some(7),
+                },
+            )
         })
         .await
         .unwrap();
@@ -865,7 +878,13 @@ async fn a_query_cursor_ends_a_batch_and_its_next_continues_after_it() {
                 cursor: second.next.clone().unwrap(),
                 through: 7,
             },
-            ..branch_query(Branch, Range { start: 1, end: 7 })
+            ..branch_query(
+                Branch,
+                Range {
+                    start: 1,
+                    end: Some(7),
+                },
+            )
         })
         .await
         .unwrap();
@@ -911,7 +930,13 @@ async fn a_chain_query_orders_by_chain_position_then_sequence() {
     child.append(input("child two").with_id("child-2")).unwrap();
 
     let whole = child
-        .query(branch_query(Chain, Range { start: 1, end: 2 }))
+        .query(branch_query(
+            Chain,
+            Range {
+                start: 1,
+                end: Some(2),
+            },
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -923,7 +948,13 @@ async fn a_chain_query_orders_by_chain_position_then_sequence() {
     let first = child
         .query(dim_agent_runtime::TimelineQuery {
             limit: std::num::NonZeroU64::new(3).unwrap(),
-            ..branch_query(Chain, Range { start: 1, end: 2 })
+            ..branch_query(
+                Chain,
+                Range {
+                    start: 1,
+                    end: Some(2),
+                },
+            )
         })
         .await
         .unwrap();
@@ -946,7 +977,13 @@ async fn a_chain_query_orders_by_chain_position_then_sequence() {
                 cursor: first.next.unwrap(),
                 through: 2,
             },
-            ..branch_query(Chain, Range { start: 1, end: 2 })
+            ..branch_query(
+                Chain,
+                Range {
+                    start: 1,
+                    end: Some(2),
+                },
+            )
         })
         .await
         .unwrap();
@@ -994,33 +1031,93 @@ async fn a_query_selects_kinds_and_the_flags_it_names() {
         )
         .unwrap();
 
-    let mut query = branch_query(Branch, Range { start: 1, end: 3 });
+    let mut query = branch_query(
+        Branch,
+        Range {
+            start: 1,
+            end: Some(3),
+        },
+    );
     query.kinds = vec!["input/message".into()];
     let by_kind = timeline.query(query).await.unwrap();
     assert_eq!(queried(&by_kind.events), ["input"]);
 
     let render = timeline
         .query(dim_agent_runtime::TimelineQuery {
-            context_render: Some(true),
-            ..branch_query(Branch, Range { start: 1, end: 3 })
+            flags: vec![dim_agent_runtime::TimelineQueryFlag::Render],
+            ..branch_query(
+                Branch,
+                Range {
+                    start: 1,
+                    end: Some(3),
+                },
+            )
         })
         .await
         .unwrap();
     assert_eq!(queried(&render.events), ["text"]);
 
-    let unstated = timeline
+    let state = timeline
         .query(dim_agent_runtime::TimelineQuery {
-            context_state: Some(false),
-            ..branch_query(Branch, Range { start: 1, end: 3 })
+            flags: vec![dim_agent_runtime::TimelineQueryFlag::State],
+            ..branch_query(
+                Branch,
+                Range {
+                    start: 1,
+                    end: Some(3),
+                },
+            )
         })
         .await
         .unwrap();
-    assert_eq!(queried(&unstated.events), ["stop"]);
+    assert_eq!(queried(&state.events), ["input", "text"]);
+
+    let union = timeline
+        .query(dim_agent_runtime::TimelineQuery {
+            flags: vec![
+                dim_agent_runtime::TimelineQueryFlag::Render,
+                dim_agent_runtime::TimelineQueryFlag::State,
+            ],
+            ..branch_query(
+                Branch,
+                Range {
+                    start: 1,
+                    end: Some(3),
+                },
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        queried(&union.events),
+        ["input", "text"],
+        "naming both flags selects the union: a row carrying one matches"
+    );
+
+    let any = timeline
+        .query(dim_agent_runtime::TimelineQuery {
+            ..branch_query(
+                Branch,
+                Range {
+                    start: 1,
+                    end: Some(3),
+                },
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(queried(&any.events), ["input", "text", "stop"]);
 
     let unknown = timeline
         .query(dim_agent_runtime::TimelineQuery {
             kinds: vec!["test/absent".into()],
-            ..branch_query(Branch, Range { start: 1, end: 3 })
+            ..branch_query(
+                Branch,
+                Range {
+                    start: 1,
+                    end: Some(3),
+                },
+            )
         })
         .await
         .unwrap();
@@ -1066,7 +1163,13 @@ async fn a_query_predicate_matches_one_dotted_path_and_an_unknown_path_matches_n
             path: path.into(),
             value,
         }),
-        ..branch_query(Branch, Range { start: 1, end: 2 })
+        ..branch_query(
+            Branch,
+            Range {
+                start: 1,
+                end: Some(2),
+            },
+        )
     };
     let reply = timeline
         .query(matching("tool", serde_json::json!("search")))
@@ -1130,8 +1233,14 @@ async fn a_query_rejects_a_future_position_a_cursor_inside_a_batch_and_a_cursor_
 
     assert!(
         matches!(
-            main.query(branch_query(Branch, Range { start: 1, end: 5 }))
-                .await,
+            main.query(branch_query(
+                Branch,
+                Range {
+                    start: 1,
+                    end: Some(5)
+                }
+            ))
+            .await,
             Err(AgentError::InvalidInput(_))
         ),
         "a position past the published head is invalid input"
@@ -1173,6 +1282,325 @@ async fn a_query_rejects_a_future_position_a_cursor_inside_a_batch_and_a_cursor_
     );
 }
 
+#[tokio::test]
+async fn a_descending_page_returns_the_newest_facts_in_ascending_order() {
+    use dim_agent_runtime::TimelineQueryDirection::Descending;
+    use dim_agent_runtime::TimelineQueryPosition::{Cursor, Range};
+    use dim_agent_runtime::TimelineQueryScope::Branch;
+
+    let store = Arc::new(MemoryTimelineStore::default());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let timeline = Timeline::new(
+        Ctx::root().unwrap(),
+        TimelineKey {
+            session_id: "session".into(),
+            branch_id: "main".into(),
+        },
+        vec![],
+        store,
+    );
+    timeline.append(input("one").with_id("main-1")).unwrap();
+    timeline.append(input("two").with_id("main-2")).unwrap();
+    timeline
+        .append_batch_registered(
+            vec![
+                input("a").with_id("main-3"),
+                input("b").with_id("main-4"),
+                input("c").with_id("main-5"),
+            ],
+            |_| Ok(()),
+        )
+        .unwrap();
+    timeline.append(input("six").with_id("main-6")).unwrap();
+
+    let first = timeline
+        .query(dim_agent_runtime::TimelineQuery {
+            direction: Descending,
+            limit: std::num::NonZeroU64::new(2).unwrap(),
+            ..branch_query(
+                Branch,
+                Range {
+                    start: 1,
+                    end: Some(6),
+                },
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        queried(&first.events),
+        ["main-3", "main-4", "main-5", "main-6"],
+        "the newest page is ordered ascending and ends at a batch start"
+    );
+    assert_eq!(
+        first.next,
+        Some(dim_agent_runtime::TimelineCursor {
+            branch_id: "main".into(),
+            sequence: 3
+        }),
+        "the cursor continues strictly below the oldest returned event"
+    );
+
+    let second = timeline
+        .query(dim_agent_runtime::TimelineQuery {
+            direction: Descending,
+            position: Cursor {
+                cursor: first.next.unwrap(),
+                through: 1,
+            },
+            ..branch_query(
+                Branch,
+                Range {
+                    start: 1,
+                    end: Some(6),
+                },
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(queried(&second.events), ["main-1", "main-2"]);
+    assert_eq!(second.next, None);
+}
+
+#[tokio::test]
+async fn a_range_ending_inside_a_batch_is_rejected_in_both_directions() {
+    use dim_agent_runtime::TimelineQueryDirection::Descending;
+    use dim_agent_runtime::TimelineQueryPosition::Range;
+    use dim_agent_runtime::TimelineQueryScope::Branch;
+
+    let store = Arc::new(MemoryTimelineStore::default());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let timeline = Timeline::new(
+        Ctx::root().unwrap(),
+        TimelineKey {
+            session_id: "session".into(),
+            branch_id: "main".into(),
+        },
+        vec![],
+        store,
+    );
+    timeline
+        .append_batch_registered(vec![input("a"), input("b"), input("c")], |_| Ok(()))
+        .unwrap();
+    for direction in [
+        dim_agent_runtime::TimelineQueryDirection::Ascending,
+        Descending,
+    ] {
+        assert!(
+            matches!(
+                timeline
+                    .query(dim_agent_runtime::TimelineQuery {
+                        direction,
+                        ..branch_query(
+                            Branch,
+                            Range {
+                                start: 1,
+                                end: Some(2)
+                            }
+                        )
+                    })
+                    .await,
+                Err(AgentError::InvalidInput(_))
+            ),
+            "{direction:?}: a page must not cross an atomic batch"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_query_event_id_selects_one_fact_and_reports_its_branch() {
+    use dim_agent_runtime::TimelineQueryPosition::Range;
+    use dim_agent_runtime::TimelineQueryScope::Chain;
+
+    let store = Arc::new(MemoryTimelineStore::default());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let ctx = Ctx::root().unwrap();
+    let main = Timeline::new(
+        ctx.clone(),
+        TimelineKey {
+            session_id: "session".into(),
+            branch_id: "main".into(),
+        },
+        vec![],
+        store.clone(),
+    );
+    main.append(input("root one").with_id("main-1")).unwrap();
+    main.append(input("root two").with_id("main-2")).unwrap();
+    main.append(branch_create("child", 2)).unwrap();
+    let child = Timeline::new(
+        ctx,
+        TimelineKey {
+            session_id: "session".into(),
+            branch_id: "child".into(),
+        },
+        vec![("main".into(), 2)],
+        store,
+    );
+    child.append(input("child one").with_id("child-1")).unwrap();
+
+    let ancestor = child
+        .query(dim_agent_runtime::TimelineQuery {
+            event_id: Some("main-2".into()),
+            ..branch_query(
+                Chain,
+                Range {
+                    start: 1,
+                    end: None,
+                },
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(queried(&ancestor.events), ["main-2"]);
+    assert_eq!(
+        ancestor.positions,
+        vec![TimelinePosition {
+            branch_id: "main".into(),
+            sequence: 2
+        }],
+        "a by-id lookup reports the branch the event lives on"
+    );
+
+    let local = child
+        .query(dim_agent_runtime::TimelineQuery {
+            event_id: Some("child-1".into()),
+            ..branch_query(
+                Chain,
+                Range {
+                    start: 1,
+                    end: None,
+                },
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(queried(&local.events), ["child-1"]);
+    assert_eq!(local.positions[0].branch_id, "child");
+
+    let absent = child
+        .query(dim_agent_runtime::TimelineQuery {
+            event_id: Some("absent".into()),
+            ..branch_query(
+                Chain,
+                Range {
+                    start: 1,
+                    end: None,
+                },
+            )
+        })
+        .await
+        .unwrap();
+    assert!(
+        absent.events.is_empty(),
+        "an id outside the scope selects nothing"
+    );
+    assert!(absent.positions.is_empty());
+    assert_eq!(absent.next, None);
+}
+
+#[tokio::test]
+async fn a_chain_range_applies_to_each_branch_and_defaults_to_the_published_head() {
+    use dim_agent_runtime::TimelineQueryPosition::Range;
+    use dim_agent_runtime::TimelineQueryScope::Chain;
+
+    let store = Arc::new(MemoryTimelineStore::default());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let ctx = Ctx::root().unwrap();
+    let main = Timeline::new(
+        ctx.clone(),
+        TimelineKey {
+            session_id: "session".into(),
+            branch_id: "main".into(),
+        },
+        vec![],
+        store.clone(),
+    );
+    for id in ["main-1", "main-2", "main-3", "main-4"] {
+        main.append(input(id).with_id(id)).unwrap();
+    }
+    main.append(branch_create("child", 2)).unwrap();
+    let child = Timeline::new(
+        ctx,
+        TimelineKey {
+            session_id: "session".into(),
+            branch_id: "child".into(),
+        },
+        vec![("main".into(), 2)],
+        store,
+    );
+    child.append(input("child-1").with_id("child-1")).unwrap();
+    child.append(input("child-2").with_id("child-2")).unwrap();
+
+    let defaulted = child
+        .query(branch_query(
+            Chain,
+            Range {
+                start: 1,
+                end: None,
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        queried(&defaulted.events),
+        ["main-1", "main-2", "child-1", "child-2"],
+        "the range's end defaults to the published head, and the ancestor reads to its cut"
+    );
+    assert_eq!(
+        defaulted
+            .positions
+            .iter()
+            .map(|position| (position.branch_id.as_str(), position.sequence))
+            .collect::<Vec<_>>(),
+        [("main", 1), ("main", 2), ("child", 1), ("child", 2)],
+        "a chain read reports the ancestor's branch for an ancestor's fact"
+    );
+
+    let clipped = child
+        .query(branch_query(
+            Chain,
+            Range {
+                start: 1,
+                end: Some(1),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        queried(&clipped.events),
+        ["main-1", "child-1"],
+        "each branch is read to the lower of the range's end and its cut"
+    );
+
+    let from_second = child
+        .query(branch_query(
+            Chain,
+            Range {
+                start: 2,
+                end: None,
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        queried(&from_second.events),
+        ["main-2", "child-2"],
+        "the range's start applies to each branch's own sequence space"
+    );
+}
+
 #[test]
 fn the_query_crosses_languages_with_its_serde_shape() {
     use dim_agent_runtime::{
@@ -1188,9 +1616,13 @@ fn the_query_crosses_languages_with_its_serde_shape() {
             },
             through: 9,
         },
+        direction: dim_agent_runtime::TimelineQueryDirection::Descending,
         kinds: vec!["input/message".into()],
-        context_render: None,
-        context_state: Some(true),
+        flags: vec![
+            dim_agent_runtime::TimelineQueryFlag::Render,
+            dim_agent_runtime::TimelineQueryFlag::State,
+        ],
+        event_id: Some("event-1".into()),
         predicate: Some(TimelineQueryPredicate {
             path: "nested.level".into(),
             value: serde_json::json!(3),
@@ -1199,14 +1631,38 @@ fn the_query_crosses_languages_with_its_serde_shape() {
     };
     let wire = serde_json::to_value(&query).unwrap();
     assert_eq!(wire["scope"], "chain");
+    assert_eq!(wire["direction"], "descending");
     assert_eq!(wire["position"]["kind"], "cursor");
     assert_eq!(wire["position"]["cursor"]["sequence"], 4);
+    assert_eq!(wire["flags"], serde_json::json!(["render", "state"]));
+    assert_eq!(wire["event_id"], "event-1");
     assert_eq!(wire["limit"], 4);
     assert_eq!(wire["predicate"]["path"], "nested.level");
     assert_eq!(
         serde_json::from_value::<dim_agent_runtime::TimelineQuery>(wire).unwrap(),
         query
     );
+    let defaulted: dim_agent_runtime::TimelineQuery = serde_json::from_value(serde_json::json!({
+        "scope": "branch",
+        "position": {"kind": "range", "start": 1},
+        "limit": 2
+    }))
+    .unwrap();
+    assert_eq!(
+        defaulted.direction,
+        dim_agent_runtime::TimelineQueryDirection::Ascending,
+        "ascending is the default"
+    );
+    assert_eq!(
+        defaulted.position,
+        TimelineQueryPosition::Range {
+            start: 1,
+            end: None
+        }
+    );
+    assert_eq!(defaulted.kinds, Vec::<String>::new());
+    assert_eq!(defaulted.flags, Vec::new());
+    assert_eq!(defaulted.event_id, None);
     assert!(
         serde_json::from_value::<dim_agent_runtime::TimelineQuery>(serde_json::json!({
             "scope": "branch",

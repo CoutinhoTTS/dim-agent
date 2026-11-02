@@ -336,20 +336,29 @@ pub trait TimelineStore: Send + Sync + 'static {
         self.read_page(key, after, limit, through)
     }
     /// One per-branch read for [`TimelineQuery`] (ADR 019, plugin contract
-    /// §5.4): applies the position, kinds, flags, predicate and limit to
-    /// `key`'s branch and returns the decoded facts in sequence order with the
-    /// cursor after them.
+    /// §5.4): applies the position, direction, kinds, flags, event id,
+    /// predicate and limit to `key`'s branch and returns the decoded facts in
+    /// sequence order, ascending, with each event's position and the cursor
+    /// after them.
     ///
     /// `query.scope` must be [`TimelineQueryScope::Branch`]. The Timeline
     /// service composes [`TimelineQueryScope::Chain`] by reading each
-    /// ancestor and then the queried branch with this method. A cursor must
-    /// name `key`'s branch and end an atomic batch; the position's through
-    /// must end one too. The limit is a target: a reply ends at an atomic
-    /// batch boundary, so its last batch may take it above the limit.
+    /// ancestor and then the queried branch with this method. The read never
+    /// crosses an atomic batch: an ascending page ends at a batch end, so its
+    /// cursor must end one, and a descending page starts at a batch end, so
+    /// its cursor must start one (or name no sequence to read). A range end
+    /// must end a batch in both directions. The limit is a target: a reply
+    /// ends at an atomic batch boundary, so its last batch may take it above
+    /// the limit.
     ///
-    /// A position past the branch head, a cursor inside a batch, a cursor on
-    /// another branch and any other scope are invalid input. A kind or a data
-    /// path the store does not know selects no rows; it is not an error.
+    /// `next` is present whenever the read stopped before the end of its
+    /// position, so a caller never mistakes a short page for the end of its
+    /// scope; it is absent only when the read reached that end.
+    ///
+    /// A position past the branch head, a range end inside a batch, a cursor
+    /// that does not name an atomic batch boundary, a cursor on another branch
+    /// and any other scope are invalid input. A kind, flag, id or data path
+    /// the store does not know selects no rows; it is not an error.
     fn query<'a>(
         &'a self,
         key: &'a TimelineKey,

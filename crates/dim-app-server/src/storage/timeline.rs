@@ -14,8 +14,9 @@ use dim_agent_runtime::Names;
 use dim_agent_runtime::{
     AgentError, BoxFuture, BranchRecord, PolicyEvent, PolicyFacts, PolicyOrder, PolicyOrderEvent,
     PolicyWindow, PublishCallback, Result, SessionConfig, StoredBranch, StoredEvent,
-    TimelineCursor, TimelineKey, TimelineQuery, TimelineQueryPosition, TimelineQueryReply,
-    TimelineQueryScope, TimelineStore, TimelineTrace, panic_message,
+    TimelineCursor, TimelineKey, TimelineQuery, TimelineQueryDirection, TimelineQueryFlag,
+    TimelineQueryPosition, TimelineQueryReply, TimelineQueryScope, TimelineStore, TimelineTrace,
+    panic_message,
 };
 use dim_agent_types::{
     AgentEvent, BranchCreateAt, ContextCompactionResult, EventKind, ModelRequest, RecoverySnapshot,
@@ -409,11 +410,60 @@ impl SqliteTimelineStore {
             .into_iter()
             .filter(|record| {
                 query
-                    .predicate
+                    .event_id
                     .as_ref()
-                    .is_none_or(|predicate| predicate.matches(&record.event))
+                    .is_none_or(|wanted| wanted == &record.event.id)
+                    && query
+                        .predicate
+                        .as_ref()
+                        .is_none_or(|predicate| predicate.matches(&record.event))
             })
             .collect())
+    }
+    /// The atomic batch end of the fact at `sequence` on `key`'s branch. The
+    /// stored row's `last_sequence` is its own last event, not the batch's, so
+    /// the boundary comes from the decoded event.
+    async fn batch_end_at(&self, key: &TimelineKey, sequence: u64) -> Result<Option<u64>> {
+        let mut reader = self.reader(RequestBodies::Unused);
+        let record = read_range(&self.db, &mut reader, key, sequence..=sequence, false).await;
+        self.finish(reader);
+        Ok(record?
+            .into_iter()
+            .find(|record| record.event.sequence == sequence)
+            .map(|record| record.batch_end))
+    }
+    /// The first sequence of the atomic batch that ends at `batch_end`,
+    /// searching no lower than `floor`: a descending page ends at this
+    /// boundary.
+    async fn batch_start(
+        &self,
+        key: &TimelineKey,
+        sequence: u64,
+        batch_end: u64,
+        floor: u64,
+    ) -> Result<u64> {
+        let mut probe = sequence.saturating_sub(1);
+        loop {
+            if probe == 0 || probe < floor {
+                return Ok(floor);
+            }
+            let low = probe.saturating_sub(63).max(1).max(floor);
+            let mut reader = self.reader(RequestBodies::Unused);
+            let chunk = read_range(&self.db, &mut reader, key, low..=probe, false).await;
+            self.finish(reader);
+            let chunk = chunk?;
+            if let Some(previous) = chunk
+                .iter()
+                .rev()
+                .find(|record| record.batch_end != batch_end)
+            {
+                return Ok(previous.event.sequence + 1);
+            }
+            if low <= floor || low == 1 {
+                return Ok(low);
+            }
+            probe = low - 1;
+        }
     }
     /// The records of `segments`, decoded with one reader of `request_bodies`.
     async fn segments(
@@ -1877,29 +1927,6 @@ fn head(connection: &Connection, key: &TimelineKey) -> Result<u64> {
         })
         .map_err(error)
 }
-/// The last sequence of the row that holds `sequence` on `branch`, `None`
-/// when the branch has no row at or before it. A read position ends an atomic
-/// batch exactly when this equals it.
-fn row_end(
-    connection: &Connection,
-    session: &str,
-    branch: &str,
-    sequence: u64,
-) -> Result<Option<u64>> {
-    let last: Option<i64> = connection
-        .prepare_cached(
-            "SELECT last_sequence FROM timeline_events \
-             WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3 \
-             ORDER BY sequence DESC LIMIT 1",
-        )
-        .map_err(error)?
-        .query_row(params![session, branch, sql_sequence(sequence)?], |row| {
-            row.get(0)
-        })
-        .optional()
-        .map_err(error)?;
-    last.map(sequence_value).transpose()
-}
 pub(super) fn read_sequence(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
     let value: i64 = row.get(index)?;
     u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
@@ -2198,13 +2225,23 @@ fn query_rows(
         sql.push_str(&format!(" AND kind IN ({placeholders})"));
         parameters.extend(query.kinds.iter().map(|kind| text(kind)));
     }
-    if let Some(render) = query.context_render {
-        sql.push_str(" AND context_render=?");
-        parameters.push(i64::from(render).into());
+    let flags: Vec<TimelineQueryFlag> = query.flags.clone();
+    if !flags.is_empty() {
+        let mut columns = Vec::new();
+        for flag in flags {
+            match flag {
+                TimelineQueryFlag::Render => columns.push("context_render=1"),
+                TimelineQueryFlag::State => columns.push("context_state=1"),
+            }
+        }
+        sql.push_str(&format!(" AND ({})", columns.join(" OR ")));
     }
-    if let Some(state) = query.context_state {
-        sql.push_str(" AND context_state=?");
-        parameters.push(i64::from(state).into());
+    if let Some(event_id) = &query.event_id {
+        sql.push_str(
+            " AND (event_id=? OR EXISTS (SELECT 1 FROM json_each(json_extract(body, '$.records')) AS r \
+               WHERE json_extract(r.value, '$.event.id')=?))",
+        );
+        parameters.extend([text(event_id), text(event_id)]);
     }
     if let Some(predicate) = &query.predicate {
         if predicate.json_path().is_none() {
@@ -3338,6 +3375,8 @@ impl TimelineStore for SqliteTimelineStore {
         key: &'a TimelineKey,
         query: &'a TimelineQuery,
     ) -> BoxFuture<'a, Result<TimelineQueryReply>> {
+        use TimelineQueryDirection::{Ascending, Descending};
+
         Box::pin(async move {
             if query.scope != TimelineQueryScope::Branch {
                 return Err(AgentError::InvalidInput(
@@ -3345,14 +3384,15 @@ impl TimelineStore for SqliteTimelineStore {
                         .into(),
                 ));
             }
-            let (through, start, cursor) = match &query.position {
-                TimelineQueryPosition::Range { start, end } => {
+            let branch = key.branch_id.clone();
+            let cursor = match &query.position {
+                TimelineQueryPosition::Range { start, .. } => {
                     if *start == 0 {
                         return Err(AgentError::InvalidInput(
                             "timeline sequences start at 1".into(),
                         ));
                     }
-                    (*end, *start, None)
+                    None
                 }
                 TimelineQueryPosition::Cursor { cursor, through } => {
                     if cursor.branch_id != key.branch_id {
@@ -3366,85 +3406,130 @@ impl TimelineStore for SqliteTimelineStore {
                             "a query cursor names a committed sequence".into(),
                         ));
                     }
-                    if cursor.sequence > *through {
+                    if query.direction == Ascending && cursor.sequence > *through {
                         return Err(AgentError::InvalidInput("future Timeline cursor".into()));
                     }
-                    (
-                        *through,
-                        cursor.sequence.checked_add(1).ok_or_else(|| {
-                            AgentError::InvalidInput(
-                                "query cursor is past the last sequence".into(),
-                            )
-                        })?,
-                        Some(cursor.sequence),
-                    )
+                    if query.direction == Descending && *through == 0 {
+                        return Err(AgentError::InvalidInput(
+                            "timeline sequences start at 1".into(),
+                        ));
+                    }
+                    Some(cursor.sequence)
                 }
             };
-            let session = key.session_id.clone();
-            let branch = key.branch_id.clone();
             let bounds = key.clone();
-            let (head, through_end, cursor_end) = self
+            let position = query.position.clone();
+            let direction = query.direction;
+            let (head, low, high) = self
                 .db
                 .run_read(move |connection| {
-                    Ok((
-                        head(connection, &bounds)?,
-                        row_end(connection, &session, &branch, through)?,
-                        cursor
-                            .map(|sequence| row_end(connection, &session, &branch, sequence))
-                            .transpose()?
-                            .flatten(),
-                    ))
+                    let head = head(connection, &bounds)?;
+                    let (low, high) = match &position {
+                        TimelineQueryPosition::Range { start, end } => {
+                            (*start, end.unwrap_or(head))
+                        }
+                        TimelineQueryPosition::Cursor { cursor, through } => match direction {
+                            Ascending => (cursor.sequence.saturating_add(1), *through),
+                            Descending => (*through, cursor.sequence.saturating_sub(1)),
+                        },
+                    };
+                    Ok((head, low, high))
                 })
                 .await?;
-            if through > head {
+            if cursor.is_some_and(|cursor| cursor > head) {
+                return Err(AgentError::InvalidInput("future Timeline cursor".into()));
+            }
+            if high > head {
                 return Err(AgentError::InvalidInput(format!(
-                    "future Timeline sequence {through}"
+                    "future Timeline sequence {high}"
                 )));
             }
-            if through > 0 && through_end != Some(through) {
+            if low > high {
+                return Ok(TimelineQueryReply {
+                    events: vec![],
+                    positions: vec![],
+                    next: None,
+                });
+            }
+            if high > 0 && self.batch_end_at(key, high).await? != Some(high) {
                 return Err(AgentError::InvalidInput(format!(
-                    "sequence {through} is inside an atomic batch"
+                    "sequence {high} is inside an atomic batch"
                 )));
             }
-            if let Some(cursor) = cursor
-                && cursor_end != Some(cursor)
+            if direction == Ascending
+                && let Some(cursor) = cursor
+                && self.batch_end_at(key, cursor).await? != Some(cursor)
             {
                 return Err(AgentError::InvalidInput(
                     "cursor is inside an atomic batch".into(),
                 ));
             }
-            if start > through {
-                return Ok(TimelineQueryReply {
-                    events: vec![],
-                    next: None,
-                });
-            }
             let limit = usize::try_from(query.limit.get()).unwrap_or(usize::MAX);
-            let mut events: Vec<StoredEvent> = Vec::new();
-            let mut window = start;
+            let mut records: Vec<StoredEvent> = Vec::new();
             let mut target = None;
-            while window <= through {
-                if target.is_some_and(|target| window > target) {
-                    break;
-                }
-                let end = window
-                    .saturating_add(255)
-                    .min(target.unwrap_or(through))
-                    .min(through);
-                events.extend(self.query_range(key, query, window..=end).await?);
-                window = end + 1;
-                if target.is_none() && events.len() >= limit {
-                    let end = events[limit - 1].batch_end;
-                    events.retain(|record| record.event.sequence <= end);
-                    if end < through {
-                        target = Some(end);
+            match direction {
+                Ascending => {
+                    let mut window = low;
+                    while window <= high {
+                        if target.is_some_and(|target| window > target) {
+                            break;
+                        }
+                        let end = window
+                            .saturating_add(255)
+                            .min(target.unwrap_or(high))
+                            .min(high);
+                        records.extend(self.query_range(key, query, window..=end).await?);
+                        window = end + 1;
+                        if target.is_none() && records.len() >= limit {
+                            let end = records[limit - 1].batch_end;
+                            records.retain(|record| record.event.sequence <= end);
+                            if end < high {
+                                target = Some(end);
+                            }
+                        }
                     }
+                }
+                Descending => {
+                    let mut window = high;
+                    let mut newest_first: Vec<StoredEvent> = Vec::new();
+                    while window >= low && window > 0 {
+                        if target.is_some_and(|target| window < target) {
+                            break;
+                        }
+                        let start = window
+                            .saturating_sub(255)
+                            .max(target.unwrap_or(low))
+                            .max(low);
+                        let mut page = self.query_range(key, query, start..=window).await?;
+                        page.reverse();
+                        newest_first.append(&mut page);
+                        window = start.saturating_sub(1);
+                        if target.is_none() && newest_first.len() >= limit {
+                            let limitth = &newest_first[limit - 1];
+                            let bottom = self
+                                .batch_start(key, limitth.event.sequence, limitth.batch_end, low)
+                                .await?;
+                            newest_first.retain(|record| record.event.sequence >= bottom);
+                            if bottom > low {
+                                target = Some(bottom);
+                            }
+                        }
+                    }
+                    newest_first.reverse();
+                    records = newest_first;
                 }
             }
             Ok(TimelineQueryReply {
-                events: events.into_iter().map(|record| record.event).collect(),
+                positions: records
+                    .iter()
+                    .map(|record| TimelinePosition {
+                        branch_id: branch.clone(),
+                        sequence: record.event.sequence,
+                    })
+                    .collect(),
+                events: records.into_iter().map(|record| record.event).collect(),
                 next: target.map(|sequence| TimelineCursor {
-                    branch_id: key.branch_id.clone(),
+                    branch_id: branch,
                     sequence,
                 }),
             })

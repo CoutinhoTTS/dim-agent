@@ -1,9 +1,9 @@
 use crate::{
     AgentError, BoxFuture, BranchRecord, PublishCallback, Result, SessionConfig, StoredBranch,
-    StoredEvent, TimelineCursor, TimelineKey, TimelineQuery, TimelineQueryPosition,
-    TimelineQueryReply, TimelineQueryScope, TimelineStore, TimelineTrace,
+    StoredEvent, TimelineCursor, TimelineKey, TimelineQuery, TimelineQueryDirection,
+    TimelineQueryPosition, TimelineQueryReply, TimelineQueryScope, TimelineStore, TimelineTrace,
 };
-use dim_agent_types::{BranchCreateAt, EventKind, RecoverySnapshot};
+use dim_agent_types::{BranchCreateAt, EventKind, RecoverySnapshot, TimelinePosition};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Mutex};
 
 /// In-memory storage for standalone Agents, tests and development profiles.
@@ -215,16 +215,25 @@ impl TimelineStore for MemoryTimelineStore {
                 .ok_or_else(|| AgentError::Storage(format!("unknown branch {}", key.branch_id)))?
                 .events;
             let head = events.last().map_or(0, |record| record.event.sequence);
-            let (through, start) = match &query.position {
-                TimelineQueryPosition::Range { start, end } => {
+            let batch_end_at = |sequence: u64| {
+                events
+                    .iter()
+                    .find(|record| record.event.sequence == sequence)
+                    .map(|record| record.batch_end)
+            };
+            let (low, high) = match (&query.position, query.direction) {
+                (TimelineQueryPosition::Range { start, end }, _) => {
                     if *start == 0 {
                         return Err(AgentError::InvalidInput(
                             "timeline sequences start at 1".into(),
                         ));
                     }
-                    (*end, *start)
+                    (*start, end.unwrap_or(head))
                 }
-                TimelineQueryPosition::Cursor { cursor, through } => {
+                (
+                    TimelineQueryPosition::Cursor { cursor, through },
+                    TimelineQueryDirection::Ascending,
+                ) => {
                     if cursor.branch_id != key.branch_id {
                         return Err(AgentError::InvalidInput(format!(
                             "query cursor names branch {}",
@@ -236,83 +245,122 @@ impl TimelineStore for MemoryTimelineStore {
                             "a query cursor names a committed sequence".into(),
                         ));
                     }
-                    if cursor.sequence > *through {
+                    if cursor.sequence > *through || *through > head {
                         return Err(AgentError::InvalidInput("future Timeline cursor".into()));
                     }
                     (
-                        *through,
                         cursor.sequence.checked_add(1).ok_or_else(|| {
                             AgentError::InvalidInput(
                                 "query cursor is past the last sequence".into(),
                             )
                         })?,
+                        *through,
                     )
                 }
+                (
+                    TimelineQueryPosition::Cursor { cursor, through },
+                    TimelineQueryDirection::Descending,
+                ) => {
+                    if cursor.branch_id != key.branch_id {
+                        return Err(AgentError::InvalidInput(format!(
+                            "query cursor names branch {}",
+                            cursor.branch_id
+                        )));
+                    }
+                    if cursor.sequence == 0 {
+                        return Err(AgentError::InvalidInput(
+                            "a query cursor names a committed sequence".into(),
+                        ));
+                    }
+                    if cursor.sequence > head || *through == 0 {
+                        return Err(AgentError::InvalidInput("future Timeline cursor".into()));
+                    }
+                    (*through, cursor.sequence - 1)
+                }
             };
-            if through > head {
+            if high > head {
                 return Err(AgentError::InvalidInput(format!(
-                    "future Timeline sequence {through}"
+                    "future Timeline sequence {high}"
                 )));
             }
-            if through > 0 {
-                let at = events
-                    .iter()
-                    .find(|record| record.event.sequence == through)
-                    .ok_or_else(|| {
-                        AgentError::InvalidInput(format!("future Timeline sequence {through}"))
-                    })?;
-                if at.batch_end != through {
-                    return Err(AgentError::InvalidInput(format!(
-                        "sequence {through} is inside an atomic batch"
-                    )));
-                }
-            }
-            if let TimelineQueryPosition::Cursor { cursor, .. } = &query.position {
-                let at = events
-                    .iter()
-                    .find(|record| record.event.sequence == cursor.sequence)
-                    .ok_or_else(|| AgentError::InvalidInput("future Timeline cursor".into()))?;
-                if at.batch_end != cursor.sequence {
-                    return Err(AgentError::InvalidInput(
-                        "cursor is inside an atomic batch".into(),
-                    ));
-                }
-            }
-            if start > through {
+            if low > high {
                 return Ok(TimelineQueryReply {
                     events: vec![],
+                    positions: vec![],
                     next: None,
                 });
             }
+            if high > 0 && batch_end_at(high) != Some(high) {
+                return Err(AgentError::InvalidInput(format!(
+                    "sequence {high} is inside an atomic batch"
+                )));
+            }
+            if let (TimelineQueryPosition::Cursor { cursor, .. }, TimelineQueryDirection::Ascending) =
+                (&query.position, query.direction)
+                && batch_end_at(cursor.sequence) != Some(cursor.sequence)
+            {
+                return Err(AgentError::InvalidInput(
+                    "cursor is inside an atomic batch".into(),
+                ));
+            }
+            let limit = usize::try_from(query.limit.get()).unwrap_or(usize::MAX);
             let mut selected: Vec<&StoredEvent> = events
                 .iter()
-                .filter(|record| record.event.sequence >= start && record.event.sequence <= through)
+                .filter(|record| record.event.sequence >= low && record.event.sequence <= high)
                 .filter(|record| {
                     let event = &record.event;
-                    let (render, state) = event.kind.context_flags();
                     (query.kinds.is_empty()
                         || query.kinds.iter().any(|kind| kind == event.kind.key()))
-                        && query.context_render.is_none_or(|wanted| wanted == render)
-                        && query.context_state.is_none_or(|wanted| wanted == state)
+                        && (query.flags.is_empty()
+                            || query
+                                .flags
+                                .iter()
+                                .any(|flag| flag.is_set(event.kind.context_flags())))
+                        && query
+                            .event_id
+                            .as_ref()
+                            .is_none_or(|wanted| wanted == &event.id)
                         && query
                             .predicate
                             .as_ref()
                             .is_none_or(|predicate| predicate.matches(event))
                 })
                 .collect();
-            let limit = usize::try_from(query.limit.get()).unwrap_or(usize::MAX);
             let mut next = None;
             if selected.len() >= limit {
-                let end = selected[limit - 1].batch_end;
-                selected.retain(|record| record.event.sequence <= end);
-                if end < through {
+                let boundary = match query.direction {
+                    TimelineQueryDirection::Ascending => selected[limit - 1].batch_end,
+                    TimelineQueryDirection::Descending => events
+                        .iter()
+                        .find(|record| {
+                            record.batch_end == selected[selected.len() - limit].batch_end
+                        })
+                        .map_or(high, |record| record.event.sequence)
+                        .max(low),
+                };
+                selected.retain(|record| match query.direction {
+                    TimelineQueryDirection::Ascending => record.event.sequence <= boundary,
+                    TimelineQueryDirection::Descending => record.event.sequence >= boundary,
+                });
+                let truncated = match query.direction {
+                    TimelineQueryDirection::Ascending => boundary < high,
+                    TimelineQueryDirection::Descending => boundary > low,
+                };
+                if truncated {
                     next = Some(TimelineCursor {
                         branch_id: key.branch_id.clone(),
-                        sequence: end,
+                        sequence: boundary,
                     });
                 }
             }
             Ok(TimelineQueryReply {
+                positions: selected
+                    .iter()
+                    .map(|record| TimelinePosition {
+                        branch_id: key.branch_id.clone(),
+                        sequence: record.event.sequence,
+                    })
+                    .collect(),
                 events: selected
                     .into_iter()
                     .map(|record| record.event.clone())

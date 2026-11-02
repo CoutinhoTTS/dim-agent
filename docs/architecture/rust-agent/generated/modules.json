@@ -1331,6 +1331,7 @@
         "format",
         "matches",
         "thread_local",
+        "unreachable",
         "vec"
       ]
     },
@@ -14656,6 +14657,7 @@
         "path TimelineQueryScope::Chain",
         "use crate::TimelineCursor",
         "use crate::TimelineQuery",
+        "use crate::TimelineQueryDirection",
         "use crate::TimelineQueryPosition",
         "use crate::TimelineQueryReply",
         "use crate::TimelineQueryScope"
@@ -14759,12 +14761,15 @@
       "references": [
         "path TimelineCursor",
         "path TimelineQuery",
+        "path TimelineQueryDirection::Ascending",
+        "path TimelineQueryDirection::Descending",
         "path TimelineQueryPosition::Cursor",
         "path TimelineQueryPosition::Range",
         "path TimelineQueryReply",
         "path TimelineQueryScope::Branch",
         "use crate::TimelineCursor",
         "use crate::TimelineQuery",
+        "use crate::TimelineQueryDirection",
         "use crate::TimelineQueryPosition",
         "use crate::TimelineQueryReply",
         "use crate::TimelineQueryScope"
@@ -14791,7 +14796,9 @@
       "to": "dim_agent_types::checkpoint",
       "references": [
         "path RecoverySnapshot",
-        "use dim_agent_types::RecoverySnapshot"
+        "path TimelinePosition",
+        "use dim_agent_types::RecoverySnapshot",
+        "use dim_agent_types::TimelinePosition"
       ]
     },
     {
@@ -15146,6 +15153,14 @@
         "path Result",
         "use crate::AgentError",
         "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::timeline_query",
+      "to": "dim_agent_types::checkpoint",
+      "references": [
+        "path TimelinePosition",
+        "use dim_agent_types::TimelinePosition"
       ]
     },
     {
@@ -24019,12 +24034,17 @@
       "references": [
         "path TimelineCursor",
         "path TimelineQuery",
+        "path TimelineQueryFlag",
+        "path TimelineQueryFlag::Render",
+        "path TimelineQueryFlag::State",
         "path TimelineQueryPosition::Cursor",
         "path TimelineQueryPosition::Range",
         "path TimelineQueryReply",
         "path TimelineQueryScope::Branch",
         "use dim_agent_runtime::TimelineCursor",
         "use dim_agent_runtime::TimelineQuery",
+        "use dim_agent_runtime::TimelineQueryDirection",
+        "use dim_agent_runtime::TimelineQueryFlag",
         "use dim_agent_runtime::TimelineQueryPosition",
         "use dim_agent_runtime::TimelineQueryReply",
         "use dim_agent_runtime::TimelineQueryScope"

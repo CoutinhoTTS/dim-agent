@@ -234,9 +234,10 @@ export type TimelineQueryScope =
   | /** The branch chain: each ancestor up to its cut, root first, then the queried branch. */ "chain"
 
 /**
- * An opaque position: the branch of the last event a query returned and the
- * sequence through which the query read it. The same sequence on a parent and
- * on its child are different positions.
+ * An opaque position: the branch of an event a query returned and that
+ * branch's sequence. The same sequence on a parent and on its child are
+ * different positions. A cursor ends an atomic batch: an ascending page ends
+ * at one, and a descending page starts at one.
  */
 export interface TimelineCursor {
   branch_id: string
@@ -245,8 +246,25 @@ export interface TimelineCursor {
 
 /** Where a query starts. */
 export type TimelineQueryPosition =
-  | /** Sequences `start..=end`. `start` may be inside an atomic batch; `end` must end one. */ { kind: "range"; start: number | bigint; end: number | bigint }
-  | /** Sequences after `cursor`, through `through`. The cursor must end an atomic batch, and `through` must end one too. */ { kind: "cursor"; cursor: TimelineCursor; through: number | bigint }
+  | /** Sequences `start..=end`, both included. `end` defaults to the queried branch's published head and may not exceed it; in a chain read it applies to each branch's own sequence space, to that branch's cut or the end, whichever is lower. */ { kind: "range"; start: number | bigint; end?: number | bigint | null }
+  | /** Continues from `cursor` in the query's direction, through `through`: ascending reads above the cursor through `through`; descending reads below it down through `through`. */ { kind: "cursor"; cursor: TimelineCursor; through: number | bigint }
+
+/**
+ * The end a page is taken from. A reply is always ordered by chain position
+ * and then sequence, ascending; the direction only decides which end of the
+ * remaining range the page comes from.
+ */
+export type TimelineQueryDirection =
+  | /** Oldest first: the page starts at the range's start, or after the cursor, and ends at an atomic batch boundary. */ "ascending"
+  | /** Newest first: the page starts at the range's end, or before the cursor, and ends at an atomic batch boundary. */ "descending"
+
+/**
+ * One of the envelope's two context flags a query may name. Naming either
+ * returns the events that carry at least one named flag.
+ */
+export type TimelineQueryFlag =
+  | /** The flag that puts an event in the rendered context. */ "render"
+  | /** The flag that puts an event in the projection's checkpoint state. */ "state"
 
 /** One equality against one JSON scalar of an event's data. */
 export interface TimelineQueryPredicate {
@@ -266,12 +284,17 @@ export interface TimelineQueryPredicate {
 export interface TimelineQuery {
   scope: TimelineQueryScope
   position: TimelineQueryPosition
+  /** Which end a page is taken from; ascending is the default. */
+  direction?: TimelineQueryDirection
   /** Event kinds (`domain/name`) the read accepts; empty accepts every kind. */
   kinds?: string[]
-  /** When named, only events whose envelope carries this render flag. */
-  context_render?: boolean | null
-  /** When named, only events whose envelope carries this state flag. */
-  context_state?: boolean | null
+  /**
+   * The context flags the read accepts; empty constrains nothing, and a
+   * non-empty set accepts events carrying at least one named flag.
+   */
+  flags?: TimelineQueryFlag[]
+  /** When named, only the event with this id. */
+  event_id?: string | null
   /** One equality the event's data must satisfy. */
   predicate?: TimelineQueryPredicate | null
   /**
@@ -282,11 +305,17 @@ export interface TimelineQuery {
 }
 
 /**
- * The facts a query read, in chain order and then sequence, and the cursor
- * after them. `next` is absent when the read reached its through.
+ * The facts a query read, in chain order and then sequence, ascending, each
+ * event's position in the same order, and the cursor after them. `next` is
+ * absent only when the read reached the end of its scope.
  */
 export interface TimelineQueryReply {
   events: import('./plugin.js').BranchEvent[]
+  /**
+   * One position per event, in the same order: the branch the event was
+   * read from and its sequence there.
+   */
+  positions: ({ branch_id: string; sequence: number | bigint })[]
   next?: TimelineCursor | null
 }
 
@@ -327,13 +356,15 @@ export interface Timeline {
   /**
    * One bounded read over this branch or over its chain ([ADR 019](../../../../docs/adr/019-event-query.md),
    * [plugin contract §5.4](../../../../docs/design/plugin-contract.md#54-the-event-query)):
-   * the position, kinds, flags, predicate and limit select the facts, and
-   * the reply is those facts in chain order and then sequence with the
-   * cursor after them. A chain read is each ancestor up to its cut, root
-   * first, then this branch to the position's through; a range's start
-   * applies to this branch alone. The read never returns a fact above the
-   * published head, and a cursor that names a branch the scope does not
-   * cover is invalid input.
+   * the position, direction, kinds, flags, event id, predicate and limit
+   * select the facts, and the reply is those facts in chain order and then
+   * sequence, ascending, with each event's position and the cursor after
+   * them. A chain read is each ancestor to its cut and then this branch to
+   * the position's end, root first; a range applies to each branch's own
+   * sequence space. A descending page is taken from the newest end, and the
+   * reply is ordered ascending all the same. The read never returns a fact
+   * above the published head, and a cursor that names a branch the scope
+   * does not cover is invalid input.
    * @throws {AgentErrorThrown}
    */
   query(query: TimelineQuery): Promise<TimelineQueryReply>

@@ -7,7 +7,7 @@
 //! through the `timeline` service.
 
 use crate::{AgentError, Result};
-use dim_agent_types::AgentEvent;
+use dim_agent_types::{AgentEvent, TimelinePosition};
 use serde::{Deserialize, Serialize};
 use std::{num::NonZeroU64, sync::Arc};
 
@@ -22,24 +22,69 @@ pub enum TimelineQueryScope {
     Chain,
 }
 
+/// The end a page is taken from. A reply is always ordered by chain position
+/// and then sequence, ascending; the direction only decides which end of the
+/// remaining range the page comes from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TimelineQueryDirection {
+    /// Oldest first: the page starts at the range's start, or after the
+    /// cursor, and ends at an atomic batch boundary.
+    #[default]
+    Ascending,
+    /// Newest first: the page starts at the range's end, or before the
+    /// cursor, and ends at an atomic batch boundary.
+    Descending,
+}
+
+/// One of the envelope's two context flags a query may name. Naming either
+/// returns the events that carry at least one named flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TimelineQueryFlag {
+    /// The flag that puts an event in the rendered context.
+    Render,
+    /// The flag that puts an event in the projection's checkpoint state.
+    State,
+}
+
+impl TimelineQueryFlag {
+    /// Whether `flags`, the envelope's `(render, state)` pair, carries this
+    /// flag.
+    pub fn is_set(self, flags: (bool, bool)) -> bool {
+        match self {
+            Self::Render => flags.0,
+            Self::State => flags.1,
+        }
+    }
+}
+
 /// Where a query starts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum TimelineQueryPosition {
-    /// Sequences `start..=end`. `start` may be inside an atomic batch; `end`
-    /// must end one.
-    Range { start: u64, end: u64 },
-    /// Sequences after `cursor`, through `through`. The cursor must end an
-    /// atomic batch, and `through` must end one too.
+    /// Sequences `start..=end`, both included. `end` defaults to the queried
+    /// branch's published head and may not exceed it; in a chain read it
+    /// applies to each branch's own sequence space, to that branch's cut or
+    /// the end, whichever is lower.
+    Range {
+        start: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end: Option<u64>,
+    },
+    /// Continues from `cursor` in the query's direction, through `through`:
+    /// ascending reads above the cursor through `through`; descending reads
+    /// below it down through `through`.
     Cursor {
         cursor: TimelineCursor,
         through: u64,
     },
 }
 
-/// An opaque position: the branch of the last event a query returned and the
-/// sequence through which the query read it. The same sequence on a parent and
-/// on its child are different positions.
+/// An opaque position: the branch of an event a query returned and that
+/// branch's sequence. The same sequence on a parent and on its child are
+/// different positions. A cursor ends an atomic batch: an ascending page ends
+/// at one, and a descending page starts at one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TimelineCursor {
@@ -117,15 +162,19 @@ impl TimelineQueryPredicate {
 pub struct TimelineQuery {
     pub scope: TimelineQueryScope,
     pub position: TimelineQueryPosition,
+    /// Which end a page is taken from; ascending is the default.
+    #[serde(default)]
+    pub direction: TimelineQueryDirection,
     /// Event kinds (`domain/name`) the read accepts; empty accepts every kind.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kinds: Vec<String>,
-    /// When named, only events whose envelope carries this render flag.
+    /// The context flags the read accepts; empty constrains nothing, and a
+    /// non-empty set accepts events carrying at least one named flag.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flags: Vec<TimelineQueryFlag>,
+    /// When named, only the event with this id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_render: Option<bool>,
-    /// When named, only events whose envelope carries this state flag.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_state: Option<bool>,
+    pub event_id: Option<String>,
     /// One equality the event's data must satisfy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub predicate: Option<TimelineQueryPredicate>,
@@ -162,12 +211,16 @@ impl TimelineQuery {
     }
 }
 
-/// The facts a query read, in chain order and then sequence, and the cursor
-/// after them. `next` is absent when the read reached its through.
+/// The facts a query read, in chain order and then sequence, ascending, each
+/// event's position in the same order, and the cursor after them. `next` is
+/// absent only when the read reached the end of its scope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TimelineQueryReply {
     pub events: Vec<Arc<AgentEvent>>,
+    /// One position per event, in the same order: the branch the event was
+    /// read from and its sequence there.
+    pub positions: Vec<TimelinePosition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<TimelineCursor>,
 }
