@@ -36,27 +36,37 @@ settings that own them. `/permissions` links to that section instead of hosting 
 needs "this path is allowed without asking" or "run without a sandbox" acts on the sandbox, not
 on permission.
 
-### D3. The two overrides are removed; a stored record's extra fields are ignored
+### D3. The two overrides are removed, and this type stops rejecting unknown keys
 
 `PermissionPolicy` loses `fileAccess` and `toolApproval`. Admission follows the preset and nothing
 else, and a record that does not name a preset takes the default.
 
-A stored policy that still carries the two fields is read as if it did not: the fields are
-unknown to the type, are ignored, and are not matched, migrated or reported. There is no mapping
-from a combination back to a preset, because the split existed for one day, no client can act on
-the combinations it allowed, and a mapping would keep the comparison rules alive.
+The type also loses `deny_unknown_fields`. A record written before this decision carries the two
+keys, and strict parsing would refuse it; with the attribute gone the keys are unknown and are
+ignored, like any other key the type does not name. The cost is deliberate and stated: a
+misspelling in this type no longer fails to parse, so a typo in a policy reads as the default.
 
-`<home>/config.json`'s `fileAccess` and `toolApproval` keys and the matching command-line options
-are removed the same way: ignored if present.
+This is a breaking format decision, not a silent reinterpretation: client options, tests and
+ADR 017 in the current alpha still write the keys, and this decision stops reading their meaning.
 
-This is a format decision, not a silent reinterpretation of a supported record: the two fields
-never had a released client, and the preset they were derived from is still in every record.
+### D4. A stored limit that no longer exists is stated, not dropped
 
-### D4. The unrepresentable-combination rule stays where it already lives
+Where a stored policy is read — Session configuration, `permission/changed`, a job's cap — the
+reader compares the ignored keys with what the preset implies. When the ignored value was
+stricter than the preset, the client says so and asks for a preset instead of starting the
+Session under wider authority.
 
-A legacy policy whose explicit dimensions cannot be expressed as a preset keeps its current
-handling — Scheduler and Workflow pass the stored policy through and surface the owner's error.
-No plugin gains a second policy comparison.
+That comparison is the only place the old names appear, and it exists because
+[003](003-approval-scope.md) and [009](009-permission-decides.md) forbid widening authority
+without saying so. It produces a notice and a choice; it does not map a value back to a preset.
+
+### D5. Cap and containment compare presets and tool lists only
+
+Scheduler's `cap`, `within` and `effective` and Workflow's launch cap keep their authority
+comparison, expressed in the presets they still have: the lower preset wins, allowed tools are the
+ones both sides allow, disallowed tools are the union. The dimension comparison — `fileRank`, the
+derived approval, and the `schedule_invalid` case for explicit Ask under a legacy read-only bound —
+disappears with the fields. `schedule_invalid` keeps its other validation of a job.
 
 ## Consequences
 
@@ -67,9 +77,10 @@ No plugin gains a second policy comparison.
   override as a user choice.
 - Clients stop rendering and writing the two overrides; a value they send under those names is
   ignored like any unknown field.
-- A Session whose stored policy named an override that disagrees with its preset now admits by the
-  preset. That is the decision's accepted cost: such a record has no supported client and the
-  preset it came with is the value it started from.
+- A Session whose stored policy named a stricter override is not started under the wider preset
+  without a notice (D4); once the user picks a preset, the record holds that preset alone.
+- Policy parsing in this type no longer rejects unknown keys, which also removes typo detection
+  there. Other types keep `deny_unknown_fields`.
 - The preset keeps its exact legacy meaning, so nothing about admission changes.
 
 ## Non-goals
