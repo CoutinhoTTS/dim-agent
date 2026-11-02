@@ -545,30 +545,45 @@ impl ContextPreparation {
             ContextOpError::Model(HostError::failed("Context compaction is not available"))
         })?;
         let through = self.timeline.committed();
-        let (context, history) = self
-            .history
-            .rendered_context(&self.timeline, through)
+        let facts = self
+            .timeline
+            .policy_facts(through, "")
             .await
             .map_err(ContextOpError::Read)?;
-        let request = configured_request(&PolicyContext::from_context(context.clone()), &history)
+        if let Some(request) = canary_request(&facts) {
+            let model = policy
+                .resolver
+                .resolve(request.clone(), cancel.clone())
+                .await
+                .map_err(ContextOpError::Model)?;
+            if let Some(input) = self
+                .incremental_usage(&facts, through, &request, model.as_ref())
+                .await?
+            {
+                return Ok(ContextUsage {
+                    through,
+                    context_window: model.context_window(),
+                    output_tokens: model.output_tokens(),
+                    threshold_tokens: model.threshold_tokens(),
+                    estimated_input_tokens: input,
+                    baseline_source: BaselineSource::ProviderBaseline,
+                });
+            }
+        }
+        let streamed = self
+            .history
+            .rendered_stream(&self.timeline, through, 256)
+            .await
+            .map_err(ContextOpError::Read)?;
+        let request = configured_request(&PolicyContext::from_stream(&streamed), &streamed.history)
             .ok_or(ContextOpError::NotConfigured)?;
-        let facts = PolicyFacts::from_context(&context, through);
-        let view = policy
-            .view(
-                request,
-                PolicyContext::from_context(context),
-                history,
-                facts,
-                Vec::new(),
-            )
-            .map_err(ContextOpError::Model)?;
         let model = policy
             .resolver
-            .resolve(view.prepared.clone(), cancel)
+            .resolve(request.clone(), cancel)
             .await
             .map_err(ContextOpError::Model)?;
         let estimate = policy
-            .estimate(&view.prepared, model.as_ref(), view.events())
+            .estimate(&request, model.as_ref(), &[])
             .map_err(ContextOpError::Model)?;
         Ok(ContextUsage {
             through,
@@ -579,6 +594,119 @@ impl ContextPreparation {
             baseline_source: estimate.source,
         })
     }
+    /// The last provider measurement plus the messages written after it, when
+    /// the request's system and tools are unchanged since that call.
+    async fn incremental_usage(
+        &self,
+        facts: &PolicyFacts,
+        through: u64,
+        request: &Arc<ModelRequest>,
+        model: &dyn crate::host::ContextModel,
+    ) -> std::result::Result<Option<f64>, ContextOpError> {
+        let Some(usage) = last_usage(facts) else {
+            return Ok(None);
+        };
+        let Some(call) = last_call(facts, &usage.request_id) else {
+            return Ok(None);
+        };
+        let segments = self
+            .timeline
+            .segments(through)
+            .map_err(ContextOpError::Read)?;
+        let rank = |branch: &str| segments.iter().position(|(name, _)| name == branch);
+        let Some(call_rank) = rank(&call.position.branch_id) else {
+            return Ok(None);
+        };
+        let at = (Some(call_rank), call.position.sequence);
+        if facts.events.iter().any(|fact| {
+            (rank(&fact.position.branch_id), fact.position.sequence) > at
+                && matches!(
+                    &fact.event.kind,
+                    dim_agent_types::EventKind::ContextConfigured(_)
+                        | dim_agent_types::EventKind::PromptChanged(_)
+                        | dim_agent_types::EventKind::ContextCompaction(
+                            dim_agent_types::ContextCompactionData {
+                                outcome: dim_agent_types::ContextCompactionResult::Completed { .. },
+                                ..
+                            }
+                        )
+                )
+        }) {
+            return Ok(None);
+        }
+        let mut tail = Vec::new();
+        for (index, (branch, cut)) in segments.iter().enumerate().skip(call_rank) {
+            let mut cursor = if index == call_rank {
+                call.position.sequence + 1
+            } else {
+                1
+            };
+            let mut events = Vec::new();
+            while cursor <= *cut {
+                let page = self
+                    .timeline
+                    .stored_context_page_in(branch, cursor - 1, 256, *cut)
+                    .await
+                    .map_err(ContextOpError::Read)?;
+                if page.is_empty() {
+                    break;
+                }
+                let end = page.last().map_or(cursor, |event| event.sequence);
+                events.extend(page);
+                cursor = end + 1;
+            }
+            if !events.is_empty() {
+                tail.push((branch.clone(), events));
+            }
+        }
+        let mut history = Vec::new();
+        let mut state = None;
+        for (branch, events) in &tail {
+            let mut supplied: Vec<Arc<dim_agent_types::AgentEvent>> = Vec::new();
+            for event in events {
+                if let dim_agent_types::EventKind::InputConsumed(data) = &event.kind
+                    && !events.iter().any(|seen| {
+                        seen.id == data.input_id
+                            && matches!(seen.kind, dim_agent_types::EventKind::InputMessage(_))
+                    })
+                    && !supplied.iter().any(|seen| seen.id == data.input_id)
+                {
+                    let input = if let Some(fact) = facts
+                        .events
+                        .iter()
+                        .find(|fact| fact.event.id == data.input_id)
+                    {
+                        Some(fact.event.clone())
+                    } else {
+                        self.timeline
+                            .event_by_id(&data.input_id)
+                            .await
+                            .map_err(ContextOpError::Read)?
+                    };
+                    if let Some(input) = input {
+                        supplied.push(input);
+                    }
+                }
+            }
+            supplied.sort_by_key(|event| event.sequence);
+            let mut all = supplied;
+            all.extend(events.iter().cloned());
+            let projected = crate::history::project_batch(&all, state.as_ref(), branch)
+                .map_err(|error| ContextOpError::Model(HostError::failed(error)))?;
+            history.extend(projected.history);
+            state = Some(projected.state);
+        }
+        let messages = history
+            .into_iter()
+            .map(|entry| entry.message.clone())
+            .collect();
+        let count = model.count_tokens(&ModelRequest {
+            messages,
+            ..ModelRequest::new(&request.provider_id, &request.model_id, Vec::new())
+        });
+        Ok(Some(usage.usage.prompt_tokens + count))
+    }
+
     async fn prepare(
         &self,
         source: ContextPrepareData,
@@ -618,16 +746,8 @@ impl ContextPreparation {
             .rendered_stream(&self.timeline, source.through, 256)
             .await
             .map_err(|error| HostError::failed(error.to_string()))?;
-        let (context, history) = if streamed.fallback {
-            let (context, history) = self
-                .history
-                .rendered_context(&self.timeline, source.through)
-                .await
-                .map_err(|error| HostError::failed(error.to_string()))?;
-            (PolicyContext::from_context(context), history)
-        } else {
-            (PolicyContext::from_stream(&streamed), streamed.history)
-        };
+        let context = PolicyContext::from_stream(&streamed);
+        let history = streamed.history;
         crate::context_policy::check_cancel(&cancel)?;
         if request.messages.len() < context.messages_len(&history)
             || !context
@@ -911,5 +1031,34 @@ impl DynPlugin for ContextPreparationPlugin {
             ctx.provide_at(self.context.clone(), service)?;
             Ok(Effect::Done)
         })
+    }
+}
+
+fn last_usage(facts: &PolicyFacts) -> Option<&dim_agent_types::ModelUsageData> {
+    facts
+        .events
+        .iter()
+        .rev()
+        .find_map(|fact| match &fact.event.kind {
+            dim_agent_types::EventKind::ModelUsage(data) => Some(data),
+            _ => None,
+        })
+}
+
+fn last_call<'a>(
+    facts: &'a PolicyFacts,
+    request_id: &str,
+) -> Option<&'a dim_agent_runtime::PolicyEvent> {
+    facts.events.iter().rev().find(|fact| {
+        matches!(&fact.event.kind, dim_agent_types::EventKind::ModelCall(data) if data.request_id == request_id)
+    })
+}
+
+fn canary_request(facts: &PolicyFacts) -> Option<Arc<ModelRequest>> {
+    let usage = last_usage(facts)?;
+    let call = last_call(facts, &usage.request_id)?;
+    match &call.event.kind {
+        dim_agent_types::EventKind::ModelCall(data) => Some(data.request.clone()),
+        _ => None,
     }
 }
