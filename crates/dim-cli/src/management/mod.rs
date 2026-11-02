@@ -360,7 +360,7 @@ pub async fn apply(
                 Err(models::Failure::Conflict { message, provider }) => {
                     ManagementResult::Refused(ManagementRefusal::Conflict {
                         message,
-                        view: Ok(Box::new(models::view(&provider, &actions))),
+                        view: provider.map(|provider| Box::new(models::view(&provider, &actions))),
                     })
                 }
             }

@@ -492,6 +492,59 @@ fn models_area_set_writes_the_revision_it_read_and_only_the_changed_fields() {
     assert!(stderr.contains(&kept), "{stderr}");
 }
 
+/// A conflict whose re-read fails is still a conflict: the command prints
+/// the owner's sentence, then the read error, and says where the text is.
+#[test]
+fn models_area_reports_a_conflict_whose_reread_fails() {
+    let home = Home::new();
+    let path = home.0.join("flash.json");
+    let kept = path.display().to_string();
+    fs::write(
+        &path,
+        json!({
+            "displayName": "Renamed",
+            "contextWindow": 128000,
+            "maxOutputTokens": 16384,
+            "toolCalling": true,
+            "vision": false,
+            "reasoning": {"supported": false}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        for _ in 0..2 {
+            let request = wire.read("provider.management");
+            wire.reply(&request, provider(models(true), 3));
+        }
+        let request = wire.read("provider.models.edit");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"Provider version changed; reread before retrying",
+            "data":{"appError":"provider_conflict"}}}));
+        // The read that would classify the conflict fails.
+        let request = wire.read("provider.management");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"the provider is unavailable"}}));
+    });
+    let output = home
+        .command()
+        .args(["models", "fixture", "set", "flash", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("The models changed since they were read; nothing was written."),
+        "{stderr}"
+    );
+    assert!(stderr.contains("the provider is unavailable"), "{stderr}");
+    assert!(stderr.contains(&kept), "{stderr}");
+}
+
 #[test]
 fn models_area_add_keeps_the_text_when_the_id_exists() {
     let home = Home::new();
@@ -1202,6 +1255,140 @@ fn tui_models_area_rereads_after_a_conflict() {
     assert!(document.contains("\"Flash v4\""), "{document}");
     assert!(!document.contains("Edited by hand"), "{document}");
     // The user's text is still in the file the conflict named.
+    let kept: Vec<std::path::PathBuf> = fs::read_dir(home.0.join("edit"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert!(
+        kept.iter().any(|path| fs::read_to_string(path)
+            .unwrap_or_default()
+            .contains("Edited by hand")),
+        "no kept file holds the user's text: {kept:?}"
+    );
+}
+
+/// A conflict whose re-read fails is still a conflict: the panel shows the
+/// owner's sentence and the read error once, drops the view and the stale
+/// link, and Ctrl+R reads the area again; the next edit opens the current
+/// document.
+#[test]
+fn tui_models_area_reports_a_conflict_whose_reread_fails() {
+    let home = Home::new();
+    let script = home.0.join("editor.sh");
+    let captured = home.0.join("edited-document");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n\
+             cp \"$1\" '{captured}'\n\
+             printf '%s' '{{\"displayName\":\"Edited by hand\"}}' > \"$1\"\n",
+            captured = captured.display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let (shown, wait_shown) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        for _ in 0..2 {
+            let request = wire.read_any();
+            match request["method"].as_str() {
+                Some("account.providers") => wire.reply(&request, json!([])),
+                Some("session.context.usage") => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                    "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+                method => panic!("unexpected request {method:?}"),
+            }
+        }
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        let request = wire.read("provider.list");
+        wire.reply(
+            &request,
+            json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
+        );
+        let request = wire.read("account.providers");
+        wire.reply(&request, json!([]));
+        let request = wire.read("provider.catalog");
+        wire.reply(&request, picker_catalog());
+        let request = wire.read("provider.management");
+        wire.reply(&request, test_provider(area_models(true), 3));
+        // Edit models opens the Provider's area.
+        let request = wire.read("provider.management");
+        wire.reply(&request, test_provider(area_models(true), 3));
+        // Ctrl+E reads the fresh template, then writes at the revision the
+        // panel read; the owner moved the version in the meantime.
+        let request = wire.read("provider.management");
+        wire.reply(&request, test_provider(area_models(true), 3));
+        let request = wire.read("provider.models.edit");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"Provider version changed; reread before retrying",
+            "data":{"appError":"provider_conflict"}}}));
+        // The read that would classify the conflict fails.
+        let request = wire.read("provider.management");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"the provider is unavailable"}}));
+        // Ctrl+R reads the area again, without the view the conflict lost.
+        let request = wire.read("provider.management");
+        wire.reply(&request, test_provider(area_models_later(), 4));
+        // The next Ctrl+E opens the current document and writes at it.
+        let request = wire.read("provider.management");
+        wire.reply(&request, test_provider(area_models_later(), 4));
+        let request = wire.read("provider.models.edit");
+        assert_eq!(
+            request["params"],
+            json!({"providerId": "test", "expectedVersion": 4, "modelId": "flash",
+                "edit": {"displayName": "Edited by hand"}})
+        );
+        wire.reply(&request, json!({}));
+        let request = wire.read("provider.management");
+        wire.reply(&request, test_provider(area_models_later(), 5));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut command = home.command();
+    command.env_remove("VISUAL").env("EDITOR", &script);
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/models\r");
+    terminal.until("Test / flash");
+    terminal.raw(b"\x1b[B");
+    terminal.raw(b"\r");
+    terminal.until("Models · Test");
+    terminal.raw(b"\x05");
+    // The owner's sentence stands, the draft's link to the stale revision
+    // is gone, and the failed read is reported once after the message.
+    terminal.until("The models changed since they were read");
+    // The sentence wraps inside the footer, so its halves are checked as
+    // the rows carry them.
+    terminal.until("Your next");
+    terminal.until("opens the current document.");
+    terminal.until("Your text is kept in");
+    terminal.until("the provider is unavailable");
+    // Ctrl+R reads the area again, without the view the conflict lost.
+    terminal.raw(b"\x12");
+    terminal.until("Flash v4");
+    terminal.raw(b"\x05");
+    terminal.until("Saved Flash v4.");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+    // The next editor was handed the current document, not the stale draft.
+    let document = fs::read_to_string(&captured).unwrap();
+    assert!(document.contains("\"Flash v4\""), "{document}");
+    assert!(!document.contains("Edited by hand"), "{document}");
+    // The user's text is still in a kept file.
     let kept: Vec<std::path::PathBuf> = fs::read_dir(home.0.join("edit"))
         .unwrap()
         .map(|entry| entry.unwrap().path())

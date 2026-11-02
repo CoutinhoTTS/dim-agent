@@ -162,10 +162,10 @@ pub struct RateLimit {
 /// Why a models action did not happen.
 pub enum Failure {
     /// The Provider changed since it was read: nothing was written, and this
-    /// is the area as it now is.
+    /// is the area as it now is, or why the read that classifies it failed.
     Conflict {
         message: String,
-        provider: Box<Provider>,
+        provider: Result<Box<Provider>, String>,
     },
     /// The action was applied and the read that reports the area failed: the
     /// change was made, and this is why the area is not shown.
@@ -425,7 +425,7 @@ async fn edit(
     if version.to_string() != *expected_revision {
         return Err(Failure::Conflict {
             message: conflict_message(ConflictKind::Edit),
-            provider: Box::new(provider),
+            provider: Ok(Box::new(provider)),
         });
     }
     let Some(model) = provider.model(id) else {
@@ -549,13 +549,19 @@ async fn conflict(
     if app_error(error) != Some("provider_conflict") {
         return Failure::Refused(error.to_string());
     }
+    let message = conflict_message(kind);
     match read(client, provider_id).await {
         Ok(provider) if provider.version == Some(version) => Failure::Refused(error.to_string()),
         Ok(provider) => Failure::Conflict {
-            message: conflict_message(kind),
-            provider: Box::new(provider),
+            message,
+            provider: Ok(Box::new(provider)),
         },
-        Err(Failure::Refused(message)) => Failure::Refused(message),
+        // The conflict stands: the owner kept the stored document because it
+        // changed, and the read that would report it now failed.
+        Err(Failure::Refused(read_error)) => Failure::Conflict {
+            message,
+            provider: Err(read_error),
+        },
         Err(error) => error,
     }
 }
