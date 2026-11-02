@@ -7,7 +7,10 @@ use std::{
     io::Write,
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -422,10 +425,77 @@ fn write_startup_failure(path: &std::path::Path, failure: StartupFailure) {
 /// open a second connection to this database.
 pub struct SqliteStorage {
     pub(super) connection: Mutex<Option<Connection>>,
+    pub(super) readers: Readers,
     admission: Mutex<Admission>,
     idle: tokio::sync::Notify,
     pub(super) path: PathBuf,
     upgraded_from: Option<u32>,
+}
+/// The read-only connections that serve reads while the writer keeps its own
+/// (#599). Four let the catalog scan, a history page and the settings,
+/// provider and Session-file reads run together; reads are short calls, and a
+/// fifth connection adds a page cache without a measured gain.
+const READ_CONNECTIONS: usize = 4;
+pub(super) struct Readers {
+    pub(super) connections: Vec<Mutex<Option<Connection>>>,
+    next: AtomicUsize,
+}
+impl Readers {
+    /// Opens `READ_CONNECTIONS` read-only connections beside the writer.
+    fn open(path: &Path) -> Result<Self> {
+        let mut connections = Vec::with_capacity(READ_CONNECTIONS);
+        for _ in 0..READ_CONNECTIONS {
+            let connection = Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .map_err(storage)?;
+            connection
+                .busy_timeout(Duration::from_secs(5))
+                .map_err(storage)?;
+            connection
+                .pragma_update(None, "cache_size", -PAGE_CACHE_KIB)
+                .map_err(storage)?;
+            functions(&connection)?;
+            connections.push(Mutex::new(Some(connection)));
+        }
+        Ok(Self {
+            connections,
+            next: AtomicUsize::new(0),
+        })
+    }
+    /// The read-only export opens one connection that serves its reads.
+    fn none() -> Self {
+        Self {
+            connections: Vec::new(),
+            next: AtomicUsize::new(0),
+        }
+    }
+}
+/// SQLite's busy handler for the writer and a copy connection (#599): retry
+/// once a millisecond for about five seconds, so one lock holder never waits
+/// out the other's backoff while the two take turns on the write lock.
+fn busy(retries: i32) -> bool {
+    if retries >= 5000 {
+        return false;
+    }
+    std::thread::sleep(Duration::from_millis(1));
+    true
+}
+fn functions(connection: &Connection) -> Result<()> {
+    connection
+        .create_scalar_function(
+            "catalog_fold",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC
+                | rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            |ctx| {
+                Ok(ctx
+                    .get::<Option<String>>(0)?
+                    .map(|text| text.to_lowercase()))
+            },
+        )
+        .map_err(storage)
 }
 struct Admission {
     closed: bool,
@@ -481,22 +551,8 @@ impl SqliteStorage {
         })?;
         let admission = DatabaseLease(admission);
         let mut connection = Connection::open(&path).map_err(storage)?;
-        connection
-            .create_scalar_function(
-                "catalog_fold",
-                1,
-                rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC
-                    | rusqlite::functions::FunctionFlags::SQLITE_UTF8,
-                |ctx| {
-                    Ok(ctx
-                        .get::<Option<String>>(0)?
-                        .map(|text| text.to_lowercase()))
-                },
-            )
-            .map_err(storage)?;
-        connection
-            .busy_timeout(Duration::from_secs(5))
-            .map_err(storage)?;
+        functions(&connection)?;
+        connection.busy_handler(Some(busy)).map_err(storage)?;
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage)?;
@@ -619,8 +675,10 @@ impl SqliteStorage {
             .pragma_update(None, "fullfsync", true)
             .map_err(storage)?;
         let _ = std::fs::remove_file(startup_note_path(&path));
+        let readers = Readers::open(&path)?;
         Ok(Arc::new(Self {
             connection: Mutex::new(Some(connection)),
+            readers,
             admission: Mutex::new(Admission {
                 closed: false,
                 running: 0,
@@ -665,6 +723,7 @@ impl SqliteStorage {
         Ok((
             Arc::new(Self {
                 connection: Mutex::new(Some(connection)),
+                readers: Readers::none(),
                 admission: Mutex::new(Admission {
                     closed: false,
                     running: 0,
@@ -682,52 +741,125 @@ impl SqliteStorage {
     pub fn upgraded_from(&self) -> Option<u32> {
         self.upgraded_from
     }
+    /// Runs `operation` on the writer's connection. Only writes, checkpoints
+    /// and reads that must follow them run here; business reads use
+    /// [`Self::run_read`].
     pub(crate) async fn run<T: Send + 'static>(
         self: &Arc<Self>,
         operation: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        {
-            let mut admission = self.admission.lock().unwrap();
-            if admission.closed {
-                return Err(storage("SQLite storage is closed"));
-            }
-            admission.running += 1;
-        }
-        let admitted = Operation(self.clone());
+        let admitted = self.admit()?;
         tokio::task::spawn_blocking(move || {
             let mut guard = admitted
                 .0
                 .connection
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                .unwrap_or_else(PoisonError::into_inner);
             let connection = guard
                 .as_mut()
                 .ok_or_else(|| storage("SQLite storage is closed"))?;
-            match catch_unwind(AssertUnwindSafe(|| operation(connection))) {
-                Ok(result) => result,
-                Err(panic) => {
-                    let failure = storage(format!(
-                        "SQLite operation panicked: {}",
-                        panic_message(panic)
-                    ));
-                    if !connection.is_autocommit()
-                        && let Err(cleanup) = connection.execute_batch("ROLLBACK")
-                    {
-                        return Err(failure.with_cleanup(storage(cleanup)));
-                    }
-                    Err(failure)
+            let result = catch_unwind(AssertUnwindSafe(|| operation(connection)));
+            outcome(connection, result)
+        })
+        .await
+        .map_err(storage)?
+    }
+    /// Runs a read on one of the read-only connections (#599). A read sees the
+    /// last commit when its statement starts and does not wait for the
+    /// writer's transaction or fsync; each call takes the next connection in
+    /// turn, so calls with a long scan, such as the catalog, leave the others
+    /// free. The read-only export store's one connection serves both.
+    pub(crate) async fn run_read<T: Send + 'static>(
+        self: &Arc<Self>,
+        operation: impl FnOnce(&Connection) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let admitted = self.admit()?;
+        tokio::task::spawn_blocking(move || {
+            let reader = admitted.0.reader();
+            match reader {
+                Some(guard) => {
+                    let connection = guard
+                        .as_ref()
+                        .ok_or_else(|| storage("SQLite storage is closed"))?;
+                    let result = catch_unwind(AssertUnwindSafe(|| operation(connection)));
+                    outcome(connection, result)
+                }
+                None => {
+                    let mut guard = admitted
+                        .0
+                        .connection
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    let connection = guard
+                        .as_mut()
+                        .ok_or_else(|| storage("SQLite storage is closed"))?;
+                    let result = catch_unwind(AssertUnwindSafe(|| operation(connection)));
+                    outcome(connection, result)
                 }
             }
         })
         .await
         .map_err(storage)?
     }
-    pub(crate) async fn run_cancellable<T: Send + 'static>(
+    fn admit(self: &Arc<Self>) -> Result<Operation> {
+        let mut admission = self.admission.lock().unwrap();
+        if admission.closed {
+            return Err(storage("SQLite storage is closed"));
+        }
+        admission.running += 1;
+        Ok(Operation(self.clone()))
+    }
+    /// Runs a copy or cleanup on its own write connection (#599). The chunks
+    /// of such an operation commit one transaction at a time, so the writer's
+    /// commits and publications run between them, and foreign keys stay off
+    /// because a fork writes a Session's rows before its session row. The
+    /// connection is not the writer's: it waits for SQLite's write lock, like
+    /// any second connection, and never holds the process connection mutex.
+    pub(crate) async fn run_copy<T: Send + 'static>(
         self: &Arc<Self>,
-        cancel: tokio_util::sync::CancellationToken,
         operation: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        self.run(move |connection| {
+        let _admitted = self.admit()?;
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut connection = Connection::open(&path).map_err(storage)?;
+            connection.busy_handler(Some(busy)).map_err(storage)?;
+            connection
+                .pragma_update(None, "wal_autocheckpoint", 0)
+                .map_err(storage)?;
+            connection
+                .pragma_update(None, "journal_size_limit", WAL_LIMIT_BYTES)
+                .map_err(storage)?;
+            connection
+                .pragma_update(None, "cache_size", -PAGE_CACHE_KIB)
+                .map_err(storage)?;
+            connection
+                .pragma_update(None, "foreign_keys", false)
+                .map_err(storage)?;
+            let result = catch_unwind(AssertUnwindSafe(|| operation(&mut connection)));
+            outcome(&connection, result)
+        })
+        .await
+        .map_err(storage)?
+    }
+    fn reader(&self) -> Option<MutexGuard<'_, Option<Connection>>> {
+        let readers = &self.readers;
+        if readers.connections.is_empty() {
+            return None;
+        }
+        let index = readers.next.fetch_add(1, Ordering::Relaxed) % readers.connections.len();
+        Some(
+            readers.connections[index]
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
+    }
+    pub(crate) async fn run_read_cancellable<T: Send + 'static>(
+        self: &Arc<Self>,
+        cancel: tokio_util::sync::CancellationToken,
+        operation: impl FnOnce(&Connection) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        self.run_read(move |connection| {
             if cancel.is_cancelled() {
                 return Err(AgentError::Cancelled("session catalog".into()));
             }
@@ -790,10 +922,19 @@ impl SqliteStorage {
                 idle.await;
             }
             tokio::task::spawn_blocking(move || {
+                for reader in &db.readers.connections {
+                    let mut slot = reader.lock().unwrap_or_else(PoisonError::into_inner);
+                    if let Some(connection) = slot.take()
+                        && let Err((connection, failure)) = connection.close()
+                    {
+                        *slot = Some(connection);
+                        return Err(storage(failure));
+                    }
+                }
                 let mut guard = db
                     .connection
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    .unwrap_or_else(PoisonError::into_inner);
                 if let Some(connection) = guard.take() {
                     if let Ok(false) = connection.is_readonly("main")
                         && let Err(error) =
@@ -818,6 +959,26 @@ impl SqliteStorage {
         })
         .await
         .map_err(storage)?
+    }
+}
+
+/// The result of a connection call, with a panic rolled back so the
+/// connection stays usable.
+fn outcome<T>(connection: &Connection, result: std::thread::Result<Result<T>>) -> Result<T> {
+    match result {
+        Ok(result) => result,
+        Err(panic) => {
+            let failure = storage(format!(
+                "SQLite operation panicked: {}",
+                panic_message(panic)
+            ));
+            if !connection.is_autocommit()
+                && let Err(cleanup) = connection.execute_batch("ROLLBACK")
+            {
+                return Err(failure.with_cleanup(storage(cleanup)));
+            }
+            Err(failure)
+        }
     }
 }
 

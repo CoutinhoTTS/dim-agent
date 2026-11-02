@@ -190,7 +190,7 @@ impl SessionStore {
         self.titles
             .0
             .db
-            .run(move |connection| Ok(read(connection, &id)))
+            .run_read(move |connection| Ok(read(connection, &id)))
             .await?
     }
     /// Commits `title` as revision `expected_revision + 1` and announces it.
