@@ -3109,11 +3109,16 @@ impl App {
         }
     }
 
-    /// The window title's topic: the session's first message on `main`
-    /// (`ui::title`), whichever line is shown.
+    /// The window title's topic: the Session's stored title when it has one,
+    /// else its first message on `main` (`ui::title`), whichever line is
+    /// shown.
     fn topic(&self) -> Option<String> {
         let snapshot = self.snapshot.as_ref()?;
-        crate::ui::title::topic(snapshot.main_topic.as_deref()?)
+        let topic = snapshot
+            .session_title
+            .as_deref()
+            .or(snapshot.main_topic.as_deref())?;
+        crate::ui::title::topic(topic)
     }
 
     /// Opens `/settings`: the panel, or a second-level switch it carries.

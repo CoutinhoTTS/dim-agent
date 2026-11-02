@@ -3273,6 +3273,15 @@
       ]
     },
     {
+      "id": "dim_cli::model::session::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::model::session",
+      "file": "crates/dim-cli/src/model/session.rs",
+      "unexpandedMacros": [
+        "assert_eq"
+      ]
+    },
+    {
       "id": "dim_cli::model::shell",
       "crate": "dim_cli",
       "parent": "dim_cli::model",
@@ -26805,6 +26814,13 @@
     },
     {
       "from": "dim_cli::model::session",
+      "to": "dim_cli::model::session::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::model::session",
       "to": "dim_cli::model::shell",
       "references": [
         "path ShellResult",
@@ -26855,6 +26871,13 @@
       "references": [
         "path Configuration",
         "use crate::wire::Configuration"
+      ]
+    },
+    {
+      "from": "dim_cli::model::session::tests",
+      "to": "dim_cli::model::session",
+      "references": [
+        "use super::stored_title"
       ]
     },
     {
@@ -28248,6 +28271,7 @@
         "path Update::Web",
         "path Update::Withdrawn",
         "path Usage",
+        "path stored_title",
         "use crate::model::session::ACCOUNT_NAMESPACE",
         "use crate::model::session::Account",
         "use crate::model::session::AccountDescriptor",
@@ -28279,7 +28303,8 @@
         "use crate::model::session::SubagentModelPolicy",
         "use crate::model::session::SwitchKind",
         "use crate::model::session::Update",
-        "use crate::model::session::Usage"
+        "use crate::model::session::Usage",
+        "use crate::model::session::stored_title"
       ]
     },
     {
@@ -32937,8 +32962,10 @@
         "path Command",
         "path Command::ListSessions",
         "path SessionItem",
+        "path stored_title",
         "use crate::model::session::Command",
-        "use crate::model::session::SessionItem"
+        "use crate::model::session::SessionItem",
+        "use crate::model::session::stored_title"
       ]
     },
     {

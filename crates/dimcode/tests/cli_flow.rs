@@ -40,6 +40,8 @@ mod session_management;
 mod skills;
 #[path = "cli_flow/tasks.rs"]
 mod tasks;
+#[path = "cli_flow/title.rs"]
+mod title;
 
 #[path = "support/daemon.rs"]
 mod daemon_cleanup;

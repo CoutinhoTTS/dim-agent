@@ -892,6 +892,14 @@ pub struct SessionItem {
     pub origin: Option<String>,
 }
 
+/// The Session's stored title, unless it has none: empty, or the
+/// `New session` placeholder an untitled Session carries. The one rule the
+/// `/resume` row and the window title share (`ui::title`).
+pub fn stored_title(title: Option<&str>) -> Option<&str> {
+    let title = title?.trim();
+    (!title.is_empty() && !title.eq_ignore_ascii_case("new session")).then_some(title)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwitchKind {
     New,
@@ -1099,5 +1107,20 @@ pub trait SessionPort {
     }
     fn stop(&self) {
         self.send(Command::Stop);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stored_title;
+
+    #[test]
+    fn stored_title_is_none_for_blanks_and_the_new_session_placeholder() {
+        assert_eq!(stored_title(Some("Fix the bug")), Some("Fix the bug"));
+        assert_eq!(stored_title(Some("  Fix the bug  ")), Some("Fix the bug"));
+        assert_eq!(stored_title(Some("New session")), None);
+        assert_eq!(stored_title(Some(" new SESSION ")), None);
+        assert_eq!(stored_title(Some("   ")), None);
+        assert_eq!(stored_title(None), None);
     }
 }
