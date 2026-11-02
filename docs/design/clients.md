@@ -123,9 +123,9 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 
 | Capability | CLI | Web | Source |
 | --- | --- | --- | --- |
-| Send, queue, automatic sending, steer (`Ctrl+S`), interrupt | done | send and stop: done; queue: later phase | InputQueue (S1) |
+| Send, queue (`Enter` while running), automatic sending, steer (`Ctrl+S`, or `Enter` on an empty draft), interrupt | done | send and stop: done; queue: later phase | InputQueue (S1) |
 | Lines: tree, switch, create, send, stop, approvals, end | done | done (right-side Lines panel) | [Timeline branches](timeline-branches.md) §14, [Web workspace](web-workspace.md#41-lines-and-branch) |
-| `/queue` panel and queue deletion | none (only Up-withdraw) | — | server contract done (S1) |
+| `/queue` panel and queue deletion | none | — | server contract done (S1) |
 | Retrieve a queued message for editing | done; a message with attachments loses them (§4 item 4) | — | |
 | Multiline, paste, large paste, images, mixed attachments, `@` files, `!` / `!!` | done | attachments: later phase | [CLI attachment input](cli-attachment-input.md), [ShellInput](plugins/ShellInput.md) |
 | Skill references (`$`, `/`, `@`) | partial: palette code exists, no Skills are listed | — | none |

@@ -8,7 +8,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::model::session::{
-    Command, CompactReply, ContextReading, DIM_OAUTH_ID, DraftPart, SessionPort, SwitchKind, Update,
+    Command, CompactReply, ContextReading, DIM_OAUTH_ID, DraftPart, SessionPort, SubmitMode,
+    SwitchKind, Update,
 };
 #[cfg(test)]
 use crate::model::shell::Outcome as ShellOutcome;
@@ -891,6 +892,9 @@ struct App {
     fork_confirm: Option<ForkAsk>,
     /// The picked message, set in the fork's composer once it is attached.
     fork_draft: Option<String>,
+    /// Queued messages withdrawn for the draft, by input id, until the host
+    /// confirms each withdrawal; a confirmed one goes into the draft.
+    recovering: Vec<(String, String)>,
 }
 
 /// Where a line the user is drafting opens.
@@ -1056,6 +1060,7 @@ impl App {
             line_draft: None,
             fork_confirm: None,
             fork_draft: None,
+            recovering: Vec::new(),
         }
     }
 
@@ -1194,13 +1199,65 @@ impl App {
         }
     }
 
-    /// Sends the next queued message in as steering (Ctrl+S).
+    /// Sends the oldest queued message in as steering (Ctrl+S, and Enter on an
+    /// empty draft).
     fn steer(&mut self) {
         if let Some((id, _)) = self.queued().into_iter().next() {
             self.host.send(Command::InputControl {
                 input_id: id,
                 action: "steer",
             });
+        }
+    }
+
+    /// Whether a key steers the draft: Ctrl+S during a run with a draft.
+    /// Without a draft, Ctrl+S steers the oldest queued message.
+    fn steers_draft(&self, key: &KeyEvent) -> bool {
+        key.code == KeyCode::Char('s')
+            && key.mods.contains(Modifiers::CTRL)
+            && self.running()
+            && !self.composer.is_empty()
+            && self.composer.shell().is_none()
+            && !self.composer.palette_open()
+            && !self.composer.mention_open()
+    }
+
+    /// Withdraws the newest queued message into the draft (Shift+Left).
+    fn recall_newest_queued(&mut self) {
+        if let Some((id, text)) = self.queued().pop() {
+            self.withdraw(id, text);
+        }
+    }
+
+    /// Withdraws every queued message, oldest first, for an interrupt. The
+    /// withdrawals reach the session before its stop, so no queued message
+    /// starts the next run.
+    fn recall_all_queued(&mut self) {
+        for (id, text) in self.queued() {
+            self.withdraw(id, text);
+        }
+    }
+
+    fn withdraw(&mut self, id: String, text: String) {
+        self.recovering.push((id.clone(), text));
+        self.host.send(Command::InputControl {
+            input_id: id,
+            action: "withdraw",
+        });
+    }
+
+    /// Puts a withdrawn message into the draft after the text already there,
+    /// once the session confirmed the withdrawal.
+    fn restore_withdrawn(&mut self, input_id: &str) {
+        let Some(at) = self.recovering.iter().position(|(id, _)| id == input_id) else {
+            return;
+        };
+        let (_, text) = self.recovering.remove(at);
+        let draft = self.composer.text();
+        if draft.trim().is_empty() {
+            self.composer.set_draft(&text);
+        } else {
+            self.composer.set_draft(&format!("{draft}\n{text}"));
         }
     }
 
@@ -1415,6 +1472,7 @@ impl App {
 
     fn apply(&mut self, update: Update) {
         match update {
+            Update::Withdrawn { input_id } => self.restore_withdrawn(&input_id),
             Update::Ready(configuration) => {
                 self.label = Some(ModelLabel::new(&configuration));
             }
@@ -1888,6 +1946,14 @@ impl App {
     /// A key for the composer: the palette, the shortcuts around it and the
     /// draft editor, with what a submit, a command or a shell line does.
     fn composer_key(&mut self, key: KeyEvent) -> Outcome {
+        let (key, mode) = if self.steers_draft(&key) {
+            (
+                KeyEvent::new(KeyCode::Enter, Modifiers::NONE),
+                SubmitMode::Steer,
+            )
+        } else {
+            (key, SubmitMode::Queue)
+        };
         let ctrl = key.mods.contains(Modifiers::CTRL);
         match key.code {
             KeyCode::Char('o' | 'p') if ctrl && !self.composer.palette_open() => {
@@ -1926,8 +1992,9 @@ impl App {
                 } else if self.shell.is_some() {
                     self.stop_shell();
                 } else if self.running() {
+                    self.recall_all_queued();
                     self.interrupt();
-                } else if !self.composer.is_empty() || self.composer.shell().is_some() {
+                } else if self.composer.shell().is_some() {
                     self.composer.clear();
                 }
                 return Outcome::Continue;
@@ -1941,16 +2008,18 @@ impl App {
                 self.set_notice(t("A shell command is already running"));
                 return Outcome::Continue;
             }
-            KeyCode::Up
+            KeyCode::Enter
                 if key.mods.0 == 0 && self.composer.is_empty() && !self.queued().is_empty() =>
             {
-                if let Some((id, text)) = self.queued().pop() {
-                    self.host.send(Command::InputControl {
-                        input_id: id,
-                        action: "withdraw",
-                    });
-                    self.composer.set_draft(&text);
-                }
+                self.steer();
+                return Outcome::Continue;
+            }
+            KeyCode::Left
+                if key.mods.0 == Modifiers::SHIFT.0
+                    && self.composer.is_empty()
+                    && !self.queued().is_empty() =>
+            {
+                self.recall_newest_queued();
                 return Outcome::Continue;
             }
             _ => {}
@@ -1972,20 +2041,20 @@ impl App {
                 history::append(&self.home, &self.cwd_key, &text);
                 self.composer.push_history(&text);
                 self.jump = Some(Jump::Bottom);
-                if self.running() {
+                if mode == SubmitMode::Queue && self.running() {
                     self.set_notice(t("Message queued"));
                 }
-                self.host.submit(text);
+                self.host.submit(text, mode);
             }
             ComposerOutcome::SubmitDraft { text, parts } => {
                 let text = text.trim().to_owned();
                 history::append(&self.home, &self.cwd_key, &text);
                 self.composer.push_history(&text);
                 self.jump = Some(Jump::Bottom);
-                if self.running() {
+                if mode == SubmitMode::Queue && self.running() {
                     self.set_notice(t("Message queued"));
                 }
-                self.host.send(Command::SubmitDraft(parts));
+                self.host.send(Command::SubmitDraft(parts, mode));
             }
             ComposerOutcome::Shell { command, shell } => {
                 let entry = format!("{}{command}", shell.prefix());
@@ -2941,6 +3010,16 @@ impl App {
             }
             "compact" => {
                 self.host.send(Command::Compact);
+                Outcome::Continue
+            }
+            "goal" => {
+                match crate::goal::request(args) {
+                    Some(request) => self.host.send(Command::Goal(request)),
+                    None => self.reports.push(Block::Status {
+                        text: crate::goal::USAGE.to_owned(),
+                        tone: Tone::Muted,
+                    }),
+                }
                 Outcome::Continue
             }
             "mcp" => {
@@ -4433,6 +4512,16 @@ impl App {
                 >= u128::from(reading.threshold) * u128::from(CONTEXT_WARNING_PERCENT)
     }
 
+    /// The shown line's goal, while the line follows it: a goal that
+    /// continues, or one held paused.
+    fn goal_label(&self) -> Option<&'static str> {
+        match self.snapshot.as_ref()?.goal.as_ref()?.status {
+            crate::goal::Status::Active => Some(t("◎ goal active")),
+            crate::goal::Status::Paused(_) => Some(t("◎ goal paused")),
+            _ => None,
+        }
+    }
+
     /// Fullscreen's bottom border label, the status corner: the run
     /// status, the slot (a notice in the highlight colour), the approvals
     /// mode when it is not the default one and the context use.
@@ -4449,6 +4538,9 @@ impl App {
                 &p.muted
             };
             parts.push(fg(&slot, color));
+        }
+        if let Some(goal) = self.goal_label() {
+            parts.push(fg(goal, &p.muted));
         }
         if self.permission_policy.tool_approval() == dim_agent_types::ToolApproval::Bypass {
             let mode = tool_policy_label(&self.permission_policy);
@@ -4475,6 +4567,10 @@ impl App {
             tool_policy_label(&self.permission_policy)
         };
         let mut left = format!("{}AGENT  \u{23f5}\u{23f5} {}", " ".repeat(MARGIN), approval);
+        if let Some(goal) = self.goal_label() {
+            left.push_str("  ");
+            left.push_str(goal);
+        }
         if let Some(context) = self.context_label() {
             left.push_str("  ");
             left.push_str(&context);
@@ -4622,8 +4718,8 @@ const QUEUE_ROWS: usize = 5;
 
 /// The queue strip's hint, and its form when messages are not shown. Every
 /// `/name` it can draw is a command in the table.
-const QUEUE_HINT: &str = "↑ edit · ctrl+s steer now";
-const QUEUE_HINT_MORE: &str = "+{count} more · ↑ edit · ctrl+s steer now";
+const QUEUE_HINT: &str = "shift+← edit last · ctrl+s steer now";
+const QUEUE_HINT_MORE: &str = "+{count} more · shift+← edit last · ctrl+s steer now";
 
 /// The queue, drawn in a titled border above the composer: the next message
 /// to run reads at the top. `height` message rows are drawn (at least the
@@ -5364,7 +5460,9 @@ mod tests {
         let expected = app.composer.expanded_text().trim().to_owned();
         assert!(expected.ends_with(" appended"));
         press(&mut app, KeyCode::Enter);
-        assert!(matches!(sent.borrow().as_slice(), [Command::Submit(text)] if text == &expected));
+        assert!(
+            matches!(sent.borrow().as_slice(), [Command::Submit(text, _)] if text == &expected)
+        );
     }
 
     #[test]
@@ -7149,7 +7247,7 @@ mod tests {
             assert!(!drawn.app.composer.text().contains("[Image #1]"));
             drawn.key(KeyCode::Enter);
             match sent.borrow().last().unwrap() {
-                Command::Submit(text) => assert!(!text.contains("[Image #1]")),
+                Command::Submit(text, _) => assert!(!text.contains("[Image #1]")),
                 Command::OpenLine { prompt, .. } => assert_eq!(prompt, "look [Image #7]"),
                 _ => panic!("message reuse must submit text or open a line"),
             }
@@ -7164,14 +7262,23 @@ mod tests {
         snapshot.focus = "main".into();
         drawn.app.apply(Update::Snapshot(Box::new(snapshot)));
         drawn.app.composer.clear();
-        drawn.key(KeyCode::Up);
-        assert_eq!(drawn.app.composer.text(), "look [Image #7]");
+        let _ = drawn
+            .app
+            .handle(InputEvent::Key(crate::ui::terminal::KeyEvent::new(
+                KeyCode::Left,
+                Modifiers::SHIFT,
+            )));
+        assert!(drawn.app.composer.is_empty());
         assert!(
             matches!(sent.borrow().last(), Some(Command::InputControl { input_id, action: "withdraw" }) if input_id == "queued-image")
         );
+        drawn.app.apply(Update::Withdrawn {
+            input_id: "queued-image".into(),
+        });
+        assert_eq!(drawn.app.composer.text(), "look [Image #7]");
         drawn.key(KeyCode::Enter);
         assert!(
-            matches!(sent.borrow().last(), Some(Command::Submit(text)) if text == "look [Image #7]")
+            matches!(sent.borrow().last(), Some(Command::Submit(text, _)) if text == "look [Image #7]")
         );
     }
 
@@ -7555,6 +7662,201 @@ mod tests {
             Some(Prompt::Ask(prompt)) => prompt.selections.get("tall").cloned(),
             _ => None,
         }
+    }
+
+    /// A session with `queued` messages waiting, while a run is in progress
+    /// when `running` is set.
+    fn session_with_queue(
+        running: bool,
+        queued: &[(&str, &str)],
+    ) -> (
+        App,
+        std::rc::Rc<std::cell::RefCell<Vec<Command>>>,
+        tempfile::TempDir,
+    ) {
+        let home = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent.clone())),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            projection_id: 7,
+            focus: "main".into(),
+            running,
+            main_running: running,
+            queued: queued
+                .iter()
+                .map(|(id, text)| crate::model::view::QueuedInput {
+                    id: (*id).into(),
+                    text: (*text).into(),
+                    display: None,
+                })
+                .collect(),
+            ..ViewSnapshot::default()
+        })));
+        (app, sent, home)
+    }
+
+    fn describe(commands: &[Command]) -> Vec<String> {
+        commands
+            .iter()
+            .map(|command| match command {
+                Command::Submit(text, mode) => format!("submit:{}:{}", mode.as_str(), text),
+                Command::InputControl { input_id, action } => format!("{action}:{input_id}"),
+                Command::Stop => "stop".into(),
+                _ => "other".into(),
+            })
+            .collect()
+    }
+
+    /// During a run Enter queues the draft, and Ctrl+S steers a draft that is
+    /// not empty.
+    #[test]
+    fn enter_queues_a_draft_and_ctrl_s_steers_it_during_a_run() {
+        let (mut app, sent, _home) = session_with_queue(true, &[]);
+        typed(&mut app, "queue me");
+        press(&mut app, KeyCode::Enter);
+        typed(&mut app, "steer me");
+        let _ = app.handle(InputEvent::Key(crate::ui::terminal::KeyEvent::new(
+            KeyCode::Char('s'),
+            Modifiers::CTRL,
+        )));
+        assert_eq!(
+            describe(&sent.borrow()),
+            ["submit:queue:queue me", "submit:steer:steer me"]
+        );
+    }
+
+    #[test]
+    fn steering_waits_for_pending_clipboard_and_image_insertions() {
+        for fullscreen in [false, true] {
+            for image in [false, true] {
+                let (mut app, sent, home) = session_with_queue(true, &[("a", "queued")]);
+                app.fullscreen = fullscreen;
+                app.composer.set_accepts_images(true);
+                let (clipboard_send, clipboard_receive) = std::sync::mpsc::channel();
+                let (image_send, image_receive) = std::sync::mpsc::channel();
+                let path = home.path().join("screen.png");
+                wide_png(&path, 32);
+                let plan = app.composer.plan_files(&[path]).unwrap();
+                let images = crate::ui::composer::read_planned(&plan).unwrap();
+                if image {
+                    app.image_read = Some(ImageRead {
+                        plan,
+                        receive: image_receive,
+                    });
+                } else {
+                    app.clipboard = Some(ClipboardRead::Native(clipboard_receive));
+                }
+                typed(&mut app, "look");
+                for key in [
+                    KeyEvent::new(KeyCode::Enter, Modifiers::NONE),
+                    KeyEvent::new(KeyCode::Char('s'), Modifiers::CTRL),
+                ] {
+                    app.handle(InputEvent::Key(key));
+                    assert!(
+                        sent.borrow().is_empty(),
+                        "pending insertion must hold sending"
+                    );
+                    assert_eq!(app.composer.text(), "look");
+                    let notice = if image {
+                        "Wait for the image insertion before sending"
+                    } else {
+                        "Wait for clipboard insertion before sending"
+                    };
+                    assert_eq!(
+                        app.notice.as_ref().map(|(text, _)| text.as_str()),
+                        Some(notice)
+                    );
+                }
+                if image {
+                    image_send.send(Ok(images)).unwrap();
+                } else {
+                    clipboard_send
+                        .send(Ok(crate::clipboard::Source::Text(" at this".into())))
+                        .unwrap();
+                }
+                app.tick();
+                app.handle(InputEvent::Key(KeyEvent::new(
+                    KeyCode::Char('s'),
+                    Modifiers::CTRL,
+                )));
+                if image {
+                    assert!(matches!(
+                        sent.borrow().as_slice(),
+                        [Command::SubmitDraft(parts, SubmitMode::Steer)]
+                            if matches!(parts.as_slice(), [DraftPart::Text(text), DraftPart::Block(dim_agent_types::ContentBlock::Image { .. })] if text == "look ")
+                    ));
+                } else {
+                    assert_eq!(describe(&sent.borrow()), ["submit:steer:look at this"]);
+                }
+            }
+        }
+    }
+
+    /// Esc withdraws the queue oldest first before the stop, and each text
+    /// joins the draft only when its withdrawal is deleted.
+    #[test]
+    fn escape_withdraws_the_queue_before_the_stop_and_restores_the_drafts() {
+        let (mut app, sent, _home) = session_with_queue(true, &[("a", "first"), ("b", "second")]);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(
+            describe(&sent.borrow()),
+            ["withdraw:a", "withdraw:b", "stop"]
+        );
+        assert!(app.composer.is_empty());
+        app.apply(Update::Withdrawn {
+            input_id: "a".into(),
+        });
+        app.apply(Update::Withdrawn {
+            input_id: "b".into(),
+        });
+        assert_eq!(app.composer.text(), "first\nsecond");
+    }
+
+    /// Shift+Left takes the newest queued message back, and its text enters
+    /// the draft once the withdrawal is deleted.
+    #[test]
+    fn shift_left_withdraws_the_newest_queued_message_into_the_draft() {
+        let (mut app, sent, _home) = session_with_queue(true, &[("a", "first"), ("b", "second")]);
+        let _ = app.handle(InputEvent::Key(crate::ui::terminal::KeyEvent::new(
+            KeyCode::Left,
+            Modifiers::SHIFT,
+        )));
+        assert_eq!(describe(&sent.borrow()), ["withdraw:b"]);
+        assert!(app.composer.is_empty());
+        app.apply(Update::Withdrawn {
+            input_id: "b".into(),
+        });
+        assert_eq!(app.composer.text(), "second");
+    }
+
+    /// Enter on an empty draft steers the oldest queued message, as Ctrl+S does.
+    #[test]
+    fn enter_on_an_empty_draft_steers_like_ctrl_s() {
+        let (mut app, sent, _home) = session_with_queue(true, &[("a", "first"), ("b", "second")]);
+        press(&mut app, KeyCode::Enter);
+        let _ = app.handle(InputEvent::Key(crate::ui::terminal::KeyEvent::new(
+            KeyCode::Char('s'),
+            Modifiers::CTRL,
+        )));
+        assert_eq!(describe(&sent.borrow()), ["steer:a", "steer:a"]);
+    }
+
+    /// Esc with no run in progress keeps the draft.
+    #[test]
+    fn escape_keeps_an_idle_draft() {
+        let (mut app, sent, _home) = session_with_queue(false, &[]);
+        typed(&mut app, "keep");
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.composer.text(), "keep");
+        assert!(sent.borrow().is_empty());
     }
 
     /// With a question pending and its answer to be chosen, `/` and Ctrl+O
