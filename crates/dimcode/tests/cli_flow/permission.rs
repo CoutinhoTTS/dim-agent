@@ -28,7 +28,7 @@ fn quiet_turn(wire: &mut Wire) {
 }
 
 #[test]
-fn line_permission_controls_preserve_other_fields_retry_conflicts_and_surface_old_daemon_errors() {
+fn line_permission_controls_keep_tool_lists_report_conflicts_and_reject_unknown_presets() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.hello(&PRESET_METHODS);
@@ -37,39 +37,41 @@ fn line_permission_controls_preserve_other_fields_retry_conflicts_and_surface_ol
         let read = wire.read("session.permission.get");
         wire.reply(&read, json!({"version":1,"policy":current}));
         wire.attached();
-        for (version, fail_conflict) in [(1, true), (2, false)] {
-            let read = wire.read("session.permission.get");
-            wire.reply(&read, json!({"version":version,"policy":current}));
-            let write = wire.read("session.permission.update");
-            let mut expected = current.clone();
-            expected["preset"] = json!("workspace-write");
-            assert_eq!(write["params"]["policy"], expected);
-            assert_eq!(write["params"]["expectedVersion"], version);
-            if fail_conflict {
-                fail(wire, &write, "permission_conflict");
-                current["disallowedTools"] = json!(["blocked", "new-deny"]);
-            } else {
-                wire.reply(&write, json!({"version":3}));
-                current = expected;
-            }
-        }
         let read = wire.read("session.permission.get");
-        wire.reply(&read, json!({"version":3,"policy":current}));
-        let read = wire.read("session.permission.get");
-        wire.reply(&read, json!({"version":3,"policy":current}));
+        wire.reply(&read, json!({"version":1,"policy":current}));
         let write = wire.read("session.permission.update");
-        let mut expected = current.clone();
-        expected["fileAccess"] = json!("unrestricted");
-        assert_eq!(write["params"]["policy"], expected);
-        fail(wire, &write, "invalid_params");
+        assert_eq!(
+            write["params"]["policy"],
+            json!({"preset":"workspace-write","allowedTools":["read"],"disallowedTools":["blocked"]})
+        );
+        assert_eq!(write["params"]["expectedVersion"], 1);
+        fail(wire, &write, "permission_conflict");
+        current["disallowedTools"] = json!(["blocked", "new-deny"]);
+        let read = wire.read("session.permission.get");
+        wire.reply(&read, json!({"version":2,"policy":current}));
+        let read = wire.read("session.permission.get");
+        wire.reply(&read, json!({"version":2,"policy":current}));
+        let write = wire.read("session.permission.update");
+        assert_eq!(
+            write["params"]["policy"],
+            json!({"preset":"workspace-write","allowedTools":["read"],"disallowedTools":["blocked","new-deny"]})
+        );
+        assert_eq!(write["params"]["expectedVersion"], 2);
+        wire.reply(&write, json!({"version":3}));
+        current["preset"] = json!("workspace-write");
+        let read = wire.read("session.permission.get");
+        wire.reply(&read, json!({"version":3,"policy":current}));
         wire.detach();
     });
     let mut terminal = Terminal::launch(home.command());
     terminal.until("\n> ");
     terminal.write(b"/permissions workspace-write\n");
-    terminal.until("permission: workspace-write");
+    terminal.until("Run the command again to switch.");
     terminal.until("\n> ");
     terminal.write(b"/permissions workspace-write\n");
+    terminal.until("Preset (main branch): workspace-write");
+    terminal.until("\n> ");
+    terminal.write(b"/permissions\n");
     terminal.until("permission: workspace-write");
     terminal.until("\n> ");
     terminal.write(b"/permissions unrestricted\n");
@@ -173,7 +175,7 @@ fn tui_home_remembers_permissions_without_login_and_applies_them_to_the_first_me
                 let create = wire.read("session.create");
                 assert_eq!(
                     create["params"]["permissionPolicy"],
-                    json!({"preset":"workspace-write","fileAccess":"read-only","toolApproval":"bypass"})
+                    json!({"preset":"full-access"})
                 );
                 wire.reply(
                     &create,
@@ -190,7 +192,7 @@ fn tui_home_remembers_permissions_without_login_and_applies_them_to_the_first_me
                     let read = wire.read("session.permission.get");
                     wire.reply(
                         &read,
-                        json!({"version":1,"policy":{"preset":"workspace-write","fileAccess":"read-only","toolApproval":"bypass","allowedTools":[],"disallowedTools":[]}}),
+                        json!({"version":1,"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}),
                     );
                 }
                 let submit = wire.read("session.submit");
@@ -290,8 +292,6 @@ fn permission_flag_selects_the_new_and_resumed_preset_with_version_checks() {
         fail(wire, &update, "permission_conflict");
         let get = wire.read("session.permission.get");
         let mut current = policy("read-only", &[], &[]);
-        current["fileAccess"] = json!("read-only");
-        current["toolApproval"] = json!("ask");
         wire.reply(
             &get,
             json!({"version":6,"policy":current}),
@@ -1003,7 +1003,7 @@ fn real_daemon_always_allow_saves_an_exact_rule_until_approvals_removes_it() {
         terminal.transcript
     );
     terminal.write(b"/permissions workspace-write\n");
-    terminal.until("permission: workspace-write");
+    terminal.until("Preset (main branch): workspace-write");
     terminal.editor();
     let mark = terminal.transcript.len();
     terminal.write(b"exec: printf ask-ran\n");
@@ -1632,7 +1632,7 @@ fn rules_drain(wire: &mut Wire) {
 /// Opens the Permissions panel and walks to its Command rules row.
 fn open_command_rules(terminal: &mut Terminal) {
     terminal.write(b"/permissions\r");
-    terminal.until("Process isolation");
+    terminal.until("Workspace write");
     terminal.until("Command rules");
     for _ in 0..3 {
         terminal.raw(b"\x1b[B");
@@ -1707,7 +1707,7 @@ fn tui_permissions_panel_lists_command_rules_and_returns() {
         terminal.until("wide-tail");
         // Esc returns to the Permissions panel the row was opened from.
         terminal.raw(b"\x1b");
-        terminal.until("File access");
+        terminal.until("Workspace write");
         terminal.raw(b"\x1b");
         thread::sleep(Duration::from_millis(200));
         terminal.write(b"/exit\r");
