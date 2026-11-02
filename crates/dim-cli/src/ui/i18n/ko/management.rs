@@ -6,6 +6,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Issues" => "문제",
         "sources" => "소스",
         "skills" => "스킬",
+        "hooks" => "훅",
+        "scheduled jobs" => "예약된 작업",
         "enabled" => "활성",
         "shadowed by {name}" => "{name}에 의해 가려짐",
         "Reloaded." => "다시 로드했습니다.",

@@ -62,6 +62,9 @@ pub const STRINGS: &[&str] = &[
     "Issues",
     "sources",
     "skills",
+    "hooks",
+    "scheduled jobs",
+    "jobs",
     "enabled",
     "disabled",
     "invalid",
@@ -70,6 +73,7 @@ pub const STRINGS: &[&str] = &[
     "Working...",
     "Reloaded.",
     "Saved.",
+    "Saved {name}.",
     "Added.",
     "Removed {name}.",
     "Ran {name}.",
@@ -101,6 +105,9 @@ pub const STRINGS: &[&str] = &[
     "The job changed since it was read; nothing was removed.",
     "The Scheduler has no area document.",
     "No scheduled job has that id.",
+    "The document changes no field; nothing was written.",
+    "The document deleted {field}, which the owner cannot clear; nothing was written.",
+    "This daemon cannot manage {area}.",
     "This workspace's hook settings changed since they were read; nothing was written.",
 ];
 
@@ -986,13 +993,13 @@ mod tests {
             Area::Skills,
             ManagementAction::List,
             ManagementResult::Refused(ManagementRefusal::Refused(
-                "This daemon cannot manage Skills.".into(),
+                "This daemon cannot manage skills.".into(),
             )),
         ));
         assert!(
             shown(&panel, 60, 10)
                 .join(" ")
-                .contains("This daemon cannot manage Skills.")
+                .contains("This daemon cannot manage skills.")
         );
     }
 
@@ -1136,11 +1143,11 @@ mod tests {
             Area::Skills,
             ManagementAction::List,
             ManagementResult::Refused(ManagementRefusal::Refused(
-                "This daemon cannot manage Skills.".into(),
+                "This daemon cannot manage skills.".into(),
             )),
         ));
         let text = shown(&panel, 60, 12).join("\n");
-        assert!(text.contains("This daemon cannot manage Skills."), "{text}");
+        assert!(text.contains("This daemon cannot manage skills."), "{text}");
         assert!(text.contains("Ctrl+R reload"), "{text}");
         match panel.handle_key(ctrl('r')) {
             Effect::Management(request) => assert_eq!(request.action, ManagementAction::Reload),

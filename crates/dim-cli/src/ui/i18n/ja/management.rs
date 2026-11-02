@@ -6,6 +6,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Issues" => "問題",
         "sources" => "ソース",
         "skills" => "スキル",
+        "hooks" => "フック",
+        "scheduled jobs" => "スケジュール済みジョブ",
         "enabled" => "有効",
         "shadowed by {name}" => "{name} が優先",
         "Reloaded." => "再読み込みしました。",

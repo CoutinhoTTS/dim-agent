@@ -6,6 +6,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Issues" => "问题",
         "sources" => "来源",
         "skills" => "技能",
+        "hooks" => "钩子",
+        "scheduled jobs" => "定时任务",
         "enabled" => "已启用",
         "shadowed by {name}" => "被 {name} 覆盖",
         "Reloaded." => "已重新加载。",

@@ -6,6 +6,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Issues" => "Problemas",
         "sources" => "Fontes",
         "skills" => "Skills",
+        "hooks" => "hooks",
+        "scheduled jobs" => "tarefas agendadas",
         "enabled" => "ativado",
         "shadowed by {name}" => "ocultado por {name}",
         "Reloaded." => "Recarregado.",

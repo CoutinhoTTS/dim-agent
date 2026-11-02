@@ -31,9 +31,9 @@ use crate::ui::i18n::{self, t, tf};
 struct Methods {
     catalog: &'static str,
     kinds: &'static [(ActionKind, &'static str)],
-    /// The area's display label, as its panel's title and every sentence
-    /// that names the area use it.
-    label: &'static str,
+    /// What the area manages, as the unsupported sentence names it: the
+    /// noun behind "This daemon cannot manage ...".
+    manages: &'static str,
 }
 
 impl Methods {
@@ -47,7 +47,7 @@ impl Methods {
 
 const SKILLS: Methods = Methods {
     catalog: "skills.catalog",
-    label: "Skills",
+    manages: "skills",
     kinds: &[
         (ActionKind::Toggle, "skills.set_enabled"),
         (ActionKind::Reload, "skills.refresh"),
@@ -56,7 +56,7 @@ const SKILLS: Methods = Methods {
 
 const HOOKS: Methods = Methods {
     catalog: "hooks.catalog",
-    label: "Hooks",
+    manages: "hooks",
     kinds: &[
         (ActionKind::Toggle, "hooks.set_enabled"),
         (ActionKind::Edit, "hooks.save"),
@@ -67,7 +67,7 @@ const HOOKS: Methods = Methods {
 
 const SCHEDULED: Methods = Methods {
     catalog: "schedule.list",
-    label: "Scheduler",
+    manages: "scheduled jobs",
     kinds: &[
         (ActionKind::Toggle, "schedule.set_enabled"),
         (ActionKind::Edit, "schedule.save"),
@@ -170,13 +170,13 @@ pub fn supports_kind(client: &Client, area: Area, kind: ActionKind) -> Result<()
     }
 }
 
-/// The unsupported-daemon sentence: the area's own label, translated where
-/// it is used, so the shared module names no area.
+/// The unsupported-daemon sentence: what the area manages, translated
+/// where it is used, so the shared module names no area.
 fn unsupported(area: Area) -> String {
     let methods = methods_of(area);
     tf(
         "This daemon cannot manage {area}.",
-        &[("area", t(methods.label))],
+        &[("area", t(methods.manages))],
     )
 }
 

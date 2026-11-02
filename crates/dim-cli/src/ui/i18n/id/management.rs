@@ -6,6 +6,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Issues" => "Masalah",
         "sources" => "Sumber",
         "skills" => "Skill",
+        "hooks" => "hook",
+        "scheduled jobs" => "tugas terjadwal",
         "enabled" => "aktif",
         "shadowed by {name}" => "tertutup oleh {name}",
         "Reloaded." => "Dimuat ulang.",
