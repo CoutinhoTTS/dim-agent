@@ -3133,7 +3133,8 @@
       "unexpandedMacros": [
         "format",
         "json",
-        "matches"
+        "matches",
+        "write"
       ]
     },
     {

@@ -348,7 +348,7 @@ pub async fn apply(
             Err(workflow::Failure::Conflict { message, listing }) => {
                 ManagementResult::Refused(ManagementRefusal::Conflict {
                     message,
-                    view: Ok(Box::new(workflow::view(&listing, &actions, cwd))),
+                    view: listing.map(|listing| Box::new(workflow::view(&listing, &actions, cwd))),
                 })
             }
         },

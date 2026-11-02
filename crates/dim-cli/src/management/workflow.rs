@@ -127,10 +127,10 @@ impl Listing {
 /// Why a Workflow action did not produce a view.
 pub enum Failure {
     /// The user document changed since it was read: nothing was written, and
-    /// this is the area as it now is.
+    /// this is the area as it now is, or why the read that reports it failed.
     Conflict {
         message: String,
-        listing: Box<Listing>,
+        listing: Result<Box<Listing>, String>,
     },
     /// The action was applied and the read that follows failed.
     ReadFailed { note: Option<String>, error: String },
@@ -141,9 +141,13 @@ pub enum Failure {
 impl std::fmt::Display for Failure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Conflict { message, .. }
-            | Self::ReadFailed { error: message, .. }
-            | Self::Refused(message) => formatter.write_str(message),
+            Self::Conflict { message, listing } => match listing {
+                Ok(_) => formatter.write_str(message),
+                Err(error) => write!(formatter, "{message} {error}"),
+            },
+            Self::ReadFailed { error: message, .. } | Self::Refused(message) => {
+                formatter.write_str(message)
+            }
         }
     }
 }
@@ -477,14 +481,13 @@ async fn start(
     Ok((entry.name.clone(), started.run_id))
 }
 
-/// The area after a conflict, when the owner kept the stored document.
+/// The area after a conflict, when the definitions changed since they were
+/// read: nothing was written, and this is the area as it now is, or why the
+/// read that reports it failed.
 async fn conflict(client: &mut Client, cwd: &str, message: &str) -> Failure {
-    match read(client, Path::new(cwd)).await {
-        Ok(listing) => Failure::Conflict {
-            message: message.to_owned(),
-            listing: Box::new(listing),
-        },
-        Err(error) => Failure::Refused(error),
+    Failure::Conflict {
+        message: message.to_owned(),
+        listing: read(client, Path::new(cwd)).await.map(Box::new),
     }
 }
 

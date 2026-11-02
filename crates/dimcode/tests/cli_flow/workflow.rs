@@ -329,6 +329,48 @@ fn workflow_enable_reports_its_line_when_the_read_after_it_fails() {
     );
 }
 
+/// A conflict whose re-read fails is still a conflict: the settings changed
+/// and nothing was written, so the command says so and why it cannot show
+/// the area.
+#[test]
+fn workflow_a_conflict_whose_reread_fails_is_still_a_conflict() {
+    let home = Home::new();
+    let (project, _) = workspace(&home);
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("workflow.list");
+        wire.reply(&request, definitions());
+        let request = wire.read("settings.read");
+        wire.reply(&request, settings());
+        let request = wire.read("settings.update");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,"message":"settings changed","data":{"appError":"settings_conflict"}}}));
+        // The re-read the conflict reports fails too.
+        let request = wire.read("workflow.list");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,"message":"the definitions are unavailable"}}));
+        drains(wire);
+    });
+    let output = home
+        .command()
+        .arg("--cwd")
+        .arg(&project)
+        .args(["workflow", "enable", "nightly-check"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("The definitions changed since they were read; nothing was written."),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("the definitions are unavailable"),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn workflow_enable_refuses_a_name_the_owner_does_not_list_as_a_project() {
     let home = Home::new();
