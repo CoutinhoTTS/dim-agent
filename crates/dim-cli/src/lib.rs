@@ -812,6 +812,18 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             println!("{}", runtime_line(&status));
             Ok(0)
         }
+        Action::RuntimeConfig { name, source, auto } => {
+            let mut params = serde_json::json!({ "name": name });
+            if let Some(source) = source {
+                params["source"] = serde_json::json!(source);
+            }
+            if let Some(auto) = auto {
+                params["auto"] = serde_json::json!(auto);
+            }
+            let status: serde_json::Value = client.typed("runtime.configure", params).await?;
+            println!("{}", runtime_line(&status));
+            Ok(0)
+        }
         Action::McpList => {
             mcp_command::list(&mut client, &options).await?;
             Ok(0)
@@ -867,9 +879,18 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
 
 /// One `runtime.list` entry as a tab-separated line.
 fn runtime_line(status: &serde_json::Value) -> String {
-    ["name", "source", "version", "status", "reason"]
+    let auto = status["auto"]
+        .as_bool()
+        .map(|on| if on { "on" } else { "off" });
+    ["name", "source"]
         .iter()
         .filter_map(|field| status[field].as_str())
+        .chain(auto)
+        .chain(
+            ["version", "status", "reason"]
+                .iter()
+                .filter_map(|field| status[field].as_str()),
+        )
         .map(|value| crate::sanitize::safe(value).replace(['\n', '\t'], " "))
         .collect::<Vec<_>>()
         .join("\t")
