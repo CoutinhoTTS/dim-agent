@@ -164,6 +164,57 @@ fn hooks_enable_and_disable_send_the_workspace_and_the_revision() {
     }
 }
 
+/// A toggle the daemon accepted is done even when the read after it fails:
+/// the line names the workspace, the read error follows, and exit is 0.
+#[test]
+fn hooks_enable_reports_the_toggle_when_the_read_after_it_fails() {
+    let home = Home::new();
+    let project = home.0.join("work");
+    fs::create_dir(&project).unwrap();
+    let expected = fs::canonicalize(&project)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let workspace = expected.clone();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("hooks.catalog");
+        wire.reply(&request, catalog());
+        let request = wire.read("hooks.set_enabled");
+        assert_eq!(
+            request["params"],
+            json!({"cwd": workspace, "enabled": true, "expectedRevision": "user:1"})
+        );
+        wire.reply(&request, json!({"revision": "projects:2"}));
+        // The toggle is committed; the report after it is what fails.
+        let request = wire.read("hooks.catalog");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"hooks catalog unavailable",
+            "data":{"appError":"hooks_failed"}}}));
+    });
+    let output = home
+        .command()
+        .arg("--cwd")
+        .arg(&project)
+        .args(["hooks", "enable"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("Enabled project hooks for {expected}.\n")
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("hooks catalog unavailable"), "{stderr}");
+}
+
 /// A toggle the owner refuses over a newer document writes nothing and reads
 /// the area again, as a save's conflict does: the subcommand exits 1 with the
 /// conflict, and the panel shows it over the view it reads again.
@@ -698,6 +749,22 @@ fn hooks_edit_keeps_the_users_text_when_the_revision_is_stale() {
         fs::read_to_string(&kept[0]).unwrap(),
         "{\"hooks\":{\"Stop\":[]}}"
     );
+    // A draft can hold commands, environment and headers, so it is readable
+    // only by the user, in a directory only the user can enter.
+    assert_eq!(
+        fs::metadata(&kept[0]).unwrap().permissions().mode() & 0o777,
+        0o600,
+        "the draft is readable only by the user"
+    );
+    assert_eq!(
+        fs::metadata(home.0.join("edit"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700,
+        "the draft directory is enterable only by the user"
+    );
 }
 
 /// Each edit keeps its own file: a second refused edit does not overwrite
@@ -970,6 +1037,84 @@ fn tui_hooks_panel_lists_the_sources_and_toggles_the_project() {
     terminal.until("Bye!");
     assert!(terminal.wait().success());
     daemon.join().unwrap();
+}
+
+/// Enter toggles the project, and only the read after the toggle fails: the
+/// panel reports what it did and the read error, and keeps no view, in both
+/// terminal modes.
+#[test]
+fn tui_hooks_panel_settles_a_toggle_whose_read_fails() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (shown, wait_shown) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            hello(wire);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history");
+            wire.reply(
+                &history,
+                json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+            );
+            for _ in 0..2 {
+                let request = wire.read_any();
+                match request["method"].as_str() {
+                    Some("account.providers") => wire.reply(&request, json!([])),
+                    Some("session.context.usage") => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                        "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+                    method => panic!("unexpected request {method:?}"),
+                }
+            }
+            wait_shown.recv_timeout(PATIENCE).unwrap();
+            let request = wire.read("hooks.catalog");
+            wire.reply(&request, document_catalog("user:1", json!({"hooks": {}})));
+            // The write reads the project revision immediately before it.
+            let request = wire.read("hooks.catalog");
+            wire.reply(&request, document_catalog("user:1", json!({"hooks": {}})));
+            let request = wire.read("hooks.set_enabled");
+            assert_eq!(request["params"]["enabled"], true);
+            wire.reply(&request, json!({"revision": "projects:2"}));
+            // The toggle is committed; the report after it is what fails.
+            let request = wire.read("hooks.catalog");
+            wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                "code":-32000,
+                "message":"hooks catalog unavailable",
+                "data":{"appError":"hooks_failed"}}}));
+            drains(wire);
+        });
+        let mut command = home.command();
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("test / model");
+        shown.send(()).unwrap();
+        terminal.write(b"/hooks\r");
+        terminal.until("The user's own document; always in effect.");
+        terminal.raw(b"\x1b[B");
+        terminal.until("/work/.dimcode/hooks.json");
+        terminal.raw(b"\r");
+        terminal.until("Enabled project.");
+        terminal.until("hooks catalog unavailable");
+        let settled = terminal.transcript.clone();
+        assert!(!settled.contains("Disabled project."), "{settled}");
+        terminal.raw(b"\x1b");
+        thread::sleep(Duration::from_millis(200));
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+        assert_eq!(
+            terminal
+                .transcript
+                .matches("hooks catalog unavailable")
+                .count(),
+            1,
+            "the read error is drawn once: {}",
+            terminal.transcript
+        );
+    }
 }
 
 /// The catalog of a workspace with no hook file anywhere: every source
