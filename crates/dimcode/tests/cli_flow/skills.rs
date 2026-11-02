@@ -407,6 +407,60 @@ fn a_daemon_without_skill_enablement_lists_but_refuses_a_change() {
     );
 }
 
+/// Ctrl+R after a read that failed reads the area again: a daemon that
+/// serves only `skills.catalog` answers the retry, and the panel never asks
+/// for a rescan.
+#[test]
+fn tui_skills_panel_reads_again_after_a_failed_read() {
+    let home = Home::new();
+    let (shown, wait_shown) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["skills.catalog"]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        for _ in 0..2 {
+            let request = wire.read_any();
+            match request["method"].as_str() {
+                Some("account.providers") => wire.reply(&request, json!([])),
+                Some("session.context.usage") => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                    "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+                method => panic!("unexpected request {method:?}"),
+            }
+        }
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        let request = wire.read("skills.catalog");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"catalog unavailable",
+            "data":{"appError":"skills_unavailable"}}}));
+        let request = wire.read("skills.catalog");
+        wire.reply(&request, catalog(true));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/skills\r");
+    terminal.until("catalog unavailable");
+    terminal.raw(b"\x12");
+    terminal.until("Writes commit messages");
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
 /// `/skills` opens the panel on the catalog and Enter toggles the selected
 /// entry; `/reload-skills` rescans without a panel and reports what it found.
 #[test]

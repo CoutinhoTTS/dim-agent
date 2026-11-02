@@ -1431,8 +1431,9 @@ fn tui_hooks_panel_settles_a_save_whose_read_fails() {
             "the written draft is not named as kept: {settled}"
         );
         assert!(drafts(&home).is_empty(), "the written draft is removed");
+        // Ctrl+R reads the area, and the rows come back.
         terminal.raw(b"\x12");
-        terminal.until("Reloaded.");
+        terminal.until("plugin:kit");
         terminal.raw(b"\x05");
         terminal.until("Saved.");
         terminal.raw(b"\x1b");
@@ -1534,7 +1535,7 @@ fn tui_hooks_panel_drops_the_draft_when_the_conflict_read_fails() {
         // The link to the stale revision went, so the next edit is the stored
         // document's.
         terminal.raw(b"\x12");
-        terminal.until("Reloaded.");
+        terminal.until("plugin:kit");
         terminal.raw(b"\x05");
         terminal.until("Saved.");
         terminal.raw(b"\x1b");

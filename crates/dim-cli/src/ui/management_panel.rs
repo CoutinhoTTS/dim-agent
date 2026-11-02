@@ -251,14 +251,21 @@ impl ManagementPanel {
             return Effect::None;
         }
         if key.code == KeyCode::Char('r') && key.mods.contains(Modifiers::CTRL) {
-            // A panel with nothing to act on still retries its read.
-            if self.view.is_some() && !self.offers(ActionKind::Reload) {
-                return Effect::None;
-            }
+            // With a view the key is the area's reload, when it has one;
+            // with none it repeats the read that failed, without asking the
+            // owner to rescan anything.
+            let action = if self.view.is_some() {
+                if !self.offers(ActionKind::Reload) {
+                    return Effect::None;
+                }
+                ManagementAction::Reload
+            } else {
+                ManagementAction::List
+            };
             self.busy = true;
             return Effect::Management(ManagementRequest {
                 area: self.area,
-                action: ManagementAction::Reload,
+                action,
             });
         }
         // Ctrl holds the actions off the filter, which takes every plain
@@ -819,8 +826,8 @@ mod tests {
         );
     }
 
-    /// Reload belongs to the area: it works on an empty area and after a
-    /// failed read, where no entry is selected to offer it.
+    /// Reload belongs to the area: it works on an empty area where no entry
+    /// is selected to offer it, and after a failed read Ctrl+R reads again.
     #[test]
     fn reload_works_on_an_empty_area_and_after_a_failed_read() {
         let mut panel = ManagementPanel::new(Area::Skills);
@@ -859,8 +866,8 @@ mod tests {
         assert!(text.contains("This daemon cannot manage skills."), "{text}");
         assert!(text.contains("Ctrl+R reload"), "{text}");
         match panel.handle_key(KeyEvent::new(KeyCode::Char('r'), Modifiers::CTRL)) {
-            Effect::Management(request) => assert_eq!(request.action, ManagementAction::Reload),
-            _ => panic!("expected a reload"),
+            Effect::Management(request) => assert_eq!(request.action, ManagementAction::List),
+            _ => panic!("expected a read"),
         }
     }
 
