@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -100,4 +100,119 @@ test('development home starts without writing an isolation policy', { skip: proc
   });
   assert.equal(configured_run.status, 0, configured_run.stderr);
   assert.equal(existsSync(path.join(configured_home, 'rust/host-isolation.json')), false);
+});
+
+/** A source checkout with two code plugins, one skills-only plugin and stubs for cargo, node and npm. */
+function pluginCheckout(t, prefix) {
+  const temporary = realpathSync(mkdtempSync(path.join(os.tmpdir(), prefix)));
+  t.after(() => rmSync(temporary, { recursive: true, force: true }));
+  const repo = path.join(temporary, 'public source');
+  const bin = path.join(temporary, 'tools');
+  const home = path.join(temporary, 'isolated home');
+  const log = path.join(temporary, 'npm.log');
+  for (const relative of ['scripts', 'target/debug', 'runtime/plugins/goal', 'runtime/plugins/session-title', 'runtime/plugins/workflow']) {
+    mkdirSync(path.join(repo, relative), { recursive: true });
+  }
+  mkdirSync(bin);
+  cpSync(path.resolve(import.meta.dirname, '../dev'), path.join(repo, 'dev'));
+  cpSync(path.join(import.meta.dirname, 'stage-plugins.mjs'), path.join(repo, 'scripts/stage-plugins.mjs'));
+  writeFileSync(path.join(repo, 'runtime/default-plugins.json'),
+    `${JSON.stringify({ plugins: { goal: 'plugins/goal', 'session-title': 'plugins/session-title', workflow: 'plugins/workflow' } })}\n`);
+  for (const name of ['goal', 'session-title']) {
+    writeFileSync(path.join(repo, `runtime/plugins/${name}/package.json`), `${JSON.stringify({ name: `@dim/${name}`, private: true })}\n`);
+    writeFileSync(path.join(repo, `runtime/plugins/${name}/package-lock.json`), `${JSON.stringify({ name: `@dim/${name}`, lockfileVersion: 3 })}\n`);
+  }
+  for (const name of ['goal', 'session-title', 'workflow']) {
+    writeFileSync(path.join(repo, `runtime/plugins/${name}/index.ts`), `export const name = '${name}';\n`);
+  }
+  writeFileSync(path.join(bin, 'cargo'), '#!/bin/bash\nexit 0\n', { mode: 0o755 });
+  writeFileSync(path.join(bin, 'node'), `#!/bin/bash\nexec "${process.execPath}" "$@"\n`, { mode: 0o755 });
+  const npm = (status) => writeFileSync(path.join(bin, 'npm'),
+    `#!/bin/bash\nprintf '%s\\n' "$PWD" >> "${log}"\nmkdir -p "$PWD/node_modules"\nexit ${status}\n`, { mode: 0o755 });
+  npm(0);
+  writeFileSync(path.join(repo, 'target/debug/dimcode'), `#!${process.execPath}
+const args = process.argv.slice(2);
+if (args.slice(-2).join(' ') === 'daemon stop') process.exit(0);
+console.log(JSON.stringify({ defaultPlugins: process.env.DIMCODE_DEFAULT_PLUGINS ?? null }));
+`, { mode: 0o755 });
+  const env = { ...process.env, PATH: `${bin}:/usr/bin:/bin`, DIMCODE_HOME: home, DIMCODE_MODEL_CONFIG: '', DIMCODE_PROVIDER: '', DIMCODE_MODEL: '' };
+  delete env.DIMCODE_DEFAULT_PLUGINS;
+  const run = (overrides = {}) => spawnSync(path.join(repo, 'dev'), ['--prompt', 'hello'], { cwd: temporary, env: { ...env, ...overrides }, encoding: 'utf8', input: '' });
+  const installs = () => existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean) : [];
+  return { temporary, repo, bin, home, log, staged: path.join(repo, 'staging/dev-plugins'), run, installs, npm };
+}
+
+/** The plugin a logged npm ci ran for; the temporary directory carries the pid. */
+const installName = (directory) => {
+  const match = /^(.*)\.partial(?:\.\d+)?$/.exec(path.basename(directory));
+  return match ? match[1] : path.basename(directory);
+};
+
+/** Temporary directories a stage holds for one plugin. */
+const leftovers = (output, relative, kind) => {
+  const parent = path.dirname(path.join(output, relative));
+  const name = path.basename(relative).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (!existsSync(parent)) return [];
+  const pattern = new RegExp(`^${name}\\.${kind}(?:\\.\\d+)?$`);
+  return readdirSync(parent).filter((entry) => pattern.test(entry));
+};
+
+test('a run stages the default plugins and updates them only when needed', { skip: process.platform === 'win32' }, (t) => {
+  const checkout = pluginCheckout(t, 'dim dev plugins ');
+  const first = checkout.run();
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(JSON.parse(first.stdout).defaultPlugins, path.join(checkout.staged, 'default-plugins.json'));
+  for (const file of ['default-plugins.json', 'plugins/goal/index.ts', 'plugins/session-title/index.ts', 'plugins/workflow/index.ts']) {
+    assert(existsSync(path.join(checkout.staged, file)), file);
+  }
+  assert.deepEqual(checkout.installs().map(installName).sort(), ['goal', 'session-title']);
+  assert.match(first.stderr, /Updated 3 default plugins \(npm ci: goal, session-title\)\./);
+  const second = checkout.run();
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(checkout.installs().length, 2);
+  assert.match(second.stderr, /Updated 3 default plugins \(npm ci: none\)\./);
+  writeFileSync(path.join(checkout.repo, 'runtime/plugins/goal/index.ts'), "export const name = 'goal edited';\n");
+  const edited = checkout.run();
+  assert.equal(edited.status, 0, edited.stderr);
+  assert.equal(readFileSync(path.join(checkout.staged, 'plugins/goal/index.ts'), 'utf8'), "export const name = 'goal edited';\n");
+  assert.equal(checkout.installs().length, 2);
+  writeFileSync(path.join(checkout.repo, 'runtime/plugins/goal/package-lock.json'), `${JSON.stringify({ name: '@dim/goal', lockfileVersion: 3, revision: 2 })}\n`);
+  const locked = checkout.run();
+  assert.equal(locked.status, 0, locked.stderr);
+  assert.equal(checkout.installs().length, 3);
+  assert.equal(installName(checkout.installs().at(-1)), 'goal');
+  assert.match(locked.stderr, /Updated 3 default plugins \(npm ci: goal\)\./);
+});
+
+test('a developer-selected default plugin file is used without staging', { skip: process.platform === 'win32' }, (t) => {
+  const checkout = pluginCheckout(t, 'dim dev configured ');
+  const configured = path.join(checkout.temporary, 'configured/default-plugins.json');
+  const result = checkout.run({ DIMCODE_DEFAULT_PLUGINS: configured });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).defaultPlugins, configured);
+  assert.equal(existsSync(path.join(checkout.repo, 'staging')), false);
+  assert.deepEqual(checkout.installs(), []);
+});
+
+test('a missing npm or a failed update runs without the default plugins', { skip: process.platform === 'win32' }, (t) => {
+  const checkout = pluginCheckout(t, 'dim dev unavailable ');
+  const staged = checkout.run();
+  assert.equal(staged.status, 0, staged.stderr);
+  writeFileSync(path.join(checkout.staged, 'plugins/goal/marker'), 'kept');
+  writeFileSync(path.join(checkout.repo, 'runtime/plugins/goal/package-lock.json'), `${JSON.stringify({ name: '@dim/goal', lockfileVersion: 3, revision: 2 })}\n`);
+  checkout.npm(1);
+  const failed = checkout.run();
+  assert.equal(failed.status, 0, failed.stderr);
+  assert.equal(JSON.parse(failed.stdout).defaultPlugins, null);
+  assert.equal((failed.stderr.match(/The default plugins were not staged; running without them\./g) ?? []).length, 1);
+  assert.match(failed.stderr, /Cannot stage goal/);
+  assert.equal(readFileSync(path.join(checkout.staged, 'plugins/goal/marker'), 'utf8'), 'kept');
+  assert.deepEqual(leftovers(checkout.staged, 'plugins/goal', 'partial'), []);
+  const withoutNpm = path.join(checkout.temporary, 'without npm');
+  mkdirSync(withoutNpm);
+  for (const name of ['cargo', 'node']) cpSync(path.join(checkout.bin, name), path.join(withoutNpm, name));
+  const missing = checkout.run({ PATH: `${withoutNpm}:/usr/bin:/bin` });
+  assert.equal(missing.status, 0, missing.stderr);
+  assert.equal(JSON.parse(missing.stdout).defaultPlugins, null);
+  assert.equal((missing.stderr.match(/Node or npm is missing; running without the default plugins\./g) ?? []).length, 1);
 });

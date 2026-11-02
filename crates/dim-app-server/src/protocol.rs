@@ -98,7 +98,6 @@ pub enum Call {
     Ping,
     Shutdown(Shutdown),
     Create(Create),
-    List(SessionList),
     Summaries(Summaries),
     Catalog(Catalog),
     CatalogCancel(CatalogCancel),
@@ -549,12 +548,6 @@ pub struct AgentClose {
 }
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SessionList {
-    #[serde(default, deserialize_with = "optional_non_null")]
-    pub agent_id: Option<String>,
-}
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Summaries {
     #[serde(default, deserialize_with = "optional_non_null")]
     pub agent_id: Option<String>,
@@ -714,7 +707,7 @@ pub struct BranchCreate {
 /// Methods still decoded by the built-in protocol cannot be shadowed by
 /// runtime contributions. Session-looking names not listed here remain valid
 /// contributed names (for example `session.shell`).
-const BUILTIN_METHODS: [&str; 35] = [
+const BUILTIN_METHODS: [&str; 34] = [
     "hello",
     "daemon.ping",
     "daemon.shutdown",
@@ -729,7 +722,6 @@ const BUILTIN_METHODS: [&str; 35] = [
     "ui.shutdown",
     "ui.replace",
     "session.create",
-    "session.list",
     "session.summaries",
     "session.catalog",
     "session.catalog.cancel",
@@ -795,7 +787,6 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             }
             "daemon.shutdown" => Call::Shutdown(params(raw_params)?),
             "session.create" => Call::Create(params(raw_params)?),
-            "session.list" => Call::List(params(raw_params)?),
             "session.summaries" => Call::Summaries(params(raw_params)?),
             "session.catalog" => Call::Catalog(params(raw_params)?),
             "session.catalog.cancel" => Call::CatalogCancel(params(raw_params)?),
@@ -1038,8 +1029,8 @@ pub struct CreateResult {
     pub session_id: String,
     pub model: ModelId,
     /// The preferences the Session's adopted configuration sends, derived from
-    /// it; only on this reply, not on `session.list` items, and absent when it
-    /// carries none.
+    /// it; only on this reply, not on `session.summaries` items, and absent
+    /// when it carries none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_preferences: Option<dim_agent_types::ModelPreferences>,
     pub sequence: u64,
@@ -1114,8 +1105,8 @@ pub struct SessionInfo {
     pub title: Option<crate::storage::TitleFields>,
 }
 /// The `session.attach` reply: the attached Session's directory record, as
-/// `session.list` gives it, plus the preferences its adopted configuration
-/// sends. Only this reply and `session.create` name them; list items do not.
+/// `session.summaries` gives it, plus the preferences its adopted
+/// configuration sends. Only this reply and `session.create` name them.
 #[derive(Debug, Serialize)]
 pub struct AttachResult {
     #[serde(flatten)]
@@ -1169,11 +1160,10 @@ pub enum Reply {
     Fork(ForkResult),
     /// The `session.delete` reply: whether this call removed the Session.
     Deleted(DeleteResult),
-    List(Vec<SessionInfo>),
     /// The attached Session's directory record, with `model` and
     /// `modelPreferences` from its latest adopted configuration, falling back
-    /// to the creation one; `session.list` items keep the creation model until
-    /// #795.
+    /// to the creation one; `session.summaries` items keep the creation model
+    /// until #795.
     Attach(AttachResult),
     Summaries(Vec<SessionSummary>),
     Catalog(CatalogResult),

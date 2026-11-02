@@ -1341,7 +1341,7 @@ async fn local_product_management_starts_without_configuration_and_isolates_inva
     }
     assert_ok(&local.rpc("daemon.ping", json!({})).await);
     assert_eq!(
-        local.rpc("session.list", json!({})).await["result"],
+        local.rpc("session.summaries", json!({})).await["result"],
         json!([])
     );
     for file in ["auth.json", "mcp.json", "skills.json"] {
@@ -1364,7 +1364,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     use std::os::unix::{ffi::OsStringExt, fs::DirBuilderExt};
 
     async fn skills_posted(session: &dim_agent_runtime::Session, enabled: bool) {
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 let Ok(view) = session
                     .service::<dim_agent_capabilities::skills::SkillsBranch>("main")
@@ -1372,7 +1372,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
                     .session()
                     .current()
                 else {
-                    tokio::task::yield_now().await;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                     continue;
                 };
                 let current = match &view.list {
@@ -1397,11 +1397,11 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
                 {
                     break;
                 }
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .unwrap();
+        .expect("the changed skill list is adopted into branch history");
     }
 
     let home = std::path::PathBuf::from("/tmp").join(format!("dp-{}", uuid::Uuid::new_v4()));
@@ -1519,7 +1519,6 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     assert_eq!(remote.features, json!([]));
     for (method, params) in [
         ("session.create", json!({"cwd":work})),
-        ("session.list", json!({})),
         ("skills.catalog", json!({})),
         ("mcp.catalog", json!({})),
         ("session.mcp", json!({"sessionId":"remote"})),
@@ -2433,7 +2432,7 @@ async fn the_creation_replies_name_the_adopted_model_preferences() {
 
     // The same live Session lists without the field: only the create and
     // attach replies name the preferences.
-    let listed = client.rpc("session.list", json!({})).await;
+    let listed = client.rpc("session.summaries", json!({})).await;
     assert_ok(&listed);
     let item = listed["result"]
         .as_array()

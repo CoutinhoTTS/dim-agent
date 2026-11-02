@@ -949,7 +949,7 @@ fn short_date(text: &str) -> &str {
 }
 
 /// `25000` reads `25,000`.
-fn count(n: u64) -> String {
+pub(crate) fn count(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {

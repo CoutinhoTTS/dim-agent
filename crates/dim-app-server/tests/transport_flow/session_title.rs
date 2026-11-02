@@ -34,7 +34,7 @@ pub(super) fn rows() -> SessionTypeScriptConfig {
 }
 
 pub(super) async fn entry(client: &mut Client, id: &str) -> Value {
-    let listed = client.rpc("session.list", json!({})).await;
+    let listed = client.rpc("session.summaries", json!({})).await;
     assert_ok(&listed);
     listed["result"]
         .as_array()

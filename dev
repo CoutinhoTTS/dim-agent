@@ -4,7 +4,7 @@ set -euo pipefail
 repository=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 inherited_names=()
 inherited_values=()
-for setting in DIM_OAUTH_CLIENT_ID_CN DIM_OAUTH_CLIENT_ID_GLOBAL DIMCODE_HOME DIMCODE_MODEL_CONFIG DIMCODE_PROVIDER DIMCODE_MODEL DIMCODE_WEB_ASSETS; do
+for setting in DIM_OAUTH_CLIENT_ID_CN DIM_OAUTH_CLIENT_ID_GLOBAL DIMCODE_HOME DIMCODE_MODEL_CONFIG DIMCODE_PROVIDER DIMCODE_MODEL DIMCODE_WEB_ASSETS DIMCODE_DEFAULT_PLUGINS; do
   if declare -p "$setting" >/dev/null 2>&1; then
     inherited_names+=("$setting")
     inherited_values+=("${!setting}")
@@ -35,7 +35,10 @@ Usage: ./dev [CLI arguments]
 With DIM_OAUTH_CLIENT_ID_CN and DIM_OAUTH_CLIENT_ID_GLOBAL set, dimcode is
 built as the account build; otherwise as the API-key build.
 Use --model-config PATH for independent API-key development.
-Migration imports Global .dim/v2 into .dim and CN .dimcode/v2 into .dimcode.
+A run that can start the daemon stages the default plugins into
+staging/dev-plugins when Node and npm are available, and passes them on.
+Migration follows the built version's channel; alpha imports .dimcode/v2
+into .dimcode-alpha. See docs/design/cli-commands.md for migration routing.
 Other commands use the isolated development home.
 Optional local configuration: .env.dev (see .env.example).
 A new development home runs commands without OS isolation: the Sandbox
@@ -138,6 +141,20 @@ if [[ "$chat" == true && "$resumed" == false && "$explicit_selection" == false ]
 fi
 
 (cd -- "$repository" && cargo build --locked -p dimcode) >&2
+# The run path can start the daemon; only --help/--version, migration and
+# `daemon stop` cannot, and they stage nothing.
+if [[ "$native_help" == false && "$migration" == false && -z "${DIMCODE_DEFAULT_PLUGINS:-}" ]]; then
+  if [[ "${caller_args[0]:-}" == daemon && "${caller_args[1]:-}" == stop ]]; then
+    :
+  elif ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo 'Node or npm is missing; running without the default plugins.' >&2
+  elif node "$repository/scripts/stage-plugins.mjs" "$repository/staging/dev-plugins" --update >&2; then
+    DIMCODE_DEFAULT_PLUGINS="$repository/staging/dev-plugins/default-plugins.json"
+    export DIMCODE_DEFAULT_PLUGINS
+  else
+    echo 'The default plugins were not staged; running without them.' >&2
+  fi
+fi
 if [[ "$native_help" == false && "$migration" == false ]]; then
   mkdir -p -m 700 -- "$product_home"
   product_home=$(cd -- "$product_home" && pwd)

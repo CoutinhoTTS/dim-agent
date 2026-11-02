@@ -383,7 +383,8 @@ fn migration_terminal_resizes_and_restores_the_screen_after_cancellation() {
 }
 
 #[test]
-fn default_migration_keeps_global_and_cn_in_their_own_homes() {
+fn default_migration_follows_the_build_channel_and_keeps_distribution_data_separate() {
+    let alpha = env!("CARGO_PKG_VERSION").contains("-alpha.");
     let user = Home::new();
     let model = user.0.join("offline.json");
     fs::write(
@@ -416,18 +417,26 @@ fn default_migration_keeps_global_and_cn_in_their_own_homes() {
     );
     assert!(!unrelated.exists());
     let global = Home(user.0.join(".dim"));
-    let cn = Home(user.0.join(".dimcode"));
+    let cn = Home(
+        user.0
+            .join(if alpha { ".dimcode-alpha" } else { ".dimcode" }),
+    );
     let global_source = global.0.join("v2");
-    let cn_source = cn.0.join("v2");
+    let cn_source = user.0.join(".dimcode/v2");
     legacy_home(&global_source, "dimglobal.sqlite", "Global conversation");
     let single = command()
         .args(["migration", "inspect", "--source-stopped"])
         .output()
         .unwrap();
-    assert!(single.status.success());
-    let single: Value = serde_json::from_slice(&single.stdout).unwrap();
-    assert_eq!(single.as_object().unwrap().len(), 1);
-    assert_eq!(single["global"]["home"], global.0.to_str().unwrap());
+    if alpha {
+        assert_eq!(single.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&single.stderr).contains("No default legacy v2 database"));
+    } else {
+        assert!(single.status.success());
+        let single: Value = serde_json::from_slice(&single.stdout).unwrap();
+        assert_eq!(single.as_object().unwrap().len(), 1);
+        assert_eq!(single["global"]["home"], global.0.to_str().unwrap());
+    }
     assert!(!cn.0.exists());
     legacy_home(&cn_source, "dimcode.sqlite", "CN conversation");
     for (source, rule) in [
@@ -446,7 +455,12 @@ fn default_migration_keeps_global_and_cn_in_their_own_homes() {
     decline.arg("migration");
     let mut terminal = Terminal::launch(decline);
     terminal.until("Continue? [y/N]");
-    for expected in [&global_source, &global.0, &cn_source, &cn.0] {
+    let expected: &[_] = if alpha {
+        &[&cn_source, &cn.0]
+    } else {
+        &[&global_source, &global.0, &cn_source, &cn.0]
+    };
+    for expected in expected {
         assert!(
             terminal.transcript.contains(expected.to_str().unwrap()),
             "{}",
@@ -467,8 +481,12 @@ fn default_migration_keeps_global_and_cn_in_their_own_homes() {
         String::from_utf8_lossy(&inspect.stderr)
     );
     let inspect: Value = serde_json::from_slice(&inspect.stdout).unwrap();
-    assert_eq!(inspect["global"]["home"], global.0.to_str().unwrap());
-    assert_eq!(inspect["global"]["result"]["database"], "dimglobal.sqlite");
+    if alpha {
+        assert!(inspect.get("global").is_none());
+    } else {
+        assert_eq!(inspect["global"]["home"], global.0.to_str().unwrap());
+        assert_eq!(inspect["global"]["result"]["database"], "dimglobal.sqlite");
+    }
     assert_eq!(inspect["cn"]["home"], cn.0.to_str().unwrap());
     assert_eq!(inspect["cn"]["result"]["database"], "dimcode.sqlite");
     let scoped = global
@@ -518,9 +536,13 @@ fn default_migration_keeps_global_and_cn_in_their_own_homes() {
     let listed = command().args(["migration", "list"]).output().unwrap();
     assert!(listed.status.success());
     let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
-    assert_eq!(listed["global"]["result"].as_array().unwrap().len(), 1);
+    if alpha {
+        assert!(listed.get("global").is_none());
+    } else {
+        assert_eq!(listed["global"]["result"].as_array().unwrap().len(), 1);
+    }
     assert_eq!(listed["cn"]["result"].as_array().unwrap().len(), 1);
-    let task = listed["global"]["result"][0]["id"].as_str().unwrap();
+    let task = listed["cn"]["result"][0]["id"].as_str().unwrap();
     let mut retry = command();
     retry.args(["migration", "retry", task]);
     let mut terminal = Terminal::launch(retry);
@@ -551,6 +573,9 @@ fn default_migration_keeps_global_and_cn_in_their_own_homes() {
             "cargo test",
         ),
     ] {
+        if alpha && name == "global" {
+            continue;
+        }
         let id = listed[name]["result"][0]["id"].as_str().unwrap();
         let shown = command().args(["migration", "show", id]).output().unwrap();
         assert!(
@@ -624,6 +649,28 @@ fn default_migration_keeps_global_and_cn_in_their_own_homes() {
                     && item["targetId"] == *session)
         );
     }
+    let selected_source = command()
+        .args(["migration", "--source"])
+        .arg(&cn_source)
+        .args(["--source-stopped", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        selected_source.status.success(),
+        "{}",
+        String::from_utf8_lossy(&selected_source.stderr)
+    );
+    let selected_source: Value = serde_json::from_slice(&selected_source.stdout).unwrap();
+    let selected_task = selected_source["task"]["id"].as_str().unwrap();
+    let selected_report = command()
+        .args(["migration", "show", selected_task])
+        .output()
+        .unwrap();
+    assert!(selected_report.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&selected_report.stdout).unwrap()["cn"]["home"],
+        cn.0.to_str().unwrap()
+    );
     let cn_task = &identities
         .iter()
         .find(|(name, _, _)| *name == "cn")
@@ -671,18 +718,22 @@ fn default_migration_keeps_global_and_cn_in_their_own_homes() {
         .unwrap();
     assert_eq!(
         isolated.status.code(),
-        Some(1),
+        Some(if alpha { 0 } else { 1 }),
         "{}",
         String::from_utf8_lossy(&isolated.stdout)
     );
     let isolated: Value = serde_json::from_slice(&isolated.stdout).unwrap();
-    assert!(
-        isolated["global"].get("error").is_some()
-            || isolated["global"]["result"]["task"]["status"] == "failed",
-        "{isolated}"
-    );
+    if alpha {
+        assert!(isolated.get("global").is_none());
+    } else {
+        assert!(
+            isolated["global"].get("error").is_some()
+                || isolated["global"]["result"]["task"]["status"] == "failed",
+            "{isolated}"
+        );
+    }
     assert_eq!(isolated["cn"]["result"]["task"]["status"], "completed");
-    for home in [&global, &cn] {
+    for (home, source) in [(&global, &global_source), (&cn, &cn_source)] {
         assert!(
             home.command()
                 .arg("--model-config")
@@ -693,7 +744,7 @@ fn default_migration_keeps_global_and_cn_in_their_own_homes() {
                 .status
                 .success()
         );
-        fs::rename(home.0.join("v2"), home.0.join("old-source-retained")).unwrap();
+        fs::rename(source, source.with_file_name("old-source-retained")).unwrap();
     }
     for (name, task, _) in &identities {
         let shown = command()
@@ -713,5 +764,11 @@ fn default_migration_keeps_global_and_cn_in_their_own_homes() {
     }
     assert!(!global.0.join("rust/daemon.sock").exists());
     assert!(!cn.0.join("rust/daemon.sock").exists());
+    if alpha {
+        assert!(!global.0.join("rust").exists());
+        assert!(!user.0.join(".dimcode/rust").exists());
+        assert!(!user.0.join(".dimcode/migration").exists());
+        assert!(!cn.0.join("v2").exists());
+    }
     assert!(!unrelated.exists());
 }

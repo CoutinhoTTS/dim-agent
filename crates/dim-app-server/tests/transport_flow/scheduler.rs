@@ -400,7 +400,7 @@ async fn node_scheduler_complete_host_restart_reconciles_input_and_never_replays
         } else {
             assert!(before.get("report_to").is_none());
         }
-        let listed = client.rpc("session.list", json!({})).await;
+        let listed = client.rpc("session.summaries", json!({})).await;
         assert_ok(&listed);
         let sessions = listed["result"].as_array().unwrap();
         assert_eq!(sessions.len(), 2);
@@ -482,7 +482,7 @@ async fn node_scheduler_complete_host_restart_reconciles_input_and_never_replays
                 }
             );
         }
-        let listed = client.rpc("session.list", json!({})).await;
+        let listed = client.rpc("session.summaries", json!({})).await;
         assert_ok(&listed);
         let sessions = listed["result"].as_array().unwrap();
         assert_eq!(sessions.len(), 2);

@@ -86,7 +86,7 @@ pub fn notify(ctx: &Ctx, session_id: &str, notice: SessionNotice);
 | 线上形式 | 通知 `session.notice`，参数 `{sessionId, source, kind, data}`。`source`、`kind`、`data` 原样取自记录；`sessionId` 是订阅所在的 Session，也是每条 Session 通知都带的路由字段。 |
 | 协议 | 只发给协议 v3 连接；v1 和 v2 的通知集合已经冻结，永远收不到它。协议版本仍为 3：这条通知是增量的，与 v3 陆续增加的事件种类一样，客户端忽略自己不处理的通知和种类。CLI 会忽略它，`exec --json` 会把它与该 Session 的其他通知一起输出。`hello.features` 只列方法，不列这条通知。 |
 | 路径 | 由订阅既有的广播监听器投影记录，所以在每个连接上，通知与 `session.event` 保持频道中的相对顺序。它和每条 Session 通知一样进入连接的可靠队列：跟不上的客户端作为慢消费者被断开，而不会在无声无息中落后。 |
-| 窗口 | 从注册监听器的那次 attach 开始，到订阅结束为止：detach、被替换、连接关闭或 `Closed`。attach 之前发出的通知不重放。附加或重新附加的客户端在 attach 之后经所有者的查询读取当前状态（标题用 `session.list`），之后的每次变更都以通知送达。同一次变更可能两边都看到，由所有者的修订号去重。 |
+| 窗口 | 从注册监听器的那次 attach 开始，到订阅结束为止：detach、被替换、连接关闭或 `Closed`。attach 之前发出的通知不重放。附加或重新附加的客户端在 attach 之后经所有者的查询读取当前状态（标题用 `session.summaries`），之后的每次变更都以通知送达。同一次变更可能两边都看到，由所有者的修订号去重。 |
 | 关闭 | 频道上的 `Closed` 记录结束订阅的转发。与关闭竞争、排在 `Closed` 之后的通知被丢弃，所以 `session.closed` 仍是该订阅最后一条 Session 通知。之后由所有者的查询读取状态。 |
 
 ## 6. C4 叶子观察方

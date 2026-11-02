@@ -350,7 +350,15 @@ async fn steers_wait_for_compaction_and_explicit_interrupts_still_cancel() {
                 .unwrap();
         } else {
             session
-                .submit("working ".repeat(350), InputMode::Queue, "main")
+                .submit(
+                    "working ".repeat(if trigger == CompactionTrigger::Threshold {
+                        300
+                    } else {
+                        350
+                    }),
+                    InputMode::Queue,
+                    "main",
+                )
                 .await
                 .unwrap();
         }
@@ -1428,6 +1436,16 @@ async fn a_failed_manual_compaction_lets_the_turn_continue_and_recovery_compacts
     let ContextCompactionResult::Completed { diagnostics, .. } = &recovered.outcome else {
         panic!("expected completion, got {:?}", recovered.outcome)
     };
+    assert!(
+        events.iter().all(|event| !matches!(
+            &event.kind,
+            EventKind::ModelOutputEnd(ModelOutputEndData {
+                outcome: ModelOutputOutcome::Failed { .. },
+                ..
+            })
+        )),
+        "local recovery bypasses regrowth without a model failure"
+    );
     assert_eq!(
         diagnostics.trigger,
         CompactionTrigger::ProviderOutputBudgetExhausted

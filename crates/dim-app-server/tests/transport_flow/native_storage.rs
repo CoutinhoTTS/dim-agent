@@ -673,7 +673,7 @@ async fn damaged_native_records_do_not_hide_healthy_agents_or_sessions() {
     assert_eq!(agents["result"].as_array().unwrap().len(), 1);
     assert_eq!(agents["result"][0]["agentId"], healthy_agent);
     let listed = client
-        .rpc("session.list", json!({"agentId":healthy_agent}))
+        .rpc("session.summaries", json!({"agentId":healthy_agent}))
         .await;
     assert_ok(&listed);
     let listed = listed["result"].as_array().unwrap();
@@ -874,7 +874,7 @@ async fn agent_sessions_restore_owners_branches_and_continue_with_original_ids()
     let (server, recovered_agent) = launch_with_agent(Arc::new(MockTools), config).await;
     let mut client = Client::new_version(&server, false, 3).await;
     assert_ne!(client.instance, original_instance);
-    let listed = client.rpc("session.list", json!({})).await;
+    let listed = client.rpc("session.summaries", json!({})).await;
     assert_ok(&listed);
     let sessions = listed["result"].as_array().unwrap();
     assert_eq!(sessions.len(), 2);
@@ -1134,7 +1134,7 @@ async fn stored_directories_outlive_idle_instances() {
         let agent = server.agent().unwrap();
         assert!(agent.sessions().is_empty());
         let mut client = Client::new_version(&server, true, 3).await;
-        let listed = client.rpc("session.list", json!({})).await;
+        let listed = client.rpc("session.summaries", json!({})).await;
         assert_ok(&listed);
         assert_eq!(listed["result"].as_array().unwrap().len(), 3);
         assert!(
@@ -1230,7 +1230,7 @@ async fn stored_directories_outlive_idle_instances() {
                 )
                 .await,
         );
-        let listed = client.rpc("session.list", json!({})).await;
+        let listed = client.rpc("session.summaries", json!({})).await;
         let item = listed["result"]
             .as_array()
             .unwrap()
@@ -1320,7 +1320,7 @@ async fn failed_creation_rolls_back_storage_but_failed_restore_preserves_it() {
     let mut client = Client::new_version(&server, true, 3).await;
     let failed = client.rpc("session.create", create(json!([]))).await;
     assert!(failed.get("error").is_some(), "{failed}");
-    let listed = client.rpc("session.list", json!({})).await;
+    let listed = client.rpc("session.summaries", json!({})).await;
     assert_eq!(listed["result"], json!([]));
     assert_eq!(counts(&Connection::open(&database).unwrap()), vec![0; 5]);
     assert!(server.agent().unwrap().sessions().is_empty());
@@ -1353,7 +1353,7 @@ async fn failed_creation_rolls_back_storage_but_failed_restore_preserves_it() {
     let mut client = Client::new_version(&server, true, 3).await;
     let restored = client.rpc("session.attach", json!({"sessionId":id})).await;
     assert!(restored.get("error").is_some(), "{restored}");
-    let listed = client.rpc("session.list", json!({})).await;
+    let listed = client.rpc("session.summaries", json!({})).await;
     assert_eq!(listed["result"].as_array().unwrap().len(), 1);
     assert_eq!(
         counts(&connection),

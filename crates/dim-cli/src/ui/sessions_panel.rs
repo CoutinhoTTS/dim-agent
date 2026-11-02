@@ -1,7 +1,7 @@
 //! The `/resume` picker: a filterable list of stored sessions (port of
 //! `sessionsPanelItems` / `SessionsPanel`).
 
-use crate::model::session::{Command, SessionItem};
+use crate::model::session::{Command, SessionItem, stored_title};
 use crate::ui::i18n::{t, tf};
 use crate::ui::list_panel::{Event, Item, ListPanel};
 use crate::ui::prompts::Effect;
@@ -181,21 +181,21 @@ fn tag(origin: Option<&str>) -> Option<&'static str> {
     }
 }
 
-/// The name unless it is the placeholder, else the first words, else the id.
+/// The stored title unless it is the placeholder, else the first words, else
+/// the id.
 pub fn label(item: &SessionItem) -> String {
-    let name = item.title.as_deref().map(str::trim).unwrap_or("");
-    if !name.is_empty() && !name.eq_ignore_ascii_case("new session") {
-        return name.to_owned();
+    if let Some(title) = stored_title(item.title.as_deref()) {
+        return title.to_owned();
     }
     let preview = item.preview.as_deref().map(str::trim).unwrap_or("");
     if !preview.is_empty() {
         return preview.replace('\n', " ");
     }
-    if name.is_empty() {
-        item.id.clone()
-    } else {
-        name.to_owned()
-    }
+    item.title
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map_or_else(|| item.id.clone(), str::to_owned)
 }
 
 pub fn relative_time(updated_at: u64, now: u64) -> String {
