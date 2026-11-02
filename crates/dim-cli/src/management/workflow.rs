@@ -222,8 +222,9 @@ pub async fn apply(
                     "The Workflow area has no document of its own.".to_owned(),
                 ));
             };
-            let name = save(client, id, expected_revision, document, &cwd).await?;
-            note = Some(tf("Saved {name}.", &[("name", &name)]));
+            // The save's name is the shared line's: the surface composes
+            // "Saved {name}." from the read that follows, which holds it.
+            save(client, id, expected_revision, document, &cwd).await?;
         }
         ManagementAction::Run { id, document } => {
             let (name, run_id) = start(client, id, document.as_ref(), &cwd, line).await?;

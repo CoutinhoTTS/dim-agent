@@ -151,10 +151,10 @@ struct SavedJob {
 /// Why a Scheduler action did not happen.
 pub enum Failure {
     /// The jobs changed since they were read: nothing was written, and this
-    /// is the area as it now is.
+    /// is the area as it now is, or why the read that reports it failed.
     Conflict {
         message: String,
-        catalog: Box<Catalog>,
+        catalog: Result<Box<Catalog>, String>,
     },
     /// The action was applied and what follows it could not be read: the
     /// change was made, the owner's answer is kept when it was read, and this
@@ -167,9 +167,13 @@ pub enum Failure {
 impl std::fmt::Display for Failure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Conflict { message, .. }
-            | Self::ReadFailed { error: message, .. }
-            | Self::Refused(message) => formatter.write_str(message),
+            Self::Conflict { message, catalog } => match catalog {
+                Ok(_) => formatter.write_str(message),
+                Err(error) => write!(formatter, "{message} {error}"),
+            },
+            Self::ReadFailed { error: message, .. } | Self::Refused(message) => {
+                formatter.write_str(message)
+            }
         }
     }
 }
@@ -315,7 +319,7 @@ async fn save(
     if job.revision.to_string() != expected_revision {
         return Err(Failure::Conflict {
             message: t(conflict_message(ConflictKind::Job)).to_owned(),
-            catalog: Box::new(catalog),
+            catalog: Ok(Box::new(catalog)),
         });
     }
     let Some(draft) = document.as_object() else {
@@ -391,18 +395,15 @@ fn conflict_message(kind: ConflictKind) -> &'static str {
 }
 
 /// The area after a refusal, when the owner refused because the jobs
-/// changed; any other refusal leaves the draft where it is.
+/// changed; any other refusal leaves the draft where it is. A read that
+/// fails is still a conflict, and says why it cannot show the area.
 async fn conflict(client: &mut Client, error: &crate::Error, kind: ConflictKind) -> Failure {
     if crate::client::app_error(error) != Some("schedule_conflict") {
         return Failure::Refused(error.to_string());
     }
-    let message = t(conflict_message(kind));
-    match catalog(client).await {
-        Ok(catalog) => Failure::Conflict {
-            message: message.to_owned(),
-            catalog: Box::new(catalog),
-        },
-        Err(error) => Failure::Refused(error),
+    Failure::Conflict {
+        message: t(conflict_message(kind)).to_owned(),
+        catalog: catalog(client).await.map(Box::new),
     }
 }
 

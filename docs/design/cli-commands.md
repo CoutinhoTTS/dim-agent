@@ -335,14 +335,20 @@ Each area has two surfaces in the native client:
 - a subcommand, `dimcode <area> <verb>`.
 
 Both surfaces use the same area adapter. `dimcode hooks list|enable|disable` keeps its output and
-exit codes, and `dimcode hooks edit` and `dimcode hooks set PATH` write through the same adapter.
+exit codes, except that a source's state line is worded once for the panel and the command;
+`dimcode hooks edit` and `dimcode hooks set PATH` write through the same adapter.
+
+Management text is composed in the interface language on both surfaces. The panel's text follows
+`/language` from the next reply, and `dimcode <area>` uses the saved language, else the system's.
 
 ### The adapter
 
 An adapter talks to the daemon through the client connection, so a subcommand needs no Session.
 It turns its owner's reply into one client view at that boundary, it performs the area's actions,
 and it refuses an action whose methods the daemon does not advertise, with an unsupported-daemon
-error. It never falls back to a file, to another method or to the host's own environment.
+error. That refusal names the area when the daemon does not serve its read, and names the kind
+when it serves the read without the kind's method: `This daemon lists scheduled jobs but cannot
+remove them.` It never falls back to a file, to another method or to the host's own environment.
 
 The client infers nothing the methods do not report. A view that needs a fact the reply does not
 carry gets that fact from the producer: `skills.catalog` reports each entry's `source`, and
@@ -403,9 +409,9 @@ add, remove, run and inspect, and the client's kinds are what it writes; a later
 adapter and the methods its kinds call, and names here the kinds it adds.
 
 A hint the bottom border cannot hold is drawn as rows above a plain bottom border, wrapped at
-the ` · ` separators so a part never splits, and a part wider than a row is cut with `…`. The
-rows take their space from the list like the footer's, so every key stays visible at any width,
-the remove confirmation included.
+the ` · ` separators; a part wider than a row wraps across rows by display width, so no key or
+action is ever cut. The rows take their space from the list like the footer's, so every key
+stays visible at any width, the remove confirmation included.
 
 - add opens the external editor on a new-entry document that the adapter supplies — the owner's
   create shape, filled with example values — and writes it with the area's create method. An
@@ -445,8 +451,9 @@ Writes follow [Execution settings](#execution-settings):
 - the adapter keeps the revision it read with the draft, and the revision is not a field the user
   types;
 - a conflict writes nothing and shows the error; the area is read again, the draft's link to the
-  stale revision is dropped, and the next edit opens the stored document. It never retries
-  automatically and never overwrites a newer document;
+  stale revision is dropped, and the next edit opens the stored document. A read that fails after
+  the conflict still drops that link and says why the area is not drawn, and the next read retries
+  it. It never retries automatically and never overwrites a newer document;
 - reload discards the draft and reads again;
 - a conflict message states the owner's fact — what changed, and that nothing was written — and
   leaves where the text is to the surface that holds it: the panel says what the next edit or add
@@ -463,11 +470,13 @@ Writes follow [Execution settings](#execution-settings):
   since it calls nothing before `hooks.catalog`;
 - a write the daemon accepted is reported as done: a failure of the read that follows is
   reported after the action, as a read failure, never as a refusal or a conflict. The CLI prints
-  the action's line, then the read error on standard error, and exits 0; a toggle's line names
-  the id, since the read is what supplies the name, and a read on its own that fails is still a
-  failure. The panel shows the action's message and the read error, keeps no view until the next
-  read, and settles the draft as on success: its file is removed and its link dropped. An
-  applied action keeps the owner's answer even when the read after it fails;
+  the action's line, then the read error on standard error, and exits 0; a Skills or Scheduler
+  toggle names the entry from the read that follows it, and the id when that read failed, since
+  the read is what supplies the name; a Hooks toggle names the workspace, since the toggle is the
+  project source; a read on its own that fails is still a failure. The panel shows the action's
+  message and the read error, keeps no view until the next read, and settles the draft as on
+  success: its file is removed and its link dropped. An applied action keeps the owner's answer
+  even when the read after it fails;
 - loading and writing disable mutation.
 
 ### The external editor

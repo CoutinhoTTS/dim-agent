@@ -6,6 +6,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Issues" => "Problemas",
         "sources" => "Fontes",
         "skills" => "Skills",
+        "hooks" => "hooks",
+        "scheduled jobs" => "tarefas agendadas",
+        "workflow definitions" => "definições de fluxo de trabalho",
         "enabled" => "ativado",
         "shadowed by {name}" => "ocultado por {name}",
         "Reloaded." => "Recarregado.",
@@ -23,9 +26,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "The user's own document; always in effect." => {
             "O documento do próprio usuário; sempre em vigor."
         }
-        "No .dimcode/hooks.json in this workspace." => {
-            "Não há .dimcode/hooks.json neste espaço de trabalho."
-        }
+        "There is no hooks file there." => "Não há arquivo de hooks ali.",
         "Owned by plugin {plugin}." => "Pertence ao plugin {plugin}.",
         "The user document turns every hook off (disableAllHooks)." => {
             "O documento do usuário desativa todos os hooks (disableAllHooks)."
@@ -79,6 +80,27 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "A execução de um job agendado não recebe documento de entrada."
         }
         "This daemon cannot manage {area}." => "Não é possível gerenciar {area}.",
+        "This daemon lists {area} but cannot toggle them." => {
+            "O daemon lista {area}, mas não permite alternar."
+        }
+        "This daemon lists {area} but cannot edit them." => {
+            "O daemon lista {area}, mas não permite editar."
+        }
+        "This daemon lists {area} but cannot reload them." => {
+            "O daemon lista {area}, mas não permite recarregar."
+        }
+        "This daemon lists {area} but cannot add them." => {
+            "O daemon lista {area}, mas não permite adicionar."
+        }
+        "This daemon lists {area} but cannot remove them." => {
+            "O daemon lista {area}, mas não permite remover."
+        }
+        "This daemon lists {area} but cannot run them." => {
+            "O daemon lista {area}, mas não permite executar."
+        }
+        "This daemon lists {area} but cannot inspect them." => {
+            "O daemon lista {area}, mas não permite ver os detalhes ou o histórico."
+        }
         "The document deleted {field}, which the owner cannot clear; nothing was written." => {
             "O documento removeu {field}, que o proprietário não pode limpar; nada foi escrito."
         }

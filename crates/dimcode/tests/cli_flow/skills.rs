@@ -118,7 +118,7 @@ fn skills_enable_from_a_daemon_without_sources_reports_the_entry() {
     );
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        "Enabled user:commit.\n"
+        "Enabled commit.\n"
     );
 }
 
@@ -290,10 +290,7 @@ fn skills_enable_and_disable_name_the_entry_and_send_the_workspace() {
         );
         assert_eq!(
             String::from_utf8(output.stdout).unwrap(),
-            format!(
-                "{} user:commit.\n",
-                if enabled { "Enabled" } else { "Disabled" }
-            )
+            format!("{} commit.\n", if enabled { "Enabled" } else { "Disabled" })
         );
         fs::remove_file(home.0.join("rust/daemon.sock")).unwrap();
     }
@@ -357,7 +354,7 @@ fn skills_commands_refuse_a_daemon_that_does_not_advertise_them() {
         daemon.join().unwrap();
         assert_eq!(output.status.code(), Some(1), "{args:?}");
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains("This daemon cannot manage Skills."),
+            String::from_utf8_lossy(&output.stderr).contains("This daemon cannot manage skills."),
             "{args:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
@@ -404,10 +401,65 @@ fn a_daemon_without_skill_enablement_lists_but_refuses_a_change() {
     daemon.join().unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("This daemon cannot manage Skills."),
+        String::from_utf8_lossy(&output.stderr)
+            .contains("This daemon lists skills but cannot toggle them."),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// Ctrl+R after a read that failed reads the area again: a daemon that
+/// serves only `skills.catalog` answers the retry, and the panel never asks
+/// for a rescan.
+#[test]
+fn tui_skills_panel_reads_again_after_a_failed_read() {
+    let home = Home::new();
+    let (shown, wait_shown) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["skills.catalog"]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        for _ in 0..2 {
+            let request = wire.read_any();
+            match request["method"].as_str() {
+                Some("account.providers") => wire.reply(&request, json!([])),
+                Some("session.context.usage") => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                    "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+                method => panic!("unexpected request {method:?}"),
+            }
+        }
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        let request = wire.read("skills.catalog");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"catalog unavailable",
+            "data":{"appError":"skills_unavailable"}}}));
+        let request = wire.read("skills.catalog");
+        wire.reply(&request, catalog(true));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/skills\r");
+    terminal.until("catalog unavailable");
+    terminal.raw(b"\x12");
+    terminal.until("Writes commit messages");
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
 }
 
 /// `/skills` opens the panel on the catalog and Enter toggles the selected
@@ -662,7 +714,7 @@ fn tui_skills_panel_says_when_the_daemon_cannot_manage_them() {
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/skills\r");
-    terminal.until("This daemon cannot manage Skills.");
+    terminal.until("This daemon cannot manage skills.");
     terminal.raw(b"\x1b");
     thread::sleep(Duration::from_millis(200));
     terminal.write(b"/exit\r");

@@ -261,6 +261,9 @@ pub enum Command {
     ListPlugins,
     /// One request to a management area's owner, through its adapter.
     Management(ManagementRequest),
+    /// The interface language's code (`en`, `zh-CN`, ...), which the worker
+    /// composes management text in from the next command on.
+    SetLocale(&'static str),
     /// Change one plugin; the worker lists the plugins again after it.
     Plugin(PluginAction),
     /// A configuration command line (`/effort high`, `/agent`, ...).
@@ -454,9 +457,13 @@ pub enum ManagementResult {
     },
     /// The action was applied and the read that reports the area failed:
     /// the change was made, and `read_error` says why the area is not shown.
-    /// `note` is the action's own line, always: the owner's answer when that
-    /// is more than the view, else the line its kind reports.
-    Applied { note: String, read_error: String },
+    /// `note` is the owner's answer when that is more than the view, such as
+    /// a run's state; without one, the surface composes the action's line
+    /// with the entry's name from the read it holds.
+    Applied {
+        note: Option<String>,
+        read_error: String,
+    },
     /// What an inspect found, in place of the list.
     Detail(ManagementDetail),
     /// Nothing was applied, and this is why.
@@ -476,11 +483,11 @@ pub struct ManagementDetail {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ManagementRefusal {
     /// The owner kept the stored document because it changed since the client
-    /// read it. Nothing was written, the area was read again, and this is what
-    /// it now is.
+    /// read it. Nothing was written; the area was read again, and this is
+    /// what it now is, or why that read failed.
     Conflict {
         message: String,
-        view: Box<ManagementView>,
+        view: Result<Box<ManagementView>, String>,
     },
     /// The daemon does not advertise the methods, or the owner refused the
     /// text: nothing was written.
@@ -490,7 +497,11 @@ pub enum ManagementRefusal {
 impl std::fmt::Display for ManagementRefusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Conflict { message, .. } | Self::Refused(message) => formatter.write_str(message),
+            Self::Conflict { message, view } => match view {
+                Ok(_) => formatter.write_str(message),
+                Err(error) => write!(formatter, "{message} {error}"),
+            },
+            Self::Refused(message) => formatter.write_str(message),
         }
     }
 }

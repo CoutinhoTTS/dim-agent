@@ -322,13 +322,24 @@ async fn write(client: &mut Client, options: &Options, draft: &Draft) -> Result<
         }
         // The document was replaced; only the report after it failed, so the
         // command did what it was asked and says why it cannot show the area.
+        // The re-read never happened, so the entry goes by the id it was
+        // sent with.
         ManagementResult::Applied { read_error, .. } => {
-            print_report(vec![management::applied_line(&request)], vec![read_error]);
+            let line = management::applied_line(&request.action, None);
+            print_report(vec![safe_line(&line)], vec![read_error]);
             Ok(0)
         }
-        // A save reports the area after it; a detail belongs to an inspect.
-        ManagementResult::View { .. } | ManagementResult::Detail(_) => {
-            print_report(vec![management::applied_line(&request)], Vec::new());
+        // A save reports the area after it, whose read names the entry.
+        ManagementResult::View { view, .. } => {
+            let name = management::entry_name(&view, &request.action);
+            let line = management::applied_line(&request.action, name);
+            print_report(vec![safe_line(&line)], Vec::new());
+            Ok(0)
+        }
+        // A detail belongs to an inspect, which applies nothing.
+        ManagementResult::Detail(_) => {
+            let line = management::applied_line(&request.action, None);
+            print_report(vec![safe_line(&line)], Vec::new());
             Ok(0)
         }
     }
@@ -352,14 +363,18 @@ async fn create(
         ManagementResult::View { note, .. } => {
             // The note names the entry the owner saved: made safe, as every
             // line the Scheduler prints is.
-            let note = note.iter().map(|note| safe_line(note)).collect();
-            print_report(note, Vec::new());
+            let line = note.map_or_else(
+                || management::applied_line(&request.action, None),
+                |note| safe_line(&note),
+            );
+            print_report(vec![line], Vec::new());
             Ok(0)
         }
         // The entry was created; only the read after it failed. The action's
         // own line still stands, made safe, and the exit stays 0.
         ManagementResult::Applied { note, read_error } => {
-            print_report(vec![safe_line(&note)], vec![read_error]);
+            let line = note.unwrap_or_else(|| management::applied_line(&request.action, None));
+            print_report(vec![safe_line(&line)], vec![read_error]);
             Ok(0)
         }
         // An add reports the entry it created; a detail belongs to an inspect.
@@ -386,14 +401,21 @@ async fn run_skills(
         // asked; only the report after it failed, and the action's own line
         // still stands.
         skills::Outcome::ReadFailed(error) => {
-            print_report(vec![management::applied_line(request)], vec![error]);
+            let line = management::applied_line(&request.action, None);
+            print_report(vec![safe_line(&line)], vec![error]);
             return Ok(0);
         }
         skills::Outcome::Refused(error) => return Err(error.into()),
     };
     match &request.action {
-        ManagementAction::Toggle { .. } => {
-            print_report(vec![management::applied_line(request)], Vec::new());
+        ManagementAction::Toggle { id, .. } => {
+            let name = catalog
+                .entries
+                .iter()
+                .find(|entry| &entry.id == id)
+                .map(|entry| entry.name.as_str());
+            let line = management::applied_line(&request.action, name);
+            print_report(vec![safe_line(&line)], Vec::new());
         }
         _ => print_report(rows(&catalog), notes(&catalog)),
     }
@@ -463,16 +485,27 @@ async fn run_scheduled(client: &mut Client, request: &ManagementRequest) -> Resu
             (ManagementAction::List | ManagementAction::Reload, None) => {
                 print_report(job_rows(&catalog), job_notes(&catalog))
             }
-            (_, None) => print_report(
-                vec![safe_line(&management::applied_line(request))],
-                Vec::new(),
-            ),
+            (_, None) => {
+                // The jobs the adapter just re-read name the entry, unless a
+                // remove took it out of the read.
+                let name = management::named_id(&request.action).and_then(|id| {
+                    catalog
+                        .jobs
+                        .iter()
+                        .find(|job| job.id == id)
+                        .map(|job| job.name.as_str())
+                });
+                let line = management::applied_line(&request.action, name);
+                print_report(vec![safe_line(&line)], Vec::new())
+            }
         },
         // The action was applied; the report after it failed. The action's own
         // line stands, made safe, and the read error goes to stderr with the
         // exit still 0.
         Err(scheduler::Failure::ReadFailed { note, error }) => {
-            let line = note.unwrap_or_else(|| management::applied_line(request));
+            // The read that would name the entry failed; what the user typed
+            // names it, except where the owner's own answer stands.
+            let line = note.unwrap_or_else(|| management::applied_line(&request.action, None));
             print_report(vec![safe_line(&line)], vec![error])
         }
         Err(error) => return Err(error.to_string().into()),
@@ -496,28 +529,30 @@ async fn run_workflow(
             print_report(lines, Vec::new())
         }
         Ok(workflow::Answer::Definitions { listing, note }) => match (&request.action, note) {
-            (_, Some(note)) => print_report(vec![safe(&note)], Vec::new()),
-            (ManagementAction::Toggle { id, enabled }, None) => {
-                let name = id.strip_prefix("project:").unwrap_or(id);
-                print_report(
-                    vec![format!(
-                        "{} {}.",
-                        if *enabled { "Enabled" } else { "Disabled" },
-                        safe(name)
-                    )],
-                    Vec::new(),
-                );
+            // The owner's own answer: the definition a create made, or a
+            // run's start.
+            (_, Some(note)) => print_report(vec![safe_line(&note)], Vec::new()),
+            // A read reports what it read; an action reports its line.
+            (ManagementAction::List | ManagementAction::Reload, None) => {
+                print_report(workflow_rows(&listing), workflow_notes(&listing))
             }
-            _ => print_report(workflow_rows(&listing), workflow_notes(&listing)),
+            (_, None) => {
+                // The definitions the adapter just re-read name the entry.
+                let name = management::named_id(&request.action)
+                    .and_then(|id| listing.find(id))
+                    .map(|entry| entry.name.as_str());
+                let line = management::applied_line(&request.action, name);
+                print_report(vec![safe_line(&line)], Vec::new())
+            }
         },
         // The action was applied; only the report after it failed. The
-        // owner's answer, when there is one, is the outcome, and the read
-        // error goes to stderr with the exit still 0.
+        // action's own line stands, made safe, and the read error goes to
+        // stderr with the exit still 0.
         Err(workflow::Failure::ReadFailed { note, error }) => {
-            // The action was applied, so its own line stands, as the shared
-            // apply reports it for the Scheduler.
-            let line = note.unwrap_or_else(|| management::applied_line(request));
-            print_report(vec![safe(&line)], vec![error])
+            // The read that would name the entry failed; what the user typed
+            // names it, except where the owner's own answer stands.
+            let line = note.unwrap_or_else(|| management::applied_line(&request.action, None));
+            print_report(vec![safe_line(&line)], vec![error])
         }
         Err(error) => return Err(error.to_string().into()),
     }
@@ -686,16 +721,8 @@ fn hook_notes(catalog: &hooks::Catalog) -> Vec<String> {
             Some(path) => format!("{} hooks ({})", safe_line(&source.source), safe_line(path)),
             None => format!("{} hooks", safe_line(&source.source)),
         };
-        if source.state != "ok" {
-            notes.push(format!(
-                "{name}: {}{}",
-                safe_line(&source.state),
-                source
-                    .message
-                    .as_deref()
-                    .map(|message| format!(": {}", safe_line(message)))
-                    .unwrap_or_default()
-            ));
+        if let Some(line) = hooks::state_line(source) {
+            notes.push(format!("{name}: {}", safe_line(&line)));
         } else if !source.enabled {
             notes.push(format!("{name}: disabled"));
         }

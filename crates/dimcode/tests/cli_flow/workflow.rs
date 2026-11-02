@@ -613,7 +613,8 @@ fn workflow_add_is_refused_before_stdin_is_read() {
     daemon.join().unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("This daemon cannot manage Workflow."),
+        String::from_utf8_lossy(&output.stderr)
+            .contains("This daemon lists workflow definitions but cannot add them."),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -799,7 +800,8 @@ fn workflow_enable_is_refused_without_the_settings_methods() {
     daemon.join().unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("This daemon cannot manage Workflow."),
+        String::from_utf8_lossy(&output.stderr)
+            .contains("This daemon lists workflow definitions but cannot toggle them."),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -1427,7 +1429,7 @@ fn tui_workflow_save_is_refused_when_the_daemon_cannot_write() {
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/workflow:save\r");
-    terminal.until("This daemon cannot manage Workflow.");
+    terminal.until("This daemon lists workflow definitions but cannot add them.");
     terminal.raw(b"\x1b");
     thread::sleep(Duration::from_millis(200));
     terminal.write(b"/exit\r");

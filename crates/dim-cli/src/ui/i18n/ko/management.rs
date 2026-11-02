@@ -6,6 +6,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Issues" => "문제",
         "sources" => "소스",
         "skills" => "스킬",
+        "hooks" => "훅",
+        "scheduled jobs" => "예약된 작업",
+        "workflow definitions" => "워크플로 정의",
         "enabled" => "활성",
         "shadowed by {name}" => "{name}에 의해 가려짐",
         "Reloaded." => "다시 로드했습니다.",
@@ -21,9 +24,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "No change." => "변경 사항이 없습니다.",
         "Your text is kept in {path}." => "작성한 내용은 {path}에 보관됩니다.",
         "The user's own document; always in effect." => "사용자 자신의 문서이며 항상 적용됩니다.",
-        "No .dimcode/hooks.json in this workspace." => {
-            "이 작업 공간에 .dimcode/hooks.json이 없습니다."
-        }
+        "There is no hooks file there." => "거기에 훅 파일이 없습니다.",
         "Owned by plugin {plugin}." => "플러그인 {plugin} 소유입니다.",
         "The user document turns every hook off (disableAllHooks)." => {
             "사용자 문서가 모든 훅을 끕니다(disableAllHooks)."
@@ -75,6 +76,27 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "예약된 작업의 실행은 입력 문서를 받지 않습니다."
         }
         "This daemon cannot manage {area}." => "{area}을(를) 관리할 수 없습니다.",
+        "This daemon lists {area} but cannot toggle them." => {
+            "{area} 목록은 표시할 수 있지만 전환할 수 없습니다."
+        }
+        "This daemon lists {area} but cannot edit them." => {
+            "{area} 목록은 표시할 수 있지만 편집할 수 없습니다."
+        }
+        "This daemon lists {area} but cannot reload them." => {
+            "{area} 목록은 표시할 수 있지만 다시 로드할 수 없습니다."
+        }
+        "This daemon lists {area} but cannot add them." => {
+            "{area} 목록은 표시할 수 있지만 추가할 수 없습니다."
+        }
+        "This daemon lists {area} but cannot remove them." => {
+            "{area} 목록은 표시할 수 있지만 삭제할 수 없습니다."
+        }
+        "This daemon lists {area} but cannot run them." => {
+            "{area} 목록은 표시할 수 있지만 실행할 수 없습니다."
+        }
+        "This daemon lists {area} but cannot inspect them." => {
+            "{area} 목록은 표시할 수 있지만 세부 정보나 기록을 볼 수 없습니다."
+        }
         "The document deleted {field}, which the owner cannot clear; nothing was written." => {
             "{field}이(가) 문서에서 삭제되었지만 소유자가 지울 수 없습니다. 아무것도 쓰지 않았습니다."
         }
