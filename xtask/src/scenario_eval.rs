@@ -1367,13 +1367,12 @@ async fn drive(
                 return driven;
             }
         }
-        match retry_declines(client, &session, &mut declines).await {
-            Ok(retried) => driven.decline_retries += retried,
-            Err(error) => {
-                driven.stop = "error";
-                driven.error = Some(error);
-                return driven;
-            }
+        if let Err(error) =
+            retry_declines(client, &session, &mut declines, &mut driven.decline_retries).await
+        {
+            driven.stop = "error";
+            driven.error = Some(error);
+            return driven;
         }
         let pending = steers.iter().any(|(_, fired)| !fired);
         if started.elapsed().as_secs_f64() >= scenario.budget.seconds {
@@ -1565,14 +1564,15 @@ async fn decline_question(
 /// Answers the declines again that the Session did not take, at most once per
 /// quiet period since the last attempt: the quiet period wakes the driver at
 /// least that often, so the registration is never missed, and a line that
-/// keeps delivering other notices does not multiply the requests. Returns how
-/// many it sent.
+/// keeps delivering other notices does not multiply the requests. The caller
+/// owns the count, so a run that ends on a reply still holds the resends it
+/// sent before it.
 async fn retry_declines(
     client: &mut Client,
     session: &str,
     declines: &mut Vec<Decline>,
-) -> std::result::Result<u32, String> {
-    let mut sent = 0;
+    sent: &mut u32,
+) -> std::result::Result<(), String> {
     let mut index = 0;
     while index < declines.len() {
         if declines[index].sent.elapsed() < QUIET {
@@ -1585,9 +1585,9 @@ async fn retry_declines(
         } else {
             index += 1;
         }
-        sent += 1;
+        *sent += 1;
     }
-    Ok(sent)
+    Ok(())
 }
 
 /// One `session.question.respond` decline: `true` when the call took it, and
@@ -5192,6 +5192,10 @@ mod tests {
         /// The `ask_user` call carries no id, which `ToolCallData` never
         /// does, so its decline cannot be keyed to the call.
         CallWithoutId,
+        /// Two `ask_user` calls in one batch, `c1` and `c2`: the peer refuses
+        /// both at first, takes the first call's resend, and fails the
+        /// second call's, so the run ends on that error after one resend.
+        RetryFails,
     }
 
     /// What a scripted peer read: the `requestId` of every decline, in order,
@@ -5384,6 +5388,17 @@ mod tests {
                                 .unwrap();
                             None
                         }
+                        PeerScript::RetryFails => {
+                            let body = match declines {
+                                1 | 2 => not_pending(),
+                                3 => json!({"result": {}}),
+                                _ => json!({"error": {"code": -32000,
+                                                      "message": "the Session is reloading",
+                                                      "data": {"appError": "session_reloading"}}}),
+                            };
+                            write.write_all(&frame(&request, body)).await.unwrap();
+                            (declines == 3).then_some("r1")
+                        }
                     };
                     if let Some(request) = closed {
                         if recorded.settled_at.load(Ordering::SeqCst) == 0 {
@@ -5416,6 +5431,7 @@ mod tests {
                     };
                     let calls = match &script {
                         PeerScript::CallWithoutId => vec![None],
+                        PeerScript::RetryFails => vec![Some("c1"), Some("c2")],
                         _ => vec![Some("c1")],
                     };
                     write
@@ -5609,6 +5625,30 @@ mod tests {
         assert!(
             reads.declines.lock().unwrap().is_empty(),
             "the run sends no decline for the call"
+        );
+    }
+
+    /// A run that ends on a resend keeps the resends it sent before it: the
+    /// peer takes the first call's resend and fails the second call's, and
+    /// the run's count still holds the one that was sent.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_resend_keeps_the_resends_sent_before_it() {
+        let directory =
+            std::env::temp_dir().join(format!("dim-scenario-eval-retry-{}", std::process::id()));
+        let (socket, _) = scripted_peer(&directory, 8_000, PeerScript::RetryFails).await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.seconds = 10.;
+        let driven = drive(&mut client, &scenario, &std::env::temp_dir(), &peer_model()).await;
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(driven.stop, "error", "{:?}", driven.error);
+        let error = driven.error.unwrap_or_default();
+        assert!(error.contains("the decline of c2 failed"), "{error}");
+        assert!(error.contains("session_reloading"), "{error}");
+        assert_eq!(
+            driven.decline_retries, 1,
+            "the count keeps the resend the peer took before the failing one"
         );
     }
 
