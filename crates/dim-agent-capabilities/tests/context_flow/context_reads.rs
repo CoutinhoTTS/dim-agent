@@ -4,11 +4,14 @@ use std::ops::RangeInclusive;
 
 type DeferredPublication = (Vec<StoredEvent>, PublishCallback, Result<()>);
 
-/// A memory store that counts context reads, records the range of every
+/// A memory store that counts whole-branch reads, records the range of every
 /// event read and can fail, pause or defer chosen calls.
 #[derive(Default)]
 pub(super) struct CountContextReads {
     memory: MemoryTimelineStore,
+    /// Reads that asked for the whole branch: a `read` or `read_segments`
+    /// range with an open end, which the policy path issues to find an event's
+    /// position. The streaming path reads bounded batches and never does.
     reads: AtomicUsize,
     attempts: AtomicUsize,
     earliest_read: std::sync::atomic::AtomicU64,
@@ -159,6 +162,9 @@ impl CountContextReads {
     async fn record(&self, branch: &str, range: &RangeInclusive<u64>) -> Result<()> {
         self.earliest_read
             .fetch_min(*range.start(), Ordering::SeqCst);
+        if *range.end() == u64::MAX {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+        }
         self.ranges
             .lock()
             .unwrap()
@@ -719,12 +725,18 @@ async fn each_model_step_reads_full_context_for_policy_and_streams_otherwise() {
                 .await
                 .unwrap();
             session.idle("main").await.unwrap();
-            let expected = 0;
-            assert_eq!(
-                store.reads.load(Ordering::SeqCst) - before,
-                expected,
-                "policy={policy}; the no-policy path streams batches"
-            );
+            // With a compaction policy in force every model step reads the
+            // whole branch to locate the compaction it finds; without one the
+            // context is only ever streamed in bounded batches.
+            let reads = store.reads.load(Ordering::SeqCst) - before;
+            if policy {
+                assert!(reads >= 1, "policy=true; a model step read no full context");
+            } else {
+                assert_eq!(
+                    reads, 0,
+                    "policy=false; the streaming path read the full context"
+                );
+            }
         }
         let history = session.history("main", None).await.unwrap();
         assert_eq!(
