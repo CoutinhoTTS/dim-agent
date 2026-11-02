@@ -422,7 +422,13 @@ login/account/logout、models、MCP 和 daemon 命令仍然可用。现有的 `-
 
 ### 守护进程启动失败
 
-所有启动守护进程的入口共用 `connect_inner` 里的客户端启动。守护进程是 detached 的，
+所有启动守护进程的入口共用 `connect_inner` 里的客户端启动。在 Unix 上，守护进程只保留
+从启动方继承的标准描述符 0-2，启动时关闭其余继承来的描述符，因此长期运行的守护进程
+不会持有启动方的管道。Linux 用一次 `close_range` 调用关闭整个范围；该调用不可用时，
+以及其他 Unix 系统上，守护进程列出 Linux 的 `/proc/self/fd` 或 `/dev/fd`，关闭列表中
+的每个编号；连列表都读不到时，从 3 关闭到进程的描述符上限（依次取软限制、硬限制、
+`sysconf(_SC_OPEN_MAX)`，都没有时取 65,536），因此没有哪条路径会留下
+继承来的描述符。守护进程是 detached 的，
 stderr 追加到 `daemon.log`，所以每次启动的一份说明是唯一既不解析历史、也不依赖客户端
 可能关闭的管道的通道。启动前 CLI 删除 `<native home>/dimcode.sqlite.startup`；原生 home
 是守护进程自己的 home，即 `<home>/rust`。子进程在客户端连上之前退出时，CLI 读取这份
