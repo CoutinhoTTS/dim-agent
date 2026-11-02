@@ -33641,7 +33641,6 @@
         "path sys::enable_raw_mode",
         "path sys::install_signal_guard",
         "path sys::is_tty",
-        "path sys::raise_stop",
         "path sys::read_timeout",
         "path sys::rearm_restore_guard",
         "path sys::remove_signal_guard",
