@@ -1855,18 +1855,9 @@ impl App {
             Update::Context(context) => self.context = context,
             Update::Compacted(reply) => {
                 let (text, tone) = match reply {
-                    CompactReply::Completed => (t("Context compacted").to_owned(), Tone::Muted),
-                    CompactReply::Skipped(reason) => (
-                        [t("Context compaction skipped"), " · ", reason.as_str()].concat(),
-                        Tone::Muted,
-                    ),
                     CompactReply::Failed(message) => (
                         [t("Context compaction failed"), " · ", message.as_str()].concat(),
                         Tone::Warning,
-                    ),
-                    CompactReply::Cancelled(reason) => (
-                        [t("Context compaction cancelled"), " · ", reason.as_str()].concat(),
-                        Tone::Muted,
                     ),
                     CompactReply::Unsupported => (
                         t("This daemon does not support context compaction").to_owned(),

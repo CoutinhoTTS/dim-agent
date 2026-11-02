@@ -763,14 +763,11 @@ pub struct ContextReading {
     pub threshold: u64,
 }
 
-/// A `session.context.compact` reply as `/compact` reports it.
+/// Failures `/compact` reports independently of committed outcomes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompactReply {
-    Completed,
-    Skipped(String),
-    /// `compaction_failed` or another failure of the call, with its message.
+    /// Failure of the call itself, with its message.
     Failed(String),
-    Cancelled(String),
     /// The daemon offers no `session.context.compact`.
     Unsupported,
 }
