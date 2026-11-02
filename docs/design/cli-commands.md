@@ -30,7 +30,7 @@ picking an earlier message and scrolling to the top or bottom are also omitted;
 Commands
   app     /exit        exit
   app     /keys        show the key bindings
-  model   /permissions   file access, tool approval and process isolation
+  model   /permissions   file access, tool approval, process isolation and command rules
   session /rename      rename this session
 
 / + Enter          -> /exit (completion only)
@@ -418,7 +418,9 @@ stays visible at any width, the remove confirmation included.
   create shape, filled with example values — and writes it with the area's create method. An
   unchanged document writes nothing, and a refusal keeps the draft, which the next Ctrl+N
   reopens, as Ctrl+E does for an edit. A conflict keeps it too: a create has no revision, so
-  dropping the draft's link to a stale revision is an edit's rule, not a create's.
+  dropping the draft's link to a stale revision is an edit's rule, not a create's. An add that
+  appends an entry to a list it read, as the command rules area's does, retries the conflict
+  instead, because an append overwrites nothing.
   `dimcode <area> add PATH` (`-` for stdin) is the same write without an editor.
 - remove asks in the hint first: it becomes `Remove <label>? Enter confirm · Esc cancel`, and
   every key but Enter cancels without changing anything. Enter sends the area's delete method
@@ -512,8 +514,9 @@ Writes follow [Execution settings](#execution-settings):
   message state live in one place.
 - Adding an area means an adapter, its command menu rows, its subcommand verbs and its design
   rows. It adds no new `Prompt`, `Command` or `Update` variant.
-- Existing panels — `/plugins`, `/permissions` — move onto this structure when they are next
-  changed. This section does not migrate them, and they keep their own keys until then.
+- `/plugins` keeps its own panel. `/permissions` keeps its panel and its keys, and its Command
+  rules row opens the area below; the three controls are choices among values, not entries, so
+  they stay pages of the one panel.
 
 ```text
 /skills ──► Command::Management { area, List } ──► adapter
@@ -690,6 +693,87 @@ connection-only action, not a kind, so they stay line commands and verbs.
 ╰───── Enter toggle · Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Ctrl+T test · Tab inspect · Esc close ─╯
 ```
 
+### The command rules area
+
+Command rules (#819): the Permissions panel's Command rules row and `dimcode permissions
+list|add PATH|remove RULE` over the user's command rules ([permission
+controls](#permission-controls), [command rules](appserver/permission-command-rules.md)). The
+owner reports the list and its Settings revision with `permission.rules`, and replaces the whole
+list at that revision with `permission.set_rules`; a stale revision is
+`permission_rules_conflict`.
+
+The row is appended after Process isolation, so the existing rows keep their positions. It opens
+this area's panel, and Esc there returns to the Permissions panel; the three controls above it
+keep their own pages.
+
+```text
+╭─ Permissions ─────────────────────────────────────────────────╮
+│ >                                                             │
+│   File access          Workspace read/write                 › │
+│   Tool approval        Ask (legacy tool exceptions)         › │
+│   Process isolation                                         › │
+│   Command rules                                             › │
+╰──── ↑↓/Tab move · Enter apply · Esc back ─────────────────────╯
+
+╭─ Command rules ───────────────────────────────────────────────╮
+│ >                                                             │
+│   user                                                        │
+│ › allow exact cargo test -p dim-cli                           │
+│   deny prefix git push                                        │
+│                                                               │
+│   Matches only this command.                                  │
+│   Allows a simple command that would otherwise ask.           │
+│   Applies in every Session, in every workspace.               │
+╰──── Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Esc close ───╯
+```
+
+Every rule is an entry. The owner has no id for one, so the id and the label are the rule's value,
+`DECISION MATCH COMMAND` — `allow exact cargo test -p dim-cli`, `deny prefix git push`. A rule has
+a decision, not an on/off state, so the entry reports no enablement (`enabled: None`) and the
+panel draws neither `enabled` nor `disabled`; it reports no states either, because a stored rule
+the owner cannot use fails the whole read. The area offers three kinds: reload re-reads
+`permission.rules` (the owner reads the Settings source on every call, so there is no rescan
+method), add appends one rule, and remove removes the rule the entry names. Toggle, edit, run and
+inspect are not offered: a rule is not on or off, the one write replaces the whole list, and a
+rule's whole content is its label and its two detail lines.
+
+Add opens the external editor on one rule, the owner's write unit without the revision:
+
+```json
+{"command": "replace-with-a-command", "match": "prefix", "decision": "deny"}
+```
+
+The command is a placeholder no one keeps, so the template reads as the example it is: the
+shared create rule writes nothing for a document left as it was, and the panel says `No change.`
+`deny` with `prefix` is the fail-closed example: a user who replaces only the command still denies.
+The adapter decodes the document as a command rule and checks it with the line prompt's
+`permission::rule` (word normalization, a non-empty command, no shell separators); the write is
+`permission::add_rule`, the line prompt's own operation: read `permission.rules`, append unless an
+equal rule exists, and write at the read revision. An add is the one kind that retries a conflict,
+up to three attempts, because an append does not depend on the other rules and overwrites
+nothing. An equal rule writes nothing and says it is already present. `dimcode permissions add
+PATH` (`-` for stdin) is the same write without an editor.
+
+Remove asks in the hint first, `Remove deny prefix git push? Enter confirm · Esc cancel`, and
+writes the list without that rule at the revision the adapter read. The action carries no
+revision: a rule's id is its value, so a remove acts on exactly the rule the user saw, and a
+change to some other rule while the panel was open is not a conflict. Two failures write nothing
+and show the list as it now is: the rule is no longer listed (`That command rule is no longer
+listed; nothing was removed.`), or another client wrote between the read and the write and the
+owner answered `permission_rules_conflict` (`Command rules changed since they were read; nothing
+was removed.`). `dimcode permissions remove 'deny prefix git push'` takes the whole rule as one
+quoted argument and deletes without a prompt, because the rule typed on the command line is the
+intent.
+
+The area is user scope only: Permission has one user Settings source, with no project rules, and a
+`.dimcode/permission.json` has no effect. Nothing is cached: the panel reads the list when it
+opens, on Ctrl+R and after each of its writes, so a rule written by Allow always, by the line
+prompt or by Web appears on the next of those reads, not while the panel sits idle.
+
+`dimcode permissions list` prints one rule per line, with the decision, the match and the command
+separated by tabs, then the columns and what deny means. `dimcode permissions remove` takes the
+whole rule as one quoted argument, so global options stay unambiguous.
+
 ## Commands
 
 | Entry | Behavior |
@@ -740,6 +824,10 @@ connection-only action, not a kind, so they stay line commands and verbs.
 | `dimcode mcp login\|logout\|enable\|disable ID` | Keep their behavior: browser or device sign-in, sign-out, and the enablement both `/mcp` clients share. |
 | `/mcp` | Open the MCP panel of the Session's workspace ([management surfaces](#management-surfaces)): an entry per server, grouped `user`, `project` and `plugin`, with the toggle, edit, add, remove, test and inspect kinds. |
 | `/mcp list\|login\|callback\|logout\|disconnect\|enable\|disable` | The line commands, unchanged: `list` prints the catalog and the Session's server states, `disconnect` closes one entry's live connections, and the rest sign in, complete a callback, sign out or toggle. |
+
+| `dimcode permissions list` | List the user's command rules over `permission.rules`: each rule's decision, match and command, then the columns and what deny means. |
+| `dimcode permissions add PATH` | Add one rule from `PATH`, or from stdin for `-`, over `permission.rules` and `permission.set_rules`: an equal rule writes nothing; a conflict re-reads and retries, at most three attempts. |
+| `dimcode permissions remove RULE` | Remove the rule named by `RULE`, which is the whole rule as one quoted `'DECISION MATCH COMMAND'` argument, over `permission.rules` and `permission.set_rules` at the revision just read; a rule that is gone, or a raced write, writes nothing and exits 1. |
 | `dimcode login [PROVIDER] [--directory URL] [--device] [--redirect-uri URI]` | Start the described account's browser or device sign-in ([Provider accounts](#provider-accounts)); without PROVIDER, list the described accounts. |
 | `dimcode account PROVIDER` | Print the described account's non-secret state. |
 | `dimcode logout PROVIDER` | Sign the described account out. |
@@ -748,7 +836,7 @@ connection-only action, not a kind, so they stay line commands and verbs.
 | `!command` / `!!command` | Call the Session's existing `shell.run` in record/private mode, including during a model turn. |
 | `--permission read-only\|workspace-write\|full-access` | Select the preset of a new or resumed Session for `dimcode`, `tui`, `exec` and `exec resume` ([permission controls](#permission-controls)). |
 | `/goal [OBJECTIVE \| set OBJECTIVE \| edit OBJECTIVE \| pause \| resume \| clear]` | Read and write the goal of the shown line, in the line client and both terminal UI modes ([goal](#goal)). |
-| `/permissions` | Open independent File access, Tool approval and Process isolation controls; manage command rules while idle ([permission controls](#permission-controls)). |
+| `/permissions` | Open the Permissions panel: independent File access, Tool approval and Process isolation controls, and the Command rules row that lists, adds and removes the user's command rules ([permission controls](#permission-controls)). |
 | `/approvals`, `/approval` | Compatibility aliases for `/permissions`; legacy preset arguments remain supported. |
 
 `dimcode hooks` writes only the user's hook document, and only through the edit kind: `dimcode hooks
@@ -1445,11 +1533,20 @@ same controls as compatibility aliases, not a second preset chooser. The control
 `main`; each field selection writes only its dimension using the current whole policy and
 version. A failed save neither changes remembered choices nor falls back to a legacy preset.
 
+Process isolation opens the execution settings. The Command rules row opens the management panel
+of [The command rules area](#the-command-rules-area), where the rules are listed, added and
+removed; Esc there returns to this panel, and the three controls above the row keep their pages.
+Arguments after `/permissions` in the terminal UI open that panel instead of being ignored, and
+it opens holding one line that says where arguments work — the line prompt and `dimcode
+permissions` — which stands above the panel's answers until the user's first key there, however
+long the opening read takes; the compact grammar belongs to the line prompt.
+
 ```text
 Permissions (main branch)
 > File access          Workspace read/write >
   Tool approval        Ask                  >
   Process isolation    Off                  >
+  Command rules                             >
 
 File access                         Tool approval
   Read only                       > Ask
@@ -1512,6 +1609,10 @@ a number never refers to a position the user has not seen. A form that prints no
 already present, a preset switch, an "always" answer during a turn) keeps the last printed one; if
 the rules changed since, its revision makes the next `remove` fail, and the conflict prints the
 current list. Without a printed list in this process, `remove` asks for `/permissions` first.
+`remove N` keeps the number because it acts on the list this prompt printed and holds that
+listing's revision, while `dimcode permissions remove` and the panel take the rule's value
+because each reads the list immediately before the write, so there is no printed listing to
+number.
 COMMAND is the rest of the line; the CLI rejects an empty command or one containing a separator
 character (`dim_agent_types::COMMAND_SEPARATORS`, the set F2 validates) before any call. A
 preset that is already in force writes nothing. Without the advertised methods, the command

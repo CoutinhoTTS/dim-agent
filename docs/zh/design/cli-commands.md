@@ -22,7 +22,7 @@ scrollback 与 fullscreen TUI 都按分类分组，分类及分类内的命令�
 Commands
   app     /exit        exit
   app     /keys        show the key bindings
-  model   /permissions   file access, tool approval and process isolation
+  model   /permissions   file access, tool approval, process isolation and command rules
   session /rename      rename this session
 
 / + Enter          -> /exit (completion only)
@@ -325,7 +325,7 @@ Esc 关闭面板。动作键要么是 Ctrl 组合键，要么是筛选从不接�
 
 底部边框放不下的键提示会画在朴素底边之上的几行里，在 ` · ` 分隔处换行；比一行还宽的部件按显示宽度换行，任何键和动作都不会被截掉。这些行与页脚一样从列表中占用空间，所以任何宽度下每个键都可见，删除确认也不例外。
 
-- add 用外部编辑器打开适配器给出的新建条目文档——所有者的创建形态，填入示例值——并以领域的创建方法写入。文档没有改动时不写入；被拒绝时保留草稿，下次 Ctrl+N 重新打开用户的文本，与 Ctrl+E 对编辑的处理一致。冲突时也同样保留：新建没有 revision，丢弃草稿与过期 revision 的关联只是编辑的规则，不适用于新建。`dimcode <area> add PATH`（`-` 表示 stdin）是不经编辑器的同一次写入。
+- add 用外部编辑器打开适配器给出的新建条目文档——所有者的创建形态，填入示例值——并以领域的创建方法写入。文档没有改动时不写入；被拒绝时保留草稿，下次 Ctrl+N 重新打开用户的文本，与 Ctrl+E 对编辑的处理一致。冲突时也同样保留：新建没有 revision，丢弃草稿与过期 revision 的关联只是编辑的规则，不适用于新建。把条目追加到已读到列表的 add（如命令规则领域）改为重试冲突，因为追加不覆盖任何内容。`dimcode <area> add PATH`（`-` 表示 stdin）是不经编辑器的同一次写入。
 - remove 先在键提示里询问：键提示变为 `Remove <label>? Enter confirm · Esc cancel`，除 Enter 外的任何键都取消且什么都不改。Enter 调用领域的删除方法，然后重新读取该领域。`dimcode <area> remove ID` 不提问直接删除，因为命令行上输入的 id 就是意图，与 `dimcode logout PROVIDER` 不提问直接退出一致。
 - run 对所选条目调用领域的具名操作。答复会改变领域所列内容的运行——Scheduler 的立即运行会加入任务的历史和上次结果——重新读取该领域，并把答复作为消息报告；所有者跳过的一次运行会说明原因。答复不改变领域所列内容的运行，像 inspect 一样把答复作为详情显示，且不重新读取该领域：MCP 的 test 是临时连接发现的工具列表。所有者是否把该方法声明为 mutating 并不决定这一点，因为 `mcp.test` 会运行该条目，却仍然不写入领域所列的任何内容。需要参数的操作是该领域自己的步骤，不属于这个种类。
 - inspect 向适配器索取条目的详情：一个标题和若干行，而不是一个视图。面板用它替代列表显示，方向键与 PageUp/PageDown 滚动，Esc 带着保留的选中项回到列表，再按一次 Esc 关闭面板。`dimcode <area> inspect ID` 打印同样的行，或该领域自己的动词，如果它的设计另有规定。
@@ -363,7 +363,7 @@ Esc 关闭面板。动作键要么是 Ctrl 组合键，要么是筛选从不接�
 - 管理经会话端口上的一个通用请求和一个通用回复，各自携带领域与类型化的动作或视图：`Command::Management(ManagementRequest)` 与 `Update::Management(ManagementReply)`。
 - 一个面板类型绘制所有领域。它建立在共享列表面板（[`ListPanel`](../../../crates/dim-cli/src/ui/list_panel.rs)）之上，确认、忙碌和消息状态只有一处。
 - 新增一个领域意味着：一个适配器、它的命令菜单行、它的子命令动词和它的设计表格行。它不新增 `Prompt`、`Command` 或 `Update` 变体。
-- 现有面板——`/plugins`、`/permissions`——在下次改动时迁移到这个结构。本节不迁移它们，在迁移前它们保留自己的按键。
+- `/plugins` 保留自己的面板。`/permissions` 保留面板与按键，其 Command rules 行打开下面的领域；三个控件是值的选择，不是条目，所以仍留在同一个面板的页面里。
 
 ```text
 /skills ──► Command::Management { area, List } ──► 适配器
@@ -473,6 +473,49 @@ run 就是 `mcp.test`：它执行或联系已存条目一次，不写入领域�
 ╰───── Enter toggle · Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Ctrl+T test · Tab inspect · Esc close ─╯
 ```
 
+### 命令规则领域
+
+命令规则（#819）：Permissions 面板的 Command rules 行，以及 `dimcode permissions list|add PATH|remove RULE`，管理用户的命令规则（[权限控制](#权限控制)、[命令规则](appserver/permission-command-rules.md)）。所有者用 `permission.rules` 报告规则列表及其 Settings revision，并用 `permission.set_rules` 按该 revision 替换整个列表；revision 过期即为 `permission_rules_conflict`。
+
+该行追加在 Process isolation 之后，现有行因此保持原位置。它打开本领域的面板，Esc 返回 Permissions 面板；它上面的三个控件保留各自的页面。
+
+```text
+╭─ Permissions ─────────────────────────────────────────────────╮
+│ >                                                             │
+│   File access          Workspace read/write                 › │
+│   Tool approval        Ask (legacy tool exceptions)         › │
+│   Process isolation                                         › │
+│   Command rules                                             › │
+╰──── ↑↓/Tab move · Enter apply · Esc back ─────────────────────╯
+
+╭─ Command rules ───────────────────────────────────────────────╮
+│ >                                                             │
+│   user                                                        │
+│ › allow exact cargo test -p dim-cli                           │
+│   deny prefix git push                                        │
+│                                                               │
+│   Matches only this command.                                  │
+│   Allows a simple command that would otherwise ask.           │
+│   Applies in every Session, in every workspace.               │
+╰──── Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Esc close ───╯
+```
+
+每条规则是一个条目。所有者没有为规则提供 id，所以 id 与标签就是规则的值，`DECISION MATCH COMMAND`——`allow exact cargo test -p dim-cli`、`deny prefix git push`。规则只有允许或拒绝的决定，没有开关状态，所以条目不上报启用状态（`enabled: None`），面板既不画 `enabled` 也不画 `disabled`；条目也没有 states，因为所有者无法使用的已存规则会让整次读取失败。领域提供三种动作：reload 重新读取 `permission.rules`（所有者每次调用都读取 Settings 来源，所以没有 rescan 方法），add 追加一条规则，remove 删除条目所指的规则。不提供 toggle、edit、run 与 inspect：规则没有开关，唯一一次写入替换整个列表，而一条规则的全部内容就是它的标签与两条详情。
+
+Add 用外部编辑器打开一条规则，即所有者写入单元去掉 revision：
+
+```json
+{"command": "replace-with-a-command", "match": "prefix", "decision": "deny"}
+```
+
+命令是一个没人会保留的占位值，所以模板读起来就是示例：把文档原样保存不会写入任何内容（共享的创建规则），面板会说 `No change.`。`deny` 配 `prefix` 是失败关闭的示例：用户只替换命令，规则仍然拒绝。适配器把文档解码为命令规则，并用行内提示符的 `permission::rule` 校验（按词归一、命令非空、不含 shell 分隔符）；写入调用 `permission::add_rule`，也就是行内提示符自己的操作：读取 `permission.rules`，除非已有相等的规则否则追加，并按读到的 revision 写入。add 是唯一会重试冲突的动作，最多三次，因为追加不依赖其他规则，也不会覆盖任何内容。相等的规则不写入，并说明它已存在。`dimcode permissions add PATH`（`-` 表示 stdin）是不经编辑器的同一次写入。
+
+Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Esc cancel`，然后按适配器读到的 revision 写入去掉该规则的列表。动作本身不携带 revision：规则的 id 就是它的值，所以 remove 作用在用户看到的那条规则上，面板打开期间其他规则的变化不算冲突。两种失败都什么都不写，并显示当前的规则列表：规则已不在列表中（`That command rule is no longer listed; nothing was removed.`），或另一客户端在读取与写入之间写入、所有者的答复是 `permission_rules_conflict`（`Command rules changed since they were read; nothing was removed.`）。`dimcode permissions remove 'deny prefix git push'` 把整条规则作为一个加引号的参数，不做确认直接删除，因为命令行上写出的规则就是意图。
+
+领域只有用户作用域：Permission 只有一个用户 Settings 来源，没有项目规则，`.dimcode/permission.json` 不起作用。没有任何缓存：面板在打开时、Ctrl+R 时以及每次自己的写入之后读取列表，所以由"总是允许"、行内提示符或 Web 写入的规则会出现在下一次这样的读取里，而不会在面板空闲时出现。
+
+`dimcode permissions list` 每行打印一条规则，用制表符分隔决定、匹配方式与命令，然后打印列说明以及 deny 的含义。`dimcode permissions remove` 把整条规则作为一个加引号的参数，因此全局选项不会产生歧义。
+
 ## 命令
 
 | 入口 | 行为 |
@@ -519,6 +562,10 @@ run 就是 `mcp.test`：它执行或联系已存条目一次，不写入领域�
 | `dimcode mcp login\|logout\|enable\|disable ID` | 行为保持不变：浏览器或设备签到、退出，以及两个 `/mcp` 客户端共用的启用/停用。 |
 | `/mcp` | 打开会话所在工作区的 MCP 面板（[管理界面](#管理界面)）：每个服务器一个条目，按 `user`、`project`、`plugin` 分组，带 toggle、edit、add、remove、test 与 inspect 种类。 |
 | `/mcp list\|login\|callback\|logout\|disconnect\|enable\|disable` | 行命令，行为不变：`list` 打印目录与会话的服务器状态，`disconnect` 关闭一个条目的活动连接，其余用于签到、完成回调、退出或切换启用状态。 |
+
+| `dimcode permissions list` | 经 `permission.rules` 列出用户的命令规则：每条规则的决定、匹配方式与命令，然后是列说明以及 deny 的含义。 |
+| `dimcode permissions add PATH` | 从 `PATH`（`-` 表示 stdin）添加一条规则，经 `permission.rules` 与 `permission.set_rules` 写入：规则已存在时不写入；冲突时重新读取并重试，最多三次。 |
+| `dimcode permissions remove RULE` | 删除 `RULE` 指定的规则，`RULE` 是作为单个加引号参数的整条 `'DECISION MATCH COMMAND'`；经刚读到的 revision 调用 `permission.rules` 与 `permission.set_rules`；规则已不存在或写入被并发修改时什么都不写，退出码 1。 |
 | `dimcode login [PROVIDER] [--directory URL] [--device] [--redirect-uri URI]` | 启动被描述账号的浏览器或设备签到（[提供方账号](#提供方账号)）；不给 PROVIDER 时列出被描述的账号。 |
 | `dimcode account PROVIDER` | 打印被描述账号的非机密状态。 |
 | `dimcode logout PROVIDER` | 让被描述的账号退出。 |
@@ -527,7 +574,7 @@ run 就是 `mcp.test`：它执行或联系已存条目一次，不写入领域�
 | `!command` / `!!command` | 以 record/private 模式调用 Session 现有的 `shell.run`，模型回合进行中也可用。 |
 | `--permission read-only\|workspace-write\|full-access` | 为 `dimcode`、`tui`、`exec` 和 `exec resume` 选择新建或恢复的 Session 的预设（[权限控制](#权限控制)）。 |
 | `/goal [OBJECTIVE \| set OBJECTIVE \| edit OBJECTIVE \| pause \| resume \| clear]` | 在行客户端和两种终端 UI 模式下读取并写入当前显示线的目标（[目标](#目标)）。 |
-| `/permissions` | 打开独立的 File access、Tool approval 和 Process isolation 控件；空闲时管理命令规则（[权限控制](#权限控制)）。 |
+| `/permissions` | 打开 Permissions 面板：独立的 File access、Tool approval 与 Process isolation 控件，以及列出、添加、删除用户命令规则的 Command rules 行（[权限控制](#权限控制)）。 |
 | `/approvals`、`/approval` | `/permissions` 的兼容别名，仍支持旧预设参数。 |
 
 `dimcode hooks` 只写用户的 Hook 文档，而且只经 edit 这一种类：`dimcode hooks edit`、
@@ -951,11 +998,14 @@ Session 创建配置 --> main 当前策略 --分支点--> 子分支策略
 控件，不另设预设选择器。控件作用于 `main`；每次字段选择使用当前完整策略与版本，只写所选维度。
 保存失败既不改变记住的选择，也不回退到旧预设。
 
+Process isolation 打开执行设置。Command rules 行打开[命令规则领域](#命令规则领域)的管理面板，在那里列出、添加和删除规则；Esc 返回本面板，该行上面的三个控件保留各自的页面。终端 UI 中 `/permissions` 后面的参数改为打开该面板，而不是被忽略；面板打开时就带着一行说明参数在哪里生效——行内提示符与 `dimcode permissions`——这行一直显示在面板的答复之上，直到用户在这里按下第一个键，无论首次读取要多久；紧凑语法属于行内提示符。
+
 ```text
 Permissions (main branch)
 > File access          Workspace read/write >
   Tool approval        Ask                  >
   Process isolation    Off                  >
+  Command rules                             >
 
 File access                         Tool approval
   Read only                       > Ask
@@ -1008,7 +1058,7 @@ Command rules (user scope, every Session):
 `remove N` 针对最后打印的编号列表。列出规则、添加规则、删除规则以及删除冲突都会打印结果列表，只有打印过的
 列表才会保留给 `remove`，所以编号不会指向用户没看到的位置。不打印列表的形式（规则已存在、切换预设、回合中
 的"总是"回答）保留最后打印的列表；如果此后规则有变化，它的修订号会让下一次 `remove` 失败，冲突时打印当前
-列表。本进程中还没有打印过列表时，`remove` 提示先运行 `/permissions`。COMMAND 是该行的剩余部分；CLI 在发出任何调用前拒绝空命令或含分隔字符的命令
+列表。本进程中还没有打印过列表时，`remove` 提示先运行 `/permissions`。`remove N` 保留编号，是因为它作用于本提示符打印过的那份列表并持有该列表的修订号；而 `dimcode permissions remove` 与面板取规则的值，因为它们各自在写入前才读取列表，没有可编号的打印列表。COMMAND 是该行的剩余部分；CLI 在发出任何调用前拒绝空命令或含分隔字符的命令
 （`dim_agent_types::COMMAND_SEPARATORS`，即 F2 校验的字符集）。已经生效的预设不会再次写入。守护进程
 没有声明相应方法时，命令报告该守护进程不提供它们。调用挂起期间，Ctrl+C 提示 CLI 正在等待结果，与
 `/export` 相同。错误作为命令错误打印，从不成为模型输入。

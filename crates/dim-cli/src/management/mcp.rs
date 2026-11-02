@@ -982,7 +982,7 @@ pub(super) async fn view(
                     id: server.id.clone(),
                     label: server.id.clone(),
                     detail: lines,
-                    enabled: server.enabled,
+                    enabled: Some(server.enabled),
                     states,
                     actions: offers(server, document.is_some(), available),
                     document,

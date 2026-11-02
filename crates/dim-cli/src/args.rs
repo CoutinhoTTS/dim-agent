@@ -67,6 +67,10 @@ Commands:\n\
   scheduled remove ID              Delete a job\n\
   scheduled run ID                 Run a job now\n\
   scheduled history ID             List a job's recent runs\n\
+  permissions list                 List the user's command rules\n\
+  permissions add PATH             Add one rule from PATH, or from stdin for -\n\
+  permissions remove RULE          Remove a rule, given as one quoted\n\
+                                   'DECISION MATCH COMMAND'\n\
   recording [on|off]               Record model requests to the home's\n\
                                    model-log/recordings.jsonl; prompts, code\n\
                                    and tool output are written there\n\
@@ -117,7 +121,8 @@ Without -p, exec reads redirected stdin through EOF, including with --image.\n\
 Idle commands: /export <markdown|json> PATH, /rename TITLE|--clear, /exit.\n\
 PATH is relative to the CLI current directory; ~ is literal.\n\
 /permissions (aliases /approvals, /approval) opens separate File access, Tool\n\
-  approval (Ask/Bypass), and Process isolation controls in the terminal UI.\n\
+  approval (Ask/Bypass) and Process isolation controls in the terminal UI, and\n\
+  a Command rules row that lists, adds and removes the user's command rules.\n\
 The line prompt accepts file-access read-only|workspace-read-write|unrestricted,\n\
   tool-approval ask|bypass, PRESET, allow|deny exact|prefix COMMAND, or remove N.\n\
 Approval accepts only y/yes; empty input denies. For a simple exec command, a/always\n\
@@ -755,6 +760,29 @@ impl Options {
                         }
                         _ => {
                             return Err("Use scheduled list, enable ID, disable ID, edit ID, set ID PATH, add PATH, remove ID, run ID or history ID".into());
+                        }
+                    };
+                }
+                "permissions" if matches!(options.action, Action::Chat) => {
+                    use crate::model::session::{Area, ManagementAction, ManagementRequest};
+                    let verb = value(&mut args)?;
+                    options.action = match verb.as_str() {
+                        "list" => Action::Management(ManagementRequest {
+                            area: Area::Permissions,
+                            action: ManagementAction::List,
+                        }),
+                        "add" => Action::ManagementAdd {
+                            area: Area::Permissions,
+                            path: value(&mut args)?.into(),
+                        },
+                        "remove" => Action::Management(ManagementRequest {
+                            area: Area::Permissions,
+                            action: ManagementAction::Remove {
+                                id: value(&mut args)?,
+                            },
+                        }),
+                        _ => {
+                            return Err("Use permissions list, permissions add PATH or permissions remove 'DECISION MATCH COMMAND'".into());
                         }
                     };
                 }

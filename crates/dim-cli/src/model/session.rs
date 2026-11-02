@@ -298,6 +298,7 @@ pub enum Area {
     Hooks,
     Mcp,
     Scheduled,
+    Permissions,
 }
 
 impl Area {
@@ -308,6 +309,7 @@ impl Area {
             Self::Hooks => "hooks",
             Self::Mcp => "mcp",
             Self::Scheduled => "scheduled",
+            Self::Permissions => "permissions",
         }
     }
 
@@ -392,8 +394,9 @@ pub struct ManagementEntry {
     /// What the entry says about itself, a line each, shown for the entry the
     /// panel has selected.
     pub detail: Vec<String>,
-    /// Whether the entry is on; a toggle asks for the other state.
-    pub enabled: bool,
+    /// Whether the entry is on; a toggle asks for the other state. `None`
+    /// for an entry that has no on/off state, such as a command rule.
+    pub enabled: Option<bool>,
     /// What the row names besides on and off.
     pub states: Vec<EntryState>,
     pub actions: Vec<ActionKind>,
@@ -829,14 +832,11 @@ pub struct ContextReading {
     pub threshold: u64,
 }
 
-/// A `session.context.compact` reply as `/compact` reports it.
+/// Failures `/compact` reports independently of committed outcomes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompactReply {
-    Completed,
-    Skipped(String),
-    /// `compaction_failed` or another failure of the call, with its message.
+    /// Failure of the call itself, with its message.
     Failed(String),
-    Cancelled(String),
     /// The daemon offers no `session.context.compact`.
     Unsupported,
 }

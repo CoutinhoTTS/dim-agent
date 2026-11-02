@@ -414,14 +414,21 @@ See the [MCP OAuth contract](../../docs/design/appserver/mcp-oauth.md#13-require
 ## Permission presets and approvals
 
 The App Server decides each tool call; the CLI selects settings and never decides a call itself.
-`/permissions` opens three independent controls, also available under `/settings`:
+`/permissions` opens three independent controls, also available under `/settings`, and the
+Command rules area:
 
 ```text
 Permissions
   File access         Read only / Workspace read/write / Unrestricted
   Tool approval       Ask / Bypass
   Process isolation   Off / Sandboxed · No network / Sandboxed · Network allowed
+  Command rules       List, add and remove the user's command rules
 ```
+
+The Command rules row opens the management panel of `Area::Permissions`: one entry per rule,
+whose id and label are the rule's value (`DECISION MATCH COMMAND`), with `Ctrl+R` reload, `Ctrl+N`
+add and `Ctrl+X` remove. A rule has a decision, not an on/off state. Esc returns to the Permissions
+panel.
 
 Choosing File access writes only `fileAccess`; choosing Tool approval writes only `toolApproval`.
 The UI preserves the branch's legacy preset and tool lists, and saves the chosen field alone in
@@ -1107,7 +1114,7 @@ The terminal UI reaches the same Session methods as the line client:
 | `/timeline` | Lists the shown line's user messages, oldest first, numbered, each with the first text of its answer, the newest selected. Typing does not filter: `e`, `q`, `b` and `f` act on the selected message as on a pick. `Enter` jumps: fullscreen picks the message (drawing from it first when it is earlier history), so the pick keys apply; scrollback draws a message it has not drawn yet, and everything after it up to what is drawn, as an earlier-history page, and otherwise says `/tui` can jump to it ([timeline UI §4.6](../../docs/design/timeline-ui.md#46-timeline-jumping-to-a-message)) |
 | `/branch [TEXT]`, `/fork [TEXT]` | As `b` and `f` on a picked message, at the shown line's newest turn end: `/branch` puts `TEXT` in the composer as the new line's opening input; `/fork` asks, then forks `main` there with `TEXT` in the fork's composer |
 | `/usage` | Reports main's context window from `session.context.usage`: estimated input tokens against the window, the output allowance and the compaction threshold; before a model has answered it says so, and a failed call is reported alone. With the reading it appends the cache read share of the last `model/usage` request on `main` (` · last request cached {percent}`), rounded down: `100%` only when every prompt token was a cache read, one decimal between `99%` and `100%`, an integer between `1%` and `99%`, `<1%` for a positive share below one percent, and `0%` for a request that reported no cache reads; the prompt token count includes cache writes, so a request that only writes the cache reads `0%`. The segment appears only once `main`'s history has finished loading, so a page that is not the last never reports its older request; after that it shows the newest request, whether it came from the history or a live event. It is absent when that request reported no cache read count or its counters cannot produce a share (cache reads above prompt tokens, or a zero prompt) |
-| `/compact` | Asks the shown line to compact its context with `session.context.compact`, during a run too. The transcript row shows the work and its outcome; the reply is reported when the method answers — `completed`, `skipped` with its reason, or the method's failure (`compaction_failed`, `compaction_cancelled`). A daemon without the method says it does not support context compaction |
+| `/compact` | Asks the shown line to compact its context with `session.context.compact`, during a run too. The matching Timeline row reports the work and its terminal outcome once; the RPC reply adds no second completed, skipped, failed or cancelled notice. Failures of the call itself and invalid replies are reported separately. A daemon without the method says it does not support context compaction |
 | `/rename TITLE`, `/rename --clear` | Sets, or clears, the shown Session's manual title with `session.rename` and reports the stored title or that the Session is untitled. Choosing `/rename` from the palette fills `/rename ` and waits; a bare `/rename` is refused with a notice and sends nothing, so `--clear` is the way to clear it without a title. The text is a command: it is never queued or submitted, also while a turn runs. With no Session shown it says so, and a Session that does not serve `session.rename` (`unknown_method`) reports that instead |
 | `/goal [OBJECTIVE \| set OBJECTIVE \| edit OBJECTIVE \| pause \| resume \| clear]` | Reads and writes the goal of the shown line through `session.goal.*`. The command's first line names the call, the line and the status in force, the objective follows it, and `/goal` alone prints the goal the line's events give; `edited` is the form that found a live goal and changed only its objective, and a typed objective after a finished goal starts a new one. While the shown line follows a goal the status area carries `◎ goal active` or `◎ goal paused`. A daemon whose Session lists no `session.goal.set` says Goal is not available and calls nothing ([Goal](#goal)) |
 | `/effort VALUE` (`/reasoning`), `/fast on\|off`, `/agent ID` | Change the Session's reasoning effort, service tier or agent; without a value they list the choices for the adopted model. `/fast` is listed in the palette only while the adopted model's catalog entry advertises priority/default service tiers |
@@ -1238,6 +1245,8 @@ The areas below use it, over the same kinds:
 - Hooks (`/hooks`, `dimcode hooks ...`) adds the user document's edit.
 - The Scheduler (`/scheduled`, `/schedule`, `dimcode scheduled ...`) introduces add, remove, run and inspect, a job per entry from `schedule.list`, with `schedule.set_enabled`, `schedule.save` for the edit and the create, `schedule.delete`, `schedule.run_now` and `schedule.history`. Its subcommands are `dimcode scheduled list`, `enable ID`, `disable ID`, `edit ID`, `set ID PATH`, `add PATH`, `remove ID`, `run ID` and `history ID`.
 - MCP (`/mcp`, `dimcode mcp ...`) lists the effective catalog with `mcp.set_enabled`, reads each entry's `mcp.configuration` for its detail and its patch, writes `mcp.update`, creates with `mcp.save`, deletes with `mcp.remove`, and shows `mcp.test` and `mcp.inspect` as details. Its subcommands are `dimcode mcp list`, `add PATH`, `edit ID`, `set ID PATH`, `remove ID`, `test ID` and `inspect ID`.
+
+- Command rules (`/permissions`'s Command rules row, `dimcode permissions ...`) is a rule per entry from `permission.rules` with `Ctrl+R`, `Ctrl+N` and `Ctrl+X`, writing through `permission.set_rules`; its subcommands are `dimcode permissions list`, `add PATH` and `remove 'DECISION MATCH COMMAND'`.
 
 The external editor is `$VISUAL`, then `$EDITOR`, then `vi` (`notepad` on Windows), run on Unix
 through `sh -c '<editor> "$@"' <editor> <file>` as git does, so a quoted path with a space

@@ -3153,6 +3153,17 @@
       ]
     },
     {
+      "id": "dim_cli::management::permissions",
+      "crate": "dim_cli",
+      "parent": "dim_cli::management",
+      "file": "crates/dim-cli/src/management/permissions.rs",
+      "unexpandedMacros": [
+        "format",
+        "serde_json::json",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_cli::management::scheduler",
       "crate": "dim_cli",
       "parent": "dim_cli::management",
@@ -25780,6 +25791,18 @@
     },
     {
       "from": "dim_cli::management",
+      "to": "dim_cli::management::permissions",
+      "references": [
+        "mod permissions",
+        "path permissions::Answer::Rules",
+        "path permissions::Failure::Conflict",
+        "path permissions::Failure::Refused",
+        "path permissions::apply",
+        "path permissions::view"
+      ]
+    },
+    {
+      "from": "dim_cli::management",
       "to": "dim_cli::management::scheduler",
       "references": [
         "mod scheduler",
@@ -25819,6 +25842,7 @@
         "path Area",
         "path Area::Hooks",
         "path Area::Mcp",
+        "path Area::Permissions",
         "path Area::Scheduled",
         "path Area::Skills",
         "path ManagementAction",
@@ -26026,6 +26050,99 @@
       ]
     },
     {
+      "from": "dim_cli::management::permissions",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path CommandMatch::Exact",
+        "path CommandMatch::Prefix",
+        "path CommandRule",
+        "path CommandRuleDecision::Allow",
+        "path CommandRuleDecision::Deny",
+        "use dim_agent_types::CommandMatch",
+        "use dim_agent_types::CommandRule",
+        "use dim_agent_types::CommandRuleDecision"
+      ]
+    },
+    {
+      "from": "dim_cli::management::permissions",
+      "to": "dim_cli",
+      "references": [
+        "path crate::Error"
+      ]
+    },
+    {
+      "from": "dim_cli::management::permissions",
+      "to": "dim_cli::management",
+      "references": [
+        "path Groups::default",
+        "path super::area_kinds",
+        "path super::entry_kinds",
+        "use super::Groups"
+      ]
+    },
+    {
+      "from": "dim_cli::management::permissions",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path ActionKind",
+        "path ManagementAction",
+        "path ManagementAction::Add",
+        "path ManagementAction::Inspect",
+        "path ManagementAction::List",
+        "path ManagementAction::Reload",
+        "path ManagementAction::Remove",
+        "path ManagementAction::Run",
+        "path ManagementAction::Save",
+        "path ManagementAction::Toggle",
+        "path ManagementEntry",
+        "path ManagementView",
+        "use crate::model::session::ActionKind",
+        "use crate::model::session::ManagementAction",
+        "use crate::model::session::ManagementEntry",
+        "use crate::model::session::ManagementView"
+      ]
+    },
+    {
+      "from": "dim_cli::management::permissions",
+      "to": "dim_cli::permission",
+      "references": [
+        "path Added::Added",
+        "path Added::Present",
+        "path Removed::Conflict",
+        "path Removed::Removed",
+        "path Rules",
+        "path permission::add_rule",
+        "path permission::describe",
+        "path permission::parse_rule_words",
+        "path permission::remove_rule",
+        "path permission::rule",
+        "path permission::rules",
+        "path permission::same_rule",
+        "use crate::permission",
+        "use crate::permission::Added",
+        "use crate::permission::Removed",
+        "use crate::permission::Rules"
+      ]
+    },
+    {
+      "from": "dim_cli::management::permissions",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path t",
+        "path tf",
+        "use crate::ui::i18n::t",
+        "use crate::ui::i18n::tf"
+      ]
+    },
+    {
+      "from": "dim_cli::management::permissions",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "use crate::client::Client"
+      ]
+    },
+    {
       "from": "dim_cli::management::scheduler",
       "to": "dim_cli",
       "references": [
@@ -26207,6 +26324,17 @@
     },
     {
       "from": "dim_cli::management_command",
+      "to": "dim_cli::management::permissions",
+      "references": [
+        "path permissions::Answer::Rules",
+        "path permissions::Failure::Conflict",
+        "path permissions::Failure::Refused",
+        "path permissions::apply",
+        "use crate::management::permissions"
+      ]
+    },
+    {
+      "from": "dim_cli::management_command",
       "to": "dim_cli::management::scheduler",
       "references": [
         "path scheduler::Answer::Detail",
@@ -26254,6 +26382,7 @@
         "path Area",
         "path Area::Hooks",
         "path Area::Mcp",
+        "path Area::Permissions",
         "path Area::Scheduled",
         "path Area::Skills",
         "path ManagementAction::Add",
@@ -26271,6 +26400,14 @@
         "use crate::model::session::ManagementAction",
         "use crate::model::session::ManagementRequest",
         "use crate::model::session::ManagementResult"
+      ]
+    },
+    {
+      "from": "dim_cli::management_command",
+      "to": "dim_cli::permission",
+      "references": [
+        "path permission::Rules",
+        "use crate::permission"
       ]
     },
     {
@@ -26741,14 +26878,8 @@
       "from": "dim_cli::permission_command",
       "to": "dim_agent_types::permission",
       "references": [
-        "path CommandMatch::Exact",
-        "path CommandMatch::Prefix",
-        "path CommandRuleDecision::Allow",
-        "path CommandRuleDecision::Deny",
         "path PermissionPreset",
         "path PermissionPreset::FullAccess",
-        "use dim_agent_types::CommandMatch",
-        "use dim_agent_types::CommandRuleDecision",
         "use dim_agent_types::PermissionPreset"
       ]
     },
@@ -26797,6 +26928,7 @@
         "path permission::describe",
         "path permission::name",
         "path permission::parse_preset",
+        "path permission::parse_rule_words",
         "path permission::read",
         "path permission::remove_rule",
         "path permission::rule",
@@ -27908,10 +28040,7 @@
         "path Command::WatchMember",
         "path Command::WatchTaskOutput",
         "path CompactReply",
-        "path CompactReply::Cancelled",
-        "path CompactReply::Completed",
         "path CompactReply::Failed",
-        "path CompactReply::Skipped",
         "path CompactReply::Unsupported",
         "path ContextReading",
         "path DIM_OAUTH_ID",
@@ -28713,6 +28842,14 @@
     },
     {
       "from": "dim_cli::ui::approvals_panel",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path Area::Permissions",
+        "use crate::model::session::Area"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::approvals_panel",
       "to": "dim_cli::permission",
       "references": [
         "path Change::FileAccess",
@@ -28746,6 +28883,7 @@
         "path Effect",
         "path Effect::Close",
         "path Effect::None",
+        "path Effect::OpenArea",
         "path Effect::SetPermission",
         "path Effect::Setting",
         "use crate::ui::prompts::Effect"
@@ -30511,6 +30649,7 @@
         "path Area",
         "path Area::Hooks",
         "path Area::Mcp",
+        "path Area::Permissions",
         "path Area::Scheduled",
         "path Area::Skills",
         "path EntryState::Invalid",
@@ -30671,6 +30810,7 @@
         "path Area",
         "path Area::Hooks",
         "path Area::Mcp",
+        "path Area::Permissions",
         "path Area::Skills",
         "path EntryState",
         "path ManagementAction",
@@ -34117,6 +34257,7 @@
         "path Area",
         "path Area::Hooks",
         "path Area::Mcp",
+        "path Area::Permissions",
         "path Area::Scheduled",
         "path Area::Skills",
         "path Command::Approval",
@@ -34173,10 +34314,7 @@
         "path Command::Usage",
         "path Command::WatchMember",
         "path Command::WatchTaskOutput",
-        "path CompactReply::Cancelled",
-        "path CompactReply::Completed",
         "path CompactReply::Failed",
-        "path CompactReply::Skipped",
         "path CompactReply::Unsupported",
         "path ContextReading",
         "path DIM_OAUTH_ID",
@@ -34539,6 +34677,7 @@
         "path Effect::OauthCancel",
         "path Effect::OauthPaste",
         "path Effect::OauthStart",
+        "path Effect::OpenArea",
         "path Effect::OpenModels",
         "path Effect::OpenPermissions",
         "path Effect::OpenUrl",
@@ -37286,6 +37425,10 @@
     {
       "module": "dim_cli::args",
       "path": "Area::Mcp"
+    },
+    {
+      "module": "dim_cli::args",
+      "path": "Area::Permissions"
     },
     {
       "module": "dim_cli::args",

@@ -15,11 +15,12 @@ use serde_json::Value;
 use crate::Result;
 use crate::args::Options;
 use crate::client::Client;
-use crate::management::{self, editor, hooks, mcp, scheduler, skills};
+use crate::management::{self, editor, hooks, mcp, permissions, scheduler, skills};
 use crate::mcp_command::print_report;
 use crate::model::session::{
     ActionKind, Area, ManagementAction, ManagementRequest, ManagementResult,
 };
+use crate::permission;
 use crate::sanitize::{safe, safe_line};
 
 /// Runs `request` and prints its area's report.
@@ -33,6 +34,7 @@ pub async fn run(
         Area::Hooks => run_hooks(client, options, request).await,
         Area::Mcp => run_mcp(client, options, request).await,
         Area::Scheduled => run_scheduled(client, request).await,
+        Area::Permissions => run_permissions(client, request).await,
     }
 }
 
@@ -240,6 +242,7 @@ async fn read(
                 .ok_or_else(|| format!("No scheduled job has that id: {id}"))?;
             Ok((job.revision.to_string(), job.document()))
         }
+        Area::Permissions => Err("A command rule has no document to edit.".to_owned().into()),
     }
 }
 
@@ -541,6 +544,53 @@ async fn run_mcp(
         Err(error) => return Err(error.to_string().into()),
     }
     Ok(0)
+}
+
+/// `permissions ...`: the user's command rules, printed as its owner reports
+/// them.
+async fn run_permissions(client: &mut Client, request: &ManagementRequest) -> Result<i32> {
+    management::supported(client, request)?;
+    match permissions::apply(client, &request.action).await {
+        Ok(permissions::Answer::Rules { rules, note }) => {
+            match note {
+                Some(note) => print_report(vec![safe_line(&note)], Vec::new()),
+                None => print_report(rule_rows(&rules), rule_notes(&rules)),
+            }
+            Ok(0)
+        }
+        // A refused write and a conflict both wrote nothing; the sentence the
+        // adapter reported is the whole answer.
+        Err(permissions::Failure::Refused(message)) => Err(message.into()),
+        Err(permissions::Failure::Conflict { message, .. }) => Err(message.into()),
+    }
+}
+
+/// One rule: its decision, match and command. The command is one column, so
+/// the owner's text is kept on one line before it joins the row.
+fn rule_rows(rules: &permission::Rules) -> Vec<String> {
+    rules
+        .command_rules
+        .iter()
+        .map(|rule| {
+            format!(
+                "{}\t{}\t{}",
+                permission::decision_name(rule.decision),
+                permission::match_name(rule.matching),
+                safe_line(&rule.command),
+            )
+        })
+        .collect()
+}
+
+fn rule_notes(rules: &permission::Rules) -> Vec<String> {
+    if rules.command_rules.is_empty() {
+        vec!["No command rule is configured.".to_owned()]
+    } else {
+        vec![
+            "Columns: decision, match, command. `permissions remove` takes a whole rule as one quoted argument.".to_owned(),
+            "Rules apply in every Session; deny wins over allow.".to_owned(),
+        ]
+    }
 }
 
 /// One job: its id, name, schedule, state, next window and last outcome.

@@ -8,6 +8,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "skills" => "Skills",
         "hooks" => "hooks",
         "scheduled jobs" => "tareas programadas",
+        "command rules" => "Reglas de comandos",
         "enabled" => "activado",
         "shadowed by {name}" => "ocultado por {name}",
         "Reloaded." => "Recargado.",
@@ -16,6 +17,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Reloaded {area}: {entries} entries, {disabled} disabled." => {
             "{area} recargado: {entries} entradas, {disabled} desactivadas."
         }
+        "Reloaded {area}: {entries} entries." => "{area} recargado: {entries} entradas.",
         "Hooks" => "Hooks",
         "invalid" => "no válido",
         "Saved." => "Guardado.",
@@ -189,6 +191,36 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "El servidor requiere autorización; ejecuta mcp login ID."
         }
         "The probe ended: {status}." => "La sonda terminó: {status}.",
+
+        "Command rules" => "Reglas de comandos",
+        "user" => "usuario",
+        "Matches only this command." => "Solo coincide con este comando.",
+        "Matches commands whose first words are these." => {
+            "Coincide con los comandos cuyas primeras palabras son estas."
+        }
+        "Allows a simple command that would otherwise ask." => {
+            "Permite un comando simple que de otro modo preguntaría."
+        }
+        "Denies the command under every preset." => "Deniega el comando con cualquier preajuste.",
+        "Applies in every Session, in every workspace." => {
+            "Se aplica en cada sesión y en cada espacio de trabajo."
+        }
+        "Rule added: {rule}." => "Regla añadida: {rule}.",
+        "Rule already present: {rule}." => "La regla ya existe: {rule}.",
+        "Rule removed: {rule}." => "Regla eliminada: {rule}.",
+        "That command rule is no longer listed; nothing was removed." => {
+            "Esa regla de comando ya no aparece en la lista; no se eliminó nada."
+        }
+        "Command rules changed since they were read; nothing was removed." => {
+            "Las reglas de comandos cambiaron desde que se leyeron; no se eliminó nada."
+        }
+        "A command rule is DECISION MATCH COMMAND, such as deny prefix git push." => {
+            "Una regla de comando se escribe DECISION MATCH COMMAND, por ejemplo deny prefix git push."
+        }
+        "Command: {command}" => "Comando: {command}",
+        "Use the line prompt or dimcode permissions." => {
+            "Usa el indicador de línea o dimcode permissions."
+        }
         _ => return None,
     })
 }
