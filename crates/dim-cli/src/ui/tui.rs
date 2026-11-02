@@ -41,6 +41,7 @@ use crate::ui::render::fullscreen::MouseOutcome;
 use crate::ui::render::markdown::MarkdownRenderer;
 use crate::ui::render::panel::{clip, wrap, wrap_words};
 use crate::ui::render::{Frame, FullScreen, Overlay, Screen};
+use crate::ui::runtime_panel::RuntimePanel;
 use crate::ui::sessions_panel::SessionsPanel;
 use crate::ui::settings_panel::{Setting, SettingsPanel, Values as SettingValues};
 use crate::ui::status::{Reporter, Runs, Status};
@@ -1036,6 +1037,7 @@ enum Prompt {
     Models(ModelsPanel),
     Providers(Box<ProvidersPanel>),
     Plugins(PluginsPanel),
+    Runtime(RuntimePanel),
     Management(Box<ManagementPanel>),
     Login(Box<OauthView>),
     Approvals(ApprovalsPanel),
@@ -1397,6 +1399,7 @@ impl App {
             | Some(Prompt::Models(_))
             | Some(Prompt::Providers(_))
             | Some(Prompt::Plugins(_))
+            | Some(Prompt::Runtime(_))
             | Some(Prompt::Management(_))
             | Some(Prompt::Login(_))
             | Some(Prompt::Approvals(_))
@@ -1474,6 +1477,12 @@ impl App {
             && let Some(snapshot) = &self.snapshot
             && panel.tick(snapshot)
         {
+            changed = true;
+        }
+        if let Some(Prompt::Runtime(panel)) = &mut self.prompt
+            && panel.tick(now)
+        {
+            self.host.send(Command::ListRuntimes);
             changed = true;
         }
         if let Some((_, until)) = &self.notice
@@ -1748,6 +1757,15 @@ impl App {
             } => {
                 if let Some(Prompt::Plugins(panel)) = &mut self.prompt {
                     panel.set_result(&action, result, plugins);
+                }
+            }
+            Update::Runtimes {
+                result,
+                runtimes,
+                plugins,
+            } => {
+                if let Some(Prompt::Runtime(panel)) = &mut self.prompt {
+                    panel.set(result, runtimes, plugins);
                 }
             }
             Update::Management(reply) => {
@@ -2190,6 +2208,7 @@ impl App {
                 Prompt::Models(p) => p.handle_key(key),
                 Prompt::Providers(p) => p.handle_key(key),
                 Prompt::Plugins(p) => p.handle_key(key),
+                Prompt::Runtime(p) => p.handle_key(key),
                 Prompt::Management(p) => p.handle_key(key),
                 Prompt::Login(p) => match p.handle_key(key) {
                     Effect::OauthBack => Effect::Close,
@@ -2906,6 +2925,11 @@ impl App {
             }
             Effect::Provider(action) => self.host.send(Command::Provider(action)),
             Effect::Plugin(action) => self.host.send(Command::Plugin(action)),
+            Effect::Runtime(action) => self.host.send(Command::Runtime(action)),
+            Effect::OpenRuntime(name) => {
+                self.open_prompt(Prompt::Runtime(RuntimePanel::on(&name)));
+                self.host.send(Command::ListRuntimes);
+            }
             Effect::Management(request) => {
                 self.remember_named(&request);
                 self.host.send(Command::Management(request));
@@ -3476,6 +3500,47 @@ impl App {
         ));
     }
 
+    /// `/runtime` opens the panel; `/runtime install NAME`,
+    /// `/runtime source NAME download|system` and `/runtime auto NAME on|off`
+    /// are the same calls the panel makes.
+    fn runtime(&mut self, args: &str) {
+        use crate::model::session::{RuntimeAction, RuntimeSource};
+        let usage =
+            "Usage: /runtime [install NAME | source NAME download|system | auto NAME on|off]";
+        let words: Vec<&str> = args.split_whitespace().collect();
+        let action = match words.as_slice() {
+            [] => None,
+            ["install", name] => Some(RuntimeAction::Install((*name).to_owned())),
+            ["source", name, source] => {
+                RuntimeSource::parse(source).map(|source| RuntimeAction::Configure {
+                    name: (*name).to_owned(),
+                    source: Some(source),
+                    auto: None,
+                })
+            }
+            ["auto", name, state] => match *state {
+                "on" => Some(true),
+                "off" => Some(false),
+                _ => None,
+            }
+            .map(|auto| RuntimeAction::Configure {
+                name: (*name).to_owned(),
+                source: None,
+                auto: Some(auto),
+            }),
+            _ => None,
+        };
+        if action.is_none() && !words.is_empty() {
+            self.set_notice(t(usage));
+            return;
+        }
+        self.open_prompt(Prompt::Runtime(RuntimePanel::new()));
+        match action {
+            Some(action) => self.host.send(Command::Runtime(action)),
+            None => self.host.send(Command::ListRuntimes),
+        }
+    }
+
     fn run_command(&mut self, name: &str, args: &str) -> Outcome {
         if let Some(command) = COMMANDS.iter().find(|c| c.name == name)
             && !command.available(self.context())
@@ -3542,7 +3607,13 @@ impl App {
                 Outcome::Continue
             }
             "mcp" => {
-                self.host.send(Command::Mcp(args.to_owned()));
+                // Bare `/mcp` opens the panel; every argument form stays the
+                // line command it was.
+                if args.trim().is_empty() {
+                    self.open_management(Area::Mcp, None);
+                } else {
+                    self.host.send(Command::Mcp(args.to_owned()));
+                }
                 Outcome::Continue
             }
             "effort" | "fast" | "agent" => {
@@ -3634,6 +3705,10 @@ impl App {
             }
             "plugins" => {
                 self.plugins(args);
+                Outcome::Continue
+            }
+            "runtime" => {
+                self.runtime(args);
                 Outcome::Continue
             }
             "skills" => {
@@ -4191,6 +4266,7 @@ impl App {
                 Some(Prompt::Models(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Providers(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Plugins(prompt)) => list(prompt.render(list_width, budget, p)),
+                Some(Prompt::Runtime(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Management(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Login(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Approvals(prompt)) => list(prompt.render(list_width, budget, p)),
@@ -4215,6 +4291,7 @@ impl App {
             Some(Prompt::Models(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Providers(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Plugins(prompt)) => Some(prompt.render(outer, panel_rows, p)),
+            Some(Prompt::Runtime(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Management(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Login(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Approvals(prompt)) => Some(prompt.render(outer, panel_rows, p)),
@@ -6863,6 +6940,144 @@ mod tests {
         assert!(app.prompt.is_none());
     }
 
+    /// `/runtime` lists through the worker, the panel's keys reach it as
+    /// runtime commands, the typed forms make the same calls, and a Pending
+    /// plugin row's Enter opens it on the runtime the row waits for.
+    #[test]
+    fn runtime_commands_reach_the_worker() {
+        use crate::model::session::{PluginItem, RuntimeAction, RuntimeItem, RuntimeSource};
+        let home = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent.clone())),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        let last = |sent: &std::cell::RefCell<Vec<Command>>| match sent.borrow().last() {
+            Some(Command::ListRuntimes) => "list".to_owned(),
+            Some(Command::Runtime(action)) => format!("{action:?}"),
+            Some(_) => "other".to_owned(),
+            None => "none".to_owned(),
+        };
+        let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
+        let node = |status: &str| RuntimeItem {
+            name: "node".into(),
+            source: RuntimeSource::Download,
+            auto: Some(true),
+            version: Some("24.21.0".into()),
+            status: status.into(),
+            reason: None,
+        };
+        let python = RuntimeItem {
+            name: "python".into(),
+            source: RuntimeSource::System,
+            auto: Some(true),
+            version: Some("3.12.15".into()),
+            status: "off".into(),
+            reason: None,
+        };
+        let waiting = PluginItem {
+            name: "goal".into(),
+            in_use: None,
+            off: false,
+            locked: false,
+            candidates: Vec::new(),
+            status: Some("pending".into()),
+            error: None,
+            waiting_for: vec!["session-node".into()],
+            refused: Vec::new(),
+        };
+        app.run_command("runtime", "");
+        assert!(matches!(app.prompt, Some(Prompt::Runtime(_))));
+        assert_eq!(last(&sent), "list");
+        app.apply(Update::Runtimes {
+            result: None,
+            runtimes: Ok(vec![node("off"), python.clone()]),
+            plugins: Ok(vec![waiting.clone()]),
+        });
+        app.handle_input(key(KeyCode::Enter));
+        assert_eq!(
+            last(&sent),
+            format!("{:?}", RuntimeAction::Install("node".into()))
+        );
+        app.apply(Update::Runtimes {
+            result: Some(Ok(())),
+            runtimes: Ok(vec![node("acquiring"), python.clone()]),
+            plugins: Ok(vec![]),
+        });
+        app.handle_input(key(KeyCode::Char('s')));
+        assert_eq!(
+            last(&sent),
+            format!(
+                "{:?}",
+                RuntimeAction::Configure {
+                    name: "node".into(),
+                    source: Some(RuntimeSource::System),
+                    auto: None,
+                }
+            )
+        );
+        let count = sent.borrow().len();
+        std::thread::sleep(std::time::Duration::from_millis(1050));
+        assert!(app.tick(), "an acquiring row is read again");
+        assert_eq!(last(&sent), "list", "the rows are read once a second");
+        assert_eq!(sent.borrow().len(), count + 1);
+        app.apply(Update::Runtimes {
+            result: None,
+            runtimes: Ok(vec![node("ready")]),
+            plugins: Ok(vec![]),
+        });
+        app.handle_input(key(KeyCode::Esc));
+        assert!(app.prompt.is_none());
+
+        app.run_command("runtime", "install node");
+        assert_eq!(
+            last(&sent),
+            format!("{:?}", RuntimeAction::Install("node".into()))
+        );
+        app.run_command("runtime", "source node system");
+        assert_eq!(
+            last(&sent),
+            format!(
+                "{:?}",
+                RuntimeAction::Configure {
+                    name: "node".into(),
+                    source: Some(RuntimeSource::System),
+                    auto: None,
+                }
+            )
+        );
+        app.run_command("runtime", "auto python off");
+        assert_eq!(
+            last(&sent),
+            format!(
+                "{:?}",
+                RuntimeAction::Configure {
+                    name: "python".into(),
+                    source: None,
+                    auto: Some(false),
+                }
+            )
+        );
+        let count = sent.borrow().len();
+        app.prompt = None;
+        app.run_command("runtime", "source node floppy");
+        assert_eq!(sent.borrow().len(), count, "an unknown source is refused");
+        assert!(app.notice.is_some());
+
+        app.run_command("plugins", "");
+        app.apply(Update::Plugins(Ok(vec![waiting])));
+        app.handle_input(key(KeyCode::Enter));
+        match &app.prompt {
+            Some(Prompt::Runtime(_)) => {}
+            _ => panic!("a waiting plugin row opens /runtime"),
+        }
+        assert_eq!(last(&sent), "list");
+    }
+
     /// The interface drawn into an emulated terminal, frame by frame.
     struct Drawn {
         app: App,
@@ -8425,7 +8640,7 @@ mod tests {
 
         press(&mut app, KeyCode::Char('/'));
         assert!(app.composer.palette_open(), "the palette opened over it");
-        typed(&mut app, "mcp");
+        typed(&mut app, "usage");
         assert!(
             app.frame((80, 40))
                 .live
@@ -8435,8 +8650,8 @@ mod tests {
         );
         press(&mut app, KeyCode::Enter);
         assert!(
-            matches!(sent.borrow().last(), Some(Command::Mcp(args)) if args.is_empty()),
-            "the palette ran /mcp"
+            matches!(sent.borrow().last(), Some(Command::Usage)),
+            "the palette ran /usage"
         );
         assert_eq!(
             selection(&app).as_deref(),
@@ -8717,8 +8932,14 @@ mod tests {
         assert_eq!(app.composer.text(), "/mc", "the query stays");
         press(&mut app, KeyCode::Enter);
         assert!(
-            matches!(sent.borrow().last(), Some(Command::Mcp(args)) if args.is_empty()),
-            "the palette ran /mcp"
+            matches!(
+                sent.borrow().last(),
+                Some(Command::Management(ManagementRequest {
+                    area: Area::Mcp,
+                    action: ManagementAction::List,
+                }))
+            ),
+            "the palette opened the MCP panel"
         );
     }
 

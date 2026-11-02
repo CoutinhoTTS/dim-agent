@@ -291,7 +291,7 @@ pub const COMMANDS: &[Command] = &[
     slash(
         "mcp",
         "model",
-        "list MCP servers, sign in or out (login|logout ID)",
+        "manage MCP servers, sign in or out (/mcp login ID)",
         &[],
         Needs::Nothing,
     ),
@@ -335,6 +335,13 @@ pub const COMMANDS: &[Command] = &[
         "model",
         "configure file access, tool approval and process isolation, and manage command rules",
         &["approvals", "approval"],
+        Needs::Nothing,
+    ),
+    slash(
+        "runtime",
+        "app",
+        "show, install or configure the plugin runtimes",
+        &[],
         Needs::Nothing,
     ),
     slash("settings", "app", "open settings", &[], Needs::Nothing),

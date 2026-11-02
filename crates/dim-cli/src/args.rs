@@ -48,6 +48,14 @@ Commands:\n\
   mcp enable ID                    Enable an MCP server shown by mcp list\n\
   mcp disable ID                   Disable it; an unlisted ID withdraws only\n\
                                    this workspace's stored enablement\n\
+  mcp add PATH                     Create an entry from PATH, or from stdin for -\n\
+  mcp edit ID                      Edit an entry's patch in the editor\n\
+  mcp set ID PATH                  Write an entry's patch from PATH,\n\
+                                   or from stdin for -\n\
+  mcp remove ID                    Delete an entry\n\
+  mcp test ID                      Probe a stored entry and list its tools\n\
+  mcp inspect ID                   Show an entry's effective configuration\n\
+  mcp disconnect ID                Close an entry's live connections\n\
   skills list                      List Skills, their sources and states\n\
   skills enable|disable ID         Turn one Skill on or off\n\
   skills reload                    Rescan this workspace's Skills\n\
@@ -84,6 +92,7 @@ Commands:\n\
   plugin remove ID\n\
   runtime list                     List the plugin runtimes and their state\n\
   runtime install node|python      Turn a plugin runtime on and acquire it\n\
+  runtime config NAME              Set a runtime's --source or --auto and apply it\n\
   daemon stop                      Gracefully stop an existing daemon\n\
   daemon vacuum [--database PATH]  Rewrite an offline database to reclaim\n\
                                    space; --database defaults to the home's\n\
@@ -204,6 +213,7 @@ pub enum Action {
         id: String,
         enabled: bool,
     },
+    McpDisconnect(String),
     /// `<area> ...`: one request to a management area's owner.
     Management(crate::model::session::ManagementRequest),
     /// `<area> edit [ID]`: the area's document in the external editor, or one
@@ -237,6 +247,13 @@ pub enum Action {
     RuntimeList,
     /// `runtime install NAME`: turn a plugin runtime on and acquire it.
     RuntimeInstall(String),
+    /// `runtime config NAME [--source download|system] [--auto on|off]`:
+    /// write the runtime's configuration and apply it.
+    RuntimeConfig {
+        name: String,
+        source: Option<String>,
+        auto: Option<bool>,
+    },
     DaemonStop,
     /// `web`: hold the daemon's local web entry open in the foreground.
     Web {
@@ -598,10 +615,53 @@ impl Options {
                     options.action = match value(&mut args)?.as_str() {
                         "list" => Action::RuntimeList,
                         "install" => Action::RuntimeInstall(value(&mut args)?),
-                        _ => return Err("Use runtime list or runtime install node|python".into()),
+                        "config" => {
+                            let name = value(&mut args)?;
+                            let (mut source, mut auto) = (None, None);
+                            while let Some(flag) = args.next() {
+                                let given = args
+                                    .next()
+                                    .ok_or_else(|| format!("{flag} requires a value"))?;
+                                match flag.as_str() {
+                                    "--source" => match given.as_str() {
+                                        "download" | "system" => source = Some(given),
+                                        other => {
+                                            return Err(format!(
+                                                "--source is download or system, not {other}"
+                                            )
+                                            .into());
+                                        }
+                                    },
+                                    "--auto" => match given.as_str() {
+                                        "on" => auto = Some(true),
+                                        "off" => auto = Some(false),
+                                        other => {
+                                            return Err(format!(
+                                                "--auto is on or off, not {other}"
+                                            )
+                                            .into());
+                                        }
+                                    },
+                                    other => {
+                                        return Err(format!(
+                                            "Use runtime config NAME [--source download|system] \
+                                             [--auto on|off], not {other}"
+                                        )
+                                        .into());
+                                    }
+                                }
+                            }
+                            Action::RuntimeConfig { name, source, auto }
+                        }
+                        _ => {
+                            return Err(
+                                "Use runtime list, runtime install or runtime config".into()
+                            );
+                        }
                     };
                 }
                 "mcp" if matches!(options.action, Action::Chat) => {
+                    use crate::model::session::{Area, ManagementAction, ManagementRequest};
                     options.action = match value(&mut args)?.as_str() {
                         "list" => Action::McpList,
                         "login" => {
@@ -621,12 +681,44 @@ impl Options {
                             Action::McpLogin(id)
                         }
                         "logout" => Action::McpLogout(value(&mut args)?),
+                        "disconnect" => Action::McpDisconnect(value(&mut args)?),
                         command @ ("enable" | "disable") => Action::McpEnable {
                             id: value(&mut args)?,
                             enabled: command == "enable",
                         },
+                        "add" => Action::ManagementAdd {
+                            area: Area::Mcp,
+                            path: value(&mut args)?.into(),
+                        },
+                        "edit" => Action::ManagementEdit {
+                            area: Area::Mcp,
+                            id: Some(value(&mut args)?),
+                        },
+                        "set" => Action::ManagementSet {
+                            area: Area::Mcp,
+                            id: Some(value(&mut args)?),
+                            path: value(&mut args)?.into(),
+                        },
+                        "remove" => Action::Management(ManagementRequest {
+                            area: Area::Mcp,
+                            action: ManagementAction::Remove {
+                                id: value(&mut args)?,
+                            },
+                        }),
+                        "test" => Action::Management(ManagementRequest {
+                            area: Area::Mcp,
+                            action: ManagementAction::Run {
+                                id: value(&mut args)?,
+                            },
+                        }),
+                        "inspect" => Action::Management(ManagementRequest {
+                            area: Area::Mcp,
+                            action: ManagementAction::Inspect {
+                                id: value(&mut args)?,
+                            },
+                        }),
                         _ => {
-                            return Err("Use mcp list, mcp login ID, mcp logout ID, mcp enable ID or mcp disable ID".into());
+                            return Err("Use mcp list, mcp add PATH, mcp edit ID, mcp set ID PATH, mcp remove ID, mcp test ID, mcp inspect ID, mcp disconnect ID, mcp login ID, mcp logout ID, mcp enable ID or mcp disable ID".into());
                         }
                     };
                 }

@@ -812,6 +812,18 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             println!("{}", runtime_line(&status));
             Ok(0)
         }
+        Action::RuntimeConfig { name, source, auto } => {
+            let mut params = serde_json::json!({ "name": name });
+            if let Some(source) = source {
+                params["source"] = serde_json::json!(source);
+            }
+            if let Some(auto) = auto {
+                params["auto"] = serde_json::json!(auto);
+            }
+            let status: serde_json::Value = client.typed("runtime.configure", params).await?;
+            println!("{}", runtime_line(&status));
+            Ok(0)
+        }
         Action::McpList => {
             mcp_command::list(&mut client, &options).await?;
             Ok(0)
@@ -829,10 +841,11 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             .await
         }
         Action::McpLogout(id) => mcp_command::sign_out(&mut client, &options, id).await,
+        Action::McpDisconnect(id) => mcp_command::disconnect(&mut client, &options, id).await,
         Action::McpEnable { id, enabled } => {
-            let (rows, notes) =
-                mcp_command::set_enabled(&mut client, &options, id, *enabled).await?;
-            mcp_command::print_report(rows, notes);
+            let state =
+                management::mcp::set_enabled(&mut client, &options.cwd, id, *enabled).await?;
+            mcp_command::print_report(vec![state.sentence()], state.notes);
             Ok(0)
         }
         Action::Management(request) => {
@@ -866,9 +879,18 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
 
 /// One `runtime.list` entry as a tab-separated line.
 fn runtime_line(status: &serde_json::Value) -> String {
-    ["name", "source", "version", "status", "reason"]
+    let auto = status["auto"]
+        .as_bool()
+        .map(|on| if on { "on" } else { "off" });
+    ["name", "source"]
         .iter()
         .filter_map(|field| status[field].as_str())
+        .chain(auto)
+        .chain(
+            ["version", "status", "reason"]
+                .iter()
+                .filter_map(|field| status[field].as_str()),
+        )
         .map(|value| crate::sanitize::safe(value).replace(['\n', '\t'], " "))
         .collect::<Vec<_>>()
         .join("\t")

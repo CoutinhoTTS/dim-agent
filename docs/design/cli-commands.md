@@ -283,6 +283,145 @@ forms and never contacts a daemon. A build without the Dim account provider
 says so, and names the API-key Provider alternative, from each of these
 commands.
 
+## Plugin runtimes
+
+RuntimeManager supplies the Node and Python runtimes that plugin code runs in
+([RuntimeManager](plugins/RuntimeManager.md)). The daemon reads its configuration when an
+action applies it (RuntimeManager §3.3), so a client can turn a runtime on, say where it comes
+from and show what it is doing, without editing `<home>/runtimes/config.json` by hand and without
+restarting anything. `/runtime` opens one panel in both terminal modes and the same area is
+`dimcode runtime` in the line client and in the CLI.
+
+### The panel
+
+Rows are the two runtimes, always node then python. A row shows its name, the configured source
+(`download` or `system`), the version in effect (the fixed version for `download`, the checked
+interpreter's version for `system`, empty while it is `off` and nothing has been checked), `auto`
+when it is on, and the status `runtime.list` gives: `off`, `acquiring`, `starting`, `ready`, `down` with its reason, or
+`failed` with the reason that lists every source and its error.
+
+Below the rows the panel names what waits on the runtime — the plugin rows that are Pending because
+one is `off` or `down` ([PluginManager §2.5](plugins/PluginManager.md#25-runtimes)) — so "why is
+goal not working" is answered in the same place as its fix. A failure prints one line per source,
+as `runtime.list` reports it.
+
+```text
+/runtime
+╭─ Plugin runtimes ─────────────────────────────────────────────────────────╮
+│ › node      download  24.21.0    ready                                    │
+│   python    system    3.12.15    off      not installed                   │
+│                                                                           │
+│   4 plugins wait for node: goal, session-title, scheduler, workflow       │
+╰─ Enter install or apply · s source · a auto · r retry · Esc close ────────╯
+```
+
+```text
+╭─ Plugin runtimes ─────────────────────────────────────────────────────────╮
+│ › node      download  24.21.0    acquiring  12s                           │
+│   python    system    3.12.15    off                                      │
+╰─ Esc close · the acquisition keeps running if you close this ─────────────╯
+```
+
+```text
+╭─ Plugin runtimes ─────────────────────────────────────────────────────────╮
+│ › node      download  24.21.0    failed                                   │
+│               https://nodejs.org/dist/v24.21.0/…: connection timed out    │
+│               https://npmmirror.com/mirrors/node/v24.21.0/…: 404         │
+│   python    system    3.12.15    off      not installed                   │
+│                                                                           │
+│   4 plugins wait for node: goal, session-title, scheduler, workflow       │
+╰─ Enter retry · s switch node to system · Esc close ───────────────────────╯
+```
+
+`acquiring` shows elapsed seconds, not a percentage: the daemon reports no byte count for an
+acquisition, and the panel does not invent one. A source list appears only on failure, where the
+daemon already reports it.
+
+### Menu entry
+
+`/runtime` is a slash command in category `app`, so the menu lists it between `/keys` and
+`/settings`; it needs no Session (`Needs::Nothing`) and takes no inline argument, because the panel
+carries the actions. The typed subforms below are accepted when typed, not offered as menu
+completions.
+
+### Keys
+
+The panel is keyboard-only and the same in scrollback and fullscreen, as the command menu contract
+requires.
+
+| key | meaning |
+| --- | --- |
+| `Up` / `Down` | move between the runtime rows |
+| `Enter` | `runtime.install NAME`: apply the configuration as it stands |
+| `s` | switch that runtime's source (`download` ↔ `system`) and apply |
+| `a` | toggle that runtime's `auto` and apply |
+| `r` | retry: the same call as `Enter`, kept because a failed row's footer says so |
+| `Esc` | close the panel; an acquisition already running keeps running |
+
+`Enter` on an `acquiring` row does nothing, which is what the daemon's `install` does while it is
+acquiring. `Enter` on a `ready` row with an unchanged source does nothing either; with a changed
+source it withdraws, disposes and re-acquires, as RuntimeManager §3.3 defines.
+
+### Writes
+
+`runtime.install {name}` is the apply the runtime already has: acquire if `off` or `failed`,
+provide the launch command again if `down`, and, when the configuration's `source` changed since
+the last apply, withdraw, dispose and acquire under the new source. It replies at once with the
+entry, so the panel follows `runtime.list` rather than waiting for an acquisition.
+
+`s` and `a` are `runtime.configure {name, source?, auto?}` followed by that same apply. The method
+writes `<home>/runtimes/config.json` — RuntimeManager's own document — atomically, merging per
+runtime and per field over the preset, and a configuration that does not write or read is the
+call's `runtime_configuration` error. The panel then shows the error and keeps the row's previous
+state on screen, because nothing changed.
+
+### Plugins that wait
+
+`/plugins` names the runtime a Pending row waits for, and `Enter` on such a row opens `/runtime`
+with that runtime selected. Today the row says only `pending`.
+
+```text
+/plugins
+╭─ Plugins ─────────────────────────────────────────────────────────────────╮
+│ › goal           on     pending · waits for the node runtime              │
+│   session-title  on     pending · waits for the node runtime              │
+│   scheduler      on     pending · waits for the node runtime              │
+│   workflow       on     pending · waits for the node runtime              │
+╰─ Enter open /runtime · o on/off · r reload · Esc close ───────────────────╯
+```
+
+### Line client and CLI
+
+The typed forms are the whole area, so a caller needs no panel:
+
+```text
+/runtime                              the same rows, in the scrollback client
+/runtime install node                 apply the configuration for node
+/runtime source node system           switch node to the system interpreter and apply
+/runtime auto python on               turn python on by configuration and apply
+```
+
+```text
+$ dimcode runtime list
+node    download  24.21.0   ready
+python  system    3.12.15   off       not installed
+4 plugins wait for node: goal, session-title, scheduler, workflow
+$ dimcode runtime install node
+node    download  24.21.0   acquiring
+$ dimcode runtime config python --source system --auto on
+python  system    3.12.15   off
+```
+
+`dimcode runtime list` prints one tab-separated row per runtime with the fields the panel shows.
+Which plugins wait for a runtime is `/plugins`' answer (`dimcode plugin list` in the line client), not
+this command's: one place names it per plugin, and the panel repeats it only for the runtime in view. `install` and `config` print the runtime's row after the
+call, which is `acquiring` or the state it returned to; a failed call prints the error and exits
+non-zero. `--help` lists these forms and never contacts a daemon.
+
+A daemon that does not serve `runtime.list` answers `unknown_method`; the panel then says the
+daemon does not serve runtimes and prints the version, rather than an empty list that reads as "no
+runtimes".
+
 ## Process isolation settings
 
 `/settings` and `/permissions` expose the same `Process isolation` control. It replaces the old
@@ -406,7 +545,8 @@ view rather than to one entry — reload, and add, which creates one — so it n
 the hint lists it whether or not an entry is selected, and Ctrl+R reads the area again after a
 failed read. The first two areas use toggle, reload and edit. The Scheduler area introduces
 add, remove, run and inspect, and the client's kinds are what it writes; a later area adds its
-adapter and the methods its kinds call, and names here the kinds it adds.
+adapter and the methods its kinds call, and names here the kinds it adds. The hint names the run
+kind's operation where an area names one: MCP's hint reads `Ctrl+T test`.
 
 A hint the bottom border cannot hold is drawn as rows above a plain bottom border, wrapped at
 the ` · ` separators; a part wider than a row wraps across rows by display width, so no key or
@@ -427,9 +567,14 @@ stays visible at any width, the remove confirmation included.
   Enter sends the area's remove method, reads the area again, and its message uses the same verb.
   `dimcode <area> remove ID` removes without a prompt, because the id typed on the command line
   is the intent, as `dimcode logout PROVIDER` signs out without one.
-- run sends the area's named operation for the selected entry, reads the area again, and its
-  message reports what the owner answered — a run the owner skipped says why. An operation that
-  takes parameters is the area's own step, not this kind's.
+- run sends the area's named operation for the selected entry. A run whose answer changes what the
+  area lists — the Scheduler's run now joins the job's history and its last outcome — reads the
+  area again and shows the answer as the message; a run the owner skipped says why. A run whose
+  answer changes nothing the area lists shows the answer as a detail, as inspect does, and does
+  not read the area again: MCP's test is the tools a temporary connection found. Whether the owner
+  declares the method mutating does not decide this, since `mcp.test` runs the entry and still
+  writes nothing the area lists. An operation that takes parameters is the area's own step, not
+  this kind's.
 - inspect asks the adapter for the entry's detail: a title and lines, not a view. The panel
   shows it in place of the list, the arrows and PageUp/PageDown scroll it, Esc returns to the
   list with the selection kept, and a second Esc closes the panel. `dimcode <area> inspect ID`
@@ -686,6 +831,92 @@ Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close
 `dimcode models PROVIDER remove MODEL` removes without the panel's confirmation, and `dimcode
 models PROVIDER inspect MODEL` prints the lines the detail shows.
 
+### The MCP area
+
+MCP adds no kind. Its entries are the effective catalog — the servers merged by id with project
+last — grouped `user`, `project` and `plugin` in that order, and by id within a group; an entry's
+label and id are its id. The panel and `dimcode mcp` use toggle, edit, reload, add, remove, run
+and inspect over `mcp.catalog`, `mcp.configuration`, `mcp.update`, `mcp.save`, `mcp.remove`,
+`mcp.set_enabled`, `mcp.test` and `mcp.inspect` ([MCP management](appserver/mcp-management.md)).
+
+A toggle writes the source's enablement at the revision `mcp.catalog` reported immediately before
+it, so the compare-and-swap covers that window; it acts on one id, so a change elsewhere in the
+source is not overwritten. A user entry's enablement is a local record, and a project entry starts
+disabled because only the toggle or `dimcode mcp enable|disable` turns it on. An edit reads
+`mcp.configuration` for the entry's revision and its document, then writes `mcp.update`, never
+`mcp.save`: a save takes a complete configuration, and the read withholds the secrets, so a save
+round trip would erase them.
+
+The edit document is the patch: an omitted field keeps its stored value, a present value replaces
+it, and `env` or `headers` changes only the keys it names. The seed names the command and working
+directory, empty `env` and `headers`, and a configured OAuth's reported fields; it never names a
+stored argument, environment value, header value, bearer token or URL, because those are withheld
+or wholesale-replaced. The document carries no transport, since the stored entry's transport is
+fixed. A stdio patch names the command, the working directory and the environment keys it
+changes:
+
+```json
+{"command": "npx", "cwd": "/work", "env": {"TOKEN": "value"}}
+```
+
+A remote patch does the same for the endpoint and the headers. Both are withheld from the seed,
+so a patch that changes them supplies them: an omitted `url` or `headers` key keeps what is
+stored.
+
+```json
+{"url": "https://mcp.example.com/mcp", "headers": {"X-Key": "value"}}
+```
+
+Add writes `mcp.save` with the catalog's source revision — `userRevision`, or `projectRevision`
+for a source of `project` — and refuses an id the catalog already lists, since a save would replace
+that entry. The create document is one entry with its source and the definition `mcp.save` takes:
+
+```json
+{
+  "id": "example",
+  "source": "user",
+  "configuration": {
+    "type": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-everything"],
+    "env": {},
+    "enabled": false
+  }
+}
+```
+
+The two remote forms replace `configuration` with
+`{"type": "http", "url": "https://mcp.example.com/mcp", "headers": {}, "enabled": false}` or the
+same with `"type": "sse"`, and add `"auth": {"type": "bearer", "token": "…"}` for a static
+credential or `"oauth": {"clientId": "…", "callbackPort": 1456, "scopes": "…",
+"authServerMetadataUrl": "…"}` for OAuth; the two exclude each other, and OAuth also excludes an
+`Authorization` header. The editor has no transport picker, so the document shows stdio and the
+document says how to switch.
+
+A run is `mcp.test`: it executes or contacts the stored entry once and writes nothing the area
+lists, so its answer is a detail — the tools a temporary connection found, titled `Tools of <id>` —
+and the area is not read again. An inspect is `mcp.inspect`: the effective entry and its Session
+connections, titled `MCP entry <id>`, and never written back. A plugin entry's configuration has no
+revision, so it offers no write, carries `read-only` and says its plugin owns it; test and inspect
+still serve it. Sign-in, sign-out, the callback and disconnect are a state machine or a
+connection-only action, not a kind, so they stay line commands and verbs.
+
+```text
+╭─ MCP ────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│   user                                                                                                               │
+│ › docs      enabled                                                                                                  │
+│     user · stdio · signed in                                                                                         │
+│     Executable: npx                                                                                                  │
+│     Stored arguments (hidden): 2                                                                                     │
+│     Working directory: —                                                                                             │
+│     Environment names: DOCS_TOKEN                                                                                    │
+│   project                                                                                                            │
+│   metrics   disabled                                                                                                 │
+│   plugin                                                                                                             │
+│   notes     enabled  read-only                                                                                       │
+╰───── Enter toggle · Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Ctrl+T test · Tab inspect · Esc close ─╯
+```
+
 ### The command rules area
 
 Command rules (#819): the Permissions panel's Command rules row and `dimcode permissions
@@ -806,6 +1037,18 @@ whole rule as one quoted argument, so global options stay unambiguous.
 | `dimcode scheduled run ID` | Run one job now over `schedule.run_now` and report what the owner returned, or why it skipped the run. |
 | `dimcode scheduled history ID` | Print one job's recent runs over `schedule.history`, newest first, with each run's state and time. |
 | `/scheduled`, `/schedule` | Open the Scheduler panel ([management surfaces](#management-surfaces)): a job per entry with its schedule, next window and last outcome, and the toggle, edit, add, remove, run and inspect kinds; the Scheduler's verb for inspect is history. Jobs are the host's, not the Session's or workspace's; only a new job's default `cwd` comes from the Session. |
+| `dimcode mcp list` | List the effective catalog over `mcp.catalog` ([The MCP area](#the-mcp-area)): each entry's id, source, transport, enablement and authorization, then each source application's errors. |
+| `dimcode mcp add PATH` | Create an entry from the panel's create document, `-` for stdin, over `mcp.save` with the source revision `mcp.catalog` reported; an id the catalog already lists is refused. |
+| `dimcode mcp edit ID` | Open the entry's `mcp.update` patch in `$VISUAL`, `$EDITOR` or the platform default, and write it at the revision `mcp.configuration` reported; unchanged text writes nothing. |
+| `dimcode mcp set ID PATH` | The same write from a file, or from stdin for `-`, with the revision read immediately before the write. |
+| `dimcode mcp remove ID` | Delete one entry over `mcp.remove` at its source revision, without a prompt: the id on the command line is the intent. |
+| `dimcode mcp test ID` | Run the stored entry once over `mcp.test` and print the tools the temporary connection found; nothing is saved. |
+| `dimcode mcp inspect ID` | Print the effective configuration and the Session's connections over `mcp.inspect`, without contacting the server. |
+| `dimcode mcp disconnect ID` | Close the entry's live connections over `mcp.disconnect`; it writes no configuration, and the entry reconnects on next use. |
+| `dimcode mcp login\|logout\|enable\|disable ID` | Keep their behavior: browser or device sign-in, sign-out, and the enablement both `/mcp` clients share. |
+| `/mcp` | Open the MCP panel of the Session's workspace ([management surfaces](#management-surfaces)): an entry per server, grouped `user`, `project` and `plugin`, with the toggle, edit, add, remove, test and inspect kinds. |
+| `/mcp list\|login\|callback\|logout\|disconnect\|enable\|disable` | The line commands, unchanged: `list` prints the catalog and the Session's server states, `disconnect` closes one entry's live connections, and the rest sign in, complete a callback, sign out or toggle. |
+
 | `dimcode permissions list` | List the user's command rules over `permission.rules`: each rule's decision, match and command, then the columns and what deny means. |
 | `dimcode permissions add PATH` | Add one rule from `PATH`, or from stdin for `-`, over `permission.rules` and `permission.set_rules`: an equal rule writes nothing; a conflict re-reads and retries, at most three attempts. |
 | `dimcode permissions remove RULE` | Remove the rule named by `RULE`, which is the whole rule as one quoted `'DECISION MATCH COMMAND'` argument, over `permission.rules` and `permission.set_rules` at the revision just read; a rule that is gone, or a raced write, writes nothing and exits 1. |
