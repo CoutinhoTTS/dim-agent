@@ -13849,16 +13849,12 @@
       "references": [
         "path crate::Feature",
         "path crate::PartRegistry",
-        "path crate::PartScope",
         "path crate::PartScope::Branch",
         "path crate::PartScope::Session",
         "path crate::parts::Copies",
         "path crate::parts::MountSite",
         "path crate::parts::Opened",
-        "path crate::parts::PartMounter",
         "path crate::parts::PartMounter::is_module",
-        "path crate::parts::PartMounter::is_row",
-        "path crate::parts::PartMounter::module",
         "path crate::parts::PartRegistry",
         "path crate::parts::PartRegistryPlugin",
         "path parts"
@@ -14569,8 +14565,7 @@
       "from": "dim_agent_runtime::timeline_context",
       "to": "dim_agent_runtime::parts",
       "references": [
-        "path crate::parts::Copies",
-        "path parts"
+        "path crate::parts::Copies"
       ]
     },
     {
