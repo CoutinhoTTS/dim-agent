@@ -8,6 +8,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "skills" => "Skill",
         "hooks" => "hook",
         "scheduled jobs" => "tugas terjadwal",
+        "models" => "model",
+        "workflow definitions" => "definisi alur kerja",
         "command rules" => "Aturan perintah",
         "enabled" => "aktif",
         "shadowed by {name}" => "tertutup oleh {name}",
@@ -43,6 +45,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "↑↓ scroll · Esc back" => "↑↓ gulir · Esc kembali",
         "Added." => "Ditambahkan.",
         "Removed {name}." => "{name} dihapus.",
+        "unavailable" => "tidak tersedia",
+        "Reset {name}? Enter confirm · Esc cancel" => "Reset {name}? Enter konfirmasi · Esc batal",
+        "Reset {name} to its catalog entry." => "{name} direset ke entri katalog.",
         "Ran {name}." => "{name} dijalankan.",
         "The user document changed since it was read; nothing was written." => {
             "Dokumen pengguna berubah sejak dibaca; tidak ada yang ditulis."
@@ -73,6 +78,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The Scheduler has no area document." => "Penjadwal tidak memiliki dokumen area.",
         "No scheduled job has that id." => "Tidak ada tugas terjadwal dengan id itu.",
+        "A scheduled job's run takes no input document." => {
+            "Eksekusi job terjadwal tidak menerima dokumen masukan."
+        }
+        "An MCP server's test takes no input document." => {
+            "Uji server MCP tidak menerima dokumen masukan."
+        }
         "This daemon cannot manage {area}." => "Tidak dapat mengelola {area}.",
         "This daemon lists {area} but cannot toggle them." => {
             "Daemon ini menampilkan {area}, tetapi tidak dapat mengalihkannya."
@@ -104,6 +115,199 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "Pengaturan hook ruang kerja ini berubah sejak dibaca; tidak ada yang ditulis."
         }
+        "Models" => "Model",
+        "catalog" => "katalog",
+        "overrides" => "penimpaan",
+        "added" => "ditambahkan",
+        "Models · {name}" => "Model · {name}",
+        "undeclared" => "belum dideklarasikan",
+        "Context window {window} · max output {output}" => {
+            "Jendela konteks {window} · output maks {output}"
+        }
+        "Endpoint {endpoint}" => "Endpoint {endpoint}",
+        "Endpoint {endpoint} · override {value}" => "Endpoint {endpoint} · penimpaan {value}",
+        "The provider reports it unavailable." => "Penyedia melaporkannya tidak tersedia.",
+        "Limits undeclared; edit the model to declare them." => {
+            "Batas belum dideklarasikan; edit modelnya untuk mendeklarasikan."
+        }
+        "Sign in to the account to use its models." => "Masuk ke akun untuk memakai modelnya.",
+        "The signed-in account changed; reload to list its models." => {
+            "Akun yang masuk berubah; muat ulang untuk menampilkan modelnya."
+        }
+        "The provider has no catalog yet." => "Penyedia ini belum punya katalog.",
+        "The provider listed no models." => "Penyedia tidak menampilkan model apa pun.",
+        "Listed {count} models." => "Menampilkan {count} model.",
+        "Refreshed the models." => "Model diperbarui.",
+        "Could not list models: {error}. Showing the stored list." => {
+            "Tidak dapat menampilkan model: {error}. Menampilkan daftar tersimpan."
+        }
+        "The signed-in account changed; the refresh cleared preferences, overrides and disables." => {
+            "Akun yang masuk berubah; muat ulang menghapus preferensi, penimpaan, dan penonaktifan."
+        }
+        "The models changed since they were read; nothing was removed." => {
+            "Model berubah sejak dibaca; tidak ada yang dihapus."
+        }
+        "The models changed since they were read; nothing was written." => {
+            "Model berubah sejak dibaca; tidak ada yang ditulis."
+        }
+        "No provider has that id." => "Tidak ada penyedia dengan id itu.",
+        "{name} is unavailable ({reason}); its enablement is kept as it is." => {
+            "{name} tidak tersedia ({reason}); status aktifnya dipertahankan."
+        }
+        "No model has that id." => "Tidak ada model dengan id itu.",
+        "This model cannot be removed." => "Model ini tidak dapat dihapus.",
+        "A Provider's models have no area document." => "Model penyedia tidak punya dokumen area.",
+        "Models have no run operation." => "Model tidak punya operasi jalankan.",
+        "The document is not an object; nothing was written." => {
+            "Dokumen bukan objek; tidak ada yang ditulis."
+        }
+        "The document changes no editable field; nothing was written." => {
+            "Dokumen tidak mengubah bidang yang dapat diedit; tidak ada yang ditulis."
+        }
+        "The model document names no model." => "Dokumen model tidak menamai model.",
+        "The provider has no model catalog to write." => {
+            "Penyedia ini tidak punya katalog model untuk ditulis."
+        }
+        "ID {id}" => "ID {id}",
+        "Source {source}" => "Sumber {source}",
+        "Status {status}" => "Status {status}",
+        "Tools {value}" => "Alat {value}",
+        "Vision {value}" => "Visi {value}",
+        "Reasoning {value}" => "Penalaran {value}",
+        "Modalities {list}" => "Modalitas {list}",
+        "Description {text}" => "Deskripsi {text}",
+        "Release date {date}" => "Tanggal rilis {date}",
+        "Pricing {value}" => "Harga {value}",
+        "Rate limit {value}" => "Batas laju {value}",
+        "Matched provider {id}" => "Penyedia cocok {id}",
+        "Matched model {id}" => "Model cocok {id}",
+        "Match strategy {strategy}" => "Strategi cocok {strategy}",
+        "Capability overrides {fields}" => "Penimpaan kemampuan {fields}",
+        "yes" => "ya",
+        "no" => "tidak",
+        "not supported" => "tidak didukung",
+        "supported" => "didukung",
+
+        "Workflow" => "Alur kerja",
+        "Saved {name}. It stays disabled until you enable it." => {
+            "{name} disimpan. Tetap nonaktif sampai Anda mengaktifkannya."
+        }
+        "The definitions changed since they were read; nothing was written." => {
+            "Definisi berubah sejak dibaca; tidak ada yang ditulis."
+        }
+        "A definition's name is its key; add it to save it under another name." => {
+            "Nama definisi adalah kuncinya; tambahkan untuk menyimpannya dengan nama lain."
+        }
+        "No project definition is named {name}." => "Tidak ada definisi proyek bernama {name}.",
+        "No workflow definition is named {name}." => {
+            "Tidak ada definisi alur kerja bernama {name}."
+        }
+        "Saved in the user workflow source; always enabled." => {
+            "Disimpan di sumber alur kerja pengguna; selalu aktif."
+        }
+        "Starts only after you enable it." => "Hanya berjalan setelah Anda mengaktifkannya.",
+        "Defined by package {package}." => "Didefinisikan oleh paket {package}.",
+        "{name} — {description} (required)" => "{name} — {description} (wajib)",
+        "{name} — {description}" => "{name} — {description}",
+        "{name} — required" => "{name} — wajib",
+        "{name} — default: {default}" => "{name} — default: {default}",
+        "and {count} more" => "dan {count} lainnya",
+        "Recent runs" => "Jalan terbaru",
+        "A workflow definition is saved as an object with a source and a document." => {
+            "Definisi alur kerja disimpan sebagai objek dengan sumber dan dokumen."
+        }
+        "A definition is saved to the user source or the project source." => {
+            "Definisi disimpan ke sumber pengguna atau sumber proyek."
+        }
+        "Started {name}: {run_id}." => "{name} dimulai: {run_id}.",
+        "Parameters are a JSON object of strings." => "Parameter adalah objek JSON berisi string.",
+        "The list reached its size limit; later definitions are not shown." => {
+            "Daftar mencapai batas ukurannya; definisi berikutnya tidak ditampilkan."
+        }
+        "No workflow definition named {name} is in the list, which reached its size limit." => {
+            "Tidak ada definisi workflow bernama {name} dalam daftar, yang mencapai batas ukurannya."
+        }
+        "MCP" => "MCP",
+        "MCP servers" => "server MCP",
+        "Ctrl+T test" => "Ctrl+T uji",
+        "sign-in required" => "perlu masuk",
+        "signed in" => "sudah masuk",
+        "sign-in expired" => "sesi masuk kedaluwarsa",
+        "missing scopes: {scopes}" => "cakupan yang kurang: {scopes}",
+        "Executable: {command}" => "Eksekutabel: {command}",
+        "Stored arguments (hidden): {count}" => "Argumen tersimpan (disembunyikan): {count}",
+        "Working directory: {cwd}" => "Direktori kerja: {cwd}",
+        "Environment names: {names}" => "Nama lingkungan: {names}",
+        "Endpoint: {endpoint}" => "Endpoint: {endpoint}",
+        "Header names: {names}" => "Nama header: {names}",
+        "Bearer token: {state}" => "Token Bearer: {state}",
+        "OAuth: configured (client ID {id})" => "OAuth: terkonfigurasi (ID klien {id})",
+        "OAuth: configured" => "OAuth: terkonfigurasi",
+        "OAuth: not configured" => "OAuth: tidak terkonfigurasi",
+        "Metadata URL: {state}" => "URL metadata: {state}",
+        "configured" => "terkonfigurasi",
+        "Owned by a plugin; change it through Plugins." => "Dimiliki plugin; ubah melalui Plugin.",
+        "MCP entry {id}" => "Entri MCP {id}",
+        "Connection {number} · {status}" => "Koneksi {number} · {status}",
+        "Tools have not been discovered." => "Alat belum ditemukan.",
+        "No live session connections." => "Tidak ada koneksi sesi aktif.",
+        "Tools of {id}" => "Alat {id}",
+        "The server exposes no tools." => "Server tidak menyediakan alat.",
+        "The add document needs an id." => "Dokumen tambah memerlukan id.",
+        "The add document needs a source of user or project." => {
+            "Sumber dokumen tambah harus user atau project."
+        }
+        "The add document needs a configuration object." => {
+            "Dokumen tambah memerlukan objek configuration."
+        }
+        "{id} is already in mcp list; remove it first or choose another id." => {
+            "{id} sudah ada di mcp list; hapus dulu atau pilih id lain."
+        }
+        "{id} is already in mcp list; choose another id, or change it through its plugin." => {
+            "{id} sudah ada di mcp list; pilih id lain atau ubah lewat plugin-nya."
+        }
+        "This entry's settings changed since they were read; nothing was written." => {
+            "Pengaturan entri ini berubah sejak dibaca; tidak ada yang ditulis."
+        }
+        "The MCP entry changed since it was read; nothing was written." => {
+            "Entri MCP berubah sejak dibaca; tidak ada yang ditulis."
+        }
+        "The MCP entries changed since they were read; nothing was written." => {
+            "Entri MCP berubah sejak dibaca; tidak ada yang ditulis."
+        }
+        "The MCP entry changed since it was read; nothing was removed." => {
+            "Entri MCP berubah sejak dibaca; tidak ada yang dihapus."
+        }
+        "MCP's documents belong to one entry; this save names none." => {
+            "Dokumen MCP milik satu entri; penyimpanan ini tidak menyebut entri."
+        }
+        "No MCP server has that id." => "Tidak ada server MCP dengan id itu.",
+        "This workspace has no project MCP source." => {
+            "Workspace ini tidak memiliki sumber MCP proyek."
+        }
+        "Enabled {id} ({source})." => "{id} ({source}) diaktifkan.",
+        "Disabled {id} ({source})." => "{id} ({source}) dinonaktifkan.",
+        "It runs this workspace's .mcp.json entry, including later edits to it, in active and new sessions." => {
+            "Ini menjalankan entri .mcp.json workspace ini, termasuk perubahan berikutnya, di sesi aktif dan baru."
+        }
+        "{id} is not in mcp list; withdrew any stored enablement of it in this workspace." => {
+            "{id} tidak ada di mcp list; pengaktifan tersimpan untuknya di workspace ini ditarik."
+        }
+        "The MCP catalog could not be read ({error}); withdrew this workspace's enablement of {id}. A user entry with this ID is unchanged." => {
+            "Katalog MCP tidak dapat dibaca ({error}); pengaktifan {id} di workspace ini ditarik. Entri pengguna dengan ID ini tidak berubah."
+        }
+        "MCP configuration: {error}" => "Konfigurasi MCP: {error}",
+        "The server rejected the stored credential; sign in again with mcp login." => {
+            "Server menolak kredensial tersimpan; masuk lagi dengan mcp login."
+        }
+        "The server requires additional scopes: {scopes}." => {
+            "Server memerlukan cakupan tambahan: {scopes}."
+        }
+        "The server requires authorization; run mcp login ID." => {
+            "Server memerlukan otorisasi; jalankan mcp login ID."
+        }
+        "The probe ended: {status}." => "Probe berakhir: {status}.",
+
         "Command rules" => "Aturan perintah",
         "user" => "pengguna",
         "Matches only this command." => "Hanya cocok dengan perintah ini.",

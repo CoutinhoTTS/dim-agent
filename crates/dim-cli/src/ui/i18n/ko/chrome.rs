@@ -302,7 +302,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "configure tool approvals" => "도구 승인 설정",
         "choose ask or full access" => "확인 또는 전체 액세스 선택",
         "open settings" => "설정 열기",
-        "suspend to the shell" => "shell로 일시 중단",
         "exit" => "종료",
 
         // composer/palette.rs
@@ -376,7 +375,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "No matching models." => "일치하는 모델 없음",
         "current" => "현재",
         "Edit models" => "모델 편집",
-        "Editing models is not available yet" => "모델 편집 아직 미지원",
         "{provider}: 1 model unavailable · dimcode models {id}" => {
             "{provider}: 모델 1개 사용 불가 · dimcode models {id}"
         }

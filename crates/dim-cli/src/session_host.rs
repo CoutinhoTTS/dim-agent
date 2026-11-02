@@ -26,7 +26,7 @@ use crate::model::session::{
     ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider, OauthEvent, OauthStart,
     PluginItem, PluginReply, ProviderAction, ProviderEntry, RuntimeAction, RuntimeItem,
     RuntimesError, SandboxBackend, SessionItem, SessionPort, SubagentModelPolicy, SwitchKind,
-    Update, Usage,
+    Update, Usage, stored_title,
 };
 use crate::model::view::{
     LineState, LineView, SideLine, TaskOutputState, TaskTarget, WorkflowInventory,
@@ -224,6 +224,11 @@ struct Worker {
     client: Client,
     updates: mpsc::Sender<Update>,
     session_id: String,
+    /// The Session's stored title, when it has a real one, and the newest
+    /// `titleRevision` this client has: the attach record's or a later
+    /// SessionStore notice's.
+    session_title: Option<String>,
+    title_revision: u64,
     /// The attached Session's workspace, which the management panels work on.
     /// A server older than the record leaves it unset, and the directory the
     /// client started in stands.
@@ -359,6 +364,8 @@ async fn run(
         client,
         updates: updates.clone(),
         session_id: String::new(),
+        session_title: None,
+        title_revision: 0,
         session_cwd: None,
         parked: String::new(),
         projection: Projection::default(),
@@ -490,6 +497,13 @@ struct Attached {
     /// The Session's workspace; absent from servers older than the record.
     #[serde(default)]
     cwd: Option<String>,
+    /// The Session's stored title; absent from servers older than the title
+    /// fields, and `None` when it has none.
+    #[serde(default)]
+    title: Option<String>,
+    /// The title's revision; 0 on a server that reports none.
+    #[serde(default)]
+    title_revision: u64,
 }
 
 #[derive(Deserialize)]
@@ -808,6 +822,8 @@ impl Worker {
             model_id: model.model_id.clone(),
             model_preferences,
         };
+        self.session_title = stored_title(attached.title.as_deref()).map(str::to_owned);
+        self.title_revision = attached.title_revision;
         self.session_id = session_id.clone();
         self.session_cwd = attached.cwd;
         self.register_ui().await;
@@ -1576,7 +1592,15 @@ impl Worker {
                     .as_deref()
                     .map(std::path::PathBuf::from)
                     .unwrap_or_else(|| self.options.cwd.clone());
-                let result = crate::management::apply(&mut self.client, &request, &cwd).await;
+                // A run a panel starts reports to the line the transcript
+                // shows, the line a submit goes to. Home has no Session yet,
+                // so it has no line to report to.
+                let line = (!self.session_id.is_empty()).then(|| crate::management::SessionLine {
+                    session_id: self.session_id.clone(),
+                    branch_id: self.focus.clone(),
+                });
+                let result =
+                    crate::management::apply(&mut self.client, &request, &cwd, line.as_ref()).await;
                 self.send(Update::Management(ManagementReply { request, result }));
             }
             Command::SetLocale(language) => crate::management::use_language(language),
@@ -1792,6 +1816,22 @@ impl Worker {
             Ok(request) => self.compact_requests.push(request),
             Err(error) => self.send(Update::Compacted(CompactReply::Failed(error.to_string()))),
         }
+    }
+
+    /// A SessionStore title commit, generated or a rename from any client.
+    /// The newest revision wins, and a title that is only the `New session`
+    /// placeholder is no title. A notice for another Session never reaches
+    /// here: the caller checks the shown Session's id.
+    fn title_notice(&mut self, data: &serde_json::Value) {
+        let Some(revision) = data["titleRevision"].as_u64() else {
+            return;
+        };
+        if revision <= self.title_revision {
+            return;
+        }
+        self.title_revision = revision;
+        self.session_title = stored_title(data["title"].as_str()).map(str::to_owned);
+        self.publish();
     }
 
     /// `/rename`: sets the shown Session's manual title, or clears it when
@@ -2046,6 +2086,13 @@ impl Worker {
             }
             "session.notice"
                 if params["sessionId"] == self.session_id
+                    && params["source"] == "SessionStore"
+                    && params["kind"] == "title" =>
+            {
+                self.title_notice(&params["data"]);
+            }
+            "session.notice"
+                if params["sessionId"] == self.session_id
                     && params["source"] == "Collaboration"
                     && params["kind"] == "memberApprovalEnded" =>
             {
@@ -2219,9 +2266,10 @@ impl Worker {
     }
 
     /// `/mcp [list]`, `/mcp login [--no-browser] ID`, `/mcp callback URL`,
-    /// `/mcp logout ID`, `/mcp enable ID`, `/mcp disable ID`.
+    /// `/mcp logout ID`, `/mcp disconnect ID`, `/mcp enable ID`,
+    /// `/mcp disable ID`.
     async fn mcp(&mut self, args: &str) -> crate::Result<()> {
-        const USAGE: &str = "Usage: /mcp [list|login [--no-browser] ID|callback URL|logout ID|enable ID|disable ID]";
+        const USAGE: &str = "Usage: /mcp [list|login [--no-browser] ID|callback URL|logout ID|disconnect ID|enable ID|disable ID]";
         let words: Vec<&str> = args.split_whitespace().collect();
         match words.as_slice() {
             [] | ["list"] => {
@@ -2266,6 +2314,23 @@ impl Worker {
                 );
             }
             // The ID is the rest of the line, spaces included.
+            ["disconnect", ..] => {
+                let (_, id) = args
+                    .trim()
+                    .split_once(char::is_whitespace)
+                    .unwrap_or((args.trim(), ""));
+                let id = id.trim();
+                if id.is_empty() {
+                    return Err(USAGE.into());
+                }
+                let params = mcp::target(&mut self.client, &self.options, id).await?;
+                self.client.rpc("mcp.disconnect", params).await?;
+                self.report(
+                    format!("Disconnected {}.", crate::sanitize::safe(id)),
+                    false,
+                );
+            }
+            // The ID is the rest of the line, spaces included.
             ["enable", ..] | ["disable", ..] => {
                 let (command, id) = args
                     .trim()
@@ -2275,15 +2340,15 @@ impl Worker {
                 if id.is_empty() {
                     return Err(USAGE.into());
                 }
-                let (rows, notes) = crate::mcp_command::set_enabled(
+                let state = crate::management::mcp::set_enabled(
                     &mut self.client,
-                    &self.options,
+                    &self.options.cwd,
                     id,
                     command == "enable",
                 )
                 .await?;
-                let mut lines = rows;
-                lines.extend(notes);
+                let mut lines = vec![state.sentence()];
+                lines.extend(state.notes);
                 self.report(lines.join("\n"), false);
             }
             _ => return Err(USAGE.into()),
@@ -2905,6 +2970,7 @@ impl Worker {
             .map(|model| (model.provider_id.clone(), model.model_id.clone()));
         Ok(ModelList {
             models,
+            manage: self.client.supports(&["provider.management"]),
             current,
             empty,
             limits,
@@ -3779,6 +3845,7 @@ impl Worker {
         snapshot.focus = self.focus.clone();
         snapshot.main_running = self.projection.running();
         snapshot.main_topic = self.projection.first_message();
+        snapshot.session_title = self.session_title.clone();
         if self.focus != "main" {
             snapshot.approvals = self.projection.approvals();
             snapshot.questions = self.projection.questions();

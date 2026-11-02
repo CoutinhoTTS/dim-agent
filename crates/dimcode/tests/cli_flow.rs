@@ -21,8 +21,13 @@ mod goal;
 #[path = "cli_flow/hooks.rs"]
 mod hooks;
 
+#[path = "cli_flow/mcp.rs"]
+mod mcp;
+
 #[path = "cli_flow/migration.rs"]
 mod migration;
+#[path = "cli_flow/models.rs"]
+mod models;
 #[path = "cli_flow/permission.rs"]
 mod permission;
 #[path = "cli_flow/question.rs"]
@@ -37,6 +42,10 @@ mod session_management;
 mod skills;
 #[path = "cli_flow/tasks.rs"]
 mod tasks;
+#[path = "cli_flow/title.rs"]
+mod title;
+#[path = "cli_flow/workflow.rs"]
+mod workflow;
 
 #[path = "support/daemon.rs"]
 mod daemon_cleanup;
@@ -223,7 +232,7 @@ impl Wire {
 
 /// The record `session.attach` replies for the Session it names: that
 /// Session's `SessionInfo`, whose model follows its latest adopted
-/// configuration rather than the creation model `session.list` reports until
+/// configuration rather than the creation model `session.summaries` reports until
 /// #795 lands.
 fn attach_record(request: &Value) -> Value {
     json!({
@@ -4447,7 +4456,7 @@ fn tui_mcp_without_a_session_reports_the_catalog_only() {
     });
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("Sign in with /login");
-    terminal.write(b"/mcp\r");
+    terminal.write(b"/mcp list\r");
     terminal.until("No MCP server is configured.");
     quiet_done.recv_timeout(PATIENCE).unwrap();
     terminal.signal(libc::SIGKILL);
@@ -5783,7 +5792,7 @@ fn tui_mcp_says_when_no_server_is_configured() {
     });
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
-    terminal.write(b"/mcp\r");
+    terminal.write(b"/mcp list\r");
     terminal.until("No MCP server is configured.");
     assert!(
         !terminal.transcript.contains("Columns:"),
@@ -5831,7 +5840,7 @@ fn tui_mcp_shows_failure_reasons_rejections_and_the_catalog_error() {
     });
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
-    terminal.write(b"/mcp\r");
+    terminal.write(b"/mcp list\r");
     terminal.until("connection refused");
     terminal.until("Version v2 rejected: duplicate tool name");
     terminal.until("MCP catalog: project MCP configuration is not active");
@@ -5932,16 +5941,16 @@ fn tui_mcp_enables_and_disables_a_project_server() {
     });
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
-    terminal.write(b"/mcp\r");
+    terminal.write(b"/mcp list\r");
     terminal.until("disabled");
     terminal.write(b"/mcp enable docs\r");
     terminal.until("Enabled \"docs\" (project).");
     terminal.until(".mcp.json");
-    terminal.write(b"/mcp\r");
+    terminal.write(b"/mcp list\r");
     terminal.until("enabled");
     terminal.write(b"/mcp disable docs\r");
     terminal.until("Disabled \"docs\" (project).");
-    terminal.write(b"/mcp\r");
+    terminal.write(b"/mcp list\r");
     terminal.until("disabled");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
@@ -8194,6 +8203,7 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
     let (shown, wait_shown) = std::sync::mpsc::channel();
     let (started, wait_started) = std::sync::mpsc::channel();
     let (more, wait_more) = std::sync::mpsc::channel();
+    let (fail, wait_fail) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
         wire.created();
@@ -8213,15 +8223,20 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
         // The wait carries no deadline of its own: the main thread's `until`
         // deadlines bound the flow, and a test that fails drops the sender.
         wait_shown.recv().unwrap();
+        let budget = json!({"inputTokens":130969.0,"contextWindow":258400.0,
+            "requestedMaxTokens":128000.0,"allowedMaxTokens":127431.0,"ratio":1.0});
+        wire.event(11, "model-output-end", json!({"turn_id":"turn","request_id":"budget-check",
+            "status":"failed","error":"Model input exhausts its context window.","budget":budget}));
+        wire.no_context();
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
             {"id":"dim-compaction-start","sequence":12,"create_at":1,"type":"context","name":"compaction-start",
-             "data":{"through":11,"trigger":"threshold","strategy":"summary"}}}));
+             "data":{"through":11,"trigger":"provider_output_budget_exhausted","strategy":"summary"}}}));
         wait_started.recv().unwrap();
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
             {"id":"dim-compaction","sequence":13,"create_at":1,"type":"context","name":"compaction",
              "data":{"through":11,"start":12,"status":"completed","retain_from":"dim-2","strategy":"summary",
                      "replacement":[{"role":"user","content":"<dim-summary>\nThe parser is half done.\n</dim-summary>"}],
-                     "diagnostics":{"reason":"auto","trigger":"threshold","estimatedInputTokens":300.0,
+                     "diagnostics":{"reason":"auto","trigger":"provider_output_budget_exhausted","estimatedInputTokens":300.0,
                                     "entriesReplaced":3,"modelCallCount":1,"durationMs":10,"strategy":{"kind":"summary"}}}}}));
         wire.no_context();
         wait_more.recv().unwrap();
@@ -8253,6 +8268,11 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
                                     "insufficientSpace":{"parts":[
                                         {"part":"summary","tokens":3200.0},
                                         {"part":"pinnedInputs","tokens":1100.0}]}}}}}));
+        wire.no_context();
+        wait_fail.recv().unwrap();
+        wire.event(18, "model-output-end", json!({"turn_id":"turn","request_id":"recovery",
+            "status":"failed","error":"Context recovery could not fit the request.","budget":budget}));
+        wire.end(json!({"turn_id":"turn","status":"failed","error":"Context recovery could not fit the request."}));
         wire.no_context();
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
@@ -8288,9 +8308,23 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
         "the kept input follows its label: {transcript}"
     );
     terminal.until("insufficient space: summary 3.2K, pinned inputs 1.1K");
+    fail.send(()).unwrap();
+    terminal.until("turn failed: Context recovery could not fit the request.");
     terminal.write(b"/exit\r");
     terminal.until("Bye!");
     assert!(terminal.wait().success());
+    assert!(
+        !terminal.transcript.contains("model failed:"),
+        "{}",
+        terminal.transcript
+    );
+    assert!(
+        !terminal
+            .transcript
+            .contains("Model input exhausts its context window."),
+        "{}",
+        terminal.transcript
+    );
     daemon.join().unwrap();
 }
 
@@ -8442,7 +8476,7 @@ fn no_catalog(wire: &mut Wire) {
     let mut line = String::new();
     while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
         assert!(
-            !line.contains("session.summaries") && !line.contains("session.list"),
+            !line.contains("session.summaries"),
             "the open read the Session catalog: {line}"
         );
         line.clear();
@@ -8856,6 +8890,48 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
     );
 }
 
+/// `/models` lists a Provider's models without offering `Edit models` when
+/// the daemon does not advertise the area's method.
+#[test]
+fn tui_models_picker_hides_edit_models_without_management_methods() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            let request: Value = serde_json::from_str(&line).unwrap();
+            line.clear();
+            let result = match request["method"].as_str().unwrap() {
+                "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,
+                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history",
+                    "provider.list","provider.catalog","provider.selection","provider.select"]}),
+                "session.create" => json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}),
+                "session.history" => json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+                "session.idle" => json!({"sequence":8}),
+                "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
+                "provider.catalog" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
+                    {"id":"model","name":"Model","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]}}),
+                "account.providers" => json!([]),
+                _ => json!({}),
+            };
+            wire.reply(&request, result);
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/models\r");
+    terminal.until("Test / model");
+    thread::sleep(Duration::from_millis(300));
+    let opened = terminal.transcript.clone();
+    assert!(opened.contains("Model"), "{opened}");
+    assert!(!opened.contains("Edit models"), "{opened}");
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
 /// ←/→ in `/models` cycles advertised reasoning efforts, including `none`
 /// when the model can turn reasoning off. Enter saves the cycled effort and
 /// adopts the model with that effort plus the other saved preferences.
@@ -9186,7 +9262,13 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
     let home = Home::new();
     let refreshed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let seen = refreshed.clone();
+    // The daemon reports the re-list that follows its refill: after the
+    // second list's last catalog reply the client has nothing in flight, so
+    // the kill below cannot interrupt a reply.
+    let (settled, wait_settled) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
+        let mut version = 1u32;
+        let mut catalogs = 0usize;
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             let request: Value = serde_json::from_str(&line).unwrap();
@@ -9223,9 +9305,14 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
                     {"providerId":"broken","displayName":"Broken","enabled":true}]}),
                 "provider.catalog" => {
                     let provider = request["params"]["providerId"].as_str().unwrap();
+                    catalogs += 1;
+                    let last = catalogs == 14;
                     if provider == "broken" {
                         wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
                             "code":-32000,"message":"catalog read failed"}}));
+                        if last {
+                            settled.send(()).ok();
+                        }
                         continue;
                     }
                     let (models, disabled) = match provider {
@@ -9249,13 +9336,24 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
                         "blank" | "manual" => (json!([]), json!([])),
                         _ => (json!([model("vendor/model-a", None, true)]), json!([])),
                     };
-                    json!({"catalog":{"version":1,"disabledModelIds":disabled,"models":models}})
+                    wire.reply(
+                        &request,
+                        json!({"catalog":{"version":version,"disabledModelIds":disabled,"models":models}}),
+                    );
+                    if last {
+                        settled.send(()).ok();
+                    }
+                    continue;
                 }
                 "provider.refresh" => {
                     seen.lock()
                         .unwrap()
                         .push(request["params"]["providerId"].as_str().unwrap().to_owned());
-                    json!({"version":2,"disabledModelIds":[],"models":[]})
+                    // The refresh stores the listed catalog under a new
+                    // version, and the read reports it, so the re-list does
+                    // not ask for the same refill again.
+                    version = 2;
+                    json!({"version":version,"disabledModelIds":[],"models":[]})
                 }
                 "account.providers" => json!([]),
                 _ => json!({}),
@@ -9273,7 +9371,6 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
     terminal.until("Blank: no models · dimcode models blank --refresh");
     terminal.until("Manual: no models · add a model with provider.models.create");
     terminal.until("Broken: catalog unreadable · dimcode models broken");
-    terminal.until("Edit models");
     assert!(
         !terminal.transcript.contains("Ready / vendor/hidden-b"),
         "a disabled model is not selectable"
@@ -9282,6 +9379,9 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
         !terminal.transcript.contains("need a window"),
         "a model unavailable for another reason, and a disabled one, raise no limits row"
     );
+    wait_settled
+        .recv_timeout(PATIENCE)
+        .expect("the picker settles after its re-list");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();
@@ -9605,7 +9705,8 @@ fn daemon_vacuum_reclaims_an_offline_store() {
     for sequence in 1..=2000 {
         connection
             .execute(
-                "INSERT INTO timeline_events VALUES ('s', 'main', ?1, ?1, 'turn/start', ?2, NULL)",
+                "INSERT INTO timeline_events (session_id, branch_id, sequence, last_sequence, kind, body) \
+                 VALUES ('s', 'main', ?1, ?1, 'turn/start', ?2)",
                 rusqlite::params![sequence, "x".repeat(4000)],
             )
             .unwrap();

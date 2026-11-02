@@ -579,35 +579,6 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn directory_stops_when_its_caller_is_gone() {
-        let directory =
-            std::env::temp_dir().join(format!("dim-directory-cancel-{}", uuid::Uuid::new_v4()));
-        let mut builder = AgentBuilder::new(AgentConfig::default());
-        dim_agent_capabilities::defaults::mock_hosts(&mut builder);
-        dim_agent_capabilities::defaults::install(&mut builder);
-        let server = serve(
-            builder,
-            ServerConfig {
-                database_path: Some(directory.join("store.sqlite")),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-        let store = server.root.get::<SessionStore>().unwrap();
-        let cancel = tokio_util::sync::CancellationToken::new();
-        cancel.cancel();
-        let result = store.directory(None, 3, cancel).await;
-        assert!(
-            matches!(result, Err(AgentError::Cancelled(_))),
-            "{result:?}"
-        );
-        server.shutdown();
-        server.join().await.unwrap();
-        std::fs::remove_dir_all(directory).unwrap();
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn catalog_pages_past_a_session_that_cannot_be_decoded() {
         let directory =

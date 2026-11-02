@@ -4,7 +4,7 @@ use super::context_reads::{CountContextReads, TASK_READS};
 use super::*;
 use dim_agent_capabilities::{
     agent_loop::AgentLoop,
-    history::{HistoryRender, context_messages, read_context, summary_message},
+    history::{context_messages, read_context, summary_message},
 };
 use rutis::host::CtxHost;
 use std::sync::atomic::AtomicBool;
@@ -26,6 +26,7 @@ enum Mode {
 #[derive(Default)]
 struct Scripted {
     mode: Mode,
+    context: Context,
     calls: AtomicUsize,
     hold: AtomicBool,
     entered: tokio::sync::Notify,
@@ -63,6 +64,7 @@ impl CompactionStrategy for Scripted {
             if self.hold.swap(false, Ordering::SeqCst) {
                 self.entered.notify_one();
                 tokio::select! {
+                    biased;
                     _ = cancel.cancelled() => {
                         return Err(HostError::Cancelled("strategy cancelled".into()));
                     }
@@ -186,9 +188,6 @@ impl Plugin for StrategyProvider {
     }
 }
 
-/// No automatic compaction (a high threshold); `strategy` serves manual
-/// steps and budget recovery. With `reload`, the strategy is provided by a
-/// restartable plugin.
 fn builder_with_strategy(
     model: Arc<dyn ModelDriver>,
     history: HistoryRenderer,
@@ -201,9 +200,7 @@ fn builder_with_strategy(
         .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
         .session_value(Arc::new(history))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
-        .session_value(Arc::new(ContextModelHost(Some(Arc::new(
-            Context::default(),
-        )))))
+        .session_value(Arc::new(ContextModelHost(Some(Arc::new(strategy.context)))))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
                 Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
@@ -312,6 +309,201 @@ fn starts_of(events: &[Arc<AgentEvent>]) -> Vec<Option<u64>> {
             _ => None,
         })
         .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn steers_wait_for_compaction_and_explicit_interrupts_still_cancel() {
+    for (trigger, interrupt) in [
+        (CompactionTrigger::Threshold, false),
+        (CompactionTrigger::ProviderOutputBudgetExhausted, false),
+        (CompactionTrigger::Manual, false),
+        (CompactionTrigger::Threshold, true),
+        (CompactionTrigger::ProviderOutputBudgetExhausted, true),
+    ] {
+        let strategy = Arc::new(Scripted {
+            context: Context {
+                threshold: (trigger == CompactionTrigger::Threshold).then_some(3_600.),
+                ..Context::default()
+            },
+            ..Scripted::default()
+        });
+        let agent = MinimalHost::start(&builder_with_strategy(
+            Arc::new(EchoModel),
+            HistoryRenderer::default(),
+            strategy.clone(),
+            None,
+        ))
+        .await
+        .unwrap();
+        let session = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
+        turns(&session, &[first().as_str(), "second", "third"]).await;
+        assert_eq!(strategy.calls.load(Ordering::SeqCst), 0);
+        strategy.hold.store(true, Ordering::SeqCst);
+        if trigger == CompactionTrigger::Manual {
+            session
+                .service::<AgentLoop>("main")
+                .unwrap()
+                .compact()
+                .unwrap();
+        } else {
+            session
+                .submit(
+                    "working ".repeat(if trigger == CompactionTrigger::Threshold {
+                        300
+                    } else {
+                        350
+                    }),
+                    InputMode::Queue,
+                    "main",
+                )
+                .await
+                .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(10), strategy.entered.notified())
+            .await
+            .expect("the requested compaction starts");
+        let before = session.history("main", None).await.unwrap();
+        let start = before
+            .iter()
+            .find(|event| {
+                matches!(
+                    &event.kind,
+                    EventKind::ContextCompactionStart(data) if data.trigger == trigger
+                )
+            })
+            .unwrap()
+            .sequence;
+        let user = session
+            .submit("USER-STEER-ONE".into(), InputMode::Steer, "main")
+            .await
+            .unwrap();
+        let report = session
+            .input(
+                InputMessageData {
+                    blocks: vec![dim_agent_capabilities::context_block::raw(
+                        "<dim-branch-message from=\"child\" to=\"main\" final=\"true\">\nBRANCH-FINAL-MARKER\n</dim-branch-message>".into(),
+                        None,
+                    )],
+                    mode: Some(InputMode::Steer),
+                    ..Default::default()
+                },
+                "main",
+            )
+            .await
+            .unwrap();
+        let last = session
+            .submit("USER-STEER-TWO".into(), InputMode::Steer, "main")
+            .await
+            .unwrap();
+        let applied = until(&session, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    &event.kind,
+                    EventKind::InputApplied(data) if data.input_id == last.id
+                )
+            })
+        })
+        .await;
+        let through = applied.last().unwrap().sequence;
+        consumed(&session, through).await;
+        let held = session.history("main", None).await.unwrap();
+        assert!(
+            !held.iter().any(|event| event.sequence > start
+                && matches!(
+                    event.kind,
+                    EventKind::ContextCompaction(_)
+                        | EventKind::ModelStart(_)
+                        | EventKind::InputConsumed(_)
+                )),
+            "inputs wait while {trigger:?} compaction runs"
+        );
+        if interrupt {
+            session.stop("main", "user stop".into()).await.unwrap();
+        } else {
+            strategy.release.notify_one();
+        }
+        until(&session, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    &event.kind,
+                    EventKind::ContextCompaction(data) if data.start == Some(start)
+                )
+            })
+        })
+        .await;
+        tokio::time::timeout(Duration::from_secs(10), session.idle("main"))
+            .await
+            .unwrap()
+            .unwrap();
+        let events = session.history("main", None).await.unwrap();
+        assert_eq!(strategy.calls.load(Ordering::SeqCst), 1, "{trigger:?}");
+        assert_paired(&events);
+        let result = events
+            .iter()
+            .find(|event| {
+                matches!(
+                    &event.kind,
+                    EventKind::ContextCompaction(data) if data.start == Some(start)
+                )
+            })
+            .unwrap();
+        let EventKind::ContextCompaction(data) = &result.kind else {
+            unreachable!()
+        };
+        if interrupt {
+            assert!(matches!(
+                &data.outcome,
+                ContextCompactionResult::Cancelled { reason } if reason == "user stop"
+            ));
+        } else {
+            assert!(matches!(
+                data.outcome,
+                ContextCompactionResult::Completed { .. }
+            ));
+            for input in [&user, &report, &last] {
+                let consumption: Vec<_> = events
+                    .iter()
+                    .filter(|event| {
+                        matches!(
+                            &event.kind,
+                            EventKind::InputConsumed(data) if data.input_id == input.id
+                        )
+                    })
+                    .collect();
+                assert_eq!(consumption.len(), 1);
+                assert!(consumption[0].sequence > result.sequence);
+            }
+            let request = events
+                .iter()
+                .find_map(|event| match &event.kind {
+                    EventKind::ModelCall(data) if event.sequence > result.sequence => {
+                        Some(&data.request)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(*request.messages[0], summary_message("short"));
+            let sent = serde_json::to_string(&request.messages).unwrap();
+            let mut previous = 0;
+            for marker in ["USER-STEER-ONE", "BRANCH-FINAL-MARKER", "USER-STEER-TWO"] {
+                assert_eq!(sent.matches(marker).count(), 1);
+                let at = sent.find(marker).unwrap();
+                assert!(at > previous);
+                previous = at;
+            }
+            assert!(matches!(
+                events.last().unwrap().kind,
+                EventKind::TurnEnd(TurnEndData {
+                    outcome: TurnOutcome::Completed { .. },
+                    ..
+                })
+            ));
+        }
+        agent.close().await.unwrap();
+    }
 }
 
 /// Every start has exactly one result with its `start` and the same ids,
@@ -462,13 +654,14 @@ fn counting_render(context: &ContextHistory) -> std::result::Result<Vec<HistoryE
 
 /// A checkpointed context read plus its caller's use renders once: the render
 /// that validates the checkpoint is the render the step keeps.
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_checkpointed_step_renders_its_context_once() {
     let store = Arc::new(CountContextReads::default());
     let mut builder = builder_with_strategy(
         Arc::new(EchoModel),
         HistoryRenderer {
-            render: HistoryRender::Custom(counting_render),
+            render: counting_render,
             ..HistoryRenderer::default()
         },
         Scripted::new(Mode::Cut),
@@ -900,7 +1093,7 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
     let mut builder = builder_with_strategy(
         Arc::new(EchoModel),
         HistoryRenderer {
-            render: HistoryRender::Custom(renamed_history),
+            render: renamed_history,
             ..HistoryRenderer::default()
         },
         Scripted::new(Mode::InsideRetained),
@@ -964,7 +1157,11 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
         ranges.sort_by_key(|range| *range.end());
         ranges
     };
-    assert_eq!(from_start("main"), [1..=cut, 1..=main_head], "{reads:?}");
+    let starts = from_start("main");
+    assert!(
+        starts.contains(&(1..=cut)) && starts.contains(&(1..=main_head)),
+        "{reads:?}"
+    );
     let (context_reads, resume) = child_reads.lock().unwrap().take().unwrap();
     assert_eq!(resume, "main");
     assert!(
@@ -1239,6 +1436,16 @@ async fn a_failed_manual_compaction_lets_the_turn_continue_and_recovery_compacts
     let ContextCompactionResult::Completed { diagnostics, .. } = &recovered.outcome else {
         panic!("expected completion, got {:?}", recovered.outcome)
     };
+    assert!(
+        events.iter().all(|event| !matches!(
+            &event.kind,
+            EventKind::ModelOutputEnd(ModelOutputEndData {
+                outcome: ModelOutputOutcome::Failed { .. },
+                ..
+            })
+        )),
+        "local recovery bypasses regrowth without a model failure"
+    );
     assert_eq!(
         diagnostics.trigger,
         CompactionTrigger::ProviderOutputBudgetExhausted

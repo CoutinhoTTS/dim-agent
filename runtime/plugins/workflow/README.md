@@ -14,6 +14,8 @@ npm ci --prefix runtime/plugins/workflow --ignore-scripts
 (cd runtime && npm install --no-save --package-lock=false --ignore-scripts --install-links ./plugins/workflow)
 ```
 
+These commands set up the shared runtime and this package in the checkout for `--session-rows` embedding and the package's tests. `./dev` needs none of them: it stages the default plugins, with their own dependencies, into `staging/dev-plugins`.
+
 The plugin directory carries [dim-plugin.json](dim-plugin.json) and is a default plugin listed in
 [runtime/default-plugins.json](../../default-plugins.json), which PluginManager loads (`--defaults`).
 An embedding host may still build a row from the manifest's `code` fields for
@@ -34,9 +36,12 @@ An unavailable dependency leaves its optional row Pending under existing assembl
 
 ## Definitions and execution
 
-`workflow.save` accepts `{source:"user"|"project", cwd?, document}`. User definitions are saved
-with owner CAS in the `workflow` Settings document; project definitions use
-`.dimcode/workflows/<name>.yaml` through `workflowFiles`. Project definitions start disabled.
+`workflow.save` takes one of two strict branches. `{source:"user", document, expectedRevision?}`
+saves the definition into the `workflow` Settings document with owner CAS: at `expectedRevision`
+when the caller gives one, and at the revision the owner reads otherwise; a user save that names
+`cwd` is refused. `{source:"project", cwd, document}` writes
+`.dimcode/workflows/<name>.yaml` through `workflowFiles` and refuses `expectedRevision`, since the
+file belongs to the workspace `cwd` names. Project definitions start disabled.
 Only the user's local `settings.update` can change the protected
 `projectEnabled[canonicalCwd][name]` field. An enabled definition takes effect at the next start;
 a running workflow keeps its accepted definition and parameter snapshot.

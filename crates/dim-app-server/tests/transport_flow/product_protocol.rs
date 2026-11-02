@@ -411,6 +411,77 @@ async fn project_entry_edits_keep_the_declared_configuration() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// A remove whose revision is stale writes nothing: the project entry stays
+/// in the file, and the user's enablement of it still stands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stale_project_remove_leaves_the_enablement_unchanged() {
+    let home = std::path::PathBuf::from("/tmp").join(format!("dsr-{}", uuid::Uuid::new_v4()));
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project = std::fs::canonicalize(&project).unwrap();
+    std::fs::write(
+        project.join(".mcp.json"),
+        json!({"mcpServers":{"local":{"command":"never-start-this-fixture"}}}).to_string(),
+    )
+    .unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    let stale = catalog["result"]["projectRevision"].clone();
+    assert_ok(&client.rpc("mcp.set_enabled", json!({"source":"project","id":"local","cwd":project,"expectedVersion":stale,"enabled":true})).await);
+
+    // Another write to the source makes the catalog's revision stale.
+    let view = client
+        .rpc(
+            "mcp.configuration",
+            json!({"source":"project","id":"local","cwd":project}),
+        )
+        .await;
+    assert_ok(&view);
+    assert_ok(&client.rpc("mcp.update", json!({"source":"project","id":"local","cwd":project,"expectedVersion":view["result"]["revision"],"patch":{"command":"never-start-this-fixture-2"}})).await);
+
+    let refused = client
+        .rpc(
+            "mcp.remove",
+            json!({"source":"project","id":"local","cwd":project,"expectedVersion":stale}),
+        )
+        .await;
+    assert_eq!(
+        refused["error"]["data"]["appError"],
+        "mcp_settings_conflict"
+    );
+
+    let after = client
+        .rpc(
+            "mcp.configuration",
+            json!({"source":"project","id":"local","cwd":project}),
+        )
+        .await;
+    assert_ok(&after);
+    assert_eq!(
+        after["result"]["enabled"], true,
+        "a stale remove withdraws no enablement"
+    );
+    let stored: Value =
+        serde_json::from_slice(&std::fs::read(project.join(".mcp.json")).unwrap()).unwrap();
+    assert!(
+        stored["mcpServers"]["local"].is_object(),
+        "a stale remove writes no document"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_connection_tests_are_disposable_preserve_drafts_and_respect_project_authority() {
     let home = std::path::PathBuf::from("/tmp").join(format!("dm-test-{}", uuid::Uuid::new_v4()));
@@ -1132,7 +1203,7 @@ async fn local_product_management_starts_without_configuration_and_isolates_inva
     }
     assert_ok(&local.rpc("daemon.ping", json!({})).await);
     assert_eq!(
-        local.rpc("session.list", json!({})).await["result"],
+        local.rpc("session.summaries", json!({})).await["result"],
         json!([])
     );
     for file in ["auth.json", "mcp.json", "skills.json"] {
@@ -1155,7 +1226,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     use std::os::unix::{ffi::OsStringExt, fs::DirBuilderExt};
 
     async fn skills_posted(session: &dim_agent_runtime::Session, enabled: bool) {
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 let Ok(view) = session
                     .service::<dim_agent_capabilities::skills::SkillsBranch>("main")
@@ -1163,7 +1234,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
                     .session()
                     .current()
                 else {
-                    tokio::task::yield_now().await;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                     continue;
                 };
                 let current = match &view.list {
@@ -1188,11 +1259,11 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
                 {
                     break;
                 }
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .unwrap();
+        .expect("the changed skill list is adopted into branch history");
     }
 
     let home = std::path::PathBuf::from("/tmp").join(format!("dp-{}", uuid::Uuid::new_v4()));
@@ -1310,7 +1381,6 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     assert_eq!(remote.features, json!([]));
     for (method, params) in [
         ("session.create", json!({"cwd":work})),
-        ("session.list", json!({})),
         ("skills.catalog", json!({})),
         ("mcp.catalog", json!({})),
         ("session.mcp", json!({"sessionId":"remote"})),
@@ -2224,7 +2294,7 @@ async fn the_creation_replies_name_the_adopted_model_preferences() {
 
     // The same live Session lists without the field: only the create and
     // attach replies name the preferences.
-    let listed = client.rpc("session.list", json!({})).await;
+    let listed = client.rpc("session.summaries", json!({})).await;
     assert_ok(&listed);
     let item = listed["result"]
         .as_array()

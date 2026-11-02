@@ -18,6 +18,15 @@ scrollback 与 fullscreen TUI 都按分类分组，分类及分类内的命令�
 菜单不列出运行、排队和 steer 的按键，它们只由按键触发。菜单只列出斜杠命令：选择较早消息、滚动到顶部或底部等视图操作也不列出；
 `Tab`、`Home`、`End` 保留各自的绑定。
 
+两种模式下，菜单都适应终端可用的列数和行数。命令名优先于描述和快捷键标签；快捷键标签会挤占
+命令名时省略标签，但不改变按键绑定。短屏幕少显示一些命令，可见窗口跟随选择。
+Scrollback 保留菜单上方的命令草稿，必要时省略菜单标题和页脚；fullscreen 保留输入框上方的
+命令面板查询行和选中项。分类分组和排序不随终端尺寸变化。
+
+当通常的历史保留空间使实时区域不足八行时，实时控件优先：两种渲染器都可为实时区域使用最多八行，
+但不超过终端高度。Fullscreen 先减少输入框的空白内边距和命令面板查询行的留白，避免两个输入区域
+重叠。草稿编辑器在剩余行数内滚动，保持光标可见且不丢弃文字。其他情况下保留通常的历史空间。
+
 ```text
 Commands
   app     /exit        exit
@@ -28,6 +37,18 @@ Commands
 / + Enter          -> /exit (completion only)
 /exit + Enter      -> exit
 /permissions + Enter -> permission controls
+```
+
+```text
+Fullscreen, 8 rows             Scrollback, 8 rows
++- Command Palette -------+
+| >                       |   +- input -----------------+
+| app /exit               |   | > /                     |
++-------------------------+   +-------------------------+
+                              +-------------------------+
++- input -----------------+   | app /exit               |
+|                         |   +-------------------------+
++-------------------------+   AGENT
 ```
 
 ## 运行按键与排队
@@ -393,7 +414,7 @@ Reset 要求确认后把两个布尔值都写为 false。Off 可保留无效的�
 
 ## 管理界面
 
-一个管理领域就是一个所有者的一组管理方法。App Server 经各自的所有者提供每个领域，不向客户端提供跨领域的通用通路（[Settings 服务](appserver/settings-service.md#11-不做什么)）：Skills 是 `skills.*`，Hooks 是 `hooks.*`，MCP 是 `mcp.*`，Scheduler 是 `schedule.*`，Workflow 定义是 `workflow.*`，命令规则是 `permission.rules` 与 `permission.set_rules`，插件是 PluginManager 的方法。它们的入口形态各不相同，并保持不变；本节只把客户端一侧做成同一个结构，使一个领域接入一次，而不是每个界面各接一次。
+一个管理领域就是一个所有者的一组管理方法。App Server 经各自的所有者提供每个领域，不向客户端提供跨领域的通用通路（[Settings 服务](appserver/settings-service.md#11-不做什么)）：Skills 是 `skills.*`，Hooks 是 `hooks.*`，MCP 是 `mcp.*`，Scheduler 是 `schedule.*`，Workflow 定义是 `workflow.*`，命令规则是 `permission.rules` 与 `permission.set_rules`，插件是 PluginManager 的方法，单个提供方的模型是 `provider.*`。它们的入口形态各不相同，并保持不变；本节只把客户端一侧做成同一个结构，使一个领域接入一次，而不是每个界面各接一次。
 
 每个领域在原生客户端里有两个界面：
 
@@ -414,7 +435,7 @@ Reset 要求确认后把两个布尔值都写为 false。Off 可保留无效的�
 
 ### 视图
 
-条目按所有者报告的分组归类——user、project、`plugin:<id>`、内置——顺序与所有者的报告顺序一致；一个 Hook 来源本身就是一个条目，归在 `sources` 分组下。每个条目有标签、详情、它的状态（已启用、已禁用、无效、被覆盖、只读）以及它提供的动作。所有者不允许客户端写入的条目（插件所有、已锁定）不提供写入动作，详情说明原因。所有者无法使用的东西作为 issue 列在条目之后。
+条目按所有者报告的分组归类——user、project、`plugin:<id>`、内置——顺序与所有者的报告顺序一致；一个 Hook 来源本身就是一个条目，归在 `sources` 分组下。每个条目有标签、详情、它的状态（已启用、已禁用、无效、不可用、被覆盖、只读）以及它提供的动作。所有者不允许客户端写入的条目（插件所有、已锁定）不提供写入动作，详情说明原因。所有者无法使用的东西作为 issue 列在条目之后。当 run 种类接受输入文档时，条目可以携带该操作的输入文档：Ctrl+T 先用外部编辑器打开它，run 随编辑器留下的文本发出。
 
 ```text
 ╭─ Skills ──────────────────────────────────────╮
@@ -446,14 +467,16 @@ Reset 要求确认后把两个布尔值都写为 false。Off 可保留无效的�
 | run | Ctrl+T | 该领域的具名操作，例如 test、run now 或 start。 |
 | inspect | Tab | 只读的详情视图。 |
 
-Esc 关闭面板。动作键要么是 Ctrl 组合键，要么是筛选从不接收的键，因为筛选会接收所有普通字母。作用于领域本身的种类属于领域的视图而不是某个条目——reload，以及新建条目的 add——所以它不需要选中项：无论是否选中条目，键提示都会列出它，读取失败后 Ctrl+R 会重新读取该领域。最先承载的两个领域用 toggle、reload 和 edit。Scheduler 领域引入 add、remove、run 和 inspect，客户端写的就是这四个种类；之后的领域只需加入自己的适配器以及它所用种类调用的方法，并在此表中写下它新增的种类。
+Esc 关闭面板。动作键要么是 Ctrl 组合键，要么是筛选从不接收的键，因为筛选会接收所有普通字母。作用于领域本身的种类属于领域的视图而不是某个条目——reload，以及新建条目的 add——所以它不需要选中项：无论是否选中条目，键提示都会列出它，读取失败后 Ctrl+R 会重新读取该领域。最先承载的两个领域用 toggle、reload 和 edit。Scheduler 领域引入 add、remove、run 和 inspect，客户端写的就是这四个种类；之后的领域只需加入自己的适配器以及它所用种类调用的方法，并在此表中写下它新增的种类。如果领域给 run 种类起了名字，键提示就用那个名字：MCP 的提示是 `Ctrl+T test`。
 
 底部边框放不下的键提示会画在朴素底边之上的几行里，在 ` · ` 分隔处换行；比一行还宽的部件按显示宽度换行，任何键和动作都不会被截掉。这些行与页脚一样从列表中占用空间，所以任何宽度下每个键都可见，删除确认也不例外。
 
 - add 用外部编辑器打开适配器给出的新建条目文档——所有者的创建形态，填入示例值——并以领域的创建方法写入。文档没有改动时不写入；被拒绝时保留草稿，下次 Ctrl+N 重新打开用户的文本，与 Ctrl+E 对编辑的处理一致。冲突时也同样保留：新建没有 revision，丢弃草稿与过期 revision 的关联只是编辑的规则，不适用于新建。把条目追加到已读到列表的 add（如命令规则领域）改为重试冲突，因为追加不覆盖任何内容。`dimcode <area> add PATH`（`-` 表示 stdin）是不经编辑器的同一次写入。
-- remove 先在键提示里询问：键提示变为 `Remove <label>? Enter confirm · Esc cancel`，除 Enter 外的任何键都取消且什么都不改。Enter 调用领域的删除方法，然后重新读取该领域。`dimcode <area> remove ID` 不提问直接删除，因为命令行上输入的 id 就是意图，与 `dimcode logout PROVIDER` 不提问直接退出一致。
-- run 对所选条目调用领域的具名操作，然后重新读取该领域，消息报告所有者的答复——所有者跳过的一次运行会说明原因。需要参数的操作是该领域自己的步骤，不属于这个种类。
+- remove 先在键提示里询问，动词随条目报告：会把条目移出的删除是 `Remove <label>? Enter confirm · Esc cancel`，会把条目恢复为默认的重置是 `Reset <label>? Enter confirm · Esc cancel`。除 Enter 外的任何键都取消且什么都不改。Enter 调用领域的移除方法，然后重新读取该领域，消息也用同一个动词。`dimcode <area> remove ID` 不提问直接移除，因为命令行上输入的 id 就是意图，与 `dimcode logout PROVIDER` 不提问直接退出一致。
+- run 对所选条目调用领域的具名操作。答复会改变领域所列内容的运行——Scheduler 的立即运行会加入任务的历史和上次结果——重新读取该领域，并把答复作为消息报告；所有者跳过的一次运行会说明原因。答复不改变领域所列内容的运行，像 inspect 一样把答复作为详情显示，且不重新读取该领域：MCP 的 test 是临时连接发现的工具列表。所有者是否把该方法声明为 mutating 并不决定这一点，因为 `mcp.test` 会运行该条目，却仍然不写入领域所列的任何内容。需要参数的操作是该领域自己的步骤，不属于这个种类：条目携带输入文档，run 种类在调用前用外部编辑器打开它。
 - inspect 向适配器索取条目的详情：一个标题和若干行，而不是一个视图。面板用它替代列表显示，方向键与 PageUp/PageDown 滚动，Esc 带着保留的选中项回到列表，再按一次 Esc 关闭面板。`dimcode <area> inspect ID` 打印同样的行，或该领域自己的动词，如果它的设计另有规定。
+
+`/workflow:save` 让领域在面板的新建编辑器中打开：第一个视图到达时，面板像 Ctrl+N 那样在新建文档上打开编辑器；领域不提供 add 时，面板停留在列表，并显示支持检查给出的那句话。
 
 文档按条目分存的领域，其条目为它自己的文档提供 edit：此时 Save 动作携带该条目的 id，适配器保留它与草稿一起读到的 revision。
 
@@ -544,6 +567,139 @@ Ctrl+T 立即运行所选任务，并报告所有者的答复——`launching`�
 
 `dimcode scheduled add PATH`（`-` 表示 stdin）是不经编辑器的创建；`dimcode scheduled history ID` 打印详情显示的那些行；`dimcode scheduled remove ID` 不经面板的确认直接删除。
 
+### Models 领域
+
+Models 领域（#818）：`/models` 里的 `Edit models` 打开单个提供方的面板，`dimcode models PROVIDER enable|disable|remove|inspect MODEL`、`edit MODEL`、`set MODEL PATH` 与 `add PATH` 是它在命令行上的同一领域，经 `provider.management` 与 `provider.models.*` 写入（[提供方管理](appserver/provider-management.md)）。提供方是领域的一部分，所以另一个提供方的回复不会落到面板里，面板标题也写明提供方（`Models · <name>`）。`dimcode models PROVIDER` 保持原有列表与四个标志；`--refresh` 就是该领域在命令行上的 reload。
+
+一个模型是一个条目。标签是显示名，详情是 id、两个上限（或 `undeclared`）、端点及其覆盖，以及所有者报告的不可用原因。条目按所有者报告的来源分组：默认模型在 `catalog`，descriptor 覆盖在 `overrides`，用户新增在 `added`，顺序固定。所有者报告为不可用的模型保留 `unavailable` 状态词，详情说明原因。账号条目在没有目录记录时没有条目；本次读取的 issue 说明它还没有目录。
+
+| 类别 | toggle | edit | remove | inspect |
+| --- | --- | --- | --- | --- |
+| 目录模型 | 是 | 是 | 否 | 是 |
+| 被覆盖的目录模型 | 是 | 是 | 是，`Reset` | 是 |
+| 用户新增模型 | 是 | 是 | 是，`Delete` | 是 |
+| 不可用模型 | 否 | 同其类别 | 同其类别 | 是 |
+
+Provider 记录的 `version` 是每次写入所取的 revision（`expectedVersion`）。写入以 Provider 目录回复，所以客户端在写入后再次读取该领域。edit 打开条目的 `ModelEdit`——`displayName`、`contextWindow`、`maxOutputTokens`、`toolCalling`、`vision`、`reasoning` 与 `modalityCapabilities`，静态 New API 模型再加 `endpoint`——并且只发送草稿改动的字段，与从新读取构建的模板对比，因此把继承的上限原样写回不会变成用户声明。toggle、add 与 remove 在写入前紧邻读取该领域：toggle 发送翻转该模型后的完整启用集合，不可用模型没有 toggle，对它的 `enable` 与 `disable` 在写入前即被拒绝，拒绝信息写明所有者的原因并说明其启用状态保持不变；remove 按条目自己的动词删除用户模型或重置覆盖；add 发送创建模板的 `ModelEntry`，两个上限都未声明。`provider_conflict` 按新读取报告的 version 分类：version 变了说明模型已变更、什么都没写；version 没变则是所有者自己的拒绝，例如重复的模型 id，草稿保留原 revision。
+
+Ctrl+R 读取该领域，并在提供方的 actions 含 `refresh` 时先发送 `provider.refresh`；被拒绝的列目录不写入任何东西，所以已存储的列表保留，所有者的原因作为 note。Tab 用完整描述替代列表显示：id、来源、状态、两个上限、端点与覆盖、工具、视觉、推理及其档位、模态、描述、发布日期、价格、速率限制、内建匹配与能力覆盖字段。
+
+```text
+╭─ Models · Relay ─────────────────────────────────────────────────────────────────────────────╮
+│ >                                                                                           │
+│   catalog                                                                                   │
+│ › flash           enabled                                                                   │
+│   reasoner        enabled   unavailable                                                     │
+│   overrides                                                                                 │
+│   tuned           enabled                                                                   │
+│   added                                                                                     │
+│   house-model     disabled                                                                  │
+│                                                                                             │
+│   tuned                                                                                     │
+│   Context window 128,000 · max output 16,384                                                │
+│   Endpoint openai-compatible · override openai                                              │
+╰──── Enter toggle · Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Tab inspect ─╯
+```
+
+选择器为每个提供方增加一行：`Edit models`，位于该提供方的块内，detail 写明提供方，因此没有可选模型的提供方也能打开。守护进程未声明 `provider.management` 时没有这一行。它在选择器的位置打开该领域，在那里按 Esc 关闭到提示符，而不是回到选择器。
+
+```text
+Select a model
+> Ready / flash              ZDR  ‹ high ›  current
+  Ready / plain              low
+  Edit models                Ready  ready
+  Other / model-x
+  Edit models                Other  other
+  Manual: no models · add a model with provider.models.create
+  Edit models                Manual  manual
+  Subagent models: Agent choice
+Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close
+```
+
+`dimcode models PROVIDER remove MODEL` 不经面板的确认直接移除；`dimcode models PROVIDER inspect MODEL` 打印详情显示的那些行。
+
+### Workflow 领域
+
+Workflow（#816）：`/workflow` 面板，`/workflow:save` 在两种模式下打开它的新建编辑器，以及 `dimcode workflow list|enable NAME|disable NAME|edit NAME|set NAME PATH|add PATH|start NAME [PATH]|history NAME`，经 `workflow.list`、`workflow.save`、`workflow.start` 与 `workflow.status`（[Workflow](plugins/Workflow.md#a3-管理方法)），再加上启用所需的 Settings 客户端方法。每个定义都是一个条目，按所有者报告的分组归类：`user`、`project` 与 `plugin:<包 id>`。用户定义始终启用，其文档就是条目的文档；项目定义默认停用，是仓库中的文件；包定义由安装提供，不提供写入。所有者无法使用的条目标记为无效，详情带上所有者的问题。
+
+项目定义的启用状态是用户 Settings 文档中的 `projectEnabled[cwd][name]` 成员。所有者自己的服务拒绝修改它（`userOnly`），所以 toggle 是一次客户端写入：`settings.read`，在按读取原样复制的文档上设置该成员，再以读取报告的 revision 调 `settings.update`。文档按读取原样复制，因此定义、限额或另一个工作区的映射都不会丢失。`settings_conflict` 走冲突路径：什么都没有写入，重新读取定义，消息说明这一点。
+
+add 用一个文档 `{source, document}` 写入任一来源，`source` 默认 `user`；项目保存创建或替换 `.dimcode/workflows/<name>.yaml`，并且保持停用，消息会说明。edit 只为用户定义提供：列表的 Settings 读取带上文档，保存带上面板读到的 revision，`conflict` 答复意味着编辑期间定义已变：什么都不写，重新读取领域，草稿保留用户的文本。CAS 单位是整个用户文档，所以编辑期间另一个定义或某个启用状态变了，保存同样返回 `conflict`。保存不得重命名定义：所有者以文档的 name 为键，重命名的编辑会保存第二个定义并留下旧的，而本领域没有 remove；写入在调用前被拒绝，草稿保留。项目定义在它所在的地方编辑，与项目 Hook 文档一样，条目的详情给出其路径。
+
+run 为任何来源中已启用且有效的定义提供。声明了参数的定义会用编辑器打开一个 JSON 对象，每个参数一个键：定义给出 `default` 时用默认值，否则用空字符串。读回的文档必须是键都在定义声明之内的字符串对象；其他情况以 `Parameters are a JSON object of strings.` 拒绝，什么都不启动。空字符串是一个给定值，不是省略。没有参数的定义立即启动。启动带上条目的名称、来源与工作区；从面板发起时还带上 `report_to {session_id, branch_id}`，指向会话与转录所显示的那一条线，也就是提交消息所去的那条线，`/tasks` 下次打开时据此找到管理启动的运行。尚无会话的面板（例如 `/new` 之后、第一条消息之前）所启动的运行不向任何地方报告。命令行没有会话，所以 `dimcode workflow start` 不发送 `report_to`，其运行不在 `/tasks` 中。消息是 `Started <name>: <run_id>.`。在面板打开的 run 文档里，保持在打开时取值上的参数不会发送，由所有者应用定义自身的完整默认值；来自文件或 stdin 的文档则原样发送。
+
+inspect 读取 `workflow.status {}`，把保留的运行过滤到该条目的名称与来源。项目定义属于一个工作区，所以它的运行还按本工作区的 `cwd` 过滤：另一个工作区的同名定义是另一个定义。用户或包定义在任何地方都是同一个，所以它的运行来自所有工作区，每行给出该运行的 `cwd`。详情是定义的行、一行 `Recent runs`，以及最多十条运行，最新的在前。本领域没有 remove：所有者没有删除方法，用户定义只能通过编辑 Settings 文档移除，项目定义通过删除其文件移除。
+
+```text
+╭─ Workflow ────────────────────────────────────────────────────────────────────────────────────╮
+│ >                                                                                             │
+│   user                                                                                        │
+│ › review-and-fix   enabled                                                                    │
+│   project                                                                                     │
+│   nightly-check    disabled  invalid                                                          │
+│   plugin:kit                                                                                  │
+│   release-notes    enabled  read-only                                                         │
+│                                                                                               │
+│   Analyze, fix in parallel, summarize                                                         │
+│   Saved in the user workflow source; always enabled.                                          │
+╰─ Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+T run · Tab inspect · Esc close ─────────────╯
+```
+
+`dimcode workflow list` 每个定义打印一行（名称、来源、状态、描述）以及无效定义的问题；`enable` 与 `disable` 作用于该名称的项目定义；`edit` 与 `set` 作用于用户定义，遇到项目名称时给出要编辑的文件并拒绝；`add` 是不经编辑器的新建；`start NAME [PATH]` 从 PATH（`-` 表示 stdin）读取参数，没有 PATH 时不带参数启动；`history NAME` 打印详情的行。裸名称按 `workflow.start` 的规则解析：先找启用的定义，再找任何定义，每一轮都按 project、然后 user、然后 package 的顺序。项目定义默认停用，因此裸名称仍能指向它。在 Settings 不认识的工作区运行命令时，打印所有者的 `definition_source_failed` 消息并以 1 退出。所有者在一个载荷处截断的列表仍打印已有的定义，并说明后续定义被省略。
+### MCP 领域
+
+MCP 不新增种类。它的条目就是生效目录——各服务器按 id 合并，project 最后——按 `user`、`project`、`plugin` 的顺序分组，组内按 id 排列；条目的标签和 id 都是服务器的 id。面板与 `dimcode mcp` 用 toggle、edit、reload、add、remove、run 与 inspect，经 `mcp.catalog`、`mcp.configuration`、`mcp.update`、`mcp.save`、`mcp.remove`、`mcp.set_enabled`、`mcp.test` 与 `mcp.inspect`（[MCP 管理](appserver/mcp-management.md)）。
+
+toggle 以 `mcp.catalog` 紧接写入前报告的 revision 写该来源的启用状态，所以比较并交换只覆盖这段窗口；它只作用于一个 id，不会覆盖来源中别处的改动。用户条目的启用状态是本地记录；项目条目一开始是停用的，只有 toggle 或 `dimcode mcp enable|disable` 会启用它。edit 先读 `mcp.configuration` 取得条目的 revision 与文档，再写 `mcp.update`，绝不用 `mcp.save`：save 接收完整配置，而读取会隐藏机密，往返一次就会把它们抹掉。
+
+编辑文档就是 patch：省略的字段保留已存值，给出的值替换它，`env` 或 `headers` 只改动它点名的键。种子文档给出命令与工作目录、空的 `env` 与 `headers`，以及已配置 OAuth 的已报告字段；它从不给出已存参数、环境变量值、请求头值、Bearer 令牌或 URL，因为这些要么被隐藏，要么整体替换。文档不带 transport，因为已存条目的 transport 是固定的。stdio 的 patch 点名命令、工作目录与要改动的环境变量键：
+
+```json
+{"command": "npx", "cwd": "/work", "env": {"TOKEN": "value"}}
+```
+
+远端条目的 patch 对 endpoint 与请求头做同样的事。两者都不在种子里，所以想改它们的 patch 必须把值给出；省略 `url` 或某个 `headers` 键就保留已存值。
+
+```json
+{"url": "https://mcp.example.com/mcp", "headers": {"X-Key": "value"}}
+```
+
+add 用目录的来源 revision——`userRevision`，来源为 `project` 时用 `projectRevision`——写 `mcp.save`，并拒绝目录中已列出的 id，因为一次 save 会替换该条目。新建文档就是一个条目，带它的来源与 `mcp.save` 接收的定义：
+
+```json
+{
+  "id": "example",
+  "source": "user",
+  "configuration": {
+    "type": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-everything"],
+    "env": {},
+    "enabled": false
+  }
+}
+```
+
+两种远程形态把 `configuration` 换成 `{"type": "http", "url": "https://mcp.example.com/mcp", "headers": {}, "enabled": false}`，或把 `"type"` 换成 `"sse"` 的同样内容；静态凭据再加 `"auth": {"type": "bearer", "token": "…"}`，OAuth 则加 `"oauth": {"clientId": "…", "callbackPort": 1456, "scopes": "…", "authServerMetadataUrl": "…"}`；两者互斥，OAuth 还与 `Authorization` 请求头互斥。编辑器没有 transport 选择器，所以文档展示 stdio，并说明如何切换。
+
+run 就是 `mcp.test`：它执行或联系已存条目一次，不写入领域所列的任何内容，所以答复是详情——临时连接发现的工具，标题为 `Tools of <id>`——且不再重新读取领域。inspect 就是 `mcp.inspect`：生效条目与它的会话连接，标题为 `MCP entry <id>`，从不写回。插件条目的配置没有 revision，所以不提供写动作，状态带 `read-only`，详情说明它属于某个插件；test 与 inspect 仍然可用。登录、退出、回调与断开连接是状态机或只作用于连接的动作，不是种类，所以它们仍是行命令与动词。
+
+```text
+╭─ MCP ────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│   user                                                                                                               │
+│ › docs      enabled                                                                                                  │
+│     user · stdio · signed in                                                                                         │
+│     Executable: npx                                                                                                  │
+│     Stored arguments (hidden): 2                                                                                     │
+│     Working directory: —                                                                                             │
+│     Environment names: DOCS_TOKEN                                                                                    │
+│   project                                                                                                            │
+│   metrics   disabled                                                                                                 │
+│   plugin                                                                                                             │
+│   notes     enabled  read-only                                                                                       │
+╰───── Enter toggle · Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Ctrl+T test · Tab inspect · Esc close ─╯
+```
+
 ### 命令规则领域
 
 命令规则（#819）：Permissions 面板的 Command rules 行，以及 `dimcode permissions list|add PATH|remove RULE`，管理用户的命令规则（[权限控制](#权限控制)、[命令规则](appserver/permission-command-rules.md)）。所有者用 `permission.rules` 报告规则列表及其 Settings revision，并用 `permission.set_rules` 按该 revision 替换整个列表；revision 过期即为 `permission_rules_conflict`。
@@ -628,6 +784,27 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 | `dimcode scheduled run ID` | 经 `schedule.run_now` 立即运行单个任务，并报告 owner 返回的内容，或它跳过这次运行的原因。 |
 | `dimcode scheduled history ID` | 经 `schedule.history` 打印单个任务最近的运行，最新的在前，并带上每次运行的状态与时间。 |
 | `/scheduled`、`/schedule` | 打开 Scheduler 面板（[管理界面](#管理界面)）：每个任务一个条目，带计划、下一次窗口与上次结果，以及 toggle、edit、add、remove、run 与 inspect 种类；Scheduler 中 inspect 的动词是 history。任务属于主机，不属于会话或工作区；只有新建任务的默认 `cwd` 来自会话。 |
+| `dimcode workflow list` | 经 `workflow.list` 列出定义（[Workflow](plugins/Workflow.md#a3-管理方法)）：每个定义的名称、来源、状态与描述，然后是无效定义的问题。 |
+| `dimcode workflow enable\|disable NAME` | 经 `settings.read` 与 `settings.update` 启用或停用该名称的项目定义，然后再次报告定义。 |
+| `dimcode workflow edit NAME` | 用 `$VISUAL`、`$EDITOR` 或平台默认编辑器打开用户定义的文档，并以用户文档读取时的 revision 经 `workflow.save` 写回；给出项目名称时改为给出要编辑的文件。 |
+| `dimcode workflow set NAME PATH` | 从 `PATH`（`-` 表示 stdin）读取用户定义并写入，用写入前紧邻读到的 revision；内容没有变化时不写入。 |
+| `dimcode workflow add PATH` | 从 `PATH`（`-` 表示 stdin）读取定义，经 `workflow.save` 创建或替换：文档给出 `source`（默认 `user`）与 `document`。 |
+| `dimcode workflow start NAME [PATH]` | 经 `workflow.start` 启动定义，参数取自 `PATH`（`-` 表示 stdin），没有 PATH 时不带参数；报告 `Started NAME: RUN_ID`，不带 `report_to`。 |
+| `dimcode workflow history NAME` | 经 `workflow.status` 打印定义的行与最近的运行，并按 `workflow.start` 的规则解析名称。 |
+| `/workflow` | 打开会话所在工作区的 Workflow 面板（[管理界面](#管理界面)）：每个定义一个条目，带来源、状态、参数与问题，以及 toggle、edit、add、run 与 inspect 种类。 |
+| `/workflow:save` | 在新建编辑器中打开 Workflow 面板。 |
+| `dimcode mcp list` | 经 `mcp.catalog` 列出生效目录（[MCP 领域](#mcp-领域)）：每个条目的 id、来源、transport、启用状态与授权，然后是各来源 application 的错误。 |
+| `dimcode mcp add PATH` | 以面板的新建文档（`-` 表示 stdin）经 `mcp.save` 创建条目，带 `mcp.catalog` 报告的来源 revision；目录已列出的 id 会被拒绝。 |
+| `dimcode mcp edit ID` | 用 `$VISUAL`、`$EDITOR` 或平台默认编辑器打开条目的 `mcp.update` patch，并以 `mcp.configuration` 报告的 revision 写回；内容没有变化时不写入。 |
+| `dimcode mcp set ID PATH` | 从 `PATH`（`-` 表示 stdin）读取 patch 并写入，用写入前紧邻读到的 revision。 |
+| `dimcode mcp remove ID` | 不经确认，经 `mcp.remove` 以来源 revision 删除单个条目：命令行上的 id 就是意图。 |
+| `dimcode mcp test ID` | 经 `mcp.test` 运行已存条目一次，并打印临时连接发现的工具；不保存任何内容。 |
+| `dimcode mcp inspect ID` | 经 `mcp.inspect` 打印生效配置与会话连接，不联系服务器。 |
+| `dimcode mcp disconnect ID` | 经 `mcp.disconnect` 关闭条目的活动连接；它不写配置，条目下次使用时重新连接。 |
+| `dimcode mcp login\|logout\|enable\|disable ID` | 行为保持不变：浏览器或设备签到、退出，以及两个 `/mcp` 客户端共用的启用/停用。 |
+| `/mcp` | 打开会话所在工作区的 MCP 面板（[管理界面](#管理界面)）：每个服务器一个条目，按 `user`、`project`、`plugin` 分组，带 toggle、edit、add、remove、test 与 inspect 种类。 |
+| `/mcp list\|login\|callback\|logout\|disconnect\|enable\|disable` | 行命令，行为不变：`list` 打印目录与会话的服务器状态，`disconnect` 关闭一个条目的活动连接，其余用于签到、完成回调、退出或切换启用状态。 |
+
 | `dimcode permissions list` | 经 `permission.rules` 列出用户的命令规则：每条规则的决定、匹配方式与命令，然后是列说明以及 deny 的含义。 |
 | `dimcode permissions add PATH` | 从 `PATH`（`-` 表示 stdin）添加一条规则，经 `permission.rules` 与 `permission.set_rules` 写入：规则已存在时不写入；冲突时重新读取并重试，最多三次。 |
 | `dimcode permissions remove RULE` | 删除 `RULE` 指定的规则，`RULE` 是作为单个加引号参数的整条 `'DECISION MATCH COMMAND'`；经刚读到的 revision 调用 `permission.rules` 与 `permission.set_rules`；规则已不存在或写入被并发修改时什么都不写，退出码 1。 |
@@ -699,7 +876,7 @@ Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
 
 ### 会话标题
 
-手动标题是 Session 自己的状态：`session.list` 与 `session.summaries` 以 `manual` 来源报告它，
+手动标题是 Session 自己的状态：`session.summaries` 以 `manual` 来源报告它，
 之后的自动生成永不替换它（[标题元数据](appserver/session-title-metadata.md)、
 [SessionTitle](plugins/SessionTitle.md)）。`session.rename {sessionId, title}` 设置它，
 `title: null` 清除它。标题文本不属于任何线，也不产生 Timeline 事件，所以重命名不增添模型读到的内容。
@@ -716,8 +893,13 @@ TITLE 视为缺失，也按同样方式拒绝。
 输入；对空的 `/rename` 回车会得到 `needs <title>` 提示且不发送任何内容，`--clear` 是唯一
 无需标题即可清除的形式。两种形式都是客户端处理的命令：文本从不入队、从不提交，模型回合进行
 中也是如此。`/resume` 列表每次打开都读取 `session.catalog`，在没有该目录的守护进程上退回
-`session.summaries`，因此显示新标题；页头显示的是首条消息的主题，不受影响。空闲的行式客户端
-读取同样的两种形式，对空的 `/rename` 打印 `Use /rename TITLE or /rename --clear`。
+`session.summaries`，因此显示新标题。窗口标题把 Session 存储的标题显示为 `DIM | <标题>`：
+它由 `session.attach` 的回复初始化，并由 `source` 为 `SessionStore`、`kind` 为 `title` 的
+`session.notice` 记录保持更新，因此自动生成的标题和来自任何客户端的重命名都会到达它。
+只有当通知的 `titleRevision` 高于客户端持有的值时才会采用。在 Session 有标题之前，窗口
+标题显示首条消息的主题；占位符 `New session` 在窗口标题和 `/resume` 行中都视为没有标题。
+`/new` 把窗口标题恢复为 `DIM`。空闲的行式客户端读取同样的两种形式，对空的 `/rename` 打印
+`Use /rename TITLE or /rename --clear`。
 
 ### 会话删除与清理
 
@@ -838,6 +1020,22 @@ current directory; ~ is literal; use an absolute path for another base`。调用
 
 其他目标命令依赖各自的功能。F6 不实现全屏界面、常驻 RPC/ACP 服务、验证/修复循环、Provider
 编辑器或 Session 删除/分叉。`dimcode export` 是 [Timeline 导出](appserver/timeline-export.md)（ADR 005 D3）：每个最终模型请求都是其中的一行 `model/call`；功能清单中请求快照的过滤项尚未实现。
+
+## 更新对话框
+
+既有更新对话框在 fullscreen 和 scrollback 中使用相同的动作，并适应可用列数和行数。
+较长的版本、命令和错误文字换行，必要时用 Up/Down 滚动。标题和动作行保持可见。
+所有动作无法放在同一行时，只显示当前聚焦的动作及其序号；Left/Right 和 Tab/BackTab 仍循环
+切换所有动作，Enter 确认，Esc 关闭。宽屏空间足够时保留既有确认布局。
+
+```text
++- Update available --------+
+| Version 0.12.0-alpha.124  |
+| is available (you have   |
+| > Later 3/3              |
+| Left/Right Tab Enter Esc |
++----------- Up/Down 1-2/7-+
+```
 
 ## 终端交互
 
@@ -1335,6 +1533,9 @@ Session 地址及 `(branchId,requestId,callId)`。
 Confirm 上 Enter 提交。只有 allowCustom 为 true 时显示自定义输入，并与所选标签分开提交。
 自定义行输入非空文字即勾选（单选时替换已选标签），清空则取消；编辑中 Esc 保留文字退出编辑，
 Enter 保留并进入下一题。编辑之外 Esc 拒答整次调用。显示脱敏不改变提交给 owner 的原始标签，composer 草稿保持。
+
+问题标签页无法放在同一行时，只显示当前标签及其位置，包括 Confirm 页。
+Tab/Shift+Tab 和 Left/Right 保留既有切换行为；标签文字不能超出提示框边界。
 
 挂起的问题不阻塞命令。其自定义回答未进入编辑时，`/`、Ctrl+O 和 Ctrl+P 在问题之上打开命令面板，
 画在该模式画命令面板的位置，问题保留标签页、选择和已输入的回答。命令面板开启命令输入状态，

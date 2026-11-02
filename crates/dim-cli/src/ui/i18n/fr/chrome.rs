@@ -334,7 +334,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "configure tool approvals" => "configurer les approbations",
         "choose ask or full access" => "choisir demander ou accès complet",
         "open settings" => "ouvrir les paramètres",
-        "suspend to the shell" => "suspendre vers le shell",
         "exit" => "quitter",
 
         // composer/palette.rs
@@ -414,7 +413,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "No matching models." => "Aucun résultat.",
         "current" => "actuel",
         "Edit models" => "Modifier les modèles",
-        "Editing models is not available yet" => "Édition des modèles pas encore disponible",
         "{provider}: 1 model unavailable · dimcode models {id}" => {
             "{provider}: 1 modèle indisponible · dimcode models {id}"
         }

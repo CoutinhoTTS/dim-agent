@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use super::Groups;
 use crate::client::Client;
 use crate::model::session::{
-    ActionKind, EntryState, ManagementAction, ManagementEntry, ManagementView,
+    ActionKind, EntryState, ManagementAction, ManagementEntry, ManagementView, RemoveVerb,
 };
 use crate::ui::i18n::{t, tf};
 
@@ -219,7 +219,9 @@ pub(super) fn view(catalog: &Catalog, available: &[ActionKind]) -> ManagementVie
                     .filter(|kind| available.contains(kind))
                     .copied()
                     .collect(),
+                remove_verb: RemoveVerb::Remove,
                 document: None,
+                run: None,
             },
         );
     }
@@ -228,6 +230,7 @@ pub(super) fn view(catalog: &Catalog, available: &[ActionKind]) -> ManagementVie
         issues.push(t("The user document turns every hook off (disableAllHooks).").to_owned());
     }
     ManagementView {
+        title: None,
         revision: Some(catalog.user_revision.clone()),
         document: catalog.user_document.clone(),
         create: None,

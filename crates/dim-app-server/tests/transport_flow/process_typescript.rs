@@ -1127,7 +1127,7 @@ async fn node_workflow_files_enforces_project_and_original_row_package_authority
                 && failure.error.contains("canonical authorized host root")),
         "{report:?}"
     );
-    assert_ok(&client.rpc("session.list", json!({})).await);
+    assert_ok(&client.rpc("session.summaries", json!({})).await);
     assert_eq!(
         std::fs::read(unlisted.join("workflows/secret.yaml")).unwrap(),
         b"unlisted"

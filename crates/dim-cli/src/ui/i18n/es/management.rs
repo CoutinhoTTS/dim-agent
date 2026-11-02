@@ -8,6 +8,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "skills" => "Skills",
         "hooks" => "hooks",
         "scheduled jobs" => "tareas programadas",
+        "models" => "modelos",
+        "workflow definitions" => "definiciones de flujo de trabajo",
         "command rules" => "Reglas de comandos",
         "enabled" => "activado",
         "shadowed by {name}" => "ocultado por {name}",
@@ -45,6 +47,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "↑↓ scroll · Esc back" => "↑↓ desplazar · Esc volver",
         "Added." => "Añadido.",
         "Removed {name}." => "{name} eliminado.",
+        "unavailable" => "no disponible",
+        "Reset {name}? Enter confirm · Esc cancel" => {
+            "¿Restablecer {name}? Enter confirmar · Esc cancelar"
+        }
+        "Reset {name} to its catalog entry." => "{name} restablecido a su entrada del catálogo.",
         "Ran {name}." => "{name} ejecutado.",
         "The user document changed since it was read; nothing was written." => {
             "El documento del usuario cambió desde que se leyó; no se escribió nada."
@@ -79,6 +86,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The Scheduler has no area document." => "El Programador no tiene documento de área.",
         "No scheduled job has that id." => "Ninguna tarea programada tiene ese id.",
+        "A scheduled job's run takes no input document." => {
+            "La ejecución de una tarea programada no toma ningún documento de entrada."
+        }
+        "An MCP server's test takes no input document." => {
+            "La prueba de un servidor MCP no toma un documento de entrada."
+        }
         "This daemon cannot manage {area}." => "No se puede gestionar {area}.",
         "This daemon lists {area} but cannot toggle them." => {
             "El daemon lista {area}, pero no permite alternar."
@@ -110,6 +123,211 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "La configuración de hooks de este espacio de trabajo cambió desde que se leyó; no se escribió nada."
         }
+        "Models" => "Modelos",
+        "catalog" => "catálogo",
+        "overrides" => "anulaciones",
+        "added" => "añadidos",
+        "Models · {name}" => "Modelos · {name}",
+        "undeclared" => "sin declarar",
+        "Context window {window} · max output {output}" => {
+            "Ventana de contexto {window} · salida máx. {output}"
+        }
+        "Endpoint {endpoint}" => "Punto de conexión {endpoint}",
+        "Endpoint {endpoint} · override {value}" => {
+            "Punto de conexión {endpoint} · anulación {value}"
+        }
+        "The provider reports it unavailable." => "El proveedor lo informa como no disponible.",
+        "Limits undeclared; edit the model to declare them." => {
+            "Límites sin declarar; edita el modelo para declararlos."
+        }
+        "Sign in to the account to use its models." => {
+            "Inicia sesión en la cuenta para usar sus modelos."
+        }
+        "The signed-in account changed; reload to list its models." => {
+            "La cuenta iniciada cambió; recarga para listar sus modelos."
+        }
+        "The provider has no catalog yet." => "Este proveedor aún no tiene catálogo.",
+        "The provider listed no models." => "El proveedor no listó ningún modelo.",
+        "Listed {count} models." => "Se listaron {count} modelos.",
+        "Refreshed the models." => "Modelos actualizados.",
+        "Could not list models: {error}. Showing the stored list." => {
+            "No se pudieron listar los modelos: {error}. Se muestra la lista guardada."
+        }
+        "The signed-in account changed; the refresh cleared preferences, overrides and disables." => {
+            "La cuenta iniciada cambió; la recarga borró preferencias, anulaciones y desactivaciones."
+        }
+        "The models changed since they were read; nothing was removed." => {
+            "Los modelos cambiaron desde su lectura; no se eliminó nada."
+        }
+        "The models changed since they were read; nothing was written." => {
+            "Los modelos cambiaron desde su lectura; no se escribió nada."
+        }
+        "No provider has that id." => "Ningún proveedor tiene ese id.",
+        "{name} is unavailable ({reason}); its enablement is kept as it is." => {
+            "{name} no está disponible ({reason}); su activación se mantiene como está."
+        }
+        "No model has that id." => "Ningún modelo tiene ese id.",
+        "This model cannot be removed." => "Este modelo no se puede eliminar.",
+        "A Provider's models have no area document." => {
+            "Los modelos de un proveedor no tienen documento de área."
+        }
+        "Models have no run operation." => "Los modelos no tienen operación de ejecución.",
+        "The document is not an object; nothing was written." => {
+            "El documento no es un objeto; no se escribió nada."
+        }
+        "The document changes no editable field; nothing was written." => {
+            "El documento no cambia ningún campo editable; no se escribió nada."
+        }
+        "The model document names no model." => "El documento del modelo no nombra ningún modelo.",
+        "The provider has no model catalog to write." => {
+            "Este proveedor no tiene catálogo de modelos que escribir."
+        }
+        "ID {id}" => "ID {id}",
+        "Source {source}" => "Origen {source}",
+        "Status {status}" => "Estado {status}",
+        "Tools {value}" => "Herramientas {value}",
+        "Vision {value}" => "Visión {value}",
+        "Reasoning {value}" => "Razonamiento {value}",
+        "Modalities {list}" => "Modalidades {list}",
+        "Description {text}" => "Descripción {text}",
+        "Release date {date}" => "Fecha de lanzamiento {date}",
+        "Pricing {value}" => "Precio {value}",
+        "Rate limit {value}" => "Límite de tasa {value}",
+        "Matched provider {id}" => "Proveedor coincidente {id}",
+        "Matched model {id}" => "Modelo coincidente {id}",
+        "Match strategy {strategy}" => "Estrategia de coincidencia {strategy}",
+        "Capability overrides {fields}" => "Anulaciones de capacidades {fields}",
+        "yes" => "sí",
+        "no" => "no",
+        "not supported" => "no compatible",
+        "supported" => "compatible",
+
+        "Workflow" => "Flujo de trabajo",
+        "Saved {name}. It stays disabled until you enable it." => {
+            "{name} guardado. Permanece desactivado hasta que lo actives."
+        }
+        "The definitions changed since they were read; nothing was written." => {
+            "Las definiciones cambiaron desde que se leyeron; no se escribió nada."
+        }
+        "A definition's name is its key; add it to save it under another name." => {
+            "El nombre de una definición es su clave; añádela para guardarla con otro nombre."
+        }
+        "No project definition is named {name}." => {
+            "Ninguna definición de proyecto se llama {name}."
+        }
+        "No workflow definition is named {name}." => {
+            "Ninguna definición de flujo de trabajo se llama {name}."
+        }
+        "Saved in the user workflow source; always enabled." => {
+            "Guardado en la fuente de flujos de trabajo del usuario; siempre activado."
+        }
+        "Starts only after you enable it." => "Solo se inicia después de que lo actives.",
+        "Defined by package {package}." => "Definido por el paquete {package}.",
+        "{name} — {description} (required)" => "{name} — {description} (obligatorio)",
+        "{name} — {description}" => "{name} — {description}",
+        "{name} — required" => "{name} — obligatorio",
+        "{name} — default: {default}" => "{name} — predeterminado: {default}",
+        "and {count} more" => "y {count} más",
+        "Recent runs" => "Ejecuciones recientes",
+        "A workflow definition is saved as an object with a source and a document." => {
+            "Una definición de flujo de trabajo se guarda como un objeto con una fuente y un documento."
+        }
+        "A definition is saved to the user source or the project source." => {
+            "Una definición se guarda en la fuente del usuario o en la del proyecto."
+        }
+        "Started {name}: {run_id}." => "{name} iniciado: {run_id}.",
+        "Parameters are a JSON object of strings." => {
+            "Los parámetros son un objeto JSON de cadenas."
+        }
+        "The list reached its size limit; later definitions are not shown." => {
+            "La lista alcanzó su límite de tamaño; las definiciones posteriores no se muestran."
+        }
+        "No workflow definition named {name} is in the list, which reached its size limit." => {
+            "Ninguna definición de workflow llamada {name} está en la lista, que alcanzó su límite de tamaño."
+        }
+        "MCP" => "MCP",
+        "MCP servers" => "servidores MCP",
+        "Ctrl+T test" => "Ctrl+T probar",
+        "sign-in required" => "inicio de sesión requerido",
+        "signed in" => "sesión iniciada",
+        "sign-in expired" => "sesión caducada",
+        "missing scopes: {scopes}" => "ámbitos faltantes: {scopes}",
+        "Executable: {command}" => "Ejecutable: {command}",
+        "Stored arguments (hidden): {count}" => "Argumentos guardados (ocultos): {count}",
+        "Working directory: {cwd}" => "Directorio de trabajo: {cwd}",
+        "Environment names: {names}" => "Nombres de entorno: {names}",
+        "Endpoint: {endpoint}" => "Extremo: {endpoint}",
+        "Header names: {names}" => "Nombres de encabezado: {names}",
+        "Bearer token: {state}" => "Token Bearer: {state}",
+        "OAuth: configured (client ID {id})" => "OAuth: configurado (ID de cliente {id})",
+        "OAuth: configured" => "OAuth: configurado",
+        "OAuth: not configured" => "OAuth: no configurado",
+        "Metadata URL: {state}" => "URL de metadatos: {state}",
+        "configured" => "configurado",
+        "Owned by a plugin; change it through Plugins." => {
+            "Propiedad de un plugin; cámbielo desde Plugins."
+        }
+        "MCP entry {id}" => "Entrada MCP {id}",
+        "Connection {number} · {status}" => "Conexión {number} · {status}",
+        "Tools have not been discovered." => "Los recursos aún no se han descubierto.",
+        "No live session connections." => "No hay conexiones de sesión activas.",
+        "Tools of {id}" => "Recursos de {id}",
+        "The server exposes no tools." => "El servidor no expone recursos.",
+        "The add document needs an id." => "El documento de alta necesita un id.",
+        "The add document needs a source of user or project." => {
+            "La fuente del documento de alta debe ser user o project."
+        }
+        "The add document needs a configuration object." => {
+            "El documento de alta necesita un objeto configuration."
+        }
+        "{id} is already in mcp list; remove it first or choose another id." => {
+            "{id} ya está en mcp list; elimínelo primero o elija otro id."
+        }
+        "{id} is already in mcp list; choose another id, or change it through its plugin." => {
+            "{id} ya está en mcp list; elija otro id o cámbielo a través de su plugin."
+        }
+        "This entry's settings changed since they were read; nothing was written." => {
+            "La configuración de esta entrada cambió desde que se leyó; no se escribió nada."
+        }
+        "The MCP entry changed since it was read; nothing was written." => {
+            "La entrada MCP cambió desde que se leyó; no se escribió nada."
+        }
+        "The MCP entries changed since they were read; nothing was written." => {
+            "Las entradas MCP cambiaron desde que se leyeron; no se escribió nada."
+        }
+        "The MCP entry changed since it was read; nothing was removed." => {
+            "La entrada MCP cambió desde que se leyó; no se eliminó nada."
+        }
+        "MCP's documents belong to one entry; this save names none." => {
+            "Los documentos MCP pertenecen a una entrada; este guardado no nombra ninguna."
+        }
+        "No MCP server has that id." => "Ningún servidor MCP tiene ese id.",
+        "This workspace has no project MCP source." => {
+            "Este espacio de trabajo no tiene una fuente MCP de proyecto."
+        }
+        "Enabled {id} ({source})." => "{id} ({source}) activado.",
+        "Disabled {id} ({source})." => "{id} ({source}) desactivado.",
+        "It runs this workspace's .mcp.json entry, including later edits to it, in active and new sessions." => {
+            "Ejecuta la entrada .mcp.json de este espacio de trabajo, incluidas sus ediciones posteriores, en sesiones activas y nuevas."
+        }
+        "{id} is not in mcp list; withdrew any stored enablement of it in this workspace." => {
+            "{id} no está en mcp list; se retiró cualquier activación guardada en este espacio de trabajo."
+        }
+        "The MCP catalog could not be read ({error}); withdrew this workspace's enablement of {id}. A user entry with this ID is unchanged." => {
+            "No se pudo leer el catálogo MCP ({error}); se retiró la activación de {id} en este espacio de trabajo. Una entrada de usuario con este ID no cambia."
+        }
+        "MCP configuration: {error}" => "Configuración MCP: {error}",
+        "The server rejected the stored credential; sign in again with mcp login." => {
+            "El servidor rechazó las credenciales guardadas; vuelve a iniciar sesión con mcp login."
+        }
+        "The server requires additional scopes: {scopes}." => {
+            "El servidor requiere ámbitos adicionales: {scopes}."
+        }
+        "The server requires authorization; run mcp login ID." => {
+            "El servidor requiere autorización; ejecuta mcp login ID."
+        }
+        "The probe ended: {status}." => "La sonda terminó: {status}.",
+
         "Command rules" => "Reglas de comandos",
         "user" => "usuario",
         "Matches only this command." => "Solo coincide con este comando.",

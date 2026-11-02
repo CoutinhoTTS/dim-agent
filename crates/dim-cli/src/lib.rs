@@ -837,23 +837,34 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             .await
         }
         Action::McpLogout(id) => mcp_command::sign_out(&mut client, &options, id).await,
+        Action::McpDisconnect(id) => mcp_command::disconnect(&mut client, &options, id).await,
         Action::McpEnable { id, enabled } => {
-            let (rows, notes) =
-                mcp_command::set_enabled(&mut client, &options, id, *enabled).await?;
-            mcp_command::print_report(rows, notes);
+            let state =
+                management::mcp::set_enabled(&mut client, &options.cwd, id, *enabled).await?;
+            mcp_command::print_report(vec![state.sentence()], state.notes);
             Ok(0)
         }
         Action::Management(request) => {
             management_command::run(&mut client, &options, request).await
         }
         Action::ManagementEdit { area, id } => {
-            management_command::edit(&mut client, &options, *area, id.clone()).await
+            management_command::edit(&mut client, &options, area.clone(), id.clone()).await
         }
         Action::ManagementSet { area, id, path } => {
-            management_command::set(&mut client, &options, *area, id.clone(), path).await
+            management_command::set(&mut client, &options, area.clone(), id.clone(), path).await
         }
         Action::ManagementAdd { area, path } => {
-            management_command::add(&mut client, &options, *area, path).await
+            management_command::add(&mut client, &options, area.clone(), path).await
+        }
+        Action::ManagementStart { area, id, path } => {
+            management_command::start(
+                &mut client,
+                &options,
+                area.clone(),
+                id.clone(),
+                path.as_deref(),
+            )
+            .await
         }
         Action::Recording { enabled } => recording::run(&mut client, &options, *enabled).await,
         Action::Chat | Action::Tui | Action::Exec => {

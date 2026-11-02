@@ -33,6 +33,16 @@ Commands:\n\
   models PROVIDER [--refresh | --clear-preferences MODEL\n\
                   | --set-limits MODEL --context-window N --max-output-tokens N\n\
                   | --set-missing-limits --context-window N --max-output-tokens N]\n\
+                                   List a Provider's models; --refresh reloads\n\
+                                   the area's list\n\
+  models PROVIDER enable|disable|remove|inspect MODEL\n\
+                                   Enable or disable one model, remove it,\n\
+                                   or print its descriptor\n\
+  models PROVIDER edit MODEL       Edit the model's fields in the editor\n\
+  models PROVIDER set MODEL PATH   Write the model's fields from PATH,\n\
+                                   or from stdin for -\n\
+  models PROVIDER add PATH         Create a model from PATH, or from stdin\n\
+                                   for -\n\
   mcp list                         List MCP servers and their enablement\n\
   mcp login ID [--no-browser] [--client-secret]\n\
                                    Sign in; secrets use hidden terminal input\n\
@@ -40,6 +50,14 @@ Commands:\n\
   mcp enable ID                    Enable an MCP server shown by mcp list\n\
   mcp disable ID                   Disable it; an unlisted ID withdraws only\n\
                                    this workspace's stored enablement\n\
+  mcp add PATH                     Create an entry from PATH, or from stdin for -\n\
+  mcp edit ID                      Edit an entry's patch in the editor\n\
+  mcp set ID PATH                  Write an entry's patch from PATH,\n\
+                                   or from stdin for -\n\
+  mcp remove ID                    Delete an entry\n\
+  mcp test ID                      Probe a stored entry and list its tools\n\
+  mcp inspect ID                   Show an entry's effective configuration\n\
+  mcp disconnect ID                Close an entry's live connections\n\
   skills list                      List Skills, their sources and states\n\
   skills enable|disable ID         Turn one Skill on or off\n\
   skills reload                    Rescan this workspace's Skills\n\
@@ -63,6 +81,16 @@ Commands:\n\
   permissions add PATH             Add one rule from PATH, or from stdin for -\n\
   permissions remove RULE          Remove a rule, given as one quoted\n\
                                    'DECISION MATCH COMMAND'\n\
+  workflow list                    List workflow definitions, their sources\n\
+                                   and states\n\
+  workflow enable|disable NAME     Turn a project definition on or off\n\
+  workflow edit NAME               Edit a user definition in the editor\n\
+  workflow set NAME PATH           Write a user definition from PATH,\n\
+                                   or from stdin for -\n\
+  workflow add PATH                Create a definition from PATH,\n\
+                                   or from stdin for -\n\
+  workflow start NAME [PATH]       Start a definition with parameters from PATH\n\
+  workflow history NAME            List a definition's recent runs\n\
   recording [on|off]               Record model requests to the home's\n\
                                    model-log/recordings.jsonl; prompts, code\n\
                                    and tool output are written there\n\
@@ -196,6 +224,7 @@ pub enum Action {
         id: String,
         enabled: bool,
     },
+    McpDisconnect(String),
     /// `<area> ...`: one request to a management area's owner.
     Management(crate::model::session::ManagementRequest),
     /// `<area> edit [ID]`: the area's document in the external editor, or one
@@ -215,6 +244,13 @@ pub enum Action {
     ManagementAdd {
         area: crate::model::session::Area,
         path: std::path::PathBuf,
+    },
+    /// `<area> start ID [PATH]`: run one entry, with its input from a file or
+    /// from stdin for `-`.
+    ManagementStart {
+        area: crate::model::session::Area,
+        id: String,
+        path: Option<std::path::PathBuf>,
     },
     /// `recording [on|off]`: the daemon's model request record.
     Recording {
@@ -639,6 +675,7 @@ impl Options {
                     };
                 }
                 "mcp" if matches!(options.action, Action::Chat) => {
+                    use crate::model::session::{Area, ManagementAction, ManagementRequest};
                     options.action = match value(&mut args)?.as_str() {
                         "list" => Action::McpList,
                         "login" => {
@@ -658,12 +695,46 @@ impl Options {
                             Action::McpLogin(id)
                         }
                         "logout" => Action::McpLogout(value(&mut args)?),
+                        "disconnect" => Action::McpDisconnect(value(&mut args)?),
                         command @ ("enable" | "disable") => Action::McpEnable {
                             id: value(&mut args)?,
                             enabled: command == "enable",
                         },
+                        "add" => Action::ManagementAdd {
+                            area: Area::Mcp,
+                            path: value(&mut args)?.into(),
+                        },
+                        "edit" => Action::ManagementEdit {
+                            area: Area::Mcp,
+                            id: Some(value(&mut args)?),
+                        },
+                        "set" => Action::ManagementSet {
+                            area: Area::Mcp,
+                            id: Some(value(&mut args)?),
+                            path: value(&mut args)?.into(),
+                        },
+                        "remove" => Action::Management(ManagementRequest {
+                            area: Area::Mcp,
+                            action: ManagementAction::Remove {
+                                id: value(&mut args)?,
+                            },
+                        }),
+                        "test" => Action::Management(ManagementRequest {
+                            area: Area::Mcp,
+                            action: ManagementAction::Run {
+                                id: value(&mut args)?,
+                                document: None,
+                                seed: None,
+                            },
+                        }),
+                        "inspect" => Action::Management(ManagementRequest {
+                            area: Area::Mcp,
+                            action: ManagementAction::Inspect {
+                                id: value(&mut args)?,
+                            },
+                        }),
                         _ => {
-                            return Err("Use mcp list, mcp login ID, mcp logout ID, mcp enable ID or mcp disable ID".into());
+                            return Err("Use mcp list, mcp add PATH, mcp edit ID, mcp set ID PATH, mcp remove ID, mcp test ID, mcp inspect ID, mcp disconnect ID, mcp login ID, mcp logout ID, mcp enable ID or mcp disable ID".into());
                         }
                     };
                 }
@@ -753,7 +824,11 @@ impl Options {
                             let id = value(&mut args)?;
                             let action = match command {
                                 "remove" => ManagementAction::Remove { id },
-                                "run" => ManagementAction::Run { id },
+                                "run" => ManagementAction::Run {
+                                    id,
+                                    document: None,
+                                    seed: None,
+                                },
                                 _ => ManagementAction::Inspect { id },
                             };
                             Action::Management(ManagementRequest {
@@ -763,6 +838,53 @@ impl Options {
                         }
                         _ => {
                             return Err("Use scheduled list, enable ID, disable ID, edit ID, set ID PATH, add PATH, remove ID, run ID or history ID".into());
+                        }
+                    };
+                }
+                "workflow" if matches!(options.action, Action::Chat) => {
+                    use crate::model::session::{Area, ManagementAction, ManagementRequest};
+                    let verb = value(&mut args)?;
+                    options.action = match verb.as_str() {
+                        "list" => Action::Management(ManagementRequest {
+                            area: Area::Workflow,
+                            action: ManagementAction::List,
+                        }),
+                        command @ ("enable" | "disable") => Action::Management(ManagementRequest {
+                            area: Area::Workflow,
+                            action: ManagementAction::Toggle {
+                                id: value(&mut args)?,
+                                enabled: command == "enable",
+                            },
+                        }),
+                        "edit" => Action::ManagementEdit {
+                            area: Area::Workflow,
+                            id: Some(value(&mut args)?),
+                        },
+                        "set" => Action::ManagementSet {
+                            area: Area::Workflow,
+                            id: Some(value(&mut args)?),
+                            path: value(&mut args)?.into(),
+                        },
+                        "add" => Action::ManagementAdd {
+                            area: Area::Workflow,
+                            path: value(&mut args)?.into(),
+                        },
+                        "start" => Action::ManagementStart {
+                            area: Area::Workflow,
+                            id: value(&mut args)?,
+                            path: args.next().map(Into::into),
+                        },
+                        "history" => Action::Management(ManagementRequest {
+                            area: Area::Workflow,
+                            action: ManagementAction::Inspect {
+                                id: value(&mut args)?,
+                            },
+                        }),
+                        _ => {
+                            return Err(
+                                "Use workflow list, enable NAME, disable NAME, edit NAME, set NAME PATH, add PATH, start NAME [PATH] or history NAME"
+                                    .into(),
+                            );
                         }
                     };
                 }
@@ -869,11 +991,73 @@ impl Options {
                         options.action = Action::Login(provider);
                     } else {
                         let provider = provider.ok_or_else(|| format!("{arg} requires a value"))?;
-                        options.action = match arg.as_str() {
-                            "account" => Action::Account(provider),
-                            "logout" => Action::Logout(provider),
-                            _ => Action::Models(provider),
-                        };
+                        if arg == "account" {
+                            options.action = Action::Account(provider);
+                        } else if arg == "logout" {
+                            options.action = Action::Logout(provider);
+                        } else {
+                            use crate::model::session::{
+                                Area, ManagementAction, ManagementRequest,
+                            };
+                            match args.peek().cloned().as_deref() {
+                                Some("enable" | "disable") => {
+                                    let enabled = value(&mut args)? == "enable";
+                                    options.action = Action::Management(ManagementRequest {
+                                        area: Area::Models {
+                                            provider_id: provider.clone(),
+                                        },
+                                        action: ManagementAction::Toggle {
+                                            id: value(&mut args)?,
+                                            enabled,
+                                        },
+                                    });
+                                }
+                                Some("edit") => {
+                                    args.next();
+                                    options.action = Action::ManagementEdit {
+                                        area: Area::Models {
+                                            provider_id: provider.clone(),
+                                        },
+                                        id: Some(value(&mut args)?),
+                                    };
+                                }
+                                Some("set") => {
+                                    args.next();
+                                    options.action = Action::ManagementSet {
+                                        area: Area::Models {
+                                            provider_id: provider.clone(),
+                                        },
+                                        id: Some(value(&mut args)?),
+                                        path: value(&mut args)?.into(),
+                                    };
+                                }
+                                Some("add") => {
+                                    args.next();
+                                    options.action = Action::ManagementAdd {
+                                        area: Area::Models {
+                                            provider_id: provider.clone(),
+                                        },
+                                        path: value(&mut args)?.into(),
+                                    };
+                                }
+                                Some(verb @ ("remove" | "inspect")) => {
+                                    args.next();
+                                    let id = value(&mut args)?;
+                                    let action = if verb == "remove" {
+                                        ManagementAction::Remove { id }
+                                    } else {
+                                        ManagementAction::Inspect { id }
+                                    };
+                                    options.action = Action::Management(ManagementRequest {
+                                        area: Area::Models {
+                                            provider_id: provider.clone(),
+                                        },
+                                        action,
+                                    });
+                                }
+                                _ => options.action = Action::Models(provider),
+                            }
+                        }
                     }
                 }
                 _ if options.client_secret => {

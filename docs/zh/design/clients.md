@@ -50,7 +50,7 @@ flowchart TB
 | --- | --- |
 | 线路协议 v3：分帧、`hello` 与功能声明、通知 | `crates/dim-app-server/src/protocol.rs`（没有文字版参考，见 §4 第 5 条）；[App Server README](../../../crates/dim-app-server/README.md) |
 | Session 方法与管理方法之分，以及每种入口提供哪些方法 | [Session 边界](contracts/session-boundary.md)（A.3 入口）、[管理方法](../../design/appserver/management-methods.md) |
-| 读取 Session：先 `session.attach`，再按固定的头部读 `session.history`，然后接收实时的 `session.event`、`session.state`、`session.model.progress`；由客户端自己折叠。attach 的回复携带该 Session 的 `SessionInfo`，其中 `model` 取自该 Session 最近采纳的配置，而 `session.list` 的条目在 [#795](https://github.com/arcships/dim/issues/795) 完成前仍报告创建时的模型，因此打开已知 Session 的客户端从它取模型，不读目录；重载期间标题字段缺失、`running` 为 false，随后的通知将其更正 | [Session 访问](contracts/session-access.md)、[CLI 命令](cli-commands.md)；[#276](https://github.com/arcships/dim/issues/276) 的处理结论 |
+| 读取 Session：先 `session.attach`，再按固定的头部读 `session.history`，然后接收实时的 `session.event`、`session.state`、`session.model.progress`；由客户端自己折叠。attach 的回复携带该 Session 的 `SessionInfo`，其中 `model` 取自该 Session 最近采纳的配置，而 `session.summaries` 的条目在 [#795](https://github.com/arcships/dim/issues/795) 完成前仍报告创建时的模型，因此打开已知 Session 的客户端从它取模型，不读目录；重载期间标题字段缺失、`running` 为 false，随后的通知将其更正 | [Session 访问](contracts/session-access.md)、[CLI 命令](cli-commands.md)；[#276](https://github.com/arcships/dim/issues/276) 的处理结论 |
 | 不属于 Timeline 事实的广播通知（`session.notice`，例如标题） | [Session 广播通知](appserver/session-notices.md) |
 | 审批与提问：`approval.request` / `cancelled` / `resolved`；提问是一次未完成的 `ask_user` 调用，用 `session.question.respond` 回答 | [ADR 003](../adr/003-approval-scope.md)、[Questions](plugins/Questions.md) |
 | 查看 Session 的界面：UI 登记处，终端界面作为 UI 叶子（`ui.open`、`ui.attach`、`ui.status`） | [Tui §3.6](../../design/plugins/Tui.md#36-ui-registry-and-ui-leaves) |
@@ -67,7 +67,7 @@ CLI 要求协议 v3，以及 `session.create` 和 `session.history` 两项功能
 | 能力 | CLI | Web | 来源 |
 | --- | --- | --- | --- |
 | 登录、登出（OAuth，守护进程描述的每个提供方） | 已实现 | — | [提供方账号](cli-commands.md#提供方账号) |
-| API-key Provider 的添加/编辑/测试/启用/禁用/切换 | 已实现；删除和模型列表编辑：CLI 中无（服务端已支持） | 只读的 `provider.*` | [Provider 管理](appserver/provider-management.md) |
+| API-key Provider 的添加/编辑/测试/启用/禁用/切换 | 已实现；删除：CLI 中无（服务端已支持）；模型列表编辑：`/models` → `Edit models` 与 `dimcode models PROVIDER` | 已实现，含模型列表与偏好写入（`provider.models.*`、`provider.preferences.update`） | [Provider 管理](appserver/provider-management.md) |
 | 切换模型 | 已实现 | 已实现 | `session.model.update` |
 | 推理强度、快速模式 | 已实现（`/effort`、`/fast`，以及 `/models` 中用 ←/→ 调整） | — | [模型配置](../../design/model-configuration.md) |
 | 子 agent 模型策略 | 已完成（`/models` → Subagent models） | — | [子 agent 模型策略](../../design/subagent-model-policy.md)、[#263](https://github.com/arcships/dim/issues/263) |

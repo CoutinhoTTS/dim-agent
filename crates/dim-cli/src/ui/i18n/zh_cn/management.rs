@@ -8,6 +8,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "skills" => "技能",
         "hooks" => "钩子",
         "scheduled jobs" => "定时任务",
+        "models" => "模型",
+        "workflow definitions" => "工作流定义",
         "command rules" => "命令规则",
         "enabled" => "已启用",
         "shadowed by {name}" => "被 {name} 覆盖",
@@ -41,6 +43,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "↑↓ scroll · Esc back" => "↑↓ 滚动 · Esc 返回",
         "Added." => "已新建。",
         "Removed {name}." => "已删除 {name}。",
+        "unavailable" => "不可用",
+        "Reset {name}? Enter confirm · Esc cancel" => "重置 {name}？Enter 确认 · Esc 取消",
+        "Reset {name} to its catalog entry." => "已将 {name} 重置为目录条目。",
         "Ran {name}." => "已运行 {name}。",
         "The user document changed since it was read; nothing was written." => {
             "用户文档在读取后已被修改；本次没有写入。"
@@ -71,6 +76,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The Scheduler has no area document." => "调度器没有领域文档。",
         "No scheduled job has that id." => "没有该 id 的定时任务。",
+        "A scheduled job's run takes no input document." => "定时任务的运行不接受输入文档。",
+        "An MCP server's test takes no input document." => "MCP 服务器的测试不接受输入文档。",
         "This daemon cannot manage {area}." => "无法管理{area}。",
         "This daemon lists {area} but cannot toggle them." => "可以列出{area}，但无法切换它们。",
         "This daemon lists {area} but cannot edit them." => "可以列出{area}，但无法编辑它们。",
@@ -92,6 +99,187 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "此工作区的钩子设置已在读取后发生变化；本次没有写入。"
         }
+        "Models" => "模型",
+        "catalog" => "目录",
+        "overrides" => "覆盖",
+        "added" => "新增",
+        "Models · {name}" => "模型 · {name}",
+        "undeclared" => "未声明",
+        "Context window {window} · max output {output}" => {
+            "上下文窗口 {window} · 最大输出 {output}"
+        }
+        "Endpoint {endpoint}" => "端点 {endpoint}",
+        "Endpoint {endpoint} · override {value}" => "端点 {endpoint} · 覆盖为 {value}",
+        "The provider reports it unavailable." => "提供方报告它不可用。",
+        "Limits undeclared; edit the model to declare them." => "上限未声明；编辑该模型以声明。",
+        "Sign in to the account to use its models." => "登录账号后即可使用其模型。",
+        "The signed-in account changed; reload to list its models." => {
+            "登录的账号已变更；重新加载以列出其模型。"
+        }
+        "The provider has no catalog yet." => "此提供方还没有目录。",
+        "The provider listed no models." => "提供方没有列出任何模型。",
+        "Listed {count} models." => "已列出 {count} 个模型。",
+        "Refreshed the models." => "模型已刷新。",
+        "Could not list models: {error}. Showing the stored list." => {
+            "无法列出模型：{error}。显示已存储的列表。"
+        }
+        "The signed-in account changed; the refresh cleared preferences, overrides and disables." => {
+            "登录的账号已变更；刷新已清除偏好、覆盖和禁用项。"
+        }
+        "The models changed since they were read; nothing was removed." => {
+            "模型在读取后已变更；本次没有移除任何东西。"
+        }
+        "The models changed since they were read; nothing was written." => {
+            "模型在读取后已变更；本次没有写入。"
+        }
+        "No provider has that id." => "没有该 id 的提供方。",
+        "{name} is unavailable ({reason}); its enablement is kept as it is." => {
+            "{name} 不可用（{reason}）；其启用状态保持不变。"
+        }
+        "No model has that id." => "没有该 id 的模型。",
+        "This model cannot be removed." => "此模型无法移除。",
+        "A Provider's models have no area document." => "提供方的模型没有领域文档。",
+        "Models have no run operation." => "模型没有运行操作。",
+        "The document is not an object; nothing was written." => "文档不是对象；本次没有写入。",
+        "The document changes no editable field; nothing was written." => {
+            "文档没有修改任何可编辑字段；本次没有写入。"
+        }
+        "The model document names no model." => "模型文档没有指明模型。",
+        "The provider has no model catalog to write." => "此提供方没有可写入的模型目录。",
+        "ID {id}" => "ID {id}",
+        "Source {source}" => "来源 {source}",
+        "Status {status}" => "状态 {status}",
+        "Tools {value}" => "工具 {value}",
+        "Vision {value}" => "视觉 {value}",
+        "Reasoning {value}" => "推理 {value}",
+        "Modalities {list}" => "模态 {list}",
+        "Description {text}" => "描述 {text}",
+        "Release date {date}" => "发布日期 {date}",
+        "Pricing {value}" => "价格 {value}",
+        "Rate limit {value}" => "速率限制 {value}",
+        "Matched provider {id}" => "匹配提供方 {id}",
+        "Matched model {id}" => "匹配模型 {id}",
+        "Match strategy {strategy}" => "匹配策略 {strategy}",
+        "Capability overrides {fields}" => "能力覆盖字段 {fields}",
+        "yes" => "是",
+        "no" => "否",
+        "not supported" => "不支持",
+        "supported" => "支持",
+
+        "Workflow" => "工作流",
+        "Saved {name}. It stays disabled until you enable it." => {
+            "已保存 {name}。在你启用它之前，它保持禁用。"
+        }
+        "The definitions changed since they were read; nothing was written." => {
+            "定义在读取后已被修改；本次没有写入。"
+        }
+        "A definition's name is its key; add it to save it under another name." => {
+            "定义的名称就是它的键；要用另一个名称保存，请新建它。"
+        }
+        "No project definition is named {name}." => "没有名为 {name} 的项目定义。",
+        "No workflow definition is named {name}." => "没有名为 {name} 的工作流定义。",
+        "Saved in the user workflow source; always enabled." => {
+            "保存在用户工作流来源中；始终启用。"
+        }
+        "Starts only after you enable it." => "只有在你启用它之后才会启动。",
+        "Defined by package {package}." => "由包 {package} 定义。",
+        "{name} — {description} (required)" => "{name} — {description}（必填）",
+        "{name} — {description}" => "{name} — {description}",
+        "{name} — required" => "{name} — 必填",
+        "{name} — default: {default}" => "{name} — 默认：{default}",
+        "and {count} more" => "另有 {count} 项",
+        "Recent runs" => "最近的运行",
+        "A workflow definition is saved as an object with a source and a document." => {
+            "工作流定义以包含来源和文档的对象保存。"
+        }
+        "A definition is saved to the user source or the project source." => {
+            "定义保存到用户来源或项目来源。"
+        }
+        "Started {name}: {run_id}." => "已启动 {name}：{run_id}。",
+        "Parameters are a JSON object of strings." => "参数是字符串组成的 JSON 对象。",
+        "The list reached its size limit; later definitions are not shown." => {
+            "列表已达到大小上限，之后的定义不会显示。"
+        }
+        "No workflow definition named {name} is in the list, which reached its size limit." => {
+            "达到大小上限的列表中没有名为 {name} 的工作流定义。"
+        }
+        "MCP" => "MCP",
+        "MCP servers" => "MCP 服务器",
+        "Ctrl+T test" => "Ctrl+T 测试",
+        "sign-in required" => "需要登录",
+        "signed in" => "已登录",
+        "sign-in expired" => "登录已过期",
+        "missing scopes: {scopes}" => "缺少权限范围：{scopes}",
+        "Executable: {command}" => "可执行文件：{command}",
+        "Stored arguments (hidden): {count}" => "已存参数（隐藏）：{count}",
+        "Working directory: {cwd}" => "工作目录：{cwd}",
+        "Environment names: {names}" => "环境变量名：{names}",
+        "Endpoint: {endpoint}" => "端点：{endpoint}",
+        "Header names: {names}" => "请求头名称：{names}",
+        "Bearer token: {state}" => "Bearer 令牌：{state}",
+        "OAuth: configured (client ID {id})" => "OAuth：已配置（客户端 ID {id}）",
+        "OAuth: configured" => "OAuth：已配置",
+        "OAuth: not configured" => "OAuth：未配置",
+        "Metadata URL: {state}" => "元数据 URL：{state}",
+        "configured" => "已配置",
+        "Owned by a plugin; change it through Plugins." => "由插件提供；请通过插件修改。",
+        "MCP entry {id}" => "MCP 条目 {id}",
+        "Connection {number} · {status}" => "连接 {number} · {status}",
+        "Tools have not been discovered." => "尚未发现工具。",
+        "No live session connections." => "没有活动的会话连接。",
+        "Tools of {id}" => "{id} 的工具",
+        "The server exposes no tools." => "服务器没有提供工具。",
+        "The add document needs an id." => "新建文档需要一个 id。",
+        "The add document needs a source of user or project." => {
+            "新建文档的来源必须是 user 或 project。"
+        }
+        "The add document needs a configuration object." => "新建文档需要一个 configuration 对象。",
+        "{id} is already in mcp list; remove it first or choose another id." => {
+            "{id} 已在 mcp list 中；请先删除它或换一个 id。"
+        }
+        "{id} is already in mcp list; choose another id, or change it through its plugin." => {
+            "{id} 已在 mcp list 中；请换一个 id，或通过其插件修改。"
+        }
+        "This entry's settings changed since they were read; nothing was written." => {
+            "该条目的设置已在读取后发生变化；本次没有写入。"
+        }
+        "The MCP entry changed since it was read; nothing was written." => {
+            "MCP 条目已在读取后发生变化；本次没有写入。"
+        }
+        "The MCP entries changed since they were read; nothing was written." => {
+            "MCP 条目已在读取后发生变化；本次没有写入。"
+        }
+        "The MCP entry changed since it was read; nothing was removed." => {
+            "MCP 条目已在读取后发生变化；本次没有删除。"
+        }
+        "MCP's documents belong to one entry; this save names none." => {
+            "MCP 的文档属于单个条目；本次保存没有指定条目。"
+        }
+        "No MCP server has that id." => "没有该 id 的 MCP 服务器。",
+        "This workspace has no project MCP source." => "此工作区没有项目级 MCP 来源。",
+        "Enabled {id} ({source})." => "已启用 {id}（{source}）。",
+        "Disabled {id} ({source})." => "已禁用 {id}（{source}）。",
+        "It runs this workspace's .mcp.json entry, including later edits to it, in active and new sessions." => {
+            "它会在当前和新的会话中运行此工作区的 .mcp.json 条目，包括之后对该文件的修改。"
+        }
+        "{id} is not in mcp list; withdrew any stored enablement of it in this workspace." => {
+            "{id} 不在 mcp list 中；已撤销它在此工作区存储的启用状态。"
+        }
+        "The MCP catalog could not be read ({error}); withdrew this workspace's enablement of {id}. A user entry with this ID is unchanged." => {
+            "无法读取 MCP 目录（{error}）；已撤销此工作区对 {id} 的启用。同 ID 的用户条目不受影响。"
+        }
+        "MCP configuration: {error}" => "MCP 配置：{error}",
+        "The server rejected the stored credential; sign in again with mcp login." => {
+            "服务器拒绝了已存储的凭据；请用 mcp login 重新登录。"
+        }
+        "The server requires additional scopes: {scopes}." => {
+            "服务器需要额外的权限范围：{scopes}。"
+        }
+        "The server requires authorization; run mcp login ID." => {
+            "服务器需要授权；请运行 mcp login ID。"
+        }
+        "The probe ended: {status}." => "探测结束：{status}。",
+
         "Command rules" => "命令规则",
         "user" => "用户",
         "Matches only this command." => "仅匹配此命令。",

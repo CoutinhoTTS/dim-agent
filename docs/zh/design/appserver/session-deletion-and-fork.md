@@ -87,7 +87,7 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
 3. **命令输出。** SessionStore 在改动任何行之前移除该 Session 的输出目录（ADR 013 D4）：它自己的 `<数据库目录>/command-output/<S>/`，以及它每一行路径所在的目录，因此分叉复制来的 `command-output/<parent>/` 和 `.dim/exec/<parent>/<branch>/` 目录也覆盖在内。另一个 Session 仍在该目录下有行时，目录保留。SessionStore 的所有权锁把这次移除与第 4 步的删行跨 Session 串行化：否则两个并发删除可能都看到对方的行，都保留共享目录，提交后目录没有所有者。分叉步骤在复制时持有同一把锁并复制当前的全部输出行；一致由锁保证，而不是靠检查文件是否存在，因此运行中的命令在写出文件之前登记的行也会被复制，该命令创建的文件归分叉所有。`command-output` 目录通过 S 的资源节点上的 FileStorage（与 S5a 一样每次调用时查找）移除；`.dim/exec` 目录由 HostPlatform 移除，HostPlatform 不读取所有权行。目录不存在视为已移除。每次移除必须在第 4 步之前落盘（§4），因此 FileStorage 的 `remove` 要同步被移除条目的父目录（§14）。失败时删除在改动任何行之前结束（§3.5）。只有本数据库有 S 的行时，SessionStore 才移除自己的 `command-output/<S>/`：`command-output/` 由同一目录下的所有数据库共用，本库没有行的 id，其目录可能属于另一个数据库的 Session（§4）。
 4. **行。** 一个 `IMMEDIATE` 事务删除 S 的全部行：`session_file_owners`、`session_output_owners`、`timeline_snapshots`、`timeline_events`、`timeline_branches`、`timeline_content`、`session_grants`、`session_owners`、`session_catalog` 和 `agent_sessions`，因外键按此顺序，另加 S5b 的标题元数据（§14）。`session_catalog` 是 [#556 的目录投影](../../../design/appserver/native-storage-format.md#556-v23-格式决定)的派生行。这就是如今创建回滚执行的操作（[timeline.rs](../../../../crates/dim-app-server/src/storage/timeline.rs) 的 `rollback_creation`），S5a 为它加上所有者行；删除与回滚共用它。它像回滚一样在 Timeline 写线程上执行，因此排在已为 S 排队的所有追加之后，并清除 S 记下的写入失败。
 5. **清扫。** SessionStore 安排 S5a 的清扫（[Session 文件 §5.4](session-files.md#54-清扫)）。最后一个所有者是 S 的文件在清扫中移除；仍有分叉拥有的文件保留。
-6. **忘记。** Agents 删除 S 的协议版本和不可用 Session 条目，把 S 的槽位标为已关闭、已删除，并在没有其他东西持有它时移除它（[空闲卸载 §6.4](idle-unload.md#64-准入槽)）。仍在准入门处等待的调用方会看到槽位已关闭，之后的调用方会发现 S 既没有所有者也没有行：两种情况下 `acquire` 都回答 `session_closed`。在第 4 步之前失败的删除则释放准入门。被它关闭的 Session 保持 `session.close` 之后的状态：行还在，`session.list` 不列出它，本进程内不再加载，重试即可删除；重启后它照常加载。删除没有关闭的 Session 在下次使用时照常加载（§16 D5）。
+6. **忘记。** Agents 删除 S 的协议版本和不可用 Session 条目，把 S 的槽位标为已关闭、已删除，并在没有其他东西持有它时移除它（[空闲卸载 §6.4](idle-unload.md#64-准入槽)）。仍在准入门处等待的调用方会看到槽位已关闭，之后的调用方会发现 S 既没有所有者也没有行：两种情况下 `acquire` 都回答 `session_closed`。在第 4 步之前失败的删除则释放准入门。被它关闭的 Session 保持 `session.close` 之后的状态：行还在，`session.summaries` 不列出它，本进程内不再加载，重试即可删除；重启后它照常加载。删除没有关闭的 Session 在下次使用时照常加载（§16 D5）。
 
 ### 3.3 删除移除什么
 
@@ -111,7 +111,7 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
 ### 3.4 客户端与订阅
 
 - 第 2 步关闭 S 时，附着在 S 上的连接收到现有的 `session.state` 和 `session.closed` 通知，与 `session.close` 相同。不加原因为 "deleted" 的通知：`session.closed` 在行事务提交之前发出，可能宣告一次随后失败的删除。协议也没有新建 Session 的列表通知，所以删除也不加。
-- 回复之后，对 S 的 `session.attach`、Session 方法和 `session.fork` 都失败于 `session_closed`，`session.list` 和 `session.summaries` 不再列出它。
+- 回复之后，对 S 的 `session.attach`、Session 方法和 `session.fork` 都失败于 `session_closed`，`session.summaries` 不再列出它。
 - 发出删除的连接本身也可能附着在 S 上，它先收到通知，再收到回复。
 
 ### 3.5 幂等与错误
@@ -203,7 +203,7 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
 
 **为什么只在 `main` 上。** 子分支的历史是各祖先的前缀加上它自己的事件，而每个分支的事件都从 1 编号。把它排成一条 `main` 要给事件重新编号，而压缩的 `through`、`branch/create.at`、`branch/start.createEvent`、批次终点和快照锚点都引用这些编号：存储将不得不改写其他所有者写下的事实。要继续某个子分支的工作，客户端在 Session 内从它创建分支。
 
-被否决：以相同的分支 id 复制子分支的祖先链，并在子分支的副本上继续。那样分叉的对话就不在它的 `main` 上，而客户端、`session.list` 和 SessionTitle 读的都是 `main`。
+被否决：以相同的分支 id 复制子分支的祖先链，并在子分支的副本上继续。那样分叉的对话就不在它的 `main` 上，而客户端、`session.summaries` 和 SessionTitle 读的都是 `main`。
 
 ### 6.3 分叉复制什么
 
@@ -443,7 +443,7 @@ S5c 与 S5a 一样只实现控制节点。在控制节点上，FileStorage 正�
 
 ## 15. 验收（流程测试）
 
-1. 删除一个正在运行轮次、并有客户端附着的已加载 Session：客户端收到 `session.closed`，回复为 `{deleted: true}`，`session.list` 不再列出它，`session.attach` 失败于 `session_closed`。任何表中都不再有它 id 的行，`command-output/<id>/` 已移除，它的 Session 文件由清扫移除。第二次删除回复 `{deleted: false}`。
+1. 删除一个正在运行轮次、并有客户端附着的已加载 Session：客户端收到 `session.closed`，回复为 `{deleted: true}`，`session.summaries` 不再列出它，`session.attach` 失败于 `session_closed`。任何表中都不再有它 id 的行，`command-output/<id>/` 已移除，它的 Session 文件由清扫移除。第二次删除回复 `{deleted: false}`。
 2. 删除未加载的 Session，以及行校验失败的 Session：都回复 `{deleted: true}`，不留任何行。
 3. 在 `main` 的静止点处分叉，一个子分支在切点之前创建、一个在之后：F 的 `main` 含有源截至 `at` 的事件且 id 相同，之后是 `session/forked`、`branch/resume` 和为第一个子分支写的一条 `branch/create-failed`；F 有第一个子分支的目录、没有其事件，不含第二个子分支的任何东西；F 只有其 `main` 事件引用的内容行和快照；重启后重新加载，不再写第二条 `session/forked` 或 `branch/create-failed`。在 `0` 处分叉以 `branch/start` 打开，没有 `session/forked`。
 4. §6.5 的几种情况：子分支在切点之后完成时分叉，子分支有未结束的轮次、工具批次和后台任务时分叉，客户端在切点之后给子分支发 steer 时分叉。每种情况下 F 的子分支都没有事件；客户端给 F 提交输入之前，F 不记录任何 `turn/start`、模型调用、工具执行或 `exec/started`；源的子分支不受影响地继续。

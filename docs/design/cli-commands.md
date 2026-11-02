@@ -17,7 +17,7 @@ contract records the native platform acceptance evidence and outstanding checks.
 In both scrollback and fullscreen TUI, group commands by category and sort
 categories and command names alphabetically by their canonical English identifiers.
 Search relevance takes priority; equally ranked matches use the same category/name order.
-Exit and suspend require their exact name or alias before dispatch: choosing an
+Exit requires its exact name or alias before dispatch: choosing an
 incomplete match fills the command name and keeps the composer open. Exact typed
 commands, including hidden commands, retain their own dispatch behavior.
 The command menu lists `/permissions` as the permission entry. `/approvals` and `/approval`
@@ -25,6 +25,22 @@ remain compatibility aliases when typed directly. Run, queue and steer keys are
 omitted from the menu. The menu only lists slash commands: the view actions for
 picking an earlier message and scrolling to the top or bottom are also omitted;
 `Tab`, `Home` and `End` retain their bindings.
+
+The menu fits the available terminal columns and rows in both modes. Command
+names take priority over descriptions and shortcut labels; a shortcut that
+would crowd out its command name is omitted from the row, without changing
+the binding. On short screens, fewer commands are shown and the window follows
+the selection. Scrollback keeps the command draft visible above the menu and
+omits the menu title and footer when necessary; fullscreen keeps its palette
+query and selection above the composer. Category grouping and ordering do not
+change with terminal size.
+
+When the usual history reservation leaves fewer than eight live rows,
+live controls take priority: either renderer can use up to eight rows for
+the live region, limited by terminal height. Fullscreen reduces the composer's empty padding
+and the palette's query padding before overlapping either input. The draft
+editor scrolls within the remaining rows and keeps its caret visible without
+discarding text. Otherwise the usual history reservation is retained.
 
 ```text
 Commands
@@ -36,6 +52,18 @@ Commands
 / + Enter          -> /exit (completion only)
 /exit + Enter      -> exit
 /permissions + Enter -> permission controls
+```
+
+```text
+Fullscreen, 8 rows             Scrollback, 8 rows
++- Command Palette -------+
+| >                       |   +- input -----------------+
+| app /exit               |   | > /                     |
++-------------------------+   +-------------------------+
+                              +-------------------------+
++- input -----------------+   | app /exit               |
+|                         |   +-------------------------+
++-------------------------+   AGENT
 ```
 
 ## Run keys and queue
@@ -463,8 +491,8 @@ A management area is one owner's management methods. The App Server serves each 
 owner and gives clients no generic path across them ([settings
 service](appserver/settings-service.md#11-what-this-does-not-do)): Skills are `skills.*`, Hooks are
 `hooks.*`, MCP is `mcp.*`, the Scheduler is `schedule.*`, Workflow definitions are `workflow.*`,
-command rules are `permission.rules` and `permission.set_rules`, and plugins are PluginManager's
-methods. Their entry shapes differ and stay as they are; this section makes one structure out of
+command rules are `permission.rules` and `permission.set_rules`, plugins are PluginManager's
+methods, and one Provider's models are `provider.*`. Their entry shapes differ and stay as they are; this section makes one structure out of
 the client side, so an area is added once instead of once per surface.
 
 Each area has two surfaces in the native client:
@@ -502,10 +530,11 @@ feature to recognise the newer contract.
 
 Entries are grouped under source headings — user, project, `plugin:<id>`, built-in — as the
 owner reports them; a hook source is itself an entry, under the heading `sources`. Each entry has a
-label, a detail, its states (enabled, disabled, invalid, shadowed, read-only) and the actions it
-offers. An entry its owner does not let the client write (plugin-owned, locked) offers no write
-action, and its detail says why. What the owner could not use is listed after the entries as its
-issues.
+label, a detail, its states (enabled, disabled, invalid, unavailable, shadowed, read-only) and the
+actions it offers. An entry its owner does not let the client write (plugin-owned, locked) offers
+no write action, and its detail says why. What the owner could not use is listed after the entries
+as its issues. An entry may carry the operation's input document when the run kind takes one: Ctrl+T
+opens the external editor on it first, and sends what it leaves with the run.
 
 ```text
 ╭─ Skills ──────────────────────────────────────╮
@@ -544,7 +573,8 @@ view rather than to one entry — reload, and add, which creates one — so it n
 the hint lists it whether or not an entry is selected, and Ctrl+R reads the area again after a
 failed read. The first two areas use toggle, reload and edit. The Scheduler area introduces
 add, remove, run and inspect, and the client's kinds are what it writes; a later area adds its
-adapter and the methods its kinds call, and names here the kinds it adds.
+adapter and the methods its kinds call, and names here the kinds it adds. The hint names the run
+kind's operation where an area names one: MCP's hint reads `Ctrl+T test`.
 
 A hint the bottom border cannot hold is drawn as rows above a plain bottom border, wrapped at
 the ` · ` separators; a part wider than a row wraps across rows by display width, so no key or
@@ -559,17 +589,29 @@ stays visible at any width, the remove confirmation included.
   appends an entry to a list it read, as the command rules area's does, retries the conflict
   instead, because an append overwrites nothing.
   `dimcode <area> add PATH` (`-` for stdin) is the same write without an editor.
-- remove asks in the hint first: it becomes `Remove <label>? Enter confirm · Esc cancel`, and
-  every key but Enter cancels without changing anything. Enter sends the area's delete method
-  and reads the area again. `dimcode <area> remove ID` deletes without a prompt, because the id
-  typed on the command line is the intent, as `dimcode logout PROVIDER` signs out without one.
-- run sends the area's named operation for the selected entry, reads the area again, and its
-  message reports what the owner answered — a run the owner skipped says why. An operation that
-  takes parameters is the area's own step, not this kind's.
+- remove asks in the hint first, with the verb the entry reports: `Remove <label>? Enter confirm
+  · Esc cancel` for an entry the remove takes out, `Reset <label>? Enter confirm · Esc cancel`
+  for one it returns to its default. Every key but Enter cancels without changing anything.
+  Enter sends the area's remove method, reads the area again, and its message uses the same verb.
+  `dimcode <area> remove ID` removes without a prompt, because the id typed on the command line
+  is the intent, as `dimcode logout PROVIDER` signs out without one.
+- run sends the area's named operation for the selected entry. A run whose answer changes what the
+  area lists — the Scheduler's run now joins the job's history and its last outcome — reads the
+  area again and shows the answer as the message; a run the owner skipped says why. A run whose
+  answer changes nothing the area lists shows the answer as a detail, as inspect does, and does
+  not read the area again: MCP's test is the tools a temporary connection found. Whether the owner
+  declares the method mutating does not decide this, since `mcp.test` runs the entry and still
+  writes nothing the area lists. An operation that takes parameters is the area's own step, not
+  this kind's: the entry carries the input document, and the run kind opens the external editor
+  on it before the call.
 - inspect asks the adapter for the entry's detail: a title and lines, not a view. The panel
   shows it in place of the list, the arrows and PageUp/PageDown scroll it, Esc returns to the
   list with the selection kept, and a second Esc closes the panel. `dimcode <area> inspect ID`
   prints the same lines, or the area's own verb where its design names one.
+
+`/workflow:save` opens its area in the panel's create editor: the first view opens the editor on
+the area's create document, as Ctrl+N would, and an area that does not offer add stays on its list
+with the sentence the support check gives.
 
 An entry of an area whose documents are per entry offers edit for its own document: the Save
 action then carries the entry's id, and the adapter keeps the revision it read with the draft.
@@ -739,6 +781,254 @@ the run was skipped — and Tab shows the job's history in place of the list:
 history ID` prints the lines the detail shows, and `dimcode scheduled remove ID` deletes without
 the panel's confirmation.
 
+### The Models area
+
+The models area (#818): `Edit models` in `/models` opens one Provider's panel, and `dimcode
+models PROVIDER enable|disable|remove|inspect MODEL`, `edit MODEL`, `set MODEL PATH` and `add
+PATH` are the same area at the command line, over `provider.management` and the
+`provider.models.*` writes ([provider management](appserver/provider-management.md)). The Provider
+is part of the area, so a reply for another Provider never lands in the panel, and the panel's
+title names the Provider (`Models · <name>`). `dimcode models PROVIDER` keeps its listing and its
+four flags; `--refresh` is the area's reload at the command line.
+
+A model is an entry. Its label is the display name, and its detail is the id, both limits (or
+`undeclared`), the endpoint and its override, and the owner's reason when the model cannot be
+used. Entries are grouped by the source the owner reports: `catalog` for defaults, `overrides`
+for descriptor overrides and `added` for user models, in that order. A model the owner reports
+unavailable keeps the `unavailable` state word, and its detail says why. An account entry the
+owner holds no catalog for has no entries; the read's issue says it has no catalog yet.
+
+| Class | toggle | edit | remove | inspect |
+| --- | --- | --- | --- | --- |
+| catalog model | yes | yes | no | yes |
+| overridden catalog model | yes | yes | yes, `Reset` | yes |
+| user-added model | yes | yes | yes, `Delete` | yes |
+| unavailable model | no | as its class | as its class | yes |
+
+The Provider record's `version` is the revision every write takes (`expectedVersion`). A write
+replies with the Provider catalog, so the client reads the area again after one. Edit opens the
+entry's `ModelEdit` — `displayName`, `contextWindow`, `maxOutputTokens`, `toolCalling`, `vision`,
+`reasoning` and `modalityCapabilities`, plus `endpoint` on a static New API model — and sends only
+the fields the draft changed, diffed against a template built from the fresh read, so an inherited
+limit written back does not become a user declaration. Toggle, add and remove read the area
+immediately before the write: toggle sends the complete enabled set with the model flipped, and
+an unavailable model has no toggle, so `enable` and `disable` on one are refused before any
+write, naming the owner's reason and saying its enablement is kept as it is; remove deletes a
+user model or resets an override, as
+the entry's own verb says; add sends the `ModelEntry` of the create template, whose limits both
+start undeclared. A `provider_conflict` is classified by the version a fresh read reports: a moved
+version means the models changed and nothing was written, and an unchanged one is the owner's own
+refusal, such as a duplicate model id, which keeps the draft's revision.
+
+Ctrl+R reads the area, and sends `provider.refresh` first when the Provider's actions include
+`refresh`; a refused listing writes nothing, so the stored list stays with the owner's reason as
+the note. Tab projects the whole descriptor in place of the list: id, source, status, both limits,
+endpoint and override, tools, vision, reasoning and its efforts, modalities, description, release
+date, pricing, rate limit, the bundled match and the capability overrides.
+
+```text
+╭─ Models · Relay ─────────────────────────────────────────────────────────────────────────────╮
+│ >                                                                                           │
+│   catalog                                                                                   │
+│ › flash           enabled                                                                   │
+│   reasoner        enabled   unavailable                                                     │
+│   overrides                                                                                 │
+│   tuned           enabled                                                                   │
+│   added                                                                                     │
+│   house-model     disabled                                                                  │
+│                                                                                             │
+│   tuned                                                                                     │
+│   Context window 128,000 · max output 16,384                                                │
+│   Endpoint openai-compatible · override openai                                              │
+╰──── Enter toggle · Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Tab inspect ─╯
+```
+
+The picker gains one row per Provider: `Edit models`, inside that Provider's block, its detail
+naming the Provider, so a Provider with no selectable model can be opened too. The row is absent
+when the daemon does not advertise `provider.management`. It opens the area in place of the
+picker, and Esc there closes the area to the prompt, not back to the picker.
+
+```text
+Select a model
+> Ready / flash              ZDR  ‹ high ›  current
+  Ready / plain              low
+  Edit models                Ready  ready
+  Other / model-x
+  Edit models                Other  other
+  Manual: no models · add a model with provider.models.create
+  Edit models                Manual  manual
+  Subagent models: Agent choice
+Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close
+```
+
+`dimcode models PROVIDER remove MODEL` removes without the panel's confirmation, and `dimcode
+models PROVIDER inspect MODEL` prints the lines the detail shows.
+
+### The Workflow area
+
+Workflow (#816): the `/workflow` panel, `/workflow:save` its create editor in both modes, and `dimcode
+workflow list|enable NAME|disable NAME|edit NAME|set NAME PATH|add PATH|start NAME [PATH]|history
+NAME` over `workflow.list`, `workflow.save`, `workflow.start` and `workflow.status`
+([Workflow](plugins/Workflow.md#a3-management-methods)), plus the Settings client methods the
+enablement needs. Every definition is an entry, grouped under the source the owner reports:
+`user`, `project` and `plugin:<package id>`. A user definition is always enabled and its document
+is the entry's document; a project definition starts disabled and is a file in the repository; a
+package definition is installed and offers no write. An entry the owner cannot use is marked
+invalid and its detail carries the owner's issues.
+
+A project definition's enabled state is the `projectEnabled[cwd][name]` member of the user
+Settings document. The owner's own service refuses to change it (`userOnly`), so the toggle is a
+client write: `settings.read`, the member set on the document as read, then `settings.update` at
+the revision the read reported. The document is copied as read, so a definition, a limit or
+another workspace's map is never lost. `settings_conflict` is the conflict path: nothing was
+written, the definitions are read again, and the message says so.
+
+Add writes either source from one document, `{source, document}`, with `source` `user` by
+default; a project save creates or replaces `.dimcode/workflows/<name>.yaml` and stays disabled,
+and the note says so. Edit is offered for user definitions only: the list's Settings read carries
+the document, the save carries the revision the panel read, and a `conflict` answer means the
+definition changed while the editor was open: nothing is written, the area is read again, and the
+draft keeps the user's text. The CAS unit is the whole user document, so a save also answers
+`conflict` when another definition or an enablement changed while the editor was open. A save may
+not rename the definition: the owner keys by the document's name, so a renamed edit would save a
+second definition and leave the old one, and the area has no remove; the write is refused before
+the call and the draft is kept. A project definition is edited wherever it lives, like a project
+hook document, and the entry's detail names its path.
+
+Run is offered for enabled, valid definitions of any source. A definition that declares parameters
+opens the editor on one JSON object, one key per parameter: its `default` where the definition
+gives one and an empty string where it does not. The document is read back as an object of strings
+whose keys the definition declares; anything else is refused with `Parameters are a JSON object of
+strings.` and nothing starts. An empty string is a supplied value, not an omission. A definition
+with no parameters starts at once. The start carries the entry's name and source and the
+workspace; from the panel it also carries `report_to {session_id, branch_id}` for the Session and
+the line the transcript shows, the line a submitted message goes to, which is how `/tasks` finds a
+management-started run when it is next opened. A panel with no Session yet, as after `/new`
+before the first message, starts a run that reports nowhere. The command line has no Session, so
+`dimcode workflow start` sends no `report_to` and its runs are outside `/tasks`. The note is
+`Started <name>: <run_id>.`. In the run document the panel opens, a parameter left at the value
+it was opened with is not sent, so the owner applies the definition's full default, while a
+document from a file or stdin is sent as given.
+
+Inspect reads `workflow.status {}` and filters the retained runs to the entry's name and source.
+A project definition belongs to one workspace, so its runs are filtered to this workspace's `cwd`
+as well: another workspace's definition of the same name is a different definition. A user or
+package definition is the same everywhere, so its runs come from every workspace and each line
+names the run's `cwd`. The detail is the definition's lines, a `Recent runs` line and up to ten
+runs, newest first. The area has no remove: the owner has no delete method, so a user definition
+leaves only by editing the Settings document, and a project definition by deleting its file.
+
+```text
+╭─ Workflow ────────────────────────────────────────────────────────────────────────────────────╮
+│ >                                                                                             │
+│   user                                                                                        │
+│ › review-and-fix   enabled                                                                    │
+│   project                                                                                     │
+│   nightly-check    disabled  invalid                                                          │
+│   plugin:kit                                                                                  │
+│   release-notes    enabled  read-only                                                         │
+│                                                                                               │
+│   Analyze, fix in parallel, summarize                                                         │
+│   Saved in the user workflow source; always enabled.                                          │
+╰─ Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+T run · Tab inspect · Esc close ─────────────╯
+```
+
+`dimcode workflow list` prints one row per definition (name, source, state, description) and the
+issues of the invalid ones; `enable` and `disable` address the project definition of that name;
+`edit` and `set` address the user definition and refuse a project name with the file to edit;
+`add` is the create without an editor; `start NAME [PATH]` takes the parameters from PATH, or from
+stdin for `-`, or starts with none; `history NAME` prints the detail's lines. A bare name resolves
+the way `workflow.start` resolves it: an enabled definition first, then any definition, and within
+each pass project, then user, then package. Project definitions start disabled, so a bare name still
+names one. A command run in a workspace that Settings does not know prints the owner's
+`definition_source_failed` message and exits 1. A listing the owner cut at one payload prints the
+definitions it holds and says the later ones are omitted.
+### The MCP area
+
+MCP adds no kind. Its entries are the effective catalog — the servers merged by id with project
+last — grouped `user`, `project` and `plugin` in that order, and by id within a group; an entry's
+label and id are its id. The panel and `dimcode mcp` use toggle, edit, reload, add, remove, run
+and inspect over `mcp.catalog`, `mcp.configuration`, `mcp.update`, `mcp.save`, `mcp.remove`,
+`mcp.set_enabled`, `mcp.test` and `mcp.inspect` ([MCP management](appserver/mcp-management.md)).
+
+A toggle writes the source's enablement at the revision `mcp.catalog` reported immediately before
+it, so the compare-and-swap covers that window; it acts on one id, so a change elsewhere in the
+source is not overwritten. A user entry's enablement is a local record, and a project entry starts
+disabled because only the toggle or `dimcode mcp enable|disable` turns it on. An edit reads
+`mcp.configuration` for the entry's revision and its document, then writes `mcp.update`, never
+`mcp.save`: a save takes a complete configuration, and the read withholds the secrets, so a save
+round trip would erase them.
+
+The edit document is the patch: an omitted field keeps its stored value, a present value replaces
+it, and `env` or `headers` changes only the keys it names. The seed names the command and working
+directory, empty `env` and `headers`, and a configured OAuth's reported fields; it never names a
+stored argument, environment value, header value, bearer token or URL, because those are withheld
+or wholesale-replaced. The document carries no transport, since the stored entry's transport is
+fixed. A stdio patch names the command, the working directory and the environment keys it
+changes:
+
+```json
+{"command": "npx", "cwd": "/work", "env": {"TOKEN": "value"}}
+```
+
+A remote patch does the same for the endpoint and the headers. Both are withheld from the seed,
+so a patch that changes them supplies them: an omitted `url` or `headers` key keeps what is
+stored.
+
+```json
+{"url": "https://mcp.example.com/mcp", "headers": {"X-Key": "value"}}
+```
+
+Add writes `mcp.save` with the catalog's source revision — `userRevision`, or `projectRevision`
+for a source of `project` — and refuses an id the catalog already lists, since a save would replace
+that entry. The create document is one entry with its source and the definition `mcp.save` takes:
+
+```json
+{
+  "id": "example",
+  "source": "user",
+  "configuration": {
+    "type": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-everything"],
+    "env": {},
+    "enabled": false
+  }
+}
+```
+
+The two remote forms replace `configuration` with
+`{"type": "http", "url": "https://mcp.example.com/mcp", "headers": {}, "enabled": false}` or the
+same with `"type": "sse"`, and add `"auth": {"type": "bearer", "token": "…"}` for a static
+credential or `"oauth": {"clientId": "…", "callbackPort": 1456, "scopes": "…",
+"authServerMetadataUrl": "…"}` for OAuth; the two exclude each other, and OAuth also excludes an
+`Authorization` header. The editor has no transport picker, so the document shows stdio and the
+document says how to switch.
+
+A run is `mcp.test`: it executes or contacts the stored entry once and writes nothing the area
+lists, so its answer is a detail — the tools a temporary connection found, titled `Tools of <id>` —
+and the area is not read again. An inspect is `mcp.inspect`: the effective entry and its Session
+connections, titled `MCP entry <id>`, and never written back. A plugin entry's configuration has no
+revision, so it offers no write, carries `read-only` and says its plugin owns it; test and inspect
+still serve it. Sign-in, sign-out, the callback and disconnect are a state machine or a
+connection-only action, not a kind, so they stay line commands and verbs.
+
+```text
+╭─ MCP ────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│   user                                                                                                               │
+│ › docs      enabled                                                                                                  │
+│     user · stdio · signed in                                                                                         │
+│     Executable: npx                                                                                                  │
+│     Stored arguments (hidden): 2                                                                                     │
+│     Working directory: —                                                                                             │
+│     Environment names: DOCS_TOKEN                                                                                    │
+│   project                                                                                                            │
+│   metrics   disabled                                                                                                 │
+│   plugin                                                                                                             │
+│   notes     enabled  read-only                                                                                       │
+╰───── Enter toggle · Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Ctrl+T test · Tab inspect · Esc close ─╯
+```
+
 ### The command rules area
 
 Command rules (#819): the Permissions panel's Command rules row and `dimcode permissions
@@ -864,6 +1154,27 @@ whole rule as one quoted argument, so global options stay unambiguous.
 | `dimcode scheduled run ID` | Run one job now over `schedule.run_now` and report what the owner returned, or why it skipped the run. |
 | `dimcode scheduled history ID` | Print one job's recent runs over `schedule.history`, newest first, with each run's state and time. |
 | `/scheduled`, `/schedule` | Open the Scheduler panel ([management surfaces](#management-surfaces)): a job per entry with its schedule, next window and last outcome, and the toggle, edit, add, remove, run and inspect kinds; the Scheduler's verb for inspect is history. Jobs are the host's, not the Session's or workspace's; only a new job's default `cwd` comes from the Session. |
+| `dimcode workflow list` | List the definitions over `workflow.list` ([Workflow](plugins/Workflow.md#a3-management-methods)): each definition's name, source, state and description, then the issues of the invalid ones. |
+| `dimcode workflow enable\|disable NAME` | Enable or disable the project definition of that name over `settings.read` and `settings.update`, then report the definitions again. |
+| `dimcode workflow edit NAME` | Open the user definition's document in `$VISUAL`, `$EDITOR` or the platform default, and save it over `workflow.save` with the revision the user document was read at; a project name names the file to edit instead. |
+| `dimcode workflow set NAME PATH` | Write the user definition from `PATH`, or from stdin for `-`, with the revision read immediately before the write; unchanged text writes nothing. |
+| `dimcode workflow add PATH` | Create or replace a definition from `PATH`, or from stdin for `-`, over `workflow.save`: the document names `source` (`user` by default) and `document`. |
+| `dimcode workflow start NAME [PATH]` | Start the definition over `workflow.start` with the parameters from `PATH`, or from stdin for `-`, or with none; report `Started NAME: RUN_ID`, without a `report_to`. |
+| `dimcode workflow history NAME` | Print the definition's lines and its recent runs over `workflow.status`, resolving the name as `workflow.start` does. |
+| `/workflow` | Open the Workflow panel of the Session's workspace ([management surfaces](#management-surfaces)): a definition per entry with its source, state, parameters and issues, and the toggle, edit, add, run and inspect kinds. |
+| `/workflow:save` | Open the Workflow panel in its create editor. |
+| `dimcode mcp list` | List the effective catalog over `mcp.catalog` ([The MCP area](#the-mcp-area)): each entry's id, source, transport, enablement and authorization, then each source application's errors. |
+| `dimcode mcp add PATH` | Create an entry from the panel's create document, `-` for stdin, over `mcp.save` with the source revision `mcp.catalog` reported; an id the catalog already lists is refused. |
+| `dimcode mcp edit ID` | Open the entry's `mcp.update` patch in `$VISUAL`, `$EDITOR` or the platform default, and write it at the revision `mcp.configuration` reported; unchanged text writes nothing. |
+| `dimcode mcp set ID PATH` | The same write from a file, or from stdin for `-`, with the revision read immediately before the write. |
+| `dimcode mcp remove ID` | Delete one entry over `mcp.remove` at its source revision, without a prompt: the id on the command line is the intent. |
+| `dimcode mcp test ID` | Run the stored entry once over `mcp.test` and print the tools the temporary connection found; nothing is saved. |
+| `dimcode mcp inspect ID` | Print the effective configuration and the Session's connections over `mcp.inspect`, without contacting the server. |
+| `dimcode mcp disconnect ID` | Close the entry's live connections over `mcp.disconnect`; it writes no configuration, and the entry reconnects on next use. |
+| `dimcode mcp login\|logout\|enable\|disable ID` | Keep their behavior: browser or device sign-in, sign-out, and the enablement both `/mcp` clients share. |
+| `/mcp` | Open the MCP panel of the Session's workspace ([management surfaces](#management-surfaces)): an entry per server, grouped `user`, `project` and `plugin`, with the toggle, edit, add, remove, test and inspect kinds. |
+| `/mcp list\|login\|callback\|logout\|disconnect\|enable\|disable` | The line commands, unchanged: `list` prints the catalog and the Session's server states, `disconnect` closes one entry's live connections, and the rest sign in, complete a callback, sign out or toggle. |
+
 | `dimcode permissions list` | List the user's command rules over `permission.rules`: each rule's decision, match and command, then the columns and what deny means. |
 | `dimcode permissions add PATH` | Add one rule from `PATH`, or from stdin for `-`, over `permission.rules` and `permission.set_rules`: an equal rule writes nothing; a conflict re-reads and retries, at most three attempts. |
 | `dimcode permissions remove RULE` | Remove the rule named by `RULE`, which is the whole rule as one quoted `'DECISION MATCH COMMAND'` argument, over `permission.rules` and `permission.set_rules` at the revision just read; a rule that is gone, or a raced write, writes nothing and exits 1. |
@@ -956,8 +1267,8 @@ Subcommands do not create a plugin command registry.
 
 ### Session titles
 
-The manual title is the Session's own state: `session.list` and
-`session.summaries` report it with its `manual` source, and later automatic
+The manual title is the Session's own state: `session.summaries`
+reports it with its `manual` source, and later automatic
 generation never replaces it ([title metadata](appserver/session-title-metadata.md),
 [SessionTitle](plugins/SessionTitle.md)). `session.rename {sessionId, title}` sets
 it and `title: null` clears it. Title text belongs to no branch and to no Timeline
@@ -979,9 +1290,15 @@ bare `/rename` is refused with a `needs <title>` notice and sends nothing, and
 `--clear` is the only form that clears without one. Every form is a command the
 client handles: the text is never queued and never submitted, including while a turn
 runs. The `/resume` list reads `session.catalog` each time it opens, and falls back to
-`session.summaries` on a daemon before the catalog, so it shows the new title; the header
-shows the first message's topic and is unaffected. The
-idle line client reads the same two forms and prints
+`session.summaries` on a daemon before the catalog, so it shows the new title. The
+window title shows the Session's stored title as `DIM | <title>`: it is seeded from the
+`session.attach` record and kept current by `session.notice` records whose `source` is
+`SessionStore` and `kind` is `title`, so the generated title and a rename from any client
+both reach it. A notice is applied only when its `titleRevision` is higher than the one
+the client holds. Until the Session has a title the window title shows the first
+message's topic, and the placeholder `New session` counts as no title in both the window
+title and the `/resume` row. `/new` returns the window title to `DIM`. The idle line
+client reads the same two forms and prints
 `Use /rename TITLE or /rename --clear` for a bare `/rename`.
 
 ### Session deletion and cleanup
@@ -1073,32 +1390,35 @@ Sessions are all active prints the sentence above instead.
 ### Migration interaction
 
 `dim` and the alpha package's `dima` invoke these same native commands. Bare
-`migration` imports each existing distribution independently:
+`migration` selects its source and target by the build's release channel:
 
-| Distribution | Legacy source | Native target home |
-| --- | --- | --- |
-| Global | `~/.dim/v2` containing `dimglobal.sqlite` | `~/.dim` |
-| CN | `~/.dimcode/v2` containing `dimcode.sqlite` | `~/.dimcode` |
+| Build | Distribution | Legacy source | Native target home |
+| --- | --- | --- | --- |
+| Alpha | CN | `~/.dimcode/v2` containing `dimcode.sqlite` | `~/.dimcode-alpha` |
+| Non-alpha | Global | `~/.dim/v2` containing `dimglobal.sqlite` | `~/.dim` |
+| Non-alpha | CN | `~/.dimcode/v2` containing `dimcode.sqlite` | `~/.dimcode` |
 
-When both exist, both are imported. Sessions, Providers, Settings and task ledgers
-remain in their own target home. The default migration command uses these paths
-independently of the chat client's alpha/development home or `DIMCODE_HOME`.
-`./dev migration` invokes the same routing without injecting its development home
-or restarting a daemon. Development verification uses disposable user homes.
+Alpha imports only the CN source and keeps its Sessions, Providers, Settings and
+task ledgers separate from non-alpha data. Non-alpha imports both distributions
+when both sources exist, keeping each in its own target home. These paths do not
+follow `DIMCODE_HOME`. `./dev migration` follows the built version's channel
+without injecting its development home or restarting a daemon. Development
+verification uses disposable user homes.
 
 An explicit `--home TARGET` scopes the command to that one home, reading
-`TARGET/v2` when `--source` is absent. `--source OLD_HOME` selects just that
-source; when it names a `v2` directory its parent is the target. Other custom
-source layouts require `--home TARGET` to make the destination explicit.
+`TARGET/v2` when `--source` is absent. On import or inspection, `--source OLD_HOME`
+selects just that source; without `--home`, it must name a `v2` directory. Alpha keeps
+`~/.dimcode-alpha` as the target; non-alpha uses the source's parent. Other
+custom source layouts require `--home TARGET` to make the destination explicit.
 The shared Migration plugin still receives one resolved source/target pair per
 invocation and knows no distribution directory convention.
 
-Default `list` reads both target homes. Default `show`, `retry` and `cancel`
-locate the task through the owners' task lists, including when its old source
-has been removed. JSON output is one object keyed by `global` and `cn`;
+Default `list` reads the target homes selected by the build's channel. Default
+`show`, `retry` and `cancel` locate the task through the owners' task lists,
+including when its old source has been removed. JSON output is one object keyed by `global` and `cn`;
 each entry contains `home` and `result`, or `home` and `error`. An absent
 distribution is omitted. No matching source is an error; a task query with no
-matching task is an error; listing with neither target home present returns `{}`.
+matching task is an error; listing with no selected target home present returns `{}`.
 A failure in one
 distribution is reported while the other is attempted. Cancellation stops the
 remaining imports. Overall exit is 1 for any failed distribution, otherwise 2
@@ -1117,11 +1437,11 @@ exit. There is no persistent Migration selection or automatic trigger. Imported
 business configuration takes effect through normal feature loading.
 
 Open imported Global data with `dim --home ~/.dim`; the ordinary default home
-does not switch to Global. `dima` uses the same migration destinations, so pass
-`--home ~/.dimcode-alpha` explicitly to import into the alpha home instead.
+does not switch to Global. `dima` opens its imported CN data in its ordinary
+alpha home.
 
 ```text
-$ ./dev migration
+$ dim migration
 Source: /Users/me/.dim/v2
 Target: /Users/me/.dim
 Source: /Users/me/.dimcode/v2
@@ -1131,6 +1451,12 @@ Close legacy and native clients using these homes. Continue? [y/N] y
 Migration completed
 Task: <task-id>
 Full report: dim migration show <task-id> --home /Users/me/.dim
+
+$ dima migration
+Source: /Users/me/.dimcode/v2
+Target: /Users/me/.dimcode-alpha
+Close legacy and native clients using these homes. Continue? [y/N] y
+<fixed progress panel; see Migration terminal presentation>
 
 $ dim migration inspect --home /tmp/dim-new --source /tmp/dim-old --source-stopped
 { "database": "dimcode.sqlite", "tables": { ... }, "issues": [] }
@@ -1220,6 +1546,24 @@ provider editor or Session deletion/fork. `dimcode export` is the
 [Timeline export](appserver/timeline-export.md) (ADR 005 D3): every final model
 request is a `model/call` line in it; the request snapshot filters of the
 feature list are not implemented.
+
+## Update dialog
+
+The existing update dialog uses the same actions in fullscreen and scrollback.
+It fits the available columns and rows: long version, command and error text
+wraps, with Up/Down scrolling when needed. The title and action row remain
+visible. If the actions do not fit on one row, show the focused action and its
+index; Left/Right and Tab/BackTab still cycle all actions, Enter confirms and
+Esc closes. Wide terminals retain the existing confirmation layout when it fits.
+
+```text
++- Update available --------+
+| Version 0.12.0-alpha.124  |
+| is available (you have   |
+| > Later 3/3              |
+| Left/Right Tab Enter Esc |
++----------- Up/Down 1-2/7-+
+```
 
 ## Terminal interaction
 
@@ -1893,6 +2237,10 @@ is typed (replacing the chosen label in a single choice) and clearing it uncheck
 while editing, Esc leaves the editor keeping the text and Enter keeps it and moves to
 the next question. Outside the editor, Esc declines the whole call. Display sanitization
 never changes the labels sent to the owner. The composer's draft is preserved.
+
+When the question tabs do not fit on one row, show only the current tab's label
+and its position, including the Confirm tab. Tab/Shift+Tab and Left/Right keep
+their existing switching behavior; tab labels cannot overflow the prompt border.
 
 A pending question does not block commands. While its free-text answer is not being
 edited, `/`, Ctrl+O and Ctrl+P open the command palette over it, drawn where that mode

@@ -186,7 +186,7 @@ async fn delete_closes_a_running_session_and_removes_what_it_stored() {
     assert_eq!(store.rows(&kept), kept_rows);
     assert!(exists(&store.output(&kept)));
 
-    let list = other.rpc("session.list", json!({})).await;
+    let list = other.rpc("session.summaries", json!({})).await;
     assert!(!listed(&list, &sid) && listed(&list, &kept));
     let summaries = other.rpc("session.summaries", json!({})).await;
     assert!(!listed(&summaries, &sid));
@@ -617,7 +617,7 @@ async fn unloaded_and_damaged_sessions_are_deleted_by_id() {
         assert!(agent.get_session(id).is_none());
     }
     assert!(!exists(&store.output(&dormant)));
-    let list = client.rpc("session.list", json!({})).await;
+    let list = client.rpc("session.summaries", json!({})).await;
     assert!(list["result"].as_array().unwrap().is_empty(), "{list}");
     drop((client, agent));
     server.shutdown();
@@ -736,7 +736,7 @@ async fn a_failed_delete_leaves_the_session_closed_until_a_retry() {
             "{method}"
         );
     }
-    let list = client.rpc("session.list", json!({})).await;
+    let list = client.rpc("session.summaries", json!({})).await;
     assert!(
         !listed(&list, &lead) && !listed(&list, &member),
         "the team ends before its leader's own rows, which this delete could not remove: {list}"
@@ -824,7 +824,7 @@ async fn a_delete_waits_for_a_building_session() {
         let mut creator = Client::new_version(&server, false, 3).await;
         let request = creator.send(method, params).await;
         held.entered.notified().await;
-        let list = client.rpc("session.list", json!({})).await;
+        let list = client.rpc("session.summaries", json!({})).await;
         let building = list["result"]
             .as_array()
             .unwrap()

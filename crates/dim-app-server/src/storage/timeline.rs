@@ -12,13 +12,13 @@ use crate::protocol::SessionOrigin;
 use dim_agent_capabilities::host::SessionFilesHost;
 use dim_agent_runtime::Names;
 use dim_agent_runtime::{
-    AgentError, BoxFuture, BranchRecord, PolicyFacts, PolicyOrder, PolicyOrderEvent, PolicyWindow,
-    PublishCallback, Result, SessionConfig, StoredBranch, StoredEvent, TimelineKey, TimelineStore,
-    TimelineTrace, panic_message,
+    AgentError, BoxFuture, BranchRecord, PolicyEvent, PolicyFacts, PolicyOrder, PolicyOrderEvent,
+    PolicyWindow, PublishCallback, Result, SessionConfig, StoredBranch, StoredEvent, TimelineKey,
+    TimelineStore, TimelineTrace, panic_message,
 };
 use dim_agent_types::{
     AgentEvent, BranchCreateAt, ContextCompactionResult, EventKind, ModelRequest, RecoverySnapshot,
-    SessionForkedData,
+    SessionForkedData, TimelinePosition,
     grant::{GrantKind, GrantMode, SessionGrant},
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -1031,20 +1031,6 @@ impl SessionStore {
     pub fn timeline_store(&self) -> Arc<dyn TimelineStore> {
         self.timeline.clone()
     }
-    pub async fn sessions(&self) -> Result<Vec<String>> {
-        self.timeline
-            .db
-            .run(|connection| {
-                connection
-                    .prepare("SELECT session_id FROM agent_sessions ORDER BY session_id")
-                    .map_err(error)?
-                    .query_map([], |row| row.get(0))
-                    .map_err(error)?
-                    .collect::<rusqlite::Result<_>>()
-                    .map_err(error)
-            })
-            .await
-    }
     /// Adds a canonical user grant for `session_id`. The caller resolves
     /// `path`; a write grant is not downgraded by a later read grant, and a
     /// read grant may become write.
@@ -1151,80 +1137,6 @@ impl SessionStore {
             .owned_paths(session_id.to_owned())
             .await
             .map_err(error)
-    }
-    /// Directory-only reads never validate or decode Timeline events. Each
-    /// record carries its title metadata, read in the same query.
-    pub async fn directory(
-        &self,
-        agent: Option<String>,
-        version: u32,
-        cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<Vec<crate::protocol::SessionInfo>> {
-        self.timeline
-            .db
-            .run_cancellable(cancel, move |connection| {
-                let filter = if agent.is_some() {
-                    " AND o.agent_id=?2"
-                } else {
-                    ""
-                };
-                let sql = format!(
-                    "SELECT s.session_id, s.config, s.created_at_ms, b.sequence, o.agent_id, \
-                 m.revision, m.title, m.title_source, s.origin, s.leader_session_id \
-                 FROM session_owners o JOIN agent_sessions s USING(session_id) \
-                 JOIN timeline_branches b ON b.session_id=s.session_id AND b.branch_id='main' \
-                 LEFT JOIN session_metadata m ON m.session_id=s.session_id \
-                 WHERE o.protocol_version=?1{filter} ORDER BY s.session_id"
-                );
-                let mut query = connection.prepare(&sql).map_err(error)?;
-                let mut parameters = vec![rusqlite::types::Value::Integer(i64::from(version))];
-                if let Some(agent) = agent {
-                    parameters.push(agent.into());
-                }
-                let mut rows = query
-                    .query(rusqlite::params_from_iter(parameters))
-                    .map_err(error)?;
-                let mut result = vec![];
-                while let Some(row) = rows.next().map_err(error)? {
-                    let id: String = row.get(0).map_err(error)?;
-                    let parsed = (|| -> Result<_> {
-                        let config: String = row.get(1).map_err(error)?;
-                        let config: SessionConfig = serde_json::from_str(&config).map_err(error)?;
-                        let (origin, parent) = if version >= 3 {
-                            (
-                                Some(stored_origin(row, 8)?),
-                                row.get::<_, Option<String>>(9).map_err(error)?,
-                            )
-                        } else {
-                            (None, None)
-                        };
-                        Ok(crate::protocol::SessionInfo {
-                            session_id: id.clone(),
-                            cwd: config.cwd,
-                            model: dim_agent_types::ModelId {
-                                provider_id: config.model.provider_id,
-                                model_id: config.model.model_id,
-                            },
-                            created_at: read_sequence(row, 2).map_err(error)?,
-                            sequence: read_sequence(row, 3).map_err(error)?,
-                            running: false,
-                            attached_clients: 0,
-                            agent_id: Some(row.get(4).map_err(error)?),
-                            origin,
-                            parent_session_id: parent,
-                            title: Some(metadata::decode(row, 5).map_err(error)?.into()),
-                        })
-                    })();
-                    match parsed {
-                        Ok(record) => result.push(record),
-                        Err(error) => {
-                            tracing::error!(session_id=%id, %error, "Invalid Session directory")
-                        }
-                    }
-                }
-                Ok(result)
-            })
-            .await
     }
     /// One Session's stored creation origin and leader link, for an attach
     /// reply (#557): one row of `agent_sessions`, no config decode, no history
@@ -1764,8 +1676,8 @@ impl SessionStore {
                     .map_err(error)?;
                 }
                 tx.execute(
-                    "INSERT INTO timeline_events (session_id, branch_id, sequence, last_sequence, kind, body, event_id) \
-                     SELECT ?2, branch_id, sequence, last_sequence, kind, body, event_id FROM timeline_events \
+                    "INSERT INTO timeline_events (session_id, branch_id, sequence, last_sequence, kind, body, event_id, context_render, context_state) \
+                     SELECT ?2, branch_id, sequence, last_sequence, kind, body, event_id, context_render, context_state FROM timeline_events \
                      WHERE session_id=?1 AND branch_id='main' AND sequence<=?3",
                     params![source, fork, cut],
                 )
@@ -1833,6 +1745,7 @@ impl SessionStore {
                         &key,
                         at + 1,
                         forked.event.kind.key(),
+                        forked.event.kind.context_flags(),
                         &Row::Event {
                             record: Box::new(wire),
                         },
@@ -2156,7 +2069,14 @@ fn write_batch(
                     started_at: record.event.create_at,
                     records: vec![wire],
                 };
-                let bytes = insert_event(connection, &batch.key, sequence, kind, &row)?;
+                let bytes = insert_event(
+                    connection,
+                    &batch.key,
+                    sequence,
+                    kind,
+                    record.event.kind.context_flags(),
+                    &row,
+                )?;
                 outputs.insert(
                     batch.key.branch_id.clone(),
                     OutputRow {
@@ -2174,6 +2094,7 @@ fn write_batch(
                     &batch.key,
                     sequence,
                     kind,
+                    record.event.kind.context_flags(),
                     &Row::Event {
                         record: Box::new(wire),
                     },
@@ -2226,11 +2147,12 @@ fn insert_event(
     key: &TimelineKey,
     sequence: u64,
     kind: &str,
+    flags: (bool, bool),
     row: &Row,
 ) -> Result<usize> {
     let body = serde_json::to_string(row).map_err(error)?;
     connection
-        .prepare_cached("INSERT INTO timeline_events VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6)")
+        .prepare_cached("INSERT INTO timeline_events VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8)")
         .map_err(error)?
         .execute(params![
             key.session_id,
@@ -2241,7 +2163,9 @@ fn insert_event(
             match row {
                 Row::Event { record } => record.event["id"].as_str(),
                 Row::Output { .. } => None,
-            }
+            },
+            i64::from(flags.0),
+            i64::from(flags.1),
         ])
         .map_err(error)?;
     Ok(body.len())
@@ -2667,7 +2591,7 @@ fn policy_rows(
     turn_id: &str,
 ) -> Result<Vec<(i64, i64)>> {
     let mut rows = Vec::new();
-    for kind in ["context/configured", "context/compaction"] {
+    for kind in ["context/configured", "context/compaction", "prompt/changed"] {
         let row: Option<(i64, i64)> = connection
             .prepare(
                 "SELECT sequence, MAX(last_sequence, COALESCE(json_extract(body, '$.record.batch_end'), last_sequence)) FROM timeline_events \
@@ -2997,6 +2921,7 @@ impl TimelineStore for SqliteTimelineStore {
                          FROM timeline_events \
                          WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3 \
                          AND event_id IS NOT NULL \
+                         AND kind IN ('turn/start', 'context/compaction-start', 'context/compaction') \
                          ORDER BY sequence",
                     )
                     .map_err(error)?;
@@ -3018,6 +2943,7 @@ impl TimelineStore for SqliteTimelineStore {
             };
             Ok(PolicyOrder {
                 through,
+                branches: Vec::new(),
                 events: rows
                     .into_iter()
                     .map(|(id, kind, sequence, through)| PolicyOrderEvent {
@@ -3028,6 +2954,7 @@ impl TimelineStore for SqliteTimelineStore {
                         compaction_start: (kind == "context/compaction-start")
                             .then_some(through.map(|value| value as u64))
                             .flatten(),
+                        boundary: false,
                     })
                     .collect(),
             })
@@ -3127,10 +3054,215 @@ impl TimelineStore for SqliteTimelineStore {
                 .await?
                 .into_iter()
                 .flatten()
-                .map(|record| record.event)
-                .filter(|event| event.sequence <= through && is_policy_event(event))
+                .filter(|record| record.event.sequence <= through && is_policy_event(&record.event))
+                .map(|record| PolicyEvent {
+                    position: TimelinePosition {
+                        branch_id: key.branch_id.clone(),
+                        sequence: record.event.sequence,
+                    },
+                    event: record.event,
+                })
                 .collect();
             Ok(PolicyFacts { through, events })
+        })
+    }
+    fn events_of_kind<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        kind: &'a str,
+        through: u64,
+    ) -> BoxFuture<'a, Result<Vec<Arc<dim_agent_types::AgentEvent>>>> {
+        Box::pin(async move {
+            let session = key.session_id.clone();
+            let branch = key.branch_id.clone();
+            let wanted = kind.to_owned();
+            let end = sql_sequence(through)?;
+            let mut reader = self.reader(RequestBodies::Rebuild);
+            let rows = holds(
+                &self.db,
+                &mut reader,
+                None,
+                move |connection, reader, rows: &mut Option<Rows>| {
+                    let rows = match rows {
+                        Some(rows) => rows,
+                        None => {
+                            let mut query = connection
+                                .prepare(
+                                    "SELECT sequence, last_sequence, kind, body, event_id \
+                                     FROM timeline_events \
+                                     WHERE session_id=?1 AND branch_id=?2 AND kind=?3 AND sequence<=?4 \
+                                     ORDER BY sequence",
+                                )
+                                .map_err(error)?;
+                            rows.insert(Rows {
+                                fetched: query_fetched(
+                                    &mut query,
+                                    rusqlite::params![session, branch, wanted, end],
+                                )?
+                                .into(),
+                                decoded: vec![],
+                            })
+                        }
+                    };
+                    rows.advance(connection, &session, reader)
+                },
+            )
+            .await?;
+            self.finish(reader);
+            let mut rows = rows.expect("a finished read fetched its rows");
+            Ok(rows
+                .records(&(1..=through), false)?
+                .into_iter()
+                .map(|record| record.event)
+                .collect())
+        })
+    }
+    fn event_by_id<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<Arc<dim_agent_types::AgentEvent>>>> {
+        Box::pin(async move {
+            let session = key.session_id.clone();
+            let branch = key.branch_id.clone();
+            let wanted = id.to_owned();
+            let sequence: Option<i64> = self
+                .db
+                .run(move |connection| {
+                    connection
+                        .query_row(
+                            "SELECT sequence FROM timeline_events \
+                             WHERE session_id=?1 AND branch_id=?2 AND event_id=?3 LIMIT 1",
+                            rusqlite::params![session, branch, wanted],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(error)
+                })
+                .await?;
+            let Some(sequence) = sequence else {
+                return Ok(None);
+            };
+            let mut reader = self.reader(RequestBodies::Rebuild);
+            let records = read_range(
+                &self.db,
+                &mut reader,
+                key,
+                sequence as u64..=sequence as u64,
+                false,
+            )
+            .await?;
+            self.finish(reader);
+            Ok(records
+                .into_iter()
+                .map(|record| record.event)
+                .find(|event| event.id == id))
+        })
+    }
+    fn last_event<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> BoxFuture<'a, Result<Option<Arc<dim_agent_types::AgentEvent>>>> {
+        Box::pin(async move {
+            let mut reader = self.reader(RequestBodies::Rebuild);
+            let records =
+                read_range(&self.db, &mut reader, key, sequence..=sequence, false).await?;
+            self.finish(reader);
+            Ok(records
+                .into_iter()
+                .map(|record| record.event)
+                .rfind(|event| event.sequence <= sequence))
+        })
+    }
+    fn read_context_page<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        after: u64,
+        limit: usize,
+        through: u64,
+    ) -> BoxFuture<'a, Result<Vec<StoredEvent>>> {
+        Box::pin(async move {
+            if after > through || limit == 0 {
+                return Ok(Vec::new());
+            }
+            let mut records = Vec::new();
+            let mut cursor = after.max(1);
+            let mut decoded = 0;
+            while cursor <= through && decoded < limit {
+                let end = cursor.saturating_add(255).min(through);
+                let mut page = self.read_context(key, cursor, end).await?;
+                decoded += page.len();
+                records.append(&mut page);
+                cursor = end + 1;
+            }
+            let mut records: Vec<_> = records
+                .into_iter()
+                .filter(|record| record.event.sequence > after)
+                .collect();
+            if let Some(record) = records.get(limit - 1) {
+                let end = record.batch_end;
+                while cursor <= end && cursor <= through {
+                    let window = cursor.saturating_add(255).min(through);
+                    let mut page = self.read_context(key, cursor, window).await?;
+                    cursor = window + 1;
+                    records.append(&mut page);
+                }
+                records.retain(|record| record.event.sequence <= end);
+            }
+            Ok(records)
+        })
+    }
+    fn read_context<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        from: u64,
+        through: u64,
+    ) -> BoxFuture<'a, Result<Vec<StoredEvent>>> {
+        Box::pin(async move {
+            if from == 0 || from > through {
+                return Ok(Vec::new());
+            }
+            let session = key.session_id.clone();
+            let branch = key.branch_id.clone();
+            let (start, end) = (sql_sequence(from)?, sql_sequence(through)?);
+            let mut reader = self.reader(RequestBodies::Rebuild);
+            let rows = holds(
+                &self.db,
+                &mut reader,
+                None,
+                move |connection, reader, rows: &mut Option<Rows>| {
+                    let rows = match rows {
+                        Some(rows) => rows,
+                        None => {
+                            let mut query = connection
+                                .prepare(
+                                    "SELECT sequence, last_sequence, kind, body, event_id FROM timeline_events \
+                             WHERE session_id=?1 AND branch_id=?2 \
+                             AND sequence >= coalesce((SELECT max(sequence) FROM timeline_events \
+                               WHERE session_id=?1 AND branch_id=?2 AND sequence <= ?3), ?3) \
+                             AND sequence<=?4 AND last_sequence >= ?3 \
+                             AND (context_render=1 OR context_state=1) ORDER BY sequence"
+                                )
+                                .map_err(error)?;
+                            rows.insert(Rows {
+                                fetched: query_fetched(
+                                    &mut query,
+                                    rusqlite::params![session, branch, start, end],
+                                )?
+                                .into(),
+                                decoded: vec![],
+                            })
+                        }
+                    };
+                    rows.advance(connection, &session, reader)
+                },
+            )
+            .await?;
+            self.finish(reader);
+            let mut rows = rows.expect("a finished read fetched its rows");
+            let records = rows.records(&(from..=through), false)?;
+            Ok(records)
         })
     }
     fn read_segments<'a>(

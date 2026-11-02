@@ -291,7 +291,7 @@ pub const COMMANDS: &[Command] = &[
     slash(
         "mcp",
         "model",
-        "list MCP servers, sign in or out (login|logout ID)",
+        "manage MCP servers, sign in or out (/mcp login ID)",
         &[],
         Needs::Nothing,
     ),
@@ -331,6 +331,20 @@ pub const COMMANDS: &[Command] = &[
         Needs::Nothing,
     ),
     slash(
+        "workflow",
+        "model",
+        "list workflow definitions, start one or save a definition",
+        &[],
+        Needs::Nothing,
+    ),
+    slash(
+        "workflow:save",
+        "model",
+        "save a workflow definition for reuse",
+        &[],
+        Needs::Nothing,
+    ),
+    slash(
         "permissions",
         "model",
         "configure file access, tool approval and process isolation, and manage command rules",
@@ -346,16 +360,6 @@ pub const COMMANDS: &[Command] = &[
     ),
     slash("settings", "app", "open settings", &[], Needs::Nothing),
     slash("keys", "app", "show the key bindings", &[], Needs::Nothing),
-    Command {
-        requires_exact_name: true,
-        ..slash(
-            "suspend",
-            "app",
-            "suspend to the shell",
-            &[],
-            Needs::Nothing,
-        )
-    },
     Command {
         key: Some("Ctrl+C Ctrl+C"),
         requires_exact_name: true,

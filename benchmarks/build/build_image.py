@@ -29,11 +29,13 @@ HERE = Path(__file__).resolve().parent
 BENCHMARKS = HERE.parent
 REPO_ROOT = BENCHMARKS.parent
 
-#: glibc 2.28 as in scripts/build-all.mjs. Linking against the build host's
-#: newer glibc would make the binary fail to start in older task images, which
-#: reads as every task in those images failing.
+#: The oldest task image is glibc 2.36 (the Debian 12 DeepSWE images); the
+#: FrontierHarness and OfficeQA images are 2.36 or newer. 2.34 is the lowest
+#: target that provides close_range, which dim-app-server now calls, so the
+#: 2.28 target no longer links. Keeping the target at 2.34 leaves headroom
+#: below the oldest image while still failing fast if an image regresses.
 RUST_TARGET = "x86_64-unknown-linux-gnu"
-GLIBC = "2.28"
+GLIBC = "2.34"
 
 IDENTITY_FILENAME = "eval-build.json"
 

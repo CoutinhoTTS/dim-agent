@@ -76,6 +76,10 @@ pub(crate) async fn run(root: &rutis::Ctx, options: &Options, command: &Command)
         return Err(USAGE.into());
     }
     let importing = matches!(command.operation, Operation::Run | Operation::Inspect);
+    let alpha = crate::update::channel(env!("CARGO_PKG_VERSION")) == "alpha";
+    let user_home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(PathBuf::from)
+        .ok_or("Cannot locate the distribution homes; pass --home TARGET");
     if options.home_explicit || importing && command.source.is_some() {
         let mut options = options.clone();
         if !options.home_explicit
@@ -84,8 +88,12 @@ pub(crate) async fn run(root: &rutis::Ctx, options: &Options, command: &Command)
             if source.file_name() != Some(std::ffi::OsStr::new("v2")) {
                 return Err("A custom source without a v2 directory requires --home TARGET".into());
             }
-            let source = std::env::current_dir()?.join(source);
-            options.home = std::fs::canonicalize(source.parent().ok_or(USAGE)?)?;
+            options.home = if alpha {
+                user_home?.join(".dimcode-alpha")
+            } else {
+                let source = std::env::current_dir()?.join(source);
+                std::fs::canonicalize(source.parent().ok_or(USAGE)?)?
+            };
         }
         let (code, output) = run_home(root, &options, command, &terminal).await?;
         if let Some(output) = output {
@@ -97,25 +105,28 @@ pub(crate) async fn run(root: &rutis::Ctx, options: &Options, command: &Command)
         }
         return Ok(code);
     }
-    let user_home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-        .map(PathBuf::from)
-        .ok_or("Cannot locate the distribution homes; pass --home TARGET")?;
-    let homes: Vec<_> = [
-        ("global", ".dim", "dimglobal.sqlite"),
-        ("cn", ".dimcode", "dimcode.sqlite"),
-    ]
-    .into_iter()
-    .filter_map(|(name, directory, database)| {
-        let home = user_home.join(directory);
-        let source = home.join("v2");
-        let present = if importing {
-            source.join(database).is_file()
-        } else {
-            home.is_dir()
-        };
-        present.then_some((name, source, home))
-    })
-    .collect();
+    let user_home = user_home?;
+    let distributions: &[_] = if alpha {
+        &[("cn", ".dimcode", ".dimcode-alpha", "dimcode.sqlite")]
+    } else {
+        &[
+            ("global", ".dim", ".dim", "dimglobal.sqlite"),
+            ("cn", ".dimcode", ".dimcode", "dimcode.sqlite"),
+        ]
+    };
+    let homes: Vec<_> = distributions
+        .iter()
+        .filter_map(|&(name, source_directory, target_directory, database)| {
+            let home = user_home.join(target_directory);
+            let source = user_home.join(source_directory).join("v2");
+            let present = if importing {
+                source.join(database).is_file()
+            } else {
+                home.is_dir()
+            };
+            present.then_some((name, source, home))
+        })
+        .collect();
     if importing && homes.is_empty() {
         return Err(
             "No default legacy v2 database found; pass --source OLD_HOME for a custom location"

@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {spawnSync} from 'node:child_process';
-import {existsSync,mkdirSync,mkdtempSync,readFileSync,readdirSync,rmSync,writeFileSync} from 'node:fs';
+import {spawn,spawnSync} from 'node:child_process';
+import {cpSync,existsSync,mkdirSync,mkdtempSync,readFileSync,readdirSync,renameSync,rmSync,writeFileSync} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {test} from 'node:test';
+import {pathToFileURL} from 'node:url';
 import {gunzipSync} from 'node:zlib';
 
 const root=path.resolve(import.meta.dirname,'..');
@@ -16,6 +17,48 @@ function fixture(t) {
   const temporary=mkdtempSync(path.join(os.tmpdir(),'dim release test '));
   t.after(()=>rmSync(temporary,{recursive:true,force:true}));
   return temporary;
+}
+
+/** The plugin a logged npm ci ran for; the temporary directory carries the pid. */
+const installName=(directory)=>{
+  const match=/^(.*)\.partial(?:\.\d+)?$/.exec(path.basename(directory));
+  return match?match[1]:path.basename(directory);
+};
+
+/** Temporary directories a stage holds for one plugin. */
+const leftovers=(output,relative,kind)=>{
+  const parent=path.dirname(path.join(output,relative));
+  const name=path.basename(relative).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+  if(!existsSync(parent)) return [];
+  const pattern=new RegExp(`^${name}\\.${kind}(?:\\.\\d+)?$`);
+  return readdirSync(parent).filter((entry)=>pattern.test(entry));
+};
+
+/** A stub npm on PATH that only records where it ran and creates node_modules. */
+function stubNpm(temporary,t) {
+  const bin=path.join(temporary,'bin');
+  mkdirSync(bin);
+  const log=path.join(temporary,'npm.log');
+  writeFileSync(path.join(bin,'npm'),`#!/bin/bash\nprintf '%s\\n' "$PWD" >> "${log}"\nmkdir -p "$PWD/node_modules"\nexit 0\n`,{mode:0o755});
+  const previous=process.env.PATH;
+  process.env.PATH=`${bin}:${previous}`;
+  t.after(()=>{process.env.PATH=previous;});
+  return {log,env:{PATH:`${bin}:${previous}`}};
+}
+
+/** A child process that stays alive until the test kills it. */
+function sleeper(t) {
+  const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});
+  t.after(()=>child.kill('SIGKILL'));
+  return child;
+}
+
+/** The default plugin payload a release payload must carry; content is not under test here. */
+function stubPlugins(temporary,name='plugins-stub') {
+  const directory=path.join(temporary,name);
+  mkdirSync(directory,{recursive:true});
+  writeFileSync(path.join(directory,'default-plugins.json'),'{"plugins":{}}\n');
+  return directory;
 }
 
 function entries(archive) {
@@ -43,13 +86,437 @@ test('workflow actions use immutable commits, including disabled publication',()
   }
 });
 
+test('staging the default plugins update is incremental and never leaves a half stage', {skip:process.platform==='win32'}, (t)=>{
+  const temporary=fixture(t);
+  const bin=path.join(temporary,'bin');
+  mkdirSync(bin);
+  const log=path.join(temporary,'npm.log');
+  const npm=(status)=>writeFileSync(path.join(bin,'npm'),`#!/bin/bash\nprintf '%s\\n' "$PWD" >> "${log}"\nmkdir -p "$PWD/node_modules"\nexit ${status}\n`,{mode:0o755});
+  npm(0);
+  const env={PATH:`${bin}:${process.env.PATH}`};
+  const output=path.join(temporary,'staged');
+  const record=path.join(output,'.stage-plugins.json');
+  const readRecord=()=>JSON.parse(readFileSync(record,'utf8'));
+  const installs=()=>existsSync(log)?readFileSync(log,'utf8').trim().split('\n').filter(Boolean):[];
+  const update=()=>run('stage-plugins.mjs',[output,'--update'],env);
+  const first=update();
+  assert.equal(first.status,0,first.stderr);
+  assert.match(first.stdout,/npm ci: goal, session-title, workflow, scheduler/);
+  assert.deepEqual(installs().map(installName).sort(),['goal','scheduler','session-title','workflow']);
+  assert.equal(readRecord().schemaVersion,1);
+  assert.deepEqual(Object.keys(readRecord().plugins).sort(),['goal','plugin-authoring','scheduler','session-title','workflow']);
+  const second=update();
+  assert.equal(second.status,0,second.stderr);
+  assert.match(second.stdout,/npm ci: none/);
+  assert.equal(installs().length,4);
+  const sourceFile=path.join(output,'plugins/goal/index.ts');
+  const original=readFileSync(sourceFile,'utf8');
+  rmSync(sourceFile);
+  assert.equal(update().status,0);
+  assert.equal(readFileSync(sourceFile,'utf8'),original);
+  const changed=readRecord();
+  changed.plugins.goal.hash='stale';
+  writeFileSync(record,`${JSON.stringify(changed)}\n`);
+  const reinstalled=update();
+  assert.equal(reinstalled.status,0,reinstalled.stderr);
+  assert.equal(installs().length,5);
+  assert.equal(installName(installs().at(-1)),'goal');
+  const removed=readRecord();
+  removed.plugins.retired={hash:null,dir:'plugins/retired'};
+  writeFileSync(record,`${JSON.stringify(removed)}\n`);
+  mkdirSync(path.join(output,'plugins/retired'),{recursive:true});
+  writeFileSync(path.join(output,'plugins/retired/index.ts'),'export {}');
+  assert.equal(update().status,0);
+  assert.equal(existsSync(path.join(output,'plugins/retired')),false);
+  assert.equal(readRecord().plugins.retired,undefined);
+  writeFileSync(path.join(output,'plugins/goal/marker'),'kept');
+  const failing=readRecord();
+  failing.plugins.goal.hash='stale again';
+  writeFileSync(record,`${JSON.stringify(failing)}\n`);
+  npm(1);
+  const failed=update();
+  assert.notEqual(failed.status,0);
+  assert.match(failed.stderr,/Cannot stage goal/);
+  assert.equal(readFileSync(path.join(output,'plugins/goal/marker'),'utf8'),'kept');
+  assert.deepEqual(leftovers(output,'plugins/goal','partial'),[]);
+  assert.equal(readRecord().plugins.goal.hash,'stale again');
+});
+
+test('the record follows the disk when an update fails part-way', {skip:process.platform==='win32'}, (t)=>{
+  const temporary=fixture(t);
+  const bin=path.join(temporary,'bin');
+  mkdirSync(bin);
+  const log=path.join(temporary,'npm.log');
+  const fail=path.join(temporary,'fail-session-title');
+  writeFileSync(path.join(bin,'npm'),`#!/bin/bash\nprintf '%s\\n' "$PWD" >> "${log}"\nmkdir -p "$PWD/node_modules"\ncase "$PWD" in *session-title*) [ -e "${fail}" ] && exit 1 ;; esac\nexit 0\n`,{mode:0o755});
+  const env={PATH:`${bin}:${process.env.PATH}`};
+  const output=path.join(temporary,'staged');
+  const record=path.join(output,'.stage-plugins.json');
+  const readRecord=()=>JSON.parse(readFileSync(record,'utf8'));
+  const installs=()=>existsSync(log)?readFileSync(log,'utf8').trim().split('\n').filter(Boolean):[];
+  const update=()=>run('stage-plugins.mjs',[output,'--update'],env);
+  assert.equal(update().status,0);
+  const changed=readRecord();
+  changed.plugins.goal.hash='stale goal';
+  changed.plugins['session-title'].hash='stale session-title';
+  writeFileSync(record,`${JSON.stringify(changed)}\n`);
+  writeFileSync(fail,'');
+  const failed=update();
+  assert.notEqual(failed.status,0);
+  assert.match(failed.stderr,/Cannot stage session-title/);
+  const afterFailure=readRecord();
+  assert.match(afterFailure.plugins.goal.hash,/^[0-9a-f]{64}$/);
+  assert.equal(afterFailure.plugins['session-title'].hash,'stale session-title');
+  assert.deepEqual(installs().slice(-2).map(installName),['goal','session-title']);
+  rmSync(fail);
+  const count=installs().length;
+  const fixed=update();
+  assert.equal(fixed.status,0,fixed.stderr);
+  assert.equal(installs().length,count+1);
+  assert.equal(installName(installs().at(-1)),'session-title');
+  const afterFix=readRecord();
+  assert.equal(afterFix.plugins.goal.hash,afterFailure.plugins.goal.hash);
+  assert.match(afterFix.plugins['session-title'].hash,/^[0-9a-f]{64}$/);
+});
+
+test('a failed swap leaves the live plugin whole until its replacement lands', {skip:process.platform==='win32'}, async (t)=>{
+  const temporary=fixture(t);
+  const bin=path.join(temporary,'bin');
+  mkdirSync(bin);
+  const log=path.join(temporary,'npm.log');
+  writeFileSync(path.join(bin,'npm'),`#!/bin/bash\nprintf '%s\\n' "$PWD" >> "${log}"\nmkdir -p "$PWD/node_modules"\nexit 0\n`,{mode:0o755});
+  const env={PATH:`${bin}:${process.env.PATH}`};
+  const output=path.join(temporary,'staged');
+  const first=run('stage-plugins.mjs',[output,'--update'],env);
+  assert.equal(first.status,0,first.stderr);
+  const goal=path.join(output,'plugins/goal');
+  const modules=path.join(goal,'node_modules');
+  assert(existsSync(modules));
+  const record=path.join(output,'.stage-plugins.json');
+  const recordBefore=readFileSync(record,'utf8');
+  const source=readFileSync(path.join(goal,'index.ts'),'utf8');
+  const {updateStage}=await import(pathToFileURL(path.join(root,'scripts/stage-plugins.mjs')).href);
+  assert.throws(()=>updateStage(output,{
+    rename:(from,to)=>{
+      if(to===goal&&from.includes('.partial')) throw new Error('injected rename failure');
+      renameSync(from,to);
+    },
+  }),/Cannot stage goal/);
+  assert(existsSync(modules),'the live dependencies stay in place');
+  assert.equal(readFileSync(path.join(goal,'index.ts'),'utf8'),source);
+  assert.equal(readFileSync(record,'utf8'),recordBefore);
+  assert.deepEqual([...leftovers(output,'plugins/goal','partial'),...leftovers(output,'plugins/goal','previous')],[]);
+  const next=run('stage-plugins.mjs',[output,'--update'],env);
+  assert.equal(next.status,0,next.stderr);
+  assert.match(next.stdout,/npm ci: none/);
+});
+
+test('an update recovers the stage a killed run left behind', {skip:process.platform==='win32'}, (t)=>{
+  const temporary=fixture(t);
+  const bin=path.join(temporary,'bin');
+  mkdirSync(bin);
+  const log=path.join(temporary,'npm.log');
+  writeFileSync(path.join(bin,'npm'),`#!/bin/bash\nprintf '%s\\n' "$PWD" >> "${log}"\nmkdir -p "$PWD/node_modules"\nexit 0\n`,{mode:0o755});
+  const env={PATH:`${bin}:${process.env.PATH}`};
+  const output=path.join(temporary,'staged');
+  assert.equal(run('stage-plugins.mjs',[output,'--update'],env).status,0);
+  const goal=path.join(output,'plugins/goal');
+  renameSync(goal,`${goal}.previous.999999`);
+  mkdirSync(`${goal}.partial.999999`);
+  writeFileSync(path.join(`${goal}.partial.999999`,'leftover'),'x');
+  const record=path.join(output,'.stage-plugins.json');
+  const recordBefore=readFileSync(record,'utf8');
+  const installed=readFileSync(log,'utf8').trim().split('\n').filter(Boolean).length;
+  const recovered=run('stage-plugins.mjs',[output,'--update'],env);
+  assert.equal(recovered.status,0,recovered.stderr);
+  assert.match(recovered.stdout,/npm ci: none/);
+  assert(existsSync(path.join(goal,'index.ts')));
+  assert(existsSync(path.join(goal,'node_modules')));
+  assert.equal(readFileSync(log,'utf8').trim().split('\n').filter(Boolean).length,installed);
+  assert.deepEqual([...leftovers(output,'plugins/goal','partial'),...leftovers(output,'plugins/goal','previous')],[]);
+  assert.equal(readFileSync(record,'utf8'),recordBefore);
+});
+
+test('two concurrent updates serialize on the stage lock', {skip:process.platform==='win32'}, async (t)=>{
+  const temporary=fixture(t);
+  const bin=path.join(temporary,'bin');
+  mkdirSync(bin);
+  const log=path.join(temporary,'npm.log');
+  const ready=path.join(temporary,'ready');
+  const release=path.join(temporary,'release');
+  writeFileSync(path.join(bin,'npm'),`#!/bin/bash\nprintf '%s\\n' "$PWD" >> "${log}"\nif [ ! -e "${ready}" ]; then\n  : > "${ready}"\n  for i in $(seq 1 1500); do [ -e "${release}" ] && break; sleep 0.02; done\nfi\nmkdir -p "$PWD/node_modules"\nexit 0\n`,{mode:0o755});
+  const env={...process.env,PATH:`${bin}:${process.env.PATH}`};
+  const output=path.join(temporary,'staged');
+  const script=path.join(root,'scripts/stage-plugins.mjs');
+  const start=()=>{
+    const child=spawn(process.execPath,[script,output,'--update'],{env});
+    const result={out:'',err:'',status:null};
+    child.stdout.on('data',(piece)=>result.out+=piece);
+    child.stderr.on('data',(piece)=>result.err+=piece);
+    const done=new Promise((resolve)=>child.on('close',(code)=>{result.status=code;resolve(result);}));
+    const timer=setTimeout(()=>child.kill('SIGKILL'),60_000);
+    done.then(()=>clearTimeout(timer));
+    return {child,result,done};
+  };
+  const first=start();
+  const deadline=Date.now()+30_000;
+  while(!existsSync(ready)&&Date.now()<deadline) await new Promise((resolve)=>setTimeout(resolve,20));
+  assert(existsSync(ready),'the first run must reach npm ci');
+  const second=start();
+  const waiting=Date.now()+10_000;
+  while(!/Waiting for another staging run/.test(second.result.err)&&Date.now()<waiting) await new Promise((resolve)=>setTimeout(resolve,20));
+  writeFileSync(release,'');
+  const [firstRun,secondRun]=await Promise.all([first.done,second.done]);
+  assert.equal(firstRun.status,0,firstRun.err);
+  assert.equal(secondRun.status,0,secondRun.err);
+  assert.equal(readFileSync(log,'utf8').trim().split('\n').filter(Boolean).length,4);
+  assert.match(secondRun.err,/Waiting for another staging run/);
+  assert.match(secondRun.out,/npm ci: none/);
+  const record=JSON.parse(readFileSync(path.join(output,'.stage-plugins.json')));
+  assert.equal(record.schemaVersion,1);
+  assert.deepEqual(Object.keys(record.plugins).sort(),['goal','plugin-authoring','scheduler','session-title','workflow']);
+  for (const name of ['goal','session-title','workflow','scheduler']) {
+    assert(existsSync(path.join(output,'plugins',name,'node_modules')),name);
+    assert.match(record.plugins[name].hash,/^[0-9a-f]{64}$/);
+  }
+  assert.equal(record.plugins['plugin-authoring'].hash,null);
+  assert.deepEqual([...leftovers(output,'plugins/goal','partial'),...leftovers(output,'plugins/goal','previous')],[]);
+});
+
+test('a lock whose owner is gone is taken over', {skip:process.platform==='win32'}, (t)=>{
+  const temporary=fixture(t);
+  const bin=path.join(temporary,'bin');
+  mkdirSync(bin);
+  writeFileSync(path.join(bin,'npm'),'#!/bin/bash\nmkdir -p "$PWD/node_modules"\nexit 0\n',{mode:0o755});
+  const env={PATH:`${bin}:${process.env.PATH}`};
+  const output=path.join(temporary,'staged');
+  assert.equal(run('stage-plugins.mjs',[output,'--update'],env).status,0);
+  const lock=path.join(output,'.stage-plugins.lock');
+  mkdirSync(lock);
+  const dead=spawnSync(process.execPath,['-e',''],{encoding:'utf8'});
+  writeFileSync(path.join(lock,'owner'),`${dead.pid}\n`);
+  const taken=run('stage-plugins.mjs',[output,'--update'],env);
+  assert.equal(taken.status,0,taken.stderr);
+  assert.doesNotMatch(taken.stderr,/Waiting for another staging run/);
+  assert.equal(existsSync(lock),false);
+});
+
+test('a lock with no owner is taken over without waiting', {skip:process.platform==='win32'}, async (t)=>{
+  const temporary=fixture(t);
+  stubNpm(temporary,t);
+  const output=path.join(temporary,'staged');
+  const lock=path.join(output,'.stage-plugins.lock');
+  mkdirSync(lock,{recursive:true});
+  const {updateStage}=await import(pathToFileURL(path.join(root,'scripts/stage-plugins.mjs')).href);
+  updateStage(output,{waitMilliseconds:400,pollMilliseconds:50});
+  assert.equal(existsSync(lock),false);
+  assert(existsSync(path.join(output,'plugins/goal/index.ts')));
+});
+
+test('a lock owned by this process is stale', {skip:process.platform==='win32'}, async (t)=>{
+  const temporary=fixture(t);
+  stubNpm(temporary,t);
+  const output=path.join(temporary,'staged');
+  const lock=path.join(output,'.stage-plugins.lock');
+  mkdirSync(lock,{recursive:true});
+  writeFileSync(path.join(lock,'owner'),`${process.pid}\n`);
+  const {updateStage}=await import(pathToFileURL(path.join(root,'scripts/stage-plugins.mjs')).href);
+  updateStage(output,{waitMilliseconds:400,pollMilliseconds:50});
+  assert.equal(existsSync(lock),false);
+});
+
+test('temporaries of a live run survive and are removed once it has exited', {skip:process.platform==='win32'}, async (t)=>{
+  const temporary=fixture(t);
+  const {env}=stubNpm(temporary,t);
+  const output=path.join(temporary,'staged');
+  const update=()=>run('stage-plugins.mjs',[output,'--update'],env);
+  assert.equal(update().status,0);
+  const child=sleeper(t);
+  const partial=`${path.join(output,'plugins/goal')}.partial.${child.pid}`;
+  const recordTemporary=path.join(output,`.stage-plugins.json.tmp.${child.pid}`);
+  mkdirSync(partial,{recursive:true});
+  writeFileSync(path.join(partial,'live.txt'),'live');
+  writeFileSync(recordTemporary,'live');
+  assert.equal(update().status,0);
+  assert(existsSync(partial),'a live run keeps its partial');
+  assert(existsSync(recordTemporary),'a live run keeps its record temporary');
+  child.kill('SIGKILL');
+  await new Promise((resolve)=>child.on('close',resolve));
+  assert.equal(update().status,0);
+  assert.equal(existsSync(partial),false);
+  assert.equal(existsSync(recordTemporary),false);
+});
+
+test('a run whose lock was replaced does not remove the replacement', {skip:process.platform==='win32'}, async (t)=>{
+  const temporary=fixture(t);
+  stubNpm(temporary,t);
+  const output=path.join(temporary,'staged');
+  const lock=path.join(output,'.stage-plugins.lock');
+  const child=sleeper(t);
+  const {updateStage}=await import(pathToFileURL(path.join(root,'scripts/stage-plugins.mjs')).href);
+  let replaced=false;
+  const rename=(source,target)=>{
+    if(!replaced) {
+      replaced=true;
+      renameSync(lock,path.join(temporary,'replaced.lock'));
+      mkdirSync(lock);
+      writeFileSync(path.join(lock,'owner'),`${child.pid}\n`);
+    }
+    renameSync(source,target);
+  };
+  updateStage(output,{rename});
+  assert.equal(replaced,true);
+  assert(existsSync(lock),'the replacement lock survives the run');
+  assert.equal(readFileSync(path.join(lock,'owner'),'utf8').trim(),String(child.pid));
+});
+
+test('a live lock past the wait fails and names it', {skip:process.platform==='win32'}, async (t)=>{
+  const temporary=fixture(t);
+  const child=sleeper(t);
+  const output=path.join(temporary,'staged');
+  const lock=path.join(output,'.stage-plugins.lock');
+  mkdirSync(lock,{recursive:true});
+  writeFileSync(path.join(lock,'owner'),`${child.pid}\n`);
+  const {updateStage}=await import(pathToFileURL(path.join(root,'scripts/stage-plugins.mjs')).href);
+  assert.throws(()=>updateStage(output,{waitMilliseconds:400,pollMilliseconds:50}),(error)=>{
+    assert.match(error.message,/still held/);
+    assert(error.message.includes(lock),error.message);
+    return true;
+  });
+  assert(existsSync(lock));
+});
+
+test('a re-keyed plugin keeps the directory its new name uses', {skip:process.platform==='win32'}, (t)=>{
+  const temporary=fixture(t);
+  const checkout=path.join(temporary,'checkout');
+  mkdirSync(path.join(checkout,'scripts'),{recursive:true});
+  mkdirSync(path.join(checkout,'runtime/plugins/goal'),{recursive:true});
+  cpSync(path.join(root,'scripts/stage-plugins.mjs'),path.join(checkout,'scripts/stage-plugins.mjs'));
+  const writeDefaults=(plugins)=>writeFileSync(path.join(checkout,'runtime/default-plugins.json'),`${JSON.stringify({plugins})}\n`);
+  writeDefaults({goal:'plugins/goal'});
+  writeFileSync(path.join(checkout,'runtime/plugins/goal/package.json'),'{"name":"goal"}\n');
+  writeFileSync(path.join(checkout,'runtime/plugins/goal/package-lock.json'),'{"name":"goal","lockfileVersion":3,"packages":{"":{"name":"goal"}}}\n');
+  writeFileSync(path.join(checkout,'runtime/plugins/goal/index.ts'),'export {};\n');
+  const bin=path.join(temporary,'bin');
+  mkdirSync(bin);
+  writeFileSync(path.join(bin,'npm'),'#!/bin/bash\nmkdir -p "$PWD/node_modules"\nexit 0\n',{mode:0o755});
+  const env={PATH:`${bin}:${process.env.PATH}`};
+  const script=path.join(checkout,'scripts/stage-plugins.mjs');
+  const output=path.join(temporary,'staged');
+  const update=()=>spawnSync(process.execPath,[script,output,'--update'],{encoding:'utf8',env:{...process.env,...env}});
+  assert.equal(update().status,0);
+  writeDefaults({'goal-v2':'plugins/goal'});
+  const renamed=update();
+  assert.equal(renamed.status,0,renamed.stderr);
+  assert(existsSync(path.join(output,'plugins/goal/index.ts')));
+  const defaults=JSON.parse(readFileSync(path.join(output,'default-plugins.json')));
+  assert.deepEqual(defaults.plugins,{'goal-v2':'plugins/goal'});
+  const record=JSON.parse(readFileSync(path.join(output,'.stage-plugins.json')));
+  assert.deepEqual(Object.keys(record.plugins),['goal-v2']);
+});
+
+test('a recorded directory outside the stage is refused before anything changes', {skip:process.platform==='win32'}, (t)=>{
+  const temporary=fixture(t);
+  const bin=path.join(temporary,'bin');
+  mkdirSync(bin);
+  writeFileSync(path.join(bin,'npm'),'#!/bin/bash\nmkdir -p "$PWD/node_modules"\nexit 0\n',{mode:0o755});
+  const env={PATH:`${bin}:${process.env.PATH}`};
+  const output=path.join(temporary,'staged');
+  assert.equal(run('stage-plugins.mjs',[output,'--update'],env).status,0);
+  const record=path.join(output,'.stage-plugins.json');
+  const data=JSON.parse(readFileSync(record));
+  data.plugins.retired={hash:null,dir:'../outside'};
+  writeFileSync(record,`${JSON.stringify(data)}\n`);
+  const outside=path.join(temporary,'outside');
+  mkdirSync(outside);
+  writeFileSync(path.join(outside,'keep.txt'),'kept');
+  const before=readFileSync(record,'utf8');
+  const refused=run('stage-plugins.mjs',[output,'--update'],env);
+  assert.notEqual(refused.status,0);
+  assert.match(refused.stderr,/retired/);
+  assert.match(refused.stderr,/outside/);
+  assert.equal(readFileSync(path.join(outside,'keep.txt'),'utf8'),'kept');
+  assert(existsSync(path.join(output,'plugins/goal/index.ts')));
+  assert.equal(readFileSync(record,'utf8'),before);
+});
+
+test('a recorded stage root is refused before anything changes', {skip:process.platform==='win32'}, (t)=>{
+  const temporary=fixture(t);
+  const bin=path.join(temporary,'bin');
+  mkdirSync(bin);
+  writeFileSync(path.join(bin,'npm'),'#!/bin/bash\nmkdir -p "$PWD/node_modules"\nexit 0\n',{mode:0o755});
+  const env={PATH:`${bin}:${process.env.PATH}`};
+  const output=path.join(temporary,'staged');
+  assert.equal(run('stage-plugins.mjs',[output,'--update'],env).status,0);
+  const record=path.join(output,'.stage-plugins.json');
+  const data=JSON.parse(readFileSync(record));
+  data.plugins.retired={hash:null,dir:'.'};
+  writeFileSync(record,`${JSON.stringify(data)}\n`);
+  const before=readFileSync(record,'utf8');
+  const refused=run('stage-plugins.mjs',[output,'--update'],env);
+  assert.notEqual(refused.status,0);
+  assert.match(refused.stderr,/retired/);
+  assert.equal(readFileSync(record,'utf8'),before);
+  assert(existsSync(path.join(output,'plugins/goal/index.ts')));
+});
+
+test('a recorded parent directory does not remove the plugins inside it', {skip:process.platform==='win32'}, (t)=>{
+  const temporary=fixture(t);
+  const bin=path.join(temporary,'bin');
+  mkdirSync(bin);
+  writeFileSync(path.join(bin,'npm'),'#!/bin/bash\nmkdir -p "$PWD/node_modules"\nexit 0\n',{mode:0o755});
+  const env={PATH:`${bin}:${process.env.PATH}`};
+  const output=path.join(temporary,'staged');
+  assert.equal(run('stage-plugins.mjs',[output,'--update'],env).status,0);
+  const record=path.join(output,'.stage-plugins.json');
+  const data=JSON.parse(readFileSync(record));
+  data.plugins.retired={hash:null,dir:'plugins'};
+  writeFileSync(record,`${JSON.stringify(data)}\n`);
+  const updated=run('stage-plugins.mjs',[output,'--update'],env);
+  assert.equal(updated.status,0,updated.stderr);
+  for (const name of ['goal','session-title','workflow','scheduler']) {
+    assert(existsSync(path.join(output,'plugins',name,'index.ts')),name);
+  }
+  const after=JSON.parse(readFileSync(record));
+  assert.equal('retired' in after.plugins,false);
+});
+
+test('a platform-specific plugin package is refused for a portable stage', {skip:process.platform==='win32'}, (t)=>{
+  const temporary=fixture(t);
+  const checkout=path.join(temporary,'checkout');
+  mkdirSync(path.join(checkout,'scripts'),{recursive:true});
+  mkdirSync(path.join(checkout,'runtime/plugins/native'),{recursive:true});
+  cpSync(path.join(root,'scripts/stage-plugins.mjs'),path.join(checkout,'scripts/stage-plugins.mjs'));
+  writeFileSync(path.join(checkout,'runtime/default-plugins.json'),`${JSON.stringify({plugins:{native:'plugins/native'}})}\n`);
+  writeFileSync(path.join(checkout,'runtime/plugins/native/package.json'),'{"name":"native"}\n');
+  writeFileSync(path.join(checkout,'runtime/plugins/native/package-lock.json'),`${JSON.stringify({name:'native',lockfileVersion:3,packages:{'node_modules/native-lib':{version:'1.0.0',os:['linux']}}})}\n`);
+  writeFileSync(path.join(checkout,'runtime/plugins/native/index.ts'),'export {};\n');
+  const output=path.join(temporary,'staged');
+  const refused=spawnSync(process.execPath,[path.join(checkout,'scripts/stage-plugins.mjs'),output,'--portable'],{encoding:'utf8'});
+  assert.notEqual(refused.status,0);
+  assert.match(refused.stderr,/native/);
+  assert.match(refused.stderr,/native-lib/);
+  assert.equal(existsSync(output),false);
+});
+
+test('the current default plugins pass the portable check', {skip:process.platform==='win32'}, (t)=>{
+  const temporary=fixture(t);
+  const bin=path.join(temporary,'bin');
+  mkdirSync(bin);
+  writeFileSync(path.join(bin,'npm'),'#!/bin/bash\nmkdir -p "$PWD/node_modules"\nexit 0\n',{mode:0o755});
+  const output=path.join(temporary,'staged');
+  const staged=run('stage-plugins.mjs',[output,'--portable'],{PATH:`${bin}:${process.env.PATH}`});
+  assert.equal(staged.status,0,staged.stderr);
+  assert(existsSync(path.join(output,'default-plugins.json')));
+});
+
 test('stages public native payload, packs it and rejects modified content', {skip:process.platform==='win32'}, (t)=>{
   const temporary=fixture(t);
   const bin=path.join(temporary,'bin');
   mkdirSync(bin);
   writeFileSync(path.join(bin,'dimcode'),`#!/bin/sh\nprintf "dimcode ${version}\\n"\n`,{mode:0o755});
   const stage=path.join(temporary,'stage');
-  const staged=run('stage-release.mjs',[bin,stage,version,commit]);
+  const staged=run('stage-release.mjs',[bin,stage,version,commit,'--plugins',stubPlugins(temporary)]);
   assert.equal(staged.status,0,staged.stderr);
   const manifest=JSON.parse(readFileSync(path.join(stage,'release-manifest.json')));
   assert.equal(manifest.account,false);
@@ -79,6 +546,10 @@ test('stages the default plugins beside bin/ in the native archive and the npm p
   const bin=path.join(temporary,'bin');
   mkdirSync(bin);
   writeFileSync(path.join(bin,'dimcode'),`#!/bin/sh\nprintf "dimcode ${version}\\n"\n`,{mode:0o755});
+  const noPlugins=run('stage-release.mjs',[bin,path.join(temporary,'no-plugins'),version,commit]);
+  assert.notEqual(noPlugins.status,0);
+  assert.match(noPlugins.stderr,/--plugins/);
+  assert.equal(existsSync(path.join(temporary,'no-plugins')),false);
   const plugins=path.join(temporary,'plugins');
   mkdirSync(path.join(plugins,'plugins/goal/node_modules/@arcships/rutis'),{recursive:true});
   writeFileSync(path.join(plugins,'default-plugins.json'),'{"plugins":{"goal":"plugins/goal"}}');
@@ -138,18 +609,18 @@ test('an account build records the account and stages only its executable', {ski
   mkdirSync(bin);
   writeFileSync(path.join(bin,'dimcode'),`#!/bin/sh\nprintf "dimcode ${version}\\n"\n`,{mode:0o755});
   const stage=path.join(temporary,'stage');
-  const staged=run('stage-release.mjs',[bin,stage,version,commit,'--account']);
+  const staged=run('stage-release.mjs',[bin,stage,version,commit,'--account','--plugins',stubPlugins(temporary)]);
   assert.equal(staged.status,0,staged.stderr);
   if(process.platform==='darwin') assert.equal(spawnSync('xattr',['-w','com.apple.provenance','x',path.join(stage,'bin/dimcode')]).status,0,
     'setting the extended attribute must succeed before packing');
   const manifest=JSON.parse(readFileSync(path.join(stage,'release-manifest.json')));
   assert.equal(manifest.account,true);
-  assert.deepEqual(Object.keys(manifest.files).sort(),['LICENSE','NOTICE','bin/dimcode',...['LICENSE','NOTICE','xai-ratatui-inline/NOTICE','xai-ratatui-textarea/NOTICE'].map((file)=>`licenses/grok-build/${file}`)].sort());
+  assert.deepEqual(Object.keys(manifest.files).sort(),['default-plugins.json','LICENSE','NOTICE','bin/dimcode',...['LICENSE','NOTICE','xai-ratatui-inline/NOTICE','xai-ratatui-textarea/NOTICE'].map((file)=>`licenses/grok-build/${file}`)].sort());
   const packed=run('pack-release.mjs',[stage,path.join(temporary,'packed')]);
   assert.equal(packed.status,0,packed.stderr);
   const npmFile=JSON.parse(readFileSync(path.join(temporary,'packed/release-manifest.json'))).npmPackages[0].file;
   assert.deepEqual(entries(path.join(temporary,'packed',npmFile)).filter((name)=>!name.endsWith('/')).sort(),
-    ['package/LICENSE','package/NOTICE','package/bin/dimcode','package/package.json','package/release-manifest.json',...['LICENSE','NOTICE','xai-ratatui-inline/NOTICE','xai-ratatui-textarea/NOTICE'].map((file)=>`package/licenses/grok-build/${file}`)].sort());
+    ['package/default-plugins.json','package/LICENSE','package/NOTICE','package/bin/dimcode','package/package.json','package/release-manifest.json',...['LICENSE','NOTICE','xai-ratatui-inline/NOTICE','xai-ratatui-textarea/NOTICE'].map((file)=>`package/licenses/grok-build/${file}`)].sort());
 });
 
 test('stages cross-built executables without running them and rejects the wrong architecture', (t)=>{
@@ -176,7 +647,8 @@ test('stages cross-built executables without running them and rejects the wrong 
   const cli=path.join(bin,`dimcode${suffix}`);
   writeFileSync(cli,header,{mode:0o755});
   const stage=path.join(temporary,'stage');
-  const result=run('stage-release.mjs',[bin,stage,version,commit],{DIM_BUILD_PLATFORM:platform});
+  const plugins=stubPlugins(temporary);
+  const result=run('stage-release.mjs',[bin,stage,version,commit,'--plugins',plugins],{DIM_BUILD_PLATFORM:platform});
   assert.equal(result.status,0,result.stderr);
   assert.equal(JSON.parse(readFileSync(path.join(stage,'release-manifest.json'))).platform,platform);
   const packed=run('pack-release.mjs',[stage,path.join(temporary,'packed')]);
@@ -187,7 +659,7 @@ test('stages cross-built executables without running them and rejects the wrong 
   else if(osName==='darwin') header.writeUInt32LE(cpu==='arm64'?0x01000007:0x0100000c,4);
   else header.writeUInt16LE(cpu==='arm64'?62:183,18);
   writeFileSync(cli,header);
-  const mismatch=run('stage-release.mjs',[bin,rejected,version,commit],{DIM_BUILD_PLATFORM:platform});
+  const mismatch=run('stage-release.mjs',[bin,rejected,version,commit,'--plugins',plugins],{DIM_BUILD_PLATFORM:platform});
   assert.notEqual(mismatch.status,0);
   assert.match(mismatch.stderr,/architecture mismatch/);
   assert.equal(existsSync(rejected),false);

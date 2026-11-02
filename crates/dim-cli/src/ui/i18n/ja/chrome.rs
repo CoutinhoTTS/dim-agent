@@ -312,7 +312,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "configure tool approvals" => "ツール承認を設定",
         "choose ask or full access" => "確認かフルアクセスを選ぶ",
         "open settings" => "設定を開く",
-        "suspend to the shell" => "シェルへサスペンド",
         "exit" => "終了",
 
         // composer/palette.rs
@@ -388,7 +387,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "No matching models." => "一致するモデルなし。",
         "current" => "現在",
         "Edit models" => "モデルを編集",
-        "Editing models is not available yet" => "モデル編集はまだ利用不可",
         "{provider}: 1 model unavailable · dimcode models {id}" => {
             "{provider}：1 モデル利用不可 · dimcode models {id}"
         }

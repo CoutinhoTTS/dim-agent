@@ -230,23 +230,24 @@ export interface Dispatcher {
 
 export interface TraceStep {
   handler: string
-  result?: { type: string; name: string; data: unknown; tags?: string[] } | null
+  result?: { type: string; name: string; data: unknown; tags?: string[]; context_render?: boolean; context_state?: boolean } | null
 }
 
 export interface TimelineTrace {
   event_id: string
-  original: { type: string; name: string; data: unknown; tags?: string[] }
+  original: { type: string; name: string; data: unknown; tags?: string[]; context_render?: boolean; context_state?: boolean }
   steps: TraceStep[]
 }
 
 export interface Timeline {
+  branchId(): Promise<string>
   ancestors(): Promise<[string, number | bigint][]>
   /**
    * Appends one event; it is published once its batch commits. Parts in
    * other languages write through it like native capabilities (ADR 001).
    * @throws {AgentErrorThrown}
    */
-  append(original: { type: string; name: string; data: unknown; tags?: string[] }): Promise<import('./plugin.js').BranchEvent>
+  append(original: { type: string; name: string; data: unknown; tags?: string[]; context_render?: boolean; context_state?: boolean }): Promise<import('./plugin.js').BranchEvent>
   /**
    * Published sequence: what is durable and visible to the Dispatcher
    * and to readers outside the branch.
@@ -261,6 +262,13 @@ export interface Timeline {
   hasPending(): Promise<boolean>
   /** @throws {AgentErrorThrown} */
   history(through?: number | bigint | null): Promise<import('./plugin.js').BranchEvent[]>
+  /**
+   * Reads the rows this projection consumes after an event cursor; a cursor
+   * inside an atomic batch reads that row and filters by sequence. The event
+   * limit is a target: the final batch may exceed it.
+   * @throws {AgentErrorThrown}
+   */
+  storedContextPage(after: number | bigint, limit: number | bigint, through: number | bigint): Promise<import('./plugin.js').BranchEvent[]>
   /** @throws {AgentErrorThrown} */
   trace(sequence: number | bigint): Promise<TimelineTrace | null>
 }

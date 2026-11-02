@@ -19,8 +19,9 @@ if [ ! -x "$CARGO_HOME/bin/rustup" ]; then
   rm "$root/rustup-init"
 fi
 
-# cargo-zigbuild links against glibc 2.28 the way scripts/build-all.mjs does, so
-# the binary runs in every task image, not only in ones as new as this host.
+# cargo-zigbuild links against an older glibc than this host, so the binary
+# runs in every task image. The eval target is 2.34: the oldest task image is
+# 2.36, and dim-app-server needs close_range (glibc 2.34).
 if [ ! -x "$root/zig/bin/python" ]; then
   python3 -m venv "$root/zig"
 fi

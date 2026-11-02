@@ -513,11 +513,6 @@ fn acp_stdio_temporary_mcp_rebinds_expired_resources_before_submission() {
     daemon.join().unwrap();
 }
 
-/// The prompt reply only arrives once the shared recovery deadline expires.
-/// Waiting up to this long only bounds a settlement that never happens; it is
-/// not the test's budget, so a loaded machine does not shorten it.
-const RECOVERY_SETTLEMENT: Duration = Duration::from_secs(300);
-
 #[test]
 fn acp_stdio_recovery_deadline_settles_cancel_without_claiming_native_stop() {
     let home = Home::new();
@@ -563,7 +558,7 @@ fn acp_stdio_recovery_deadline_settles_cancel_without_claiming_native_stop() {
     )
     .unwrap();
     peer.input.flush().unwrap();
-    let result = peer.response_within(3, RECOVERY_SETTLEMENT);
+    let result = peer.response(3);
     assert_eq!(result["result"]["stopReason"], "cancelled");
     assert_eq!(
         result["result"]["_meta"]["dim"]["nativeCancellation"],
@@ -760,6 +755,13 @@ fn acp_stdio_slow_output_fails_explicitly_without_stopping_native_execution() {
     daemon.join().unwrap();
 }
 
+/// Bounds a peer frame that never arrives, so a broken path fails instead of
+/// hanging; it is not a step's budget. The frame is due when the CLI and the
+/// fixture's daemon reach it, and a debug CLI starting on a loaded machine can
+/// take tens of seconds, so ten times the 30 s step budget keeps machine load
+/// out of the result (#807).
+const HANG_GUARD: Duration = Duration::from_secs(300);
+
 struct Peer {
     child: Child,
     input: UnixStream,
@@ -809,14 +811,8 @@ impl Peer {
     }
 
     fn response(&mut self, id: i64) -> Value {
-        self.response_within(id, PATIENCE)
-    }
-
-    /// Waits up to `patience` for the reply, for flows whose timing the CLI's
-    /// own recovery deadline sets.
-    fn response_within(&mut self, id: i64, patience: Duration) -> Value {
         loop {
-            let frame = self.frame_within(patience);
+            let frame = self.frame();
             if frame.get("id") == Some(&json!(id)) {
                 return frame;
             }
@@ -835,20 +831,28 @@ impl Peer {
     }
 
     fn frame(&mut self) -> Value {
-        self.frame_within(PATIENCE)
-    }
-
-    fn frame_within(&mut self, patience: Duration) -> Value {
         if self.output.buffer().is_empty() {
+            let deadline = Instant::now() + HANG_GUARD;
             let mut fd = libc::pollfd {
                 fd: self.output.get_ref().as_raw_fd(),
                 events: libc::POLLIN,
                 revents: 0,
             };
-            assert!(
-                unsafe { libc::poll(&mut fd, 1, patience.as_millis() as i32) } > 0,
-                "ACP frame timed out"
-            );
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                match unsafe { libc::poll(&mut fd, 1, remaining.as_millis() as i32) } {
+                    ready if ready > 0 => break,
+                    0 => panic!("ACP frame timed out"),
+                    _ => {
+                        let error = std::io::Error::last_os_error();
+                        assert_eq!(
+                            error.kind(),
+                            std::io::ErrorKind::Interrupted,
+                            "ACP poll failed: {error}"
+                        );
+                    }
+                }
+            }
         }
         let mut line = String::new();
         if self.output.read_line(&mut line).unwrap() == 0 {

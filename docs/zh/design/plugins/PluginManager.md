@@ -135,7 +135,7 @@ flowchart LR
 
 ### 2.3 默认配置文件
 
-随 Dim 发布，只读，用 `--defaults PATH` 交给 App Server（默认 CLI 传入其发布包中的文件；开发时使用 `runtime/default-plugins.json`）。
+随 Dim 发布，只读，用 `--defaults PATH` 交给 App Server（默认 CLI 传入其发布包中的文件；`./dev` 把这个文件和它列出的插件复制到检出目录中被忽略的 `staging/dev-plugins`，并传入该副本，使插件解析运行时唯一的一份 `@deepseek-ai/cordis`）。
 
 ```json
 {

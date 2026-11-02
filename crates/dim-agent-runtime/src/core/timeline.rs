@@ -1,7 +1,7 @@
 use super::keys::KeyFilter;
 use crate::{
-    AgentError, BoxFuture, BranchLifecycle, FaultReporter, PolicyFacts, PolicyOrder, PolicyWindow,
-    Result, StoredEvent, TimelineKey, TimelineStore,
+    AgentError, BoxFuture, BranchLifecycle, FaultReporter, PolicyFacts, PolicyOrder,
+    PolicyOrderEvent, PolicyWindow, Result, StoredEvent, TimelineKey, TimelineStore,
 };
 use dim_agent_types::{
     AgentEvent, EventDraft, EventKind, InputMessageData, ProjectionCheckpoint, RecoverySnapshot,
@@ -212,6 +212,10 @@ impl Timeline {
     pub(crate) fn key(&self) -> &TimelineKey {
         &self.0.key
     }
+    pub fn branch_id(&self) -> String {
+        self.0.key.branch_id.clone()
+    }
+
     pub fn ancestors(&self) -> Vec<(String, u64)> {
         self.0.ancestors.clone()
     }
@@ -764,6 +768,141 @@ impl Timeline {
             .collect())
     }
 
+    /// The branch chain the context covers, root first: each ancestor to its
+    /// fixed cut and the local branch to `through`.
+    #[service(skip)]
+    pub fn segments(&self, through: u64) -> Result<Vec<(String, u64)>> {
+        let through = self.through(Some(through))?;
+        Ok(self
+            .0
+            .ancestors
+            .iter()
+            .cloned()
+            .chain(std::iter::once((self.0.key.branch_id.clone(), through)))
+            .filter(|(_, cut)| *cut > 0)
+            .collect())
+    }
+
+    /// The ancestor events of one kind, root first.
+    #[service(skip)]
+    pub async fn ancestor_events_of_kind(&self, kind: &str) -> Result<Vec<Arc<AgentEvent>>> {
+        let mut events = Vec::new();
+        for (branch, cut) in &self.0.ancestors {
+            if *cut == 0 {
+                continue;
+            }
+            let key = TimelineKey {
+                session_id: self.0.key.session_id.clone(),
+                branch_id: branch.clone(),
+            };
+            events.extend(self.0.store.events_of_kind(&key, kind, *cut).await?);
+        }
+        Ok(events)
+    }
+
+    /// The event with this id on the local branch.
+    #[service(skip)]
+    pub async fn event_by_id(&self, id: &str) -> Result<Option<Arc<AgentEvent>>> {
+        self.0.store.event_by_id(&self.0.key, id).await
+    }
+
+    /// The position of one event anywhere in the branch chain.
+    #[service(skip)]
+    pub async fn event_position(&self, id: &str) -> Result<Option<TimelinePosition>> {
+        for (branch, _) in self
+            .0
+            .ancestors
+            .iter()
+            .cloned()
+            .chain(std::iter::once((self.0.key.branch_id.clone(), 0)))
+        {
+            let key = TimelineKey {
+                session_id: self.0.key.session_id.clone(),
+                branch_id: branch.clone(),
+            };
+            if let Some(event) = self.0.store.event_by_id(&key, id).await? {
+                return Ok(Some(TimelinePosition {
+                    branch_id: branch,
+                    sequence: event.sequence,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    /// One filtered page of `branch`, which may be an ancestor.
+    #[service(skip)]
+    pub async fn stored_context_page_in(
+        &self,
+        branch: &str,
+        after: u64,
+        limit: usize,
+        through: u64,
+    ) -> Result<Vec<Arc<AgentEvent>>> {
+        let key = TimelineKey {
+            session_id: self.0.key.session_id.clone(),
+            branch_id: branch.to_owned(),
+        };
+        Ok(self
+            .0
+            .store
+            .read_context_page(&key, after, limit, through)
+            .await?
+            .into_iter()
+            .map(|record| record.event)
+            .collect())
+    }
+
+    /// Reads the rows this projection consumes after an event cursor; a cursor
+    /// inside an atomic batch reads that row and filters by sequence. The event
+    /// limit is a target: the final batch may exceed it.
+    pub async fn stored_context_page(
+        &self,
+        after: u64,
+        limit: usize,
+        through: u64,
+    ) -> Result<Vec<Arc<AgentEvent>>> {
+        let through = self.through(Some(through))?;
+        if after > through {
+            return Err(AgentError::InvalidInput("future Timeline cursor".into()));
+        }
+        Ok(self
+            .0
+            .store
+            .read_context_page(&self.0.key, after, limit, through)
+            .await?
+            .into_iter()
+            .map(|record| record.event)
+            .collect())
+    }
+    /// A local event range read from the store, bypassing the hot cache.
+    #[service(skip)]
+    pub async fn stored_local<R: RangeBounds<u64> + Send>(
+        &self,
+        range: R,
+    ) -> Result<Vec<Arc<AgentEvent>>> {
+        let start = match range.start_bound() {
+            Bound::Included(n) => *n,
+            Bound::Excluded(n) => n.saturating_add(1),
+            Bound::Unbounded => 1,
+        }
+        .max(1);
+        let end = match range.end_bound() {
+            Bound::Included(n) => *n,
+            Bound::Excluded(n) => n.saturating_sub(1),
+            Bound::Unbounded => self.committed(),
+        };
+        let end = self.through(Some(end))?;
+        Ok(self
+            .0
+            .store
+            .read(&self.0.key, start..=end)
+            .await?
+            .into_iter()
+            .map(|record| record.event)
+            .collect())
+    }
+
     /// Full fact replay; no interpreter or snapshot is required.
     #[service(skip)]
     pub async fn context(&self, through: u64) -> Result<ContextHistory> {
@@ -797,6 +936,12 @@ impl Timeline {
         }
         Ok(PolicyFacts { through, events })
     }
+    /// The last event at or before a fixed cut, even inside its atomic batch.
+    #[service(skip)]
+    async fn boundary_event(&self, key: &TimelineKey, cut: u64) -> Result<Option<Arc<AgentEvent>>> {
+        self.0.store.last_event(key, cut).await
+    }
+
     /// The event order for legal compaction cuts.
     #[service(skip)]
     pub async fn policy_order(&self, through: u64) -> Result<PolicyOrder> {
@@ -809,17 +954,35 @@ impl Timeline {
             .chain(std::iter::once((self.0.key.branch_id.clone(), through)))
             .collect();
         let mut events = Vec::new();
+        let mut branches = Vec::new();
         for (branch, cut) in segments {
             if cut == 0 {
                 continue;
             }
             let key = TimelineKey {
                 session_id: self.0.key.session_id.clone(),
-                branch_id: branch,
+                branch_id: branch.clone(),
             };
+            branches.push(branch.clone());
             events.extend(self.0.store.policy_order(&key, cut).await?.events);
+            if let Some(boundary) = self.boundary_event(&key, cut).await? {
+                events.push(PolicyOrderEvent {
+                    id: boundary.id.clone(),
+                    branch_id: branch,
+                    sequence: boundary.sequence,
+                    turn_start: matches!(boundary.kind, EventKind::TurnStart(_)),
+                    compaction_start: None,
+                    boundary: true,
+                });
+            }
         }
-        Ok(PolicyOrder { through, events })
+        let rank = |branch: &str| branches.iter().position(|name| name == branch);
+        events.sort_by_key(|event| (rank(&event.branch_id), event.sequence));
+        Ok(PolicyOrder {
+            through,
+            branches,
+            events,
+        })
     }
 
     /// The anchor and turn window for a known compaction cut.
@@ -877,15 +1040,15 @@ impl Timeline {
         window.cut_sequence = cut_sequence;
         Ok(window)
     }
-    /// Select an interpreter-compatible cache before decoding or trimming facts.
-    /// Invalid caches are disposable; failures reading required facts are not.
+    /// The latest interpreter-compatible checkpoint at `through`, if one is
+    /// valid for this branch and its fixed ancestor chain.
     #[service(skip)]
-    pub async fn context_with_checkpoint(
+    pub async fn checkpoint(
         &self,
         through: u64,
         interpreter: &str,
         decode: fn(&RecoverySnapshot, &AgentEvent) -> Option<ProjectionCheckpoint>,
-    ) -> Result<ContextHistory> {
+    ) -> Result<Option<ProjectionCheckpoint>> {
         let through = self.through(Some(through))?;
         let segments: Vec<_> = self
             .0
@@ -937,9 +1100,21 @@ impl Timeline {
             {
                 continue;
             }
-            return self.context_from(through, Some(checkpoint)).await;
+            return Ok(Some(checkpoint));
         }
-        self.context(through).await
+        Ok(None)
+    }
+    /// Select an interpreter-compatible cache before decoding or trimming facts.
+    /// Invalid caches are disposable; failures reading required facts are not.
+    #[service(skip)]
+    pub async fn context_with_checkpoint(
+        &self,
+        through: u64,
+        interpreter: &str,
+        decode: fn(&RecoverySnapshot, &AgentEvent) -> Option<ProjectionCheckpoint>,
+    ) -> Result<ContextHistory> {
+        let checkpoint = self.checkpoint(through, interpreter, decode).await?;
+        self.context_from(through, checkpoint).await
     }
     async fn context_from(
         &self,

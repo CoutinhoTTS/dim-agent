@@ -526,8 +526,9 @@ impl Native {
                 }
                 _ => json!({"encoding":"event","record":wire}),
             };
+            let (render, state) = event.kind.context_flags();
             tx.execute(
-                "INSERT INTO timeline_events VALUES (?1,'main',?2,?2,?3,?4,?5)",
+                "INSERT INTO timeline_events VALUES (?1,'main',?2,?2,?3,?4,?5,?6,?7)",
                 params![
                     session,
                     i64::try_from(event.sequence).map_err(failure)?,
@@ -537,7 +538,9 @@ impl Native {
                         None
                     } else {
                         Some(event.id.clone())
-                    }
+                    },
+                    i64::from(render),
+                    i64::from(state),
                 ],
             )
             .map_err(failure)?;

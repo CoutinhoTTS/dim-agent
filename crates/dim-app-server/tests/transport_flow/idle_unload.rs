@@ -172,7 +172,7 @@ async fn pages(sessions: &Sessions, id: &str, through: u64, limit: usize) -> Vec
 
 /// §13 item 1: 50 runs through `sessions`, each one input, `idle` and the
 /// `history` pages. Once dropped, all are unloaded after the grace and every
-/// released instance is gone; `session.list` still lists each at its stored
+/// released instance is gone; `session.summaries` still lists each at its stored
 /// head and its history reads in full. A later input restores one, and its
 /// turn runs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -205,7 +205,7 @@ async fn fifty_dropped_runs_unload_and_the_next_input_restores_one() {
         loads.released(id).await;
         assert_eq!(loads.of(id), (1, false), "{id} was not restored");
     }
-    let listed = client.rpc("session.list", json!({})).await;
+    let listed = client.rpc("session.summaries", json!({})).await;
     for (id, through, _) in &runs {
         let info = listed["result"]
             .as_array()
@@ -449,7 +449,7 @@ async fn an_index_reload_waits_for_a_release_and_the_next_generation_unloads() {
     }
     unloaded(first).await;
     unloaded(second).await;
-    let listed = client.rpc("session.list", json!({})).await;
+    let listed = client.rpc("session.summaries", json!({})).await;
     for id in [&first_id, &second_id] {
         assert!(
             listed["result"]
@@ -701,7 +701,7 @@ fn stored_heads(store: &Store, id: &str) -> std::collections::BTreeMap<String, u
 
 /// §13 item 4, the Session's own part: an unload is not a close. It leaves
 /// the stored head of every branch where it was, writing no `stop/interrupt`
-/// or anything else; the Session stays in `session.list`; and the restore
+/// or anything else; the Session stays in `session.summaries`; and the restore
 /// adds only a `branch/resume` to each branch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unload_writes_nothing_and_the_restore_only_resumes() {
@@ -744,7 +744,7 @@ async fn an_unload_writes_nothing_and_the_restore_only_resumes() {
     assert_eq!(stored_heads(&store, &id), heads);
     unloaded(session).await;
     assert_eq!(stored_heads(&store, &id), heads);
-    let listed = client.rpc("session.list", json!({})).await;
+    let listed = client.rpc("session.summaries", json!({})).await;
     assert!(
         listed["result"]
             .as_array()
@@ -776,9 +776,9 @@ async fn an_unload_writes_nothing_and_the_restore_only_resumes() {
     server.join().await.unwrap();
 }
 
-/// §13 item 8, the Agents part: `session.list` and `session.summaries`,
-/// called again and again while Sessions unload under them, never fail and
-/// never omit a stored Session or event.
+/// §13 item 8, the Agents part: `session.summaries`, called again and again
+/// while Sessions unload under it, never fails and never omits a stored
+/// Session or event.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn listing_while_sessions_unload_never_fails_or_omits_one() {
     let store = Store::new();
@@ -804,7 +804,7 @@ async fn listing_while_sessions_unload_never_fails_or_omits_one() {
         runs.insert(id, (head, text));
     }
     let check = async |client: &mut Client| {
-        let listed = client.rpc("session.list", json!({})).await;
+        let listed = client.rpc("session.summaries", json!({})).await;
         let summaries = client.rpc("session.summaries", json!({})).await;
         for reply in [&listed, &summaries] {
             assert_ok(reply);
@@ -869,7 +869,7 @@ async fn an_unloaded_session_is_deleted_as_stored_and_forked_after_a_restore() {
         "deleted without a restore"
     );
     assert!(stored_heads(&store, &doomed_id).is_empty());
-    let listed = client.rpc("session.list", json!({})).await;
+    let listed = client.rpc("session.summaries", json!({})).await;
     assert!(
         !listed["result"]
             .as_array()
@@ -900,7 +900,7 @@ async fn an_unloaded_session_is_deleted_as_stored_and_forked_after_a_restore() {
         loads.released(id).await;
     }
     assert_eq!(loads.of(&fork_id), (1, false));
-    let listed = client.rpc("session.list", json!({})).await;
+    let listed = client.rpc("session.summaries", json!({})).await;
     for id in [&source_id, &fork_id] {
         assert!(
             listed["result"]
