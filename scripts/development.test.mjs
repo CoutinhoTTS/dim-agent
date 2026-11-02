@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -142,6 +142,21 @@ console.log(JSON.stringify({ defaultPlugins: process.env.DIMCODE_DEFAULT_PLUGINS
   return { temporary, repo, bin, home, log, staged: path.join(repo, 'staging/dev-plugins'), run, installs, npm };
 }
 
+/** The plugin a logged npm ci ran for; the temporary directory carries the pid. */
+const installName = (directory) => {
+  const match = /^(.*)\.partial(?:\.\d+)?$/.exec(path.basename(directory));
+  return match ? match[1] : path.basename(directory);
+};
+
+/** Temporary directories a stage holds for one plugin. */
+const leftovers = (output, relative, kind) => {
+  const parent = path.dirname(path.join(output, relative));
+  const name = path.basename(relative).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (!existsSync(parent)) return [];
+  const pattern = new RegExp(`^${name}\\.${kind}(?:\\.\\d+)?$`);
+  return readdirSync(parent).filter((entry) => pattern.test(entry));
+};
+
 test('a run stages the default plugins and updates them only when needed', { skip: process.platform === 'win32' }, (t) => {
   const checkout = pluginCheckout(t, 'dim dev plugins ');
   const first = checkout.run();
@@ -150,7 +165,7 @@ test('a run stages the default plugins and updates them only when needed', { ski
   for (const file of ['default-plugins.json', 'plugins/goal/index.ts', 'plugins/session-title/index.ts', 'plugins/workflow/index.ts']) {
     assert(existsSync(path.join(checkout.staged, file)), file);
   }
-  assert.deepEqual(checkout.installs().map((directory) => path.basename(directory)).sort(), ['goal.partial', 'session-title.partial']);
+  assert.deepEqual(checkout.installs().map(installName).sort(), ['goal', 'session-title']);
   assert.match(first.stderr, /Updated 3 default plugins \(npm ci: goal, session-title\)\./);
   const second = checkout.run();
   assert.equal(second.status, 0, second.stderr);
@@ -165,7 +180,7 @@ test('a run stages the default plugins and updates them only when needed', { ski
   const locked = checkout.run();
   assert.equal(locked.status, 0, locked.stderr);
   assert.equal(checkout.installs().length, 3);
-  assert.equal(path.basename(checkout.installs().at(-1)), 'goal.partial');
+  assert.equal(installName(checkout.installs().at(-1)), 'goal');
   assert.match(locked.stderr, /Updated 3 default plugins \(npm ci: goal\)\./);
 });
 
@@ -192,7 +207,7 @@ test('a missing npm or a failed update runs without the default plugins', { skip
   assert.equal((failed.stderr.match(/The default plugins were not staged; running without them\./g) ?? []).length, 1);
   assert.match(failed.stderr, /Cannot stage goal/);
   assert.equal(readFileSync(path.join(checkout.staged, 'plugins/goal/marker'), 'utf8'), 'kept');
-  assert.equal(existsSync(path.join(checkout.staged, 'plugins/goal.partial')), false);
+  assert.deepEqual(leftovers(checkout.staged, 'plugins/goal', 'partial'), []);
   const withoutNpm = path.join(checkout.temporary, 'without npm');
   mkdirSync(withoutNpm);
   for (const name of ['cargo', 'node']) cpSync(path.join(checkout.bin, name), path.join(withoutNpm, name));

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 const repo = path.resolve(import.meta.dirname, '..');
@@ -59,44 +59,157 @@ const validate = (output, previous) => {
 
 /** Puts `partial` in place of `target`, restoring `target` if the swap fails. */
 const swap = (partial, target, rename) => {
-  const backup = `${target}.previous`;
-  rmSync(backup, { recursive: true, force: true });
+  const previous = `${target}.previous.${process.pid}`;
+  rmSync(previous, { recursive: true, force: true });
   const existed = existsSync(target);
-  if (existed) rename(target, backup);
+  if (existed) rename(target, previous);
   try {
     rename(partial, target);
   } catch (error) {
-    if (existed) rename(backup, target);
+    if (existed) rename(previous, target);
     throw error;
   }
-  rmSync(backup, { recursive: true, force: true });
+  rmSync(previous, { recursive: true, force: true });
 };
 
 const writeAtomically = (file, content) => {
-  const temporary = `${file}.tmp`;
+  const temporary = `${file}.tmp.${process.pid}`;
   writeFileSync(temporary, content);
   renameSync(temporary, file);
 };
 
+/** Blocks this thread without busy-waiting; staging is sequential by nature. */
+const sleep = (milliseconds) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+
+const alive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code !== 'ESRCH';
+  }
+};
+
+/** The pid a lock's owner file names, or null while it is being written. */
+const lockOwner = (lock) => {
+  try {
+    const pid = Number(readFileSync(path.join(lock, 'owner'), 'utf8').trim());
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+};
+
 /**
- * Updates an existing stage in place. The rule: every run copies every listed
- * plugin's sources again, so an edit takes effect on the next run; `npm ci`
- * runs only for a plugin whose package files hash differs from the one
- * recorded in `.stage-plugins.json`; a plugin that is no longer listed is
- * removed; and each plugin is built beside the live copy, whose dependencies
- * it copies when they are reused, and swapped in only when complete. The live
- * copy is never touched before the swap, so every staged plugin is complete
- * at every moment; the swap renames it aside, puts the replacement in place
- * and restores it if that fails. The record is rewritten after each swap, so
- * it always describes what is on disk. A failure names the plugin, exits
- * non-zero, and leaves the plugins before it updated and the rest as they
- * were. Recorded directories are validated against the stage before anything
- * changes, and a directory is removed only when no current plugin uses it.
+ * One lock per stage: a candidate directory holding the owner's pid is renamed
+ * into place, so a lock always has an owner and a lock without one is stale. A
+ * second run waits for a live holder; a lock whose owner is gone, or whose
+ * owner is this process, is taken over by removing it and retrying. Two runs
+ * can both decide a lock is stale and both take it over; the worst this can do
+ * is make one run fail with "Cannot stage", and the live plugin stays whole
+ * because a rename onto a non-empty target fails and the swap restores it.
  */
-export function updateStage(destination, { rename = renameSync } = {}) {
+const acquire = (lock, { waitMilliseconds, pollMilliseconds }) => {
+  const deadline = Date.now() + waitMilliseconds;
+  const candidate = `${lock}.new.${process.pid}`;
+  let announced = false;
+  for (;;) {
+    try {
+      rmSync(candidate, { recursive: true, force: true });
+      mkdirSync(candidate);
+      writeFileSync(path.join(candidate, 'owner'), `${process.pid}\n`);
+      renameSync(candidate, lock);
+      return;
+    } catch (error) {
+      rmSync(candidate, { recursive: true, force: true });
+      if (error.code !== 'EEXIST' && error.code !== 'ENOTEMPTY') throw error;
+    }
+    const owner = lockOwner(lock);
+    if (owner === null || owner === process.pid || !alive(owner)) {
+      rmSync(lock, { recursive: true, force: true });
+      continue;
+    }
+    if (!announced) {
+      console.error(`Waiting for another staging run to finish (${lock}).`);
+      announced = true;
+    }
+    if (Date.now() + pollMilliseconds > deadline) {
+      throw new Error(`The staging lock is still held after ${waitMilliseconds} ms: ${lock}`);
+    }
+    sleep(pollMilliseconds);
+  }
+};
+
+/**
+ * Removes what a killed run left behind. A `previous` whose target is missing
+ * is renamed back, and every other temporary is removed, but only when its pid
+ * is not alive or is this process's own, so a live run's temporaries stay.
+ */
+const recover = (output, bases) => {
+  const dead = (pid) => pid === process.pid || !alive(pid);
+  const parents = new Set([output]);
+  for (const base of bases) parents.add(path.dirname(base));
+  for (const parent of parents) {
+    if (!existsSync(parent)) continue;
+    for (const entry of readdirSync(parent)) {
+      const match = /^(.*)\.(partial|previous)\.(\d+)$/.exec(entry);
+      if (!match || !dead(Number(match[3]))) continue;
+      const leftover = path.join(parent, entry);
+      if (match[2] === 'previous') {
+        const target = path.join(parent, match[1]);
+        if (existsSync(target)) rmSync(leftover, { recursive: true, force: true });
+        else renameSync(leftover, target);
+      } else {
+        rmSync(leftover, { recursive: true, force: true });
+      }
+    }
+  }
+  for (const entry of readdirSync(output)) {
+    const temporary = /^(\.stage-plugins\.json|default-plugins\.json)\.tmp\.(\d+)$/.exec(entry);
+    const candidate = /^\.stage-plugins\.lock\.new\.(\d+)$/.exec(entry);
+    if (!temporary && !candidate) continue;
+    if (!dead(Number(temporary?.[2] ?? candidate?.[1]))) continue;
+    rmSync(path.join(output, entry), { recursive: true, force: true });
+  }
+};
+
+/**
+ * Updates an existing stage in place under one lock per stage. The rule: every
+ * run copies every listed plugin's sources again, so an edit takes effect on
+ * the next run; `npm ci` runs only for a plugin whose package files hash
+ * differs from the one recorded in `.stage-plugins.json`; a plugin that is no
+ * longer listed is removed; and each plugin is built beside the live copy,
+ * whose dependencies it copies when they are reused, then swapped in only
+ * when complete. The live copy is never touched before the swap, so every
+ * staged plugin is complete at every moment; the swap renames it aside, puts
+ * the replacement in place and restores it if that fails. The record is
+ * rewritten after each swap, so it always describes what is on disk. A
+ * failure names the plugin, exits non-zero, and leaves the plugins before it
+ * updated and the rest as they were. A second run waits for the lock, and the
+ * first run of a stage left by a killed one takes over its stale lock and
+ * recovers its temporaries. Recorded directories are validated against the
+ * stage before anything changes, and a directory is removed only when no
+ * current plugin uses it.
+ */
+export function updateStage(destination, {
+  waitMilliseconds = 180_000,
+  pollMilliseconds = 200,
+  rename = renameSync,
+} = {}) {
   const output = path.resolve(destination);
-  const record = path.join(output, '.stage-plugins.json');
   mkdirSync(output, { recursive: true });
+  const lock = path.join(output, '.stage-plugins.lock');
+  acquire(lock, { waitMilliseconds, pollMilliseconds });
+  try {
+    updateLocked(output, rename);
+  } finally {
+    if (lockOwner(lock) === process.pid) rmSync(lock, { recursive: true, force: true });
+  }
+}
+
+/** The body of an update, run while holding the stage lock. */
+function updateLocked(output, rename) {
+  const record = path.join(output, '.stage-plugins.json');
   const previous = (() => {
     try {
       const data = JSON.parse(readFileSync(record, 'utf8'));
@@ -106,6 +219,8 @@ export function updateStage(destination, { rename = renameSync } = {}) {
     }
   })();
   validate(output, previous);
+  recover(output, [...Object.values(plugins).map((relative) => path.resolve(output, relative)),
+    ...Object.values(previous).filter((entry) => entry?.dir).map((entry) => path.resolve(output, entry.dir))]);
   const entries = { ...previous };
   const writeRecord = () => writeAtomically(record,
     `${JSON.stringify({ schemaVersion: 1, plugins: entries }, null, 2)}\n`);
@@ -114,7 +229,7 @@ export function updateStage(destination, { rename = renameSync } = {}) {
   for (const [name, relative] of Object.entries(plugins)) {
     const source = path.join(path.dirname(defaults), relative);
     const target = path.join(output, relative);
-    const partial = `${target}.partial`;
+    const partial = `${target}.partial.${process.pid}`;
     const code = existsSync(path.join(source, 'package.json'));
     assert(!code || existsSync(path.join(source, 'package-lock.json')), `${name} has no package-lock.json`);
     const hash = dependencies(source);
@@ -154,8 +269,9 @@ export function updateStage(destination, { rename = renameSync } = {}) {
   }
   writeRecord();
   const defaultsCopy = path.join(output, 'default-plugins.json');
-  copy(defaults, `${defaultsCopy}.tmp`);
-  renameSync(`${defaultsCopy}.tmp`, defaultsCopy);
+  const defaultsTemporary = `${defaultsCopy}.tmp.${process.pid}`;
+  copy(defaults, defaultsTemporary);
+  renameSync(defaultsTemporary, defaultsCopy);
   console.log(`Updated ${Object.keys(plugins).length} default plugins (npm ci: ${installed.length ? installed.join(', ') : 'none'}).`);
 }
 
