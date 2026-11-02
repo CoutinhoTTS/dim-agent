@@ -2581,8 +2581,7 @@
         "assert_eq",
         "format",
         "json",
-        "params",
-        "tokio::pin"
+        "params"
       ]
     },
     {
@@ -23866,7 +23865,6 @@
         "path AgentError",
         "path AgentError::Closed",
         "path AgentError::InvalidInput",
-        "path AgentError::Storage",
         "path Result",
         "use dim_agent_runtime::AgentError",
         "use dim_agent_runtime::Result",
