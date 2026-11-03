@@ -513,6 +513,8 @@ impl Projection {
                     error = Some("MCP configuration could not be resolved");
                     continue;
                 }
+                let config =
+                    config::expand(&config, &|name| std::env::var(name).ok()).configuration;
                 let config = match source.scope() {
                     Some(scope) => config::effective(settings, scope, &id, config, &enablement),
                     None => Ok(config),

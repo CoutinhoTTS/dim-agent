@@ -1338,6 +1338,143 @@ impl McpPluginDocument {
     }
 }
 
+/// A configuration with environment references expanded, and the names the
+/// expansion read. The stored document is never changed.
+#[derive(Clone, PartialEq)]
+pub(crate) struct Expanded {
+    pub configuration: McpServerSettings,
+    pub referenced: BTreeSet<String>,
+    pub unset: BTreeSet<String>,
+}
+
+/// Expands `${NAME}` and `${NAME:-default}` in the fields an entry runs with:
+/// `command`, each argument, each environment value, `cwd`, the remote `url`,
+/// each header value and the bearer token. Header and environment names,
+/// unknown members and OAuth settings are literal.
+///
+/// Only `${` followed by a name and `}` or `:-` is a reference; every other
+/// `$` is literal. A variable set to the empty string counts as set, an
+/// unset reference without a default keeps its text, and a default ends at
+/// the first `}` without nesting.
+pub(crate) fn expand(
+    configuration: &McpServerSettings,
+    environment: &dyn Fn(&str) -> Option<String>,
+) -> Expanded {
+    let mut scan = Scan::default();
+    let configuration = match configuration {
+        McpServerSettings::Stdio {
+            kind,
+            command,
+            args,
+            env,
+            cwd,
+            enabled,
+            extra,
+        } => McpServerSettings::Stdio {
+            kind: kind.clone(),
+            command: scan.text(command, environment),
+            args: args
+                .iter()
+                .map(|argument| scan.text(argument, environment))
+                .collect(),
+            env: env
+                .iter()
+                .map(|(name, value)| (name.clone(), scan.text(value, environment)))
+                .collect(),
+            cwd: cwd.as_ref().map(|cwd| scan.text(cwd, environment)),
+            enabled: *enabled,
+            extra: extra.clone(),
+        },
+        McpServerSettings::Remote {
+            kind,
+            url,
+            headers,
+            auth,
+            oauth,
+            enabled,
+            extra,
+        } => McpServerSettings::Remote {
+            kind: kind.clone(),
+            url: scan.text(url, environment),
+            headers: headers
+                .iter()
+                .map(|(name, value)| (name.clone(), scan.text(value, environment)))
+                .collect(),
+            auth: auth
+                .as_ref()
+                .map(|BearerAuth::Bearer { token }| BearerAuth::Bearer {
+                    token: scan.text(token, environment),
+                }),
+            oauth: oauth.clone(),
+            enabled: *enabled,
+            extra: extra.clone(),
+        },
+    };
+    Expanded {
+        configuration,
+        referenced: scan.referenced,
+        unset: scan.unset,
+    }
+}
+
+#[derive(Default)]
+struct Scan {
+    referenced: BTreeSet<String>,
+    unset: BTreeSet<String>,
+}
+
+impl Scan {
+    fn text(&mut self, value: &str, environment: &dyn Fn(&str) -> Option<String>) -> String {
+        let mut expanded = String::with_capacity(value.len());
+        let mut rest = value;
+        while let Some(start) = rest.find("${") {
+            expanded.push_str(&rest[..start]);
+            let candidate = &rest[start + 2..];
+            let Some((name, default, used)) = reference(candidate) else {
+                expanded.push('$');
+                rest = &rest[start + 1..];
+                continue;
+            };
+            self.referenced.insert(name.to_owned());
+            if let Some(value) = environment(name) {
+                expanded.push_str(&value);
+            } else if let Some(default) = default {
+                expanded.push_str(default);
+            } else {
+                self.unset.insert(name.to_owned());
+                expanded.push_str(&rest[start..start + 2 + used]);
+            }
+            rest = &candidate[used..];
+        }
+        expanded.push_str(rest);
+        expanded
+    }
+}
+
+/// One reference after its `${`: the name, the default text after `:-`, and
+/// the bytes it occupies, closing brace included.
+fn reference(input: &str) -> Option<(&str, Option<&str>, usize)> {
+    let bytes = input.as_bytes();
+    let first = *bytes.first()?;
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return None;
+    }
+    let mut used = 1;
+    while used < bytes.len() && (bytes[used].is_ascii_alphanumeric() || bytes[used] == b'_') {
+        used += 1;
+    }
+    let name = &input[..used];
+    match bytes.get(used) {
+        Some(b'}') => Some((name, None, used + 1)),
+        Some(b':') if bytes.get(used + 1) == Some(&b'-') => {
+            let start = used + 2;
+            let close = input[start..].find('}')?;
+            Some((name, Some(&input[start..start + close]), start + close + 1))
+        }
+        _ => None,
+    }
+}
+
 /// The canonical workspace of an authorized project source, as the
 /// enablement key.
 pub(crate) fn workspace(settings: &SettingsService, scope: SettingsScope) -> Result<String> {
@@ -1631,5 +1768,205 @@ mod tests {
             assert!(text.contains("entry id is empty"), "{text}");
             assert!(!text.contains("command") && !text.contains('{'), "{text}");
         }
+    }
+
+    fn remote(url: &str, headers: &[(&str, &str)], token: Option<&str>) -> McpServerSettings {
+        McpServerSettings::Remote {
+            kind: RemoteTransport::Http,
+            url: url.to_owned(),
+            headers: headers
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect(),
+            auth: token.map(|token| BearerAuth::Bearer {
+                token: token.to_owned(),
+            }),
+            oauth: Some(Box::new(McpOAuthSettings {
+                client_id: Some("${OAUTH_CLIENT}".into()),
+                auth_server_metadata_url: Some("https://${OAUTH_HOST}/metadata".into()),
+                ..Default::default()
+            })),
+            enabled: None,
+            extra: BTreeMap::from([("note".into(), json!("${EXTRA}"))]),
+        }
+    }
+
+    #[test]
+    fn expansion_expands_a_name_and_a_default_only_when_unset() {
+        let environment = |name: &str| match name {
+            "SET" => Some("value".to_owned()),
+            "EMPTY" => Some(String::new()),
+            _ => None,
+        };
+        let expanded = expand(
+            &remote(
+                "https://${SET}.test/${MISSING}",
+                &[("X-Value", "${EMPTY}${DEFAULTED:-fallback}")],
+                None,
+            ),
+            &environment,
+        );
+        let McpServerSettings::Remote { url, headers, .. } = &expanded.configuration else {
+            panic!("a remote entry stays remote");
+        };
+        assert_eq!(url, "https://value.test/${MISSING}");
+        assert_eq!(headers["X-Value"].as_str(), "fallback");
+        assert_eq!(
+            expanded.referenced,
+            BTreeSet::from([
+                "DEFAULTED".to_owned(),
+                "EMPTY".to_owned(),
+                "MISSING".to_owned(),
+                "SET".to_owned(),
+            ])
+        );
+        assert_eq!(expanded.unset, BTreeSet::from(["MISSING".to_owned()]));
+    }
+
+    #[test]
+    fn expansion_leaves_other_dollar_text_literal() {
+        for text in ["$A", "$$", "${1BAD}", "${A-B}", "${", "a${B"] {
+            let expanded = expand(&remote(text, &[], None), &|_| {
+                panic!("no reference is parsed from {text}")
+            });
+            let McpServerSettings::Remote { url, .. } = &expanded.configuration else {
+                panic!("a remote entry stays remote");
+            };
+            assert_eq!(url, text, "{text}");
+            assert!(expanded.referenced.is_empty(), "{text}");
+            assert!(expanded.unset.is_empty(), "{text}");
+        }
+
+        // There is no nesting: a default ends at the first `}`.
+        let expanded = expand(&remote("${A:-${B}}", &[], None), &|_| None);
+        let McpServerSettings::Remote { url, .. } = &expanded.configuration else {
+            panic!("a remote entry stays remote");
+        };
+        assert_eq!(url, "${B}");
+        assert_eq!(expanded.referenced, BTreeSet::from(["A".to_owned()]));
+        assert!(expanded.unset.is_empty());
+    }
+
+    #[test]
+    fn expansion_walks_exactly_the_listed_fields() {
+        let stdio = McpServerSettings::Stdio {
+            kind: Some(Stdio::Stdio),
+            command: "${CMD}".into(),
+            args: vec!["--flag=${FLAG}".into(), "${PLAIN}".into()],
+            env: BTreeMap::from([("ENV_NAME".into(), "${VALUE}".into())]),
+            cwd: Some("${DIR}".into()),
+            enabled: Some(true),
+            extra: BTreeMap::from([("note".into(), json!("${EXTRA}"))]),
+        };
+        let environment = |name: &str| match name {
+            "CMD" => Some("server".to_owned()),
+            "FLAG" => Some("on".to_owned()),
+            "VALUE" => Some("value".to_owned()),
+            "DIR" => Some("/tmp/work".to_owned()),
+            "URL" => Some("https://example.test/mcp".to_owned()),
+            "HEADER" => Some("header-value".to_owned()),
+            "TOKEN" => Some("token-value".to_owned()),
+            _ => None,
+        };
+        let expanded = expand(&stdio, &environment);
+        let McpServerSettings::Stdio {
+            kind,
+            command,
+            args,
+            env,
+            cwd,
+            enabled,
+            extra,
+        } = &expanded.configuration
+        else {
+            panic!("a stdio entry stays stdio");
+        };
+        assert!(matches!(kind, Some(Stdio::Stdio)));
+        assert_eq!(command, "server");
+        assert_eq!(args, &["--flag=on".to_owned(), "${PLAIN}".to_owned()]);
+        assert_eq!(env["ENV_NAME"].as_str(), "value");
+        assert_eq!(cwd.as_deref(), Some("/tmp/work"));
+        assert_eq!(*enabled, Some(true));
+        assert_eq!(extra["note"], json!("${EXTRA}"));
+        assert_eq!(
+            expanded.referenced,
+            BTreeSet::from([
+                "CMD".to_owned(),
+                "DIR".to_owned(),
+                "FLAG".to_owned(),
+                "PLAIN".to_owned(),
+                "VALUE".to_owned(),
+            ])
+        );
+
+        let remote = remote(
+            "${URL}",
+            &[("X-Header", "${HEADER}")],
+            Some("Bearer ${TOKEN}"),
+        );
+        let expanded = expand(&remote, &environment);
+        let McpServerSettings::Remote {
+            url,
+            headers,
+            auth,
+            oauth,
+            extra,
+            ..
+        } = &expanded.configuration
+        else {
+            panic!("a remote entry stays remote");
+        };
+        assert_eq!(url, "https://example.test/mcp");
+        assert_eq!(headers["X-Header"].as_str(), "header-value");
+        assert!(matches!(
+            auth,
+            Some(BearerAuth::Bearer { token }) if token == "Bearer token-value"
+        ));
+        let oauth = oauth.as_deref().unwrap();
+        assert_eq!(oauth.client_id.as_deref(), Some("${OAUTH_CLIENT}"));
+        assert_eq!(
+            oauth.auth_server_metadata_url.as_deref(),
+            Some("https://${OAUTH_HOST}/metadata")
+        );
+        assert_eq!(extra["note"], json!("${EXTRA}"));
+        assert_eq!(
+            expanded.referenced,
+            BTreeSet::from(["HEADER".to_owned(), "TOKEN".to_owned(), "URL".to_owned()])
+        );
+    }
+
+    #[test]
+    fn expansion_reports_referenced_and_unset_names_once() {
+        let expanded = expand(
+            &remote("${B}/${A}/${B}/${D:-fallback}/${A}", &[], None),
+            &|name: &str| (name == "A").then(|| "a".to_owned()),
+        );
+        assert_eq!(
+            expanded.referenced,
+            BTreeSet::from(["A".to_owned(), "B".to_owned(), "D".to_owned()])
+        );
+        assert_eq!(expanded.unset, BTreeSet::from(["B".to_owned()]));
+    }
+
+    #[test]
+    fn expansion_does_not_change_a_stored_document() {
+        let source = json!({
+            "mcpServers": {
+                "docs": {
+                    "type": "http",
+                    "url": "https://${MCP_HOST}/mcp",
+                    "headers": {"Authorization": "Bearer ${MCP_TOKEN}"}
+                }
+            }
+        });
+        let document: McpSettings = serde_json::from_value(source.clone()).unwrap();
+        let before = serde_json::to_value(&document).unwrap();
+        let configuration = document.get("docs").unwrap();
+        let expanded = expand(configuration, &|_| Some("expanded".to_owned()));
+        assert!(
+            serde_json::to_value(&expanded.configuration).unwrap() != before["mcpServers"]["docs"]
+        );
+        assert_eq!(serde_json::to_value(&document).unwrap(), before);
+        assert_eq!(before, source);
     }
 }

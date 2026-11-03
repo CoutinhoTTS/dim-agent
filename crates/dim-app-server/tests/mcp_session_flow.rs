@@ -67,6 +67,8 @@ struct Remote {
     expire_once: AtomicBool,
     /// Adds a tool when the client has connected a second time.
     grown: AtomicBool,
+    /// The `x-generation` and `Authorization` every request carried.
+    seen: Mutex<Vec<(String, String)>>,
 }
 impl Remote {
     fn new() -> Arc<Self> {
@@ -90,7 +92,13 @@ impl Remote {
             session_check: AtomicBool::new(false),
             expire_once: AtomicBool::new(false),
             grown: AtomicBool::new(false),
+            seen: Mutex::default(),
         })
+    }
+
+    /// The generation and authorization each request carried so far.
+    fn seen(&self) -> Vec<(String, String)> {
+        self.seen.lock().unwrap().clone()
     }
 }
 async fn rpc(
@@ -101,6 +109,18 @@ async fn rpc(
     let Some(id) = body.get("id") else {
         return StatusCode::ACCEPTED.into_response();
     };
+    remote.seen.lock().unwrap().push((
+        headers
+            .get("x-generation")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned(),
+        headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned(),
+    ));
     let method = body["method"].as_str().unwrap();
     let checked = remote.session_check.load(Ordering::SeqCst);
     let current_session = format!("s{}", remote.session.load(Ordering::SeqCst));
@@ -1065,6 +1085,36 @@ async fn enabled_project_entry_serves_tools_and_disabling_stops_it_in_every_sess
     );
     assert!(results(&session).await.last().unwrap().contains("isError"));
     state(&session, McpSourceState::Disabled).await;
+    env.close().await;
+}
+
+/// #952: an entry's references expand from the daemon's environment when the
+/// Session connects, not when the document is read.
+#[tokio::test]
+async fn expansion_from_the_daemon_environment_at_connect() {
+    let env = Env::with_config(
+        |_, _| {},
+        |url, _| {
+            unsafe {
+                std::env::set_var("MCP_TEST_952_URL", url);
+                std::env::set_var("MCP_TEST_952_TOKEN", "made-up-token");
+            }
+            json!({"mcpServers":{"docs":{
+                "type":"http",
+                "url":"${MCP_TEST_952_URL}",
+                "auth":{"type":"bearer","token":"${MCP_TEST_952_TOKEN}"}
+            }}})
+        },
+    )
+    .await;
+    let session = env.session(false, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    let seen = env.remote.seen();
+    assert!(
+        seen.iter()
+            .any(|(_, authorization)| authorization == "Bearer made-up-token"),
+        "the connection did not carry the expanded bearer token: {seen:?}"
+    );
     env.close().await;
 }
 
