@@ -370,12 +370,20 @@ pub async fn set_enabled(
         }
         Err(error) => return Err(error),
     };
-    let (source, listed) = match catalog.servers.iter().find(|server| server.id == id) {
-        Some(server) if server.source == "plugin" => return Err(PLUGIN.into()),
-        Some(server) => (server.source.clone(), true),
-        None if !enabled && catalog.project_revision.is_some() => ("project".into(), false),
-        None => return Err(format!("No MCP server {id:?} in mcp list").into()),
-    };
+    let (source, listed) =
+        if let Some(server) = catalog.servers.iter().find(|server| server.id == id) {
+            if server.source == "plugin" {
+                return Err(PLUGIN.into());
+            }
+            (server.source.clone(), true)
+        } else if let Some(entry) = catalog.invalid.iter().find(|entry| entry.id == id) {
+            // A broken entry is not enableable; its own error says why.
+            return Err(entry.error.clone().into());
+        } else if !enabled && catalog.project_revision.is_some() {
+            ("project".into(), false)
+        } else {
+            return Err(format!("No MCP server {id:?} in mcp list").into());
+        };
     let expected = if source == "project" {
         catalog
             .project_revision
@@ -440,7 +448,7 @@ impl std::fmt::Display for Failure {
 pub enum Answer {
     /// The area after the action, and what the owner's reply adds beyond it.
     Area {
-        catalog: Catalog,
+        catalog: Box<Catalog>,
         note: Option<String>,
     },
     /// A test's tools, typed, so each surface formats them itself.
@@ -457,14 +465,20 @@ pub async fn catalog(client: &mut Client, cwd: &str) -> Result<Catalog, String> 
         .map_err(|error| error.to_string())
 }
 
-/// The effective entry `id` names, or why the area has none.
+/// The effective entry `id` names, or why the area has none. A broken entry
+/// answers with its own error: it has no effective configuration to test or
+/// inspect.
 pub async fn target(client: &mut Client, cwd: &str, id: &str) -> Result<Server, String> {
-    catalog(client, cwd)
-        .await?
-        .servers
-        .into_iter()
-        .find(|server| server.id == id)
-        .ok_or_else(|| t("No MCP server has that id.").to_owned())
+    let Catalog {
+        servers, invalid, ..
+    } = catalog(client, cwd).await?;
+    if let Some(server) = servers.into_iter().find(|server| server.id == id) {
+        return Ok(server);
+    }
+    if let Some(entry) = invalid.into_iter().find(|entry| entry.id == id) {
+        return Err(entry.error);
+    }
+    Err(t("No MCP server has that id.").to_owned())
 }
 
 /// One entry's configuration as its owner reports it.
@@ -577,11 +591,12 @@ pub async fn apply(
             let patch: Patch = serde_json::from_value(document.clone())
                 .map_err(|error| Failure::Refused(format!("mcp.update: {error}")))?;
             let catalog = catalog(client, cwd).await.map_err(Failure::Refused)?;
-            let server = catalog
-                .servers
-                .iter()
-                .find(|server| &server.id == id)
-                .ok_or_else(|| Failure::Refused(t("No MCP server has that id.").to_owned()))?;
+            let Some(server) = catalog.servers.iter().find(|server| &server.id == id) else {
+                if let Some(entry) = catalog.invalid.iter().find(|entry| &entry.id == id) {
+                    return Err(Failure::Refused(entry.error.clone()));
+                }
+                return Err(Failure::Refused(t("No MCP server has that id.").to_owned()));
+            };
             if server.source == "plugin" {
                 return Err(Failure::Refused(PLUGIN.to_owned()));
             }
@@ -645,6 +660,11 @@ pub async fn apply(
             } else {
                 catalog.user_revision
             };
+            // Saving over a broken entry of the same source replaces it.
+            let replaced = catalog
+                .invalid
+                .iter()
+                .any(|invalid| invalid.id == entry.id && invalid.source == entry.source);
             let written = client
                 .rpc(
                     "mcp.save",
@@ -660,19 +680,26 @@ pub async fn apply(
             if let Err(error) = written {
                 return Err(refused(client, cwd, &error, Conflict::Add).await);
             }
-            note = Some(tf("Added {id}.", &[("id", &safe_line(&entry.id))]));
+            note = Some(if replaced {
+                tf("Replaced {id}.", &[("id", &safe_line(&entry.id))])
+            } else {
+                tf("Added {id}.", &[("id", &safe_line(&entry.id))])
+            });
         }
         ManagementAction::Remove { id } => {
             let catalog = catalog(client, cwd).await.map_err(Failure::Refused)?;
-            let server = catalog
-                .servers
-                .iter()
-                .find(|server| &server.id == id)
-                .ok_or_else(|| Failure::Refused(t("No MCP server has that id.").to_owned()))?;
-            if server.source == "plugin" {
-                return Err(Failure::Refused(PLUGIN.to_owned()));
-            }
-            let expected = if server.source == "project" {
+            let source =
+                if let Some(server) = catalog.servers.iter().find(|server| &server.id == id) {
+                    if server.source == "plugin" {
+                        return Err(Failure::Refused(PLUGIN.to_owned()));
+                    }
+                    server.source.clone()
+                } else if let Some(entry) = catalog.invalid.iter().find(|entry| &entry.id == id) {
+                    entry.source.clone()
+                } else {
+                    return Err(Failure::Refused(t("No MCP server has that id.").to_owned()));
+                };
+            let expected = if source == "project" {
                 catalog.project_revision.clone().ok_or_else(|| {
                     Failure::Refused(t("This workspace has no project MCP source.").to_owned())
                 })?
@@ -685,7 +712,7 @@ pub async fn apply(
                     json!({
                         "cwd": cwd,
                         "id": id,
-                        "source": server.source,
+                        "source": source,
                         "expectedVersion": expected,
                     }),
                 )
@@ -708,7 +735,10 @@ pub async fn apply(
         ManagementAction::Inspect { id } => return inspect(client, cwd, id).await,
     }
     match catalog(client, cwd).await {
-        Ok(catalog) => Ok(Answer::Area { catalog, note }),
+        Ok(catalog) => Ok(Answer::Area {
+            catalog: Box::new(catalog),
+            note,
+        }),
         // A read applied nothing, so its failure is the answer itself, not a
         // report that follows a write.
         Err(error) if matches!(action, ManagementAction::List | ManagementAction::Reload) => {
@@ -998,6 +1028,33 @@ pub(super) async fn view(
                     actions: offers(server, document.is_some(), available),
                     remove_verb: RemoveVerb::Remove,
                     document,
+                    run: None,
+                },
+            );
+        }
+        // A broken entry has no configuration to toggle, edit, test or
+        // inspect. It can be removed, and an add of the same id replaces it.
+        for entry in catalog
+            .invalid
+            .iter()
+            .filter(|entry| entry.source == source)
+        {
+            let mut actions = vec![ActionKind::Remove];
+            actions.retain(|kind| available.contains(kind));
+            groups.push(
+                source,
+                ManagementEntry {
+                    id: entry.id.clone(),
+                    label: entry.id.clone(),
+                    detail: vec![
+                        header(&entry.source, t("invalid"), None, None),
+                        safe_line(&entry.error),
+                    ],
+                    enabled: None,
+                    states: vec![EntryState::Invalid],
+                    actions,
+                    remove_verb: RemoveVerb::Remove,
+                    document: None,
                     run: None,
                 },
             );

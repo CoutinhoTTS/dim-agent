@@ -13,12 +13,24 @@ pub struct Catalog {
     pub user_revision: String,
     pub project_revision: Option<String>,
     pub servers: Vec<Server>,
+    /// Entries that did not decode. A daemon older than this list reports
+    /// none; its catalog omitted their whole source instead.
+    #[serde(default)]
+    pub invalid: Vec<Invalid>,
     pub user_application: Application,
     /// The plugin source's application row; a daemon older than that row
     /// reports none.
     #[serde(default)]
     pub plugin_application: Option<Application>,
     pub project_application: Option<Application>,
+}
+/// One entry that did not decode, with an error that names the entry and the
+/// field and never repeats a value.
+#[derive(Deserialize)]
+pub struct Invalid {
+    pub id: String,
+    pub source: String,
+    pub error: String,
 }
 #[derive(Deserialize)]
 pub struct Server {
@@ -80,12 +92,20 @@ pub async fn catalog_report(
             ));
         }
     }
-    // The columns describe rows: with no server, the report says so instead.
+    for entry in catalog.invalid {
+        rows.push(format!(
+            "{:?}\t{}\tinvalid\t{}",
+            entry.id,
+            safe_line(&entry.source),
+            safe_line(&entry.error)
+        ));
+    }
+    // The columns describe rows: with no row, the report says so instead.
     let mut notes = if rows.is_empty() {
         vec!["No MCP server is configured.".to_owned()]
     } else {
         vec![
-            "Columns: ID, source, transport, enablement, authorization.\nAn enabled entry runs its command or endpoint. Project entries start disabled until you run mcp enable ID.\nSign in with mcp login ID; sign out with mcp logout ID.".to_owned(),
+            "Columns: ID, source, transport, enablement, authorization.\nAn enabled entry runs its command or endpoint. Project entries start disabled until you run mcp enable ID.\nSign in with mcp login ID; sign out with mcp logout ID.\nA row with `invalid` where its transport belongs did not decode; fix or remove it.".to_owned(),
         ]
     };
     for (source, application) in [
@@ -109,11 +129,15 @@ pub async fn target(client: &mut Client, options: &Options, id: &str) -> Result<
     let catalog: Catalog = client
         .typed("mcp.catalog", json!({"cwd": options.workspace().as_str()}))
         .await?;
-    let server = catalog
-        .servers
-        .into_iter()
-        .find(|server| server.id == id)
-        .ok_or("No matching MCP server; inspect mcp list")?;
+    let server = catalog.servers.into_iter().find(|server| server.id == id);
+    let Some(server) = server else {
+        let invalid = catalog
+            .invalid
+            .into_iter()
+            .find(|entry| entry.id == id)
+            .ok_or("No matching MCP server; inspect mcp list")?;
+        return Err(invalid.error.into());
+    };
     Ok(json!({"id":id,"source":server.source,"cwd":options.workspace().as_str()}))
 }
 

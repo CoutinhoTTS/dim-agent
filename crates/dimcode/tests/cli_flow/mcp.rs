@@ -1988,3 +1988,207 @@ fn mcp_entries_round_trip_through_the_real_app_server() {
         String::from_utf8_lossy(&output.stdout)
     );
 }
+
+/// The catalog with one entry that did not decode beside its valid entries.
+fn broken_catalog() -> Value {
+    let mut listed = catalog(true, None);
+    listed["invalid"] = json!([{
+        "id": "broken",
+        "source": "user",
+        "error": "MCP server broken: field type must be http or sse; ws is not a supported transport",
+    }]);
+    listed
+}
+
+/// `mcp list` prints a broken entry on its own row, with its source and its
+/// error, after the valid rows.
+#[test]
+fn mcp_list_prints_a_broken_entry_with_its_error() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, broken_catalog());
+    });
+    let output = home.command().args(["mcp", "list"]).output().unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let broken = stdout
+        .lines()
+        .find(|line| line.contains("\"broken\""))
+        .unwrap_or_else(|| panic!("no broken row in {stdout:?}"));
+    assert!(broken.contains("user"), "{broken:?}");
+    assert!(broken.contains("invalid"), "{broken:?}");
+    assert!(broken.contains("must be http or sse"), "{broken:?}");
+    assert!(
+        stdout.lines().any(|line| line.contains("\"docs\"")),
+        "{stdout:?}"
+    );
+}
+
+/// `mcp remove` removes a broken entry at its source revision.
+#[test]
+fn mcp_remove_removes_a_broken_entry_at_its_sources_revision() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, broken_catalog());
+        let request = wire.read("mcp.remove");
+        assert_eq!(request["params"]["id"], "broken");
+        assert_eq!(request["params"]["source"], "user");
+        assert_eq!(request["params"]["expectedVersion"], "user:1");
+        assert!(request["params"]["cwd"].is_string());
+        wire.reply(&request, json!({}));
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, broken_catalog());
+    });
+    let output = home
+        .command()
+        .args(["mcp", "remove", "broken"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Removed broken.\n"
+    );
+}
+
+/// An add whose id names a broken entry of the same source replaces it and
+/// says so; it is not refused as a duplicate.
+#[test]
+fn mcp_add_replaces_a_broken_entry() {
+    let home = Home::new();
+    let path = home.0.join("entry.json");
+    let mut document = new_entry("user");
+    document["id"] = json!("broken");
+    fs::write(&path, serde_json::to_string(&document).unwrap()).unwrap();
+    let saved = document.clone();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, broken_catalog());
+        let request = wire.read("mcp.save");
+        assert_eq!(request["params"]["id"], "broken");
+        assert_eq!(request["params"]["source"], "user");
+        assert_eq!(request["params"]["expectedVersion"], "user:1");
+        assert_eq!(request["params"]["configuration"], saved["configuration"]);
+        wire.reply(&request, json!({}));
+        area(wire, broken_catalog(), docs(true));
+    });
+    let output = home
+        .command()
+        .args(["mcp", "add"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Replaced broken.\n"
+    );
+}
+
+/// A broken entry is not enableable: the command refuses it with its own
+/// error before any write.
+#[test]
+fn mcp_enable_refuses_a_broken_entry_with_its_error() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, broken_catalog());
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                assert_ne!(
+                    value["method"], "mcp.set_enabled",
+                    "a broken entry was toggled"
+                );
+            }
+            line.clear();
+        }
+    });
+    let output = home
+        .command()
+        .args(["mcp", "enable", "broken"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("field type must be http or sse"),
+        "{stderr:?}"
+    );
+}
+
+/// `/mcp` marks a broken entry invalid, shows its error, and offers only
+/// removal: Enter and Ctrl+T send nothing, and Ctrl+X removes it.
+#[test]
+fn tui_mcp_panel_marks_a_broken_entry_invalid_and_offers_removal() {
+    let home = Home::new();
+    let (shown, wait_shown) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        started(wire);
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        area(wire, broken_catalog(), docs(true));
+        // The removal reads the entry's source, then writes at its revision
+        // and reports the area again.
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, broken_catalog());
+        let request = wire.read("mcp.remove");
+        assert_eq!(
+            request["params"],
+            json!({"cwd": "/workspace", "id": "broken", "source": "user",
+                   "expectedVersion": "user:1"})
+        );
+        wire.reply(&request, json!({}));
+        area(wire, catalog(true, None), docs(true));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/mcp\r");
+    terminal.until("user · stdio · signed in (missing scopes: repo)");
+    // The broken row follows the valid user entry.
+    terminal.raw(b"\x1b[B");
+    terminal.until("broken");
+    terminal.until("user · invalid");
+    terminal.until("must be http or sse");
+    // Enter and Ctrl+T are not offered; removal is.
+    terminal.raw(b"\r");
+    thread::sleep(Duration::from_millis(200));
+    terminal.raw(b"\x14");
+    thread::sleep(Duration::from_millis(200));
+    terminal.raw(b"\x18");
+    terminal.until("broken? Enter confirm");
+    terminal.raw(b"\r");
+    terminal.until("Removed broken.");
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}

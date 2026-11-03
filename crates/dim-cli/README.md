@@ -327,6 +327,11 @@ The configuration references credentials by environment-variable name. The share
 authorization (`sign-in required`, `signed in`, `sign-in expired`, or `—` when absent).
 Missing scopes appear below the entry. With no entry in the catalog it says so in one line
 instead of printing the column legend, which describes rows.
+An entry that does not decode is listed with `invalid` in place of its transport and its error
+instead of the authorization column. It stays in its file as written and never runs; `mcp remove
+ID` deletes it, an add with the same id and source replaces it, and `mcp enable`, `mcp test` and
+`mcp inspect` refuse it with that error. Every other write keeps it as written. An entry error
+names the id and the field and states the expected kind; it never repeats a value.
 It does not print commands, environment values, headers or credentials. `mcp enable ID` and
 `mcp disable ID`, or `/mcp enable ID` and `/mcp disable ID` in either client, change the entry
 that `mcp list` shows for the workspace.
@@ -342,7 +347,8 @@ omitted `url` or header key keeps the stored one. `dimcode mcp remove ID` delete
 source revision. `dimcode mcp test ID`
 runs the stored entry once and prints the tools the temporary connection found, and `dimcode mcp
 inspect ID` prints the effective configuration and the Session's connections without contacting
-the server. `dimcode mcp disconnect ID` closes the entry's live connections without changing its
+the server. A broken entry has no configuration to read, so `mcp edit` and `mcp set` refuse it
+with its error. `dimcode mcp disconnect ID` closes the entry's live connections without changing its
 enablement or stored configuration; the entry reconnects on next use. The `/mcp` panel does the
 same on a list: `Enter`, `Ctrl+E`, `Ctrl+N`, `Ctrl+X`, `Ctrl+T` and `Tab`.
 
@@ -1138,7 +1144,7 @@ The terminal UI reaches the same Session methods as the line client:
 | Input | Effect |
 | --- | --- |
 | `!command` / `!!command` | Runs through `shell.run` on the line whose conversation is shown, in record or private mode; its progress streams under the composer, `Esc` or `Ctrl+C` sends `shell.stop`. A recorded run comes back as the Session's input event and is drawn as a shell block, also after resume; a private run, or one that could not be recorded, is drawn only here |
-| `/mcp` | Opens the MCP panel of the Session's workspace ([management surfaces](#management-surfaces)): an entry per server from `mcp.catalog`, grouped `user`, `project` and `plugin`, with its configuration below the list; `Enter` or `Space` toggles, `Ctrl+E` edits the `mcp.update` patch, `Ctrl+N` adds from the create template, `Ctrl+X` removes after a confirmation, `Ctrl+T` tests the stored entry and `Tab` inspects it. A plugin entry offers no write and says its plugin owns it; an entry whose configuration read failed is marked invalid and offers no edit |
+| `/mcp` | Opens the MCP panel of the Session's workspace ([management surfaces](#management-surfaces)): an entry per server from `mcp.catalog`, grouped `user`, `project` and `plugin`, with its configuration below the list; `Enter` or `Space` toggles, `Ctrl+E` edits the `mcp.update` patch, `Ctrl+N` adds from the create template, `Ctrl+X` removes after a confirmation, `Ctrl+T` tests the stored entry and `Tab` inspects it. A plugin entry offers no write and says its plugin owns it; an entry whose configuration read failed is marked invalid and offers no edit. An entry that did not decode is marked invalid, shows its error, and offers only `Ctrl+X` removal; `Ctrl+N` with the same id and source replaces it |
 | `/mcp list` | MCP servers with their authorization, then the Session's server states; a state line carries its reason below it: a failed server's message, `Version VERSION rejected: REASON` for a refused tool-source version, and one `MCP catalog: ERROR` note for the Session. With no server configured, one line says so instead of the column legend. Without a Session it shows the configuration alone, the report `mcp list` prints |
 | `/mcp login [--no-browser] ID` | Starts sign-in, opens the browser unless `--no-browser` or SSH, and catches the callback on a loopback listener when the redirect port is free; `/mcp callback URL` completes it with a pasted callback instead. A client secret needs hidden input, so `--client-secret` points to `dimcode mcp login ID --client-secret` |
 | `/mcp logout ID` | Signs out and reports whether the token was revoked |
