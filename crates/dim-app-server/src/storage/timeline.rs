@@ -2209,6 +2209,20 @@ const BY_ID_SEQUENCE: &str = "SELECT sequence FROM timeline_events \
 
 /// The row-header path of a data field `write_batch` moves out of an output
 /// row's records; a predicate on that field reads the header instead.
+/// The JSON type SQLite reports for a scalar, so a predicate compares like with
+/// like: `1`, `1.0` and `true` are three different values.
+fn json_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(true) => "true",
+        serde_json::Value::Bool(false) => "false",
+        serde_json::Value::Number(number) if number.is_i64() || number.is_u64() => "integer",
+        serde_json::Value::Number(_) => "real",
+        serde_json::Value::String(_) => "text",
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => "object",
+    }
+}
+
 fn output_header_path(path: &str) -> Option<String> {
     matches!(path, "turn_id" | "request_id").then(|| format!("$.{path}"))
 }
@@ -2274,22 +2288,23 @@ fn query_rows(
             return Err(error("query path is not field names joined by dots"));
         }
         let value = json_value(&predicate.value)?;
+        let kind = json_type_name(&predicate.value);
         let mut paths = vec![format!("$.record.event.data.{}", predicate.path)];
         if let Some(header) = output_header_path(&predicate.path) {
             paths.push(header);
         }
         let mut clauses = Vec::new();
         for path in paths {
-            clauses.push("(json_type(body, ?) IS NOT NULL AND json_extract(body, ?) IS ?)");
+            clauses.push("(json_type(body, ?) = ? AND json_extract(body, ?) IS ?)");
             let path = text(&path);
-            parameters.extend([path.clone(), path, value.clone()]);
+            parameters.extend([path.clone(), text(kind), path, value.clone()]);
         }
         clauses.push(
             "(EXISTS (SELECT 1 FROM json_each(json_extract(body, '$.records')) AS r \
-               WHERE json_type(r.value, ?) IS NOT NULL AND json_extract(r.value, ?) IS ?))",
+               WHERE json_type(r.value, ?) = ? AND json_extract(r.value, ?) IS ?))",
         );
         let record_path = text(&format!("$.event.data.{}", predicate.path));
-        parameters.extend([record_path.clone(), record_path, value]);
+        parameters.extend([record_path.clone(), text(kind), record_path, value]);
         sql.push_str(&format!(" AND ({})", clauses.join(" OR ")));
     }
     sql.push_str(if descending {

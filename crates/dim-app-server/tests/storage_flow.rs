@@ -8041,6 +8041,82 @@ async fn a_query_selects_kinds_flags_and_a_predicate_from_sqlite() {
     db.close().await.unwrap();
 }
 
+/// `1`, `1.0` and `true` are three values: a predicate that compares with one
+/// of them must not spend its page on the other two, or a page of one fact
+/// comes back empty and the caller reads that as the end of the selection.
+#[tokio::test]
+async fn a_query_compares_a_json_scalar_by_its_type() {
+    use dim_agent_runtime::TimelineQueryDirection::{Ascending, Descending};
+    use dim_agent_runtime::TimelineQueryScope::Branch;
+
+    let values = |sequence: u64| {
+        [
+            (1u64, serde_json::json!(true)),
+            (2, serde_json::json!(1)),
+            (3, serde_json::json!(1.0)),
+        ]
+        .into_iter()
+        .find(|(at, _)| *at == sequence)
+        .map(|(_, value)| value)
+        .unwrap()
+    };
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store: std::sync::Arc<dyn TimelineStore> = SqliteTimelineStore::new(db.clone());
+    let memory_store: std::sync::Arc<dyn TimelineStore> =
+        std::sync::Arc::new(dim_agent_runtime::MemoryTimelineStore::default());
+    for target in [store.clone(), memory_store.clone()] {
+        target
+            .create_session("query", &SessionConfig::default())
+            .await
+            .unwrap();
+        for sequence in 1..=3u64 {
+            publish_records(
+                &target,
+                key("query", "main"),
+                vec![query_record(
+                    sequence,
+                    sequence,
+                    &format!("value-{sequence}"),
+                    marked(serde_json::json!({"value": values(sequence)})),
+                )],
+            )
+            .await;
+        }
+    }
+    let sqlite = Timeline::restore(
+        rutis::Ctx::root().unwrap(),
+        key("query", "main"),
+        vec![],
+        store.clone(),
+    )
+    .await
+    .unwrap();
+    let memory = Timeline::restore(
+        rutis::Ctx::root().unwrap(),
+        key("query", "main"),
+        vec![],
+        memory_store,
+    )
+    .await
+    .unwrap();
+
+    for (direction, value, expected) in [
+        (Ascending, serde_json::json!(1), "value-2"),
+        (Ascending, serde_json::json!(1.0), "value-3"),
+        (Descending, serde_json::json!(true), "value-1"),
+    ] {
+        let mut request = query(Branch, 1);
+        request.direction = direction;
+        request.predicate = Some(predicate("value", value));
+        let from_sqlite = sqlite.query(request.clone()).await.unwrap();
+        let from_memory = memory.query(request).await.unwrap();
+        assert_eq!(query_ids(&from_sqlite), [expected], "{direction:?} sqlite");
+        assert_eq!(query_ids(&from_memory), [expected], "{direction:?} memory");
+    }
+    db.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn a_query_selects_an_output_rows_turn_id_and_request_id() {
     use dim_agent_runtime::TimelineQueryScope::Branch;
