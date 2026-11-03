@@ -4973,7 +4973,9 @@
       "parent": "dim_cli::ui",
       "file": "crates/dim-cli/src/ui/timeline_panel.rs",
       "unexpandedMacros": [
-        "format"
+        "format",
+        "unreachable",
+        "vec"
       ]
     },
     {
@@ -34324,6 +34326,14 @@
     },
     {
       "from": "dim_cli::ui::timeline_panel",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path t",
+        "use crate::ui::i18n::t"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::timeline_panel",
       "to": "dim_cli::ui::list_panel",
       "references": [
         "path Event::Close",
@@ -34351,6 +34361,16 @@
     },
     {
       "from": "dim_cli::ui::timeline_panel",
+      "to": "dim_cli::ui::render::panel",
+      "references": [
+        "path visible_width",
+        "path wrap_words",
+        "use crate::ui::render::panel::visible_width",
+        "use crate::ui::render::panel::wrap_words"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::timeline_panel",
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path KeyCode::Char",
@@ -34359,6 +34379,22 @@
         "use crate::ui::terminal::KeyCode",
         "use crate::ui::terminal::KeyEvent",
         "use crate::ui::terminal::Modifiers"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::timeline_panel",
+      "to": "dim_cli::ui::text",
+      "references": [
+        "path truncate_cells",
+        "use crate::ui::text::truncate_cells"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::timeline_panel",
+      "to": "dim_cli::ui::theme::ansi",
+      "references": [
+        "path fg",
+        "use crate::ui::theme::ansi::fg"
       ]
     },
     {
@@ -34391,6 +34427,7 @@
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path KeyCode",
+        "path KeyCode::Esc",
         "path KeyCode::Up",
         "path KeyEvent",
         "path KeyEvent::new",
@@ -35496,6 +35533,7 @@
         "path Effect::EndLine",
         "path Effect::Exit",
         "path Effect::FocusLine",
+        "path Effect::Fork",
         "path Effect::LanguageApply",
         "path Effect::LanguagePreview",
         "path Effect::LanguageRestore",
@@ -36103,7 +36141,8 @@
         "path ViewRow",
         "path ViewSnapshot",
         "path ViewSnapshot::default",
-        "path crate::model::view::QueuedInput"
+        "path crate::model::view::QueuedInput",
+        "path crate::model::view::TurnEnd::Completed"
       ]
     },
     {
@@ -36215,6 +36254,7 @@
         "path KeyCode::Backspace",
         "path KeyCode::Char",
         "path KeyCode::Down",
+        "path KeyCode::End",
         "path KeyCode::Enter",
         "path KeyCode::Esc",
         "path KeyCode::Home",
