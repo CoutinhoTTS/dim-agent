@@ -6,12 +6,15 @@ use crate::{
     methods::{Interruption, MethodDecl, RpcError, SessionMethods, params, reply},
     timeline_tree::TreeCommands,
 };
-use dim_agent_runtime::{Branch, Names};
+use dim_agent_runtime::{
+    Branch, Names, TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
+    TimelineQueryPredicate, TimelineQueryScope,
+};
 use dim_agent_types::*;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::{num::NonZeroU64, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 pub const NAMESPACE: &str = "session.context";
@@ -78,13 +81,27 @@ async fn compact(branch: &Branch, cancel: &CancellationToken) -> Result<Value, R
         let head = watch.borrow_and_update().0;
         if head > after {
             let result = branch
-                .local(after + 1..=head)
+                .query(TimelineQuery {
+                    scope: TimelineQueryScope::Branch,
+                    include_publishing: false,
+                    from_event: None,
+                    from_sequence: Some(after + 1),
+                    order_by: TimelineQueryOrderBy::Sequence,
+                    direction: TimelineQueryDirection::Ascending,
+                    kinds: vec!["context/compaction".into()],
+                    flags: Vec::new(),
+                    event_id: None,
+                    predicate: Some(TimelineQueryPredicate {
+                        path: "command".into(),
+                        value: json!(command),
+                    }),
+                    limit: NonZeroU64::MIN,
+                    offset: 0,
+                })
                 .await?
+                .events
                 .into_iter()
-                .find(|event| {
-                    matches!(&event.kind, EventKind::ContextCompaction(data)
-                        if data.command == Some(command))
-                });
+                .next();
             if let Some(event) = result {
                 let EventKind::ContextCompaction(data) = &event.kind else {
                     unreachable!("matched a compaction")

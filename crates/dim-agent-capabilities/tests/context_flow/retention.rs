@@ -4,6 +4,7 @@
 //! recovery compares the trigger's own estimate with the input budget.
 use super::*;
 use dim_agent_capabilities::context_block;
+use dim_agent_runtime::testing::chain_events;
 
 /// Runs a large first turn, carrying `block`, then small turns until an
 /// automatic compaction completes; returns the history and the number of
@@ -45,7 +46,7 @@ async fn compact_after_small_turns(
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let cut = events.iter().find_map(|event| match &event.kind {
             EventKind::ContextCompaction(ContextCompactionData {
                 outcome: ContextCompactionResult::Completed { retain_from, .. },
@@ -99,7 +100,7 @@ async fn a_cut_on_the_retention_window_boundary_stays_a_legal_cut() {
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        events = session.history("main", None).await.unwrap();
+        events = chain_events(&session, "main", ..).await.unwrap();
         if events.iter().any(|event| {
             matches!(
                 &event.kind,
@@ -232,7 +233,7 @@ async fn a_tail_that_cannot_fit_the_bound_is_replaced_entirely() {
             .unwrap();
         session.idle("main").await.unwrap();
     }
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let at = events
         .iter()
         .position(|event| {
@@ -357,7 +358,7 @@ async fn recovery_compares_the_provider_baseline_estimate_with_the_input_budget(
                     .unwrap();
                 session.idle("main").await.unwrap();
             }
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             assert!(
                 events.iter().all(|event| !matches!(
                     &event.kind,
@@ -460,7 +461,7 @@ async fn automatic_compaction_waits_for_a_quarter_of_the_budget_of_new_history()
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert!(events.iter().any(|event| matches!(
         &event.kind,
         EventKind::ContextCompaction(ContextCompactionData {
@@ -477,7 +478,7 @@ async fn automatic_compaction_waits_for_a_quarter_of_the_budget_of_new_history()
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert_eq!(
         starts(&events),
         1,
@@ -490,7 +491,7 @@ async fn automatic_compaction_waits_for_a_quarter_of_the_budget_of_new_history()
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert_eq!(starts(&events), 2, "the quarter of new history is reached");
     agent.close().await.unwrap();
 }
@@ -535,7 +536,7 @@ async fn compact_marked(
         .unwrap();
     session.idle("main").await.unwrap();
     for index in 0..30 {
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
 
         if events.iter().any(|event| {
             matches!(
@@ -608,7 +609,7 @@ async fn a_summary_that_overshoots_the_budget_fails_the_recovery_request() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let starts = events
         .iter()
         .filter(|event| matches!(event.kind, EventKind::ContextCompactionStart(_)))
@@ -697,7 +698,7 @@ async fn a_child_branch_regrows_from_its_own_history() {
             .unwrap();
         session.idle("main").await.unwrap();
     }
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert_eq!(
         events
             .iter()
@@ -732,7 +733,7 @@ async fn a_child_branch_regrows_from_its_own_history() {
         .await
         .unwrap();
     session.idle(&child).await.unwrap();
-    let child_events = session.history(&child, None).await.unwrap();
+    let child_events = chain_events(&session, &child, ..).await.unwrap();
     let inherited = events
         .iter()
         .filter(|event| matches!(event.kind, EventKind::ContextCompactionStart(_)))
@@ -833,7 +834,7 @@ async fn a_budget_retry_reuses_a_cut_before_the_latest_turn_start() {
             .unwrap();
         session.idle("main").await.unwrap();
     }
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let first = events
         .iter()
         .find_map(|event| match &event.kind {

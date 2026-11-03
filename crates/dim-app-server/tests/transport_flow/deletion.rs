@@ -716,10 +716,7 @@ async fn a_failed_delete_leaves_the_session_closed_until_a_retry() {
     let request =
         json!({"action":"request","agentId":agent_id,"prompt":"tool:wait {\"millis\":60000}"});
     turn(&mut client, &lead, &format!("tool:agent {request}")).await;
-    let member = agent
-        .get_session(&lead)
-        .unwrap()
-        .history("main", None)
+    let member = chain_events(&agent.get_session(&lead).unwrap(), "main", ..)
         .await
         .unwrap()
         .iter()

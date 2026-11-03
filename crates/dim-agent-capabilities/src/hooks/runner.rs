@@ -20,8 +20,8 @@ use crate::{
     tool_registry::ToolRegistry,
 };
 use dim_agent_runtime::{
-    BranchLifecycle, Delivery, Dispatcher, Names, SessionConfig, SessionIdentity, Timeline,
-    TimelineIdentity,
+    BranchLifecycle, Dispatcher, Names, SessionConfig, SessionIdentity, Timeline, TimelineIdentity,
+    rebuild_facts,
 };
 use dim_agent_types::{
     AgentEvent, ApprovalCancelledData, ApprovalDecision, ApprovalRequestData, ApprovalRespondData,
@@ -1803,18 +1803,32 @@ impl DynPlugin for HooksBranchPlugin {
                 tasks: tracker.clone(),
             });
             let owner = branch.clone();
+            let read = branch.clone();
+            let read_timeline = branch.timeline.clone();
             dispatcher
-                .follow(ctx, "HooksBranch", &FOLLOWED_EVENTS, move |delivery| {
-                    match delivery {
-                        Delivery::Replay(events) => {
-                            for event in &events {
-                                owner.fold(event, false);
+                .consume(
+                    ctx,
+                    "HooksBranch".into(),
+                    FOLLOWED_EVENTS.map(String::from).to_vec(),
+                    Arc::new(move || {
+                        let read = read.clone();
+                        let timeline = read_timeline.clone();
+                        Box::pin(async move {
+                            let reply = rebuild_facts(&timeline, &FOLLOWED_EVENTS).await?;
+                            for event in &reply.events {
+                                read.fold(event, false);
                             }
-                        }
-                        Delivery::Live(event) => owner.fold(&event, true),
-                    }
-                    Box::pin(async { Ok(()) })
-                })
+                            Ok(reply.through)
+                        })
+                    }),
+                    Arc::new(move |event| {
+                        let owner = owner.clone();
+                        Box::pin(async move {
+                            owner.fold(&event, true);
+                            Ok(())
+                        })
+                    }),
+                )
                 .await?;
             let closing = tracker.clone();
             ctx.effect(move || async move {

@@ -4,6 +4,7 @@ use super::*;
 use dim_agent_capabilities::permission::{
     CommandRulesHost, NoCommandRules, Permission, PermissionState,
 };
+use dim_agent_runtime::testing::{branch_events, chain_events};
 use dim_agent_runtime::{Agent, Session};
 use dim_agent_types::{InputBlock, InputMessageData, PermissionPolicy, UserInput};
 use dim_app_server::methods::ManagementMethods;
@@ -599,8 +600,7 @@ async fn input_replies_after_publication_and_lookup_waits_for_committed_inputs()
     let receipt = sessions.ok("input", request).await;
     let sequence = receipt["sequence"].as_u64().unwrap();
     assert!(session.sequence("main").unwrap() >= sequence);
-    let event = session
-        .local("main", sequence..=sequence)
+    let event = branch_events(&session, "main", sequence..=sequence)
         .await
         .unwrap()
         .pop()
@@ -660,7 +660,7 @@ async fn input_replies_after_publication_and_lookup_waits_for_committed_inputs()
         .ok("input", input(&session, "test:once", json!([])))
         .await;
     assert_ne!(other["inputId"], first["inputId"]);
-    let history = session.local("main", ..).await.unwrap();
+    let history = branch_events(&session, "main", ..).await.unwrap();
     for id in ["test:twice", "test:once"] {
         assert_eq!(history.iter().filter(|event| matches!(&event.kind, EventKind::InputMessage(data) if data.submission_id.as_deref() == Some(id))).count(), 1);
     }
@@ -737,8 +737,7 @@ async fn input_replies_after_publication_and_lookup_waits_for_committed_inputs()
 /// Waits until the branch holds an event of `key`.
 async fn event_written(session: &Session, key: &str) {
     tokio::time::timeout(Duration::from_secs(5), async {
-        while !session
-            .history("main", None)
+        while !chain_events(session, "main", ..)
             .await
             .unwrap()
             .iter()
@@ -793,7 +792,7 @@ async fn idle_covers_written_turns_and_waits_on_a_pending_approval_until_stop() 
     let cutoff = sessions.ok("idle", at.clone()).await["sequence"]
         .as_u64()
         .unwrap();
-    let history = session.local("main", ..=cutoff).await.unwrap();
+    let history = branch_events(&session, "main", ..=cutoff).await.unwrap();
     let consumed = history
         .iter()
         .position(|event| matches!(&event.kind, EventKind::InputConsumed(data) if data.input_id == receipt["inputId"]))
@@ -825,7 +824,7 @@ async fn idle_covers_written_turns_and_waits_on_a_pending_approval_until_stop() 
     assert_eq!(idle["ok"], true, "{idle}");
     let cutoff = idle["value"]["sequence"].as_u64().unwrap();
     assert!(cutoff >= stopped);
-    let history = session.local("main", ..=cutoff).await.unwrap();
+    let history = branch_events(&session, "main", ..=cutoff).await.unwrap();
     let interrupt = history
         .iter()
         .position(|event| matches!(&event.kind, EventKind::StopInterrupt(data) if data.reason == "Stopped by automation"))
@@ -1024,7 +1023,7 @@ async fn a_consumer_launches_writes_waits_and_withdraws_by_input_id() {
 
     sessions.ok("stop", at.clone()).await;
     let cutoff = sessions.ok("idle", at).await["sequence"].as_u64().unwrap();
-    let history = session.local("main", ..=cutoff).await.unwrap();
+    let history = branch_events(&session, "main", ..=cutoff).await.unwrap();
     let held = held["inputId"].as_str().unwrap();
     let first = first["inputId"].as_str().unwrap();
     assert!(history.iter().any(|event| matches!(&event.kind,
@@ -1115,7 +1114,7 @@ async fn history_pages_the_branch_through_a_fixed_sequence_on_batch_boundaries()
     assert_eq!(through, Some(head));
     assert_eq!(
         Value::Array(events),
-        serde_json::to_value(session.local("main", ..=head).await.unwrap()).unwrap()
+        serde_json::to_value(branch_events(&session, "main", ..=head).await.unwrap()).unwrap()
     );
     let page = sessions.ok("history", at(json!({"through":first}))).await;
     assert_eq!(page["through"], first);
@@ -1821,7 +1820,7 @@ async fn node_input_settlement_outlives_reloads_and_a_resubmission_gets_its_rece
         "a stopping row's late cleanup writes no input"
     );
     assert_eq!(sessions.ok("lookup", json!({"sessionId":target.id(),"branchId":"main","submissionId":"test:late-row-call"})).await, json!({"status":"unknown"}));
-    let history = target.local("main", ..).await.unwrap();
+    let history = branch_events(&target, "main", ..).await.unwrap();
     for id in ["settlement:index:publication", "settlement:row:append"] {
         assert_eq!(history.iter().filter(|event| matches!(&event.kind, EventKind::InputMessage(data) if data.submission_id.as_deref() == Some(id))).count(), 1);
     }
@@ -1882,7 +1881,7 @@ async fn rust_named_input_keeps_its_outcome_across_reload_and_a_dropped_result()
         recovered["status"], "accepted",
         "dropping a result does not end its admitted writer"
     );
-    let history = target.local("main", ..).await.unwrap();
+    let history = branch_events(&target, "main", ..).await.unwrap();
     for id in ["settlement:rust:publication", "settlement:rust:dropped"] {
         assert_eq!(history.iter().filter(|event| matches!(&event.kind, EventKind::InputMessage(data) if data.submission_id.as_deref() == Some(id))).count(), 1);
     }
@@ -1983,10 +1982,7 @@ async fn submission_ids_survive_restart_and_legacy_duplicates_stay_ambiguous() {
         sessions.error("input", write("test:legacy")).await,
         "ambiguous"
     );
-    let history = agent
-        .get_session(target.id())
-        .unwrap()
-        .local("main", ..)
+    let history = branch_events(&agent.get_session(target.id()).unwrap(), "main", ..)
         .await
         .unwrap();
     for (id, count) in [("test:durable", 1), ("test:legacy", 2)] {
@@ -2058,7 +2054,7 @@ async fn node_input_preparation_refuses_a_retired_row_before_handoff() {
     let reply: Value = serde_json::from_str(reply["result"].as_str().unwrap()).unwrap();
     assert_eq!(reply["ok"], true, "the replacement row can submit: {reply}");
     let current = agent.get_session(target.id()).unwrap();
-    assert_eq!(current.local("main", ..).await.unwrap().iter().filter(|event| matches!(&event.kind, EventKind::InputMessage(data) if data.submission_id.as_deref() == Some("test:retired-before-handoff"))).count(), 1);
+    assert_eq!(branch_events(&current, "main", ..).await.unwrap().iter().filter(|event| matches!(&event.kind, EventKind::InputMessage(data) if data.submission_id.as_deref() == Some("test:retired-before-handoff"))).count(), 1);
     server.shutdown();
     server.join().await.unwrap();
 }
@@ -2120,7 +2116,7 @@ async fn node_crash_resubmission_gets_the_original_receipt() {
     assert_eq!(receipt["value"]["sequence"], waiting.sequence, "{receipt}");
     let recovered = sessions.ok("lookup", json!({"sessionId":target.id(),"branchId":"main","submissionId":"settlement:crash:append"})).await;
     assert_eq!(recovered["inputId"], receipt["value"]["inputId"]);
-    assert_eq!(target.local("main", ..).await.unwrap().iter().filter(|event| matches!(&event.kind, EventKind::InputMessage(data) if data.submission_id.as_deref() == Some("settlement:crash:append"))).count(), 1);
+    assert_eq!(branch_events(&target, "main", ..).await.unwrap().iter().filter(|event| matches!(&event.kind, EventKind::InputMessage(data) if data.submission_id.as_deref() == Some("settlement:crash:append"))).count(), 1);
     server.shutdown();
     server.join().await.unwrap();
 }

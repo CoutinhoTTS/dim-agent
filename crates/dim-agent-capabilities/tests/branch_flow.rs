@@ -12,6 +12,7 @@ use dim_agent_capabilities::{
     workspace_tools::{file_reads::FileReads, files::FileTools},
 };
 use dim_agent_runtime::testing::MinimalHost;
+use dim_agent_runtime::testing::{branch_events, chain_events, timeline_events};
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
@@ -27,6 +28,9 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 mod support;
+
+/// How many events one page of a line reads.
+const LINE_PAGE: usize = 10_000;
 use support::{Broadcast, Committed};
 
 async fn soon<T>(future: impl std::future::Future<Output = T>) -> T {
@@ -175,11 +179,10 @@ async fn batch_reads(timeline: &Timeline) -> BatchReads {
             .map_err(|error| format!("{error:?}"))
     }
     vec![
-        sequences(timeline.local(..=1).await),
-        sequences(timeline.history(Some(1)).await),
-        sequences(timeline.context(1).await.map(|context| context.events)),
-        sequences(timeline.local(..=2).await),
-        sequences(timeline.local(2..=2).await),
+        sequences(timeline_events(timeline, TimelineQueryScope::Branch, ..=1).await),
+        sequences(timeline_events(timeline, TimelineQueryScope::Chain, ..=1).await),
+        sequences(timeline_events(timeline, TimelineQueryScope::Branch, ..=2).await),
+        sequences(timeline_events(timeline, TimelineQueryScope::Branch, 2..=2).await),
     ]
 }
 struct ProbePlugin {
@@ -223,7 +226,12 @@ impl DynPlugin for ProbePlugin {
             if identity.branch_id == "main" {
                 *probe.main_timeline.lock().unwrap() = Some(timeline.clone());
                 if probe.read_while_opening.load(Ordering::SeqCst) {
-                    timeline.local(..=timeline.committed()).await?;
+                    timeline_events(
+                        &timeline,
+                        TimelineQueryScope::Branch,
+                        ..=timeline.committed(),
+                    )
+                    .await?;
                     let reads = batch_reads(&timeline).await;
                     probe.opening_reads.lock().unwrap().push(reads);
                 }
@@ -783,17 +791,7 @@ async fn restore_settles_interrupted_creates_and_keeps_failed_directories_inacti
     probe.read_while_opening.store(true, Ordering::SeqCst);
     let mut builder = builder(&probe);
     builder.timeline_store(store);
-    let inside = Err(format!(
-        "{:?}",
-        AgentError::InvalidInput("sequence 1 is inside an atomic batch".into())
-    ));
-    let batch = vec![
-        inside.clone(),
-        inside.clone(),
-        inside,
-        Ok(vec![1, 2]),
-        Ok(vec![2]),
-    ];
+    let batch = vec![Ok(vec![1]), Ok(vec![1]), Ok(vec![1, 2]), Ok(vec![2])];
     for _ in 0..2 {
         let agent = MinimalHost::start(&builder).await.unwrap();
         let session = soon(agent.restore_session("saved".into())).await.unwrap();
@@ -802,6 +800,10 @@ async fn restore_settles_interrupted_creates_and_keeps_failed_directories_inacti
         let main = probe.main_timeline.lock().unwrap().clone().unwrap();
         assert_eq!(opening, batch);
         assert_eq!(batch_reads(&main).await, batch);
+        assert!(matches!(
+            main.batch_end(1).await,
+            Err(AgentError::InvalidInput(_))
+        ));
         assert_eq!(
             session
                 .branches()
@@ -810,7 +812,7 @@ async fn restore_settles_interrupted_creates_and_keeps_failed_directories_inacti
                 .collect::<Vec<_>>(),
             ["main"]
         );
-        let history = session.local("main", ..).await.unwrap();
+        let history = branch_events(&session, "main", ..).await.unwrap();
         let terminals: Vec<_> = history
             .iter()
             .filter_map(|event| match &event.kind {
@@ -963,8 +965,7 @@ async fn a_restart_completes_an_end_without_its_result() {
             .collect::<Vec<_>>(),
         ["main"]
     );
-    let results: Vec<BranchEndedData> = session
-        .local("main", ..)
+    let results: Vec<BranchEndedData> = branch_events(&session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -978,10 +979,7 @@ async fn a_restart_completes_an_end_without_its_result() {
     assert_eq!(results[0].end_event, end.sequence);
     assert!(results[0].ancestor.is_none());
     assert_eq!(session.ended_head("ended"), Some(end.sequence));
-    let page = session
-        .local_page("ended", 0, 64, end.sequence)
-        .await
-        .unwrap();
+    let page = line_events(&session, "ended").await.unwrap();
     assert!(
         page.iter()
             .any(|event| matches!(&event.kind, EventKind::BranchEnd(_)))
@@ -992,8 +990,7 @@ async fn a_restart_completes_an_end_without_its_result() {
     ));
     assert_eq!(session.ended_head("grand"), Some(grand_first.sequence));
     assert!(
-        session
-            .local_page("grand", 0, 64, grand_first.sequence)
+        line_events(&session, "grand")
             .await
             .unwrap()
             .iter()
@@ -1145,10 +1142,7 @@ async fn a_restart_completes_an_interrupted_descendants_end_first() {
         Some(end.sequence + 1),
         "the child's result extends the line"
     );
-    let events = session
-        .local_page("X", 0, 64, session.ended_head("X").unwrap())
-        .await
-        .unwrap();
+    let events = line_events(&session, "X").await.unwrap();
     let result = events
         .iter()
         .find(|event| matches!(&event.kind, EventKind::BranchEnded(data) if data.branch == "C"))
@@ -1163,8 +1157,7 @@ async fn a_restart_completes_an_interrupted_descendants_end_first() {
             ancestor: Some("X".into()),
         })
     );
-    let results: Vec<BranchEndedData> = session
-        .history("main", None)
+    let results: Vec<BranchEndedData> = chain_events(&session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -1342,7 +1335,7 @@ async fn an_end_at_load_finds_the_restored_line_published() {
         ["Ok(())"],
         "the end at load found its line"
     );
-    let main_events = session.local("main", ..).await.unwrap();
+    let main_events = branch_events(&session, "main", ..).await.unwrap();
     let results: Vec<BranchEndedData> = main_events
         .iter()
         .filter_map(|event| match &event.kind {
@@ -1360,8 +1353,7 @@ async fn an_end_at_load_finds_the_restored_line_published() {
     let stopped = session.ended_head("E").expect("the line ended");
     assert!(stopped > head.sequence);
     assert!(
-        session
-            .local_page("E", 0, 64, stopped)
+        line_events(&session, "E")
             .await
             .unwrap()
             .iter()
@@ -1384,8 +1376,7 @@ async fn an_end_refuses_a_line_that_is_still_opening() {
         async move { soon(session.branch("main".into(), cut, options("delayed"))).await }
     });
     soon(probe.child_entered.notified()).await;
-    let child = session
-        .local("main", ..)
+    let child = branch_events(&session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -1409,7 +1400,7 @@ async fn an_end_refuses_a_line_that_is_still_opening() {
     probe.child_release.notify_one();
     assert!(creating.await.unwrap().is_err());
     soon(session.idle("main")).await.unwrap();
-    let events = session.local("main", ..).await.unwrap();
+    let events = branch_events(&session, "main", ..).await.unwrap();
     assert!(events.iter().any(|event| matches!(
         &event.kind,
         EventKind::BranchCreateFailed(BranchCreateFailedData::Failed { branch, .. })
@@ -1582,11 +1573,7 @@ async fn ending_a_line_ends_its_children_first_and_records_one_result_each() {
     assert!(!session.branches().iter().any(|line| line.id == parent));
     assert!(!session.branches().iter().any(|line| line.id == grandchild));
 
-    let grandchild_head = session.sequence(&grandchild).unwrap();
-    let grandchild_events = session
-        .local_page(&grandchild, 0, 64, grandchild_head)
-        .await
-        .unwrap();
+    let grandchild_events = line_events(&session, &grandchild).await.unwrap();
     assert!(matches!(
         grandchild_events
             .iter()
@@ -1595,11 +1582,7 @@ async fn ending_a_line_ends_its_children_first_and_records_one_result_each() {
         Some(EventKind::BranchEnd(BranchEndData { source: end, ancestor }))
             if *end == source && ancestor.as_deref() == Some(parent.as_str())
     ));
-    let parent_head = session.sequence(&parent).unwrap();
-    let parent_events = session
-        .local_page(&parent, 0, 64, parent_head)
-        .await
-        .unwrap();
+    let parent_events = line_events(&session, &parent).await.unwrap();
     assert!(matches!(
         parent_events
             .iter()
@@ -1628,15 +1611,17 @@ async fn ending_a_line_ends_its_children_first_and_records_one_result_each() {
         "the child's result precedes the parent's close"
     );
     assert!(
-        session
-            .history("main", None)
+        chain_events(&session, "main", ..)
             .await
             .unwrap()
             .iter()
             .any(|event| matches!(&event.kind, EventKind::BranchEnded(data)
             if data.branch == parent && data.source == source && data.ancestor.is_none()))
     );
-    assert_eq!(session.sequence(&parent).unwrap(), parent_head);
+    assert_eq!(
+        session.sequence(&parent).unwrap(),
+        parent_events.last().unwrap().sequence
+    );
     soon(agent.close()).await.unwrap();
 }
 
@@ -2123,7 +2108,7 @@ async fn a_host_line_opens_with_its_identity_block_and_the_creator_prompt() {
         .await
         .unwrap();
     soon(session.idle(&child)).await.unwrap();
-    let local = session.history(&child, None).await.unwrap();
+    let local = chain_events(&session, &child, ..).await.unwrap();
     let Some(EventKind::InputMessage(input)) = local
         .iter()
         .find(|event| matches!(event.kind, EventKind::InputMessage(_)))
@@ -2314,7 +2299,7 @@ async fn final_prompt_position_and_fixed_ancestor_prefix_drive_creation() {
         .await
         .unwrap();
     soon(session.idle(&child)).await.unwrap();
-    let create = create_event(&session.local("main", ..).await.unwrap());
+    let create = create_event(&branch_events(&session, "main", ..).await.unwrap());
     let info = session
         .branches()
         .into_iter()
@@ -2324,7 +2309,7 @@ async fn final_prompt_position_and_fixed_ancestor_prefix_drive_creation() {
         (info.branch_point, info.create_anchor),
         (Some(1), Some(create.sequence))
     );
-    let local = session.local(&child, ..).await.unwrap();
+    let local = branch_events(&session, &child, ..).await.unwrap();
     assert!(
         matches!(&local[0].kind, EventKind::BranchStart(data) if data.create_event == Some(create.sequence))
     );
@@ -2334,10 +2319,13 @@ async fn final_prompt_position_and_fixed_ancestor_prefix_drive_creation() {
             Some([ContentBlock::Text { text }]) if text == "final prompt"
         ))
     );
-    let inherited = session.history(&child, Some(0)).await.unwrap();
+    let inherited = chain_events(&session, &child, ..=0).await.unwrap();
     assert_eq!(inherited.len(), 1);
-    assert_eq!(inherited[0], session.local("main", ..=1).await.unwrap()[0]);
-    let local = session.local(&child, ..).await.unwrap();
+    assert_eq!(
+        inherited[0],
+        branch_events(&session, "main", ..=1).await.unwrap()[0]
+    );
+    let local = branch_events(&session, &child, ..).await.unwrap();
     let applied: Vec<&str> = local
         .iter()
         .filter_map(|event| match &event.kind {
@@ -2364,37 +2352,18 @@ async fn final_prompt_position_and_fixed_ancestor_prefix_drive_creation() {
         );
     }
     assert!(
-        session
-            .history("main", None)
+        chain_events(&session, "main", ..)
             .await
             .unwrap()
             .iter()
             .any(|event| event.id == create.id)
     );
-    let main_timeline = probe
-        .commands
-        .lock()
-        .unwrap()
-        .as_ref()
-        .unwrap()
-        .get("main")
-        .unwrap();
-    let trace = main_timeline.trace(create.sequence).await.unwrap().unwrap();
-    assert!(matches!(
-        trace.original.kind,
-        EventKind::BranchCreate(BranchCreateData {
-            at: BranchCreateAt::Create {},
-            source: BranchSource::Host { .. },
-            ..
-        })
-    ));
-
     *probe.rewrite.lock().unwrap() =
         Rewrite::Business(BranchCreateAt::Create {}, "tail prompt".into());
     let tail = soon(session.branch("main".into(), 0, options("ignored")))
         .await
         .unwrap();
-    let tail_create = create_event(&session.local("main", ..).await.unwrap());
+    let tail_create = create_event(&branch_events(&session, "main", ..).await.unwrap());
     let tail_info = session
         .branches()
         .into_iter()
@@ -2403,9 +2372,8 @@ async fn final_prompt_position_and_fixed_ancestor_prefix_drive_creation() {
     assert_eq!(tail_info.branch_point, Some(tail_create.sequence));
     assert_eq!(tail_info.create_anchor, Some(tail_create.sequence));
     assert_eq!(
-        session.history(&tail, Some(0)).await.unwrap(),
-        session
-            .history("main", Some(tail_create.sequence))
+        chain_events(&session, &tail, ..=0).await.unwrap(),
+        chain_events(&session, "main", ..=tail_create.sequence)
             .await
             .unwrap()
     );
@@ -2416,8 +2384,8 @@ async fn final_prompt_position_and_fixed_ancestor_prefix_drive_creation() {
         .unwrap();
     soon(session.idle(&grandchild)).await.unwrap();
     assert_eq!(
-        session.history(&grandchild, Some(0)).await.unwrap(),
-        session.history(&tail, Some(0)).await.unwrap()
+        chain_events(&session, &grandchild, ..=0).await.unwrap(),
+        chain_events(&session, &tail, ..=0).await.unwrap()
     );
     assert_eq!(
         probe.child_builds.load(Ordering::SeqCst),
@@ -2474,7 +2442,7 @@ async fn delayed_create_uses_its_anchor_and_survives_an_abandoned_waiter() {
         (child.branch_point, child.create_anchor),
         (Some(create.sequence), Some(create.sequence))
     );
-    let prefix = session.history(&child.id, Some(0)).await.unwrap();
+    let prefix = chain_events(&session, &child.id, ..=0).await.unwrap();
     assert_eq!(prefix.last().unwrap().id, create.id);
     assert!(!prefix.iter().any(|event| event.id == later.id));
     soon(agent.close()).await.unwrap();
@@ -2501,8 +2469,7 @@ async fn close_releases_an_unconsumed_create_without_waiting_for_dispatch() {
     assert_eq!(probe.child_builds.load(Ordering::SeqCst), 0);
     probe.release.notify_one();
     soon(close).await.unwrap();
-    let failures: Vec<_> = session
-        .local("main", ..)
+    let failures: Vec<_> = branch_events(&session, "main", ..)
         .await
         .unwrap()
         .into_iter()
@@ -2570,8 +2537,7 @@ async fn parent_close_waits_for_dispatch_before_releasing_branch_reservations() 
         .unwrap();
     soon(session.idle(&child)).await.unwrap();
     assert!(
-        session
-            .history(&child, None)
+        chain_events(&session, &child, ..)
             .await
             .unwrap()
             .iter()
@@ -2597,8 +2563,7 @@ async fn failed_build_rolls_back_and_releases_capacity_even_without_its_waiter()
     assert_eq!(probe.child_cleanups.load(Ordering::SeqCst), 1);
     assert_eq!(*probe.cleanup_write.lock().unwrap(), Some(true));
     assert_eq!(session.branches().len(), 1);
-    let failures: Vec<_> = session
-        .local("main", ..)
+    let failures: Vec<_> = branch_events(&session, "main", ..)
         .await
         .unwrap()
         .into_iter()
@@ -2686,12 +2651,18 @@ async fn candidates_remain_private_until_the_initial_input_is_accepted() {
         "candidate was public: {checks:?}"
     );
     assert!(session.branches().iter().any(|info| info.id == child));
-    assert!(session.local(&child, ..).await.unwrap().iter().any(
-        |event| matches!(&event.kind, EventKind::InputMessage(data) if matches!(
-            data.user.as_ref().map(|user| user.content.as_slice()),
-            Some([ContentBlock::Text { text }]) if text == "accepted"
-        ))
-    ));
+    assert!(
+        branch_events(&session, &child, ..)
+            .await
+            .unwrap()
+            .iter()
+            .any(
+                |event| matches!(&event.kind, EventKind::InputMessage(data) if matches!(
+                    data.user.as_ref().map(|user| user.content.as_slice()),
+                    Some([ContentBlock::Text { text }]) if text == "accepted"
+                ))
+            )
+    );
     let before = session.sequence("main").unwrap();
     assert!(matches!(
         soon(session.branch("main".into(), 0, options("collision"))).await,
@@ -2765,7 +2736,7 @@ async fn model_output_cannot_be_inherited_as_an_asymmetric_prefix() {
         .await
         .unwrap();
     soon(session.idle("main")).await.unwrap();
-    let events = session.local("main", ..).await.unwrap();
+    let events = branch_events(&session, "main", ..).await.unwrap();
     let model_start = events
         .iter()
         .find(|event| matches!(event.kind, EventKind::ModelStart(_)))
@@ -2823,7 +2794,7 @@ async fn a_tool_call_on_main_opens_a_line_before_its_own_request() {
         .find(|info| info.parent.as_deref() == Some("main"))
         .expect("the tool call opened a line");
     soon(session.idle(&child.id)).await.unwrap();
-    let main_events = session.local("main", ..).await.unwrap();
+    let main_events = branch_events(&session, "main", ..).await.unwrap();
     let model_start = main_events
         .iter()
         .find(|event| matches!(event.kind, EventKind::ModelStart(_)))
@@ -2841,7 +2812,7 @@ async fn a_tool_call_on_main_opens_a_line_before_its_own_request() {
     );
     let mut open_last = std::collections::HashMap::<String, u64>::new();
     for info in &branches {
-        let local = session.local(&info.id, ..).await.unwrap();
+        let local = branch_events(&session, &info.id, ..).await.unwrap();
         open_last.insert(info.id.clone(), local.last().unwrap().sequence);
     }
     soon(agent.close()).await.unwrap();
@@ -2852,7 +2823,7 @@ async fn a_tool_call_on_main_opens_a_line_before_its_own_request() {
     let mut last = std::collections::HashMap::<String, u64>::new();
     for (branch, event) in events.iter().map(|record| record.as_ref().unwrap()) {
         assert!(ids.insert(event.id.clone()), "events are broadcast once");
-        let local = session.local(branch, ..).await.unwrap();
+        let local = branch_events(&session, branch, ..).await.unwrap();
         assert!(Arc::ptr_eq(&local[event.sequence as usize - 1], event));
         let previous = last.insert(branch.clone(), event.sequence);
         if let Some(previous) = previous {
@@ -2917,9 +2888,16 @@ async fn call(session: &Session, branch: &str, arguments: &str) -> (String, Stri
             .to_string(),
     )
 }
+/// The events of one line, whole batches, the way a host pages a line: the tree
+/// serves both an open line and one that ended.
+async fn line_events(session: &Session, branch: &str) -> Result<Vec<Arc<AgentEvent>>> {
+    session
+        .session_service::<TreeCommands>()?
+        .page(branch.to_owned(), 0, LINE_PAGE)
+        .await
+}
 async fn local_events(session: &Session, branch: &str) -> Vec<Arc<AgentEvent>> {
-    let head = session.sequence(branch).unwrap();
-    session.local_page(branch, 0, 10_000, head).await.unwrap()
+    line_events(session, branch).await.unwrap()
 }
 async fn until_events(
     session: &Session,
@@ -2927,8 +2905,7 @@ async fn until_events(
     done: impl Fn(&[Arc<AgentEvent>]) -> bool,
 ) -> Vec<Arc<AgentEvent>> {
     for _ in 0..600 {
-        if let Ok(head) = session.sequence(branch)
-            && let Ok(events) = session.local_page(branch, 0, 10_000, head).await
+        if let Ok(events) = line_events(session, branch).await
             && done(&events)
         {
             return events;
@@ -3116,6 +3093,7 @@ async fn a_refused_branch_call_writes_nothing() {
             .iter()
             .any(|info| info.parent.as_deref() == Some(tool_line.as_str()))
     );
+    let before = branch_events(&session, &host, ..).await.unwrap().len();
     assert_eq!(
         call(
             &session,
@@ -3140,6 +3118,11 @@ async fn a_refused_branch_call_writes_nothing() {
             format!("Line {host} was not opened with this tool; it follows its own protocol.")
         )
     );
+    assert_eq!(
+        branch_events(&session, &host, ..).await.unwrap().len(),
+        before
+    );
+    let main_before = branch_events(&session, "main", ..).await.unwrap().len();
     assert_eq!(
         call(
             &session,
@@ -3169,7 +3152,7 @@ async fn a_refused_branch_call_writes_nothing() {
     // A refused call writes no message to its target; the runtime may still
     // write its own parent block on an open line.
     for line in [&host, &tool_line] {
-        let events = session.local(line, ..).await.unwrap();
+        let events = branch_events(&session, line, ..).await.unwrap();
         for event in &events {
             if let EventKind::InputMessage(data) = &event.kind {
                 assert!(
@@ -3180,6 +3163,23 @@ async fn a_refused_branch_call_writes_nothing() {
                     "a refused call writes no message to {line}"
                 );
             }
+        }
+    }
+    let notices = ["<dim-branch-idle", "<dim-branch-lines", "<dim-branch-ended"];
+    for event in branch_events(&session, "main", ..)
+        .await
+        .unwrap()
+        .iter()
+        .skip(main_before)
+    {
+        if matches!(event.kind, EventKind::InputMessage(_)) {
+            assert!(
+                notices
+                    .iter()
+                    .any(|prefix| !blocks_with(std::slice::from_ref(event), prefix).is_empty()),
+                "a refused read writes nothing to main: {:?}",
+                event.kind
+            );
         }
     }
     assert_eq!(
@@ -3210,16 +3210,14 @@ async fn a_refused_branch_call_writes_nothing() {
         )
     );
     assert!(
-        !session
-            .local(&host, ..)
+        !branch_events(&session, &host, ..)
             .await
             .unwrap()
             .iter()
             .any(|event| matches!(event.kind, EventKind::BranchEnd(_)))
     );
     assert!(
-        !session
-            .local("main", ..)
+        !branch_events(&session, "main", ..)
             .await
             .unwrap()
             .iter()
@@ -3338,7 +3336,7 @@ async fn main_lists_its_open_tool_lines_under_one_key() {
         ),
         "the roster carries the built-in closing sentence: {text}"
     );
-    let history = session.history(&first, None).await.unwrap();
+    let history = chain_events(&session, &first, ..).await.unwrap();
     let (identity, retired) = line_block(&history).unwrap();
     assert!(!retired);
     assert!(identity.ends_with("</dim-branch-line>"));
@@ -3418,7 +3416,7 @@ async fn a_configured_description_reaches_the_request_declaration() {
         .await
         .unwrap();
     soon(session.idle("main")).await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let tools = events
         .iter()
         .rev()
@@ -3462,8 +3460,7 @@ fn system_text(prompt: &SystemPrompt) -> String {
 
 /// The system of a branch's last model call.
 async fn last_system(session: &Session, branch: &str) -> String {
-    session
-        .history(branch, None)
+    chain_events(session, branch, ..)
         .await
         .unwrap()
         .iter()
@@ -3489,12 +3486,12 @@ async fn each_line_carries_the_entry_of_the_marker_its_part_writes() {
     let main = last_system(&session, "main").await;
     assert_eq!(main.matches(IDENTITY_ENTRY).count(), 1, "{main:?}");
     assert_eq!(main.matches(ROSTER_ENTRY).count(), 1, "{main:?}");
-    let roster = line_block(&session.history("main", None).await.unwrap());
+    let roster = line_block(&chain_events(&session, "main", ..).await.unwrap());
     assert!(roster.is_some_and(|(text, _)| text.starts_with("<dim-branch-lines")));
 
     // The line carries its identity marker, and the Session's writer
     // explains it there.
-    let opening = line_block(&session.history(&child, None).await.unwrap())
+    let opening = line_block(&chain_events(&session, &child, ..).await.unwrap())
         .expect("the line's opening input carries its identity");
     assert!(opening.0.starts_with(&format!(
         "<dim-branch-line branch=\"{child}\" parent=\"main\" source=\"tool\">"
@@ -3562,7 +3559,7 @@ async fn a_line_names_the_stale_file_failure_the_way_the_tool_reports_it() {
         .await
         .unwrap();
     let child = open_line(&session, "watch the tests").await;
-    let history = session.history(&child, None).await.unwrap();
+    let history = chain_events(&session, &child, ..).await.unwrap();
     let (identity, _) = line_block(&history).unwrap();
     assert!(
         identity.contains(
@@ -3642,7 +3639,7 @@ async fn the_branch_tool_declares_its_actions_and_modes() {
         .await
         .unwrap();
     soon(session.idle("main")).await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let tools = events
         .iter()
         .rev()
@@ -4685,7 +4682,7 @@ async fn an_ending_line_and_main_get_no_parent_block() {
     soon(session.idle("main")).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     if let Ok(head) = session.sequence("line") {
-        let events = session.local_page("line", 0, 10_000, head).await.unwrap();
+        let events = branch_events(&session, "line", ..=head).await.unwrap();
         assert!(
             parent_block_events(&events).is_empty(),
             "an ending line gets no block: {events:#?}"
@@ -4729,10 +4726,7 @@ async fn the_parent_block_replays_after_a_compaction() {
             .unwrap();
         soon(session.idle(&child)).await.unwrap();
     }
-    let message = baseline_message(
-        &session.history(&child, None).await.unwrap(),
-        "branch:parent",
-    )
+    let message = baseline_message(&local_events(&session, &child).await, "branch:parent")
     .expect("the line compacted and its parent block replayed");
     let MessageContent::Text(text) = &message.content else {
         panic!("the parent block is text: {message:?}");
@@ -5319,7 +5313,7 @@ async fn a_tool_line_ends_itself_and_main_learns_it_from_the_roster() {
             .any(|event| matches!(&event.kind, EventKind::BranchEnd(data)
         if matches!(data.source, BranchSource::Tool { .. }) && data.ancestor.is_none()))
     );
-    assert!(session.local(&child, ..).await.is_err());
+    assert!(branch_events(&session, &child, ..).await.is_err());
     assert_eq!(
         call(
             &session,
@@ -5625,8 +5619,11 @@ async fn the_roster_and_the_identity_replay_after_a_compaction() {
             .unwrap();
         soon(session.idle("main")).await.unwrap();
     }
-    let message = baseline_message(&session.history("main", None).await.unwrap(), "branch:line")
-        .expect("main compacted and the roster replayed");
+    let message = baseline_message(
+        &chain_events(&session, "main", ..).await.unwrap(),
+        "branch:line",
+    )
+    .expect("main compacted and the roster replayed");
     let MessageContent::Text(text) = &message.content else {
         panic!("the roster is text: {message:?}");
     };
@@ -5642,8 +5639,11 @@ async fn the_roster_and_the_identity_replay_after_a_compaction() {
             .unwrap();
         soon(session.idle(&child)).await.unwrap();
     }
-    let message = baseline_message(&session.history(&child, None).await.unwrap(), "branch:line")
-        .expect("the child compacted and its identity replayed");
+    let message = baseline_message(
+        &chain_events(&session, &child, ..).await.unwrap(),
+        "branch:line",
+    )
+    .expect("the child compacted and its identity replayed");
     let MessageContent::Text(text) = &message.content else {
         panic!("the identity is text: {message:?}");
     };
@@ -5771,7 +5771,7 @@ async fn a_stop_settles_the_branch_tool_while_the_tree_still_builds_the_child() 
     soon(session.stop("main", "user stop".into()))
         .await
         .unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let result = events
         .iter()
         .find_map(|event| match &event.kind {
@@ -5790,7 +5790,7 @@ async fn a_stop_settles_the_branch_tool_while_the_tree_still_builds_the_child() 
     probe.child_release.notify_one();
     soon(async {
         loop {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             if events
                 .iter()
                 .any(|event| matches!(event.kind, EventKind::BranchCreateFailed(_)))

@@ -13,6 +13,7 @@ use dim_agent_capabilities::{
     host::*,
     tool_registry::ToolSourcesView,
 };
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::{testing::MinimalHost, *};
 use dim_agent_types::*;
 use dim_app_server::{
@@ -577,7 +578,7 @@ async fn adopted(session: &Session, version: Option<&str>) {
             changed.changed().await.unwrap();
         }
         loop {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(session, "main", ..).await.unwrap();
             if events.iter().rev().find_map(|e| match &e.kind {
                 EventKind::ContextConfigured(c) => Some(
                     c.settings
@@ -598,8 +599,7 @@ async fn adopted(session: &Session, version: Option<&str>) {
     .unwrap();
 }
 async fn results(session: &Session) -> Vec<String> {
-    session
-        .history("main", None)
+    chain_events(session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -1101,7 +1101,7 @@ async fn a_type_array_tool_registers_calls_and_stores_the_canonical_form() {
             .unwrap()
             .contains("spaces-ok")
     );
-    let history = session.history("main", None).await.unwrap();
+    let history = chain_events(&session, "main", ..).await.unwrap();
     let called = history
         .iter()
         .rev()
@@ -1356,7 +1356,7 @@ async fn project_visibility_disable_refresh_failure_and_permission_use_real_sour
             .unwrap()
             .is_empty()
     );
-    assert!(user.history("main", None).await.unwrap().iter().any(|event| matches!(
+    assert!(chain_events(&user, "main", ..).await.unwrap().iter().any(|event| matches!(
         &event.kind, EventKind::ModelOutputEnd(end)
         if matches!(&end.outcome, ModelOutputOutcome::Failed { error, .. } if error.contains("Tool was not offered"))
     )));
@@ -1956,7 +1956,7 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
                 .await
                 .unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             assert!(
                 matches!(events.last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })),
                 "{:?}",
@@ -2000,7 +2000,7 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
             .unwrap();
         session.idle("main").await.unwrap();
         assert!(
-            matches!(session.history("main", None).await.unwrap().last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })),
+            matches!(chain_events(&session, "main", ..).await.unwrap().last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })),
             "a later turn also completes"
         );
         agent.close().await.unwrap();
@@ -2152,7 +2152,7 @@ async fn a_view_mounts_its_document_and_calls_the_entry_it_came_from() {
             .contains(&"refresh".to_string())
     );
 
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert!(
         events.iter().all(|event| !matches!(
             event.kind,

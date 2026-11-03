@@ -1,5 +1,6 @@
 use super::*;
 use axum::http::Uri;
+use dim_agent_runtime::testing::chain_events;
 use rutis::host::CtxHost;
 
 const IMAGE: &str =
@@ -1502,7 +1503,7 @@ async fn four_native_apis_preserve_signed_blocks_and_tool_continuation() {
                 ..Default::default()
             }, "main").await.unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main",None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             assert!(matches!(events.last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })), "{kind}: {:?}", events.iter().filter_map(|e| if let EventKind::ModelOutputEnd(data)=&e.kind{Some(&data.outcome)}else{None}).collect::<Vec<_>>());
             assert!(events.iter().any(|e| matches!(&e.kind, EventKind::Text(data) if data.delta=="finished")));
             let requests = server.endpoint.requests.lock().unwrap().clone();
@@ -1763,7 +1764,7 @@ async fn explicit_system_breakpoints_stay_within_the_four_breakpoint_limit() {
                 .await
                 .unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             let last = &events.last().unwrap().kind;
             if breaks < 5 {
                 assert!(
@@ -1883,7 +1884,7 @@ async fn native_unsigned_thinking_completes_and_is_not_replayed() {
                 .await
                 .unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             assert!(
                 matches!(
                     events.last().unwrap().kind,
@@ -2047,7 +2048,7 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
             let agent=model_agent(models.clone(),Some(custom)).await;
             let session=agent.create_session(server.session_config()).await.unwrap();
             session.submit("tool".into(),InputMode::Queue,"main").await.unwrap();session.idle("main").await.unwrap();
-            let events=session.history("main",None).await.unwrap();
+            let events=chain_events(&session, "main", ..).await.unwrap();
             assert!(events.iter().any(|e|matches!(&e.kind,EventKind::ModelOutputEnd(data) if matches!(data.outcome,ModelOutputOutcome::Failed{..}))));
             // Calls the failed output started are closed, never dispatched (agent-029).
             assert!(!events.iter().any(|e|matches!(&e.kind,EventKind::ToolCall(_)) || matches!(&e.kind,EventKind::ToolResult(data) if data.call_event_id.is_some())));
@@ -2067,7 +2068,7 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
             let session = agent.create_session(server.session_config()).await.unwrap();
             session.submit("missing-continuation".into(),InputMode::Queue,"main").await.unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main",None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             // The reply completes and commits its complete content.
             assert!(matches!(events.last().unwrap().kind,EventKind::TurnEnd(TurnEndData{outcome:TurnOutcome::Completed{..},..})),"{kind}");
             assert!(events.iter().any(|event|matches!(&event.kind,EventKind::ModelContent(_))),"{kind}");
@@ -2091,7 +2092,7 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
             let session = agent.create_session(server.session_config()).await.unwrap();
             session.submit(prompt.into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.starts_with("before"))), "{kind}: {prompt}");
             assert!(events.iter().any(|event| matches!(event.kind, EventKind::ToolUse(_))), "complete native tool input must precede EOF");
             assert!(events.iter().any(|event| matches!(&event.kind, EventKind::ModelOutputEnd(data) if matches!(data.outcome, ModelOutputOutcome::Failed { .. }))), "{kind}: {prompt}");
@@ -2107,7 +2108,7 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
             let session = agent.create_session(server.session_config()).await.unwrap();
             session.submit(prompt.into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             let visible: String = events.iter().filter_map(|event| match &event.kind { EventKind::Text(data) => Some(data.delta.as_str()), _ => None }).collect();
             assert_eq!(visible, "Cannot comply.");
             assert!(matches!(events.last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })));
@@ -2118,7 +2119,7 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
             let replay = requests[1].2["input"].as_array().unwrap().iter().find(|item| item["id"] == "refusal-1").unwrap();
             assert_eq!(replay["content"], json!([{"type":"output_text","text":"Cannot comply."}]));
             assert_eq!(replay["phase"], "final_answer");
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta == "finished")));
             agent.close().await.unwrap();
             server.close().await;
@@ -2129,7 +2130,7 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
             let session = agent.create_session(server.session_config()).await.unwrap();
             session.submit(prompt.into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             assert!(matches!(events.last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })), "{prompt}");
             let requests = server.endpoint.requests.lock().unwrap().clone();
             assert_eq!(requests.len(), 2);
@@ -2248,7 +2249,7 @@ async fn tool_result_images_take_the_form_its_protocol_defines() {
             let session = agent.create_session(server.session_config()).await.unwrap();
             session.submit("call the tool".into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             assert!(
                 matches!(events.last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })),
                 "{kind}: {:?}",
@@ -2322,7 +2323,7 @@ async fn tool_result_images_take_the_form_its_protocol_defines() {
             session.submit("another".into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
             assert!(
-                matches!(session.history("main", None).await.unwrap().last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })),
+                matches!(chain_events(&session, "main", ..).await.unwrap().last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })),
                 "{kind}: a later turn also completes"
             );
             agent.close().await.unwrap();
@@ -2350,7 +2351,7 @@ async fn a_model_without_image_input_gets_the_placeholder_in_a_tool_result() {
         let session = agent.create_session(config).await.unwrap();
         session.submit("call the tool".into(), InputMode::Queue, "main").await.unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(matches!(events.last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })));
         for content in tool_result_events(&events) {
             assert!(

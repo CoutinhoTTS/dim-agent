@@ -162,6 +162,9 @@ impl TimelineStore for Probe {
     fn head<'a>(&'a self, key: &'a TimelineKey) -> BoxFuture<'a, Result<u64>> {
         self.timed(Op::Other, self.inner.head(key), |_| 0)
     }
+    fn batch_end<'a>(&'a self, key: &'a TimelineKey, sequence: u64) -> BoxFuture<'a, Result<()>> {
+        self.inner.batch_end(key, sequence)
+    }
     fn append(
         &self,
         key: TimelineKey,

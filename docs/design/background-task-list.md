@@ -32,8 +32,8 @@ discovered by its state notice without finding its creation in main's local hist
 reloading branch's state can be delayed until its Loop returns. Clients consume
 these public notices, not the internal branch directory. There is no initial
 enumeration-complete notice or snapshot barrier. The public
-[history handler](../../crates/dim-app-server/src/connection/tree.rs) calls
-`Session::local_page`, which reads the named branch's own records; it does not
+[history handler](../../crates/dim-app-server/src/connection/tree.rs) reads
+the named branch's own records; it does not
 copy ancestor records into that branch's task list. The v3
 [event filter](../../crates/dim-app-server/src/tree_protocol.rs) already exposes
 the branch and task facts above.

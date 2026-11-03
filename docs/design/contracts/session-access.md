@@ -12,7 +12,7 @@ Process plugins reach Sessions the way Collaboration already does: through Agent
 | `launch` with a policy capped by the starter | Agents | Scheduler, Workflow |
 | `SessionConfig` field `interactive` | Agents | Plugins that read it from the Session's `SessionConfig` (Questions, SessionTitle) |
 | Input with source raw blocks (marker, keys, `submissionId`) | InputQueue data contract, runtime facade | Scheduler, Workflow; Goal branch parts write the same form, and Hooks branch parts (to be designed) would too |
-| Fixed-prefix read | Runtime facade (existing `sequence`, `local_page` and `history`, A.5) | Process callers and branch parts deciding from Timeline facts |
+| Fixed-prefix read | Runtime facade (`sequence` and `history`) and the page read `AgentIndex::history_page` (A.5) | Process callers and branch parts deciding from Timeline facts |
 | Withdrawal (command `input/withdraw` with optional `reason`, proposed in [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities), result `input/deleted`, `session.input.withdraw` through InputQueue's `sessionMethods`) | InputQueue | Clients, AcpGateway, Scheduler, Workflow |
 
 Session-scoped and branch-scoped plugins do not use this interface to reach their own Session. They use their Session's and branch's services, the branch Dispatcher and the Session broadcast directly.
@@ -197,7 +197,7 @@ Only plugins in the control node's process hold `sessions`, and it is never expo
 
 ### 9.2 Fixed-prefix read
 
-Withdrawn ([#50](https://github.com/arcships/dim/issues/50)): the existing Session facade composes it, so no runtime change is needed. `Session::sequence(branch)` returns the published head; if it is below `atLeast` the read fails `future_sequence`, otherwise `Session::history(branch, Some(head))` reads through that head. Both read only published events and the head only grows, so the prefix is fixed (A.5). Process callers page the same prefix with `Session::local_page` (A.5).
+Withdrawn ([#50](https://github.com/arcships/dim/issues/50)): the existing Session facade composes it, so no runtime change is needed. `Session::sequence(branch)` returns the published head; if it is below `atLeast` the read fails `future_sequence`, otherwise `Session::query(branch, query)` reads that head and below. Both read only published events and the head only grows, so the prefix is fixed (A.5). Process callers page the same prefix with `AgentIndex::history_page` (A.5).
 
 ### 9.3 Caller source fixed from plugin identity
 
@@ -327,7 +327,7 @@ Not in this contract: `createdBy` (the Session's origin) and the `client` parame
 
 ### A.5 Fixed-prefix read
 
-`sessions.history` with `atLeast` fixes `through` as the published head at call time. It fails with `future_sequence` if that head is below `atLeast`, and otherwise returns the branch's own events through that head, paged by `after` and `limit`. It is composed from the existing facade: read the head with `Session::sequence(branch)`, then page with `Session::local_page(branch, after, limit, head)`. Branch parts that need the ancestor prefix read `Session::history(branch, Some(head))` (§9.2). Every event delivered by the branch Dispatcher or the Session broadcast is published, so `atLeast = event.sequence` succeeds while the branch exists.
+`sessions.history` with `atLeast` fixes `through` as the published head at call time. It fails with `future_sequence` if that head is below `atLeast`, and otherwise returns the branch's own events through that head, paged by `after` and `limit`. It is composed from the existing facade: read the head with `Session::sequence(branch)`, then page with `AgentIndex::history_page`, which pages a loaded line through the branch's query and one that has ended or is not loaded through the App Server's page read. A branch part that needs the ancestor prefix reads the chain with the same query (§9.2). Every event delivered by the branch Dispatcher or the Session broadcast is published, so `atLeast = event.sequence` succeeds while the branch exists.
 
 ### A.6 Errors
 
@@ -405,7 +405,7 @@ while the first write is still unpublished.
 | per-call acquire | `AgentIndex::acquire(id)` (existing, crate-internal) returning a `SessionUse` lease |
 | `input` | `Session::input(InputMessageData, branch)` (existing; returns the committed input for an id the branch already holds); a key is `InputBlock::Raw { key: Some(name), retire }` |
 | `lookup` | `Session::lookup(branch, submission_id)`, shared with `session.input_lookup`: the branch's index of submission ids; waits for the found input's publication |
-| `history` | `Session::sequence(branch)`, failing `future_sequence` below `at_least`, then `Session::local_page(branch, after, limit, through)` |
+| `history` | `Session::sequence(branch)`, failing `future_sequence` below `at_least`, then `AgentIndex::history_page(id, branch, after, limit, through)` |
 | `withdraw` | `Session::service::<InputQueue>(branch)` then `InputQueue::withdraw(InputWithdrawData { input_id, reason }, None) -> Result<(Withdrawal, Option<Arc<AgentEvent>>), AgentError>` (S1): appends `input/withdraw` and replies with InputQueue's decision once it is written; `Withdrawal::Deleted { sequence }` or `Withdrawal::NotHeld`. Agents replies `deleted` once that `input/deleted` is published |
 | `stop`, `idle` | `Session::stop`, `Session::idle` (existing) |
 | `delete` | `AgentIndex::delete(id)` (S5c, crate-internal): admission gate, close, `SessionStore::delete_session`, forget |
