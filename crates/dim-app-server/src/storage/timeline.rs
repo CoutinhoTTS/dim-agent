@@ -375,6 +375,38 @@ impl SqliteTimelineStore {
     /// applies the kinds, flags and predicate; a predicate that matches a
     /// record inside a merged output row is re-checked on the decoded events,
     /// because that row holds several of them.
+    /// The event a query names by id, looked up through the id index so the
+    /// read costs one key and not a range. Merged output rows carry their
+    /// events' ids inside the body, so a miss here falls back to the page.
+    async fn query_event_by_id(
+        &self,
+        key: &TimelineKey,
+        query: &TimelineQuery,
+    ) -> Result<Option<StoredEvent>> {
+        let Some(id) = query.event_id.clone() else {
+            return Ok(None);
+        };
+        let session = key.session_id.clone();
+        let branch = key.branch_id.clone();
+        let sequence: Option<u64> = self
+            .db
+            .run_read(move |connection| {
+                connection
+                    .prepare_cached(BY_ID_SEQUENCE)
+                    .map_err(error)?
+                    .query_row(params![session, branch, id], |row| read_sequence(row, 0))
+                    .optional()
+                    .map_err(error)
+            })
+            .await?;
+        let Some(sequence) = sequence else {
+            return Ok(None);
+        };
+        let mut reader = self.reader(RequestBodies::Rebuild);
+        let record = read_range(&self.db, &mut reader, key, sequence..=sequence, false).await;
+        self.finish(reader);
+        Ok(record?.into_iter().next())
+    }
     /// One page of a query: the SQL selects the rows (kinds, flags, event id,
     /// predicate, order) and takes at most `rows` of them; the decoded events
     /// are checked against the event id and the predicate again, because a
@@ -2216,6 +2248,11 @@ fn query_fetched(
         })
         .collect()
 }
+/// The sequence of the event a query names by id. `timeline_events_by_id`
+/// answers this without touching a body; the page then reads that one row.
+const BY_ID_SEQUENCE: &str = "SELECT sequence FROM timeline_events \
+     WHERE session_id=?1 AND branch_id=?2 AND event_id=?3 ORDER BY sequence LIMIT 1";
+
 /// The rows a query selects from `session`'s `branch` in `range`, in sequence
 /// order. Position, kinds, flags and predicate select in SQL; the decoded
 /// events are checked against the predicate again, because a merged output
@@ -3505,6 +3542,24 @@ impl TimelineStore for SqliteTimelineStore {
                 return Err(AgentError::InvalidInput(
                     "cursor is inside an atomic batch".into(),
                 ));
+            }
+            if query.event_id.is_some()
+                && let Some(record) = self.query_event_by_id(key, query).await?
+                && record.event.sequence >= low
+                && record.event.sequence <= high
+                && query
+                    .predicate
+                    .as_ref()
+                    .is_none_or(|predicate| predicate.matches(&record.event))
+            {
+                return Ok(TimelineQueryReply {
+                    positions: vec![TimelinePosition {
+                        branch_id: branch.clone(),
+                        sequence: record.event.sequence,
+                    }],
+                    events: vec![record.event],
+                    next: None,
+                });
             }
             let limit = usize::try_from(query.limit.get()).unwrap_or(usize::MAX);
             let rows = u64::try_from(limit).unwrap_or(u64::MAX);
