@@ -2684,6 +2684,16 @@
       ]
     },
     {
+      "id": "dim_app_server::storage::worktrees",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::storage",
+      "file": "crates/dim-app-server/src/storage/worktrees.rs",
+      "unexpandedMacros": [
+        "matches",
+        "params"
+      ]
+    },
+    {
       "id": "dim_app_server::transport",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -23315,6 +23325,15 @@
       ]
     },
     {
+      "from": "dim_app_server::storage",
+      "to": "dim_app_server::storage::worktrees",
+      "references": [
+        "mod worktrees",
+        "use worktrees::WorktreeDirectory",
+        "use worktrees::WorktreeUsage"
+      ]
+    },
+    {
       "from": "dim_app_server::storage::catalog",
       "to": "dim_agent_runtime::error",
       "references": [
@@ -24059,6 +24078,32 @@
         "path error",
         "use super::SqliteStorage",
         "use super::sqlite::error"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::worktrees",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path AgentError::Closed",
+        "path Result",
+        "use dim_agent_runtime::AgentError",
+        "use dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::worktrees",
+      "to": "dim_app_server::storage::sqlite",
+      "references": [
+        "path error",
+        "use super::sqlite::error"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::worktrees",
+      "to": "dim_app_server::storage::timeline",
+      "references": [
+        "path SessionStore",
+        "use super::SessionStore"
       ]
     },
     {

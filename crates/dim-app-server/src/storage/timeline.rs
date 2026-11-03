@@ -921,6 +921,7 @@ impl SqliteTimelineStore {
             "timeline_content",
             "session_grants",
             "session_output_owners",
+            "session_worktrees",
             "session_metadata",
             "session_catalog",
             "session_owners",
@@ -1014,7 +1015,9 @@ pub struct SessionStore {
     /// Serializes output ownership across Sessions: a delete's shared-owner
     /// check, removal and row deletion, and a fork's copy of the output rows,
     /// so a fork either copies before the removal or sees no rows (ADR 013 D4).
-    ownership: Arc<tokio::sync::Mutex<()>>,
+    /// Worktree association writes take it too, so deletion finishes before a
+    /// late association checks that its Session still exists.
+    pub(super) ownership: Arc<tokio::sync::Mutex<()>>,
 }
 impl SessionStore {
     /// `ctx` is SessionStore's own context, from which each file step reads
@@ -2863,6 +2866,7 @@ fn drop_session(connection: &mut Connection, session: &str) -> Result<usize> {
         for table in [
             "session_output_owners",
             "session_grants",
+            "session_worktrees",
             "session_metadata",
             "session_catalog",
             "session_owners",

@@ -13,6 +13,7 @@ fn catalog_backfill_failure_preserves_the_legacy_store() {
                 *table != "session_catalog"
                     && !V28_TABLES.contains(table)
                     && !V29_TABLES.contains(table)
+                    && !V32_TABLES.contains(table)
             })
             .collect::<Vec<_>>(),
     );

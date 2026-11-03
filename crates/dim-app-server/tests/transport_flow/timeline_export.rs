@@ -331,7 +331,7 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
 
         assert_eq!(
             live[0],
-            json!({"kind":"header","export":1,"session_id":session,"store_format":31,"sensitive":true})
+            json!({"kind":"header","export":1,"session_id":session,"store_format":dim_app_server::storage::STORE_FORMAT,"sensitive":true})
         );
         let branches: Vec<_> = live.iter().filter(|line| line["kind"] == "branch").collect();
         assert_eq!(branches.len(), 2);
@@ -403,6 +403,8 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             (27, "", false),
             (28, "", false),
             (29, "", false),
+            (30, "", false),
+            (31, "", false),
         ] {
             let older = directory.join(format!("copies/v{version}.sqlite"));
             let catalog = if version < 23 {
@@ -428,10 +430,13 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             } else {
                 ""
             };
-            changed(&database, &older, &format!("{catalog} {grants} {output} {dropped} {end_index} DROP TABLE agent_store_format;
+            changed(&database, &older, &format!("{catalog} {grants} {output} {dropped} {end_index}
+                DROP TABLE session_worktrees; DROP TABLE worktree_directories; DROP TABLE agent_store_format;
                 CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {version}));
                 INSERT INTO agent_store_format VALUES ({version});"));
-            without_switch_columns(&older);
+            if version < 31 {
+                without_switch_columns(&older);
+            }
             if version < 30 {
                 without_origin_column(&older);
             }
@@ -448,8 +453,8 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
 
         for (name, sql) in [
             ("newer.sqlite", "DROP TABLE agent_store_format;
-                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 32));
-                INSERT INTO agent_store_format VALUES (32);"),
+                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 33));
+                INSERT INTO agent_store_format VALUES (33);"),
             ("changed.sqlite", "CREATE TABLE extra (id TEXT)"),
         ] {
             let path = directory.join("copies").join(name);
