@@ -1513,6 +1513,7 @@
       "unexpandedMacros": [
         "format",
         "json",
+        "matches",
         "tokio::select",
         "tracing::warn",
         "vec"
@@ -15529,6 +15530,7 @@
         "path RunState::Launching",
         "path RunState::Lost",
         "path RunState::Missed",
+        "path RunState::Running",
         "path RunState::Skipped",
         "path RunState::Submitted",
         "path RunState::TimedOut",
@@ -15678,6 +15680,16 @@
         "path PermissionPreset",
         "use dim_agent_types::PermissionPolicy",
         "use dim_agent_types::PermissionPreset"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::methods",
+      "to": "dim_app_server::agents::sessions",
+      "references": [
+        "path SessionPermissions",
+        "path SessionRef",
+        "use dim_app_server::SessionPermissions",
+        "use dim_app_server::SessionRef"
       ]
     },
     {
@@ -16355,6 +16367,15 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::agents::sessions",
+      "references": [
+        "use agents::SessionPermissions",
+        "use agents::SessionRef",
+        "use agents::SessionsError"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::approval",
       "references": [
         "mod approval"
@@ -16940,7 +16961,9 @@
         "path SessionPermissions",
         "path sessions",
         "path sessions::SessionsService",
-        "use sessions::SessionPermissions"
+        "use sessions::SessionPermissions",
+        "use sessions::SessionRef",
+        "use sessions::SessionsError"
       ]
     },
     {

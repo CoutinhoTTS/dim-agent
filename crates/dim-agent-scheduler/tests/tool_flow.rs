@@ -185,8 +185,10 @@ async fn the_schedule_tool_saves_jobs_for_interactive_sessions_only() {
         )
         .await
         .unwrap();
-    wait_for("the saved job", || {
-        model.texts().contains("schedule: saved job")
+    wait_for("the saved job and its authority transition", || {
+        let texts = model.texts();
+        texts.contains(r#"\"transition\":{\"from\":null"#)
+            && texts.contains(r#"\"effective_policy\":{\"preset\":\"full-access\""#)
     })
     .await;
 

@@ -15,16 +15,17 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::Names;
 use dim_agent_types::{PermissionPolicy, PermissionPreset};
 use dim_app_server::{
+    SessionPermissions, SessionRef,
     methods::ManagementMethods,
     plugin_files::PluginFileTransactions,
     settings::{SettingsError, SettingsService},
 };
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 const NAMESPACE: &str = "schedule";
 const DEFAULT_HISTORY_LIMIT: u32 = 20;
@@ -35,6 +36,7 @@ pub struct SchedulerPlugin {
     settings: Key<SettingsService>,
     files: Key<PluginFileTransactions>,
     methods: Key<ManagementMethods>,
+    permissions: Key<SessionPermissions>,
 }
 
 impl SchedulerPlugin {
@@ -43,6 +45,7 @@ impl SchedulerPlugin {
             settings: names.key()?,
             files: names.key()?,
             methods: names.key()?,
+            permissions: names.key()?,
         })
     }
 }
@@ -56,6 +59,7 @@ impl DynPlugin for SchedulerPlugin {
             self.settings.erase(),
             self.files.erase(),
             self.methods.erase(),
+            self.permissions.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -63,16 +67,40 @@ impl DynPlugin for SchedulerPlugin {
             let settings = ctx.require_at(&self.settings)?;
             let files = ctx.require_at(&self.files)?;
             let methods = ctx.require_at(&self.methods)?;
+            let permissions = ctx.require_at(&self.permissions)?;
             settings.register::<ScheduleDocument>(ctx)?;
             let shared = Arc::new(Shared {
                 ctx: ctx.clone(),
                 settings,
                 files,
+                permissions,
                 pruning: tokio::sync::Mutex::new(()),
+                stop: ctx.cancellation_token(),
+                tasks: TaskTracker::new(),
             });
+            let cleanup = shared.clone();
+            ctx.effect(move || async move {
+                cleanup.stop.cancel();
+                cleanup.tasks.close();
+                cleanup.tasks.wait().await;
+                Ok(())
+            })?;
             ctx.provide_as::<ScheduleJobs>(Arc::new(ScheduleJobs {
                 shared: shared.clone(),
             }))?;
+            methods.register(
+                ctx,
+                NAMESPACE,
+                vec![
+                    MethodDecl::new("schedule.list", false, Interruption::Report),
+                    MethodDecl::new("schedule.save", true, Interruption::Drain),
+                    MethodDecl::new("schedule.delete", true, Interruption::Drain),
+                    MethodDecl::new("schedule.set_enabled", true, Interruption::Drain),
+                    MethodDecl::new("schedule.history", false, Interruption::Report),
+                    MethodDecl::new("schedule.run_now", true, Interruption::Drain),
+                ],
+                handler(shared.clone()),
+            )?;
             match runs::read(&shared.files).await {
                 Ok(active) => crate::engine::recover(
                     &shared,
@@ -86,31 +114,13 @@ impl DynPlugin for SchedulerPlugin {
                 }
             }
             let timer = shared.clone();
-            let stop = ctx.cancellation_token();
-            tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                        _ = stop.cancelled() => break,
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
-                    }
+            shared.spawn(async move {
+                while timer.pause(std::time::Duration::from_secs(1)).await {
                     if let Err(error) = crate::engine::tick(&timer).await {
                         tracing::warn!(%error, "scheduler tick failed");
                     }
                 }
             });
-            methods.register(
-                ctx,
-                NAMESPACE,
-                vec![
-                    MethodDecl::new("schedule.list", false, Interruption::Report),
-                    MethodDecl::new("schedule.save", true, Interruption::Drain),
-                    MethodDecl::new("schedule.delete", true, Interruption::Drain),
-                    MethodDecl::new("schedule.set_enabled", true, Interruption::Drain),
-                    MethodDecl::new("schedule.history", false, Interruption::Report),
-                    MethodDecl::new("schedule.run_now", true, Interruption::Drain),
-                ],
-                handler(shared),
-            )?;
             Ok(Effect::Done)
         })
     }
@@ -120,8 +130,31 @@ pub(crate) struct Shared {
     pub(crate) ctx: Ctx,
     pub(crate) settings: Arc<SettingsService>,
     pub(crate) files: Arc<PluginFileTransactions>,
+    pub(crate) permissions: Arc<SessionPermissions>,
     /// Serializes retention passes, so a pass never deletes what another reads.
     pub(crate) pruning: tokio::sync::Mutex<()>,
+    /// Cancelled when this generation starts to unload.
+    pub(crate) stop: CancellationToken,
+    /// The timer, run tasks and retention passes; cleanup waits for them.
+    pub(crate) tasks: TaskTracker,
+}
+
+impl Shared {
+    /// Starts owned background work, unless the owner is unloading.
+    pub(crate) fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
+        if !self.stop.is_cancelled() {
+            self.tasks.spawn(task);
+        }
+    }
+
+    /// Waits `delay`; `false` once the owner is unloading, when the caller
+    /// stops and leaves an active run to the next generation's recovery.
+    pub(crate) async fn pause(&self, delay: std::time::Duration) -> bool {
+        tokio::select! {
+            _ = self.stop.cancelled() => false,
+            _ = tokio::time::sleep(delay) => true,
+        }
+    }
 }
 
 fn handler(shared: Arc<Shared>) -> Handler {
@@ -173,15 +206,12 @@ pub(crate) async fn read_document(
 
 /// The host's configured maximum, the authority a management save captures
 /// (§3.3). Read before the settings write.
-pub(crate) async fn host_bound(ctx: &Ctx) -> Result<PermissionPolicy, SchedulerError> {
-    rutis_bridge::session::call_service::<PermissionPolicy>(
-        ctx,
-        "sessionPermissions",
-        "permissionDefaults",
-        (json!({}),),
-    )
-    .await
-    .map_err(|error| SchedulerError::new("service_unavailable", error.to_string()))
+pub(crate) async fn host_bound(shared: &Shared) -> Result<PermissionPolicy, SchedulerError> {
+    shared
+        .permissions
+        .permission_defaults(Default::default())
+        .await
+        .map_err(|error| SchedulerError::new("service_unavailable", error.to_string()))
 }
 
 async fn dispatch(
@@ -205,7 +235,7 @@ async fn dispatch(
         }
         "schedule.set_enabled" => {
             let input: SetEnabledParams = params(value)?;
-            Ok(set_enabled(shared, input, cancel).await?)
+            Ok(json!({ "job": set_enabled(shared, input, cancel).await? }))
         }
         "schedule.history" => {
             let input: HistoryParams = params(value)?;
@@ -260,28 +290,18 @@ struct ManagementPatch {
     max_run_minutes: Option<u32>,
 }
 
-/// A saved job as the operator writes it. The server owns `created_by`,
-/// `policy_cap`, `enabled_at`, `revision` and the id of a new job.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+/// The fields of a job a save writes. The server owns `created_by`,
+/// `policy_cap`, `enabled_at`, `revision` and the job id.
 struct JobInput {
-    #[serde(default)]
-    id: Option<String>,
     name: String,
     schedule: Schedule,
     prompt: String,
     cwd: String,
-    #[serde(default)]
     model: Option<ModelSelection>,
-    #[serde(default)]
     agent_id: Option<String>,
-    #[serde(default)]
     mode: Option<Mode>,
-    #[serde(default)]
     policy: Option<PermissionPreset>,
-    #[serde(default)]
     max_run_minutes: Option<u32>,
-    #[serde(default)]
     enabled: Option<bool>,
 }
 
@@ -317,13 +337,17 @@ fn not_found(job_id: &str) -> SchedulerError {
 }
 
 /// The last window of a job's runs, or the enable anchor before its first
-/// window: the first window after it is the job's next window.
+/// window: the first window after it is the job's next window. An `at` job
+/// with no run has an open start, so a past instant is recorded `missed`.
 pub(crate) fn window_after(job: &Job, runs: &[Run]) -> DateTime<Utc> {
     let last = runs
         .iter()
         .filter(|run| run.job_id == job.id)
         .filter_map(|run| canonical_instant(&run.window))
         .max();
+    if last.is_none() && matches!(job.schedule, Schedule::At(_)) {
+        return DateTime::<Utc>::MIN_UTC;
+    }
     last.or_else(|| {
         job.enabled_at
             .as_deref()
@@ -470,7 +494,7 @@ async fn save(
     input: SaveParams,
     cancel: &CancellationToken,
 ) -> Result<Value, SchedulerError> {
-    let host = host_bound(&shared.ctx).await?;
+    let host = host_bound(shared).await?;
     let id = input.job.id.clone();
     let enabled = input.job.enabled;
     let patch = JobPatch {
@@ -483,7 +507,7 @@ async fn save(
         policy: input.job.policy,
         max_run_minutes: input.job.max_run_minutes,
     };
-    let (job, _) = save_job(
+    let (job, previous) = save_job(
         shared,
         cancel,
         id.as_deref(),
@@ -502,7 +526,7 @@ async fn save(
         },
     )
     .await?;
-    Ok(json!({ "job": job }))
+    Ok(json!({ "transition": transition(previous.as_ref(), &job), "job": job }))
 }
 
 async fn delete(
@@ -537,7 +561,7 @@ async fn set_enabled(
     shared: &Shared,
     input: SetEnabledParams,
     cancel: &CancellationToken,
-) -> Result<Value, SchedulerError> {
+) -> Result<Job, SchedulerError> {
     let snapshot = read_document(shared, cancel).await?;
     let mut document = snapshot.document;
     let index = document
@@ -560,7 +584,7 @@ async fn set_enabled(
         .update(SettingsScope::User, &snapshot.revision, document, cancel)
         .await
         .map_err(write_failure)?;
-    Ok(json!({ "job": job }))
+    Ok(job)
 }
 
 async fn history(shared: &Shared, input: HistoryParams) -> Result<Value, SchedulerError> {
@@ -653,19 +677,9 @@ pub struct JobReply {
     pub records: Value,
 }
 
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SessionRef {
-    session_id: String,
-    branch_id: String,
-}
-
-#[derive(Deserialize, Serialize)]
-struct PermissionReply {
-    policy: PermissionPolicy,
-}
-
 const PROMPT_PREVIEW_BYTES: usize = 4 * 1024;
+const NAME_PREVIEW_BYTES: usize = 256;
+const DETAIL_PREVIEW_BYTES: usize = 512;
 
 fn invalid(message: &str) -> SchedulerError {
     SchedulerError::new("schedule_invalid", message)
@@ -676,27 +690,24 @@ async fn branch_policy(
     shared: &Shared,
     caller: &Caller,
 ) -> Result<PermissionPolicy, SchedulerError> {
-    session_policy(&shared.ctx, &caller.session_id, &caller.branch_id).await
+    session_policy(shared, &caller.session_id, &caller.branch_id).await
 }
 
 /// The live authority of a branch, read from `sessionPermissions` (§1.3).
 pub(crate) async fn session_policy(
-    ctx: &Ctx,
+    shared: &Shared,
     session_id: &str,
     branch_id: &str,
 ) -> Result<PermissionPolicy, SchedulerError> {
-    let reply = rutis_bridge::session::call_service::<PermissionReply>(
-        ctx,
-        "sessionPermissions",
-        "permission",
-        (SessionRef {
+    let state = shared
+        .permissions
+        .permission(SessionRef {
             session_id: session_id.to_owned(),
             branch_id: branch_id.to_owned(),
-        },),
-    )
-    .await
-    .map_err(|error| SchedulerError::new("service_unavailable", error.to_string()))?;
-    Ok(reply.policy)
+        })
+        .await
+        .map_err(|error| SchedulerError::new("service_unavailable", error.to_string()))?;
+    Ok(state.policy)
 }
 
 /// The result of a first-reuse binding CAS (A.5.1).
@@ -761,7 +772,6 @@ fn merge(
                 return Err(invalid("a new job needs name, schedule and prompt"));
             };
             Ok(JobInput {
-                id: None,
                 name,
                 schedule,
                 prompt,
@@ -775,7 +785,6 @@ fn merge(
             })
         }
         Some(before) => Ok(JobInput {
-            id: Some(before.id.clone()),
             name: patch.name.unwrap_or_else(|| before.name.clone()),
             schedule: patch.schedule.unwrap_or_else(|| before.schedule.clone()),
             prompt: patch.prompt.unwrap_or_else(|| before.prompt.clone()),
@@ -790,46 +799,45 @@ fn merge(
     }
 }
 
-fn origin_text(origin: &Origin) -> String {
-    match origin {
-        Origin::User => "user".into(),
-        Origin::Tool {
-            session_id,
-            branch_id,
-        } => format!("tool {session_id}/{branch_id}"),
+/// One side of a save's authority transition (§3.3): who saved the job, its
+/// cap, the policy its runs request, and where their reports go.
+fn authority(job: Option<&Job>) -> Value {
+    job.map_or(Value::Null, |job| {
+        json!({
+            "origin": job.created_by,
+            "cap": job.policy_cap,
+            "effective_policy": crate::engine::requested_policy(job).cap(&job.policy_cap),
+            "report_to": match &job.created_by {
+                Origin::User => Value::Null,
+                Origin::Tool { session_id, branch_id } =>
+                    json!({ "session_id": session_id, "branch_id": branch_id }),
+            },
+        })
+    })
+}
+
+/// The old-to-new authority transition a save returns (§3.3).
+fn transition(previous: Option<&Job>, job: &Job) -> Value {
+    json!({ "from": authority(previous), "to": authority(Some(job)) })
+}
+
+/// A run as the model reads it: the reason bounded (§A.3).
+fn run_preview(run: &Value) -> Value {
+    let mut run = run.clone();
+    if let Some(detail) = run["detail"].as_str() {
+        run["detail"] = json!(truncate(detail, DETAIL_PREVIEW_BYTES));
     }
+    run
 }
 
-fn preset_text(preset: &PermissionPreset) -> String {
-    serde_json::to_value(preset)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .unwrap_or_default()
-}
-
-/// The old-to-new authority transition a save reports (§3.3).
-fn transition(previous: Option<&Job>, job: &Job) -> String {
-    let old_origin = previous.map_or("none".to_owned(), |before| origin_text(&before.created_by));
-    let old_cap = previous.map_or("none".to_owned(), |before| {
-        preset_text(&before.policy_cap.preset)
-    });
-    let report = match &job.created_by {
-        Origin::User => "none (history only)".to_owned(),
-        Origin::Tool {
-            session_id,
-            branch_id,
-        } => format!("{session_id}/{branch_id}"),
-    };
-    format!(
-        "schedule: saved job {} revision {}. origin: {} -> {}. authority cap: {} -> {}. report target: {}.",
-        job.id,
-        job.revision,
-        old_origin,
-        origin_text(&job.created_by),
-        old_cap,
-        preset_text(&job.policy_cap.preset),
-        report
-    )
+/// A job as the model reads it: the name and prompt bounded (§A.3).
+fn job_preview(job: &Job) -> Value {
+    let mut value = serde_json::to_value(job).expect("jobs serialize");
+    let prompt = truncate(&job.prompt, PROMPT_PREVIEW_BYTES);
+    value["prompt_truncated"] = json!(prompt.len() < job.prompt.len());
+    value["prompt"] = json!(prompt);
+    value["name"] = json!(truncate(&job.name, NAME_PREVIEW_BYTES));
+    value
 }
 
 impl ScheduleJobs {
@@ -869,9 +877,12 @@ impl ScheduleJobs {
                     move |previous| merge(previous, patch, &cwd),
                 )
                 .await?;
-                let content = transition(previous.as_ref(), &job);
-                let records = json!({ "job": job, "previous": previous });
-                Ok(JobReply { content, records })
+                let transition = transition(previous.as_ref(), &job);
+                Ok(JobReply {
+                    content: json!({ "job": job_preview(&job), "transition": transition })
+                        .to_string(),
+                    records: json!({ "job": job, "transition": transition }),
+                })
             }
             ToolAction::Get => {
                 let job_id = request
@@ -883,19 +894,31 @@ impl ScheduleJobs {
                     .iter()
                     .find(|job| job.id == job_id)
                     .ok_or_else(|| not_found(&job_id))?;
-                let mut value = serde_json::to_value(job).expect("jobs serialize");
-                let prompt = truncate(&job.prompt, PROMPT_PREVIEW_BYTES);
-                value["prompt_truncated"] = json!(prompt.len() < job.prompt.len());
-                value["prompt"] = json!(prompt);
                 Ok(JobReply {
-                    content: value.to_string(),
+                    content: json!({ "job": job_preview(job) }).to_string(),
                     records: json!({ "job": job }),
                 })
             }
             ToolAction::List => {
                 let value = list(shared, &cancel).await?;
+                let jobs = value["jobs"].as_array().into_iter().flatten().map(|job| {
+                    let mut job = job.clone();
+                    if let Some(object) = job.as_object_mut() {
+                        object.remove("prompt");
+                    }
+                    if let Some(name) = job["name"].as_str() {
+                        job["name"] = json!(truncate(name, NAME_PREVIEW_BYTES));
+                    }
+                    if let Some(issue) = job["schedule_error"].as_str() {
+                        job["schedule_error"] = json!(truncate(issue, DETAIL_PREVIEW_BYTES));
+                    }
+                    if !job["last_run"].is_null() {
+                        job["last_run"] = run_preview(&job["last_run"]);
+                    }
+                    job
+                });
                 Ok(JobReply {
-                    content: value.to_string(),
+                    content: json!({ "jobs": jobs.collect::<Vec<_>>() }).to_string(),
                     records: value,
                 })
             }
@@ -916,11 +939,11 @@ impl ScheduleJobs {
                 let enabled = request
                     .enabled
                     .ok_or_else(|| invalid("enabled is required"))?;
-                let value =
+                let job =
                     set_enabled(shared, SetEnabledParams { job_id, enabled }, &cancel).await?;
                 Ok(JobReply {
-                    content: value.to_string(),
-                    records: value,
+                    content: json!({ "job": job_preview(&job) }).to_string(),
+                    records: json!({ "job": job }),
                 })
             }
             ToolAction::History => {
@@ -935,8 +958,13 @@ impl ScheduleJobs {
                     },
                 )
                 .await?;
+                let runs = value["runs"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(run_preview);
                 Ok(JobReply {
-                    content: value.to_string(),
+                    content: json!({ "runs": runs.collect::<Vec<_>>() }).to_string(),
                     records: value,
                 })
             }
@@ -947,7 +975,7 @@ impl ScheduleJobs {
                 let run = crate::engine::accept(self.shared.clone(), &job_id).await?;
                 let value = serde_json::to_value(&run).expect("runs serialize");
                 Ok(JobReply {
-                    content: value.to_string(),
+                    content: run_preview(&value).to_string(),
                     records: value,
                 })
             }

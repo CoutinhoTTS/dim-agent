@@ -41,6 +41,7 @@ pub mod web;
 mod web_entry;
 
 use agents::{AgentIndex, AgentsPlugin};
+pub use agents::{SessionPermissions, SessionRef, SessionsError};
 use collaboration::CollaborationPlugin;
 use connection::{ConnectionHub, ConnectionPlugin, RpcPlugin};
 use control::{ServerControl, ServerControlPlugin};

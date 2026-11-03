@@ -766,13 +766,19 @@ launch 一个 Session。不增加立即删除策略，也不从旧运行推断�
 
 ## 附录 G. Rust 绑定
 
-下列公开绑定已可用；#317 的包拥有 Scheduler 功能服务和任务，交付仍须通过上述失败报告检查。
+Scheduler 以原生 Rust 实现，没有 TypeScript 包、Node 进程或回退路径。上文合同不变，只更换绑定。
+
+位置：独立业务 crate `crates/dim-agent-scheduler`，不属于 App Server 代码（principles §1）。产品入口经 App Server 的原生 profile 安装函数（`process_entry(args, provider, install)`）安装它，App Server crate 不依赖它；未安装它的宿主没有 `schedule.*` 方法和 `schedule` 工具。Session 部分是 profile 中安装的 Feature，与 `dim-agent-questions` 相同。两部分都使用现有 Rust 名称：`Names::key`、`Key<T>`、`require_at`、`provide_as`、`Feature::session` 与 `AgentBuilder::require_feature`。
 
 | 中立 | Rust |
 | --- | --- |
-| 注册到 toolRegistry 的工具 schedule | SchedulerSession 在 apply 中经 `Keyed<ToolRegistry>` 调用 `tools.register(ctx, ToolContribution {definition, handler})`；execute(ToolCall,cancel) |
-| 注册到 `managementMethods` 的命名空间 `schedule` | 由 Rpc 按调用查找而不依赖 |
-| sessions | 公开命名服务 host_key("sessions")；原生请求类型和 AgentIndex::acquire 是私有实现，不是外部 crate API |
-| scheduleJobs | Scheduler 已实现的进程服务，依赖绑定见 §1.1 |
-| 进程存储 | 既有 pluginFiles.open scope，立即登记 effect 清理；使用 A.7 已确定的内部 v1 格式 |
-| 定时器 / 跟踪 | 进程插件拥有，立即登记清理，apply 后启动业务，卸载前停止新工作并结算 |
+| 注册到 toolRegistry 的工具 schedule | Session 部分经 `names.key()` 取得 `ToolRegistry`，在 apply 中调用 `tools.register(ctx, ToolContribution {definition, handler})` |
+| 注册到 `managementMethods` 的命名空间 `schedule` | 进程部分取得 `ManagementMethods` 并调用 `methods.register(ctx, "schedule", declarations, handler)`；Rpc 按调用查找，不依赖 Scheduler |
+| scheduleJobs | 以 `names::register::<ScheduleJobs>(catalog, None)` 注册的进程组名称；Session 部分经 `names.key()` 读取，没有接线部分或转发插件 |
+| sessionPermissions、settings、pluginFiles | App Server 的类型化服务（`SessionPermissions`、`SettingsService`、`PluginFileTransactions`），经 `names.key()` 取得；crate 依赖 `dim-app-server`，`xtask check` 允许该依赖 |
+| sessions | 共享的 host-dispatch 名称，以 JSON 信封调用；其原生请求类型是 App Server 私有实现 |
+| 权限 cap | `dim-agent-types` 中的 `PermissionPolicy::cap` 与 `within`，与 S2 launch 使用同一函数，并按共享样例测试 |
+| 进程存储 | App Server 的类型化 `PluginFileTransactions` 服务；宿主写 `{version: 1, text}` 信封，Scheduler 提供内部 v1 文本，字节与 TypeScript 版本相同 |
+| 定时器 / 跟踪 | 进程部分拥有：定时器、运行任务、恢复与保留在其任务跟踪器中运行，在方法与服务注册后启动。卸载时（`ctx.cancellation_token()`）停止新工作并结束等待，清理在存储 scope 关闭前等待跟踪器；已接纳的 `sessions` 调用先结算。仍活动的运行留在文件中，由下一代恢复。Session 工具返回 §1.3 的卸载结果及 `schedule: cancelled before handover` |
+| Cron 与时区 | `croner` 与 `chrono-tz`，由 `deny.toml` 检查 |
+| 测试 | 经管理方法、`schedule` 工具与 CLI wire 测试的公开流程，脚本模型可挂起一个 turn；不添加私有辅助函数单元测试（AGENTS.md Testing） |

@@ -17,6 +17,9 @@ use tokio_util::sync::CancellationToken;
 const DESCRIPTION: &str = "Manage scheduled jobs across this host, including other workspaces. Every create/update, even a rename, replaces the saving branch and authority cap; future reports go to this branch. An omitted policy keeps its stored value, whose default can change with the saving origin. Inspect the old-to-new authority transition in the result.";
 
 const UNAVAILABLE: &str = "schedule is available only in interactive leader Sessions.";
+const UNLOADING_BEFORE_CALL: &str = "tool provider generation is unloading; this call was not made. The tool is offered again once its provider is active; a later request uses the current provider.";
+const UNLOADING_AFTER_CALL: &str = "tool provider generation is unloading; this call may already have taken effect. Check the operation's state before repeating it with the current provider.";
+const CANCELLED_BEFORE_HANDOVER: &str = "schedule: cancelled before handover";
 
 fn declaration() -> ToolDefinition {
     let mut tool = definition(
@@ -99,6 +102,7 @@ impl DynPlugin for SchedulerSession {
             let tools = ctx.require_at(&self.tools)?;
             let config = ctx.require_at(&self.config)?;
             let identity = ctx.require_at(&self.identity)?;
+            let closing = ctx.cancellation_token();
             tools.register(
                 ctx,
                 ToolContribution {
@@ -107,6 +111,7 @@ impl DynPlugin for SchedulerSession {
                         jobs,
                         config,
                         session_id: identity.session_id.clone(),
+                        closing,
                     }),
                 },
             )?;
@@ -119,6 +124,8 @@ struct ScheduleTool {
     jobs: Arc<ScheduleJobs>,
     config: Arc<SessionConfig>,
     session_id: String,
+    /// Cancelled when this generation starts to unload.
+    closing: CancellationToken,
 }
 
 impl ToolHandler for ScheduleTool {
@@ -126,9 +133,12 @@ impl ToolHandler for ScheduleTool {
         &self,
         call: ToolCall,
         context: ToolExecutionContext,
-        _cancel: CancellationToken,
+        cancel: CancellationToken,
     ) -> HostFuture<'_, ToolResult> {
         Box::pin(async move {
+            if self.closing.is_cancelled() {
+                return Ok(ToolResult::error(UNLOADING_BEFORE_CALL));
+            }
             if !self.config.interactive
                 || self.config.collaboration_role == CollaborationRole::Member
             {
@@ -147,7 +157,17 @@ impl ToolHandler for ScheduleTool {
                 branch_id: context.branch_id,
                 cwd: self.config.cwd.clone(),
             };
-            Ok(match self.jobs.call(request, caller).await {
+            if self.closing.is_cancelled() {
+                return Ok(ToolResult::error(UNLOADING_BEFORE_CALL));
+            }
+            if cancel.is_cancelled() {
+                return Ok(ToolResult::error(CANCELLED_BEFORE_HANDOVER));
+            }
+            let reply = self.jobs.call(request, caller).await;
+            if self.closing.is_cancelled() {
+                return Ok(ToolResult::error(UNLOADING_AFTER_CALL));
+            }
+            Ok(match reply {
                 Ok(reply) => {
                     let mut result = ToolResult::text(reply.content);
                     result.structured_content = reply.records.as_object().cloned();

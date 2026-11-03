@@ -1,7 +1,7 @@
 //! Scheduled and manual runs (design §3.2, A.4–A.6): windows, acceptance, the
 //! pre-effect recheck, launch or reuse of a Session, the first-reuse binding,
-//! input, tracking to a terminal outcome, and the steer report of a tool-saved
-//! job's outcome. Retention and cancellation on unload are not implemented yet.
+//! input, tracking to a terminal outcome, the steer report of a tool-saved
+//! job's outcome, and retention.
 use crate::{
     document::{Job, Mode, Origin, Schedule, canonical_instant},
     methods::{Binding, Shared, bind_job, host_bound, read_document, session_policy, window_after},
@@ -26,6 +26,14 @@ const RETAINED_TERMINAL_RUNS: usize = 100;
 
 /// A Session service code that asks the caller to retry later: the Agents index or
 /// the capability set is still loading after a restart (`reloading`, `capability reloading`).
+/// The error a run task returns when the owner unloads mid-run. The run stays
+/// active in the file, and the next generation's recovery resumes it.
+const UNLOADING: &str = "service_reloading";
+
+fn unloading() -> SchedulerError {
+    SchedulerError::new(UNLOADING, "Scheduler is unloading")
+}
+
 fn is_reloading(code: &str) -> bool {
     code.ends_with("reloading")
 }
@@ -118,10 +126,10 @@ async fn record(
     if let Some(run) = &run
         && run.state == RunState::Launching
     {
-        tokio::spawn(execute(shared.clone(), accepted, run.clone()));
+        shared.spawn(execute(shared.clone(), accepted, run.clone()));
     }
     if run.is_some() {
-        tokio::spawn(prune(shared.clone()));
+        shared.spawn(prune(shared.clone()));
     }
     Ok(run)
 }
@@ -217,7 +225,7 @@ async fn disable(shared: &Arc<Shared>, job_id: &str) -> Result<(), SchedulerErro
 /// The authority of a run's launch request: the saved preset, capped by the
 /// saved authority (§3.3). A management job without a preset requests
 /// read-only; a tool job requests its saved cap.
-fn requested_policy(job: &Job) -> PermissionPolicy {
+pub(crate) fn requested_policy(job: &Job) -> PermissionPolicy {
     match (&job.created_by, job.policy) {
         (_, Some(preset)) => PermissionPolicy {
             preset,
@@ -300,7 +308,7 @@ async fn finish(
     match settled {
         Some(run) => {
             let outcome = report(shared, run).await;
-            tokio::spawn(prune(shared.clone()));
+            shared.spawn(prune(shared.clone()));
             outcome
         }
         None => Ok(()),
@@ -308,8 +316,12 @@ async fn finish(
 }
 
 /// Steers a tool-saved run's outcome into the branch that saved the job, once.
-/// A failed send is recorded in the run's detail and is not retried.
+/// `skipped` and `missed` runs only keep history (A.6). A failed send is
+/// recorded in the run's detail and is not retried.
 async fn report(shared: &Arc<Shared>, run: Run) -> Result<(), SchedulerError> {
+    if matches!(run.state, RunState::Skipped | RunState::Missed) {
+        return Ok(());
+    }
     let Some(target) = run.report_to.clone() else {
         return Ok(());
     };
@@ -452,9 +464,12 @@ async fn prune_once(shared: &Arc<Shared>) -> Result<(), SchedulerError> {
 /// stopped (A.5). Nothing is launched or submitted again.
 pub fn recover(shared: &Arc<Shared>, active: Vec<Run>) {
     for run in active {
-        let shared = shared.clone();
-        tokio::spawn(async move {
-            if let Err(error) = resume(&shared, &run).await {
+        let owner = shared.clone();
+        shared.spawn(async move {
+            let shared = owner;
+            if let Err(error) = resume(&shared, &run).await
+                && error.code != UNLOADING
+            {
                 let _ = finish(&shared, &run.run_id, RunState::Lost, error.message).await;
             }
         });
@@ -479,21 +494,22 @@ async fn resume(shared: &Arc<Shared>, run: &Run) -> Result<(), SchedulerError> {
         )
         .await;
     };
-    let input_id = match &run.input_event_id {
-        Some(input_id) => input_id.clone(),
+    let (input_id, start) = match &run.input_event_id {
+        Some(input_id) => (input_id.clone(), None),
         None => match lookup_input(shared, &session_id, &run.submission_id).await {
-            Ok(Some(input_id)) => {
+            Ok(Some((input_id, sequence))) => {
                 let accepted = input_id.clone();
                 update_run(shared, &run.run_id, move |run| {
                     run.state = RunState::Submitted;
                     run.input_event_id = Some(accepted);
                 })
                 .await?;
-                input_id
+                (input_id, Some(sequence))
             }
             Ok(None) => {
                 return finish(shared, &run.run_id, RunState::Lost, "input_unknown".into()).await;
             }
+            Err(code) if code == UNLOADING => return Err(unloading()),
             Err(code) => {
                 return finish(
                     shared,
@@ -505,7 +521,7 @@ async fn resume(shared: &Arc<Shared>, run: &Run) -> Result<(), SchedulerError> {
             }
         },
     };
-    track(shared, &run.run_id, &session_id, &input_id, deadline).await
+    track(shared, &run.run_id, &session_id, &input_id, start, deadline).await
 }
 
 /// `Ok(None)` when the Session never accepted the submission. A service error
@@ -515,21 +531,29 @@ async fn lookup_input(
     shared: &Arc<Shared>,
     session_id: &str,
     submission_id: &str,
-) -> Result<Option<String>, String> {
+) -> Result<Option<(String, u64)>, String> {
     let args = json!({"sessionId": session_id, "branchId": "main", "submissionId": submission_id});
     loop {
         match sessions(&shared.ctx, "lookup", args.clone()).await {
             Ok(Ok(value)) => {
                 return match value["status"].as_str() {
-                    Some("accepted") => value["inputId"]
-                        .as_str()
-                        .map(|input_id| Some(input_id.to_owned()))
-                        .ok_or_else(|| "invalid_data".to_owned()),
+                    Some("accepted") => {
+                        match (value["inputId"].as_str(), value["sequence"].as_u64()) {
+                            (Some(input_id), Some(sequence)) => {
+                                Ok(Some((input_id.to_owned(), sequence)))
+                            }
+                            _ => Err("invalid_data".to_owned()),
+                        }
+                    }
                     _ => Ok(None),
                 };
             }
             Ok(Err(code)) if !is_reloading(&code) => return Err(code),
-            Ok(Err(_)) | Err(_) => tokio::time::sleep(POLL).await,
+            Ok(Err(_)) | Err(_) => {
+                if !shared.pause(POLL).await {
+                    return Err(UNLOADING.to_owned());
+                }
+            }
         }
     }
 }
@@ -559,7 +583,9 @@ fn escaped(text: &str) -> String {
 }
 
 async fn execute(shared: Arc<Shared>, job: Job, run: Run) {
-    if let Err(error) = drive(&shared, &job, &run).await {
+    if let Err(error) = drive(&shared, &job, &run).await
+        && error.code != UNLOADING
+    {
         let _ = finish(&shared, &run.run_id, RunState::Lost, error.message).await;
     }
 }
@@ -695,11 +721,11 @@ async fn launch(
 /// management save, or the saving branch's current policy for a tool save.
 async fn live_policy(shared: &Shared, job: &Job) -> Result<PermissionPolicy, SchedulerError> {
     match &job.created_by {
-        Origin::User => host_bound(&shared.ctx).await,
+        Origin::User => host_bound(shared).await,
         Origin::Tool {
             session_id,
             branch_id,
-        } => session_policy(&shared.ctx, session_id, branch_id).await,
+        } => session_policy(shared, session_id, branch_id).await,
     }
 }
 
@@ -719,7 +745,7 @@ async fn reuse(
             return Ok(false);
         }
     };
-    let actual = match session_policy(&shared.ctx, bound, "main").await {
+    let actual = match session_policy(shared, bound, "main").await {
         Ok(actual) => actual,
         Err(_) => {
             settle_checked(shared, job, run, RunState::Skipped, "policy_read_failed").await?;
@@ -838,11 +864,15 @@ async fn drive(shared: &Arc<Shared>, job: &Job, run: &Run) -> Result<(), Schedul
         "rawBlocks": [{"text": marker}],
         "content": [{"type": "text", "text": job.prompt}],
     });
-    let input_id = match sessions(&shared.ctx, "input", input).await {
-        Ok(Ok(receipt)) => receipt["inputId"]
-            .as_str()
-            .ok_or_else(|| SchedulerError::invalid_data("input reply has no inputId"))?
-            .to_owned(),
+    let (input_id, start) = match sessions(&shared.ctx, "input", input).await {
+        Ok(Ok(receipt)) => match (receipt["inputId"].as_str(), receipt["sequence"].as_u64()) {
+            (Some(input_id), Some(sequence)) => (input_id.to_owned(), sequence),
+            _ => {
+                return Err(SchedulerError::invalid_data(
+                    "input reply has no inputId and sequence",
+                ));
+            }
+        },
         Ok(Err(code))
             if !is_reloading(&code)
                 && !matches!(code.as_str(), "publication_unknown" | "ambiguous") =>
@@ -850,10 +880,11 @@ async fn drive(shared: &Arc<Shared>, job: &Job, run: &Run) -> Result<(), Schedul
             return finish(shared, &run.run_id, RunState::Failed, code).await;
         }
         Ok(Err(_)) | Err(_) => match lookup_input(shared, &session_id, &run.submission_id).await {
-            Ok(Some(input_id)) => input_id,
+            Ok(Some(accepted)) => accepted,
             Ok(None) => {
                 return finish(shared, &run.run_id, RunState::Lost, "input_unknown".into()).await;
             }
+            Err(code) if code == UNLOADING => return Err(unloading()),
             Err(code) => {
                 return finish(
                     shared,
@@ -878,20 +909,32 @@ async fn drive(shared: &Arc<Shared>, job: &Job, run: &Run) -> Result<(), Schedul
         .as_deref()
         .and_then(canonical_instant)
         .ok_or_else(|| SchedulerError::invalid_data("accepted run has no deadline"))?;
-    track(shared, &run.run_id, &session_id, &input_id, deadline).await
+    track(
+        shared,
+        &run.run_id,
+        &session_id,
+        &input_id,
+        Some(start),
+        deadline,
+    )
+    .await
 }
 
-/// Follows the run's Session history until its first turn ends after the
-/// input is consumed. At the deadline an unconsumed input is withdrawn, and a
-/// consumed one is stopped; either settles `timed_out`.
+/// Follows the run's Session history, from the input's own sequence when it
+/// is known, until its first turn ends after the input is consumed; the run is
+/// `running` from that consumption. History is read page by page from the last
+/// returned event, so no event before the head is skipped. At the deadline an
+/// unconsumed input is withdrawn, and a consumed one is stopped; either
+/// settles `timed_out`.
 async fn track(
     shared: &Arc<Shared>,
     run_id: &str,
     session_id: &str,
     input_id: &str,
+    start: Option<u64>,
     deadline: DateTime<Utc>,
 ) -> Result<(), SchedulerError> {
-    let mut after: Option<u64> = None;
+    let mut after = start.map(|sequence| sequence.saturating_sub(1));
     let mut consumed = false;
     let mut timing_out = false;
     loop {
@@ -901,11 +944,15 @@ async fn track(
         }
         let page = match sessions(&shared.ctx, "history", args).await {
             Ok(Err(code)) if is_reloading(&code) => {
-                tokio::time::sleep(POLL).await;
+                if !shared.pause(POLL).await {
+                    return Err(unloading());
+                }
                 continue;
             }
             Err(_) => {
-                tokio::time::sleep(POLL).await;
+                if !shared.pause(POLL).await {
+                    return Err(unloading());
+                }
                 continue;
             }
             Ok(Err(code)) => return finish(shared, run_id, RunState::Failed, code).await,
@@ -913,9 +960,21 @@ async fn track(
         };
         let events: Vec<AgentEvent> = serde_json::from_value(page["events"].clone())
             .map_err(|error| SchedulerError::invalid_data(error.to_string()))?;
+        let through = page["through"].as_u64();
+        if let Some(last) = events.last() {
+            after = Some(last.sequence);
+        }
         for event in events {
             match event.kind {
-                EventKind::InputConsumed(data) if data.input_id == input_id => consumed = true,
+                EventKind::InputConsumed(data) if data.input_id == input_id && !consumed => {
+                    consumed = true;
+                    update_run(shared, run_id, |run| {
+                        if run.state == RunState::Submitted {
+                            run.state = RunState::Running;
+                        }
+                    })
+                    .await?;
+                }
                 EventKind::TurnEnd(end) if consumed => {
                     let (state, detail) = if timing_out {
                         (RunState::TimedOut, "timed_out".to_owned())
@@ -933,7 +992,9 @@ async fn track(
                 _ => {}
             }
         }
-        after = page["through"].as_u64().or(after);
+        if through.is_some_and(|through| after.is_some_and(|after| after < through)) {
+            continue;
+        }
         if Utc::now() >= deadline && !timing_out {
             timing_out = true;
             if !consumed {
@@ -964,6 +1025,8 @@ async fn track(
                 .await;
             }
         }
-        tokio::time::sleep(POLL).await;
+        if !shared.pause(POLL).await {
+            return Err(unloading());
+        }
     }
 }

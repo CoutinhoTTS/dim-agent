@@ -1,6 +1,6 @@
 # Scheduler
 
-Status: Design approved; optional package implemented in [#317](https://github.com/arcships/dim/pull/317). Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: Rust, native, with no Node dependency ([overview Appendix C](../overview.md#appendix-c-implementation-language)). The TypeScript package it replaces is removed with the migration; [Appendix G](#appendix-g-rust-binding) is the proposed binding and is pending maintainer confirmation.
+Status: Design approved; optional package implemented in [#317](https://github.com/arcships/dim/pull/317). Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: Rust, native, with no Node dependency ([overview Appendix C](../overview.md#appendix-c-implementation-language)). The TypeScript package it replaces is removed with the migration; [Appendix G](#appendix-g-rust-binding) is the Rust binding.
 
 **Delivery boundary.** The package and its public-flow verification are supplied by #317; installation remains explicit under §1.3. C4 tools (#150), Settings source declarations/read-write (#175), Settings events (#177), `sessions` (S2), live permission reads (#259), native input ownership (#267) and S10's [public composition](../process-typescript.md#52-public-pluginfiles-binding) supply its public dependencies. Agents idle unloading (#126/#331) and the first-reuse contract (#339) are merged. The package uses the coordinated rutis 0.16.0 upgrade and the unchanged Appendix D failure-reporting checks in §1.3; no core or rutis expansion is requested.
 
@@ -846,29 +846,27 @@ Known recovery limit: `launch` can finish after a caller disappears, before its 
 
 ## Appendix G. Rust binding
 
-The binding is implemented: Scheduler is native Rust with no TypeScript package,
-Node process or fallback. Maintainer confirmation of the binding is still pending. The contract above
-is unchanged; only its binding moves.
+Scheduler is native Rust with no TypeScript package, Node process or fallback.
+The contract above is unchanged; only its binding moves.
 
-Proposed placement: a dedicated business crate, `crates/dim-agent-scheduler`,
-not App Server code (principles §1). Its process part is a row supplied through the
-product entry point as `dim-oauth` supplies its row, so the App Server crate does not
-depend on it. Its Session part is a Feature installed in the profile, as
-`dim-agent-questions` is. Both parts use the Rust names that exist today:
-`Names::key`, `Key<T>`, `require_at`, `provide_as`, `Feature::session`, `register_part`
-and `AgentBuilder::require_feature`. The Rust binding does not use `Keyed<T>`,
-`KeyedGate`, `Deps` or `names.part(...)`; AGENTS.md describes those names, which are
-not in the code.
+Placement: a dedicated business crate, `crates/dim-agent-scheduler`, not App
+Server code (principles §1). The product entry point installs it through the App
+Server's native-profile installer (`process_entry(args, provider, install)`), so
+the App Server crate does not depend on it; a host that does not install it has
+no `schedule.*` methods or `schedule` tool. Its Session part is a Feature
+installed in the profile, as `dim-agent-questions` is. Both parts use the Rust
+names that exist today: `Names::key`, `Key<T>`, `require_at`, `provide_as`,
+`Feature::session` and `AgentBuilder::require_feature`.
 
-| Neutral | Rust (proposed) |
+| Neutral | Rust |
 | --- | --- |
 | Tool `schedule` registered with `toolRegistry` | Session part keys `ToolRegistry` from `names.key()` and calls `tools.register(ctx, ToolContribution {definition, handler})` in `apply`, as `dim-agent-questions` does |
 | Namespace `schedule` registered with `managementMethods` | Process part keys `ManagementMethods` and calls `methods.register(ctx, "schedule", declarations, handler)`; Rpc looks it up per call and holds no dependency on Scheduler |
 | `scheduleJobs` | Process-group name registered with `names::register::<ScheduleJobs>(catalog, None)`; the Session part reads it with `names.key()`, so no wiring part or forwarding plugin exists |
-| `sessions`, `sessionPermissions`, `settings`, `pluginFiles` | Existing services provided by App Server. Reaching them is an open decision: typed keys require a dependency on `dim-app-server`, and shared host-dispatch names avoid it with JSON calls. `xtask check` decides whether the chosen dependency is allowed |
+| `sessionPermissions`, `settings`, `pluginFiles` | Typed App Server services (`SessionPermissions`, `SettingsService`, `PluginFileTransactions`) keyed with `names.key()`; the crate depends on `dim-app-server`, which `xtask check` allows |
+| `sessions` | The shared host-dispatch name, called with its JSON envelope; its native request types are private to App Server |
+| Policy cap | `PermissionPolicy::cap` and `within` in `dim-agent-types`, the same functions the S2 launch uses, tested against the shared fixtures |
 | Process storage | The typed `PluginFileTransactions` service of App Server ([trusted plugin storage](../../../crates/dim-app-server/README.md#trusted-plugin-storage)). The host writes the `{version: 1, text}` envelope; Scheduler supplies the inner v1 text, the same bytes the TypeScript version wrote. |
-| Timer and trackers | Owned by the process part; tasks start after the owner is published and stop on `closing()`, settling admitted S2 calls before their scope closes |
-| Cron and time zones | No cron parser or IANA time-zone database is in `Cargo.lock` today (only `chrono`). Choosing and vetting those crates is an open decision, checked by `deny.toml` |
-| Tests | Public flows through the management methods, the `schedule` tool and the CLI wire tests. Deterministic time and gate points need a test seam, an open decision; private helper unit tests are not added (AGENTS.md Testing) |
-
-Open decisions for confirmation: crate name and placement; how typed services are reached; the cron and time-zone dependencies; and the test seam for clock and pause points.
+| Timer and trackers | Owned by the process part: the timer, run tasks, recovery and retention run in its task tracker and start after its methods and services are registered. On unload (`ctx.cancellation_token()`), new work stops, waits end, and cleanup joins the tracker before the storage scope closes; an admitted `sessions` call settles first. A run still active is left in the file for the next generation's recovery. The Session tool returns the unloading results of §1.3 and `schedule: cancelled before handover` |
+| Cron and time zones | `croner` and `chrono-tz`, checked by `deny.toml` |
+| Tests | Public flows through the management methods, the `schedule` tool and the CLI wire tests, with a scripted model that can hold a turn; private helper unit tests are not added (AGENTS.md Testing) |
