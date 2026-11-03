@@ -3565,7 +3565,10 @@
       "crate": "dim_cli",
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/ui/mod.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "cfg",
+        "format"
+      ]
     },
     {
       "id": "dim_cli::ui::approvals_panel",
@@ -4669,7 +4672,8 @@
       "parent": "dim_cli::ui",
       "file": "crates/dim-cli/src/ui/sessions_panel.rs",
       "unexpandedMacros": [
-        "format"
+        "format",
+        "matches"
       ]
     },
     {
@@ -28422,6 +28426,7 @@
         "path Command::Compact",
         "path Command::Configure",
         "path Command::EndLine",
+        "path Command::FindRepository",
         "path Command::FocusLine",
         "path Command::Fork",
         "path Command::Goal",
@@ -28518,6 +28523,10 @@
         "path SandboxBackend",
         "path SessionItem",
         "path SessionPort",
+        "path SessionsScope",
+        "path SessionsScope::All",
+        "path SessionsScope::Repository",
+        "path SessionsScope::Workspace",
         "path SubagentModelPolicy",
         "path SwitchKind",
         "path SwitchKind::Forked",
@@ -28548,6 +28557,7 @@
         "path Update::Ready",
         "path Update::Renamed",
         "path Update::Report",
+        "path Update::RepositoryWorkspaces",
         "path Update::Runtimes",
         "path Update::Sessions",
         "path Update::ShellDone",
@@ -28593,6 +28603,7 @@
         "use crate::model::session::SandboxBackend",
         "use crate::model::session::SessionItem",
         "use crate::model::session::SessionPort",
+        "use crate::model::session::SessionsScope",
         "use crate::model::session::SubagentModelPolicy",
         "use crate::model::session::SwitchKind",
         "use crate::model::session::Update",
@@ -33295,10 +33306,22 @@
         "path Command",
         "path Command::ListSessions",
         "path SessionItem",
+        "path SessionsScope",
+        "path SessionsScope::All",
+        "path SessionsScope::Repository",
+        "path SessionsScope::Workspace",
         "path stored_title",
         "use crate::model::session::Command",
         "use crate::model::session::SessionItem",
+        "use crate::model::session::SessionsScope",
         "use crate::model::session::stored_title"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::sessions_panel",
+      "to": "dim_cli::ui",
+      "references": [
+        "use crate::ui::tilde"
       ]
     },
     {
@@ -33351,8 +33374,12 @@
       "from": "dim_cli::ui::sessions_panel",
       "to": "dim_cli::ui::terminal::input",
       "references": [
+        "path KeyCode::Char",
         "path KeyEvent",
-        "use crate::ui::terminal::KeyEvent"
+        "path Modifiers::CTRL",
+        "use crate::ui::terminal::KeyCode",
+        "use crate::ui::terminal::KeyEvent",
+        "use crate::ui::terminal::Modifiers"
       ]
     },
     {
@@ -35096,6 +35123,7 @@
         "path Command::Compact",
         "path Command::Configure",
         "path Command::EndLine",
+        "path Command::FindRepository",
         "path Command::FocusLine",
         "path Command::Fork",
         "path Command::Goal",
@@ -35198,6 +35226,7 @@
         "path Update::Ready",
         "path Update::Renamed",
         "path Update::Report",
+        "path Update::RepositoryWorkspaces",
         "path Update::Runtimes",
         "path Update::Sessions",
         "path Update::ShellDone",
