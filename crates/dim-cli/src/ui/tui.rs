@@ -4822,6 +4822,13 @@ impl App {
             self.awaiting_window = true;
             return;
         }
+        // Home keeps the provider and model it drew but no preference: no
+        // configuration is adopted there until its first message arrives.
+        if session_id.is_empty()
+            && let Some(label) = &mut self.label
+        {
+            label.effort = None;
+        }
         self.session_id = session_id;
         self.planner.reset();
         self.commits = CommitState::default();
