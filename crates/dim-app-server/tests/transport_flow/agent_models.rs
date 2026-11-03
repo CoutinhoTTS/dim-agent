@@ -1,5 +1,6 @@
-//! The `models` tool through an actual Session, ToolRegistry and ToolExecutor:
-//! it lists the models Provider would serve, with their provider IDs.
+//! The `agent` tool's `models` action through an actual Session, ToolRegistry
+//! and ToolExecutor: it lists the models Provider would serve, with their
+//! provider IDs, so a leader can name one for a profile.
 use super::*;
 
 const PROVIDER: &str = "018ec73f-0000-7000-8000-000000000051";
@@ -8,7 +9,8 @@ async fn create_session(client: &mut Client) -> String {
     let created = client
         .rpc(
             "session.create",
-            json!({"cwd": std::env::temp_dir(), "tools": ["models"], "interactive": false}),
+            json!({"cwd": std::env::temp_dir(), "tools": ["agent"], "interactive": false,
+                "permissionPolicy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}),
         )
         .await;
     assert_ok(&created);
@@ -20,7 +22,7 @@ async fn submit(client: &mut Client, id: &str) {
         &client
             .rpc(
                 "session.submit",
-                json!({"sessionId":id,"branchId":"main","text":"tool:models {}"}),
+                json!({"sessionId":id,"branchId":"main","text":"tool:agent {\"action\":\"models\"}"}),
             )
             .await,
     );
@@ -48,18 +50,11 @@ async fn result(session: &dim_agent_runtime::Session) -> ToolResult {
         .expect("tool result")
 }
 
-fn text(result: &ToolResult) -> &str {
-    match &result.content {
-        dim_agent_types::ToolContent::Text(text) => text,
-        _ => panic!("models returns text"),
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn models_tool_lists_the_provider_ids_the_session_can_use() {
+async fn the_agent_tool_lists_the_provider_ids_a_member_can_run() {
     let home = std::fs::canonicalize(std::env::temp_dir())
         .unwrap()
-        .join(format!("dm-models-{}", uuid::Uuid::new_v4()));
+        .join(format!("dm-agent-models-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&home).unwrap();
     let (server, _requests, _release) = super::session_typescript::start(ServerConfig {
         product_home: Some(home.clone()),
@@ -98,10 +93,15 @@ async fn models_tool_lists_the_provider_ids_the_session_can_use() {
     let listed = result(&session).await;
     assert_ne!(listed.is_error, Some(true), "{listed:?}");
     assert_eq!(
-        text(&listed),
-        format!(
-            "Available models: 1\n\nprovider {PROVIDER}\n  served  context 128000  output 16384"
-        )
+        listed.structured_content.as_ref().unwrap()["models"],
+        json!([{
+            "providerId": PROVIDER,
+            "modelId": "served",
+            "contextWindow": 128_000,
+            "maxOutputTokens": 16_384,
+            "vision": false,
+            "reasoning": false,
+        }])
     );
 
     let area = client.rpc("provider.management", json!({})).await;
@@ -118,10 +118,7 @@ async fn models_tool_lists_the_provider_ids_the_session_can_use() {
     submit(&mut client, &id).await;
     let none = result(&session).await;
     assert_ne!(none.is_error, Some(true), "{none:?}");
-    assert_eq!(
-        text(&none),
-        "No models are available to this Session; sign in to a provider or add one first."
-    );
+    assert_eq!(none.structured_content.unwrap()["models"], json!([]));
 
     server.shutdown();
     server.join().await.unwrap();

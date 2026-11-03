@@ -18,7 +18,6 @@ pub mod methods;
 pub mod modality;
 pub mod model_catalog;
 pub mod model_log;
-mod models;
 mod outbound;
 pub mod permission_rules;
 #[cfg(windows)]
@@ -683,9 +682,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         )?);
         rows.push(register_part(&mut builtins, builder.catalog(), |names| {
             Ok(Box::new(provider::ProviderPlugin::new(names)?))
-        })?);
-        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-            Ok(Box::new(models::ModelsPlugin::new(names)?))
         })?);
         rows.push(register_part(&mut builtins, builder.catalog(), |names| {
             Ok(Box::new(modality::ModalityPlugin::new(names)?))

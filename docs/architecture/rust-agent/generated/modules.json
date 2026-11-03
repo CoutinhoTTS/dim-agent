@@ -2224,17 +2224,6 @@
       ]
     },
     {
-      "id": "dim_app_server::models",
-      "crate": "dim_app_server",
-      "parent": "dim_app_server",
-      "file": "crates/dim-app-server/src/models.rs",
-      "unexpandedMacros": [
-        "format",
-        "json",
-        "vec"
-      ]
-    },
-    {
       "id": "dim_app_server::outbound",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -16298,15 +16287,6 @@
     },
     {
       "from": "dim_app_server",
-      "to": "dim_app_server::models",
-      "references": [
-        "mod models",
-        "path models",
-        "path models::ModelsPlugin::new"
-      ]
-    },
-    {
-      "from": "dim_app_server",
       "to": "dim_app_server::outbound",
       "references": [
         "mod outbound"
@@ -17765,9 +17745,11 @@
         "path HostError::Cancelled",
         "path HostError::failed",
         "path HostFuture",
+        "path SelectableModelsHost",
         "path ToolExecutionContext",
         "use dim_agent_capabilities::host::HostError",
         "use dim_agent_capabilities::host::HostFuture",
+        "use dim_agent_capabilities::host::SelectableModelsHost",
         "use dim_agent_capabilities::host::ToolExecutionContext"
       ]
     },
@@ -21232,77 +21214,6 @@
       "references": [
         "path SourceDeclaration",
         "use crate::settings::SourceDeclaration"
-      ]
-    },
-    {
-      "from": "dim_app_server::models",
-      "to": "dim_agent_capabilities::host",
-      "references": [
-        "path HostError::Cancelled",
-        "path HostFuture",
-        "path SelectableModelsHost",
-        "path ToolExecutionContext",
-        "use dim_agent_capabilities::host::HostError",
-        "use dim_agent_capabilities::host::HostFuture",
-        "use dim_agent_capabilities::host::SelectableModelsHost",
-        "use dim_agent_capabilities::host::ToolExecutionContext"
-      ]
-    },
-    {
-      "from": "dim_app_server::models",
-      "to": "dim_agent_capabilities::tool_registry",
-      "references": [
-        "path ToolContribution",
-        "path ToolHandler",
-        "path ToolRegistry",
-        "path definition",
-        "use dim_agent_capabilities::tool_registry::ToolContribution",
-        "use dim_agent_capabilities::tool_registry::ToolHandler",
-        "use dim_agent_capabilities::tool_registry::ToolRegistry",
-        "use dim_agent_capabilities::tool_registry::definition"
-      ]
-    },
-    {
-      "from": "dim_app_server::models",
-      "to": "dim_agent_runtime::names",
-      "references": [
-        "path Names",
-        "use dim_agent_runtime::Names"
-      ]
-    },
-    {
-      "from": "dim_app_server::models",
-      "to": "dim_agent_runtime::parts",
-      "references": [
-        "path PartRegistry",
-        "path PartRegistry::register",
-        "path PartScope::Session",
-        "use dim_agent_runtime::PartRegistry",
-        "use dim_agent_runtime::PartScope"
-      ]
-    },
-    {
-      "from": "dim_app_server::models",
-      "to": "dim_agent_types::model",
-      "references": [
-        "path ModelCapabilitySnapshot",
-        "use dim_agent_types::ModelCapabilitySnapshot"
-      ]
-    },
-    {
-      "from": "dim_app_server::models",
-      "to": "dim_agent_types::tool",
-      "references": [
-        "path ToolCall",
-        "path ToolDefinition",
-        "path ToolResult",
-        "path ToolResult::error",
-        "path ToolResult::text",
-        "path ToolSource::Extension",
-        "use dim_agent_types::ToolCall",
-        "use dim_agent_types::ToolDefinition",
-        "use dim_agent_types::ToolResult",
-        "use dim_agent_types::ToolSource"
       ]
     },
     {

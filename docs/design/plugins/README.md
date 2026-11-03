@@ -10,7 +10,6 @@ A plugin is split by the owner of its state into parts, each placed in its owner
 | --- | --- | --- | --- | --- |
 | [Migration](Migration.md) | on-demand import tasks, source mappings, progress and retry records; unloaded after settlement | — | — | [Delivery plan](../../plan/analysis/legacy-migration.md) |
 | [Provider management](../appserver/provider-management.md) | existing Provider: configuration, catalogs, client preferences and management methods | — | — | #329 |
-| [Models](Models.md) | `models` in App Server: registers the Session part beside Provider, where the selectable-model port exists | `models` tool: the models this Session can use, with their provider IDs | — | — |
 | [Questions](Questions.md) | — | `ask_user` tool, `session.question.respond`, waiters of running `ask_user` calls; no events | — | M2; #262 |
 | [ShellInput](ShellInput.md) | — | `shell.*` methods, command runs | — | P1 |
 | [Attachments](Attachments.md) | — | `attachment.put`, Session files | — | P1 |
@@ -27,7 +26,7 @@ A plugin is split by the owner of its state into parts, each placed in its owner
 | [Notifications](Notifications.md) | — | Session observer, `notify` tool | — | Withdrawn |
 | [Scheduler](Scheduler.md) | triggers, run history (jobs in Settings) | `schedule` tool | — | P2 |
 | [Workflow](Workflow.md) | runs (definitions in Settings or project files) | `workflow` tool | — | P2 |
-| [Collaboration](Collaboration.md) | member relations and temporary agents | `agent` tool, reports and messages; the two markers' guide entries | the delegation's facts, wake inputs and settlement | #551 |
+| [Collaboration](Collaboration.md) | member relations and temporary agents | `agent` tool, including the `models` action that lists the models a new member can run; reports and messages; the two markers' guide entries | the delegation's facts, wake inputs and settlement | #551 |
 | [ExternalAgent](ExternalAgent.md) | external conversations, Collaboration member kind `external-agent`; bridge row per node | — (delegation and decisions are Collaboration's) | — | P3 |
 | [AcpGateway](AcpGateway.md) | client-host plugin: ACP/RPC connections, requests and cleanup; outside the daemon | — | — | #436; PR #441; [acceptance](../acp-gateway-acceptance.md) |
 | [TemporaryMcp](TemporaryMcp.md) | registered by the existing MCP feature | temporary bindings, MCP server children and tools; no settings writes | — | #436 |
@@ -42,6 +41,6 @@ A plugin is split by the owner of its state into parts, each placed in its owner
 
 | Scope | Parts |
 | --- | --- |
-| Process parts | Provider (management supplement), Models (the row that registers the tool), Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RuntimeManager, RemoteGateway, Skills (installation), PromptSuggestion (the Settings source) in the daemon; AcpGateway in its client host process |
-| Session parts | Questions, ShellInput, Attachments, SessionTitle, PromptSuggestion, Goal, Models, Web, Recall, Hooks, Scheduler, Workflow, PromptSources, Prompt (the entries table) |
+| Process parts | Provider (management supplement), Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RuntimeManager, RemoteGateway, Skills (installation), PromptSuggestion (the Settings source) in the daemon; AcpGateway in its client host process |
+| Session parts | Questions, ShellInput, Attachments, SessionTitle, PromptSuggestion, Goal, Web, Recall, Hooks, Scheduler, Workflow, PromptSources, Prompt (the entries table) |
 | Branch parts | Goal (with Pursuit), Hooks, Prompt |

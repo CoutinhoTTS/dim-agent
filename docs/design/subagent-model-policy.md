@@ -30,7 +30,10 @@ The requesting branch is a deliberate refinement of the feature list's "main
 session" wording: a child keeps its adopted cut even if main later adopts another
 model. Later `/agent` adoption affects only subsequent samples on that branch.
 The leader model is not given the effective override in request/inspect replies
-in this scope. Tool help states that user policy may override the requested profile;
+in this scope. The `agent` tool's `models` action
+([Collaboration §7](plugins/Collaboration.md#7-the-models-a-member-can-run)) lists the
+models the Session can start a member with, with their provider IDs, and reports
+neither the policy nor the effective override. Tool help states that user policy may override the requested profile;
 Agent inspection still describes the profile, not a member's adopted model. No
 callback or wait for member creation is added just to expose that choice.
 

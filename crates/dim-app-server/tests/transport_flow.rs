@@ -106,6 +106,8 @@ mod branch_typescript;
 #[path = "transport_flow/runtime_manager.rs"]
 mod runtime_manager;
 
+#[path = "transport_flow/agent_models.rs"]
+mod agent_models;
 #[path = "transport_flow/foreign_rows.rs"]
 mod foreign_rows;
 #[path = "transport_flow/goal.rs"]
@@ -114,8 +116,6 @@ mod goal;
 mod guide_entries;
 #[path = "transport_flow/modality.rs"]
 mod modality;
-#[path = "transport_flow/models.rs"]
-mod models;
 #[path = "transport_flow/plugin_manager.rs"]
 mod plugin_manager;
 #[path = "transport_flow/process_typescript.rs"]
