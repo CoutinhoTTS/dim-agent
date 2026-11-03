@@ -43,7 +43,7 @@ Each fact is delivered the way Skills already delivers its list ([Skills §Sessi
 
 1. The **owner** registers one prompt source with the Session's `PromptRegistry` from a Session part's `apply`; the registration ends with that part.
 2. Prompt turns a `State` source into one `<dim-state source="…">` Append input. The body is final text produced by the owner, escaped by the owner. The source declares its `order`.
-3. A **branch part** watches the owner's change signal (a `watch`, a Settings event, or `turn/start`) and asks Prompt to adopt the source through `ConfigureControl::configure(targets([SOURCE]))`.
+3. A **branch part** watches the owner's change signal (a Settings event, or the operator's input) and asks Prompt to adopt the source through `ConfigureControl::configure(targets([SOURCE]))`.
 4. The branch's Prompt loads the source, compares it with the adopted entry, and writes a state input only when the body changed.
 
 Consequences:
@@ -67,9 +67,9 @@ Current prompt sources are Session-wide in practice. `targets()` fixes `PromptSc
 
 | Fact | Trigger | Boundary |
 | --- | --- | --- |
-| Clients | `turn/start`; branch open | One snapshot per turn, not per attach/detach |
-| Settings | the owner's change signal (`settings.changed` for a Settings source); `turn/start`; branch open | Adopt before the next request; coalesce within a turn |
-| Client view | `turn/start`; branch open | Only if promoted to the model; a boolean, not per-switch |
+| Clients | operator input (`input/message` with user content); branch open | One snapshot per operator input, not per attach/detach |
+| Settings | the owner's change signal (`settings.changed` for a Settings source); operator input; branch open | Adopt before the next request; coalesce |
+| Client view | operator input; branch open | Only if promoted to the model; a boolean, not per-switch |
 | Existing environment, date, instructions | PromptSources' check, including [#986](https://github.com/arcships/dim/issues/986)'s request-boundary direction | Unchanged |
 
 - **No wake.** A changed fact does not start a turn. The block is consumed with the next request; an idle branch stays idle.
@@ -134,7 +134,7 @@ A Scheduler or Workflow Session has no client. A Collaboration member may have n
 
 The format follows [design rules §4 rule 8](../architecture/rust-agent/principles.md).
 
-### 12.1 App Server: the `sessionClients` host
+### 12.1 App Server: the `sessionClientsHost` host
 
 **Owner:** App Server (Connection, UiHost, Rpc).
 
@@ -161,7 +161,7 @@ The format follows [design rules §4 rule 8](../architecture/rust-agent/principl
 
 **Owner:** CLI/TUI, Web, Desktop and AcpGateway clients.
 
-- A client may report the line it views with the additive method in [ClientView](plugins/ClientView.md). Version 1 uses it for management/UI only; the model body remains a boolean at a turn boundary if the fact is later promoted.
+- A client may report the line it views with the additive method in [ClientView](plugins/ClientView.md). Version 1 uses it for management/UI only; the model body remains a boolean on an operator input if the fact is later promoted.
 
 ### 12.5 Settings owners
 
@@ -181,7 +181,7 @@ The format follows [design rules §4 rule 8](../architecture/rust-agent/principl
 | §4 rule 4 Core carries no business meaning | The host returns generic counts; the source renders the owner's fact; no core branch. |
 | §4 rule 5 Batch | No new facts; a state block is one adopted input, not a batch. |
 | §4 rule 6 Context from consumed events | The block reaches the model only as an adopted input through Prompt; no second context path. |
-| §4 rule 7 Public events and services | The new `sessionClients` service is public and named; the facts use existing prompt sources and `ConfigureControl`. |
+| §4 rule 7 Public events and services | The new `sessionClientsHost` service is public and named; the facts use existing prompt sources and `ConfigureControl`. |
 | §4 rule 8 Infrastructure unchanged | No Timeline, Dispatcher, envelope, assembly or facade change. The App Server host and the capability parts are plugin-level. If a branch-scoped source is needed, it is raised to Prompt/PromptSources, not implemented here. |
 | §4 rule 9 Timeline holds only decision facts | Presence, settings and view do not enter the Timeline; they are process/Session state. |
 | §4 rule 10 Adopted inputs | The model reads only `<dim-state>` inputs produced by Prompt; no runtime context injection. |
@@ -195,9 +195,9 @@ The format follows [design rules §4 rule 8](../architecture/rust-agent/principl
 
 | Scenario | Expected |
 | --- | --- |
-| Two TUIs attach the same Session | The model sees one presence block at the next turn start with 2 tui; not two attach blocks |
-| A TUI leaves while idle | No block; the next turn start shows 1 tui |
-| The last client leaves | The next turn start says no client is attached |
+| Two TUIs attach the same Session | The model sees one presence block at the next operator input with 2 tui; not two attach blocks |
+| A TUI leaves while idle | No block; the next operator input shows 1 tui |
+| The last client leaves | The next operator input says no client is attached |
 | Web, ACP or a remote device attaches | The channel count names it; no device id/name/token |
 | No provider | No source, no block, no error |
 | Settings change from another client | The next request after the change carries the new execution state; no reload |

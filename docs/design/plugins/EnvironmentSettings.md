@@ -10,7 +10,7 @@ Owns:
 
 - the criterion for a model-facing setting;
 - the first state source `dim/settings/execution` and its body;
-- the branch trigger that adopts it on a change and at `turn/start`.
+- the branch trigger that adopts it on a change and when the operator's input arrives.
 
 Does not own:
 
@@ -75,9 +75,9 @@ The source is written by the capability, but its values belong to `ExecutionSett
 The source has two triggers, both of which read the latest value and ask Prompt to adopt it:
 
 1. **A committed change.** The branch part listens to `settings.changed` on `settings_changes("execution")` (`settings/execution`). The event carries `{source, scope, revision}`, never the document; the source load reads the host.
-2. **A turn start.** The branch part also follows `turn/start`, so a value that changed while no listener was active, or a restored branch, converges before the turn's first request.
+2. **An operator input.** The branch part also follows `input/message` with operator content, so a value that changed while no listener was active, or a restored branch, converges on the next input. The handler spawns a tracked adoption and returns.
 
-Both feed one one-slot signal. A task that started after `BranchLifecycle::activated()` reads and configures once per burst; several writes before the adoption collapse into one read. The task checks `BranchLifecycle::closing()` and the generation token.
+Both triggers ask Prompt's serial adoption queue; several writes before the adoption collapse into one read. Prompt refuses an adoption after the branch closes.
 
 The initial configuration adopts the source at branch open, so the first request of a branch carries the current value.
 
@@ -116,8 +116,7 @@ Version 1 therefore does not publish the permission preset. It also does not pub
 | --- | --- |
 | `P:ExecutionSettingsHost` | Read the effective sandbox and network |
 | `S:PromptRegistry` | Register `dim/settings/execution` |
-| `B:Dispatcher` | Follow `turn/start` |
-| `B:BranchLifecycle` | Activation and closing gates |
+| `B:Dispatcher` | Follow the operator's input |
 | `B:dyn ConfigureControl` | Adopt the source |
 | process bus (`settings.changed`) | Wake on a committed write |
 
@@ -163,6 +162,6 @@ The feature is installed only where `ExecutionSettingsHost` is provided. A fixed
 ## 11. Open decisions
 
 1. The branch-scoped source route for permission preset and other per-branch settings.
-2. Whether the source also adopts at each model request (the #986 boundary) instead of only at turn start and on a change.
+2. Whether the source also adopts at each model request (the #986 boundary) instead of only on a change and on operator input.
 3. Whether `dim/language` joins this capability or stays in PromptSources once its value carrier exists.
 4. The exact set of later model-facing settings after the first `execution` source is measured.

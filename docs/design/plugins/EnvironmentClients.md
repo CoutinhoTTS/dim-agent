@@ -8,9 +8,9 @@ EnvironmentClients tells the model who is attached to its Session: how many clie
 
 Owns:
 
-- the process host contract `sessionClients` that answers a per-Session client count;
+- the process host contract `sessionClientsHost` that answers a per-Session client count;
 - the prompt source `dim/environment/clients` and its body;
-- the branch trigger that adopts the source at `turn/start` and branch open.
+- the branch trigger that adopts the source when the operator's input arrives, and at branch open.
 
 Does not own:
 
@@ -21,11 +21,11 @@ Does not own:
 
 ## 2. Own contract
 
-### 2.1 The `sessionClients` host
+### 2.1 The `sessionClientsHost` host
 
 | Element | Form |
 | --- | --- |
-| Service | `sessionClients`, process scope, read-only |
+| Service | `sessionClientsHost`, process scope, read-only |
 | Method | `counts {sessionId}` → `{total, byChannel}` |
 | `total` | Number of attached clients, one per client, not per connection |
 | `byChannel` | Map from channel name to count, sorted by channel |
@@ -81,9 +81,9 @@ The body is final text. It is generated from the counts only; no external conten
 ### 2.4 Adoption
 
 - The Session part registers the source; the initial configuration adopts it at branch open.
-- The branch part follows `turn/start` on the branch's Dispatcher. For each delivered event it signals a one-slot `watch`; a task that started after `BranchLifecycle::activated()` reads the source through `ConfigureControl::configure(targets([SOURCE]))`, once per change, and loops. Several turn starts before the adoption collapse into one read.
-- The branch part checks `BranchLifecycle::closing()` and the generation token; it adopts nothing after close.
-- It does not listen to attach/detach directly; idle churn produces no block. The next turn sees the current snapshot.
+- The branch part follows `input/message` on the branch's Dispatcher and acts only on an operator input (`user` content). For each one it spawns a tracked task that asks Prompt to adopt the source through `ConfigureControl::configure(targets([SOURCE]))`; the handler returns without waiting. The tasks are closed with the branch.
+- The branch part does not listen to attach/detach directly; idle churn produces no block. The next operator input reads the current snapshot.
+- The state block is written after the operator's input, so the first request of that turn may carry it or the next request may; the design accepts this one-request lag unless a request-boundary check is added. Prompt refuses an adoption after the branch closes, so no write follows close.
 
 ## 3. Events and state
 
@@ -98,8 +98,7 @@ A restored branch loads the source at `branch/resume`; the body is the current c
 | `P:SessionClientsHost` | The App Server read-only counts |
 | `S:SessionIdentity` | The Session id the source reads |
 | `S:PromptRegistry` | Register the source |
-| `B:Dispatcher` | Follow `turn/start` |
-| `B:BranchLifecycle` | Activation and closing gates |
+| `B:Dispatcher` | Follow the operator's input |
 | `B:dyn ConfigureControl` | Adopt the source |
 
 The feature is installed only by an assembly that provides `SessionClientsHost` (the App Server daemon profile). A native/direct profile installs neither the host nor the parts; the model sees no presence block.
@@ -118,7 +117,7 @@ The feature is installed only by an assembly that provides `SessionClientsHost` 
 
 ## 6. Noise and identity
 
-- One block per turn at most, and only when the count changed.
+- One block per operator input at most, and only when the count changed.
 - Per-branch local copies are expected: every open line has its own branch part and its own block.
 - No client roster, labels, ids, times or departure history in the model body. Management/UI may read more through its own surface.
 - No token, device id or device name. The remote channel is named only as `remote`.
@@ -148,11 +147,11 @@ No client change is required for the count. Line view is [ClientView](ClientView
 | §1 Parts bounded | Session part registers the source; branch part adopts; the App Server host is process state. No wiring module. |
 | §4 rule 1 Command events | No other module's state is changed. |
 | §4 rule 2 Handover | No handover; presence does not control a turn. |
-| §4 rule 3 Before callbacks | None. The Dispatcher handler signals a watch and returns; the task adopts. |
+| §4 rule 3 Before callbacks | None. The Dispatcher handler spawns a tracked adoption and returns. |
 | §4 rule 4 Core carries no business meaning | The host returns generic counts; the source owns the wording. |
 | §4 rule 5 Batch | No new facts. |
 | §4 rule 6 Context from consumed events | The block is an adopted input; no second path. |
-| §4 rule 7 Public services | `sessionClients` is a named process service; the source is a registered prompt source. |
+| §4 rule 7 Public services | `sessionClientsHost` is a named process service; the source is a registered prompt source. |
 | §4 rule 8 Infrastructure unchanged | No Timeline, Dispatcher, envelope, assembly or facade change. |
 | §4 rule 9 Timeline holds decision facts | Presence is process state; it does not enter the Timeline. |
 | §4 rule 10 Adopted inputs | The body reaches the model only through Prompt's state input. |
@@ -166,14 +165,14 @@ No client change is required for the count. Line view is [ClientView](ClientView
 
 | Scenario | Expected |
 | --- | --- |
-| Two TUI leaves attach the same Session | At the next turn start: `2 clients attached: 2 tui.`; no attach blocks |
+| Two TUI leaves attach the same Session | At the next operator input: `2 clients attached: 2 tui.`; no attach blocks |
 | A TUI leaf's underlying connection also attaches | It is one `tui`, not `tui` + `cli` |
 | A line client attaches | `cli` |
 | Web attaches | `web` |
 | ACP attaches | `acp` |
 | A paired remote device attaches | `remote`; no device id/name |
 | A leaf is `starting` | Not counted until it attaches |
-| One of two clients leaves while idle | No block; the next turn start says one |
+| One of two clients leaves while idle | No block; the next operator input says one |
 | Last client leaves | `No client is attached.` |
 | No provider | No block, no error |
 | Restore | Current count, not an old count |

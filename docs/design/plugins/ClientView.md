@@ -53,7 +53,7 @@ The management/UI read lists the clients and their viewed branch. It may be fold
 
 Default: **off**. `dim/environment/clients` stays counts-only.
 
-If a later design promotes it, the only allowed model fact is a small aggregate computed at `turn/start` and branch open:
+If a later design promotes it, the only allowed model fact is a small aggregate computed on operator input and at branch open:
 
 ```text
 <dim-state source="dim/environment/clients">2 clients attached: 2 tui. 1 client is viewing this line.</dim-state>
@@ -125,7 +125,7 @@ No Timeline event. The view is process memory on the connection/registry. It is 
 | An unattached connection calls it | Rejected |
 | An unknown or ended branch | Rejected |
 | Reconnect | The client re-reports; no stale view |
-| If promoted later | One boolean at `turn/start`, not a per-switch history |
+| If promoted later | One boolean on operator input, not a per-switch history |
 
 ## 9. Open decisions
 
