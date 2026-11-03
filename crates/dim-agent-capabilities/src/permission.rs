@@ -20,7 +20,8 @@ use crate::{
 };
 use dim_agent_runtime::{
     AgentError, Delivery, Dispatcher, Names, Registration, Registrations, SessionConfig,
-    SessionIdentity, StateCell, Timeline,
+    SessionIdentity, StateCell, Timeline, TimelineQuery, TimelineQueryDirection,
+    TimelineQueryOrderBy, TimelineQueryScope,
 };
 use dim_agent_types::{
     AgentEvent, ApprovalCallData, BranchSource, COMMAND_SEPARATORS, CommandMatch, CommandRule,
@@ -31,6 +32,7 @@ use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::{Ctx, Error};
 use std::{
     collections::HashMap,
+    num::NonZeroU64,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -535,17 +537,30 @@ impl Permission {
         }
         dispatched.await.map_err(|_| PermissionUpdateError::Closed)
     }
-    /// Folds the ancestor prefix, then this branch's own events.
+    /// Folds the chain's last `permission/changed`, then this branch's own
+    /// events.
     async fn rebuild(&self, local: &[Arc<AgentEvent>]) -> dim_agent_runtime::Result<()> {
         let inherited = self
             .timeline
-            .ancestor_events_of_kind("permission/changed")
-            .await?;
+            .query(TimelineQuery {
+                scope: TimelineQueryScope::Chain,
+                from_event: None,
+                from_sequence: None,
+                order_by: TimelineQueryOrderBy::Sequence,
+                direction: TimelineQueryDirection::Descending,
+                kinds: vec!["permission/changed".into()],
+                flags: Vec::new(),
+                event_id: None,
+                predicate: None,
+                limit: NonZeroU64::MIN,
+                offset: 0,
+            })
+            .await?
+            .events;
         let mut state = self.state.get();
-        for event in &inherited {
-            if let EventKind::PermissionChanged(data) = &event.kind {
-                state.policy = data.policy.clone();
-            }
+        if let Some(EventKind::PermissionChanged(data)) = inherited.first().map(|event| &event.kind)
+        {
+            state.policy = data.policy.clone();
         }
         for event in local {
             if let EventKind::PermissionChanged(data) = &event.kind {

@@ -25,6 +25,7 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::{
     AgentBuilder, AgentError, BranchLifecycle, CollaborationRole, Dispatcher, Names, Session,
     SessionConfig, SessionHold, SessionIdentity, SessionLifecycle, Timeline, TimelineIdentity,
+    TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryScope,
 };
 use dim_agent_types::*;
 use futures_util::{
@@ -39,6 +40,7 @@ use serde_json::{Value, json};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    num::NonZeroU64,
     sync::{Arc, Mutex},
 };
 use tokio::sync::watch;
@@ -708,8 +710,6 @@ struct BranchRecord {
     /// refused nor have a handled `result`. Updated only by handlers, in
     /// sequence order.
     open: BTreeMap<String, BTreeSet<String>>,
-    /// Positions only; full result bodies remain in the Timeline store.
-    results: BTreeMap<String, u64>,
     /// Delivery work per peer runs in operation event order.
     chains: BTreeMap<String, (u64, Shared<WorkFuture<'static, ()>>)>,
 }
@@ -1065,23 +1065,36 @@ impl CollaborationSession {
     }
 
     async fn result(&self, branch_id: &str, result_id: &str) -> ToolResult {
-        let position = {
-            let state = self.state.lock().unwrap();
-            state.branches.get(branch_id).and_then(|branch| {
-                branch
-                    .results
-                    .get(result_id)
-                    .map(|sequence| (branch.timeline.clone(), *sequence))
-            })
-        };
-        let Some((timeline, sequence)) = position else {
+        let timeline = self
+            .state
+            .lock()
+            .unwrap()
+            .branches
+            .get(branch_id)
+            .map(|branch| branch.timeline.clone());
+        let Some(timeline) = timeline else {
             return ToolResult::error("No collaboration result with this resultId.");
         };
-        let local = match timeline.local(sequence..=sequence).await {
-            Ok(local) => local,
+        let reply = match timeline
+            .query(TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                from_event: None,
+                from_sequence: None,
+                order_by: TimelineQueryOrderBy::Sequence,
+                direction: TimelineQueryDirection::Ascending,
+                kinds: Vec::new(),
+                flags: Vec::new(),
+                event_id: Some(result_id.to_owned()),
+                predicate: None,
+                limit: NonZeroU64::MIN,
+                offset: 0,
+            })
+            .await
+        {
+            Ok(reply) => reply,
             Err(error) => return ToolResult::error(error.to_string()),
         };
-        let Some(event) = local.iter().find(|event| event.id == result_id) else {
+        let Some(event) = reply.events.first() else {
             return ToolResult::error("No collaboration result with this resultId.");
         };
         match &event.kind {
@@ -1269,7 +1282,6 @@ impl CollaborationSession {
             EventKind::CollaborationDelivered(data) => self.delivered(branch_id, data),
             EventKind::CollaborationResult(data) => {
                 self.with_branch(branch_id, |branch| {
-                    branch.results.insert(event.id.clone(), event.sequence);
                     close_request(&mut branch.open, &data.request_event_id);
                 });
                 let this = self.clone();
@@ -2764,11 +2776,6 @@ impl DynPlugin for CollaborationTimelinePlugin {
                     closing: false,
                     ops: BTreeMap::new(),
                     open: BTreeMap::new(),
-                    results: events
-                        .iter()
-                        .filter(|&event| matches!(event.kind, EventKind::CollaborationResult(_)))
-                        .map(|event| (event.id.clone(), event.sequence))
-                        .collect(),
                     chains: BTreeMap::new(),
                 },
             );
