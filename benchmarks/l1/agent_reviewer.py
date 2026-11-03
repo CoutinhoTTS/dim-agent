@@ -14,7 +14,8 @@ Usage (as a ReviewerConfig.command):
     python3 -m l1.agent_reviewer
 
 Reads DIM_EVAL_BASE_URL, DIM_EVAL_JUDGE_MODEL and the key named by
-DIM_EVAL_API_KEY_ENV. Writes one JSON object per changed file, then a summary.
+DIM_EVAL_API_VAR (legacy fallback: DIM_EVAL_API_KEY_ENV). Writes one JSON
+object per changed file, then a summary.
 """
 
 from __future__ import annotations
@@ -146,7 +147,12 @@ def main() -> int:
 
     base_url = os.environ.get("DIM_EVAL_BASE_URL", DEFAULT_BASE_URL)
     model = os.environ.get("DIM_EVAL_JUDGE_MODEL", DEFAULT_MODEL)
-    key_var = os.environ.get("DIM_EVAL_API_KEY_ENV", DEFAULT_KEY_ENV)
+    key_var = (os.environ.get("DIM_EVAL_API_VAR")
+               or os.environ.get("DIM_EVAL_API_KEY_ENV", DEFAULT_KEY_ENV))
+    if "****" in key_var:
+        # Harbor redacts the value of KEY-named carrier variables; a name like
+        # "DEEP****KEY" can never name a real variable, so fall back.
+        key_var = DEFAULT_KEY_ENV
     api_key = os.environ.get(key_var, "")
     if not api_key:
         sys.stderr.write(f"{key_var} is empty\n")

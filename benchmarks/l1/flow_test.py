@@ -334,7 +334,7 @@ class L1FlowTest(unittest.TestCase):
         )
         with fake_endpoint(cut_off) as base_url, mock.patch.dict(os.environ, {
             "DIM_EVAL_BASE_URL": base_url,
-            "DIM_EVAL_API_KEY_ENV": "FAKE_JUDGE_KEY",
+            "DIM_EVAL_API_VAR": "FAKE_JUDGE_KEY",
             "FAKE_JUDGE_KEY": "k",
             "NO_PROXY": "127.0.0.1",
             "no_proxy": "127.0.0.1",
