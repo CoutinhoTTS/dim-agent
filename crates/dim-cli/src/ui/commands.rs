@@ -204,12 +204,7 @@ pub const COMMANDS: &[Command] = &[
     ),
     Command {
         argument: Some("<title>"),
-        ..slash(
-            "rename",
-            "rename this session",
-            &[],
-            Needs::Session,
-        )
+        ..slash("rename", "rename this session", &[], Needs::Session)
     },
     slash(
         "web",
@@ -310,12 +305,7 @@ pub const COMMANDS: &[Command] = &[
         "Ctrl+S",
         Needs::Queue,
     ),
-    action(
-        "scroll-top",
-        "scroll to the top",
-        "Home",
-        Needs::Fullscreen,
-    ),
+    action("scroll-top", "scroll to the top", "Home", Needs::Fullscreen),
     action(
         "scroll-bottom",
         "scroll to the bottom",

@@ -20,6 +20,7 @@ tracing.workspace = true
 regex = "1"
 
 [dev-dependencies]
+dim-agent-aimux.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 dim-app-server = { workspace = true, features = ["testing"] }
 dim-client.workspace = true

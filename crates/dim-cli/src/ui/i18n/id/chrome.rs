@@ -344,6 +344,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "esc close" => "esc tutup",
         "Suggestions" => "Saran",
         "Skills" => "Skill",
+        "Skill loaded: {name}" => "Skill dimuat: {name}",
         "Commands" => "Perintah",
         "Command Palette" => "Palet Perintah",
         "No matches" => "Tak ada hasil",
