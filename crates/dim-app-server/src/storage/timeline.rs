@@ -3507,29 +3507,19 @@ impl TimelineStore for SqliteTimelineStore {
                 ));
             }
             let limit = usize::try_from(query.limit.get()).unwrap_or(usize::MAX);
-            let mut records: Vec<StoredEvent> = Vec::new();
+            let rows = u64::try_from(limit).unwrap_or(u64::MAX);
+            let (mut records, _) = self.query_page(key, query, low..=high, rows).await?;
             let mut target = None;
             match direction {
                 Ascending => {
-                    let mut from = low;
-                    while from <= high && records.len() < limit {
-                        let rows = u64::try_from(limit - records.len()).unwrap_or(u64::MAX);
-                        let (page, edge) = self.query_page(key, query, from..=high, rows).await?;
-                        let Some(edge) = edge else { break };
-                        records.extend(page);
-                        if edge < from {
-                            break;
-                        }
-                        from = edge.saturating_add(1);
-                    }
                     if records.len() >= limit {
                         let end = records[limit - 1].batch_end;
                         let read_to = records.last().map_or(0, |record| record.event.sequence);
                         if end > read_to {
-                            let (page, _) = self
+                            let (tail, _) = self
                                 .query_page(key, query, read_to + 1..=end, u64::MAX)
                                 .await?;
-                            records.extend(page);
+                            records.extend(tail);
                         }
                         records.retain(|record| record.event.sequence <= end);
                         if end < high {
@@ -3538,24 +3528,6 @@ impl TimelineStore for SqliteTimelineStore {
                     }
                 }
                 Descending => {
-                    let mut from = high;
-                    while from >= low && from > 0 {
-                        let rows = u64::try_from(
-                            limit
-                                .max(records.len())
-                                .saturating_sub(records.len())
-                                .max(1),
-                        )
-                        .unwrap_or(u64::MAX);
-                        let (page, edge) = self.query_page(key, query, low..=from, rows).await?;
-                        let Some(edge) = edge else { break };
-                        records.extend(page);
-                        records.sort_by_key(|record| record.event.sequence);
-                        if records.len() >= limit || edge > from {
-                            break;
-                        }
-                        from = edge.saturating_sub(1);
-                    }
                     records.sort_by_key(|record| record.event.sequence);
                     if records.len() >= limit {
                         let oldest = &records[records.len() - limit];
