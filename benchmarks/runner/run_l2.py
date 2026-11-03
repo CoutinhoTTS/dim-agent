@@ -204,17 +204,25 @@ def verifier_proxy_enabled() -> bool:
     return verifier_proxy_url() is not None
 
 
+def _cached_python(cache: Path) -> Path | None:
+    """The cached CPython directory, or None when the cache is unprepared."""
+    python = cache / "python"
+    return python if any(python.glob("cpython-3.13.*")) else None
+
+
 def verifier_env() -> dict[str, str]:
     """Environment for the verifier phase.
 
-    Terminal-Bench verifiers install uv from astral.sh and run ``uvx``, which
-    downloads CPython. Both would otherwise hit the network on every trial.
-    ``UV_INSTALLER_GITHUB_BASE_URL`` points the uv installer at the release
-    archive under ``EVAL_CACHE``; the installer still runs and writes
-    ``$HOME/.local/bin``, but reads the tarball locally. ``UV_PYTHON_INSTALL_DIR``
-    does the same for CPython. ``CURL_HOME`` forces HTTP/1.1 for curl-based
-    downloads; uv itself is reqwest and does not read it. The cache is mounted
-    read-only, so the agent phase cannot modify what the verifier consumes.
+    Terminal-Bench verifiers install uv from astral.sh and run ``uvx -p 3.13``,
+    which downloads CPython. The CPython download is cached under
+    ``EVAL_CACHE`` and mounted read-only at ``/opt/eval-cache``; the uv install
+    still uses the network, because the verifier scripts run their own
+    installers and the cache cannot make those idempotent without changing the
+    pinned task bodies. ``CURL_HOME`` forces HTTP/1.1 for curl-based downloads
+    when the prep step wrote a ``.curlrc``; uv itself is reqwest and does not
+    read it. Both settings are only exported when the cache actually contains
+    the artifact, so an unprepared cache falls back to the network instead of
+    failing every verifier.
 
     Proxy settings still come from ``DIM_EVAL_VERIFIER_PROXY``. The agent phase
     is untouched: it reaches only the model host, and dimcode would otherwise
@@ -223,13 +231,14 @@ def verifier_env() -> dict[str, str]:
     """
     cache = "/opt/eval-cache"
     env = {
-        "CURL_HOME": f"{cache}/curl-home",
-        "UV_INSTALLER_GITHUB_BASE_URL": f"file://{cache}/uv-releases",
-        "UV_PYTHON_INSTALL_DIR": f"{cache}/python",
         "UV_CACHE_DIR": "/tmp/uv-cache",
         "UV_HTTP_TIMEOUT": "300",
         "UV_CONCURRENT_DOWNLOADS": "1",
     }
+    if _cached_python(EVAL_CACHE) is not None:
+        env["UV_PYTHON_INSTALL_DIR"] = f"{cache}/python"
+    if (EVAL_CACHE / "curl-home" / ".curlrc").is_file():
+        env["CURL_HOME"] = f"{cache}/curl-home"
     proxy = verifier_proxy_url()
     if proxy is not None:
         bypass = verifier_no_proxy()
@@ -243,9 +252,9 @@ def verifier_env() -> dict[str, str]:
 def build_job_config(settings: ProviderSettings) -> dict:
     cli_image = _env("DIM_EVAL_CLI_IMAGE")
     EVAL_CACHE.mkdir(parents=True, exist_ok=True)
-    if not (EVAL_CACHE / "uv-releases").is_dir() or not (EVAL_CACHE / "python").is_dir():
-        print(f"[run_l2] WARNING: verifier cache {EVAL_CACHE} is not prepared; "
-              "verifiers will download uv and CPython at scoring time", flush=True)
+    if _cached_python(EVAL_CACHE) is None:
+        print(f"[run_l2] WARNING: no cached CPython 3.13 under {EVAL_CACHE}/python; "
+              "uvx will download it at scoring time", flush=True)
     run_id = os.environ.get(
         "DIM_EVAL_RUN_ID",
         datetime.now(timezone.utc).strftime("%Y-%m-%d__%H-%M-%S"),

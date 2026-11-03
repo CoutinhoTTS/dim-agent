@@ -100,25 +100,22 @@ cron ─► nightly.sh ─► git fetch dim 与 dim-eval-data（SSH）─► cor
 
 ```sh
 cache=~/dim-eval/eval-cache
-mkdir -p "$cache/curl-home" "$cache/uv-releases/astral-sh/uv/releases/download/0.9.5" \
-  "$cache/python" "$cache/uv"
+mkdir -p "$cache/curl-home" "$cache/python" "$cache/uv"
 printf 'http1.1\n' > "$cache/curl-home/.curlrc"
-curl -LsSf -o \
-  "$cache/uv-releases/astral-sh/uv/releases/download/0.9.5/uv-x86_64-unknown-linux-gnu.tar.gz" \
+# 任意一个 uv 0.9.5 的二进制都可以用来填充 CPython 缓存。
+curl -LsSf -o /tmp/uv.tar.gz \
   https://github.com/astral-sh/uv/releases/download/0.9.5/uv-x86_64-unknown-linux-gnu.tar.gz
-tar -xzf \
-  "$cache/uv-releases/astral-sh/uv/releases/download/0.9.5/uv-x86_64-unknown-linux-gnu.tar.gz" \
-  -C "$cache/uv" --strip-components=1
+tar -xzf /tmp/uv.tar.gz -C "$cache/uv" --strip-components=1
 UV_PYTHON_INSTALL_DIR="$cache/python" UV_CACHE_DIR=/tmp/uv-cache \
   "$cache/uv/uv" python install 3.13
 ```
 
-`UV_INSTALLER_GITHUB_BASE_URL` 指向本地的 0.9.5 release 归档，verifier 的
-`curl .../install.sh | sh` 仍会执行，但 tarball 从本地读；`UV_PYTHON_INSTALL_DIR` 让
-`uvx -p 3.13` 命中 `cpython-3.13.9`。`CURL_HOME` 让 curl 用 HTTP/1.1，避开代理的 HTTP/2
-问题；uv 自己是 reqwest，不读 curlrc，它的下载仍走代理，只是 CPython 和 uv 安装包不再从
-GitHub 取。缓存挂载是只读的，agent 阶段改不了它；`UV_CACHE_DIR` 放在容器的 `/tmp`，每个
-trial 独立。缓存缺失时 `run_l2.py` 会打印 warning，verifier 退回网络下载。
+`UV_PYTHON_INSTALL_DIR` 让 `uvx -p 3.13` 命中 `cpython-3.13.9`；`CURL_HOME` 让 curl 用
+HTTP/1.1，避开代理的 HTTP/2 问题。uv 安装本身仍从 astral.sh 下载（verifier 脚本无条件执行
+安装器），`UV_INSTALLER_GITHUB_BASE_URL` 不再设置，所以缓存缺失时安装器会走网络而不是失败。
+`UV_CACHE_DIR` 放在容器的 `/tmp`，每个 trial 独立。`run_l2.py` 只在 `python/` 下找到
+`cpython-3.13.*` 时才导出 `UV_PYTHON_INSTALL_DIR`；缺失时打印 warning，让 verifier 回退到
+网络下载。
 
 ## 试运行
 
