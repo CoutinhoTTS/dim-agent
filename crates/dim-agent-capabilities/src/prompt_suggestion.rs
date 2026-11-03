@@ -661,6 +661,8 @@ impl Part {
         };
         let mut state = self.state.lock().unwrap();
         let before = state.enabled.replace(settings.enabled);
+        #[cfg(feature = "testing")]
+        testing::settings_applied(&self.session_id, settings.enabled, settings.max_chars);
         if settings.enabled {
             if before != Some(true) {
                 state.unused = 0;
@@ -1336,6 +1338,61 @@ pub mod testing {
             // wakes this wait instead of being missed.
             notified.as_mut().enable();
             if shared_requests(session_id) > seen {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// The settings documents each Session's change listener has applied, in
+    /// the order it applied them.
+    static APPLIED: Mutex<Vec<(String, bool, u32)>> = Mutex::new(Vec::new());
+    static APPLIED_SIGNAL: Notify = Notify::const_new();
+
+    /// Records a document the change listener applied. It runs under the
+    /// state lock, so a request that wakes on the record reads the state the
+    /// listener leaves, never the state before the change.
+    pub(crate) fn settings_applied(session_id: &str, enabled: bool, max_chars: u32) {
+        APPLIED
+            .lock()
+            .unwrap()
+            .push((session_id.to_owned(), enabled, max_chars));
+        APPLIED_SIGNAL.notify_waiters();
+    }
+
+    /// The number of settings documents `session_id`'s change listener has
+    /// applied.
+    pub fn settings_applied_count(session_id: &str) -> usize {
+        APPLIED
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(held, _, _)| held.as_str() == session_id)
+            .count()
+    }
+
+    /// Resolves once `session_id` has applied a document of this state after
+    /// the first `seen` applications.
+    pub async fn settings_applied_after(
+        session_id: &str,
+        seen: usize,
+        enabled: bool,
+        max_chars: u32,
+    ) {
+        loop {
+            let notified = APPLIED_SIGNAL.notified();
+            tokio::pin!(notified);
+            // Register before the check, so an application between the two
+            // wakes this wait instead of being missed.
+            notified.as_mut().enable();
+            let applied = APPLIED
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(held, _, _)| held.as_str() == session_id)
+                .skip(seen)
+                .any(|(_, on, chars)| *on == enabled && *chars == max_chars);
+            if applied {
                 return;
             }
             notified.await;

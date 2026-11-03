@@ -10968,6 +10968,7 @@
       "references": [
         "mod testing",
         "path testing::completion",
+        "path testing::settings_applied",
         "path testing::sharing",
         "path testing::unloaded"
       ]

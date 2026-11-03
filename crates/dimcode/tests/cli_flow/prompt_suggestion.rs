@@ -494,7 +494,9 @@ fn settings_toggles_the_switch_through_the_daemon() {
     let mut terminal = Terminal::launch_tui(command);
     terminal.until("test / model");
     terminal.write(b"/settings\r");
-    terminal.until("Prompt suggestion");
+    // The row shows the value the daemon reported; pressing before it is
+    // applied makes the client read the source again.
+    terminal.until_row("Prompt suggestion", "off");
     for _ in 0..8 {
         terminal.raw(b"\x1b[B");
     }
