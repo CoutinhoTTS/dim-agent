@@ -150,11 +150,11 @@ leader text carries the bullet only when the action is offered. The member decla
 carries the action: a member cannot delegate. A factory that replaces the leader description is one
 whole text and states the action itself, as it does for every other action (§3).
 
-The read stays optional rather than declared as a gating dependency: the part takes it with the
-runtime's optional read at mount, because declaring it in `injects` would keep Collaboration from
-loading wherever Provider is absent, which is a supported profile. An optional dependency is a
-snapshot taken when the part loads; a Provider reload does not reload this part, and a later call
-answers with the owner's own error until the Session or its part reloads.
+The read stays optional rather than a dependency that gates the part: a deployment without
+Provider is a supported profile, and Collaboration must load there too, so the part reads the port
+once when it mounts instead of waiting for it. That read is a snapshot: a Provider reload does not
+reload this part, and a later call answers with the owner's own error until the Session or its part
+reloads.
 
 **Reply.** One object, as for `list` and `inspect`:
 
