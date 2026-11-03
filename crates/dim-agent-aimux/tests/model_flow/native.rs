@@ -3125,3 +3125,70 @@ async fn responses_output_text_parts_and_function_call_ids_are_kept() {
         "the function call keeps its item id"
     );
 }
+
+/// A Gemini terminal chunk finishes the stream while the HTTP body stays open
+/// (vendored patch for arcships/aimux#469).
+#[tokio::test]
+async fn gemini_terminal_chunk_finishes_while_the_body_stays_open() {
+    use aimux_core::language_model::LanguageModel;
+    use aimux_core::language_model_message::convert_to_language_model_prompt;
+    use aimux_core::message::ModelMessage;
+    use aimux_core::options::CallOptions;
+    use aimux_core::stream_part::StreamPart;
+    use aimux_providers::google::{GoogleProviderSettings, create_google};
+    use futures::StreamExt;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0u8; 4096];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let count = socket.read(&mut chunk).await.unwrap();
+            assert_ne!(count, 0);
+            request.extend_from_slice(&chunk[..count]);
+        }
+        let body = "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"done\"}]},\"finishReason\":\"STOP\",\"index\":0}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1,\"totalTokenCount\":2}}\n\n";
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n{body}"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    });
+    let model = create_google(GoogleProviderSettings {
+        api_key: Some("test-key".into()),
+        base_url: Some(format!("http://{address}/v1beta")),
+        ..Default::default()
+    })
+    .unwrap()
+    .generative_ai("gemini-2.5-pro");
+    let options = CallOptions::new(
+        convert_to_language_model_prompt(&[ModelMessage::user("hi")], None, None).unwrap(),
+    );
+    let mut result = model.do_stream(&options).await.unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut finished = false;
+        while let Some(part) = result.stream.next().await {
+            if matches!(part.unwrap(), StreamPart::Finish { .. }) {
+                finished = true;
+                break;
+            }
+        }
+        finished
+    })
+    .await;
+    server.abort();
+    assert!(
+        matches!(outcome, Ok(true)),
+        "the terminal chunk must finish the stream while the body stays open"
+    );
+}

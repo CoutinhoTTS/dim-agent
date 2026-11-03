@@ -317,6 +317,8 @@ struct GoogleLanguageModelStream {
     active_tool_calls: Vec<(RawToolCall, GoogleJsonAccumulator)>,
     response_metadata_emitted: bool,
     stream_errored: bool,
+    /// `Finish` was already emitted for this stream.
+    finished: bool,
     prompt_blocked: bool,
     // Provider-metadata accumulators (mirrors TS `lastGroundingMetadata` /
     // `lastUrlContextMetadata` + the finishReason-chunk snapshot).
@@ -642,6 +644,11 @@ impl GoogleLanguageModelStream {
 
         if let Some(reason) = candidate.finish_reason.as_deref() {
             self.final_finish_reason = Some(parse_finish_reason(reason, self.has_tool_calls));
+            // The terminal chunk completes the turn; the HTTP body may stay
+            // open (keep-alive, proxies), so finish here instead of waiting
+            // for EOF.
+            self.finish(controller);
+            controller.terminate();
         }
     }
 }
@@ -837,9 +844,13 @@ impl Transformer for GoogleLanguageModelStream {
 }
 
 impl GoogleLanguageModelStream {
-    /// Close the open segments and emit `Finish`: at the end of the body, or
-    /// right after an error event.
+    /// Close the open segments and emit `Finish`: at the end of the body, at
+    /// the terminal chunk, or right after an error event.
     fn finish(&mut self, controller: &mut Controller) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
         // Close any remaining open text/reasoning segment.
         if let Some(id) = self.text_id.take() {
             controller.text_end(id);
