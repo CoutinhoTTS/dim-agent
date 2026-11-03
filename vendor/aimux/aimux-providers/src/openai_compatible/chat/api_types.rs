@@ -124,6 +124,10 @@ pub(crate) struct Delta {
     pub reasoning: Option<String>,
     #[serde(default)]
     pub reasoning_content: Option<String>,
+    /// Refusal text carried by a streaming delta (`refusal` field of the
+    /// OpenAI Chat Completions API). Visible output, like `content`.
+    #[serde(default)]
+    pub refusal: Option<String>,
     #[serde(default)]
     pub tool_calls: Option<Vec<DeltaToolCall>>,
     #[serde(default)]

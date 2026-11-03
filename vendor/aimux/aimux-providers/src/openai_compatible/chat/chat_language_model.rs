@@ -805,6 +805,15 @@ impl Transformer for OpenAICompatibleChatStream {
                     provider_metadata: None,
                 }));
             }
+            // Refusal text is visible output, not a silent empty answer
+            // (dim patch for arcships/aimux#461, applied to the Chat model
+            // dim's protocols run on).
+            if let Some(refusal) = choice.delta.refusal.filter(|text| !text.is_empty()) {
+                delta_content.push(GenerateContent::Text {
+                    text: refusal,
+                    provider_metadata: None,
+                });
+            }
             delta_content.extend(content_parts(choice.delta.content.as_ref()));
             for part in delta_content {
                 match part {
