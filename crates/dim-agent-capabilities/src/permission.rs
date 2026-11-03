@@ -744,21 +744,21 @@ impl DynPlugin for PermissionPlugin {
             let rebuild = service.clone();
             let live = service.clone();
             dispatcher
-                .follow(
+                .consume(
                     ctx,
-                    "Permission",
-                    &["permission/changed"],
-                    move || {
+                    "Permission".into(),
+                    ["permission/changed"].map(String::from).to_vec(),
+                    Arc::new(move || {
                         let rebuild = rebuild.clone();
                         Box::pin(async move { rebuild.rebuild().await })
-                    },
-                    move |event| {
+                    }),
+                    Arc::new(move |event| {
                         let live = live.clone();
                         Box::pin(async move {
                             live.consume(&event);
                             Ok(())
                         })
-                    },
+                    }),
                 )
                 .await?;
             ctx.provide_at(self.state.clone(), service.state.clone())?;

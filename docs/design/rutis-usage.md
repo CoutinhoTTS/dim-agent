@@ -435,7 +435,7 @@ impl DynPlugin for WaitBranch {
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             let dispatcher = ctx.require_at(&self.dispatcher)?;
-            /* dispatcher.follow(ctx, "Wait", keys, rebuild, handler).await?: subscribe, hold,
+            /* dispatcher.consume(ctx, "Wait", keys, rebuild, handler).await?: subscribe, hold,
                read the folded kinds with their unpublished tail, release above the cutoff
                (plugin contract §5.2), then ctx.provide_at(self.wait.clone(), wait) */
             Ok(Effect::Done)
@@ -594,8 +594,8 @@ async def apply(ctx, config):
 ```
 
 ```ts
-// A Capability that subscribes first, rebuilds from the query with its
-// unpublished tail, then follows live events (plugin contract §5.2).
+// A Capability that rebuilds from the query with its unpublished tail, then
+// follows live events (plugin contract §5.2).
 export default definePlugin({
   name: 'ExampleCounter',
   inject: ['dispatcher', 'timeline'],
@@ -607,26 +607,21 @@ export default definePlugin({
     const fold = (event: BranchEvent) => {
       if (event.type === 'input' && event.name === 'message') count++
     }
-    let covered: bigint | undefined
-    const held: BranchEvent[] = []
-    await dispatcher.listen('example-counter', ['input/message'], event => {
-      if (covered === undefined) held.push(event)
-      else fold(event)
-    })
-    const page = await timeline.queryWithTail({
-      scope: 'branch', direction: 'ascending', kinds: ['input/message'], limit: 1024n, offset: 0n,
-    })
-    page.events.forEach(fold)
-    covered = BigInt(page.through)
-    held.filter(event => BigInt(event.sequence) > covered).forEach(fold)
+    await dispatcher.consume('example-counter', ['input/message'], async () => {
+      const page = await timeline.queryWithTail({
+        scope: 'branch', direction: 'ascending', kinds: ['input/message'], limit: 1024n, offset: 0n,
+      })
+      page.events.forEach(fold)
+      return BigInt(page.through)
+    }, event => fold(event))
     ctx.provide('exampleCounter', { get: () => ({ count }) })
   },
 })
 ```
 
-The hand-written form also holds without the query: `listen` before `committed()`, then a rebuild
-from `local` through that cutoff while the handler waits, skipping the live events it covered.
+A part that reads nothing registers with `listen`, which delivers live facts only; `consume` is the
+registration for one that rebuilds.
 
 The repository's fixtures show the form in both languages: `runtime/fixtures/branch-part.ts`,
-`runtime/fixtures/python/python_branch_part.py` and `runtime/plugins/goal/branch.ts` subscribe
-first and rebuild from the Timeline themselves.
+`runtime/fixtures/python/python_branch_part.py` and `runtime/plugins/goal/branch.ts` consume the
+branch this way.

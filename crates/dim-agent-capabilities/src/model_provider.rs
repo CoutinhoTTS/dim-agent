@@ -357,18 +357,20 @@ impl DynPlugin for ModelProviderPlugin {
             let read = owner.clone();
             let read_timeline = owner.timeline.clone();
             dispatcher
-                .follow(
+                .consume(
                     ctx,
-                    "ModelProvider",
-                    &[
+                    "ModelProvider".into(),
+                    [
                         "model/call",
                         "stop/interrupt",
                         "step/model-start",
                         "input/applied",
                         "turn/start",
                         "turn/end",
-                    ],
-                    move || {
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                    Arc::new(move || {
                         let read = read.clone();
                         let timeline = read_timeline.clone();
                         Box::pin(async move {
@@ -390,8 +392,8 @@ impl DynPlugin for ModelProviderPlugin {
                             read.rebuild(&mut read.state.lock().unwrap(), &reply.events)?;
                             Ok(reply.through)
                         })
-                    },
-                    move |event| {
+                    }),
+                    Arc::new(move |event| {
                         let owner = owner.clone();
                         let failures = failures.clone();
                         let lifecycle = lifecycle.clone();
@@ -481,7 +483,7 @@ impl DynPlugin for ModelProviderPlugin {
                             });
                             Ok(())
                         })
-                    },
+                    }),
                 )
                 .await?;
             ctx.provide_at(self.progress.clone(), service.progress.clone())?;

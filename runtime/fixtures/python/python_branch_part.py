@@ -1,7 +1,7 @@
-"""A branch part in Python: it subscribes first, folds the branch's facts
-through the cutoff of its own read, follows live events in order and, after the
-first turn ends, writes one marked input to its own branch naming the branch
-and the events it has seen. `python_plugin` registers it."""
+"""A branch part in Python: it consumes the branch's facts, folding them
+through the cutoff of its own read and then live in order, and, after the first
+turn ends, writes one marked input to its own branch naming the branch and the
+events it has seen. `python_plugin` registers it."""
 
 from rutis import define_plugin
 
@@ -16,8 +16,6 @@ async def apply(ctx, config):
     session, branch = identity["sessionId"], identity["branchId"]
     seen = []
     state = {"written": False}
-    covered = None
-    held = []
 
     def step(event, live):
         key = f"{event['type']}/{event['name']}"
@@ -35,38 +33,30 @@ async def apply(ctx, config):
         if written is not None:
             await written
 
-    async def live(event):
-        if covered is None:
-            held.append(event)
-        else:
-            await release(event)
+    async def rebuild():
+        start = None
+        while True:
+            query = {
+                "scope": "branch",
+                "order_by": "sequence",
+                "direction": "ascending",
+                "kinds": ["input/message", "turn/start", "turn/end"],
+                "limit": PAGE,
+                "offset": 0,
+            }
+            if start is not None:
+                query["from_sequence"] = start
+            page = await timeline.queryWithTail(query)
+            events = page["events"]
+            for event in events:
+                step(event, False)
+            if not events or len(events) < PAGE:
+                return int(page["through"])
+            start = int(events[-1]["sequence"]) + 1
 
-    await dispatcher.listen(
-        "python-branch-fixture", ["input/message", "turn/start", "turn/end"], live
+    await dispatcher.consume(
+        "python-branch-fixture", ["input/message", "turn/start", "turn/end"], rebuild, release
     )
-    start = None
-    while True:
-        query = {
-            "scope": "branch",
-            "order_by": "sequence",
-            "direction": "ascending",
-            "kinds": ["input/message", "turn/start", "turn/end"],
-            "limit": PAGE,
-            "offset": 0,
-        }
-        if start is not None:
-            query["from_sequence"] = start
-        page = await timeline.queryWithTail(query)
-        events = page["events"]
-        for event in events:
-            step(event, False)
-        if not events or len(events) < PAGE:
-            covered = page["through"]
-            break
-        start = int(events[-1]["sequence"]) + 1
-    for event in held:
-        if int(event["sequence"]) > int(covered):
-            await release(event)
 
 
 part = define_plugin(

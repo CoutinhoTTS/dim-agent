@@ -96,7 +96,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `configurationPublisher` | branch | ContextPreparation | Rust-only | — |
 | `configureControl` | branch | Prompt | Rust-only | — |
 | `contextPreparation` | branch | ContextPreparation | Rust-only | — |
-| `dispatcher` | branch | BranchScope | yes | `changed` async, `committed` async, `history` async, `listen` async, `local` async, `notify` async, `sequence` async |
+| `dispatcher` | branch | BranchScope | yes | `changed` async, `committed` async, `consume` async, `history` async, `listen` async, `local` async, `notify` async, `sequence` async |
 | `fileReads` | branch | FileReads | Rust-only | — |
 | `inputQueue` | branch | InputQueue | Rust-only | — |
 | `loopState` | branch | Loop | Rust-only | — |

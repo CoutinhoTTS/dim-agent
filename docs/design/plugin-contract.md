@@ -118,7 +118,7 @@ R4). This table says what each name Dim defines is for.
 | `sessionLifecycle` | `session` | SessionScope | yes | `activated`, `closing`, `hold`, `release`: a hold is an id the calling row owns, ended by `release(id)` or that row's unload |
 | `sessionConfig` | `session` | SessionScope | yes | `get()`: the creation-time configuration, the snapshot a tool call carries |
 | `timeline` | `branch` | BranchScope | yes, except `before` | `append`, the published sequence and the event query (§5.4); the query reaches other languages with its declaration |
-| `dispatcher` | `branch` | BranchScope | yes, `listen` and reads; their Rust forms `follow` and `subscribe` are Rust-only | Ordered consumption (§5.2) |
+| `dispatcher` | `branch` | BranchScope | yes, `consume`, `listen` and reads; their Rust forms are the same `consume` and `subscribe`, which is Rust-only | Ordered consumption (§5.2) |
 | `branchLifecycle` | `branch` | BranchScope | yes | `activated`, `closing` |
 | `timelineIdentity` | `branch` | BranchScope | yes | `{sessionId, branchId}` |
 
@@ -168,14 +168,15 @@ time, to every part registered in the current generation. It delivers live facts
 rebuilds reads its own history (§5.4). A new generation rebuilds as the
 [capability reload protocol](../architecture/rust-agent/single-tree.md#能力重载协议) describes.
 
-A part that rebuilds runs the same steps in one registration (R1): it subscribes to the keys first,
-holds the matching facts, reads the facts its rebuild folds through the branch's `timeline` query
-with its unpublished tail, folds them, and takes the cutoff from the reply (§5.4); then it delivers
-the held facts above the cutoff and each later matching fact, in sequence order and none twice.
-Live facts wait until the read returns, so the work the rebuild leaves, such as failing the
-operations a previous generation left open, is done before them. In Rust the registration is
-`dispatcher.follow`; a part in another language writes the three steps where its own subscription
-lives, since the read belongs to the part and its SDK has no such helper (ADR 006 D1).
+A part that rebuilds registers once for both (R1), under the name `consume` in every binding: it
+subscribes to the keys first, holds the matching facts, runs its rebuild, which reads the facts it
+folds through the branch's `timeline` query with its unpublished tail (§5.4) and returns the cutoff
+that read took; then it delivers the held facts above the cutoff and each later matching fact, in
+sequence order and none twice. Live facts wait until the rebuild returns, so the work the rebuild
+leaves, such as failing the operations a previous generation left open, is done before them. The
+handler and the rebuild are functions in every binding: a closure in Rust, where the registration
+is `dispatcher.consume`, and a function in a part in another language, whose binding passes it the
+same way. The read belongs to the part.
 
 The kinds the read selects are the kinds its rebuild folds, which are not always the keys it
 consumes: a rebuild may fold the terminals of the operations its part issues. The cutoff belongs to
@@ -359,20 +360,21 @@ design is merged. R4–R7 concern how Dim uses rutis and are in
   A mistake (a cutoff read before subscribing, `history` instead of `local`) silently loses or
   double-counts events.
 - **Existing mechanisms considered:** `subscribe`/`listen` plus `committed`/`local` are correct but
-  leave the protocol to every author. An SDK helper per language would replicate the protocol
-  (ADR 006 D1).
-- **Needed:** `dispatcher.follow` in Rust, which subscribes and holds the matching facts, calls the
-  rebuild — the part reads the facts it folds through the Timeline query with its unpublished tail
-  and returns the cutoff — then delivers the held facts above the cutoff and each later matching
-  fact, in sequence order. Live facts wait
-  until the rebuild returns, so the failure terminals a rebuild writes come before them. It carries
-  no business meaning. A part in another language subscribes first and runs the same steps itself;
-  the read belongs to the part, so a per-language helper would only repeat it (ADR 006 D1).
+  leave the protocol to every author. A separate SDK helper per language would replicate the
+  protocol (ADR 006 D1); one registration that takes the rebuild and the handler as functions does
+  not, since each language passes its own.
+- **Needed:** `consume`, one registration in every language, which subscribes and holds the matching
+  facts, calls the rebuild — the part reads the facts it folds through the Timeline query with its
+  unpublished tail and returns the cutoff — then delivers the held facts above the cutoff and each
+  later matching fact, in sequence order. Live facts wait until the rebuild returns, so the failure
+  terminals a rebuild writes come before them. It carries no business meaning. The handler and the
+  rebuild are closures in the Rust binding and functions in the others; that is a binding
+  difference, not a second interface.
 - **Effect on sequence, batch, interruption, reload:** none on the Timeline. The delivery order equals
   the hand-written protocol's. Reload behaviour is that of §7.2.
 - **Owner:** Dim runtime (Dispatcher). Delivered in phase 5
-  ([#380](https://github.com/arcships/dim/issues/380)): `follow` in Rust; the rebuild is one call
-  the part makes, not one call per fact.
+  ([#380](https://github.com/arcships/dim/issues/380)): `consume` in every language; the rebuild is
+  one call the part makes, not one call per fact.
 
 ### R2. Lifecycle and identity services in the Session and branch scopes, for every language
 

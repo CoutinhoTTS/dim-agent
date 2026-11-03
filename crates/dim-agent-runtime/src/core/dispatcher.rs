@@ -152,28 +152,29 @@ impl Dispatcher {
         Ok(())
     }
     /// Registers an ordered consumer that rebuilds: the subscribe and rebuild
-    /// steps of the capability reload protocol as one registration. It
-    /// subscribes like [`Self::subscribe`] and holds the facts that match the
-    /// keys, calls `rebuild` once, which reads the facts its rebuild folds
-    /// through this branch's `timeline` and returns the cutoff that read took,
-    /// then delivers the held facts and every later matching fact above that
-    /// cutoff, in sequence order and none twice ([plugin contract §5.2]).
-    /// Live facts wait until `rebuild` returns, so work it leaves to do, such
-    /// as terminals for open operations, is done before them. A `rebuild`
-    /// failure is returned and lets no live fact through; live failures and
-    /// the lifetime are [`Self::subscribe`]'s.
-    ///
-    /// [plugin contract §5.2]: ../../../../docs/design/plugin-contract.md#52-consuming-facts
-    #[service(skip)]
-    pub async fn follow(
+    /// steps of the capability reload protocol as one registration (plugin
+    /// contract §5.2). It subscribes like [`Self::subscribe`] and holds the
+    /// facts that match the keys, calls `rebuild` once, which reads the facts
+    /// the part folds through this branch's `timeline` and returns the cutoff
+    /// that read took, then delivers the held facts and every later matching
+    /// fact above that cutoff, in sequence order and none twice. Live facts
+    /// wait until `rebuild` returns, so work it leaves to do, such as terminals
+    /// for open operations, is done before them. A `rebuild` failure is
+    /// returned and lets no live fact through; live failures and the lifetime
+    /// are [`Self::subscribe`]'s.
+    pub async fn consume(
         &self,
         ctx: &Ctx,
-        name: impl Into<String>,
-        keys: &[&str],
-        rebuild: impl FnOnce() -> BoxFuture<'static, Result<u64>> + Send + 'static,
-        handler: impl Fn(Arc<AgentEvent>) -> BoxFuture<'static, Result<()>> + Send + Sync + 'static,
+        name: String,
+        keys: Vec<String>,
+        rebuild: Arc<dyn Fn() -> BoxFuture<'static, Result<u64>> + Send + Sync>,
+        handler: Arc<dyn Fn(AgentEvent) -> BoxFuture<'static, Result<()>> + Send + Sync>,
     ) -> Result<()> {
-        let handler: Arc<Handler> = Arc::new(handler);
+        let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+        let handler: Arc<Handler> = Arc::new(move |event: Arc<AgentEvent>| {
+            let handler = handler.clone();
+            Box::pin(async move { handler((*event).clone()).await })
+        });
         let held = Arc::new(std::sync::Mutex::new(Held {
             holding: true,
             covered: 0,
@@ -181,7 +182,7 @@ impl Dispatcher {
         }));
         let live = handler.clone();
         let staging = held.clone();
-        self.subscribe(ctx, name, keys, move |event| {
+        self.subscribe(ctx, name, &keys, move |event| {
             let live = live.clone();
             let staging = staging.clone();
             Box::pin(async move {

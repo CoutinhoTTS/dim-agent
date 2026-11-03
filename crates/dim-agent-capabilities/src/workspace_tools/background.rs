@@ -506,11 +506,11 @@ impl DynPlugin for BackgroundExecPlugin {
             let read = service.clone();
             let read_timeline = service.timeline.clone();
             dispatcher
-                .follow(
+                .consume(
                     ctx,
-                    "BackgroundExec",
-                    &["exec/ended", "stop/interrupt"],
-                    move || {
+                    "BackgroundExec".into(),
+                    ["exec/ended", "stop/interrupt"].map(String::from).to_vec(),
+                    Arc::new(move || {
                         let read = read.clone();
                         let timeline = read_timeline.clone();
                         Box::pin(async move {
@@ -528,8 +528,8 @@ impl DynPlugin for BackgroundExecPlugin {
                             read.repost(unposted);
                             Ok(reply.through)
                         })
-                    },
-                    move |event| consumer.consume(event),
+                    }),
+                    Arc::new(move |event| consumer.consume(Arc::new(event))),
                 )
                 .await?;
             ctx.provide_at(self.exec.clone(), service)?;

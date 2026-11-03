@@ -1806,11 +1806,11 @@ impl DynPlugin for HooksBranchPlugin {
             let read = branch.clone();
             let read_timeline = branch.timeline.clone();
             dispatcher
-                .follow(
+                .consume(
                     ctx,
-                    "HooksBranch",
-                    &FOLLOWED_EVENTS,
-                    move || {
+                    "HooksBranch".into(),
+                    FOLLOWED_EVENTS.map(String::from).to_vec(),
+                    Arc::new(move || {
                         let read = read.clone();
                         let timeline = read_timeline.clone();
                         Box::pin(async move {
@@ -1820,14 +1820,14 @@ impl DynPlugin for HooksBranchPlugin {
                             }
                             Ok(reply.through)
                         })
-                    },
-                    move |event| {
+                    }),
+                    Arc::new(move |event| {
                         let owner = owner.clone();
                         Box::pin(async move {
                             owner.fold(&event, true);
                             Ok(())
                         })
-                    },
+                    }),
                 )
                 .await?;
             let closing = tracker.clone();

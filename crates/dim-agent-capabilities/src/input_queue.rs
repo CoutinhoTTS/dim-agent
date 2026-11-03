@@ -311,18 +311,20 @@ impl DynPlugin for InputQueuePlugin {
             let read = queue.clone();
             let read_timeline = queue.timeline.clone();
             dispatcher
-                .follow(
+                .consume(
                     ctx,
-                    "InputQueue",
-                    &[
+                    "InputQueue".into(),
+                    [
                         "input/message",
                         "input/consumed",
                         "input/withdraw",
                         "turn/start",
                         "turn/end",
                         "stop/interrupt",
-                    ],
-                    move || {
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                    Arc::new(move || {
                         let read = read.clone();
                         let timeline = read_timeline.clone();
                         Box::pin(async move {
@@ -343,11 +345,11 @@ impl DynPlugin for InputQueuePlugin {
                             read.rebuild(&reply.events)?;
                             Ok(reply.through)
                         })
-                    },
-                    move |event| {
+                    }),
+                    Arc::new(move |event| {
                         let owner = owner.clone();
-                        Box::pin(async move { owner.on_event(event) })
-                    },
+                        Box::pin(async move { owner.on_event(Arc::new(event)) })
+                    }),
                 )
                 .await?;
             ctx.provide_at(self.state.clone(), queue.observable.clone())?;

@@ -97,11 +97,18 @@ impl DynPlugin for ToolExecutorPlugin {
             let lifecycle = ctx.cancellation_token();
             let read = owner.clone();
             let read_timeline = timeline.clone();
-            dispatcher.follow(
+            dispatcher.consume(
                 ctx,
-                "ToolExecutor",
-                &["step/tool-call", "stop/interrupt", "turn/start", "turn/end"],
-                move || {
+                "ToolExecutor".into(),
+                [
+                    "step/tool-call",
+                    "stop/interrupt",
+                    "turn/start",
+                    "turn/end",
+                ]
+                .map(String::from)
+                .to_vec(),
+                Arc::new(move || {
                     let read = read.clone();
                     let timeline = read_timeline.clone();
                     Box::pin(async move {
@@ -119,8 +126,8 @@ impl DynPlugin for ToolExecutorPlugin {
                         rebuild(&mut read.state.lock().unwrap(), &timeline, &reply.events)?;
                         Ok(reply.through)
                     })
-                },
-                move |event| {
+                }),
+                Arc::new(move |event| {
                     let owner = owner.clone();
                     let timeline = timeline.clone();
                     let faults = faults.clone();
@@ -337,7 +344,7 @@ impl DynPlugin for ToolExecutorPlugin {
                         Ok(())
                     })()
                     })
-                },
+                }),
             ).await?;
             ctx.provide_at(self.executor.clone(), service)?;
             Ok(Effect::Done)

@@ -134,7 +134,19 @@ async function loadGoalBranch(read, options = {}) {
     branchLifecycle: { activated: async () => true, closing: () => closing.promise },
     sessionLifecycle,
     dispatcher: counted({
-      listen: async (_name, _keys, handler) => { listener = handler },
+      consume: async (_name, _keys, rebuild, handler) => {
+        const held = []
+        let covered
+        listener = event => {
+          if (covered === undefined) {
+            held.push(event)
+            return
+          }
+          return handler(event)
+        }
+        covered = BigInt(await call(rebuild, []))
+        for (const event of held) if (event.sequence > covered) await handler(event)
+      },
       local: async (start, through) => branch.events.filter(event => event.sequence >= BigInt(start) && event.sequence <= BigInt(through)),
       committed: async () => branch.sequence,
     }),

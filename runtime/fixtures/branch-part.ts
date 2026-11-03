@@ -13,10 +13,8 @@ export const part = definePlugin({
     const seen: string[] = []
     let written = false
     let reported = false
-    let replayingMarker = false
     let cutoff = 0n
-    let rebuilt!: () => void
-    const ready = new Promise<void>(resolve => { rebuilt = resolve })
+    let replayingMarker = false
     const step = (event: BranchEvent, live: boolean) => {
       const key = `${event.type}/${event.name}`
       seen.push(key)
@@ -36,14 +34,17 @@ export const part = definePlugin({
         })
       }
     }
-    await dispatcher.listen('branch-part-fixture', ['input/message', 'turn/start', 'turn/end'], async event => {
-      await ready
-      if (BigInt(event.sequence) > cutoff) step(event, true)
-    })
-    cutoff = BigInt(await dispatcher.committed())
-    if (cutoff > 0n) for (const event of await dispatcher.local(0, cutoff)) step(event, false)
-    replayingMarker = written
-    rebuilt()
+    await dispatcher.consume(
+      'branch-part-fixture',
+      ['input/message', 'turn/start', 'turn/end'],
+      async () => {
+        cutoff = BigInt(await dispatcher.committed())
+        if (cutoff > 0n) for (const event of await dispatcher.local(0, cutoff)) step(event, false)
+        replayingMarker = written
+        return cutoff
+      },
+      async event => step(event, true),
+    )
   },
 })
 

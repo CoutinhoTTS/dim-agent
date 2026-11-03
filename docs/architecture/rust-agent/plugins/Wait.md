@@ -78,7 +78,7 @@ Provides branch-local wait state recording eligible arrivals during an open turn
 Consumes `input/message`, `turn/start`, `turn/end`; produces no events directly.
 Tagged background notices and steer inputs can end a wait; the input opening a
 turn does not. Turn end clears pending arrivals. It registers with
-`Dispatcher::follow` and rebuilds by reading the last `turn/start` or `turn/end`
+`Dispatcher::consume` and rebuilds by reading the last `turn/start` or `turn/end`
 with its unpublished tail. Reload rebuilds only open-turn status, not old
 arrival notifications. Wait futures are caller-owned and use caller cancellation; the
 plugin does not spawn tasks. Only one wait can run per branch.

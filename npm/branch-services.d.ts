@@ -185,6 +185,21 @@ export interface SessionLifecycle {
 /** Delivers one branch's committed events on that branch's private channel. */
 export interface Dispatcher {
   /**
+   * Registers an ordered consumer that rebuilds: the subscribe and rebuild
+   * steps of the capability reload protocol as one registration (plugin
+   * contract §5.2). It subscribes like [`Self::subscribe`] and holds the
+   * facts that match the keys, calls `rebuild` once, which reads the facts
+   * the part folds through this branch's `timeline` and returns the cutoff
+   * that read took, then delivers the held facts and every later matching
+   * fact above that cutoff, in sequence order and none twice. Live facts
+   * wait until `rebuild` returns, so work it leaves to do, such as terminals
+   * for open operations, is done before them. A `rebuild` failure is
+   * returned and lets no live fact through; live failures and the lifetime
+   * are [`Self::subscribe`]'s.
+   * @throws {AgentErrorThrown}
+   */
+  consume(name: string, keys: string[], rebuild: () => number | bigint | Promise<number | bigint>, handler: (arg0: import('./plugin.js').BranchEvent) => void | Promise<void>): Promise<void>
+  /**
    * [`Self::subscribe`] in data form, for parts in other languages: the
    * calling row's `ctx`, owned keys, and a handler taking the committed
    * event by value whose failure is the subscriber's handler failure.

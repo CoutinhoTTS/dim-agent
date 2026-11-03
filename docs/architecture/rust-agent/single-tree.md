@@ -369,7 +369,7 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 | 历史投影 | turn 结束时仍未得到结果的工具提议，投影为未执行的错误结果 |
 | 已知代价 | 未随重载的上下文准备跨过重载时，已判失败的 turn 仍可能完成一次模型调用 |
 
-`Dispatcher::follow` 把订阅与重建合为一次注册（[插件契约 §5.2](../../design/plugin-contract.md#52-consuming-facts)）：它先注册订阅并暂存匹配键的实时事件，然后调用重建回调；回调以分支 `timeline` 的 `queryWithTail` 读取自己折叠的 kind、算出状态并返回读取的截点，截点之后的暂存事件与之后匹配的事件才按序号交给实时处理器。Dispatcher 不再读历史。其他语言按同样三步自写（先订阅、读取、释放截点之后的事件）；手写的 Rust 订阅、闸门与跳过仍然有效。
+`Dispatcher::consume` 把订阅与重建合为一次注册（[插件契约 §5.2](../../design/plugin-contract.md#52-consuming-facts)）：它先注册订阅并暂存匹配键的实时事件，然后调用重建；重建以分支 `timeline` 的 `queryWithTail` 读取自己折叠的 kind、算出状态并返回读取的截点，截点之后的暂存事件与之后匹配的事件才按序号交给实时处理器。Dispatcher 不再读历史。其他语言用同一个名字 `consume`，处理函数与重建是各绑定里的函数；不重建的部件用 `listen`，只收实时事件。
 
 随上游重载的能力：
 

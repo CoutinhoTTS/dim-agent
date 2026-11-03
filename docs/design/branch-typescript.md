@@ -128,14 +128,13 @@ same-module snapshots, online metadata, disablement and Pending apply unchanged.
 
 ## Subscription, rebuild and recovery
 
-1. Subscribe with `dispatcher.listen` first and hold the matching events, then read the branch's
-   own facts through `timeline.queryWithTail`, with the ones written and not yet published, and
-   fold them; the reply's `through` is the cutoff. Release the held events above it and fold each
-   later matching event directly. Live events wait until the fold returns, so what the rebuild
-   owes is written before them. The native Capabilities run the same steps in one registration,
-   `Dispatcher::follow` ([plugin contract §5.2](plugin-contract.md#52-consuming-facts)).
-   Subscribe with `listen`, then read `committed()` and `local(0, cutoff)` and skip live events at
-   or below the cutoff, stays valid as well.
+1. Register once with `dispatcher.consume`: it subscribes first and holds the matching events, then
+   runs the rebuild, which reads the branch's own facts through `timeline.queryWithTail`, with the
+   ones written and not yet published, folds them, and returns the reply's `through` as the cutoff.
+   The held events above the cutoff and each later matching event then reach the handler directly.
+   Live events wait until the rebuild returns, so what the rebuild owes is written before them. The
+   native Capabilities register the same way
+   ([plugin contract §5.2](plugin-contract.md#52-consuming-facts)).
 2. Folding history repeats no side effect; decisions act on live events. A restored or reloaded
    generation rebuilds the same way and does not repeat a write its predecessor committed.
 3. A handler registers its work with its part and returns. Network and tool waits belong to that

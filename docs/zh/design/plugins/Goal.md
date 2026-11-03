@@ -288,7 +288,7 @@ TypeScript，位于 `runtime/plugins/goal`，为一行：其 `index.ts` 经 `par
 | `goal.ts` | 共享：变更与续跑输入（A.5）、标记解析、折叠（§2）与决策（A.4） | — |
 | `index.ts` | 该行：注册两个定义，并把该行工厂配置中的两句策略文本交给各自的副本 | `inject: ["partRegistry", "settings"]`、`provides: {}`、`config.texts`，`settings` 取自 `settings.ts` |
 | `session.ts` | `GoalPlugin`：把 `<dim-goal>` 引导条目（A.5.1）注册到 `guideEntries`，把 `goal_update` 注册到 `toolRegistry`，把 `session.goal` 注册到 `sessionMethods`；经 `treeCommands.input` 写入 | Session 定义，`inject: ["treeCommands", "toolRegistry", "sessionMethods", "guideEntries"]` |
-| `branch.ts` | `GoalBranchPlugin`：用 `dispatcher.consume` 注册，折叠重放，对实时事件决策，并以自有任务写入；从 `goal` 来源读取 `maxContinuations`。在 [Pursuit](Pursuit.md) 的评审裁判下它还创建评审分支并担任评审者角色 | 分支定义，`inject: ["dispatcher", "timeline", "timelineIdentity", "treeCommands", "settings", "branchLifecycle", "sessionLifecycle"]` |
+| `branch.ts` | `GoalBranchPlugin`：用 `dispatcher.consume` 注册，折叠重建读到的内容，对实时事件决策，并以自有任务写入；从 `goal` 来源读取 `maxContinuations`。在 [Pursuit](Pursuit.md) 的评审裁判下它还创建评审分支并担任评审者角色 | 分支定义，`inject: ["dispatcher", "timeline", "timelineIdentity", "treeCommands", "settings", "branchLifecycle", "sessionLifecycle"]` |
 
 新分支检查（§3.4）用时间线查询读取继承前缀：分支链、`input/message`、从新到旧，遇到第一个带 key 的块即停止，并跳过分支自身的事件，因此只向后翻页继承前缀。嵌入方把这一行加入
 `ServerConfig.session_typescript` 即可安装 Goal；产品打包归 PluginManager。

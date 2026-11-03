@@ -202,6 +202,9 @@ void branch.dispatcher.listen('counter', ['input/message'], async event => {
   const data: Record<string, unknown> = event.data;
   void sequence; void data;
 });
+void branch.dispatcher.consume('counter', ['input/message'],
+  async () => 1n,
+  async event => { void (event.sequence as number | bigint) });
 const cutoff: number | bigint = await branch.dispatcher.committed();
 const own: BranchEvent[] = await branch.dispatcher.local(0n, cutoff);
 void branch.dispatcher.history(cutoff);

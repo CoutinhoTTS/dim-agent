@@ -1247,10 +1247,10 @@ impl DynPlugin for LoopPlugin {
             let read = service.clone();
             let read_timeline = service.timeline.clone();
             dispatcher
-                .follow(
+                .consume(
                     ctx,
-                    "Loop",
-                    &[
+                    "Loop".into(),
+                    [
                         "input/applied",
                         "input/consumed",
                         "stop/interrupt",
@@ -1265,8 +1265,10 @@ impl DynPlugin for LoopPlugin {
                         "step/tool-result",
                         "context/compact",
                         "context/compaction",
-                    ],
-                    move || {
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                    Arc::new(move || {
                         let read = read.clone();
                         let timeline = read_timeline.clone();
                         Box::pin(async move {
@@ -1300,11 +1302,11 @@ impl DynPlugin for LoopPlugin {
                             );
                             Ok(reply.through)
                         })
-                    },
-                    move |event| {
+                    }),
+                    Arc::new(move |event| {
                         let owner = owner.clone();
-                        Box::pin(async move { owner.on_event(event) })
-                    },
+                        Box::pin(async move { owner.on_event(Arc::new(event)) })
+                    }),
                 )
                 .await?;
             ctx.provide_at(self.state.clone(), service.observable.clone())?;

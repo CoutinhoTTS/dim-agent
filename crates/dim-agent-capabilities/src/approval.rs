@@ -359,11 +359,11 @@ impl DynPlugin for ApprovalPlugin {
             let live = service.clone();
             let timeline = service.timeline.clone();
             dispatcher
-                .follow(
+                .consume(
                     ctx,
-                    "Approval",
-                    &["approval/respond"],
-                    move || {
+                    "Approval".into(),
+                    ["approval/respond"].map(String::from).to_vec(),
+                    Arc::new(move || {
                         let rebuild = rebuild.clone();
                         let timeline = timeline.clone();
                         Box::pin(async move {
@@ -375,11 +375,11 @@ impl DynPlugin for ApprovalPlugin {
                             rebuild.rebuild(&reply.events)?;
                             Ok(reply.through)
                         })
-                    },
-                    move |event| {
+                    }),
+                    Arc::new(move |event| {
                         live.consume(&event);
                         Box::pin(async { Ok(()) })
-                    },
+                    }),
                 )
                 .await?;
             ctx.provide_at(self.approval.clone(), service)?;

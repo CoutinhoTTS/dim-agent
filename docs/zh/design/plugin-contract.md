@@ -107,7 +107,7 @@ process (root)                 process parts: storage, catalogs, connections, Ag
 | `sessionLifecycle` | `session` | SessionScope | 是 | `activated`、`closing`、`hold`、`release`：hold 是调用方的行拥有的 id，由 `release(id)` 或该行卸载结束 |
 | `sessionConfig` | `session` | SessionScope | 是 | `get()`：创建时的配置，即工具调用携带的快照 |
 | `timeline` | `branch` | BranchScope | 是，`before` 除外 | `append`、已发布序号与事件查询（§5.4）；查询随其声明到达其他语言 |
-| `dispatcher` | `branch` | BranchScope | 是，`consume`、`listen` 和读取；它们的 Rust 形式 `follow` 和 `subscribe` 仅限 Rust | 有序消费（§5.2） |
+| `dispatcher` | `branch` | BranchScope | 是，`consume`、`listen` 和读取；它们的 Rust 形式就是同一个 `consume`，以及仅限 Rust 的 `subscribe` | 有序消费（§5.2） |
 | `branchLifecycle` | `branch` | BranchScope | 是 | `activated`、`closing` |
 | `timelineIdentity` | `branch` | BranchScope | 是 | `{sessionId, branchId}` |
 
@@ -146,10 +146,14 @@ Rust 能注册它。
 该分支的事实。Dispatcher 按序号顺序逐条投递，本代次注册的每个部件都会收到。新代次按
 [能力重载协议](../../architecture/rust-agent/single-tree.md#能力重载协议)重建。
 
-需要重建的部件只注册一次，两者兼得（R1）。注册固定截点 `S`，先把重放交给处理函数：本分支截至 `S` 的事实，
-即 `local` 读到的内容，不按键过滤；再按序号顺序交付 `S` 之后每条匹配的事实，不重复。实时事实等重放处理完
-才交付，所以重放留下的工作，例如让上一代留下的未完成操作失败，在重放里完成。手写的注册、读取截点和重建
-仍然有效。
+需要重建的部件只注册一次，两者兼得（R1），各绑定的名字都是 `consume`：先订阅这些键并暂存匹配的实时事实，
+再调用它自己的重建；重建用分支的 `timeline` 查询连未发布尾部一起读它折叠的事实（§5.4），并返回这次读取
+取的截点；随后截点之上的暂存事实与之后每条匹配的事实按序号顺序交付，不重复。实时事实等重建返回后才交付，
+所以重建留下的工作，例如让上一代留下的未完成操作失败，排在它们之前。处理函数与重建在各绑定里都是函数：
+Rust 里是闭包，注册即 `dispatcher.consume`；其他语言的部件里是函数，其绑定以同样方式传入。读取属于部件。
+
+读取选择的种类是重建折叠的种类，不总是它消费的键：重建可能折叠该部件发出操作的终态。截点属于这次读取，
+所以分页读取的部件取最后一页的截点；调用方若自己定一个更早的，两者之间的事实会被重放一遍。
 
 ### 5.3 总线事件
 
@@ -279,14 +283,16 @@ Dispatcher 处理函数可能在发布（`activated`）之前收到开启阶段�
   `crates/dim-agent-capabilities/src/wait.rs:361-380` 和 `runtime/plugins/goal/branch.ts:120-128`。
   一个错误（在订阅之前读取截点、用 `history` 代替 `local`）会无声地丢失或重复计算事件。
 - **考虑过的现有机制：**`subscribe`/`listen` 加 `committed`/`local` 是正确的，但把协议留给每个作者。
-  每种语言一个 SDK 辅助函数会复制这个协议（ADR 006 D1）。
-- **所需机制：**`dispatcher.consume(name, keys, handler)`：它注册、固定 `S`、把 `local(..=S)` 作为重放
-  投递一次，然后投递 `S` 之后的实时事件，通过同一个处理函数，按序号顺序。实时事件等重放处理完才投递，
-  与手写重建闸门挡住它们一样，所以重建写出的失败终态排在它们之前。它不带业务含义。
+  每种语言各自写一个 SDK 辅助函数会复制这个协议（ADR 006 D1）；一次注册、把重建与处理函数作为函数传入则不复制，
+  因为每种语言传入的是自己的函数。
+- **所需机制：**`consume`，每种语言都是同一次注册：它订阅并暂存匹配的事实，调用重建——部件经 Timeline 查询
+  连未发布尾部一起读它折叠的事实，并返回截点——然后按序号顺序交付截点之上的暂存事实与之后每条匹配的事实。
+  实时事实等重建返回后才投递，所以重建写出的失败终态排在它们之前。它不带业务含义。处理函数与重建在 Rust
+  绑定里是闭包，在其他绑定里是函数；这是绑定的差别，不是两套接口。
 - **对序号、批次、中断、重载的影响：**对 Timeline 没有影响。投递顺序与手写协议的相同。重载行为即 §7.2 所述。
 - **所有者：**Dim 运行时（Dispatcher）。已在阶段 5 交付
-  （[#380](https://github.com/arcships/dim/issues/380)）：每种语言都有 `consume`，Rust 中为 `follow`；
-  重放是整段一次投递，不是每个事件一次调用。
+  （[#380](https://github.com/arcships/dim/issues/380)）：每种语言都是 `consume`；重建是部件自己的一次调用，
+  不是每个事件一次。
 
 ### R2. Session 作用域与分支作用域、每种语言都有生命周期与标识服务
 

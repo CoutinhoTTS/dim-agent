@@ -929,10 +929,10 @@ impl DynPlugin for ContextPreparationPlugin {
             let read = owner.clone();
             let read_timeline = owner.timeline.clone();
             dispatcher
-                .follow(
+                .consume(
                     ctx,
-                    "ContextPreparation",
-                    &[
+                    "ContextPreparation".into(),
+                    [
                         "context/prepare",
                         "context/compaction-start",
                         "context/compaction",
@@ -941,8 +941,10 @@ impl DynPlugin for ContextPreparationPlugin {
                         "input/applied",
                         "turn/start",
                         "turn/end",
-                    ],
-                    move || {
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                    Arc::new(move || {
                         let read = read.clone();
                         let timeline = read_timeline.clone();
                         Box::pin(async move {
@@ -965,8 +967,8 @@ impl DynPlugin for ContextPreparationPlugin {
                             read.rebuild(&mut read.state.lock().unwrap(), &reply.events)?;
                             Ok(reply.through)
                         })
-                    },
-                    move |event| {
+                    }),
+                    Arc::new(move |event| {
                         let owner = owner.clone();
                         let failures = failures.clone();
                         let lifecycle = lifecycle.clone();
@@ -1059,7 +1061,7 @@ impl DynPlugin for ContextPreparationPlugin {
                             });
                             Ok(())
                         })
-                    },
+                    }),
                 )
                 .await?;
             ctx.provide_at(self.context.clone(), service)?;

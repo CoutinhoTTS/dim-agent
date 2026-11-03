@@ -394,19 +394,21 @@ impl DynPlugin for WaitBranchPlugin {
             let rebuild = wait.clone();
             let consumer = wait.clone();
             dispatcher
-                .follow(
+                .consume(
                     ctx,
-                    "Wait",
-                    &["input/message", "turn/start", "turn/end"],
-                    move || {
+                    "Wait".into(),
+                    ["input/message", "turn/start", "turn/end"]
+                        .map(String::from)
+                        .to_vec(),
+                    Arc::new(move || {
                         let rebuild = rebuild.clone();
                         let timeline = timeline.clone();
                         Box::pin(async move { rebuild.rebuild(&timeline).await })
-                    },
-                    move |event| {
+                    }),
+                    Arc::new(move |event| {
                         consumer.consume(&event);
                         Box::pin(async { Ok(()) })
-                    },
+                    }),
                 )
                 .await?;
             ctx.provide_at(self.wait.clone(), wait)?;

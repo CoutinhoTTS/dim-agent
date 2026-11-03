@@ -9,7 +9,12 @@ import {
 
 type TurnEnd = { turn_id: string; status: string }
 type Dispatcher = {
-  listen(name: string, keys: string[], handler: (event: AgentEvent) => void | Promise<void>): Promise<void>
+  consume(
+    name: string,
+    keys: string[],
+    rebuild: () => number | bigint | Promise<number | bigint>,
+    handler: (event: AgentEvent) => void | Promise<void>,
+  ): Promise<void>
   local(start: number | bigint, through: number | bigint): Promise<AgentEvent[]>
   committed(): Promise<number | bigint>
 }
@@ -293,7 +298,7 @@ export default definePlugin({
         })
       }
     }
-    const consume = (event: AgentEvent, live: boolean) => {
+    const ingest = (event: AgentEvent, live: boolean) => {
       const turnStart = fold.turnStart
       fold.apply(event)
       const sequence = BigInt(event.sequence)
@@ -327,38 +332,34 @@ export default definePlugin({
       }
     }
 
-    // Subscribe first and hold the live facts while the fold reads, then fold
-    // this branch's facts through the cutoff of that read, unpublished tail
-    // included, and release only what lies above it (A.6 Load).
-    let covered: bigint | undefined
-    const held: AgentEvent[] = []
-    await dispatcher.listen('Goal', KEYS, event => {
-      if (covered === undefined) held.push(event)
-      else consume(event, true)
-    })
-    let from: bigint | undefined
-    for (;;) {
-      const reply = await timeline.queryWithTail({
-        scope: 'branch',
-        ...(from === undefined ? {} : { from_sequence: from }),
-        order_by: 'sequence',
-        direction: 'ascending',
-        limit: REBUILD_PAGE,
-        offset: 0n,
-      })
-      for (const event of reply.events) consume(event, false)
-      const last = reply.events.at(-1)
-      if (last === undefined || BigInt(reply.events.length) < REBUILD_PAGE) {
-        covered = BigInt(reply.through)
-        break
+    // Fold this branch's facts through the cutoff of one read, unpublished
+    // tail included, and release only what lies above it (A.6 Load).
+    await dispatcher.consume('Goal', KEYS, async () => {
+      let from: bigint | undefined
+      let through = 0n
+      for (;;) {
+        const reply = await timeline.queryWithTail({
+          scope: 'branch',
+          ...(from === undefined ? {} : { from_sequence: from }),
+          order_by: 'sequence',
+          direction: 'ascending',
+          limit: REBUILD_PAGE,
+          offset: 0n,
+        })
+        for (const event of reply.events) ingest(event, false)
+        const last = reply.events.at(-1)
+        if (last === undefined || BigInt(reply.events.length) < REBUILD_PAGE) {
+          through = BigInt(reply.through)
+          break
+        }
+        from = BigInt(last.sequence) + 1n
       }
-      from = BigInt(last.sequence) + 1n
-    }
-    // The decisions the previous generation owed are taken once, before any
-    // live event.
-    decideEnd()
-    settle()
-    if (start !== undefined) decideStart(start)
-    for (const event of held) if (BigInt(event.sequence) > covered) consume(event, true)
+      // The decisions the previous generation owed are taken once, before any
+      // live event.
+      decideEnd()
+      settle()
+      if (start !== undefined) decideStart(start)
+      return through
+    }, event => ingest(event, true))
   },
 })

@@ -1825,10 +1825,10 @@ impl DynPlugin for BranchLinePlugin {
             let read = line.clone();
             let read_timeline = timeline.clone();
             dispatcher
-                .follow(
+                .consume(
                     ctx,
-                    "BranchLine",
-                    &[
+                    "BranchLine".into(),
+                    [
                         "branch/create",
                         "branch/create-failed",
                         "branch/ended",
@@ -1841,8 +1841,10 @@ impl DynPlugin for BranchLinePlugin {
                         "turn/end",
                         "step/tool-use",
                         "step/tool-result",
-                    ],
-                    move || {
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                    Arc::new(move || {
                         let read = read.clone();
                         let timeline = read_timeline.clone();
                         Box::pin(async move {
@@ -1867,14 +1869,14 @@ impl DynPlugin for BranchLinePlugin {
                             read.rebuild(&reply.events);
                             Ok(reply.through)
                         })
-                    },
-                    move |event| {
+                    }),
+                    Arc::new(move |event| {
                         let consumer = consumer.clone();
                         Box::pin(async move {
                             consumer.consume(&event);
                             Ok(())
                         })
-                    },
+                    }),
                 )
                 .await?;
             line.want(Decision::Roster);

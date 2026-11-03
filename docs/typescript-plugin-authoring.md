@@ -80,29 +80,21 @@ const counter = definePlugin({
     const fold = (event: BranchEvent) => {
       if (event.type === 'input' && event.name === 'message') count++
     }
-    // Subscribe first, hold what arrives while the fold reads, and release
-    // only the facts above the read's cutoff.
-    let covered: bigint | undefined
-    const held: BranchEvent[] = []
-    await dispatcher.listen('example-counter', ['input/message'], event => {
-      if (covered === undefined) held.push(event)
-      else fold(event)
-    })
-    let from: bigint | undefined
-    for (;;) {
-      const page = await timeline.queryWithTail({
-        scope: 'branch', ...(from === undefined ? {} : { from_sequence: from }),
-        direction: 'ascending', kinds: ['input/message'], limit: 256n, offset: 0n,
-      })
-      page.events.forEach(fold)
-      const last = page.events.at(-1)
-      if (last === undefined || page.events.length < 256) {
-        covered = BigInt(page.through)
-        break
+    // One registration: the rebuild folds this branch's facts and returns the
+    // cutoff of its read, then the events above it arrive as live.
+    await dispatcher.consume('example-counter', ['input/message'], async () => {
+      let from: bigint | undefined
+      for (;;) {
+        const page = await timeline.queryWithTail({
+          scope: 'branch', ...(from === undefined ? {} : { from_sequence: from }),
+          direction: 'ascending', kinds: ['input/message'], limit: 256n, offset: 0n,
+        })
+        page.events.forEach(fold)
+        const last = page.events.at(-1)
+        if (last === undefined || page.events.length < 256) return BigInt(page.through)
+        from = BigInt(last.sequence) + 1n
       }
-      from = BigInt(last.sequence) + 1n
-    }
-    held.filter(event => BigInt(event.sequence) > covered!).forEach(fold)
+    }, event => fold(event))
     ctx.provide('exampleCounter', { get: () => ({ count }) })
   },
 })
@@ -692,7 +684,7 @@ parts.
 
 | Service | Contract |
 | --- | --- |
-| `dispatcher` | `listen(name, keys, handler)` registers a live consumer on the calling part's context: the handler receives each committed event that matches the keys, in sequence order, and none twice. It delivers live facts only; a part that rebuilds reads its own history through `timeline.queryWithTail` and skips what the read covered (§[Ordered branch consumption](#ordered-branch-consumption)). A handler's throw/rejection follows the native branch failure path. `committed/local/history` read committed history. `notify/sequence/changed` expose native dispatch progress and wakeups, not an ordered event subscription. |
+| `dispatcher` | `consume(name, keys, rebuild, handler)` registers an ordered consumer on the calling part's context. It subscribes first and holds the matching facts, calls `rebuild` once — the part reads the facts it folds through `timeline.queryWithTail` and returns the cutoff that read took — then delivers the held facts above the cutoff and each later matching fact, in sequence order, and none twice. `listen(name, keys, handler)` registers a live consumer only, for a part that does not rebuild. A handler's throw/rejection follows the native branch failure path. `committed/local/history` read committed history. `notify/sequence/changed` expose native dispatch progress and wakeups, not an ordered event subscription. |
 | `treeCommands` | Session directory `list/info`, validated `input` by branch id and `create`. These are the Rust data methods, not the process `sessions` request envelopes. |
 | `branchLifecycle` | Background work waits for `activated()` and releases its resources when `closing()` resolves. Never wait for activation inside a Dispatcher callback. |
 | `timelineIdentity` | `get()` returns the original Session and branch ids. |
@@ -718,28 +710,22 @@ export const counter = definePlugin({
     const fold = (event: BranchEvent) => {
       if (event.type === 'input' && event.name === 'message') count++
     }
-    let covered: bigint | undefined
-    const held: BranchEvent[] = []
-    await dispatcher.listen('example-counter', ['input/message'], event => {
-      if (covered === undefined) held.push(event)
-      else fold(event)
-    })
-    let from: bigint | undefined
-    for (;;) {
-      const page = await timeline.queryWithTail({
-        scope: 'branch', ...(from === undefined ? {} : { from_sequence: from }),
-        direction: 'ascending', kinds: ['input/message'], limit: 256n, offset: 0n,
-      })
-      page.events.forEach(fold)
-      const last = page.events.at(-1)
-      if (last === undefined || page.events.length < 256) {
-        covered = BigInt(page.through)
-        through = covered
-        break
+    await dispatcher.consume('example-counter', ['input/message'], async () => {
+      let from: bigint | undefined
+      for (;;) {
+        const page = await timeline.queryWithTail({
+          scope: 'branch', ...(from === undefined ? {} : { from_sequence: from }),
+          direction: 'ascending', kinds: ['input/message'], limit: 256n, offset: 0n,
+        })
+        page.events.forEach(fold)
+        const last = page.events.at(-1)
+        if (last === undefined || page.events.length < 256) {
+          through = BigInt(page.through)
+          return through
+        }
+        from = BigInt(last.sequence) + 1n
       }
-      from = BigInt(last.sequence) + 1n
-    }
-    held.filter(event => BigInt(event.sequence) > covered!).forEach(fold)
+    }, event => fold(event))
     ctx.provide('exampleCounter', { get: () => ({ count, through }) })
   },
 })
@@ -748,21 +734,22 @@ export const counter = definePlugin({
 Its plugin registers it for `branch` and lists `"exampleCounter": "branch"` in its row's
 `instanceNames` ([One row per plugin](#one-row-per-plugin)).
 
-The part subscribes first and holds the events that match the keys, then reads this branch's facts
-through its published head with the facts written and not yet published, a page at a time, and
-folds them itself. The reply's `through` is the cutoff of that read, and it is the last page's
-cutoff when the read pages; an earlier cutoff would re-read what lies between the two. The part
-then releases the held facts above the cutoff, and each later matching fact reaches the handler
-directly; none is folded twice. Live facts wait until the fold returns, so do what the rebuild
-leaves to do, such as ending the operations a previous generation left open, before releasing
-them. A rebuild repeats no external side effect. Publish a derived service after the fold. This
-example's state belongs to the branch part and is rebuilt on each generation.
+`consume` subscribes first and holds the events that match the keys, then calls the rebuild, which
+reads this branch's facts through its published head with the facts written and not yet published,
+a page at a time, and folds them itself. The reply's `through` is the cutoff of that read, and it is
+the last page's cutoff when the read pages; an earlier cutoff would re-read what lies between the
+two. The registration returns that cutoff as the rebuild's value, then releases the held facts
+above it, and each later matching fact reaches the handler directly; none is folded twice. Live
+facts wait until the rebuild returns, so do what the rebuild leaves to do, such as ending the
+operations a previous generation left open, before returning. A rebuild repeats no external side
+effect. Publish a derived service after `consume` resolves. This example's state belongs to the
+branch part and is rebuilt on each generation.
 
 The kind list of the read is the kinds the rebuild folds, which are not always the keys the part
-consumes: a rebuild may fold the terminals of the operations its part issues. The hand-written
-form also holds without the query: subscribe with `listen` before sampling `committed()`, rebuild
-from `local` through that fixed cutoff while the handler waits, and skip live events at or below
-it. The [real Node part](../runtime/fixtures/branch-part.ts) is written that way.
+consumes: a rebuild may fold the terminals of the operations its part issues. A part that reads
+nothing may use `listen` instead, which delivers live facts only; a read of `local` or `history`
+inside a rebuild works too, and the [real Node part](../runtime/fixtures/branch-part.ts) reads that
+way.
 
 Callbacks can run on opening facts before publication. Register long work in the part's owned
 tasks and return; do not wait for dispatch, activation or a child creation whose progress depends
@@ -807,7 +794,7 @@ so ask them through their commands, such as input through `treeCommands.input`, 
 appending their events. The branch's Timeline is closed by the branch itself, so `timeline` has no
 `close`.
 
-Extension events behave like any other branch event. `dispatcher.listen` with a key such as
+Extension events behave like any other branch event. `dispatcher.consume` with a key such as
 `myplugin/*` delivers them in order, `local` and `history` return them, they are persisted and
 restored with the branch, and a restored generation rebuilds from them. They never reach the
 model's context; write an adopted input or return a tool result when the model needs content
@@ -837,27 +824,20 @@ export const checkpoints = definePlugin({
         await timeline.append({ type: 'myplugin', name: 'checkpoint', data: { step: steps + 1 } })
       }
     }
-    let covered: bigint | undefined
-    const held: BranchEvent[] = []
-    await dispatcher.listen('example-checkpoints', ['myplugin/*', 'turn/end'], async event => {
-      if (covered === undefined) held.push(event)
-      else await release(event)
-    })
-    let from: bigint | undefined
-    for (;;) {
-      const page = await timeline.queryWithTail({
-        scope: 'branch', ...(from === undefined ? {} : { from_sequence: from }),
-        direction: 'ascending', kinds: ['myplugin/*'], limit: 256n, offset: 0n,
-      })
-      page.events.forEach(fold)
-      const last = page.events.at(-1)
-      if (last === undefined || page.events.length < 256) {
-        covered = BigInt(page.through)
-        break
+    // Rebuild from your own events in history; act only on live events.
+    await dispatcher.consume('example-checkpoints', ['myplugin/*', 'turn/end'], async () => {
+      let from: bigint | undefined
+      for (;;) {
+        const page = await timeline.queryWithTail({
+          scope: 'branch', ...(from === undefined ? {} : { from_sequence: from }),
+          direction: 'ascending', kinds: ['myplugin/*'], limit: 256n, offset: 0n,
+        })
+        page.events.forEach(fold)
+        const last = page.events.at(-1)
+        if (last === undefined || page.events.length < 256) return BigInt(page.through)
+        from = BigInt(last.sequence) + 1n
       }
-      from = BigInt(last.sequence) + 1n
-    }
-    for (const event of held) if (BigInt(event.sequence) > covered) await release(event)
+    }, event => release(event))
   },
 })
 ```

@@ -97,7 +97,7 @@ nothing; each write follows a live event, except one heal of a load that writes
 a roster a crash left missing. A
 restart can lose an idle notice: the notice is decided on live events only
 (design [§6.2](../../../design/timeline-branches.md#62-known-costs)). It
-registers with `Dispatcher::follow` and writes from one owned task, which
+registers with `Dispatcher::consume` and writes from one owned task, which
 rechecks the fold before writing.
 
 ### Tests
