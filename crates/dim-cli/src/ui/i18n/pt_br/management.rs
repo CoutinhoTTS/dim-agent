@@ -41,16 +41,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Ctrl+T run" => "Ctrl+T executar",
         "Ctrl+X remove" => "Ctrl+X remover",
         "Tab inspect" => "Tab inspecionar",
-        "Remove {name}? Enter confirm · Esc cancel" => {
-            "Remover {name}? Enter confirmar · Esc cancelar"
-        }
+        "Remove {name}?" => "Remover {name}?",
         "↑↓ scroll · Esc back" => "↑↓ rolar · Esc voltar",
         "Added." => "Adicionado.",
         "Removed {name}." => "{name} removido.",
         "unavailable" => "indisponível",
-        "Reset {name}? Enter confirm · Esc cancel" => {
-            "Restaurar {name}? Enter confirmar · Esc cancelar"
-        }
+        "Reset {name}?" => "Restaurar {name}?",
+        "Enter confirm" => "Enter confirmar",
+        "Esc cancel" => "Esc cancelar",
         "Reset {name} to its catalog entry." => "{name} restaurado para a entrada do catálogo.",
         "Ran {name}." => "{name} executado.",
         "The user document changed since it was read; nothing was written." => {

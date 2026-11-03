@@ -37,8 +37,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "follow, talk to and end this session's lines" => {
             "このセッションのラインを追い、話しかけ、終了"
         }
-        "End line" => "ラインを終了",
-        "y/N" => "y/N",
+        "End line {id}?" => "{id} のラインを終了しますか？",
+        "y end it" => "y 終了",
+        "n cancel" => "n キャンセル",
         "main is the session itself; a line ends, main does not" => {
             "main はセッション自体です。ラインは終了できますが main は終了しません"
         }
@@ -280,6 +281,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "run" => "実行",
         "view" => "表示",
         "model" => "モデル",
+        "extensions" => "拡張",
         "app" => "アプリ",
         "skill" => "スキル",
         // composer/commands.rs: descriptions
@@ -371,7 +373,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
 
         // sessions_panel.rs
         "Sessions" => "セッション",
-        "Enter open · Ctrl+R refresh · Esc close" => "Enter 開く · Ctrl+R 更新 · Esc 閉じる",
+        "Sessions · This workspace" => "セッション · このワークスペース",
+        "Sessions · This repository" => "セッション · このリポジトリ",
+        "Sessions · All workspaces" => "セッション · すべてのワークスペース",
+        "No saved sessions in this workspace. Ctrl+S shows more." => {
+            "このワークスペースに保存済みセッションはありません。Ctrl+S で他のワークスペースを表示します。"
+        }
+        "Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close" => {
+            "Enter 開く · Ctrl+S 範囲 · Ctrl+R 更新 · Esc 閉じる"
+        }
         "Loading sessions..." => "セッションを読込中…",
         "No saved sessions yet." => "保存済みセッションなし。",
         "No matching sessions." => "一致するセッションなし。",

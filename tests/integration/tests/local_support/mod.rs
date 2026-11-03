@@ -783,4 +783,12 @@ impl TimelineStore for HoldingStore {
     ) -> BoxFuture<'a, Result<Option<TimelineTrace>>> {
         self.memory.trace(key, sequence)
     }
+    fn query<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        query: &'a dim_agent_runtime::TimelineQuery,
+        through: u64,
+    ) -> BoxFuture<'a, Result<dim_agent_runtime::TimelineQueryPage>> {
+        self.memory.query(key, query, through)
+    }
 }

@@ -34,8 +34,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "更早的 {count} 条消息 · Enter 或点击加载"
         }
         "follow, talk to and end this session's lines" => "查看、对话并结束本会话的线",
-        "End line" => "结束线",
-        "y/N" => "y/N",
+        "End line {id}?" => "结束线 {id}？",
+        "y end it" => "y 结束",
+        "n cancel" => "n 取消",
         "main is the session itself; a line ends, main does not" => {
             "main 就是会话本身；线可以结束，main 不能"
         }
@@ -254,6 +255,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "run" => "运行",
         "view" => "视图",
         "model" => "模型",
+        "extensions" => "扩展",
         "app" => "应用",
         "skill" => "技能",
         "start a new session" => "开始新会话",
@@ -332,7 +334,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Could not save the theme: {error}" => "无法保存主题：{error}",
 
         "Sessions" => "会话",
-        "Enter open · Ctrl+R refresh · Esc close" => "Enter 打开 · Ctrl+R 刷新 · Esc 关闭",
+        "Sessions · This workspace" => "会话 · 当前工作区",
+        "Sessions · This repository" => "会话 · 当前仓库",
+        "Sessions · All workspaces" => "会话 · 所有工作区",
+        "No saved sessions in this workspace. Ctrl+S shows more." => {
+            "当前工作区没有已保存的会话。Ctrl+S 查看更多。"
+        }
+        "Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close" => {
+            "Enter 打开 · Ctrl+S 切换范围 · Ctrl+R 刷新 · Esc 关闭"
+        }
         "Loading sessions..." => "正在加载会话...",
         "No saved sessions yet." => "暂无已保存的会话。",
         "No matching sessions." => "无匹配的会话。",

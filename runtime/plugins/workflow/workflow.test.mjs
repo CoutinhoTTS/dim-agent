@@ -21,19 +21,30 @@ async function until(work) {
 }
 
 async function fixture(t, options = {}) {
+  const seed = { stored: options.stored ?? null, version: null }
   const state = {
     document: { definitions: {}, projectEnabled: {}, max_concurrent_runs: 4, max_concurrent_stages: 4 },
-    revision: '0', stored: null, launches: [], inputs: [], histories: [], stops: [], deletes: [], files: new Map(),
+    revision: '0', launches: [], inputs: [], histories: [], stops: [], deletes: [], files: new Map(),
     sessions: new Map(), receipts: new Map(), behavior: () => 'complete', response: prompt => prompt,
     ...options,
   }
+  delete state.stored
+  let storeReads = 0
+  let signalReads = 0
+  // A test's own write of the store moves the change signal, as another owner
+  // or a direct file write would.
+  Object.defineProperty(state, 'stored', {
+    get: () => seed.stored,
+    set: text => { seed.stored = text; seed.version = randomUUID() },
+  })
+  Object.defineProperty(state, 'storeReads', { get: () => storeReads })
+  Object.defineProperty(state, 'signalReads', { get: () => signalReads })
   const event = (sessionId, type, name, data) => {
     const events = state.sessions.get(sessionId)
     const value = { id: randomUUID(), sequence: events.length + 1, create_at: Date.now(), type, name, data }
     events.push(value)
     return value
   }
-  let fileTail = Promise.resolve()
   let activeScopes = 0
   const services = {
     settings: {
@@ -51,27 +62,34 @@ async function fixture(t, options = {}) {
     pluginFiles: { open: async () => {
       activeScopes++
       let closed = false
+      const tails = new Map()
       return {
         async withLock(path, work) {
-          assert.equal(path, 'workflow/runs.json')
-          const before = fileTail
+          assert.ok(['workflow/runs.json', 'workflow/runs.version'].includes(path), path)
+          const before = tails.get(path) ?? Promise.resolve()
           const done = Promise.withResolvers()
-          fileTail = done.promise
+          tails.set(path, done.promise)
           await before
           try {
             assert.equal(closed, false, 'run operation outlived its file scope')
             return ok(await work({
-              read: async () => ok(state.stored),
+              read: async () => {
+                if (path === 'workflow/runs.json') { storeReads++; return ok(seed.stored) }
+                signalReads++
+                return ok(seed.version)
+              },
               replace: async text => {
-                await state.beforeReplace?.(text)
-                state.stored = text
+                if (path === 'workflow/runs.json') {
+                  await state.beforeReplace?.(text)
+                  seed.stored = text
+                } else seed.version = text
                 return ok(null)
               },
             }))
           } finally { done.resolve() }
         },
         quiesce() { return null },
-        async close() { await fileTail; closed = true; activeScopes--; return null },
+        async close() { await Promise.all([...tails.values()]); closed = true; activeScopes--; return null },
       }
     } },
     workflowFiles: {
@@ -1158,6 +1176,28 @@ test('reload retries deletion after it succeeded but removing the ownership reco
   await f.reload()
   await until(() => JSON.parse(f.state.stored).runs.length === 100)
   assert.deepEqual(f.state.deletes, ['owned-0', 'owned-0'])
+})
+
+test('a running stage polls the change signal instead of reading the run store', async t => {
+  const seed = await fixture(t)
+  await seed.method('save', { source: 'user', document: definition('history', [{ stage: { id: 'one', prompt: 'done' } }]) })
+  const first = (await seed.method('start', { name: 'history', cwd: '/workspace' })).value.run_id
+  await seed.settled(first)
+  const completed = JSON.parse(seed.state.stored).runs[0]
+  const runs = Array.from({ length: 100 }, (_, index) => ({ ...structuredClone(completed),
+    run_id: `past-${index}`, created_at: '2026-01-01T00:00:00.000Z',
+    ended_at: `2026-01-01T00:00:00.${String(index).padStart(3, '0')}Z`,
+  }))
+  const f = await fixture(t, { stored: JSON.stringify({ version: 2, runs }), behavior: () => 'held' })
+  await f.method('save', { source: 'user', document: definition('watch', [{ stage: { id: 'one', prompt: 'held' } }]) })
+  const id = (await f.method('start', { name: 'watch', cwd: '/workspace' })).value.run_id
+  await until(async () => (await f.method('status', { run_id: id })).value.stages[0].state === 'running')
+  const reads = f.state.storeReads
+  const signals = f.state.signalReads
+  await delay(2200)
+  assert.ok(f.state.signalReads > signals, 'the running stage polls the change signal')
+  assert.equal(f.state.storeReads, reads, 'an unchanged store is not read again')
+  assert.equal((await f.method('stop', { run_id: id })).value.state, 'stopped')
 })
 
 test('a report guidance with a line break is refused when the plugin loads', async t => {

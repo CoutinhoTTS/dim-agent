@@ -45,8 +45,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "follow, talk to and end this session's lines" => {
             "acompanhar, conversar e encerrar as linhas desta sessão"
         }
-        "End line" => "Encerrar linha",
-        "y/N" => "y/N",
+        "End line {id}?" => "Encerrar a linha {id}?",
+        "y end it" => "y encerrar",
+        "n cancel" => "n cancelar",
         "main is the session itself; a line ends, main does not" => {
             "main é a própria sessão; uma linha encerra, main não"
         }
@@ -304,6 +305,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "run" => "execução",
         "view" => "exibição",
         "model" => "modelo",
+        "extensions" => "extensões",
         "app" => "app",
         "skill" => "skill",
         // composer/commands.rs: descriptions
@@ -399,8 +401,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
 
         // sessions_panel.rs
         "Sessions" => "Sessões",
-        "Enter open · Ctrl+R refresh · Esc close" => {
-            "Enter abrir · Ctrl+R atualizar · Esc fechar"
+        "Sessions · This workspace" => "Sessões · Este espaço de trabalho",
+        "Sessions · This repository" => "Sessões · Este repositório",
+        "Sessions · All workspaces" => "Sessões · Todos os espaços de trabalho",
+        "No saved sessions in this workspace. Ctrl+S shows more." => {
+            "Sem sessões salvas neste espaço de trabalho. Ctrl+S mostra mais."
+        }
+        "Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close" => {
+            "Enter abrir · Ctrl+S escopo · Ctrl+R atualizar · Esc fechar"
         }
         "Loading sessions..." => "Carregando sessões…",
         "No saved sessions yet." => "Sem sessões salvas.",

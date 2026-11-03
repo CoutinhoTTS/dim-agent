@@ -34,9 +34,22 @@ written to the terminal remains append-only; fullscreen redraws retained history
 
 ## Command menu
 
-In both scrollback and fullscreen TUI, group commands by category and sort
-categories and command names alphabetically by their canonical English identifiers.
-Search relevance takes priority; equally ranked matches use the same category/name order.
+In both scrollback and fullscreen TUI, list commands in a fixed task order:
+Session, model and permissions, extensions and automation, view, then app.
+Within each category use the following order, not alphabetical or recent-use order:
+
+| Category | Commands in order |
+| --- | --- |
+| `session` | `/new`, `/resume`, `/timeline`, `/goal`, `/tasks`, `/lines`, `/branch`, `/fork`, `/compact`, `/usage`, `/rename`, `/web` |
+| `model` | `/models`, `/agent`, `/effort`, `/fast`, `/permissions`, `/connect`, `/login` |
+| `extensions` | `/skills`, `/mcp`, `/plugins`, `/hooks`, `/scheduled`, `/workflow`, `/workflow:save`, `/reload-skills`, `/runtime` |
+| `view` | `/theme`, `/language`, `/tools`, `/tui` |
+| `app` | `/settings`, `/keys`, `/exit` |
+
+`/fast` is listed only when the model advertises service tiers.
+Search relevance takes priority; equally ranked matches keep this task order.
+The order is independent of the interface language. Opening `/` selects `/new`;
+`/exit` is last in the unfiltered command list.
 Exit requires its exact name or alias before dispatch: choosing an
 incomplete match fills the command name and keeps the composer open. Exact typed
 commands, including hidden commands, retain their own dispatch behavior.
@@ -49,7 +62,8 @@ picking an earlier message and scrolling to the top or bottom are also omitted;
 `Tab`, `Home` and `End` retain their bindings.
 
 The menu fits the available terminal columns and rows in both modes. Command
-names take priority over descriptions and shortcut labels; a shortcut that
+names take priority over category labels, descriptions and shortcut labels;
+category labels shorten when needed to preserve command names. A shortcut that
 would crowd out its command name is omitted from the row, without changing
 the binding. On short screens, fewer commands are shown and the window follows
 the selection. Scrollback keeps the command draft visible above the menu and
@@ -64,14 +78,43 @@ and the palette's query padding before overlapping either input. The draft
 editor scrolls within the remaining rows and keeps its caret visible without
 discarding text. Otherwise the usual history reservation is retained.
 
+A list panel never draws more rows than it is given; given fewer than two, it
+draws nothing, since the two borders alone would take the budget. The list fills
+the rows the other parts leave. While the list cannot draw its first three
+entries, the notes give up lines from the end, the blank row before them going
+with the last line. When not even one list row fits beside the other parts, the
+panel gives up the rest of the notes, the filter's padding (the row below the
+query first), its footer lines (the first first), the hint's rows above the
+border, the query row and the list's last row, in that order. The selected entry
+and the hint's closing key stay the longest. A hint too wide for the bottom
+border drops whole parts and keeps its first and closing keys. A confirmation is
+shortened by its own rule: the full question and its two keys first, then the
+question cut with `…`, then the two keys, then the confirm key alone, and last
+that key cut with `…`; the confirm key stays the longest.
+
+```text
+Natural height                                      Short budget, 5 rows
+╭─ Sessions ─────────────────────────────────────╮  ╭─ Sessions ─────────────────────────────────────╮
+│                                                │  │                                                │
+│ >                                              │  │ >                                              │
+│                                                │  │ › [Chat] review the parser                     │
+│   [Chat] review the parser                     │  ╰────── Enter open · Ctrl+R refresh · Esc close ─╯
+│   [Chat] fix the flaky test                    │
+│   [Chat] release notes                         │
+╰────── Enter open · Ctrl+R refresh · Esc close ─╯
+```
+
 ```text
 Commands
-  app     /exit        exit
-  app     /keys        show the key bindings
-  model   /permissions   file access, tool approval, process isolation and command rules
-  session /rename      rename this session
+  session /new         start a new session
+  session /resume      resume a previous session
+  session /timeline    jump to a message of the shown line
+  session /goal        follow or change the shown line's goal
+  session /tasks       view command output or interrupt a member
+  session /lines       follow, talk to and end this session's lines
 
-/ + Enter          -> /exit (completion only)
+/ + Enter          -> start a new session
+/ex + Enter        -> /exit (completion only)
 /exit + Enter      -> exit
 /permissions + Enter -> permission controls
 ```
@@ -80,10 +123,10 @@ Commands
 Fullscreen, 8 rows             Scrollback, 8 rows
 +- Command Palette -------+
 | >                       |   +- input -----------------+
-| app /exit               |   | > /                     |
+| session /new            |   | > /                     |
 +-------------------------+   +-------------------------+
                               +-------------------------+
-+- input -----------------+   | app /exit               |
++- input -----------------+   | session /new            |
 |                         |   +-------------------------+
 +-------------------------+   AGENT
 ```
@@ -408,10 +451,10 @@ daemon already reports it.
 
 ### Menu entry
 
-`/runtime` is a slash command in category `app`, so the menu lists it between `/keys` and
-`/settings`; it needs no Session (`Needs::Nothing`) and takes no inline argument, because the panel
-carries the actions. The typed subforms below are accepted when typed, not offered as menu
-completions.
+`/runtime` is a slash command in category `extensions`; its position follows the
+[command menu order](#command-menu). It needs no Session (`Needs::Nothing`) and takes no inline
+argument, because the panel carries the actions. The typed subforms below are accepted when typed,
+not offered as menu completions.
 
 ### Keys
 
@@ -1166,6 +1209,7 @@ whole rule as one quoted argument, so global options stay unambiguous.
 | `dimcode session delete SESSION` | Permanently delete the Session and everything the store keeps for it; there is no prompt. |
 | `dimcode session cleanup (--older-than DURATION\|--keep N) [--yes]` | Show the Sessions one selector matches, then delete them after confirmation. |
 | `/rename TITLE` or `/rename --clear` | Set, or clear, the shown Session's manual title; the text is a command and never becomes model input. |
+| `/resume` | Open the Sessions picker on this workspace ([the `/resume` picker](#the-resume-picker)); `Ctrl+S` cycles this workspace, this repository when offered, and every workspace. |
 | `/export markdown PATH` or `/export json PATH` | Export the current main branch to a file while the interactive client is idle. |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | Write the Session's whole Timeline as versioned JSONL without a daemon ([Timeline export](appserver/timeline-export.md)); write to stdout when no output path is supplied. |
 | `dimcode daemon vacuum [--database PATH]` | Rewrite an offline native store with SQLite `VACUUM` to reclaim the pages deleted Sessions left, and print its size before and after ([storage format](appserver/native-storage-format.md#sqlite-运行参数与空间回收)); it fails while a daemon owns the database and never creates or upgrades one. |
@@ -1302,6 +1346,69 @@ to the prompt without submitting input. `/exit` takes no arguments. Only these
 exact command names are intercepted; other text follows the normal input path.
 Subcommands do not create a plugin command registry.
 
+### The `/resume` picker
+
+`/resume` opens on the workspace `dimcode` was launched in: the directory
+`--cwd` names, canonicalized, which is also the workspace `session.create`
+records for a Session it creates there. The list holds the stored Sessions of
+exactly that workspace, newest first, and every open starts there. `Ctrl+S`
+cycles this workspace, this repository and all workspaces, and the title names
+the scope shown. The filter keeps the composer's `Ctrl+A` and `Ctrl+W`, and
+`Tab` moves the selection down.
+
+```text
+╭─ Sessions · This workspace ──────────────────────────────────────────────────╮
+│                                                                              │
+│ >                                                                            │
+│                                                                              │
+│   Fix the failing test       3h ago                                          │
+│   Update the catalog design  1d ago                                          │
+╰───────────────────── Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close ─╯
+```
+
+```text
+╭─ Sessions · This repository ─────────────────────────────────────────────────╮
+│                                                                              │
+│ >                                                                            │
+│                                                                              │
+│   Fix the failing test       3h ago · ~/src/app/web                          │
+│   Update the catalog design  1d ago · ~/src/app-fix/web                      │
+╰───────────────────── Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close ─╯
+```
+
+```text
+╭─ Sessions · All workspaces ──────────────────────────────────────────────────╮
+│                                                                              │
+│ >                                                                            │
+│                                                                              │
+│   Fix the failing test       3h ago · ~/src/app/web                          │
+│   Update the catalog design  1d ago · ~/src/other                            │
+╰───────────────────── Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close ─╯
+```
+
+- A scope change works like a new query: it cancels the pending read, drops the
+  cursor and reads the first page again; the query stays and applies within the
+  new scope.
+- This repository holds the launch workspace and the same relative directory in
+  every worktree of its git repository, read with `git rev-parse` and
+  `git worktree list --porcelain` in the background when the picker opens. The
+  first page does not wait for git, and both reads share a two-second bound; a
+  git that fails or does not answer leaves the scope out, without a notice. It
+  is offered only when the set holds more than one entry and the daemon reads a
+  set of workspaces (`session.catalog.workspaces`) or lists through
+  `session.summaries`. A bare worktree adds nothing.
+- Outside this workspace's scope every row leads with its update time and then
+  names its workspace, with the home directory written `~`. The label takes at
+  most half the row, and the time comes first, so a long path is what gets cut.
+- With no Sessions and no query, this workspace's scope says `No saved sessions
+  in this workspace. Ctrl+S shows more.`; the other empty and no-match lines
+  stay unchanged.
+- A daemon before `session.catalog` is listed through `session.summaries`, and
+  the client applies the scope to the rows it receives with the same exact
+  match.
+- `dimcode --resume ID` resumes a Session of any workspace, and cleanup selects
+  across every workspace.
+
 ### Session titles
 
 The manual title is the Session's own state: `session.summaries`
@@ -1369,7 +1476,8 @@ selects with one of two selectors and reads both from the `updatedAt` of
 | `--older-than DURATION` | Every Session whose `updatedAt` is at least `DURATION` ago. `DURATION` is a count and a unit `d`, `h` or `m`, such as `30d`. |
 | `--keep N` | The N most recently active Sessions stay; every other Session is selected. |
 
-Cleanup selects only the Sessions `/resume` lists by default
+Cleanup selects across every workspace, not only the one `/resume` opens on: the
+classes it selects are the ones `/resume` lists by default
 ([classification](appserver/session-classification.md#35-catalog-visibility)): origin
 `client` or `unknown`. An `internal` Session is never selected: a member goes with
 its leader's delete and a launched Session belongs to its plugin. An `acp` Session is

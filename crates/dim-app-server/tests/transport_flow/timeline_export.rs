@@ -209,7 +209,7 @@ fn without_switch_columns(database: &Path) {
         .prepare(
             "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='timeline_events' \
              AND name NOT IN ('timeline_events_render', 'timeline_events_state', \
-             'timeline_events_positions') AND sql IS NOT NULL",
+             'timeline_events_context', 'timeline_events_positions') AND sql IS NOT NULL",
         )
         .unwrap()
         .query_map([], |row| row.get(0))
@@ -331,7 +331,7 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
 
         assert_eq!(
             live[0],
-            json!({"kind":"header","export":1,"session_id":session,"store_format":31,"sensitive":true})
+            json!({"kind":"header","export":1,"session_id":session,"store_format":32,"sensitive":true})
         );
         let branches: Vec<_> = live.iter().filter(|line| line["kind"] == "branch").collect();
         assert_eq!(branches.len(), 2);
@@ -448,8 +448,8 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
 
         for (name, sql) in [
             ("newer.sqlite", "DROP TABLE agent_store_format;
-                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 32));
-                INSERT INTO agent_store_format VALUES (32);"),
+                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 33));
+                INSERT INTO agent_store_format VALUES (33);"),
             ("changed.sqlite", "CREATE TABLE extra (id TEXT)"),
         ] {
             let path = directory.join("copies").join(name);

@@ -6,7 +6,7 @@ use crate::{
     host::*,
 };
 use dim_agent_runtime::{
-    ContextHistory, PolicyFacts, PolicyOrder, PolicyOrderEvent, PolicyWindow, Timeline,
+    ContextHistory, PolicyFacts, PolicyOrder, PolicyOrderEvent, PolicyTurns, PolicyWindow, Timeline,
 };
 use dim_agent_types::*;
 use std::{
@@ -158,33 +158,48 @@ impl PolicyContext {
         crate::history::projected_message_refs(self.compaction(), history)
     }
 
-    pub fn retained_entry(&self, history: &[HistoryEntry], cut: &str) -> Result<usize, String> {
+    /// The index of the first entry at or after a chain position.
+    pub fn position_entry(&self, history: &[HistoryEntry], position: &TimelinePosition) -> usize {
+        let rank = |branch: &str| self.branches.iter().position(|name| name == branch);
+        let at = (rank(&position.branch_id), position.sequence);
+        history
+            .iter()
+            .position(|entry| (rank(&entry.position.branch_id), entry.position.sequence) >= at)
+            .unwrap_or(history.len())
+    }
+
+    /// The index of the first entry a cut keeps. `order` is the read the cut
+    /// was chosen from; the context's own order answers cuts it carries.
+    pub fn retained_entry(
+        &self,
+        history: &[HistoryEntry],
+        cut: &str,
+        order: Option<&PolicyOrder>,
+    ) -> Result<usize, String> {
         if let Some(index) = history.iter().position(|entry| entry.event_id == cut) {
             return Ok(index);
         }
-        let rank = |branch: &str| self.branches.iter().position(|name| name == branch);
         if let Some(position) = &self.compaction_cut
             && self.compaction.as_ref().is_some_and(|data| {
                 matches!(&data.outcome,
                     ContextCompactionResult::Completed { retain_from, .. } if retain_from == cut)
             })
         {
-            let at = (rank(&position.branch_id), position.sequence);
-            return Ok(history
-                .iter()
-                .position(|entry| (rank(&entry.position.branch_id), entry.position.sequence) >= at)
-                .unwrap_or(history.len()));
+            return Ok(self.position_entry(history, position));
         }
         let event = self
             .order
             .iter()
+            .chain(order.into_iter().flat_map(|order| order.events.iter()))
             .find(|event| event.id == cut)
             .ok_or_else(|| format!("Compaction cut {cut} is outside the policy order"))?;
-        let at = (rank(&event.branch_id), event.sequence);
-        Ok(history
-            .iter()
-            .position(|entry| (rank(&entry.position.branch_id), entry.position.sequence) >= at)
-            .unwrap_or(history.len()))
+        Ok(self.position_entry(
+            history,
+            &TimelinePosition {
+                branch_id: event.branch_id.clone(),
+                sequence: event.sequence,
+            },
+        ))
     }
 
     pub fn full(&self) -> Option<&ContextHistory> {
@@ -393,7 +408,9 @@ impl ContextPolicy {
 
     /// Projects `request` under the compaction in effect: the context's own,
     /// or a later one of the same source that a retry reuses (`reusable`).
-    pub fn view(
+    /// A reused cut the context's order does not carry is placed by one
+    /// by-id read: the order holds the anchors, not every turn start.
+    pub async fn view(
         &self,
         request: Arc<ModelRequest>,
         context: PolicyContext,
@@ -402,15 +419,31 @@ impl ContextPolicy {
         reusable: Vec<Arc<AgentEvent>>,
     ) -> Result<View, HostError> {
         let prefix_len = context.messages_len(&history);
-        let reused = reusable.iter().rev().find_map(|event| match &event.kind {
-            EventKind::ContextCompaction(data) => checkpoint(data).and_then(|checkpoint| {
-                context
-                    .retained_entry(&history, &checkpoint.retain_from)
-                    .ok()
-                    .map(|kept| (checkpoint, kept))
-            }),
-            _ => None,
-        });
+        let mut reused = None;
+        for event in reusable.iter().rev() {
+            let EventKind::ContextCompaction(data) = &event.kind else {
+                continue;
+            };
+            let Some(checkpoint) = checkpoint(data) else {
+                continue;
+            };
+            let kept = match context.retained_entry(&history, &checkpoint.retain_from, None) {
+                Ok(kept) => kept,
+                Err(_) => {
+                    let Some(position) = self
+                        .timeline
+                        .event_position(&checkpoint.retain_from)
+                        .await
+                        .map_err(|error| HostError::failed(error.to_string()))?
+                    else {
+                        continue;
+                    };
+                    context.position_entry(&history, &position)
+                }
+            };
+            reused = Some((checkpoint, kept));
+            break;
+        }
         let (history, checkpoint, prepared) = match reused {
             Some((checkpoint, kept)) => {
                 let history = history[kept..].to_vec();
@@ -461,6 +494,25 @@ impl ContextPolicy {
         Ok(request)
     }
 
+    /// The event order a compaction step chooses its cuts from: the order
+    /// reads only the turn starts after the retention rule's window.
+    async fn cut_order(
+        &self,
+        view: &View,
+        model: &dyn ContextModel,
+        through: u64,
+    ) -> Result<PolicyOrder, HostError> {
+        let window = cut_window(&view.history, model);
+        let turns = match &window {
+            Some(at) => PolicyTurns::After(at),
+            None => PolicyTurns::All,
+        };
+        self.timeline
+            .policy_order(through, turns)
+            .await
+            .map_err(|error| HostError::failed(error.to_string()))
+    }
+
     /// The prepared request and the trigger's estimate of it.
     #[allow(clippy::too_many_arguments)]
     async fn prepare_estimated(
@@ -488,7 +540,9 @@ impl ContextPolicy {
                 _ => false,
             })
             .collect();
-        let view = self.view(request, context, history, facts, reusable)?;
+        let view = self
+            .view(request, context, history, facts, reusable)
+            .await?;
         let model = self
             .resolver
             .resolve(view.prepared.clone(), cancel.clone())
@@ -511,11 +565,6 @@ impl ContextPolicy {
                 .into(),
             )
             .map_err(|e| HostError::failed(e.to_string()))?;
-        let policy_order = self
-            .timeline
-            .policy_order(source.through)
-            .await
-            .map_err(|error| HostError::failed(error.to_string()))?;
         let provider_budget = source.recovery.clone().or_else(|| {
             (estimate.input > input_budget(model.as_ref())).then(|| ProviderOutputBudgetFacts {
                 input_tokens: estimate.input,
@@ -526,11 +575,18 @@ impl ContextPolicy {
             })
         });
         let recovery = provider_budget.is_some();
-        if !recovery
-            && (estimate.input < model.threshold_tokens()
-                || !regrown(&view, &policy_order, model.as_ref()))
-        {
+        if !recovery && estimate.input < model.threshold_tokens() {
             return Ok((view.prepared, estimate.input));
+        }
+        if !recovery {
+            let policy_order = self
+                .timeline
+                .policy_order(source.through, PolicyTurns::Anchors)
+                .await
+                .map_err(|error| HostError::failed(error.to_string()))?;
+            if !regrown(&view, &policy_order, model.as_ref()) {
+                return Ok((view.prepared, estimate.input));
+            }
         }
         let step = CompactionStep {
             turn_id: Some(source.turn_id.clone()),
@@ -596,15 +652,13 @@ impl ContextPolicy {
     ) -> Result<Compacted, HostError> {
         let started = Instant::now();
         let turn_id = step.turn_id.as_deref();
-        let carried = turn_id.and_then(|turn| carried_pins(view, turn));
+        let policy_order = self
+            .cut_order(view, model.as_ref(), view.facts.through)
+            .await?;
+        let carried = turn_id.and_then(|turn| carried_pins(view, turn, &policy_order));
         let turn = turn_id.map(|turn| (turn, carried.as_ref()));
         let manual = step.trigger == CompactionTrigger::Manual;
-        let rule = Retention::new(view, model.as_ref(), turn, manual);
-        let policy_order = self
-            .timeline
-            .policy_order(view.facts.through)
-            .await
-            .map_err(|error| HostError::failed(error.to_string()))?;
+        let rule = Retention::new(view, model.as_ref(), turn, manual, &policy_order);
         let mut cuts = legal_cuts(&policy_order, &view.history);
         let limit = rule.limit(
             &view.history,
@@ -736,7 +790,9 @@ impl ContextPolicy {
                     None,
                 ),
             };
-            return self.commit(step, view, model, start, outcome).await;
+            return self
+                .commit(step, view, model, &policy_order, start, outcome)
+                .await;
         }
         let first = self
             .pass(
@@ -862,7 +918,8 @@ impl ContextPolicy {
             },
             StepOutcome::Cancelled { reason } => ContextCompactionResult::Cancelled { reason },
         };
-        self.commit(step, view, model, start, outcome).await
+        self.commit(step, view, model, &policy_order, start, outcome)
+            .await
     }
 
     /// Whether the entries a compaction at `cut` removes — less the pinned
@@ -906,6 +963,7 @@ impl ContextPolicy {
         step: CompactionStep,
         view: &View,
         model: Arc<dyn ContextModel>,
+        order: &PolicyOrder,
         start: Arc<AgentEvent>,
         outcome: ContextCompactionResult,
     ) -> Result<Compacted, HostError> {
@@ -940,7 +998,7 @@ impl ContextPolicy {
         };
         let request = view
             .context
-            .retained_entry(&view.history, retain_from)
+            .retained_entry(&view.history, retain_from, Some(order))
             .map_err(HostError::failed)
             .and_then(|kept| {
                 let (request, tokens) =
@@ -1273,6 +1331,7 @@ impl CarriedPins {
         replacement: &[Message],
         parts: Option<&ReplacementParts>,
         ids: Option<&[String]>,
+        order: &PolicyOrder,
     ) -> Self {
         let pinned = parts.map_or(&[][..], |parts| {
             let from = ((parts.strategy + parts.digest) as usize).min(replacement.len());
@@ -1285,6 +1344,13 @@ impl CarriedPins {
             .iter()
             .find(|entry| entry.event_id == retain_from)
             .map(|entry| entry.position.sequence)
+            .or_else(|| {
+                order
+                    .events
+                    .iter()
+                    .find(|event| event.id == retain_from)
+                    .map(|event| event.sequence)
+            })
             .or_else(|| view.context.sequence(retain_from))
             .unwrap_or(0);
         Self {
@@ -1361,23 +1427,22 @@ fn digest_entries(
             }
             None => (Vec::new(), false),
         };
-        let cut_index = view
-            .context
-            .order
-            .iter()
-            .position(|event| event.id == window.cut);
-        for event in &window.tool_results {
-            let after_cut = cut_index.map_or(event.sequence > window.cut_sequence, |cut| {
-                view.context
-                    .order
-                    .iter()
-                    .position(|ordered| ordered.id == event.id)
-                    .is_none_or(|index| index >= cut)
+        // The window places the cut and every tool result by chain position: it
+        // merges ancestor and current-branch results, so raw sequences do not
+        // order them. A result at or after the cut is not part of it.
+        let rank = |branch: &str| view.context.branches.iter().position(|name| name == branch);
+        let cut = window
+            .cut_position
+            .as_ref()
+            .map(|cut| (rank(&cut.branch_id), cut.sequence));
+        for result in &window.tool_results {
+            let after_cut = cut.is_none_or(|cut| {
+                (rank(&result.position.branch_id), result.position.sequence) >= cut
             });
             if after_cut {
                 continue;
             }
-            let EventKind::ToolResult(data) = &event.kind else {
+            let EventKind::ToolResult(data) = &result.event.kind else {
                 continue;
             };
             for result in &data.results {
@@ -1459,7 +1524,7 @@ fn digest_key(effect: &ToolEffect) -> (u8, &str) {
 /// the turn still running; otherwise the turn's pins start at its own
 /// `turn/start` (ContextCompaction §5.9). A snapshot is only a cache, so
 /// this lookup does not depend on one.
-fn carried_pins(view: &View, turn_id: &str) -> Option<CarriedPins> {
+fn carried_pins(view: &View, turn_id: &str, order: &PolicyOrder) -> Option<CarriedPins> {
     let data = view
         .events
         .iter()
@@ -1489,6 +1554,7 @@ fn carried_pins(view: &View, turn_id: &str) -> Option<CarriedPins> {
         replacement,
         replacement_parts.as_ref(),
         pinned_inputs.as_deref(),
+        order,
     ))
 }
 
@@ -1729,6 +1795,32 @@ fn input_budget(model: &dyn ContextModel) -> f64 {
     (model.context_window() - model.output_tokens()).max(0.)
 }
 
+/// The tokens `history[index..]` counts for every index.
+fn tail_tokens(history: &[HistoryEntry], empty: f64, model: &dyn ContextModel) -> Vec<f64> {
+    let mut tail = vec![0.; history.len() + 1];
+    for (index, entry) in history.iter().enumerate().rev() {
+        let message = ModelRequest::new("", "", vec![entry.message.as_ref().clone()]);
+        tail[index] = tail[index + 1] + model.count_tokens(&message) - empty;
+    }
+    tail
+}
+
+/// The chain position after which a turn start can be the first cut the
+/// retention rule keeps: the last history entry whose retained tail still
+/// exceeds `RETAINED_SHARE` of the input budget. The rule keeps the first cut
+/// whose tail fits `min(RETAINED_SHARE × B, BOUND_SHARE × B − resident)`; a
+/// cut keeping fewer entries keeps a larger tail too, so no cut before this
+/// position can be kept (ContextCompaction §5.3).
+fn cut_window(history: &[HistoryEntry], model: &dyn ContextModel) -> Option<TimelinePosition> {
+    let empty = model.count_tokens(&ModelRequest::new("", "", Vec::new()));
+    let tail = tail_tokens(history, empty, model);
+    let budget = RETAINED_SHARE * input_budget(model);
+    let last = tail[..history.len()]
+        .iter()
+        .rposition(|tokens| *tokens > budget)?;
+    Some(history[last].position.clone())
+}
+
 /// The retention rule of one compaction step (ContextCompaction §5.3): the
 /// request frame and the running turn's pins are fixed for the step, so the
 /// rule measures them once and answers each cut with its resident parts.
@@ -1738,6 +1830,9 @@ struct Retention<'a> {
     /// The running turn and the pins it already carries (§5.9).
     turn: Option<(&'a str, Option<&'a CarriedPins>)>,
     manual: bool,
+    /// The order the step's cuts come from: its turn starts are the manual
+    /// limit's candidate.
+    order: &'a PolicyOrder,
     empty: f64,
     frame: f64,
 }
@@ -1748,6 +1843,7 @@ impl<'a> Retention<'a> {
         model: &'a dyn ContextModel,
         turn: Option<(&'a str, Option<&'a CarriedPins>)>,
         manual: bool,
+        order: &'a PolicyOrder,
     ) -> Self {
         let empty = model.count_tokens(&ModelRequest::new("", "", Vec::new()));
         // The frame is the same at every cut: the system prompt, the tool
@@ -1764,6 +1860,7 @@ impl<'a> Retention<'a> {
             model,
             turn,
             manual,
+            order,
             empty,
             frame: model.count_tokens(&frame),
         }
@@ -1815,15 +1912,7 @@ impl<'a> Retention<'a> {
         cuts: &[CompactionCut],
         replacement_size: f64,
     ) -> Option<usize> {
-        let count = |messages: Vec<Message>| {
-            self.model
-                .count_tokens(&ModelRequest::new("", "", messages))
-        };
-        let mut tail = vec![0.; history.len() + 1];
-        for (index, entry) in history.iter().enumerate().rev() {
-            tail[index] =
-                tail[index + 1] + count(vec![entry.message.as_ref().clone()]) - self.empty;
-        }
+        let tail = tail_tokens(history, self.empty, self.model);
         let budget = input_budget(self.model);
         let fits = cuts.iter().position(|cut| {
             let resident_tokens = self.resident(history, cut, replacement_size);
@@ -1832,12 +1921,7 @@ impl<'a> Retention<'a> {
         let latest_turn = self
             .manual
             .then(|| {
-                let start = self
-                    .view
-                    .context
-                    .order
-                    .iter()
-                    .rfind(|event| event.turn_start)?;
+                let start = self.order.events.iter().rfind(|event| event.turn_start)?;
                 cuts.iter().position(|cut| cut.retain_from == start.id)
             })
             .flatten();
@@ -1873,12 +1957,14 @@ fn replanned(
         &first.replacement,
         first.parts.as_ref(),
         first.ids.as_deref(),
+        policy_order,
     );
     let rule = Retention::new(
         view,
         model,
         turn.map(|(turn, _)| (turn, Some(&carried))),
         manual,
+        policy_order,
     );
     let history = &view.history[first.kept..];
     let mut cuts = legal_cuts(policy_order, history);

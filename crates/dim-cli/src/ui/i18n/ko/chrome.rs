@@ -39,8 +39,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "이전 메시지 {count}개 · Enter 또는 클릭으로 불러오기"
         }
         "follow, talk to and end this session's lines" => "이 세션의 라인을 보고, 대화하고, 종료",
-        "End line" => "라인 종료",
-        "y/N" => "y/N",
+        "End line {id}?" => "{id} 라인을 종료할까요?",
+        "y end it" => "y 종료",
+        "n cancel" => "n 취소",
         "main is the session itself; a line ends, main does not" => {
             "main은 세션 자체입니다. 라인은 종료되지만 main은 그렇지 않습니다"
         }
@@ -272,6 +273,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "run" => "실행",
         "view" => "보기",
         "model" => "모델",
+        "extensions" => "확장",
         "app" => "앱",
         "skill" => "스킬",
         // composer/commands.rs: descriptions
@@ -359,7 +361,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
 
         // sessions_panel.rs
         "Sessions" => "세션",
-        "Enter open · Ctrl+R refresh · Esc close" => "Enter 열기 · Ctrl+R 새로고침 · Esc 닫기",
+        "Sessions · This workspace" => "세션 · 이 워크스페이스",
+        "Sessions · This repository" => "세션 · 이 저장소",
+        "Sessions · All workspaces" => "세션 · 모든 워크스페이스",
+        "No saved sessions in this workspace. Ctrl+S shows more." => {
+            "이 워크스페이스에 저장된 세션 없음. Ctrl+S로 더 보기."
+        }
+        "Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close" => {
+            "Enter 열기 · Ctrl+S 범위 · Ctrl+R 새로고침 · Esc 닫기"
+        }
         "Loading sessions..." => "세션 불러오는 중…",
         "No saved sessions yet." => "저장된 세션 없음",
         "No matching sessions." => "일치하는 세션 없음",
