@@ -206,7 +206,7 @@ A part reads facts through its branch's `timeline` service with one bounded quer
 | Element | What it says |
 | --- | --- |
 | Scope | This branch, or the branch chain: each ancestor up to its cut, root first, then this branch to its head |
-| Position | A sequence range whose ends are inclusive, or a cursor with the sequence the read may go through. Its upper end is optional: absent, the read covers each branch's own coverage — an ancestor to its cut, the read branch to its published head; named, it is an inclusive bound applied to each branch's own sequence space and clamped to that branch's cut, so it never hides an ancestor fact. A range end must end an atomic batch, while its start may fall inside one |
+| Position | A sequence range whose ends are inclusive, or a cursor. Either form may name an upper end — the range's end, or the sequence the cursor may read through — and either may leave it out: absent, the read covers each branch's own coverage — an ancestor to its cut, the read branch to its published head; named, it is an inclusive bound applied to each branch's own sequence space and clamped to that branch's cut, so it never hides an ancestor fact. A named upper end must end an atomic batch; a range's start may fall inside one |
 | Kinds and flags | The event kinds it accepts (`domain/name`), and the envelope's context flags (§5.1) it selects on |
 | Event id | An equality on the event id: one id selects that event, so a caller reads one event or looks up its position without paging |
 | Predicate | One equality against one JSON scalar. The path is a sequence of field names inside the event's data joined by dots, with no array indexing and no wildcards |
@@ -225,11 +225,12 @@ storage translates that form. A binding writes this path syntax and invents no o
 
 The cursor is opaque. It names a position, not a number: it carries the branch together with a
 sequence, so the same sequence on a parent and on its child are different positions. The cursor
-never splits an atomic batch: an ascending page does not end inside one, and a descending page does
-not start inside one. After an ascending page the cursor continues strictly after the last event
-returned; after a descending page, strictly before the oldest event returned. The reply is the
-events, each with its chain position — its branch and sequence — and the next cursor; the next
-cursor is absent once the scope is exhausted, so absence means no more, not start over.
+names an atomic batch boundary: an ascending page does not end inside an atomic batch, and a
+descending page does not start inside one. After an ascending page the cursor continues strictly
+after the last event returned; after a descending page, strictly before the oldest event returned.
+The reply is the events, each with its chain position — its branch and sequence — and the next
+cursor; the next cursor is absent once the scope is exhausted, so absence means no more, not start
+over.
 
 The query returns facts; it does not fold, project or aggregate them. What a part folds from facts
 is its own state and stays with it ([ADR 002](../adr/002-plugin-scope.md) D1). A part that needs a
@@ -238,7 +239,7 @@ whole prefix reads pages and folds them itself.
 | Input | Result |
 | --- | --- |
 | A position past the published head | Invalid input |
-| A range end inside an atomic batch | Invalid input |
+| A range end or a named cursor through inside an atomic batch | Invalid input |
 | A cursor that does not name an atomic batch boundary | Invalid input |
 | A cursor that names a branch the read's scope does not cover | Invalid input |
 | A kind or a data path the store does not know | No rows; not an error |
