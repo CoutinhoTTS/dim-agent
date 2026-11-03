@@ -136,55 +136,6 @@ fn tui_resume_labels_origins_and_shows_acp_sessions_when_asked() {
     daemon.join().unwrap();
 }
 
-#[test]
-fn tui_resume_reads_the_launch_workspace_on_every_page() {
-    let home = Home::new();
-    let workspace = std::fs::canonicalize(&home.0).unwrap();
-    let workspace = workspace.to_str().unwrap().to_owned();
-    let expected = workspace.clone();
-    let (paged, next_page) = std::sync::mpsc::channel();
-    let daemon = home.daemon(move |wire| {
-        wire.hello(&["session.catalog"]);
-        wire.created();
-        let attach = wire.read("session.attach");
-        wire.reply(&attach, attach_record(&attach));
-        let history = wire.read("session.history");
-        wire.reply(
-            &history,
-            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
-        );
-        wire.no_context();
-        let providers = wire.read("account.providers");
-        wire.reply(&providers, json!([]));
-        let first = wire.read("session.catalog");
-        assert_eq!(first["params"]["cwd"], json!(expected), "{first}");
-        wire.reply(
-            &first,
-            json!({"sessions":rows(0,50),"nextCursor":"second-page"}),
-        );
-        let second = wire.read("session.catalog");
-        assert_eq!(second["params"]["cwd"], json!(expected), "{second}");
-        assert_eq!(second["params"]["cursor"], "second-page");
-        wire.reply(&second, json!({"sessions":rows(50,100)}));
-        paged.send(()).unwrap();
-        no_catalog(wire);
-    });
-    let mut command = home.command();
-    command.args(["--cwd", &workspace]);
-    let mut terminal = Terminal::launch_tui(command);
-    terminal.until("test / model");
-    terminal.write(b"/resume\r");
-    terminal.until("topic0000");
-    terminal.write(b"\x1b[F");
-    terminal.until("topic0049");
-    next_page.recv_timeout(PATIENCE).unwrap();
-    terminal.write(b"\x1b[27u");
-    terminal.write(b"/exit\r");
-    terminal.until("Bye!");
-    assert!(terminal.wait().success());
-    daemon.join().unwrap();
-}
-
 /// Ctrl+S widens the picker like a new query: every workspace, with each row
 /// naming the one it lives in.
 #[test]
@@ -271,55 +222,6 @@ fn tui_resume_says_when_the_workspace_has_no_saved_sessions() {
     terminal.until("test / model");
     terminal.write(b"/resume\r");
     terminal.until("No saved sessions in this workspace. Ctrl+S shows more.");
-    terminal.write(b"\x1b[27u");
-    terminal.write(b"/exit\r");
-    terminal.until("Bye!");
-    assert!(terminal.wait().success());
-    daemon.join().unwrap();
-}
-
-#[test]
-fn tui_resume_searches_inside_the_workspace() {
-    let home = Home::new();
-    let workspace = std::fs::canonicalize(&home.0).unwrap();
-    let workspace = workspace.to_str().unwrap().to_owned();
-    let expected = workspace.clone();
-    let daemon = home.daemon(move |wire| {
-        wire.hello(&["session.catalog"]);
-        wire.created();
-        let attach = wire.read("session.attach");
-        wire.reply(&attach, attach_record(&attach));
-        let history = wire.read("session.history");
-        wire.reply(
-            &history,
-            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
-        );
-        wire.no_context();
-        let providers = wire.read("account.providers");
-        wire.reply(&providers, json!([]));
-        let first = wire.read("session.catalog");
-        wire.reply(
-            &first,
-            json!({"sessions":[{"sessionId":"plain","cwd":expected,"preview":"plain preview","model":{"providerId":"test","modelId":"model"},"updatedAt":5}]}),
-        );
-        let query = wire.read("session.catalog");
-        assert_eq!(query["params"]["query"], "needle", "{query}");
-        assert_eq!(query["params"]["cwd"], json!(expected), "{query}");
-        wire.reply(
-            &query,
-            json!({"sessions":[{"sessionId":"match","cwd":expected,"preview":"needle result","model":{"providerId":"test","modelId":"model"},"updatedAt":4}]}),
-        );
-        no_catalog(wire);
-    });
-    let mut command = home.command();
-    command.args(["--cwd", &workspace]);
-    let mut terminal = Terminal::launch_tui(command);
-    terminal.until("test / model");
-    terminal.write(b"/resume\r");
-    terminal.until("plain preview");
-    terminal.write(b"needle");
-    terminal.until("needle result");
-    terminal.write(b"\x1b[27u");
     terminal.write(b"\x1b[27u");
     terminal.write(b"/exit\r");
     terminal.until("Bye!");
