@@ -28,7 +28,7 @@ pub mod protocol;
 pub mod provider;
 pub mod runtime_manager;
 pub mod session_grants;
-mod session_title;
+pub mod session_title;
 pub mod session_typescript;
 pub mod settings;
 pub mod settings_methods;
@@ -1194,6 +1194,7 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
         "sessions",
         "sessionMetadata",
         "auxiliaryModel",
+        "sessionTitleGenerator",
         "settings",
     ] {
         catalog.register_shared(name);

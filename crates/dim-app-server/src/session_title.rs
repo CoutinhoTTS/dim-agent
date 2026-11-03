@@ -16,7 +16,8 @@ use dim_agent_types::{ContentBlock, EventKind, Message, ModelId, Role, UserInput
 use regex::Regex;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
-use serde::Deserialize;
+use rutis_bridge::session::{Value as ServiceValue, arg, host_key, settle};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -26,6 +27,35 @@ use std::{
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 const SOURCE: &str = "session-title";
+pub const GENERATOR: &str = "sessionTitleGenerator";
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GenerateTitleRequest {
+    pub provider_id: String,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GenerateTitleReply {
+    Generated { title: String },
+    Unavailable { reason: TitleUnavailableReason },
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TitleUnavailableReason {
+    UnsupportedProvider,
+    AccountUnavailable,
+    Disabled,
+    NotEntitled,
+    QuotaExhausted,
+    ServiceReloading,
+}
+
 const SYSTEM: &str = "Write a short title for this conversation: at most 8 words, in the language of the user's message, no quotes, no trailing punctuation. Reply with the title only.";
 static PUNCTUATION: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^\p{Quotation_Mark}+|\p{P}+$").expect("valid title punctuation expression")
@@ -143,6 +173,7 @@ impl DynPlugin for SessionTitle {
             let config = ctx.require_at(&self.config)?;
             let lifecycle = ctx.require_at(&self.lifecycle)?;
             let owner = Arc::new(Owner {
+                ctx: ctx.clone(),
                 id: identity.session_id.clone(),
                 settings: ctx.require_at(&self.settings)?,
                 sessions: ctx.require_at(&self.sessions)?,
@@ -230,6 +261,7 @@ struct State {
     no_text: bool,
 }
 struct Owner {
+    ctx: Ctx,
     id: String,
     settings: Arc<SettingsService>,
     sessions: Arc<SessionsService>,
@@ -305,29 +337,23 @@ impl Owner {
             let text = first.content.iter().filter_map(|block| match block {
                 ContentBlock::Text { text, .. } => Some(text.as_str()), _ => None,
             }).collect::<Vec<_>>().join("\n").chars().take(2000).collect::<String>();
-            if text.is_empty() {
+            if text.trim_matches(space).is_empty() {
                 self.state.lock().unwrap().no_text = true;
                 return Ok("skipped");
             }
-            let model = document.model.or(model).ok_or(())?;
             let cancel = self.stop.child_token();
-            let call = self.auxiliary.0.complete(model, AuxiliaryRequest {
-                system: Some(SYSTEM.into()),
-                messages: vec![Message::text(Role::User, text)],
-                max_output_tokens: None,
-            }, cancel.clone());
+            let call = self.generate(document.model, model, &text, document.max_length, cancel.clone());
             tokio::pin!(call);
             let completed = tokio::select! {
-                result = &mut call => result.map_err(|_| ())?,
-                _ = tokio::time::sleep(Duration::from_secs(30)) => { cancel.cancel(); let _ = call.await; return Err(()); },
-                _ = self.stop.cancelled() => { cancel.cancel(); let _ = call.await; return Err(()); },
+                result = &mut call => result,
+                _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                    cancel.cancel(); let _ = call.await;
+                    Ok(fallback_title(&text, document.max_length))
+                },
+                _ = self.stop.cancelled() => { cancel.cancel(); let _ = call.await; return Ok("skipped"); },
             };
             if self.stop.is_cancelled() { return Ok("skipped"); }
-            let line = completed.text.trim_matches(space).split(['\r', '\n', '\u{2028}', '\u{2029}']).next().expect("split has a first line").trim_matches(space);
-            let line = PUNCTUATION.replace_all(line, "");
-            let line = SPACE.replace_all(&line, " ");
-            let text: String = line.trim_matches(space).chars().take(document.max_length).collect();
-            let text = text.trim_matches(space).to_owned();
+            let text = completed?;
             if text.is_empty() { return Err(()); }
             match self.store.set_title(&self.id, stored.revision, Some(Title { text, source: TitleSource::Auto })).await {
                 Ok(_) => Ok("completed"),
@@ -345,6 +371,86 @@ impl Owner {
         if !self.stop.is_cancelled() && (entered || result.is_err()) {
             tracing::info!(target: "session_title", outcome = result.unwrap_or("failed"), duration_ms = started.elapsed().as_millis() as u64);
         }
+    }
+    async fn generate(
+        &self,
+        explicit: Option<ModelId>,
+        adopted: Option<ModelId>,
+        text: &str,
+        max_length: usize,
+        cancel: CancellationToken,
+    ) -> Result<String, ()> {
+        if cancel.is_cancelled() {
+            return Err(());
+        }
+        if explicit.is_none()
+            && let Some(model) = &adopted
+            && let Some(service) = self.ctx.get_at(&host_key(GENERATOR))
+        {
+            let request = GenerateTitleRequest {
+                provider_id: model.provider_id.clone(),
+                text: text.into(),
+            };
+            let cancelled = cancel.clone();
+            let callback = ServiceValue::callback(move |_| {
+                let cancelled = cancelled.clone();
+                Ok(ServiceValue::cancellable_future(async move {
+                    cancelled.cancelled().await;
+                    Ok(ServiceValue::Undefined)
+                }))
+            });
+            let reply = async {
+                let reply = service.invoke(
+                    "generate",
+                    ServiceValue::List(vec![arg(&request)?, callback]),
+                )?;
+                let data = settle(reply).await?.json()?;
+                serde_json::from_value::<GenerateTitleReply>(data)
+                    .map_err(|error| rutis_bridge::session::Error::Value(error.to_string()))
+            }
+            .await;
+            if cancel.is_cancelled() {
+                return Err(());
+            }
+            match reply {
+                Ok(GenerateTitleReply::Generated { title }) => {
+                    let title = title_text(&title, max_length);
+                    if !title.is_empty() {
+                        return Ok(title);
+                    }
+                }
+                Ok(GenerateTitleReply::Cancelled) => return Err(()),
+                _ => {}
+            }
+        }
+        if cancel.is_cancelled() {
+            return Err(());
+        }
+        if let Some(model) = explicit.or(adopted) {
+            let reply = self
+                .auxiliary
+                .0
+                .complete(
+                    model,
+                    AuxiliaryRequest {
+                        system: Some(SYSTEM.into()),
+                        messages: vec![Message::text(Role::User, text)],
+                        max_output_tokens: None,
+                    },
+                    cancel.clone(),
+                )
+                .await;
+            if cancel.is_cancelled() {
+                return Err(());
+            }
+            if let Ok(reply) = reply {
+                let title = title_text(&reply.text, max_length);
+                if !title.is_empty() {
+                    return Ok(title);
+                }
+            }
+        }
+        Ok(fallback_title(text, max_length))
     }
     async fn rename(&self, params: Value, cancel: CancellationToken) -> Result<Value, RpcError> {
         if self.stop.is_cancelled() {
@@ -407,6 +513,23 @@ impl Owner {
             "Title changed during rename",
         ))
     }
+}
+fn fallback_title(text: &str, max_length: usize) -> String {
+    let text = SPACE.replace_all(text, " ");
+    let text: String = text.trim_matches(space).chars().take(max_length).collect();
+    text.trim_matches(space).to_owned()
+}
+fn title_text(text: &str, max_length: usize) -> String {
+    let line = text
+        .trim_matches(space)
+        .split(['\r', '\n', '\u{2028}', '\u{2029}'])
+        .next()
+        .expect("split has a first line")
+        .trim_matches(space);
+    let line = PUNCTUATION.replace_all(line, "");
+    let line = SPACE.replace_all(&line, " ");
+    let text: String = line.trim_matches(space).chars().take(max_length).collect();
+    text.trim_matches(space).to_owned()
 }
 fn space(c: char) -> bool {
     (c.is_whitespace() && c != '\u{0085}') || c == '\u{FEFF}'

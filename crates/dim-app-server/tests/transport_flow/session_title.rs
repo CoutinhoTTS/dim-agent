@@ -5,6 +5,53 @@ use std::path::PathBuf;
 use tokio::sync::{mpsc, oneshot};
 
 type Request = (Value, oneshot::Sender<String>);
+type Generation = (
+    dim_app_server::session_title::GenerateTitleRequest,
+    oneshot::Sender<Value>,
+);
+
+struct Generator(mpsc::UnboundedSender<Generation>);
+impl rutis_bridge::session::HostDispatch for Generator {
+    fn methods(&self) -> Option<Value> {
+        Some(json!({"generate":"async"}))
+    }
+    fn invoke(
+        &self,
+        method: &str,
+        args: rutis_bridge::session::Value,
+    ) -> rutis_bridge::session::Reply {
+        use rutis_bridge::session::{Value as V, settle};
+        assert_eq!(method, "generate");
+        let mut args = args.list()?.into_iter();
+        let request = serde_json::from_value(args.next().unwrap().json()?).unwrap();
+        let cancellation = args.next().unwrap().reference()?;
+        let (release, reply) = oneshot::channel();
+        self.0.send((request, release)).unwrap();
+        Ok(V::future(async move {
+            tokio::select! {
+                reply = reply => Ok(reply.unwrap().into()),
+                _ = async {
+                    let returned = cancellation.call_async(V::List(vec![])).await?;
+                    settle(returned).await
+                } => Ok(json!({"kind":"cancelled"}).into()),
+            }
+        }))
+    }
+}
+struct GeneratorPlugin(Arc<Generator>);
+impl rutis::Plugin for GeneratorPlugin {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "TitleGeneratorFixture"
+    }
+    async fn apply(&self, ctx: &rutis::Ctx, (): ()) -> rutis::Result {
+        ctx.provide_at(
+            rutis_bridge::session::host_key(dim_app_server::session_title::GENERATOR),
+            self.0.clone() as Arc<dyn rutis_bridge::session::HostDispatch>,
+        )?;
+        Ok(())
+    }
+}
 
 pub(super) async fn complete(
     State(sent): State<mpsc::UnboundedSender<Request>>,
@@ -126,6 +173,28 @@ pub(super) async fn configure(client: &mut Client, document: Value) {
     );
 }
 
+fn title_builder(provider: &str) -> AgentBuilder {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::install_with_prompt(
+        &mut builder,
+        Arc::new(dim_agent_capabilities::host::EmptyPromptHost),
+        Some(dim_agent_runtime::ConfigureUpdate {
+            sources: vec![],
+            model: Some(dim_agent_types::ModelSelection {
+                provider_id: provider.into(),
+                model_id: "main".into(),
+                capability_snapshot: None,
+                config: None,
+                metadata: None,
+            }),
+        }),
+    );
+    defaults::mock_model_hosts(&mut builder);
+    defaults::tool_host(&mut builder, Arc::new(MockTools));
+    dim_app_server::collaboration::install(&mut builder);
+    builder
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_session_title_generation_rename_settings_restore_fork_and_close() {
     use std::os::unix::fs::PermissionsExt;
@@ -138,24 +207,7 @@ async fn native_session_title_generation_rename_settings_restore_fork_and_close(
         .route("/{*path}", post(complete))
         .with_state(sent);
     let http = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let mut builder = AgentBuilder::new(AgentConfig::default());
-    defaults::install_with_prompt(
-        &mut builder,
-        Arc::new(dim_agent_capabilities::host::EmptyPromptHost),
-        Some(dim_agent_runtime::ConfigureUpdate {
-            sources: vec![],
-            model: Some(dim_agent_types::ModelSelection {
-                provider_id: "018ec73f-0000-7000-8000-000000000008".into(),
-                model_id: "main".into(),
-                capability_snapshot: None,
-                config: None,
-                metadata: None,
-            }),
-        }),
-    );
-    defaults::mock_model_hosts(&mut builder);
-    defaults::tool_host(&mut builder, Arc::new(MockTools));
-    dim_app_server::collaboration::install(&mut builder);
+    let builder = title_builder("018ec73f-0000-7000-8000-000000000008");
     let server = serve(
         builder,
         ServerConfig {
@@ -497,6 +549,234 @@ async fn native_session_title_generation_rename_settings_restore_fork_and_close(
         requests.try_recv().is_err(),
         "an image-only first input has no automatic title"
     );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    http.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn optional_title_generation_routes_falls_back_and_cancels_without_gating_the_session() {
+    let store = super::deletion::Store::new();
+    let (sent, mut requests) = mpsc::unbounded_channel::<Request>();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let http = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/{*path}", post(complete))
+                .with_state(sent),
+        )
+        .await
+        .unwrap();
+    });
+    let (sent, mut generations) = mpsc::unbounded_channel::<Generation>();
+    let generator = Arc::new(Generator(sent));
+    let provider = "018ec73f-0000-7000-8000-000000000009";
+    let mut builder = title_builder(provider);
+    builder.plugin(move |_| Ok(Box::new(GeneratorPlugin(generator.clone()))));
+    let server = serve(
+        builder,
+        ServerConfig {
+            unix_path: Some(PathBuf::from("/tmp").join(format!(
+                "dim-title-routing-{}/server.sock",
+                uuid::Uuid::new_v4()
+            ))),
+            product_home: Some(store.0.clone()),
+            ..store.config()
+        },
+    )
+    .await
+    .unwrap();
+    let agent = server.agent().unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(&client.rpc("provider.create", json!({"providerId":provider,"displayName":"Routing fixture",
+        "connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"auth":{"type":"anonymous"}},
+        "models":[{"modelId":"main","displayName":"Main","status":"active",
+            "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000,16_384)}],"enabled":true})).await);
+    assert_ok(
+        &client
+            .rpc(
+                "provider.select",
+                json!({"providerId":provider,"modelId":"main"}),
+            )
+            .await,
+    );
+
+    let id = create(&mut client, &store.0, true).await;
+    submit(&mut client, &id, "a dedicated title request").await;
+    let (request, release) = tokio::time::timeout(Duration::from_secs(10), generations.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(request.provider_id, provider);
+    assert_eq!(request.text, "a dedicated title request");
+    release
+        .send(json!({"kind":"generated","title":"Dedicated title"}))
+        .unwrap();
+    titled(&mut client, &id, "Dedicated title", "auto").await;
+    assert!(
+        requests.try_recv().is_err(),
+        "a generated title never calls the fallback model"
+    );
+
+    configure(
+        &mut client,
+        json!({"model":{"providerId":provider,"modelId":"main"}}),
+    )
+    .await;
+    let explicit = create(&mut client, &store.0, true).await;
+    submit(&mut client, &explicit, "use the explicit title model").await;
+    let (request, release) = tokio::time::timeout(Duration::from_secs(10), requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(request["model"], "main");
+    release.send("Explicit model".into()).unwrap();
+    titled(&mut client, &explicit, "Explicit model", "auto").await;
+    assert!(
+        generations.try_recv().is_err(),
+        "an explicit model bypasses the optional service"
+    );
+    configure(&mut client, json!({"model":null})).await;
+
+    for reply in [
+        json!({"kind":"unavailable","reason":"unsupported_provider"}),
+        json!({"kind":"unavailable","reason":"quota_exhausted"}),
+        json!({"kind":"failed"}),
+        json!({"kind":"generated","title":"  "}),
+    ] {
+        let fallback = create(&mut client, &store.0, true).await;
+        submit(&mut client, &fallback, "first request for fallback").await;
+        let (_, release) = tokio::time::timeout(Duration::from_secs(10), generations.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        release.send(reply).unwrap();
+        let (_, release) = tokio::time::timeout(Duration::from_secs(10), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        release.send("Fallback model".into()).unwrap();
+        titled(&mut client, &fallback, "Fallback model", "auto").await;
+        assert!(
+            requests.try_recv().is_err(),
+            "only one fallback request is made"
+        );
+    }
+
+    let failed = create(&mut client, &store.0, true).await;
+    submit(
+        &mut client,
+        &failed,
+        "request text\n survives model failure??",
+    )
+    .await;
+    let (_, release) = tokio::time::timeout(Duration::from_secs(10), generations.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    release.send(json!({"kind":"failed"})).unwrap();
+    let (_, release) = tokio::time::timeout(Duration::from_secs(10), requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    release.send("   ".into()).unwrap();
+    titled(
+        &mut client,
+        &failed,
+        "request text survives model failure??",
+        "auto",
+    )
+    .await;
+
+    let deadline = create(&mut client, &store.0, true).await;
+    submit(
+        &mut client,
+        &deadline,
+        "the deadline keeps the request text",
+    )
+    .await;
+    let (_, mut release) = tokio::time::timeout(Duration::from_secs(10), generations.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(35), release.closed())
+        .await
+        .unwrap();
+    titled(
+        &mut client,
+        &deadline,
+        "the deadline keeps the request text",
+        "auto",
+    )
+    .await;
+    assert!(
+        requests.try_recv().is_err(),
+        "the shared deadline never starts another model call"
+    );
+
+    let manual = create(&mut client, &store.0, true).await;
+    submit(
+        &mut client,
+        &manual,
+        "rename while the service is generating",
+    )
+    .await;
+    let (_, release) = tokio::time::timeout(Duration::from_secs(10), generations.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ok(
+        &when_served(
+            &mut client,
+            "session.rename",
+            json!({"sessionId":manual,"title":"Manual winner"}),
+        )
+        .await,
+    );
+    release
+        .send(json!({"kind":"generated","title":"Stale service title"}))
+        .unwrap();
+    titled(&mut client, &manual, "Manual winner", "manual").await;
+
+    let closing = create(&mut client, &store.0, true).await;
+    submit(&mut client, &closing, "close the optional service request").await;
+    let (_, mut release) = tokio::time::timeout(Duration::from_secs(10), generations.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    agent.get_session(&closing).unwrap().close().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), release.closed())
+        .await
+        .unwrap();
+    assert_eq!(entry(&mut client, &closing).await["title"], Value::Null);
+    assert!(
+        requests.try_recv().is_err(),
+        "closing never starts a fallback model call"
+    );
+
+    assert_ok(
+        &client
+            .rpc("plugin.disable", json!({"name":"TitleGeneratorFixture"}))
+            .await,
+    );
+    let withdrawn = create(&mut client, &store.0, true).await;
+    submit(
+        &mut client,
+        &withdrawn,
+        "title after the optional provider was withdrawn",
+    )
+    .await;
+    let (_, release) = tokio::time::timeout(Duration::from_secs(10), requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    release.send("Provider withdrawn".into()).unwrap();
+    titled(&mut client, &withdrawn, "Provider withdrawn", "auto").await;
+    assert!(generations.try_recv().is_err());
+
     drop(client);
     server.shutdown();
     server.join().await.unwrap();
