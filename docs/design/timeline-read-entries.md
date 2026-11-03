@@ -210,7 +210,7 @@ Not verified: whether each unclosed pair can cross a turn, so whether reading fr
 
 1. Decided: replay is removed. A part that needs facts still in flight (written, not yet dispatched) reads them through a Timeline read that returns the query result plus the undispatched tail. A part with no such need folds from its subscription alone. Section 7.7 gives the handover.
 2. Decided: the check that a position ends an atomic batch stays, and lives on the store port. It is not a field of the query.
-3. Proposed, adopt: the checkpoint stores the resume event id and the caller continues with from_event, which names its branch. Section 7.6 shows the resume event is never step/text on the normal path.
+3. Decided: the checkpoint stores the resume event id and the caller continues with from_event, which names its branch. Section 7.6 shows the resume event is never step/text on the normal path. Known risk: when no entry is kept, resume falls back to the last event of the context, whose kind is not restricted; from_event is then slower but still resolves.
 4. The reads in §1.4 bypass the service. Which migration owns them?
 5. Proposed exits, not decided: `Branch` and `Agent` keep one `query` that only forwards, with no `history`, `local`, `context` or `page`; the Dispatcher has no reads, and goal takes the Timeline service; the App Server keeps one store read for sessions that are not loaded, with the same page shape as `query`. goal's binding to the Timeline service: the name `timeline` exists in `Services`, resolution for a branch part was not verified.
 6. Goal, file reads and the collaboration rebuild read to the committed position. Proposed: file reads and goal move to the published head only after their facts are shown to be published when read; until then they keep a read that reaches the undispatched tail.
@@ -350,7 +350,7 @@ On Timeline, Branch, Agent and Dispatcher: history, local, page, page_cursor, co
 
 ### 7.5 Not decided
 
-Still open: the handover details (section 7.7), which of goal, file reads and the collaboration rebuild need in-flight facts, and whether the checkpoint stores the resume event id (proposed in section 4, question 3).
+Still open: the handover details (section 7.7), which of goal, file reads and the collaboration rebuild need in-flight facts.
 
 ### 7.6 Checkpoint resume and the undispatched queue (read from source)
 
@@ -369,3 +369,4 @@ Still open: the handover details (section 7.7), which of goal, file reads and th
 - Handover, as designed so far: subscribe and hold live events, take the cutoff, read history and tail up to it, then release held events above it. Not yet checked against the current subscription mechanism.
 - The batch-end check lives on the store port.
 - Per consumer, whether it needs in-flight facts is still to be settled: goal, file reads, collaboration rebuild. Each is decided when its own migration starts.
+- The checkpoint stores the resume event id and the caller continues with from_event (decided; section 4, question 3).
