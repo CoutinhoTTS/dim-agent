@@ -4161,7 +4161,8 @@ async fn a_leader_whose_member_is_in_use_is_not_deleted_when_inactive_is_require
 }
 
 /// A store left with an incomplete delegation and an orphaned one: startup
-/// removes both before it serves, and leaves no member rows behind.
+/// removes both before it serves, removes the orphaned one's member Session,
+/// and keeps the incomplete one's owner Session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn startup_removes_an_incomplete_and_an_orphaned_delegation() {
     let directory = std::env::temp_dir().join(format!("dim-team-startup-{}", uuid::Uuid::new_v4()));
@@ -4181,9 +4182,17 @@ async fn startup_removes_an_incomplete_and_an_orphaned_delegation() {
                 rusqlite::params![profile.to_string()],
             )
             .unwrap();
+        // The incomplete delegation still has its leader Session row; the
+        // orphaned one names a leader that is gone.
         connection
             .execute(
-                "INSERT INTO agents(agent_id, profile, is_default, owner_session_id) VALUES(?1, ?2, 0, 'leader-gone')",
+                "INSERT INTO agent_sessions(session_id, config, created_at_ms, leader_session_id) VALUES('leader', ?1, 0, NULL)",
+                rusqlite::params![config],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO agents(agent_id, profile, is_default, owner_session_id) VALUES(?1, ?2, 0, 'leader')",
                 rusqlite::params!["incomplete", profile.to_string()],
             )
             .unwrap();
@@ -4234,7 +4243,15 @@ async fn startup_removes_an_incomplete_and_an_orphaned_delegation() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(members, 0);
+    assert_eq!(members, 0, "the orphaned member Session was not removed");
+    let leader: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM agent_sessions WHERE session_id='leader'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(leader, 1, "the incomplete delegation's owner was removed");
     drop(agent);
     server.shutdown();
     server.join().await.unwrap();

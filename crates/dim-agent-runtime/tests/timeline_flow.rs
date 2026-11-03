@@ -176,6 +176,9 @@ async fn before_pipeline_is_atomic_and_branch_snapshots_share_only_fixed_prefix(
     let original = timeline.append(input("one")).unwrap();
     assert_eq!(original.kind, input("one").kind);
     assert!(timeline.trace(1).await.unwrap().is_none());
+    let boundary = timeline.history(Some(original.sequence)).await.unwrap();
+    assert_eq!(boundary.len(), 1);
+    assert_eq!(boundary[0].kind, input("one").kind);
     failing.dispose().await.unwrap();
     let changed = timeline.append(input("two")).unwrap();
     assert_eq!(changed.kind, input("two changed").kind);

@@ -295,6 +295,7 @@
         "assert",
         "assert_eq",
         "assert_ne",
+        "format",
         "json",
         "panic",
         "vec"
@@ -1516,8 +1517,7 @@
       "parent": "dim_agent_types::events",
       "file": "crates/dim-agent-types/src/events.rs",
       "unexpandedMacros": [
-        "assert_eq",
-        "serde_json::json"
+        "assert_eq"
       ]
     },
     {
@@ -6676,7 +6676,9 @@
       "from": "dim_agent_aimux::stream::tests",
       "to": "dim_agent_capabilities::host",
       "references": [
+        "path HostError",
         "path HostError::Failed",
+        "path ModelChunk",
         "path ModelChunk::MessageStart",
         "path ModelChunk::Text",
         "path ModelChunk::Usage",
@@ -15462,7 +15464,6 @@
       "from": "dim_agent_types::events::context_flag_tests",
       "to": "dim_agent_types::events",
       "references": [
-        "path super::ExtensionEvent::new",
         "use super::context_flags"
       ]
     },
@@ -34723,6 +34724,20 @@
         "use crate::ui::transcript::tool_group::Detail",
         "use crate::ui::transcript::tool_group::ToolGroup",
         "use crate::ui::transcript::tool_group::project_group"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::block::tests",
+      "to": "dim_agent_capabilities::history",
+      "references": [
+        "path dim_agent_capabilities::history::summary_message"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::block::tests",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path dim_agent_types::MessageContent::Text"
       ]
     },
     {

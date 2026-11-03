@@ -168,7 +168,7 @@ fn a_server_that_exits_without_a_note_keeps_the_requirement() {
         .args(["--server", server.to_str().unwrap(), "exec", "-p", "hello"])
         .output()
         .unwrap();
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("--server must name a standalone dim-app-server binary"),
