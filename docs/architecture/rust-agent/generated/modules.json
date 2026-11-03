@@ -14794,14 +14794,18 @@
         "path TimelineQueryDirection::Ascending",
         "path TimelineQueryDirection::Descending",
         "path TimelineQueryOrderBy::Sequence",
+        "path TimelineQueryPage",
         "path TimelineQueryReply",
         "path TimelineQueryScope::Branch",
         "path TimelineQueryScope::Chain",
+        "path TimelineTailReply",
         "use crate::TimelineQuery",
         "use crate::TimelineQueryDirection",
         "use crate::TimelineQueryOrderBy",
+        "use crate::TimelineQueryPage",
         "use crate::TimelineQueryReply",
-        "use crate::TimelineQueryScope"
+        "use crate::TimelineQueryScope",
+        "use crate::TimelineTailReply"
       ]
     },
     {

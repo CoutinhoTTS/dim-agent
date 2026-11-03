@@ -407,7 +407,7 @@ impl SqliteTimelineStore {
         self.finish(reader);
         Ok(record?
             .into_iter()
-            .find(|record| matches_selection(query, &record.event)))
+            .find(|record| query.accepts(&record.event)))
     }
     /// One page of a query: the SQL selects the rows (kinds, flags, event id,
     /// predicate, order) and takes at most `rows` of them; the decoded events
@@ -455,7 +455,7 @@ impl SqliteTimelineStore {
         let mut records: Vec<StoredEvent> = rows
             .records(&range, false)?
             .into_iter()
-            .filter(|record| matches_selection(query, &record.event))
+            .filter(|record| query.accepts(&record.event))
             .collect();
         if descending {
             records.sort_by_key(|record| std::cmp::Reverse(record.event.sequence));
@@ -2331,25 +2331,6 @@ fn query_fetched(
         })
         .collect()
 }
-/// Whether one event satisfies every element of a selection, so the same rule
-/// serves both the page's post-decode check and the by-id path.
-fn matches_selection(query: &TimelineQuery, event: &dim_agent_types::AgentEvent) -> bool {
-    (query.kinds.is_empty() || query.kinds.iter().any(|kind| kind == event.kind.key()))
-        && (query.flags.is_empty()
-            || query
-                .flags
-                .iter()
-                .any(|flag| flag.is_set(event.kind.context_flags())))
-        && query
-            .event_id
-            .as_ref()
-            .is_none_or(|wanted| wanted == &event.id)
-        && query
-            .predicate
-            .as_ref()
-            .is_none_or(|predicate| predicate.matches(event))
-}
-
 /// The sequence of the event a query names by id. `timeline_events_by_id`
 /// answers this without touching a body; the page then reads that one row.
 const BY_ID_SEQUENCE: &str = "SELECT sequence FROM timeline_events \
@@ -3734,7 +3715,7 @@ impl TimelineStore for SqliteTimelineStore {
                 && let Some(record) = self.query_event_by_id(key, query).await?
                 && record.event.sequence >= from
                 && record.event.sequence <= through
-                && matches_selection(query, &record.event)
+                && query.accepts(&record.event)
             {
                 let skip_one = query.offset > 0;
                 let mut events = Vec::new();

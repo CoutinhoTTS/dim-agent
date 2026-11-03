@@ -175,6 +175,26 @@ fn is_zero(value: &u64) -> bool {
 }
 
 impl TimelineQuery {
+    /// Whether `event` satisfies the selection: the kinds, the flags, the
+    /// event id and the one predicate. The scope, the start, the page and the
+    /// direction belong to the read, not to a fact.
+    pub fn accepts(&self, event: &AgentEvent) -> bool {
+        (self.kinds.is_empty() || self.kinds.iter().any(|kind| kind == event.kind.key()))
+            && (self.flags.is_empty()
+                || self
+                    .flags
+                    .iter()
+                    .any(|flag| flag.is_set(event.kind.context_flags())))
+            && self
+                .event_id
+                .as_ref()
+                .is_none_or(|wanted| wanted == &event.id)
+            && self
+                .predicate
+                .as_ref()
+                .is_none_or(|predicate| predicate.matches(event))
+    }
+
     /// Checks the input a caller can get wrong before any storage read: the
     /// predicate's spelling and value. The read point is the store's to bound.
     pub fn validate(&self) -> Result<()> {
@@ -204,6 +224,21 @@ pub struct TimelineQueryReply {
     /// One position per event, in the same order: the branch the event was
     /// read from and its sequence there.
     pub positions: Vec<TimelinePosition>,
+}
+
+/// The facts a read that adds the branch's unpublished tail returned, and the
+/// cutoff it took.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TimelineTailReply {
+    /// The page, in the query's order, each fact with its position.
+    pub events: Vec<Arc<AgentEvent>>,
+    /// One position per event, in the same order.
+    pub positions: Vec<TimelinePosition>,
+    /// The committed sequence the page is cut at: no fact above it was read,
+    /// and a fact written after the read started is above it. A caller
+    /// holding live events releases the ones above this sequence.
+    pub through: u64,
 }
 
 /// What one branch's read returned: the page, and how many matching events it

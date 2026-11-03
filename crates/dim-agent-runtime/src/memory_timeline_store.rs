@@ -219,24 +219,7 @@ impl TimelineStore for MemoryTimelineStore {
             let mut matched: Vec<&StoredEvent> = events
                 .iter()
                 .filter(|record| record.event.sequence >= from && record.event.sequence <= through)
-                .filter(|record| {
-                    let event = &record.event;
-                    (query.kinds.is_empty()
-                        || query.kinds.iter().any(|kind| kind == event.kind.key()))
-                        && (query.flags.is_empty()
-                            || query
-                                .flags
-                                .iter()
-                                .any(|flag| flag.is_set(event.kind.context_flags())))
-                        && query
-                            .event_id
-                            .as_ref()
-                            .is_none_or(|wanted| wanted == &event.id)
-                        && query
-                            .predicate
-                            .as_ref()
-                            .is_none_or(|predicate| predicate.matches(event))
-                })
+                .filter(|record| query.accepts(&record.event))
                 .collect();
             if query.direction == TimelineQueryDirection::Descending {
                 matched.reverse();
