@@ -61,7 +61,7 @@ Session 部件通过既有的广播观察自己的 Session（[ADR 002 D2](../../
 | 更新的输入 | 最近轮次结束后是否出现过 `input/message` 或 `input/applied` | `input/message`、`input/applied` |
 | 在途 | 至多一个：`{turnId, 取消令牌}` | `session.suggestion.request` |
 | 提示 | 至多一个：`{turnId, text}` | 一次完成的请求 |
-| 未采用计数 | 自上次采用以来未采用就被清除的提示数 | `cleared` 与 `respond` |
+| 未采用计数 | 自上次采用或开关开启以来未采用就被清除的提示数 | `cleared`、`respond` 与设置变更 |
 
 不存储、不重放、不导出，也不写 `model/usage` 事件：建议不是一轮。请求身份是建议自己的（[§5](#5-请求与缓存)）；日志只带数字与原因码，从不带文本或对话内容。
 
@@ -180,7 +180,7 @@ session.notice {sessionId, source: "PromptSuggestion", kind: "cleared", data: {t
 | 7 | 该轮没有在途请求；若有，一个请求同时答复双方 | `accepted: true` |
 | 8 | `main` 已提交的头不会先压缩：`estimatedInputTokens` 加指令的 token 未超过 `thresholdTokens` | `compaction_due` |
 
-未采用计数：显示后被清除而未采用记一次；连续二十次后该 Session 停止提供并以 `throttled` 答复，直到一次采用。采用会清零。
+未采用计数：显示后被清除而未采用记一次；连续二十次后该 Session 停止提供并以 `throttled` 答复。计数在一次采用后清零，也在开关由关转为开时清零，因此在 `/settings` 中关闭再开启即可恢复。该暂停有意持续整个 Session：它阻止为不使用建议的用户继续花费请求，而忽略提示的用户通常是在自己输入消息。
 
 上下文门在任何构建之前，按 `session.context.usage` 的同一读法，通过 `ContextPreparation` 读取 `main` 的用量；指令的 token 按每 token 四字符估算，因为部件没有模型计数器。建议从不运行准备、因而从不压缩：在真实请求会先压缩的头上，建议不发送，因为它将建立在那个请求即将替换的前缀上。用量读不到时（没有装载压缩、尚无配置），不会有即将发生的压缩，请求照常进行。
 
@@ -256,7 +256,7 @@ CLI 只在看到该轮 `turn/end` 为 `Completed` 之后、且输入框为空、
 | 任何编辑 | 隐藏提示并发送 `respond dismiss` |
 | 新一轮或新输入 | daemon 的通知清除提示 |
 
-`/settings` 增加 `Prompt suggestion` 开关，由 daemon 对 `prompt-suggestion` 来源的 `settings.read`/`settings.update` 支撑，其状态就是来源的 `enabled`。客户端新增的每个字符串都在全部十种语言中存在。
+`/settings` 增加 `Prompt suggestion` 开关，由 daemon 对 `prompt-suggestion` 来源的 `settings.read`/`settings.update` 支撑，其状态就是来源的 `enabled`。客户端新增的每个字符串都在全部十种语言中存在。请求以 `throttled` 被拒绝时，客户端在每个 Session 中只播报一次建议已暂停、以及在 `/settings` 中关闭再开启即可恢复；同一 Session 中后续的拒绝保持安静。
 
 ## 12. 规则检查
 
@@ -332,11 +332,11 @@ metadata：turnId 与 extensions.requestId 加 "/suggestion"
 3. 每个门一个流程：关闭、不是最新轮次、最后一次内容没有文本、非根 Session。
 4. 每种取消一个流程：新输入、轮次开始、更新的请求、拒绝、Session 关闭。截止不用等待 30 秒来固定。
 5. 校验：多行回复、以 `/` 开头、`<none>`、拒绝语与重复上一条用户消息，各自以 `invalid` 清除。
-6. 未采用计数：连续 20 次未采用后 `throttled`；一次采用后重置。
+6. 未采用计数：连续 20 次未采用后 `throttled`；一次采用后重置，关闭再开启开关同样重置。
 7. 上下文门：模型的用量让 `main` 的头超过阈值时，`request` 答复 `compaction_due` 且不发出任何模型请求。
 8. 设置：默认关闭、`maxChars` 有范围校验、项目作用域被拒绝、修改无需重载即生效；`maxChars` 的修改保留正在显示的提示，关闭开关则以 `disabled` 清除。
 
-CLI 流程（`crates/dimcode/tests/cli_flow/prompt_suggestion.rs`）用脚本化 daemon：只在完成的轮次之后、输入框为空时才发送请求；提示在两种布局中绘制，窄终端截断；`Right` 只插入不发送；`Tab` 在滚动视图接受、在全屏聚焦卡片；空输入框上的 `Enter` 不发送；`Esc` 与编辑会隐藏并发送 `respond dismiss`；`/settings` 可切换开关。
+CLI 流程（`crates/dimcode/tests/cli_flow/prompt_suggestion.rs`）用脚本化 daemon：只在完成的轮次之后、输入框为空时才发送请求；提示在两种布局中绘制，窄终端截断；`Right` 只插入不发送；`Tab` 在滚动视图接受、在全屏聚焦卡片；空输入框上的 `Enter` 不发送；`Esc` 与编辑会隐藏并发送 `respond dismiss`；`/settings` 可切换开关；`throttled` 拒绝在每个 Session 中只播报一次。
 
 ## 附录 C. 评测
 

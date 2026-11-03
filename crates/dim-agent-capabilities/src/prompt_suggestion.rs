@@ -583,7 +583,9 @@ impl Part {
     /// A committed write on the source: read the new document, and clear the
     /// shown offer and the request in flight only when the switch turned off.
     /// A `maxChars` change alone leaves them alone, because they were valid
-    /// when they began; the next request reads the new value.
+    /// when they began; the next request reads the new value. Turning the
+    /// switch on ends the pause the unused count caused, so a user who
+    /// stopped seeing offers can resume without ending the Session.
     async fn settings_changed(self: Arc<Self>) {
         let Ok(settings) = self.read_settings(CancellationToken::new()).await else {
             return;
@@ -591,7 +593,12 @@ impl Part {
         let clear = {
             let mut state = self.state.lock().unwrap();
             let before = state.enabled.replace(settings.enabled);
-            if settings.enabled || before == Some(false) {
+            if settings.enabled {
+                if before != Some(true) {
+                    state.unused = 0;
+                }
+                None
+            } else if before == Some(false) {
                 None
             } else {
                 let cleared = state.take_offer().map(|turn_id| (turn_id, "disabled"));

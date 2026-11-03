@@ -1116,6 +1116,9 @@ pub enum Update {
     SuggestionCleared {
         turn_id: String,
     },
+    /// The Session paused suggestions for the rest of it after the unused
+    /// count reached its limit: said once per Session.
+    SuggestionThrottled,
     /// A transient status-line message.
     Toast(String),
     Permissions(Result<dim_agent_types::PermissionPolicy, String>),

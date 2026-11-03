@@ -447,6 +447,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Show ACP sessions" => "顯示 ACP 工作階段",
         "Prompt suggestion" => "提示建議",
         "Prompt suggestion: {error}" => "提示建議：{error}",
+        "Suggestions paused in this session after 20 unused. Turn them off and on in /settings to resume." => {
+            "本工作階段在 20 次未採用後暫停了提示建議。在 /settings 中關閉再開啟即可恢復。"
+        }
         // keys.rs
         "show the key bindings" => "顯示快速鍵",
         "Application keys" => "應用程式快速鍵",

@@ -384,6 +384,41 @@ fn a_narrow_terminal_truncates_the_offer() {
     daemon.join().unwrap();
 }
 
+/// A `throttled` refusal is said once per Session: the second completed turn
+/// asks again and its refusal stays quiet.
+#[test]
+fn the_pause_is_announced_once_per_session() {
+    let home = Home::new();
+    let (settled, settle) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        opened(wire, &[], vec![]);
+        completed(wire, "turn-1");
+        methods(wire, true);
+        let request = wire.read("session.suggestion.request");
+        wire.reply(&request, json!({"accepted":false,"reason":"throttled"}));
+        completed(wire, "turn-2");
+        let request = wire.read("session.suggestion.request");
+        wire.reply(&request, json!({"accepted":false,"reason":"throttled"}));
+        wire.quiet(Duration::from_millis(300));
+        settled.send(()).unwrap();
+        wire.hold();
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("Suggestions paused in this session");
+    settle.recv_timeout(PATIENCE).unwrap();
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+    assert_eq!(
+        terminal
+            .transcript
+            .matches("Suggestions paused in this session")
+            .count(),
+        1
+    );
+}
+
 #[test]
 fn settings_toggles_the_switch_through_the_daemon() {
     let home = Home::new();

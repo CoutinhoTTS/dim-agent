@@ -465,6 +465,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Show ACP sessions" => "ACP 세션 표시",
         "Prompt suggestion" => "프롬프트 제안",
         "Prompt suggestion: {error}" => "프롬프트 제안: {error}",
+        "Suggestions paused in this session after 20 unused. Turn them off and on in /settings to resume." => {
+            "이 세션에서 미사용 20회 후 프롬프트 제안이 일시 중지되었습니다. /settings에서 끄고 다시 켜면 재개됩니다."
+        }
         // keys.rs
         "show the key bindings" => "단축키 보기",
         "Application keys" => "앱 단축키",

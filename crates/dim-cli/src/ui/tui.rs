@@ -2293,6 +2293,13 @@ impl App {
                     self.suggestion = None;
                 }
             }
+            Update::SuggestionThrottled => {
+                self.notices.push(
+                    t("Suggestions paused in this session after 20 unused. \
+                       Turn them off and on in /settings to resume.")
+                    .to_owned(),
+                );
+            }
             Update::ModelPolicy(update) => {
                 if let Some(Prompt::Models(panel)) = &mut self.prompt
                     && let Some(notice) = panel.set_policy(update)

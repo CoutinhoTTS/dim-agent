@@ -934,6 +934,68 @@ async fn twenty_unused_offers_stop_offering_until_an_accept() {
 /// A `maxChars` rewrite leaves a shown offer alone, because it was valid when
 /// the request was accepted; turning the switch off withdraws it with
 /// `disabled`.
+/// An accept before the limit starts the count over, and so does turning the
+/// switch off and on: the pause a reached limit causes can be ended without
+/// ending the Session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_accept_and_a_turn_on_reset_the_unused_count() {
+    let fixture = serve_fixture(Reply::Text("run the tests".into())).await;
+    let (mut client, id) = create(&fixture, true).await;
+    submit(&mut client, &id, "add a test").await;
+    let turn = latest_turn(&mut client, &id).await;
+    configure(&mut client, json!({"enabled":true})).await;
+
+    for _ in 0..5 {
+        assert_eq!(
+            suggest(&mut client, &id, &turn).await,
+            json!({"accepted": true})
+        );
+        suggestion_notice(&mut client, "offer").await;
+        respond(&mut client, &id, &turn, "dismiss").await;
+        suggestion_notice(&mut client, "cleared").await;
+    }
+    assert_eq!(
+        suggest(&mut client, &id, &turn).await,
+        json!({"accepted": true})
+    );
+    suggestion_notice(&mut client, "offer").await;
+    respond(&mut client, &id, &turn, "accept").await;
+    let cleared = suggestion_notice(&mut client, "cleared").await;
+    assert_eq!(cleared["params"]["data"]["reason"], "accepted");
+
+    // Twenty more unused offers reach the limit; the accept made room for
+    // all of them.
+    for _ in 0..20 {
+        assert_eq!(
+            suggest(&mut client, &id, &turn).await,
+            json!({"accepted": true})
+        );
+        suggestion_notice(&mut client, "offer").await;
+        respond(&mut client, &id, &turn, "dismiss").await;
+        suggestion_notice(&mut client, "cleared").await;
+    }
+    assert_eq!(
+        suggest(&mut client, &id, &turn).await,
+        json!({"accepted": false, "reason": "throttled"})
+    );
+    let requests = fixture.model.suggestions().len();
+    assert_eq!(requests, 26, "one model call per accepted request");
+
+    configure(&mut client, json!({"enabled":false})).await;
+    configure(&mut client, json!({"enabled":true})).await;
+    // The change listener reads the document in its own task: once it has
+    // run, the count is zero again.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        suggest(&mut client, &id, &turn).await,
+        json!({"accepted": true})
+    );
+    let offer = suggestion_notice(&mut client, "offer").await;
+    assert_eq!(offer["params"]["data"]["text"], "run the tests");
+    assert_eq!(fixture.model.suggestions().len(), requests + 1);
+    fixture.end().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_max_chars_change_keeps_the_offer_and_disabling_clears_it() {
     let fixture = serve_fixture(Reply::Text("run the tests".into())).await;

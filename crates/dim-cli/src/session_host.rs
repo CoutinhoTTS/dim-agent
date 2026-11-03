@@ -299,6 +299,9 @@ struct Worker {
     /// `None` until the first completed turn reads it, and again after a
     /// Session switch.
     suggestion_methods: Option<bool>,
+    /// Whether this Session already said that the unused count paused its
+    /// suggestions, so later refusals stay quiet; a switch starts over.
+    suggestion_throttle_noted: bool,
 }
 
 struct MemberDetailRead {
@@ -405,6 +408,7 @@ async fn run(
         refilled_catalogs: Default::default(),
         refill_requests: Vec::new(),
         suggestion_methods: None,
+        suggestion_throttle_noted: false,
     };
     worker.send(Update::Permissions(Ok(dim_agent_types::PermissionPolicy {
         preset: worker
@@ -846,6 +850,7 @@ impl Worker {
         self.title_revision = attached.title_revision;
         self.session_id = session_id.clone();
         self.suggestion_methods = None;
+        self.suggestion_throttle_noted = false;
         self.session_cwd = attached.cwd;
         self.register_ui().await;
         self.mcp_required.clear();
@@ -1448,13 +1453,25 @@ impl Worker {
                     }
                 };
                 if offered {
-                    let _ = self
+                    #[derive(Deserialize)]
+                    struct Reply {
+                        #[serde(default)]
+                        reason: Option<String>,
+                    }
+                    let reply = self
                         .client
-                        .typed::<serde_json::Value>(
+                        .typed::<Reply>(
                             "session.suggestion.request",
                             json!({"sessionId": self.session_id, "turnId": turn_id}),
                         )
                         .await;
+                    if let Ok(reply) = reply
+                        && reply.reason.as_deref() == Some("throttled")
+                        && !self.suggestion_throttle_noted
+                    {
+                        self.suggestion_throttle_noted = true;
+                        self.send(Update::SuggestionThrottled);
+                    }
                 }
             }
             Command::SuggestionRespond { turn_id, accept } => {

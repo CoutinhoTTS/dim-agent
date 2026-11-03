@@ -61,7 +61,7 @@ All state is in memory, per Session, and lost on unload:
 | Newer input | Whether an `input/message` or `input/applied` followed the latest turn's end | `input/message`, `input/applied` |
 | In-flight | At most one: `{turnId, cancellation token}` | `session.suggestion.request` |
 | Offer | At most one: `{turnId, text}` | a completed request |
-| Unused count | Offers cleared without an accept since the last accept | `cleared` and `respond` |
+| Unused count | Offers cleared without an accept since the last accept or turn-on of the switch | `cleared`, `respond` and a settings change |
 
 Nothing is stored, replayed or exported, and no `model/usage` event is written: the suggestion is not a turn. The request identity is the suggestion's own ([§5](#5-the-request-and-the-cache)); the logs carry numbers and reason codes, never the text or the conversation.
 
@@ -180,7 +180,7 @@ The gates of `request`, in order. A refused request answers `{accepted: false, r
 | 7 | No request is in flight for this turn; if one is, it answers for both | `accepted: true` |
 | 8 | `main`'s committed head is not about to compact: `estimatedInputTokens` plus the instruction's tokens does not exceed `thresholdTokens` | `compaction_due` |
 
-The unused counter: an offer shown and then cleared without an accept counts once; twenty in a row stop offering in that Session with `throttled` until an accept. Accepting clears the count.
+The unused counter: an offer shown and then cleared without an accept counts once; twenty in a row stop offering in that Session with `throttled`. The count resets on an accept and when the switch is turned on after being off, so turning suggestions off and on in `/settings` resumes them. The pause is Session-long on purpose: it stops spending requests on a user who does not use suggestions, and a user who ignores an offer is usually typing their own message.
 
 The context gate reads `main`'s usage through `ContextPreparation` exactly as `session.context.usage` reads it, before anything is built; the instruction's tokens are counted at four characters per token, since the part has no model counter. The suggestion never runs preparation and so never compacts: at a head where a real request would compact first, the suggestion is not sent, because it would be built on the prefix that request is about to replace. When the usage cannot be read (no compaction installed, no configuration yet), no compaction is imminent and the request proceeds as it is.
 
@@ -256,7 +256,7 @@ The offer is muted text in the empty composer row in both layouts, truncated wit
 | Any edit | Hide the offer and send `respond dismiss` |
 | A new turn or input | The offer is cleared by the daemon's notice |
 
-`/settings` gains a `Prompt suggestion` switch backed by the daemon's `settings.read`/`settings.update` on the `prompt-suggestion` source; its state is the source's `enabled`. Every string the client adds exists in all ten locales.
+`/settings` gains a `Prompt suggestion` switch backed by the daemon's `settings.read`/`settings.update` on the `prompt-suggestion` source; its state is the source's `enabled`. Every string the client adds exists in all ten locales. A request refused with `throttled` makes the client say once per Session that suggestions are paused and that turning the switch off and on resumes them; later refusals in the same Session stay quiet.
 
 ## 12. Rule check
 
@@ -332,11 +332,11 @@ Transport flows (`crates/dim-app-server/tests/transport_flow/prompt_suggestion.r
 3. One flow per gate: disabled, not the latest turn, no text in the last content, a non-root Session.
 4. One flow per cancellation: new input, a turn start, a newer request, dismissal, Session close. The deadline is not pinned by waiting 30 s.
 5. The validator: a multi-line reply, a leading `/`, `<none>`, a refusal and a repeat of the last user message each clear with `invalid`.
-6. The unused counter: 20 unused offers then `throttled`; an accept resets it.
+6. The unused counter: 20 unused offers then `throttled`; an accept resets it, and so does turning the switch off and on.
 7. The context gate: a model whose usage puts `main`'s head over its threshold makes `request` answer `compaction_due` and start no model request.
 8. Settings: the default is off, `maxChars` is range-checked, project scope is refused, and a change applies without a reload; a `maxChars` rewrite keeps a shown offer, and turning the switch off clears it with `disabled`.
 
-CLI flows (`crates/dimcode/tests/cli_flow/prompt_suggestion.rs`) over a scripted daemon: the request is sent only after a completed turn with an empty composer; the offer is drawn in both layouts and truncated on a narrow terminal; `Right` inserts without sending; `Tab` accepts in scrollback and focuses a card in fullscreen; `Enter` on an empty composer does not send; `Esc` and an edit dismiss and send `respond dismiss`; `/settings` toggles the switch.
+CLI flows (`crates/dimcode/tests/cli_flow/prompt_suggestion.rs`) over a scripted daemon: the request is sent only after a completed turn with an empty composer; the offer is drawn in both layouts and truncated on a narrow terminal; `Right` inserts without sending; `Tab` accepts in scrollback and focuses a card in fullscreen; `Enter` on an empty composer does not send; `Esc` and an edit dismiss and send `respond dismiss`; `/settings` toggles the switch; a `throttled` refusal is announced once per Session.
 
 ## Appendix C. Evaluation
 
