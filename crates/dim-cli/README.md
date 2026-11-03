@@ -420,6 +420,12 @@ with its error. `dimcode mcp disconnect ID` closes the entry's live connections 
 enablement or stored configuration; the entry reconnects on next use. The `/mcp` panel does the
 same on a list: `Enter`, `Ctrl+E`, `Ctrl+N`, `Ctrl+X`, `Ctrl+T` and `Tab`.
 
+Every command above that names one stored entry by ID also takes `--source SOURCE`, whose values
+are the sources `mcp list` prints: `user`, `project` and `plugin`. An ID one source lists is that
+entry without the flag, as before; an ID more than one source lists needs it, and the command
+refuses the ID otherwise, naming the sources. The panel keeps the rows apart the same way: two
+sources' entries of one ID are two rows, and each action names its own source.
+
 ```bash
 dimcode --home /path/to/isolated-home --model-config model.json --cwd /path/to/project mcp list
 # Review the entry in .mcp.json and the code or endpoint it runs, then:
@@ -477,8 +483,9 @@ Waiting for the browser callback. You can also paste the full callback URL now; 
 Callback URL: _
 ```
 
-Use `mcp login ID --no-browser --client-secret` for the standalone command; flags can also precede ID. Slash-command
-flags precede the ID; its remaining text is the literal ID, including spaces. `/mcp list` also
+Use `mcp login ID --no-browser --client-secret` for the standalone command; flags can also precede ID. In a slash
+command `--no-browser` and `--client-secret` precede the ID, while `--source SOURCE` may stand on either side; the
+remaining text is the literal ID, including spaces. `/mcp list` also
 shows the attached Session's server states and a sign-in hint for `auth_required`.
 Invalid callbacks can be pasted again. Ctrl+C, EOF or expiry stops waiting and prints the
 restart command. Expiry exits 1, cancellation exits 130, and a submitted operation that succeeds
@@ -1214,10 +1221,10 @@ The terminal UI reaches the same Session methods as the line client:
 | `!command` / `!!command` | Runs through `shell.run` on the line whose conversation is shown, in record or private mode; its progress streams under the composer, `Esc` or `Ctrl+C` sends `shell.stop`. A recorded run comes back as the Session's input event and is drawn as a shell block, also after resume; a private run, or one that could not be recorded, is drawn only here |
 | `/mcp` | Opens the MCP panel of the Session's workspace ([management surfaces](#management-surfaces)): an entry per server from `mcp.catalog`, grouped `user`, `project` and `plugin`, with its configuration below the list; `Enter` or `Space` toggles, `Ctrl+E` edits the `mcp.update` patch, `Ctrl+N` adds from the create template, `Ctrl+X` removes after a confirmation, `Ctrl+T` tests the stored entry and `Tab` inspects it. A plugin entry offers no write and says its plugin owns it; an entry whose configuration read failed is marked invalid and offers no edit. An entry that did not decode is marked invalid, shows its error, and offers only `Ctrl+X` removal; `Ctrl+N` with the same id and source replaces it |
 | `/mcp list` | MCP servers with their authorization, then the Session's server states; a state line carries its reason below it: a failed server's message, `Version VERSION rejected: REASON` for a refused tool-source version, and one `MCP catalog: ERROR` note for the Session. With no server configured, one line says so instead of the column legend. Without a Session it shows the configuration alone, the report `mcp list` prints |
-| `/mcp login [--no-browser] ID` | Starts sign-in, opens the browser unless `--no-browser` or SSH, and catches the callback on a loopback listener when the redirect port is free; `/mcp callback URL` completes it with a pasted callback instead. A client secret needs hidden input, so `--client-secret` points to `dimcode mcp login ID --client-secret` |
-| `/mcp logout ID` | Signs out and reports whether the token was revoked |
-| `/mcp disconnect ID` | Closes the entry's live connections without changing its enablement or stored configuration; the entry reconnects on next use |
-| `/mcp enable ID` / `/mcp disable ID` | Turns a server on or off with the request `dimcode mcp enable` / `mcp disable` sends and the same result text. Enabling a project entry runs this workspace's `.mcp.json` entry, including later edits, in active and new sessions; disabling stops it in every session before the call returns. The next `/mcp` lists the new state |
+| `/mcp login [--no-browser] ID [--source SOURCE]` | Starts sign-in, opens the browser unless `--no-browser` or SSH, and catches the callback on a loopback listener when the redirect port is free; `/mcp callback URL` completes it with a pasted callback instead. A client secret needs hidden input, so `--client-secret` points to `dimcode mcp login ID --client-secret` |
+| `/mcp logout ID [--source SOURCE]` | Signs out and reports whether the token was revoked |
+| `/mcp disconnect ID [--source SOURCE]` | Closes the entry's live connections without changing its enablement or stored configuration; the entry reconnects on next use |
+| `/mcp enable ID` / `/mcp disable ID [--source SOURCE]` | Turns a server on or off with the request `dimcode mcp enable` / `mcp disable` sends and the same result text. Enabling a project entry runs this workspace's `.mcp.json` entry, including later edits, in active and new sessions; disabling stops it in every session before the call returns. The next `/mcp` lists the new state |
 | `/plugins` (`/plugin`) | Lists every plugin name from `plugin.list` (built-in, default, installed): the candidate in use, its state, whether it is locked, and for the selected one its candidates and any error, wait or refused content. `Enter` turns an off plugin on (`plugin.enable`) or, after a confirmation, turns it off (`plugin.disable`); a locked one says why it cannot be turned off. `r` reloads it (`plugin.reload`), `Ctrl+R` lists again. The list is read again after each change, and a failed call shows the method's message |
 | `/plugins install PATH` | Installs and turns on the plugin directory at `PATH`, relative to the workspace (`plugin.install`), then opens the list with the outcome, including when a restart is required. Git installs, update and remove are `dimcode plugin ...` |
 | `/skills` | Lists the Skills of the Session's workspace from `skills.catalog`, grouped under the source each was found in (`user`, `project`, `plugin:<id>`), with its state and, for the selected one, its description and file; the catalog's issues follow the entries. `Enter` or `Space` enables or disables the selected Skill (`skills.set_enabled`) and the list is read again; `Ctrl+R` rescans the roots (`skills.refresh`). A daemon without the methods says it cannot manage skills |
