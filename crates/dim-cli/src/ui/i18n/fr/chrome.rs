@@ -43,8 +43,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "follow, talk to and end this session's lines" => {
             "suivre, dialoguer et terminer les lignes de cette session"
         }
-        "End line" => "Terminer la ligne",
-        "y/N" => "y/N",
+        "End line {id}?" => "Terminer la ligne {id} ?",
+        "y end it" => "y terminer",
+        "n cancel" => "n annuler",
         "main is the session itself; a line ends, main does not" => {
             "main est la session elle-même ; une ligne se termine, pas main"
         }
@@ -395,8 +396,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
 
         // sessions_panel.rs
         "Sessions" => "Sessions",
-        "Enter open · Ctrl+R refresh · Esc close" => {
-            "Enter ouvrir · Ctrl+R actualiser · Esc fermer"
+        "Sessions · This workspace" => "Sessions · Cet espace de travail",
+        "Sessions · This repository" => "Sessions · Ce dépôt",
+        "Sessions · All workspaces" => "Sessions · Tous les espaces de travail",
+        "No saved sessions in this workspace. Ctrl+S shows more." => {
+            "Aucune session enregistrée dans cet espace de travail. Ctrl+S en affiche d'autres."
+        }
+        "Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close" => {
+            "Enter ouvrir · Ctrl+S portée · Ctrl+R actualiser · Esc fermer"
         }
         "Loading sessions..." => "Chargement…",
         "No saved sessions yet." => "Aucune session enregistrée.",

@@ -74,12 +74,13 @@ impl Summary {
         }
         (!reasons.is_empty()).then(|| reasons.join(", "))
     }
-    /// Whether `/resume`'s default list shows this Session, which is every
+    /// The origin classes `/resume`'s default list keeps, which is every
     /// origin but `internal` and `acp`
     /// ([classification](../../../docs/design/appserver/session-classification.md)).
-    /// Cleanup removes no Session `/resume` hides: a member goes with its
-    /// leader's delete, a launched Session with its plugin, and an ACP
-    /// Session is deleted by its id.
+    /// Cleanup selects across every workspace and removes no Session
+    /// `/resume` hides: a member goes with its leader's delete, a launched
+    /// Session with its plugin, and an ACP Session is deleted by its id
+    /// ([session deletion and cleanup](../../../docs/design/cli-commands.md#session-deletion-and-cleanup)).
     fn resumable(&self) -> bool {
         !matches!(self.origin.as_deref(), Some("internal" | "acp"))
     }

@@ -63,13 +63,17 @@ pub struct CompactionCut {
 pub struct PolicyWindow {
     pub through: u64,
     pub cut: String,
-    pub cut_sequence: u64,
+    /// The cut's own chain position, when the window read found its row.
+    pub cut_position: Option<TimelinePosition>,
     pub events: Vec<Arc<AgentEvent>>,
-    pub tool_results: Vec<Arc<AgentEvent>>,
+    /// The `step/tool-result` events from the previous cut on, each with the
+    /// branch and sequence that place it before or after the new cut: a
+    /// window merges ancestor and current-branch results.
+    pub tool_results: Vec<PolicyEvent>,
 }
 
 /// The event ids and turn starts a compaction needs to enumerate legal cuts,
-/// without decoding event bodies.
+/// without decoding turn bodies.
 #[derive(Debug, Clone, Default)]
 pub struct PolicyOrder {
     pub through: u64,
@@ -96,6 +100,17 @@ fn window_event(event: &AgentEvent) -> bool {
     )
 }
 
+fn order_event(event: &AgentEvent, key: &TimelineKey) -> PolicyOrderEvent {
+    PolicyOrderEvent {
+        id: event.id.clone(),
+        branch_id: key.branch_id.clone(),
+        sequence: event.sequence,
+        turn_start: matches!(&event.kind, EventKind::TurnStart(_)),
+        compaction_start: None,
+        boundary: false,
+    }
+}
+
 fn policy_event(event: &AgentEvent) -> bool {
     matches!(
         &event.kind,
@@ -116,6 +131,27 @@ pub struct StoredEvent {
     pub event: Arc<AgentEvent>,
     pub trace: Option<TimelineTrace>,
     pub batch_end: u64,
+}
+
+/// Where a backward, kind-filtered read of a branch chain continues: the
+/// pinned head, the segment of the chain (ancestors root first, then the
+/// branch itself) and the last sequence of that segment still to read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BranchCursor {
+    pub(crate) through: u64,
+    pub(crate) segment: Option<usize>,
+    pub(crate) before: u64,
+}
+
+/// One page of a branch chain read backwards: the matching events of one
+/// segment, oldest first.
+#[derive(Debug, Clone)]
+pub struct BranchPage {
+    pub events: Vec<Arc<AgentEvent>>,
+    /// The page after this one, older, or `None` at the start of the chain.
+    pub next: Option<BranchCursor>,
+    /// Whether these events are the branch's own, not an ancestor's.
+    pub own: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -324,6 +360,41 @@ pub trait TimelineStore: Send + Sync + 'static {
             Ok(records)
         })
     }
+    /// Reads one page of a branch walked backwards: the events whose kind is
+    /// in `kinds`, at or below `before`, taking at most `limit` stored rows
+    /// from the newest, returned oldest first. `before` is a published
+    /// sequence, so a caller pins one head and reads its pages from there; the
+    /// end of the page is the input of the next call. A stored row may hold
+    /// several events (streamed output deltas), so a page may return more
+    /// events than rows. Every other row is skipped before it is decoded.
+    /// The default reads the branch to its head and trims in memory.
+    fn read_kind_page<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        kinds: &'a [&'a str],
+        before: u64,
+        limit: usize,
+    ) -> BoxFuture<'a, Result<Vec<StoredEvent>>> {
+        Box::pin(async move {
+            let head = self.head(key).await?;
+            let before = before.min(head);
+            if before == 0 || limit == 0 {
+                return Ok(Vec::new());
+            }
+            let records = self.read(key, 1..=head).await?;
+            let mut records: Vec<_> = records
+                .into_iter()
+                .filter(|record| {
+                    record.event.sequence <= before
+                        && kinds.iter().any(|kind| record.event.kind.key() == *kind)
+                })
+                .collect();
+            if records.len() > limit {
+                records.drain(..records.len() - limit);
+            }
+            Ok(records)
+        })
+    }
     /// The latest completed compaction at or below `through` on one branch:
     /// its cut and its own sequence. A read may start at that cut instead of
     /// the branch's segment start. Stores may answer without decoding the
@@ -485,35 +556,49 @@ pub trait TimelineStore: Send + Sync + 'static {
         })
     }
 
-    /// The event order for legal compaction cuts.
+    /// The event order a compaction derives its legal cuts from: this
+    /// segment's last `turn/start` and last `context/compaction-start` at or
+    /// before `through`, plus the `turn/start` events in `turns`. Events are
+    /// ordered by sequence and each appears once.
+    /// A store answers the turn starts without decoding their bodies; only
+    /// the compaction start's `through` is read.
     fn policy_order<'a>(
         &'a self,
         key: &'a TimelineKey,
+        turns: RangeInclusive<u64>,
         through: u64,
     ) -> BoxFuture<'a, Result<PolicyOrder>> {
         Box::pin(async move {
             let records = self.read(key, 1..=through).await?;
-            let branch_id = key.branch_id.clone();
-            let mut events: Vec<PolicyOrderEvent> = records
-                .into_iter()
-                .map(|record| PolicyOrderEvent {
-                    turn_start: matches!(&record.event.kind, EventKind::TurnStart(_)),
-                    compaction_start: match &record.event.kind {
-                        EventKind::ContextCompactionStart(data) => Some(data.through),
-                        _ => None,
-                    },
-                    boundary: false,
-                    id: record.event.id.clone(),
-                    branch_id: branch_id.clone(),
-                    sequence: record.event.sequence,
-                })
-                .collect();
-            if let Some(last) = events.last_mut() {
-                last.boundary = true;
+            let mut events = Vec::new();
+            let mut last_turn = None;
+            let mut last_start = None;
+            for record in &records {
+                match &record.event.kind {
+                    EventKind::TurnStart(_) => {
+                        last_turn = Some(record);
+                        if turns.contains(&record.event.sequence) {
+                            events.push(order_event(&record.event, key));
+                        }
+                    }
+                    EventKind::ContextCompactionStart(data) => {
+                        let mut event = order_event(&record.event, key);
+                        event.compaction_start = Some(data.through);
+                        last_start = Some(event);
+                    }
+                    _ => {}
+                }
             }
+            events.extend(
+                last_turn
+                    .filter(|record| !turns.contains(&record.event.sequence))
+                    .map(|record| order_event(&record.event, key)),
+            );
+            events.extend(last_start);
+            events.sort_by_key(|event| event.sequence);
             Ok(PolicyOrder {
                 through,
-                branches: vec![branch_id],
+                branches: vec![key.branch_id.clone()],
                 events,
             })
         })
@@ -549,15 +634,22 @@ pub trait TimelineStore: Send + Sync + 'static {
             });
             let mut events = Vec::new();
             let mut tool_results = Vec::new();
-            let mut cut_sequence = 0u64;
+            let mut cut_position = None;
             for record in records {
+                let position = TimelinePosition {
+                    branch_id: key.branch_id.clone(),
+                    sequence: record.event.sequence,
+                };
                 if matches!(&record.event.kind, EventKind::ToolResult(_))
                     && previous_sequence.is_none_or(|cut| record.event.sequence >= cut)
                 {
-                    tool_results.push(record.event.clone());
+                    tool_results.push(PolicyEvent {
+                        position: position.clone(),
+                        event: record.event.clone(),
+                    });
                 }
                 if record.event.id == cut {
-                    cut_sequence = record.event.sequence;
+                    cut_position = Some(position);
                 }
                 if record.event.id == cut || window_event(&record.event) {
                     events.push(record.event);
@@ -566,7 +658,7 @@ pub trait TimelineStore: Send + Sync + 'static {
             Ok(PolicyWindow {
                 through,
                 cut: cut.to_owned(),
-                cut_sequence,
+                cut_position,
                 events,
                 tool_results,
             })

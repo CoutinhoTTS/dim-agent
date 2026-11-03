@@ -41,16 +41,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Ctrl+T run" => "Ctrl+T 実行",
         "Ctrl+X remove" => "Ctrl+X 削除",
         "Tab inspect" => "Tab 詳細",
-        "Remove {name}? Enter confirm · Esc cancel" => {
-            "{name} を削除しますか？Enter で確定 · Esc でキャンセル"
-        }
+        "Remove {name}?" => "{name} を削除しますか？",
         "↑↓ scroll · Esc back" => "↑↓ スクロール · Esc で戻る",
         "Added." => "作成しました。",
         "Removed {name}." => "{name} を削除しました。",
         "unavailable" => "利用不可",
-        "Reset {name}? Enter confirm · Esc cancel" => {
-            "{name} をリセットしますか？Enter で確定 · Esc でキャンセル"
-        }
+        "Reset {name}?" => "{name} をリセットしますか？",
+        "Enter confirm" => "Enter で確定",
+        "Esc cancel" => "Esc でキャンセル",
         "Reset {name} to its catalog entry." => "{name} をカタログ項目にリセットしました。",
         "Ran {name}." => "{name} を実行しました。",
         "The user document changed since it was read; nothing was written." => {

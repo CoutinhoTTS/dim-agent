@@ -2457,6 +2457,104 @@ fn window_rows(
     Ok(rows)
 }
 
+/// The events of one `policy_order` read: the last turn start, the turn
+/// starts in `turns`, and the last compaction start with its `through`. Only
+/// the compaction start's body is decoded; `timeline_policy_turns` covers the
+/// turn starts, so their rows are never read.
+fn policy_order_events(
+    connection: &Connection,
+    key: &TimelineKey,
+    turns: &RangeInclusive<u64>,
+    through: u64,
+) -> Result<Vec<PolicyOrderEvent>> {
+    let turn = |id: String, sequence: u64| PolicyOrderEvent {
+        id,
+        branch_id: key.branch_id.clone(),
+        sequence,
+        turn_start: true,
+        compaction_start: None,
+        boundary: false,
+    };
+    let start = |id: String, sequence: u64, through: Option<u64>| PolicyOrderEvent {
+        id,
+        branch_id: key.branch_id.clone(),
+        sequence,
+        turn_start: false,
+        compaction_start: through,
+        boundary: false,
+    };
+    let mut events = Vec::new();
+    let from = *turns.start();
+    let to = (*turns.end()).min(through);
+    if from <= to {
+        let mut query = connection
+            .prepare(
+                "SELECT event_id, sequence FROM timeline_events \
+                 WHERE session_id=?1 AND branch_id=?2 AND kind='turn/start' \
+                 AND sequence BETWEEN ?3 AND ?4 AND event_id IS NOT NULL \
+                 ORDER BY sequence",
+            )
+            .map_err(error)?;
+        for row in query
+            .query_map(
+                params![
+                    key.session_id,
+                    key.branch_id,
+                    sql_sequence(from)?,
+                    sql_sequence(to)?
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .map_err(error)?
+        {
+            let (id, sequence) = row.map_err(error)?;
+            events.push(turn(id, sequence_value(sequence)?));
+        }
+    }
+    let last: Option<(String, i64)> = connection
+        .prepare(
+            "SELECT event_id, sequence FROM timeline_events \
+             WHERE session_id=?1 AND branch_id=?2 AND kind='turn/start' \
+             AND sequence<=?3 AND event_id IS NOT NULL \
+             ORDER BY sequence DESC LIMIT 1",
+        )
+        .map_err(error)?
+        .query_row(
+            params![key.session_id, key.branch_id, sql_sequence(through)?],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    if let Some((id, sequence)) = last {
+        let sequence = sequence_value(sequence)?;
+        if !(from <= sequence && sequence <= to) {
+            events.push(turn(id, sequence));
+        }
+    }
+    let anchor: Option<(String, i64, Option<i64>)> = connection
+        .prepare(
+            "SELECT event_id, sequence, \
+             json_extract(body, '$.record.event.data.through') \
+             FROM timeline_events \
+             WHERE session_id=?1 AND branch_id=?2 AND kind='context/compaction-start' \
+             AND sequence<=?3 AND event_id IS NOT NULL \
+             ORDER BY sequence DESC LIMIT 1",
+        )
+        .map_err(error)?
+        .query_row(
+            params![key.session_id, key.branch_id, sql_sequence(through)?],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    if let Some((id, sequence, through)) = anchor {
+        let through = through.map(sequence_value).transpose()?;
+        events.push(start(id, sequence_value(sequence)?, through));
+    }
+    events.sort_by_key(|event| event.sequence);
+    Ok(events)
+}
+
 fn policy_rows(
     connection: &Connection,
     key: &TimelineKey,
@@ -3167,55 +3265,19 @@ impl TimelineStore for SqliteTimelineStore {
     fn policy_order<'a>(
         &'a self,
         key: &'a TimelineKey,
+        turns: RangeInclusive<u64>,
         through: u64,
     ) -> BoxFuture<'a, Result<PolicyOrder>> {
         Box::pin(async move {
-            let session = key.session_id.clone();
-            let branch = key.branch_id.clone();
-            let query_branch = branch.clone();
-            let rows = self
+            let key = key.clone();
+            let events = self
                 .db
-                .run_read(move |connection| {
-                    let mut query = connection
-                        .prepare(
-                            "SELECT event_id, kind, sequence, \
-                             json_extract(body, '$.record.event.data.through') \
-                             FROM timeline_events \
-                             WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3 \
-                             AND event_id IS NOT NULL \
-                             ORDER BY sequence",
-                        )
-                        .map_err(error)?;
-                    query
-                        .query_map(params![session, query_branch, through as i64], |row| {
-                            Ok((
-                                row.get::<_, String>(0)?,
-                                row.get::<_, String>(1)?,
-                                row.get::<_, i64>(2)?,
-                                row.get::<_, Option<i64>>(3)?,
-                            ))
-                        })
-                        .map_err(error)?
-                        .collect::<rusqlite::Result<Vec<_>>>()
-                        .map_err(error)
-                })
+                .run_read(move |connection| policy_order_events(connection, &key, &turns, through))
                 .await?;
             Ok(PolicyOrder {
                 through,
                 branches: Vec::new(),
-                events: rows
-                    .into_iter()
-                    .map(|(id, kind, sequence, through)| PolicyOrderEvent {
-                        id,
-                        branch_id: branch.clone(),
-                        sequence: sequence as u64,
-                        turn_start: kind == "turn/start",
-                        compaction_start: (kind == "context/compaction-start")
-                            .then_some(through.map(|value| value as u64))
-                            .flatten(),
-                        boundary: false,
-                    })
-                    .collect(),
+                events,
             })
         })
     }
@@ -3263,20 +3325,30 @@ impl TimelineStore for SqliteTimelineStore {
                 .filter(|event| event.sequence <= through)
             {
                 if is_tool_result(&event) {
-                    tool_results.push(event.clone());
+                    tool_results.push(PolicyEvent {
+                        position: TimelinePosition {
+                            branch_id: branch.clone(),
+                            sequence: event.sequence,
+                        },
+                        event: event.clone(),
+                    });
                 }
                 if event.id == cut || is_window_event(&event) {
                     events.push(event);
                 }
             }
-            let cut_sequence = events
-                .iter()
-                .find(|event| event.id == cut)
-                .map_or(0, |event| event.sequence);
+            let cut_position =
+                events
+                    .iter()
+                    .find(|event| event.id == cut)
+                    .map(|event| TimelinePosition {
+                        branch_id: branch.clone(),
+                        sequence: event.sequence,
+                    });
             Ok(PolicyWindow {
                 through,
                 cut: cut.to_owned(),
-                cut_sequence,
+                cut_position,
                 events,
                 tool_results,
             })
@@ -3378,6 +3450,72 @@ impl TimelineStore for SqliteTimelineStore {
                 .into_iter()
                 .map(|record| record.event)
                 .collect())
+        })
+    }
+    fn read_kind_page<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        kinds: &'a [&'a str],
+        before: u64,
+        limit: usize,
+    ) -> BoxFuture<'a, Result<Vec<StoredEvent>>> {
+        Box::pin(async move {
+            if before == 0 || limit == 0 || kinds.is_empty() {
+                return Ok(Vec::new());
+            }
+            let session = key.session_id.clone();
+            let branch = key.branch_id.clone();
+            let end = sql_sequence(before)?;
+            let sql = format!(
+                "SELECT sequence, last_sequence, kind, body, event_id \
+                 FROM timeline_events \
+                 WHERE session_id=? AND branch_id=? AND sequence<=? AND kind IN ({}) \
+                 ORDER BY sequence DESC LIMIT ?",
+                vec!["?"; kinds.len()].join(",")
+            );
+            let mut values = vec![
+                rusqlite::types::Value::Text(session.clone()),
+                rusqlite::types::Value::Text(branch.clone()),
+                rusqlite::types::Value::Integer(end),
+            ];
+            values.extend(
+                kinds
+                    .iter()
+                    .map(|kind| rusqlite::types::Value::Text((*kind).into())),
+            );
+            values.push(rusqlite::types::Value::Integer(
+                i64::try_from(limit).map_err(error)?,
+            ));
+            let mut reader = self.reader(RequestBodies::Rebuild);
+            let rows = holds(
+                &self.db,
+                &mut reader,
+                None,
+                move |connection, reader, rows: &mut Option<Rows>| {
+                    let rows = match rows {
+                        Some(rows) => rows,
+                        None => {
+                            let mut query = connection.prepare(&sql).map_err(error)?;
+                            let fetched = query_fetched(
+                                &mut query,
+                                rusqlite::params_from_iter(values.iter()),
+                            )?;
+                            rows.insert(Rows {
+                                fetched: fetched.into(),
+                                decoded: vec![],
+                            })
+                        }
+                    };
+                    rows.advance(connection, &session, reader)
+                },
+            )
+            .await?;
+            self.finish(reader);
+            let mut records = rows
+                .expect("a finished read fetched its rows")
+                .records(&(1..=before), false)?;
+            records.sort_by_key(|record| record.event.sequence);
+            Ok(records)
         })
     }
     fn event_by_id<'a>(

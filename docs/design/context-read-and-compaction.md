@@ -61,7 +61,7 @@ Rules: [design rules](../architecture/rust-agent/principles.md)、[ADR 002](../a
 
 ## 5. 策略的位置
 
-`policy_order` 现在返回整条分支的每个事件，只为了让策略把“条目来源事件 id”换算成位置。策略实际只需要三类信息：
+`policy_order` 曾返回整条分支的每个事件，只为了让策略把“条目来源事件 id”换算成位置。策略实际只需要三类信息：
 
 - 上次压缩尝试的位置与它的 `through`；
 - 轮次开始的位置；
@@ -73,11 +73,12 @@ Rules: [design rules](../architecture/rust-agent/principles.md)、[ADR 002](../a
 2. 段顺序是祖先链顺序；跨段比较用“段序，再序号”。
 3. `regrown` 的边界是该次尝试的 `through` 在它所在段的位置；条目位置在边界之后即算新内容。
 4. `legal_cuts` 的候选是轮次开始、条目来源位置、边界事件，按位置排序。
-5. `policy_order` 只返回轮次开始、压缩开始/事实和边界事件；查询使用新的 kind 部分索引，不再扫全分支。
+5. `policy_order` 每段只返回：最后一个轮次开始、最后一个压缩开始（带它的 `through`）、边界事件，以及保留窗口之后的轮次开始。窗口从最后一条“保留尾仍超出 `RETAINED_SHARE × B`”的条目之后开始：更早的裁剪点保留的尾不会更小，保留规则不可能先选中它，所以这些轮次开始不读。普通准备只读这些锚点（窗口为空）：`rendered_stream` 的 `PolicyOrder` 只需要锚点、边界和已完成压缩的裁剪点。保留窗口只在计算裁剪点的压缩步骤读取，`regrown` 也只用锚点里的最后一个压缩开始。轮次开始由派生索引 `timeline_policy_turns` 覆盖（[原生存储格式](appserver/native-storage-format.md#索引与实际查询)），只读索引不读正文；只有最后一个压缩开始的正文被读出它的 `through`。
+6. 预算重试复用它来源的压缩（`reusable`）。它的裁剪点可能不是最后一个轮次开始，流式 order 不带时就按事件 id 做一次定点读取（`Timeline::event_position`）取得位置，再按位置定位保留的第一条条目；不因此重新读取全部轮次开始。
 
 ## 6. 迁移与兼容
 
-- 只加两列和三个部分索引：`WHERE context_render = 1`、`WHERE context_state = 1`，以及策略定位用的 `timeline_events_positions`（`WHERE kind IN ('turn/start', 'context/compaction-start', 'context/compaction')`）。事件正文不变，冻结 fixture 不变。
+- 只加两列和三个部分索引：`WHERE context_render = 1`、`WHERE context_state = 1`，以及策略定位用的 `timeline_events_positions`（`WHERE kind IN ('turn/start', 'context/compaction-start', 'context/compaction')`）。事件正文不变，冻结 fixture 不变。v32（[#605](https://github.com/arcships/dim/issues/605)）把两个键相同的读取索引合并为一个 `WHERE context_render = 1 OR context_state = 1`；读取条件不变，写入不再为同一行维护两个索引。
 - **填充**：核心事件的两列是其 key 的纯函数（`context_flags`）；扩展事件的两列取事件自己的值，
   已有的扩展事件没有这两个字段，回填为 0。升级在同一事务里加列并按 key 集合回填；事务提交前库不可用，提交后整体生效，不存在部分迁移的状态。不复制正文，不按会话暂存。
 - **等价性**：开关集合就是渲染/折叠实际消费的集合，由差分测试证明——同一前缀上，过滤读取的 entries 与状态必须与不过滤的结果逐条一致。
@@ -106,7 +107,7 @@ Rules: [design rules](../architecture/rust-agent/principles.md)、[ADR 002](../a
 - **Storage（原生存储）**
   - 被挡住的规则：读取要能跳过无关行，且迁移不能留下新旧并存的库。
   - 考虑过的机制：只改事件正文（要解析正文才能筛）、逐会话提交（失败会留下半迁移库）。
-  - 通用能力：两列与三个部分索引（含 `timeline_events_positions`）。
+  - 通用能力：两列与两个部分索引（含 `timeline_events_positions`；v31 的三个中两个读取索引在 v32 合并）。
   - owner 与 issue：存储文档与实现。
 
 ## 9. 验收
@@ -120,9 +121,10 @@ Rules: [design rules](../architecture/rust-agent/principles.md)、[ADR 002](../a
 | 无快照 | 从段首重放状态下仍只从裁剪点收消息，结果与有快照时一致 |
 | 迁移 | 升级事务加列并按 key 回填，提交前库不可用、提交后整体生效；回填后的开关与渲染/折叠消费的集合一致（差分测试） |
 | 读取量 | 命中快照时只读裁剪点之后的渲染行与状态行；`context-breakdown` 对照 |
+| 策略定位 | 每段只读最后一个轮次开始、最后一个压缩开始与边界事件，以及窗口之后的轮次开始；轮次开始由派生索引覆盖、不读正文。存储流程测试核对返回集合与查询计划；压缩流程测试用一个“保留尾刚好跨过 `RETAINED_SHARE × B`”的回合开始核对它仍被选中，窗口偏小即失败 |
 
 ## 10. 删减检查
 
-- 只加两列三个索引；不新增事件、字段、缓存或配置。
+- 只加两列两个索引；不新增事件、字段、缓存或配置。
 - 不复制正文，不引入第二份状态；开关只是索引。
 - 不描述渲染、checkpoint、压缩的内部逻辑；它们留在各自实现。
