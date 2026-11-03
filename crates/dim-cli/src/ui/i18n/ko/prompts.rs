@@ -1,5 +1,19 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
+        "Reasoning effort" => "추론 강도",
+        "Loading reasoning efforts…" => "추론 강도 옵션을 불러오는 중…",
+        "Current: {value}" => "현재: {value}",
+        "Model default" => "모델 기본값",
+        "This model does not advertise reasoning efforts." => {
+            "이 모델은 추론 강도 옵션을 제공하지 않습니다."
+        }
+        "↑↓ move · 1-9 select · Enter apply · Esc cancel" => {
+            "↑↓ 이동 · 1-9 선택 · Enter 적용 · Esc 취소"
+        }
+        "Esc cancel" => "Esc 취소",
+        "Model changed; reopen /effort to choose its reasoning effort." => {
+            "모델이 변경되었습니다. /effort를 다시 열어 추론 강도를 선택하세요."
+        }
         // prompts.rs: exit confirmation
         "The agent is still running." => "에이전트 실행 중",
         "AskUser is waiting for an answer." => "AskUser 답변 대기 중",

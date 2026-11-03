@@ -1,5 +1,19 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
+        "Reasoning effort" => "Denkaufwand",
+        "Loading reasoning efforts…" => "Denkaufwand-Optionen werden geladen…",
+        "Current: {value}" => "Aktuell: {value}",
+        "Model default" => "Modellstandard",
+        "This model does not advertise reasoning efforts." => {
+            "Dieses Modell bietet keine Denkaufwand-Optionen an."
+        }
+        "↑↓ move · 1-9 select · Enter apply · Esc cancel" => {
+            "↑↓ bewegen · 1-9 wählen · Enter anwenden · Esc abbrechen"
+        }
+        "Esc cancel" => "Esc abbrechen",
+        "Model changed; reopen /effort to choose its reasoning effort." => {
+            "Modell geändert; /effort erneut öffnen, um den Denkaufwand zu wählen."
+        }
         // prompts.rs: exit confirmation
         "The agent is still running." => "Der Agent läuft noch.",
         "AskUser is waiting for an answer." => "AskUser wartet auf Antwort.",

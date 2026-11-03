@@ -290,9 +290,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "맨 위로 스크롤",
         "scroll to the bottom" => "맨 아래로 스크롤",
         "pick an earlier message to edit or quote" => "편집/인용할 이전 메시지 선택",
-        "collapse or expand tool details and compaction summaries" => {
-            "도구 상세 및 압축 요약 접기/펼치기"
-        }
+        "cycle tool details: collapsed, summary, expanded" => "도구 상세 전환: 접힘, 요약, 펼침",
         "switch between fullscreen and scrollback" => "전체 화면/스크롤백 전환",
         "switch theme" => "테마 전환",
         "switch language" => "언어 전환",

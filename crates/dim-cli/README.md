@@ -251,7 +251,10 @@ At the idle interactive prompt, `/effort VALUE` (alias `/reasoning`) changes
 reasoning effort, `/fast on|off` selects priority/default service tiers, and
 `/agent ID` adopts an Agent profile's prompt and optional model. Tools and
 permissions keep the current Session configuration. A profile with a model resets effort
-and service tier to that model's defaults; a prompt-only profile preserves them. Bare commands list choices;
+and service tier to that model's defaults; a prompt-only profile preserves them. In both TUI modes,
+bare `/effort` opens an AskUser-style single-choice dialog for the current model:
+↑/↓ or 1–9 select, Enter applies, Esc cancels. It changes only the Session, not saved model defaults.
+The line client and the other bare commands list choices;
 unsupported values leave the prompt usable. Commands in `--prompt` or piped input
 remain literal model input. See [model configuration](../../docs/design/model-configuration.md).
 
@@ -774,7 +777,7 @@ The interactive terminal UI has two modes over the same session. Scrollback (the
 | Sending a message | Follow the bottom again |
 | Mouse drag | Select transcript text; release copies it (OSC 52, plus `pbcopy` locally on macOS; inside tmux OSC 52 goes through passthrough, which needs `set -g allow-passthrough on`) |
 | Click a link | Opens it in the system browser (OSC 8 links, or a bare `http(s)://` URL); over SSH the status row shows the URL instead |
-| Click a tool group's header or a thought's title | Opens (`▾`) or closes (`▸`) that group, or shows a settled thought whole or as its one-row summary; a running group keeps the form it is given when it settles. A settled block opens in place: the view stops following the bottom so the header stays under the pointer. A press counts as a click only if no drag followed and its row still shows the same text at the release, so output arriving in between cannot redirect it. `/tools` sets every tool group and compaction row, settled ones included, and lays the transcript out again from the bottom; thinking details have their own switch in `/settings` |
+| Click a tool group's header or a thought's title | Cycles a tool group through collapsed (`▸`), summary (`▾`) and expanded (`▾`), or shows a settled thought whole or as its one-row summary; a running group keeps the form it is given when it settles. A settled block opens in place: the view stops following the bottom so the header stays under the pointer. A press counts as a click only if no drag followed and its row still shows the same text at the release, so output arriving in between cannot redirect it. `/tools` sets every tool group and compaction row, settled ones included, and lays the transcript out again from the bottom; thinking details have their own switch in `/settings` |
 | `Tab` / `Shift+Tab` | Pick older / newer user messages (`Up` / `Down` while one is picked); past the newest the pick ends. `Esc` ends it, `e` puts the message in the composer to edit and send again; `b` opens a line of the shown line cut just before the message, with the message in the composer as its opening input (`Enter` opens it through `session.branch_create` and shows it, `Esc` cancels); `f`, on `main` only, asks, then forks the Session just before the message (`session.fork`) and attaches to the fork with the message in its composer. A `⑂ line` row, written where a line opened on the shown line, is picked too: `Enter` (or a click) shows that line ([timeline UI](../../docs/design/timeline-ui.md)); so is the load-more row at the top, which `Enter` loads |
 | `/`, `Ctrl+O`, `Ctrl+P` | Open the command palette centred over the dimmed transcript, with its own query row; a draft set aside by `Ctrl+O`/`Ctrl+P` returns when the command entry it opened ends (`Enter`, `Esc` or an emptied draft). With a question pending whose free-text answer is not being edited, the palette opens over it instead, and the question keeps its answers while the command's argument is typed |
 | `Home` / `End` | With an empty composer: scroll to the top / bottom of the transcript |
@@ -796,6 +799,19 @@ Opening the group still shows each tool's full path and diff.
 ✓ Edited 2 files (+18 -5) · src/main.rs, src/config.rs ▸
 ✓ Edited 5 files (+42 -16) · src/main.rs, … 4 more ▸
 ✓ Ran 1 command, edited src/main.rs (+12 -3) ▸
+```
+
+Summary keeps the group header and adds one row per call in its original order,
+with the tool name and command, path or primary input. Each call takes at most
+one terminal row, even for a long command. Multiline commands show only the first
+nonblank line followed by `…`; output, diff bodies and script bodies stay hidden
+until expanded. Member summary rows still open their conversations.
+
+```text
+✓ Ran 1 command, read 1 file, edited src/main.rs (+12 -3) ▾
+  ✓ Exec · cargo check -p dim-cli
+  ✓ Read · docs/INDEX.md
+  ✓ Edited src/main.rs (+12 -3)
 ```
 
 Interrupting a turn immediately shows a transient `Stopping` notice in the status slot. The transcript records the user-interruption note from the confirmed cancellation, after the answer has finished revealing and immediately before `stopped`, once per cancelled turn. Reopening preserves this order for turns interrupted by this version of the TUI. Older cancellations and cancellations from the line client retain their existing `stopped` display.
@@ -877,7 +893,7 @@ Both scrollback and fullscreen palettes list slash commands, grouped by category
 
 Typing ranks the matches: the exact name, a name prefix, an alias prefix, a prefix of a name part (`reload-skills` for `sk`), a name containing the query, a description word starting with it, then three or more letters in order through the name (`stg` for `settings`); a match inside a description word does not count. Equally ranked matches use the category/name order. See the [command menu design](../../docs/design/cli-commands.md#command-menu).
 
-`/settings` gathers the interface settings: theme and language (each opens its picker and comes back), the startup form (`tuiMode`), tool details (`tuiToolDetailsExpanded`), thinking details (`tuiThinkingDetailsExpanded`), the fullscreen mouse (`tuiMouseMode`: off hands selection and the wheel to the terminal), notifications (`tuiNotifyOnComplete`, on by default), ACP Sessions in `/resume` (`showAcpSessions`, off by default), tool approvals and execution settings. Tool and thinking details are independent and both default to collapsed in both modes; saved preferences are preserved. With tool details collapsed, each tool group shows only its header, and each compaction row hides its summary. `/tools` flips tool and compaction details without changing thinking. Model selection stays in `/model` (`/models`). Switches flip with `Enter`, `←`/`→` or `Space` and are saved to `config.json` at once. See the [transcript detail settings contract](../../docs/design/cli-commands.md#transcript-detail-settings).
+`/settings` gathers the interface settings: theme and language (each opens its picker and comes back), the startup form (`tuiMode`), tool details (`tuiToolDetails`: `collapsed`, `summary`, `expanded`), thinking details (`tuiThinkingDetailsExpanded`), the fullscreen mouse (`tuiMouseMode`: off hands selection and the wheel to the terminal), notifications (`tuiNotifyOnComplete`, on by default), ACP Sessions in `/resume` (`showAcpSessions`, off by default), tool approvals and execution settings. Tool and thinking details are independent and both default to collapsed in both modes. The old `tuiToolDetailsExpanded` boolean is read when no valid three-state preference exists; new changes save to `tuiToolDetails` without replacing the legacy key's format. Collapsed tool groups retain their header and member cards; summary shows one row per call; expanded shows full details. Compaction bodies show only in expanded. `/tools` cycles the three forms without changing thinking. Model selection stays in `/model` (`/models`). Settings change with `Enter`, `←`/`→` or `Space` and save to `config.json` at once. See the [transcript detail settings contract](../../docs/design/cli-commands.md#transcript-detail-settings).
 
 Notifications reach a user who switched windows when the run finishes or waits on a permission or a question (each request once): iTerm2 gets `OSC 9`, kitty `OSC 99`, Ghostty, WezTerm and foot `OSC 777`; tmux and any other terminal get a bell, which tmux forwards and terminals turn into a Dock bounce, a taskbar flash or a tab badge.
 
@@ -1141,7 +1157,7 @@ The terminal UI reaches the same Session methods as the line client:
 | `/compact` | Asks the shown line to compact its context with `session.context.compact`, during a run too. The matching Timeline row reports the work and its terminal outcome once; the RPC reply adds no second completed, skipped, failed or cancelled notice. Failures of the call itself and invalid replies are reported separately. A daemon without the method says it does not support context compaction |
 | `/rename TITLE`, `/rename --clear` | Sets, or clears, the shown Session's manual title with `session.rename` and reports the stored title or that the Session is untitled. Choosing `/rename` from the palette fills `/rename ` and waits; a bare `/rename` is refused with a notice and sends nothing, so `--clear` is the way to clear it without a title. The text is a command: it is never queued or submitted, also while a turn runs. With no Session shown it says so, and a Session that does not serve `session.rename` (`unknown_method`) reports that instead. The window title shows the stored title, or the first message's topic until the Session has one |
 | `/goal [OBJECTIVE \| set OBJECTIVE \| edit OBJECTIVE \| pause \| resume \| clear]` | Reads and writes the goal of the shown line through `session.goal.*`. The command's first line names the call, the line and the status in force, the objective follows it, and `/goal` alone prints the goal the line's events give; `edited` is the form that found a live goal and changed only its objective, and a typed objective after a finished goal starts a new one. While the shown line follows a goal the status area carries `◎ goal active` or `◎ goal paused`. A daemon whose Session lists no `session.goal.set` says Goal is not available and calls nothing ([Goal](#goal)) |
-| `/effort VALUE` (`/reasoning`), `/fast on\|off`, `/agent ID` | Change the Session's reasoning effort, service tier or agent; without a value they list the choices for the adopted model. `/fast` is listed in the palette only while the adopted model's catalog entry advertises priority/default service tiers |
+| `/effort [VALUE]` (`/reasoning`), `/fast on\|off`, `/agent ID` | Change the Session's reasoning effort, service tier or agent. Bare `/effort` opens an AskUser-style picker for the adopted model in both TUI modes; ↑/↓ or 1–9 select, Enter applies, Esc cancels. The line client and the other bare commands list choices. `/fast` is listed in the palette only while the adopted model's catalog entry advertises priority/default service tiers |
 | Paste of local file paths | An image the model takes becomes an `[Image #N]` token sent as an image block; another file is inserted as its path, and so is an image the model does not take. At most 20 images, a group all or nothing |
 | `Ctrl+V` | Reads the native clipboard off the interface thread: files, then an image, then text. `Enter` waits until the read is in |
 | A paste of 4 lines or 201 characters or more | Stays a `[... N lines]` token; on send it is stored with `attachment.put` and referenced as `[Pasted text: PATH (N lines)]` |

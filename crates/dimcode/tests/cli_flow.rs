@@ -4539,6 +4539,95 @@ fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
 }
 
 #[test]
+fn tui_effort_dialog_selects_the_current_models_effort_and_cancels_without_writing() {
+    fn catalog(wire: &mut Wire) {
+        let request = wire.read("provider.catalog");
+        assert_eq!(request["params"], json!({"providerId":"test"}));
+        let mut capabilities = serde_json::to_value(
+            dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384),
+        )
+        .unwrap();
+        capabilities["reasoning"] = json!(true);
+        wire.reply(
+            &request,
+            json!({"catalog":{"models":[
+                {"id":"other","capabilities":capabilities,"metadata":{"reasoning":{
+                    "supported":true,"effortOptions":["invalid-neighbor"]}}},
+                {"id":"model","capabilities":capabilities,"metadata":{"reasoning":{
+                    "supported":true,"effortOptions":["low","high"],
+                    "off":{"kind":"enable_thinking","value":false}}}}
+            ]}}),
+        );
+    }
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let daemon = home.daemon(|wire| {
+            wire.hello(&[]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history");
+            wire.reply(
+                &history,
+                json!({"events":[configured_event(4, "model", json!({"reasoningEffort":"high"}))],
+                "through":8,"nextAfter":8,"done":true}),
+            );
+            wire.no_context();
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            catalog(wire);
+            catalog(wire);
+            let selected = wire.read("session.model.update");
+            assert_eq!(
+                selected["params"],
+                json!({"sessionId":"session","branchId":"main",
+                "modelPreferences":{"reasoningEffort":"high"}})
+            );
+            wire.reply(&selected, json!({"outcome":"unchanged"}));
+            catalog(wire);
+            catalog(wire);
+            catalog(wire);
+            let selected = wire.read("session.model.update");
+            assert_eq!(
+                selected["params"],
+                json!({"sessionId":"session","branchId":"main",
+                "modelPreferences":{"reasoningEffort":"none"}})
+            );
+            wire.reply(&selected, json!({"outcome":"adopted"}));
+            wire.hold();
+        });
+        let mut command = home.command();
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("test / model · high");
+        terminal.write(b"/effort\r");
+        terminal.until("Current: high");
+        terminal.until("2 (•) high");
+        terminal.write(b"\r");
+        terminal.until("Reasoning effort configuration unchanged: high");
+        terminal.write(b"/effort\r");
+        terminal.until("Current: high");
+        terminal.write(b"\x1b");
+        terminal.until(if fullscreen {
+            "test / model · high"
+        } else {
+            "Ask anything..."
+        });
+        terminal.write(b"/reasoning\r");
+        terminal.until("Current: high");
+        terminal.until("3 ( ) none");
+        assert!(!terminal.transcript.contains("invalid-neighbor"));
+        terminal.write(b"3\r");
+        terminal.until("Reasoning effort configuration adopted: none");
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
+#[test]
 fn tui_mcp_and_configuration_commands_use_session_methods() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {

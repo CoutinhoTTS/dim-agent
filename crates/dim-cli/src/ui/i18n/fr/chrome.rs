@@ -322,8 +322,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "défiler en haut",
         "scroll to the bottom" => "défiler en bas",
         "pick an earlier message to edit or quote" => "choisir un message à modifier ou citer",
-        "collapse or expand tool details and compaction summaries" => {
-            "replier/déplier les détails des outils et les résumés de compression"
+        "cycle tool details: collapsed, summary, expanded" => {
+            "changer les détails : repliés, résumé, dépliés"
         }
         "switch between fullscreen and scrollback" => "basculer plein écran / défilement",
         "switch theme" => "changer de thème",

@@ -1,5 +1,19 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
+        "Reasoning effort" => "Upaya penalaran",
+        "Loading reasoning efforts…" => "Memuat pilihan upaya penalaran…",
+        "Current: {value}" => "Saat ini: {value}",
+        "Model default" => "Bawaan model",
+        "This model does not advertise reasoning efforts." => {
+            "Model ini tidak menawarkan pilihan upaya penalaran."
+        }
+        "↑↓ move · 1-9 select · Enter apply · Esc cancel" => {
+            "↑↓ pindah · 1-9 pilih · Enter terapkan · Esc batal"
+        }
+        "Esc cancel" => "Esc batal",
+        "Model changed; reopen /effort to choose its reasoning effort." => {
+            "Model berubah; buka kembali /effort untuk memilih upaya penalarannya."
+        }
         // prompts.rs: exit confirmation
         "The agent is still running." => "Agen masih berjalan.",
         "AskUser is waiting for an answer." => "AskUser menunggu jawaban.",

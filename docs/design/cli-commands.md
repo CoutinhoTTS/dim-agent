@@ -15,19 +15,27 @@ contract records the native platform acceptance evidence and outstanding checks.
 ## Transcript detail settings
 
 In both scrollback and fullscreen TUI, `/settings` exposes independent
-`Tool details` and `Thinking details` switches. Enter, Left/Right or Space
-toggles the selected switch and saves it immediately in the CLI home.
-Both switches default to collapsed.
-Saved preferences are preserved independently for both switches.
+`Tool details` and `Thinking details` settings. Enter, Left/Right or Space
+cycles Tool details through collapsed, summary and expanded, and toggles
+Thinking details between collapsed and expanded. Changes save immediately in
+the CLI home. Both settings default to collapsed; saved preferences, including
+the old boolean tool preference, are preserved independently.
 
 ```text
 Settings · Interface
-  Tool details       collapsed
+  Tool details       summary
   Thinking details   collapsed
 ```
 
-`/tools` changes tool details only, retaining its existing control of compaction
-details. Thinking details controls both streaming and completed thoughts,
+Collapsed tool groups retain their existing header and member cards. Summary
+adds one row per call, in call order, naming its tool and input target or command,
+without output, diffs or script bodies. Each row truncates to one terminal row;
+a multiline command shows its first nonblank line followed by `…`. Expanded
+retains the full tool details. Clicking a tool header cycles the same three forms
+for that group only. A member's summary row still opens its conversation.
+
+`/tools` cycles the three tool forms, retaining its control of compaction details:
+only expanded shows a compaction's summary body. Thinking details controls both streaming and completed thoughts,
 including the line side panel. Changing either setting updates its retained
 history and live content without changing the other setting. Scrollback already
 written to the terminal remains append-only; fullscreen redraws retained history.
@@ -884,6 +892,10 @@ Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close
 
 `dimcode models PROVIDER remove MODEL` removes without the panel's confirmation, and `dimcode
 models PROVIDER inspect MODEL` prints the lines the detail shows.
+
+Bare `/effort` and `/reasoning` open the current model's inline effort picker in both TUI
+modes; explicit-value forms and the line client keep their command behavior. The selection
+contract is owned by [model configuration](model-configuration.md#scrollback-interaction).
 
 ### The Workflow area
 
