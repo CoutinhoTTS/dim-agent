@@ -29,12 +29,18 @@ pub struct Service {
     pub rejected: Mutex<Vec<String>>,
     pub issued: AtomicUsize,
     pub refreshes: AtomicUsize,
+    pub refresh_wait: AtomicBool,
+    pub refresh_release: tokio::sync::Notify,
     pub reject_refresh: AtomicBool,
     /// `expires_in` of the next issued token only; absent means one hour.
     pub expires_in: Mutex<Option<Value>>,
     pub models: Mutex<Option<Value>>,
     pub reset_keys: Mutex<Vec<String>>,
     pub reset_forbidden: AtomicBool,
+    pub title_requests: Mutex<Vec<(String, Value)>>,
+    pub title_response: Mutex<Option<(StatusCode, Value)>>,
+    pub title_wait: AtomicBool,
+    pub title_release: tokio::sync::Notify,
 }
 impl Service {
     pub fn calls(&self, prefix: &str) -> usize {
@@ -138,6 +144,9 @@ pub async fn start() -> Fixture {
                 match grant.as_str() {
                     "refresh_token" => {
                         s.refreshes.fetch_add(1, Ordering::SeqCst);
+                        if s.refresh_wait.load(Ordering::SeqCst) {
+                            s.refresh_release.notified().await;
+                        }
                         if s.reject_refresh.load(Ordering::SeqCst) {
                             return (StatusCode::BAD_REQUEST, Json(json!({"error":"invalid_grant"})))
                                 .into_response();
@@ -260,6 +269,22 @@ pub async fn start() -> Fixture {
                     {"title":"Other hit","url":"https://other.test/","description":"Fallback description"}
                 ]}}))
                 .into_response()
+            }),
+        )
+        .route(
+            "/v1/session/rename",
+            post(|State(s): State<Arc<Service>>, headers: HeaderMap, Json(body): Json<Value>| async move {
+                s.record("POST /v1/session/rename".into());
+                s.title_requests.lock().unwrap().push((bearer(&headers), body));
+                if s.rejects(&headers) {
+                    return unauthorized();
+                }
+                if s.title_wait.load(Ordering::SeqCst) {
+                    s.title_release.notified().await;
+                }
+                let (status, body) = s.title_response.lock().unwrap().clone()
+                    .unwrap_or((StatusCode::OK, json!({"title":"Account title","source":"model"})));
+                (status, Json(body)).into_response()
             }),
         )
         .route(

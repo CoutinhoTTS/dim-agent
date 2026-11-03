@@ -1,5 +1,16 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
+        "Reasoning effort" => "推理强度",
+        "Loading reasoning efforts…" => "正在读取推理强度选项…",
+        "Current: {value}" => "当前：{value}",
+        "Model default" => "模型默认值",
+        "This model does not advertise reasoning efforts." => "此模型未声明可选的推理强度。",
+        "↑↓ move · 1-9 select · Enter apply · Esc cancel" => {
+            "↑↓ 移动 · 1-9 选择 · Enter 应用 · Esc 取消"
+        }
+        "Model changed; reopen /effort to choose its reasoning effort." => {
+            "模型已切换，请重新打开 /effort 选择推理强度。"
+        }
         "The agent is still running." => "智能体仍在运行。",
         "AskUser is waiting for an answer." => "AskUser 正在等待回答。",
         "A permission request is waiting." => "有授权请求正在等待。",

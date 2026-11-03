@@ -1,5 +1,18 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
+        "Reasoning effort" => "Esfuerzo de razonamiento",
+        "Loading reasoning efforts…" => "Cargando opciones de razonamiento…",
+        "Current: {value}" => "Actual: {value}",
+        "Model default" => "Predeterminado del modelo",
+        "This model does not advertise reasoning efforts." => {
+            "Este modelo no ofrece opciones de esfuerzo de razonamiento."
+        }
+        "↑↓ move · 1-9 select · Enter apply · Esc cancel" => {
+            "↑↓ mover · 1-9 elegir · Enter aplicar · Esc cancelar"
+        }
+        "Model changed; reopen /effort to choose its reasoning effort." => {
+            "El modelo cambió; vuelve a abrir /effort para elegir su esfuerzo de razonamiento."
+        }
         // prompts.rs: exit confirmation
         "The agent is still running." => "El agente sigue activo.",
         "AskUser is waiting for an answer." => "AskUser espera una respuesta.",

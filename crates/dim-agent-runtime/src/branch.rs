@@ -127,6 +127,22 @@ impl Branch {
         let through = self.published(through)?;
         self.0.timeline().history(Some(through)).await
     }
+    /// The first page of a backward, kind-filtered read of the whole branch
+    /// chain, pinned at the published head.
+    pub fn page_cursor(&self) -> Result<BranchCursor> {
+        self.0.timeline().page_cursor(self.sequence())
+    }
+    /// One page of that read: up to `limit` stored rows of `kinds`, oldest
+    /// first, from the cursor's segment at the pinned head. `kinds` is the
+    /// caller's selection; the store skips every other row before decoding.
+    pub async fn page(
+        &self,
+        cursor: BranchCursor,
+        limit: usize,
+        kinds: &[&str],
+    ) -> Result<BranchPage> {
+        self.0.timeline().page(cursor, limit, kinds).await
+    }
     pub async fn local<R: std::ops::RangeBounds<u64> + Send>(
         &self,
         range: R,
@@ -148,6 +164,26 @@ impl Branch {
     pub async fn context(&self, through: u64) -> Result<ContextHistory> {
         let through = self.published(Some(through))?;
         self.0.timeline().context(through).await
+    }
+    /// The cut of the latest completed compaction at or below `through` on this
+    /// branch, when it is one of its own events.
+    pub async fn compaction_cut(&self, through: u64) -> Result<Option<u64>> {
+        let through = self.published(Some(through))?;
+        self.0.timeline().compaction_cut(through).await
+    }
+    /// One page of the rows the context projection consumes after `after`; the
+    /// cursor may fall inside an atomic batch and the event limit is a target.
+    pub async fn context_page(
+        &self,
+        after: u64,
+        limit: usize,
+        through: u64,
+    ) -> Result<Vec<Arc<AgentEvent>>> {
+        let through = self.published(Some(through))?;
+        self.0
+            .timeline()
+            .stored_context_page(after, limit, through)
+            .await
     }
     pub async fn trace(&self, sequence: u64) -> Result<Option<TimelineTrace>> {
         self.published(Some(sequence))?;

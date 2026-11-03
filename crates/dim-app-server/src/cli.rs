@@ -20,19 +20,11 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::{AgentBuilder, AgentConfig};
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
-/// Adds a product's process plugins to the builder before the server starts.
-/// The App Server does not depend on them: a product executable passes its own
-/// installer (for example `dim_agent_scheduler::install`), and the plain
-/// `dim-app-server` binary passes none.
-pub type ProductInstall = fn(&mut AgentBuilder);
-
-fn no_product_plugins(_: &mut AgentBuilder) {}
-
 /// Runs the App Server command line: `args` are the arguments after the
 /// program name. This keeps the descriptors the process inherited; a process
 /// `main` enters through [`process_entry`].
 pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::error::Error>> {
-    run_with(args, None, no_product_plugins)
+    run_with(args, None, |_| {})
 }
 
 /// Runs a process that serves the App Server: closes every descriptor above
@@ -45,7 +37,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
 pub fn process_entry(
     args: impl IntoIterator<Item = String>,
     managed_provider: Option<crate::managed_provider::ManagedProviderRow>,
-    install: ProductInstall,
+    install: fn(&mut AgentBuilder),
 ) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(unix)]
     close_inherited_descriptors();
@@ -204,13 +196,14 @@ pub fn product_session_defaults(defaults: &mut dim_agent_runtime::SessionConfig)
 
 /// [`run`] with a managed provider plugin, which an account build's own
 /// executable supplies; it is installed when the server has a product home.
+/// `install` contributes the host's native plugins to the builder before assembly.
 ///
 /// This is an in-process entry that keeps the descriptors the process has
 /// open; a process `main` calls [`process_entry`] instead.
 pub fn run_with(
     args: impl IntoIterator<Item = String>,
     managed_provider: Option<crate::managed_provider::ManagedProviderRow>,
-    install: ProductInstall,
+    install: fn(&mut AgentBuilder),
 ) -> Result<(), Box<dyn std::error::Error>> {
     let argv: Vec<String> = args.into_iter().collect();
     if argv.first().map(String::as_str) == Some("--connect-pipe") {
@@ -524,8 +517,8 @@ pub fn run_with(
                 .or(config.plugin_files.as_ref())
             {
                 super::create_private_directory(&root.join("scheduler"))?;
-                install(&mut builder);
             }
+            install(&mut builder);
         } else if mock_model {
             defaults::install(&mut builder);
             defaults::mock_model_hosts(&mut builder);

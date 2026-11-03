@@ -62,6 +62,9 @@ mod native_storage;
 #[path = "transport_flow/compaction.rs"]
 mod compaction;
 
+#[path = "transport_flow/default_effort.rs"]
+mod default_effort;
+
 #[path = "transport_flow/recall.rs"]
 mod recall;
 
@@ -152,8 +155,6 @@ mod ui_host;
 #[path = "transport_flow/web_entry.rs"]
 mod web_entry;
 
-#[path = "transport_flow/session_title.rs"]
-mod session_title;
 #[path = "transport_flow/workflow.rs"]
 mod workflow;
 
@@ -2415,3 +2416,6 @@ async fn unmounted_management_preserves_mock_sessions_and_wire_admission() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+#[path = "transport_flow/worktrees.rs"]
+mod worktrees;

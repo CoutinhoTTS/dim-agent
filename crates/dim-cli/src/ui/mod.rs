@@ -11,10 +11,28 @@ use std::path::PathBuf;
 pub struct Env {
     /// Product home for saved settings and input history.
     pub home: PathBuf,
-    /// The workspace the session works in.
-    pub workspace: PathBuf,
+    /// The workspace the session works in, as every request names it.
+    pub workspace: String,
     /// Start in the fullscreen interface instead of scrollback.
     pub fullscreen: bool,
+}
+
+/// A path with the user's home directory written `~`.
+pub(crate) fn tilde(path: &str) -> String {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
+    let Some(home) = home else {
+        return path.to_owned();
+    };
+    let home = home.to_string_lossy();
+    if home.is_empty() {
+        return path.to_owned();
+    }
+    match path.strip_prefix(home.as_ref()) {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') || rest.starts_with('\\') => {
+            format!("~{rest}")
+        }
+        _ => path.to_owned(),
+    }
 }
 
 pub mod approvals_panel;

@@ -871,27 +871,13 @@ async fn node_default_plugins_load_and_their_settings_follow_them() {
     assert_eq!(item(&list, "web")["use"], "builtin", "{list}");
     assert_eq!(item(&list, "Agents")["use"], "builtin", "{list}");
 
-    let read = json!({"source": "session-title", "scope": "user"});
+    let read = json!({"source": "goal", "scope": "user"});
     assert_ok(&call(&mut client, "settings.read", read.clone()).await);
-    assert_ok(
-        &call(
-            &mut client,
-            "plugin.disable",
-            json!({"name": "session-title"}),
-        )
-        .await,
-    );
+    assert_ok(&call(&mut client, "plugin.disable", json!({"name": "goal"})).await);
     let gone = client.rpc("settings.read", read.clone()).await;
     assert_eq!(app_error(&gone), "settings_unknown_source", "{gone}");
-    assert_ok(
-        &call(
-            &mut client,
-            "plugin.enable",
-            json!({"name": "session-title"}),
-        )
-        .await,
-    );
-    running(&mut client, &["session-title"]).await;
+    assert_ok(&call(&mut client, "plugin.enable", json!({"name": "goal"})).await);
+    running(&mut client, &["goal"]).await;
     assert_ok(&call(&mut client, "settings.read", read).await);
 
     // §6 `config`: goal's Settings source through the `plugin` tool.
@@ -970,6 +956,79 @@ async fn node_default_plugins_load_and_their_settings_follow_them() {
     }
     let stored = call(&mut client, "settings.read", read).await;
     assert_eq!(stored["result"]["document"], document, "{stored}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_former_default_plugin_uses_its_builtin_and_preserves_source_choices() {
+    let home = home();
+    let config = config(&home);
+    let path = home.join("plugins.json");
+    let original =
+        json!({"version":1,"installed":[],"names":{"web":{"use":"default"}}}).to_string();
+    std::fs::write(&path, &original).unwrap();
+    let (server, _, _) = start(config.clone()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let list = running(&mut client, &["web"]).await;
+    assert_eq!(item(&list, "web")["use"], "builtin", "{list}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    assert_ok(&call(&mut client, "plugin.disable", json!({"name":"web"})).await);
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(item(&list, "web")["status"], "off", "{list}");
+    assert_ok(&call(&mut client, "plugin.enable", json!({"name":"web"})).await);
+    running(&mut client, &["web"]).await;
+    let source = plugin_dir(&home.join("src"), "web");
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.install",
+            json!({"id":"web-replacement","source":{"path":source}}),
+        )
+        .await,
+    );
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.enable",
+            json!({"name":"web","use":"web-replacement"}),
+        )
+        .await,
+    );
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(item(&list, "web")["use"], "web-replacement", "{list}");
+    let absent = call(
+        &mut client,
+        "settings.read",
+        json!({"source":"web","scope":"user"}),
+    )
+    .await;
+    assert_eq!(app_error(&absent), "settings_unknown_source", "{absent}");
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.enable",
+            json!({"name":"web","use":"builtin"}),
+        )
+        .await,
+    );
+    running(&mut client, &["web"]).await;
+    assert_ok(
+        &call(
+            &mut client,
+            "settings.read",
+            json!({"source":"web","scope":"user"}),
+        )
+        .await,
+    );
     drop(client);
     server.shutdown();
     server.join().await.unwrap();

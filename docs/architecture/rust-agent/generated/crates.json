@@ -237,7 +237,43 @@
   },
   {
     "from": "dim-oauth",
+    "to": "dim-session-title"
+  },
+  {
+    "from": "dim-oauth",
     "to": "rutis"
+  },
+  {
+    "from": "dim-session-title",
+    "to": "dim-agent-capabilities"
+  },
+  {
+    "from": "dim-session-title",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "dim-session-title",
+    "to": "dim-agent-types"
+  },
+  {
+    "from": "dim-session-title",
+    "to": "dim-app-server"
+  },
+  {
+    "from": "dim-session-title",
+    "to": "rutis"
+  },
+  {
+    "from": "dim-session-title",
+    "to": "dim-app-server"
+  },
+  {
+    "from": "dim-session-title",
+    "to": "dim-client"
+  },
+  {
+    "from": "dimcode",
+    "to": "dim-agent-runtime"
   },
   {
     "from": "dimcode",
@@ -257,11 +293,11 @@
   },
   {
     "from": "dimcode",
-    "to": "dim-agent-capabilities"
+    "to": "dim-session-title"
   },
   {
     "from": "dimcode",
-    "to": "dim-agent-runtime"
+    "to": "dim-agent-capabilities"
   },
   {
     "from": "dimcode",
@@ -302,6 +338,10 @@
   {
     "from": "xtask",
     "to": "dim-client"
+  },
+  {
+    "from": "xtask",
+    "to": "dim-session-title"
   },
   {
     "from": "xtask",

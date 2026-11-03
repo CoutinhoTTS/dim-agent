@@ -23,7 +23,7 @@
         "reads": []
       },
       {
-        "id": 61,
+        "id": 62,
         "parent": 2,
         "name": "Attachments",
         "state": "Active",
@@ -53,7 +53,7 @@
         ]
       },
       {
-        "id": 60,
+        "id": 61,
         "parent": 2,
         "name": "Questions",
         "state": "Active",
@@ -83,7 +83,7 @@
         ]
       },
       {
-        "id": 59,
+        "id": 60,
         "parent": 2,
         "name": "PrepareModelHost",
         "state": "Active",
@@ -113,7 +113,7 @@
         ]
       },
       {
-        "id": 58,
+        "id": 59,
         "parent": 2,
         "name": "ContextCompaction",
         "state": "Active",
@@ -143,7 +143,7 @@
         ]
       },
       {
-        "id": 57,
+        "id": 58,
         "parent": 2,
         "name": "CommandRules",
         "state": "Active",
@@ -173,7 +173,7 @@
         ]
       },
       {
-        "id": 56,
+        "id": 57,
         "parent": 2,
         "name": "PromptSources",
         "state": "Active",
@@ -203,7 +203,7 @@
         ]
       },
       {
-        "id": 55,
+        "id": 56,
         "parent": 2,
         "name": "ShellInput",
         "state": "Active",
@@ -233,7 +233,7 @@
         ]
       },
       {
-        "id": 54,
+        "id": 55,
         "parent": 2,
         "name": "Recall",
         "state": "Active",
@@ -263,7 +263,7 @@
         ]
       },
       {
-        "id": 53,
+        "id": 54,
         "parent": 2,
         "name": "Wait",
         "state": "Active",
@@ -293,7 +293,7 @@
         ]
       },
       {
-        "id": 52,
+        "id": 53,
         "parent": 2,
         "name": "WorkspaceTools",
         "state": "Active",
@@ -323,7 +323,7 @@
         ]
       },
       {
-        "id": 51,
+        "id": 52,
         "parent": 2,
         "name": "BranchTool",
         "state": "Active",
@@ -353,7 +353,7 @@
         ]
       },
       {
-        "id": 50,
+        "id": 51,
         "parent": 2,
         "name": "ToolExecution",
         "state": "Active",
@@ -383,7 +383,7 @@
         ]
       },
       {
-        "id": 49,
+        "id": 50,
         "parent": 2,
         "name": "Permission",
         "state": "Active",
@@ -413,7 +413,7 @@
         ]
       },
       {
-        "id": 48,
+        "id": 49,
         "parent": 2,
         "name": "ModelProvider",
         "state": "Active",
@@ -443,7 +443,7 @@
         ]
       },
       {
-        "id": 47,
+        "id": 48,
         "parent": 2,
         "name": "Loop",
         "state": "Active",
@@ -473,7 +473,7 @@
         ]
       },
       {
-        "id": 46,
+        "id": 47,
         "parent": 2,
         "name": "Prompt",
         "state": "Active",
@@ -503,7 +503,7 @@
         ]
       },
       {
-        "id": 45,
+        "id": 46,
         "parent": 2,
         "name": "ContextPreparation",
         "state": "Active",
@@ -533,7 +533,7 @@
         ]
       },
       {
-        "id": 44,
+        "id": 45,
         "parent": 2,
         "name": "ToolRegistry",
         "state": "Active",
@@ -563,7 +563,7 @@
         ]
       },
       {
-        "id": 43,
+        "id": 44,
         "parent": 2,
         "name": "InputQueue",
         "state": "Active",
@@ -593,7 +593,7 @@
         ]
       },
       {
-        "id": 42,
+        "id": 43,
         "parent": 2,
         "name": "SessionMethods",
         "state": "Active",
@@ -623,7 +623,7 @@
         ]
       },
       {
-        "id": 41,
+        "id": 42,
         "parent": 2,
         "name": "TimelineTree",
         "state": "Active",
@@ -653,7 +653,7 @@
         ]
       },
       {
-        "id": 40,
+        "id": 41,
         "parent": 2,
         "name": "SessionBroadcast",
         "state": "Active",
@@ -677,6 +677,53 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "provider": 39,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 40,
+        "parent": 2,
+        "name": "session-title",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_agent_runtime::parts::PartRegistry",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_app_server::settings::SettingsService",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_agent_runtime::parts::PartRegistry",
+            "scope": null,
+            "provider": 39,
+            "generation": 1
+          },
+          {
+            "service": "dim_app_server::settings::SettingsService",
+            "scope": null,
+            "provider": 16,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_agent_runtime::parts::PartRegistry",
+            "provider": 39,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_app_server::settings::SettingsService",
+            "provider": 16,
             "declared": true,
             "external": true
           }
@@ -2384,6 +2431,12 @@
       {
         "service": "dim_agent_capabilities::execution_settings::ExecutionSettingsHost",
         "provider": 22,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_agent_capabilities::file_access::WorktreeAssociations",
+        "provider": 7,
         "generation": 1,
         "removing": false
       },

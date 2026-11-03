@@ -10,6 +10,7 @@ pub use catalog::initialize_session_catalog;
 pub(crate) use catalog::truncate_preview;
 #[cfg(feature = "testing")]
 pub use codec::NodeLoads;
+pub use dim_agent_capabilities::file_access::WorktreeDirectory;
 pub use export::export_timeline;
 #[cfg(feature = "testing")]
 pub use metadata::testing;
@@ -17,7 +18,9 @@ pub use metadata::{MetadataError, SessionMetadata, Title, TitleFields, TitleSour
 pub use sqlite::{
     FORMAT as STORE_FORMAT, SqliteStorage, SqliteStoragePlugin, Vacuumed, vacuum_store,
 };
-pub use timeline::{SessionStore, SessionStorePlugin, SqliteTimelineStore, TurnWindow};
+pub use timeline::{
+    SessionStore, SessionStorePlugin, SqliteTimelineStore, TurnWindow, WorktreeUsage,
+};
 
 /// The directory below the database directory where WorkspaceTools keeps each
 /// Session's command output, `command-output/<sessionId>/`. The daemon gives
