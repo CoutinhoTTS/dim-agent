@@ -3571,6 +3571,7 @@ impl TimelineStore for SqliteTimelineStore {
         &'a self,
         key: &'a TimelineKey,
         query: &'a TimelineQuery,
+        from: u64,
         through: u64,
     ) -> BoxFuture<'a, Result<TimelineQueryPage>> {
         Box::pin(async move {
@@ -3582,6 +3583,7 @@ impl TimelineStore for SqliteTimelineStore {
             }
             if query.event_id.is_some()
                 && let Some(record) = self.query_event_by_id(key, query).await?
+                && record.event.sequence >= from
                 && record.event.sequence <= through
                 && matches_selection(query, &record.event)
             {
