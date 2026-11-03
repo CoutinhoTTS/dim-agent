@@ -6259,7 +6259,7 @@ mod tests {
                         id: "b-7c".into(),
                         parent: Some("main".into()),
                         purpose: "parser race".into(),
-                        state: LineState::EndedItself,
+                        state: LineState::Working,
                         cut: None,
                     },
                 ],
@@ -6495,7 +6495,7 @@ mod tests {
                 "Esc close",
                 false,
             );
-            sweep(fullscreen, &lines, "Lines", "b-7c", "Esc close", false);
+            sweep(fullscreen, &lines, "Lines", "b-7c", "y end it", false);
             sweep(
                 fullscreen,
                 &isolation,

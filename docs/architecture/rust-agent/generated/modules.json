@@ -30998,13 +30998,6 @@
     },
     {
       "from": "dim_cli::ui::lines_panel",
-      "to": "dim_cli::ui::theme::ansi",
-      "references": [
-        "use crate::ui::theme::ansi::fg"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::lines_panel",
       "to": "dim_cli::ui::theme::palette",
       "references": [
         "path Palette",

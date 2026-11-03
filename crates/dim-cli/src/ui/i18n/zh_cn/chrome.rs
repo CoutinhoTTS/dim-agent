@@ -34,8 +34,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "更早的 {count} 条消息 · Enter 或点击加载"
         }
         "follow, talk to and end this session's lines" => "查看、对话并结束本会话的线",
-        "End line" => "结束线",
-        "y/N" => "y/N",
+        "End line {id}?" => "结束线 {id}？",
+        "y end it" => "y 结束",
+        "n cancel" => "n 取消",
         "main is the session itself; a line ends, main does not" => {
             "main 就是会话本身；线可以结束，main 不能"
         }

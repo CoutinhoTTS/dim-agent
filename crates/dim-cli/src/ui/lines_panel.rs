@@ -6,7 +6,6 @@ use crate::ui::prompts::Effect;
 use crate::ui::render::markdown::MarkdownRenderer;
 use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
 use crate::ui::theme::Palette;
-use crate::ui::theme::ansi::fg;
 
 const HINT: &str = "Enter show the line · x end it · Esc close";
 
@@ -160,7 +159,7 @@ impl LinesPanel {
         if let Some(line) = self.confirm.clone() {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') if key.mods == Modifiers::NONE => {
-                    self.confirm = None;
+                    self.answer();
                     return Effect::EndLine {
                         session_id: self.session_id.clone(),
                         projection_id: self.projection_id,
@@ -170,7 +169,7 @@ impl LinesPanel {
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc
                     if key.mods == Modifiers::NONE =>
                 {
-                    self.confirm = None;
+                    self.answer();
                 }
                 _ => {}
             }
@@ -196,7 +195,7 @@ impl LinesPanel {
                 ) {
                     return Effect::Notice(format!("{} {id}", t("Line has ended:")));
                 }
-                self.confirm = Some(id);
+                self.ask_to_end(id);
             }
             return Effect::None;
         }
@@ -211,6 +210,21 @@ impl LinesPanel {
         self.list.cursor(width)
     }
 
+    /// Asks for the end of `id` in the panel's hint, naming the line as the
+    /// rows name it, until the user answers.
+    fn ask_to_end(&mut self, id: String) {
+        let question = tf("End line {id}?", &[("id", &safe(short_id(&id)))]);
+        self.list
+            .set_confirmation(question, t("y end it").to_owned(), t("n cancel").to_owned());
+        self.confirm = Some(id);
+    }
+
+    /// Drops the question and gives the panel its key hint back.
+    fn answer(&mut self) {
+        self.confirm = None;
+        self.list.set_hint(HINT.to_owned());
+    }
+
     pub fn render(
         &self,
         width: usize,
@@ -218,14 +232,7 @@ impl LinesPanel {
         p: &Palette,
         _markdown: &MarkdownRenderer,
     ) -> Vec<String> {
-        let footer: Vec<String> = match &self.confirm {
-            Some(line) => {
-                let prompt = format!("{} {}? ({})", t("End line"), safe(line), t("y/N"));
-                vec![fg(&prompt, &p.warning)]
-            }
-            None => Vec::new(),
-        };
-        self.list.render_with_footer(width, rows, p, &footer)
+        self.list.render(width, rows, p)
     }
 }
 
