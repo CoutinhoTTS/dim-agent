@@ -5449,6 +5449,16 @@
       ]
     },
     {
+      "id": "dim_migration::native::tests",
+      "crate": "dim_migration",
+      "parent": "dim_migration::native",
+      "file": "crates/dim-migration/src/native.rs",
+      "unexpandedMacros": [
+        "assert",
+        "json"
+      ]
+    },
+    {
       "id": "dim_migration::providers",
       "crate": "dim_migration",
       "parent": "dim_migration",
@@ -37949,11 +37959,25 @@
     },
     {
       "from": "dim_migration::native",
+      "to": "dim_migration::native::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_migration::native",
       "to": "dim_migration::source",
       "references": [
         "path SessionData",
         "use crate::source::SessionData",
         "use crate::source::fingerprint"
+      ]
+    },
+    {
+      "from": "dim_migration::native::tests",
+      "to": "dim_migration::native",
+      "references": [
+        "path validate_settings"
       ]
     },
     {
