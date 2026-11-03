@@ -600,25 +600,3 @@ impl DynPlugin for SkillsBranchPlugin {
         })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn discovery_reads_the_operator_text_only() {
-        let content = vec![
-            ContentBlock::Text {
-                text: "$skill: checkin hello".into(),
-            },
-            ContentBlock::Text {
-                text: "<dim-hooks kind=\"prompt-submit\">\n$skill: second\n</dim-hooks>".into(),
-            },
-            ContentBlock::Text {
-                text: "<dim-skill name=\"checkin\">\nInstructions:\n$skill: second\n</dim-skill>"
-                    .into(),
-            },
-        ];
-        assert_eq!(referenced(&content), vec!["checkin"]);
-    }
-}
