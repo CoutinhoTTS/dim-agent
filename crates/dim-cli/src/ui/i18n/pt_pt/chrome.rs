@@ -34,8 +34,21 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "line {id}" => "linha {id}",
         "jump to a message of the shown line" => "ir para uma mensagem da linha mostrada",
         "Timeline" => "Cronologia",
-        "Enter jump · e edit · q quote · b branch · f fork · Esc close" => {
-            "Enter ir · e editar · q citar · b ramo · f fork · Esc fechar"
+        "Enter actions · Esc close" => "Enter ações · Esc fechar",
+        "Timeline actions" => "Ações da cronologia",
+        "↑↓ select · Enter confirm · Esc cancel" => {
+            "↑↓ selecionar · Enter confirmar · Esc cancelar"
+        }
+        "Jump to message" => "Ir para a mensagem",
+        "Edit as a new draft" => "Editar como novo rascunho",
+        "Quote message" => "Citar mensagem",
+        "Create branch from here" => "Criar ramo a partir daqui",
+        "Before this message" => "Antes desta mensagem",
+        "Fork session" => "Fazer fork da sessão",
+        "1. Create fork" => "1. Criar fork",
+        "2. Cancel" => "2. Cancelar",
+        "Creates a new session; the current session stays unchanged." => {
+            "Cria uma sessão; a sessão atual permanece inalterada."
         }
         "No messages yet." => "Ainda não há mensagens.",
         "Already on screen above; /tui jumps to it" => "Já está acima; /tui vai diretamente",
@@ -45,8 +58,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "follow, talk to and end this session's lines" => {
             "seguir, falar e terminar as linhas desta sessão"
         }
-        "End line" => "Terminar linha",
-        "y/N" => "y/N",
+        "End line {id}?" => "Terminar a linha {id}?",
+        "y end it" => "y terminar",
+        "n cancel" => "n cancelar",
         "main is the session itself; a line ends, main does not" => {
             "main é a própria sessão; uma linha termina, main não"
         }
@@ -58,12 +72,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "e edit · b branch · f fork" => "e editar · b ramo · f fork",
         "e edit" => "e editar",
-        "Fork the session before “{message}”? (y/N)" => {
-            "Fazer fork da sessão antes de “{message}”? (y/N)"
-        }
-        "Fork the session after the last turn? (y/N)" => {
-            "Fazer fork da sessão após o último turno? (y/N)"
-        }
+        "Fork the session before “{message}”?" => "Fazer fork da sessão antes de “{message}”?",
+        "Fork the session after the last turn?" => "Fazer fork da sessão após o último turno?",
         "⑂ new line from {id} · Esc cancel" => "⑂ nova linha a partir de {id} · Esc cancelar",
         "A fork copies main; b opens a line here" => "Um fork copia main; b abre uma linha aqui",
         "A line opens from text; images and files were not included" => {
@@ -308,6 +318,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "run" => "execução",
         "view" => "vista",
         "model" => "modelo",
+        "extensions" => "extensões",
         "app" => "aplicação",
         "skill" => "competência",
         // composer/commands.rs: descriptions
@@ -332,8 +343,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "pick an earlier message to edit or quote" => {
             "escolher mensagem anterior para editar ou citar"
         }
-        "collapse or expand tool details and compaction summaries" => {
-            "recolher/expandir detalhes de ferramentas e resumos de compactação"
+        "cycle tool details and compaction summaries" => {
+            "alternar detalhes de ferramentas e resumos de compactação"
         }
         "switch between fullscreen and scrollback" => {
             "alternar entre ecrã inteiro e histórico do terminal"

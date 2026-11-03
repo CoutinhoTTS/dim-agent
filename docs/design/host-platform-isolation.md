@@ -49,7 +49,7 @@ user-approved write ([ADR 011 D2](../adr/011-execution-settings.md)).
    shell. The Session configuration supplies the workspace separately from the model's requested
    working directory. `exec` has no input that selects a boundary; a call that still sends
    `sandbox` is rejected as `exec_invalid_request`.
-2. `HostPlatform::prepare_isolated_process(spec, workspace: &Path, output_dir: Option<&Path>)`
+2. `HostPlatform::prepare_isolated_process(spec, workspaces, output_dir: Option<&Path>)`
    reads the execution switches through the `ExecutionSettingsHost` port, selects the environment
    names and constructs the backend argv or profile. Only ShellSession supplies its immutable,
    host-owned current branch output directory. It returns the prepared spec, the process's
@@ -283,3 +283,15 @@ errors; the port is the same shape as `CommandRulesHost` and `SkillSettingsHost`
 already holds the process, so no namespace or PID manager is needed, and ShellInput stays outside
 this boundary. The declaration line and the failure note are text in existing places — no new
 result field, code, Timeline fact or approval category.
+
+## Confirmed workspace roots
+
+For [worktree access R3](worktree-access.md#r3-新进程的工作目录与隔离范围), WorkspaceTools and
+ShellSession query the Session's optional file facts service before preparing a new process. Its
+resolved cwd triggers recognition; the service returns the original workspace together with confirmed
+roots for `prepare_isolated_process`. No tool input supplies additional roots. A host without the service
+retains its original workspace boundary. Discovery unavailability is reported without expanding the
+boundary; cancellation or a failed root query starts no process. The existing sandbox and network
+switches still decide enforcement, independently of tool permission. Running processes and persistent
+shells keep their startup boundary. Recognition does not mount Git's common directory or any sibling
+outside the confirmed subtrees. System/output root rules and overlap validation continue to apply.

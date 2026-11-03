@@ -10,6 +10,7 @@ Run: python3 -m unittest discover -s benchmarks/l1 -p 'flow_test.py'
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -50,6 +51,74 @@ FAKE_REVIEWER = textwrap.dedent(
 ).strip()
 
 AGENT_REVIEWER = Path(__file__).resolve().parent / "agent_reviewer.py"
+
+
+class AgentReviewerKeyVarTest(unittest.TestCase):
+    """How the judge resolves which environment variable holds the API key.
+
+    The value of `DIM_EVAL_API_VAR` is the *name* of the provider key variable.
+    The legacy carrier `DIM_EVAL_API_KEY_ENV` matched harbor's sensitive-name
+    regex, so a job built before the rename arrives with its value redacted to
+    `DEEP****KEY` — or templated to `${DIM_EVAL_API_KEY_ENV}` when harbor's own
+    environment held the same value. Either shape names a variable that cannot
+    exist, and looking it up reports the wrong failure ("X is empty").
+    """
+
+    def setUp(self) -> None:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import agent_reviewer  # noqa: F401
+        self.module = agent_reviewer
+
+    def _resolve(self, env: dict[str, str]) -> tuple[int, str | None]:
+        """Run agent_reviewer.main() under `env`; return (exit, api_key used)."""
+        captured: dict[str, str | None] = {"key": None}
+
+        def fake_call(content, base_url, model, api_key):
+            captured["key"] = api_key
+            return "{}\n"
+
+        # `clear=True`: the resolution must see exactly the names under test,
+        # not whatever DIM_EVAL_* variables the driving shell happens to hold.
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch("sys.stdin", new=io.StringIO("prompt")), \
+                mock.patch.object(self.module, "call_model",
+                                  side_effect=fake_call) as call:
+            rc = self.module.main()
+        return rc, (captured["key"] if call.called else None)
+
+    def test_the_new_carrier_wins(self) -> None:
+        rc, key = self._resolve({
+            "DIM_EVAL_API_VAR": "FAKE_NEW", "FAKE_NEW": "new-key",
+            "DIM_EVAL_API_KEY_ENV": "FAKE_LEGACY", "FAKE_LEGACY": "legacy-key",
+        })
+        self.assertEqual((rc, key), (0, "new-key"))
+
+    def test_the_legacy_carrier_is_still_a_fallback(self) -> None:
+        rc, key = self._resolve({
+            "DIM_EVAL_API_KEY_ENV": "FAKE_LEGACY", "FAKE_LEGACY": "legacy-key",
+        })
+        self.assertEqual((rc, key), (0, "legacy-key"))
+
+    def test_a_legacy_carrier_present_but_empty_falls_through(self) -> None:
+        rc, key = self._resolve({
+            "DIM_EVAL_API_KEY_ENV": "", "DEEPSEEK_API_KEY": "default-key",
+        })
+        self.assertEqual((rc, key), (0, "default-key"))
+
+    def test_a_redacted_name_is_refused_not_looked_up(self) -> None:
+        rc, key = self._resolve({
+            "DIM_EVAL_API_KEY_ENV": "DEEP****KEY", "DEEPSEEK_API_KEY": "x",
+        })
+        self.assertEqual(rc, 2)
+        self.assertIsNone(key)
+
+    def test_a_template_name_is_refused_not_looked_up(self) -> None:
+        rc, key = self._resolve({
+            "DIM_EVAL_API_KEY_ENV": "${DEEPSEEK_API_KEY}",
+            "DEEPSEEK_API_KEY": "x",
+        })
+        self.assertEqual(rc, 2)
+        self.assertIsNone(key)
 
 
 @contextmanager
@@ -334,7 +403,7 @@ class L1FlowTest(unittest.TestCase):
         )
         with fake_endpoint(cut_off) as base_url, mock.patch.dict(os.environ, {
             "DIM_EVAL_BASE_URL": base_url,
-            "DIM_EVAL_API_KEY_ENV": "FAKE_JUDGE_KEY",
+            "DIM_EVAL_API_VAR": "FAKE_JUDGE_KEY",
             "FAKE_JUDGE_KEY": "k",
             "NO_PROXY": "127.0.0.1",
             "no_proxy": "127.0.0.1",

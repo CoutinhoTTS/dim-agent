@@ -16,6 +16,7 @@ mod state;
 #[cfg(feature = "testing")]
 pub mod testing;
 mod timeline_context;
+mod timeline_query;
 mod timeline_store;
 
 pub use agent::*;
@@ -23,7 +24,9 @@ pub use assembly::*;
 pub use branch::*;
 pub use config::*;
 pub use contracts::*;
-pub use core::{ContextHistory, Delivery, Dispatcher, Timeline, TimelineTrace, TraceStep};
+pub use core::{
+    ContextHistory, Delivery, Dispatcher, PolicyTurns, Timeline, TimelineTrace, TraceStep,
+};
 pub use dim_agent_types::{PermissionPolicy, PermissionPreset};
 pub use error::*;
 pub use lifecycle::*;
@@ -37,4 +40,5 @@ pub use timeline_store::{PolicyEvent, PolicyFacts, PolicyOrder, PolicyOrderEvent
 pub use scope::*;
 pub use state::*;
 pub use timeline_context::*;
+pub use timeline_query::*;
 pub use timeline_store::*;

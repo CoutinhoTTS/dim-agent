@@ -1,8 +1,9 @@
 use crate::{
     AgentError, BoxFuture, BranchRecord, PublishCallback, Result, SessionConfig, StoredBranch,
-    StoredEvent, TimelineKey, TimelineStore, TimelineTrace,
+    StoredEvent, TimelineKey, TimelineQuery, TimelineQueryDirection, TimelineQueryPage,
+    TimelineQueryScope, TimelineStore, TimelineTrace,
 };
-use dim_agent_types::{BranchCreateAt, EventKind, RecoverySnapshot};
+use dim_agent_types::{BranchCreateAt, EventKind, RecoverySnapshot, TimelinePosition};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Mutex};
 
 /// In-memory storage for standalone Agents, tests and development profiles.
@@ -190,6 +191,74 @@ impl TimelineStore for MemoryTimelineStore {
                         .collect())
                 })
                 .collect()
+        })
+    }
+    fn query<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        query: &'a TimelineQuery,
+        from: u64,
+        through: u64,
+    ) -> BoxFuture<'a, Result<TimelineQueryPage>> {
+        Box::pin(async move {
+            if query.scope != TimelineQueryScope::Branch {
+                return Err(AgentError::InvalidInput(
+                    "a store read applies one branch; the Timeline service composes the chain"
+                        .into(),
+                ));
+            }
+            let sessions = self.0.lock().unwrap();
+            let session = sessions.get(&key.session_id).ok_or_else(|| {
+                AgentError::Storage(format!("unknown session {}", key.session_id))
+            })?;
+            let events = &session
+                .branches
+                .get(&key.branch_id)
+                .ok_or_else(|| AgentError::Storage(format!("unknown branch {}", key.branch_id)))?
+                .events;
+            let mut matched: Vec<&StoredEvent> = events
+                .iter()
+                .filter(|record| record.event.sequence >= from && record.event.sequence <= through)
+                .filter(|record| {
+                    let event = &record.event;
+                    (query.kinds.is_empty()
+                        || query.kinds.iter().any(|kind| kind == event.kind.key()))
+                        && (query.flags.is_empty()
+                            || query
+                                .flags
+                                .iter()
+                                .any(|flag| flag.is_set(event.kind.context_flags())))
+                        && query
+                            .event_id
+                            .as_ref()
+                            .is_none_or(|wanted| wanted == &event.id)
+                        && query
+                            .predicate
+                            .as_ref()
+                            .is_none_or(|predicate| predicate.matches(event))
+                })
+                .collect();
+            if query.direction == TimelineQueryDirection::Descending {
+                matched.reverse();
+            }
+            let offset = usize::try_from(query.offset).unwrap_or(usize::MAX);
+            let limit = usize::try_from(query.limit.get()).unwrap_or(usize::MAX);
+            let skipped = matched.len().min(offset);
+            let page: Vec<&StoredEvent> = matched.into_iter().skip(skipped).take(limit).collect();
+            Ok(TimelineQueryPage {
+                positions: page
+                    .iter()
+                    .map(|record| TimelinePosition {
+                        branch_id: key.branch_id.clone(),
+                        sequence: record.event.sequence,
+                    })
+                    .collect(),
+                events: page
+                    .into_iter()
+                    .map(|record| record.event.clone())
+                    .collect(),
+                skipped: skipped as u64,
+            })
         })
     }
     fn read_kind_page<'a>(

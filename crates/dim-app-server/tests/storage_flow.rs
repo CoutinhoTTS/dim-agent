@@ -24,6 +24,9 @@ use std::{
 #[path = "storage_flow/catalog.rs"]
 mod catalog;
 
+#[path = "storage_flow/worktrees.rs"]
+mod worktrees;
+
 const INTERPRETER: &str = "dim/context-projection/v3";
 fn snapshot(sequence: u64, checkpoint: &ProjectionCheckpoint) -> RecoverySnapshot {
     let mut snapshot = RecoverySnapshot {
@@ -213,6 +216,8 @@ const BUSINESS_TABLES: &[&str] = &[
     "session_file_owners",
     "session_grants",
     "session_output_owners",
+    "worktree_directories",
+    "session_worktrees",
     "session_metadata",
     "session_catalog",
 ];
@@ -222,6 +227,7 @@ const V15_TABLES: [&str; 2] = ["session_files", "session_file_owners"];
 const V16_TABLES: [&str; 1] = ["session_metadata"];
 const V28_TABLES: [&str; 1] = ["session_grants"];
 const V29_TABLES: [&str; 1] = ["session_output_owners"];
+const V33_TABLES: [&str; 2] = ["worktree_directories", "session_worktrees"];
 /// The columns `table` has, so a record example written for a later format
 /// contributes only the cells an older table can hold.
 fn table_columns(connection: &Connection, table: &str) -> Vec<String> {
@@ -345,6 +351,11 @@ const V31_REPLACED: &[&str] = &[
 const V32_ADDITIONS: &[&str] = &[
     "CREATE INDEX timeline_events_context ON timeline_events(session_id, branch_id, sequence) WHERE context_render = 1 OR context_state = 1",
 ];
+const V33_ADDITIONS: &[&str] = &[
+    "CREATE TABLE worktree_directories (repository TEXT NOT NULL, root TEXT NOT NULL, PRIMARY KEY (repository, root))",
+    "CREATE TABLE session_worktrees (session_id TEXT NOT NULL REFERENCES agent_sessions(session_id), repository TEXT NOT NULL, root TEXT NOT NULL, subtree TEXT NOT NULL, PRIMARY KEY (session_id, repository, root), FOREIGN KEY (repository, root) REFERENCES worktree_directories(repository, root))",
+    "CREATE INDEX session_worktrees_by_directory ON session_worktrees(repository, root, session_id)",
+];
 const V23_ADDITIONS: &[&str] = &[
     "CREATE TABLE session_catalog (session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0), preview TEXT, cwd TEXT NOT NULL)",
     "CREATE INDEX session_catalog_by_activity ON session_catalog(updated_at_ms DESC, session_id)",
@@ -362,6 +373,7 @@ fn schema_of(version: u32) -> Vec<String> {
         .chain(V31_REPLACED.iter().filter(|_| version == 31))
         .chain(V31_ADDITIONS.iter().filter(|_| version >= 31))
         .chain(V32_ADDITIONS.iter().filter(|_| version >= 32))
+        .chain(V33_ADDITIONS.iter().filter(|_| version >= 33))
         .filter(|sql| version <= 24 || !sql.starts_with("CREATE INDEX timeline_events_by_end "))
         .map(|sql| sql.replace("(version = 13)", &format!("(version = {version})")))
         .map(|sql| {
@@ -443,10 +455,15 @@ fn v15_store(path: &std::path::Path) -> Connection {
         .unwrap();
     connection
 }
+/// Whether the store has the schema object `name`.
 /// The schema statements of a store, sorted.
 fn schema(connection: &Connection) -> Vec<String> {
     let mut statements: Vec<String> = connection
-        .prepare("SELECT sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name != 'timeline_history_anchors'")
+        .prepare(
+            "SELECT sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' \
+             AND name NOT IN ('timeline_history_anchors', 'timeline_events_by_kind', \
+                              'timeline_policy_turns')",
+        )
         .unwrap()
         .query_map([], |row| row.get(0))
         .unwrap()
@@ -574,7 +591,7 @@ async fn documented_native_records_restore_with_legacy_snapshot_bypassed() {
         .execute("DELETE FROM agent_store_format", [])
         .unwrap();
     connection
-        .execute("INSERT INTO agent_store_format VALUES (32)", [])
+        .execute("INSERT INTO agent_store_format VALUES (?1)", [STORE_FORMAT])
         .unwrap();
     insert_documented_records(&connection, BUSINESS_TABLES);
     drop(connection);
@@ -3663,8 +3680,8 @@ fn a_newer_store_leaves_an_actionable_startup_note() {
     Connection::open(&database.0)
         .unwrap()
         .execute_batch(
-            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 33));
-             INSERT INTO agent_store_format VALUES (33);",
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 34));
+             INSERT INTO agent_store_format VALUES (34);",
         )
         .unwrap();
     let original = std::fs::read(&database.0).unwrap();
@@ -3674,10 +3691,10 @@ fn a_newer_store_leaves_an_actionable_startup_note() {
     assert!(message.contains("unsupported SQLite schema"), "{message}");
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
-    assert!(note.contains("Store format: v33"), "{note}");
-    assert!(note.contains("Daemon format: v32"), "{note}");
+    assert!(note.contains("Store format: v34"), "{note}");
+    assert!(note.contains("Daemon format: v33"), "{note}");
     assert!(note.contains("Existing data was preserved"), "{note}");
-    assert!(note.contains("Run a build supporting v33"), "{note}");
+    assert!(note.contains("Run a build supporting v34"), "{note}");
     assert!(note.contains("--home PATH"), "{note}");
 }
 
@@ -3695,7 +3712,7 @@ fn a_mismatched_store_note_does_not_claim_a_downgrade() {
     assert!(SqliteStorage::open(database.0.clone()).is_err());
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
-    assert!(note.contains("Store format: v29 (schema is v32)"), "{note}");
+    assert!(note.contains("Store format: v29 (schema is v33)"), "{note}");
     assert!(note.contains("marker and schema disagree"), "{note}");
     assert!(
         note.contains("Use the build that wrote this store"),
@@ -3739,7 +3756,7 @@ fn an_empty_marker_table_is_reported_as_missing_or_ambiguous() {
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
     assert!(
-        note.contains("Store format: v32 (format marker is missing or ambiguous)"),
+        note.contains("Store format: v33 (format marker is missing or ambiguous)"),
         "{note}"
     );
     assert!(!note.contains("Run a build supporting"), "{note}");
@@ -3832,20 +3849,20 @@ fn a_failed_open_replaces_the_previous_startup_note() {
     Connection::open(&database.0)
         .unwrap()
         .execute_batch(
-            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 33));
-             INSERT INTO agent_store_format VALUES (33);",
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 34));
+             INSERT INTO agent_store_format VALUES (34);",
         )
         .unwrap();
     std::fs::write(
         startup_note(&database.0),
-        "dimcode-startup-failure v1 pid=1\nCannot open native store /previous.\n  Store format: v34\n",
+        "dimcode-startup-failure v1 pid=1\nCannot open native store /previous.\n  Store format: v35\n",
     )
     .unwrap();
     assert!(SqliteStorage::open(database.0.clone()).is_err());
     let note = read_startup_note(&database.0);
-    assert!(note.contains("Store format: v33"), "{note}");
+    assert!(note.contains("Store format: v34"), "{note}");
     assert!(!note.contains("/previous"), "{note}");
-    assert!(!note.contains("v34"), "{note}");
+    assert!(!note.contains("v35"), "{note}");
 }
 
 #[test]
@@ -3864,7 +3881,10 @@ fn a_successful_upgrade_removes_a_stale_startup_note() {
     std::fs::write(startup_note(&database.0), "stale").unwrap();
     drop(SqliteStorage::open(database.0.clone()).unwrap());
     assert!(!startup_note(&database.0).exists());
-    assert_eq!(marker(&Connection::open(&database.0).unwrap()), vec![32]);
+    assert_eq!(
+        marker(&Connection::open(&database.0).unwrap()),
+        vec![i64::from(STORE_FORMAT)]
+    );
 }
 
 fn marker(connection: &Connection) -> Vec<i64> {
@@ -3888,6 +3908,7 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
         .chain(["session_catalog"].iter().filter(|_| from < 23))
         .chain(V28_TABLES.iter().filter(|_| from < 28))
         .chain(V29_TABLES.iter().filter(|_| from < 29))
+        .chain(V33_TABLES.iter().filter(|_| from < 33))
         .copied()
         .collect();
     let kept: Vec<&str> = BUSINESS_TABLES
@@ -3944,8 +3965,8 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
     store.close().await.unwrap();
     db.close().await.unwrap();
     let connection = Connection::open(&database.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(32));
-    assert_eq!(marker(&connection), [32]);
+    assert_eq!(schema(&connection), schema_of(STORE_FORMAT));
+    assert_eq!(marker(&connection), [i64::from(STORE_FORMAT)]);
     let text: (i64, i64) = connection
         .query_row(
             "SELECT context_render, context_state FROM timeline_events WHERE kind = 'step/text' LIMIT 1",
@@ -4062,8 +4083,8 @@ async fn a_v13_store_upgrades_in_place_once() {
     assert_eq!(db.upgraded_from(), None);
     db.close().await.unwrap();
     let connection = Connection::open(&fresh.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(32));
-    assert_eq!(marker(&connection), [32]);
+    assert_eq!(schema(&connection), schema_of(STORE_FORMAT));
+    assert_eq!(marker(&connection), [i64::from(STORE_FORMAT)]);
     drop(connection);
 
     let database = Database::new();
@@ -4183,7 +4204,7 @@ async fn a_v21_store_upgrades_in_place_once_and_restores_typeless_tool_schemas()
 
     let connection = Connection::open(&database.0).unwrap();
     assert_ne!(schema(&connection), schema_of(21));
-    assert_eq!(marker(&connection), [32]);
+    assert_eq!(marker(&connection), [i64::from(STORE_FORMAT)]);
     let body: String = connection
         .query_row(
             "SELECT body FROM timeline_content WHERE session_id = 'schema' AND kind = 'tools'",
@@ -4429,7 +4450,7 @@ async fn the_daemon_reports_a_v13_upgrade_on_stderr_once() {
         reports.push(stderr);
     }
     let line = format!(
-        "Upgraded native store {} from format v13 to v32; earlier dimcode versions cannot open it.",
+        "Upgraded native store {} from format v13 to v{STORE_FORMAT}; earlier dimcode versions cannot open it.",
         path.display()
     );
     assert!(
@@ -6702,8 +6723,8 @@ async fn a_v25_provider_record_keeps_supplied_limits_and_drops_assumed_ones() {
             .unwrap()
     };
     let connection = Connection::open(&database.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(32));
-    assert_eq!(marker(&connection), [32]);
+    assert_eq!(schema(&connection), schema_of(STORE_FORMAT));
+    assert_eq!(marker(&connection), [i64::from(STORE_FORMAT)]);
     drop(connection);
 
     let listed_expected = json!({
@@ -7060,6 +7081,111 @@ async fn policy_facts_selects_latest_completed_compaction_in_both_stores() {
         .collect();
     assert_eq!(sqlite_ids, memory_ids);
     assert_eq!(sqlite_ids, ["event-1"]);
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn policy_order_reads_the_last_anchors_and_the_turn_window_in_both_stores() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let sqlite = SqliteTimelineStore::new(db.clone());
+    let memory = MemoryTimelineStore::default();
+    sqlite
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    memory
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let turn = |sequence: u64, turn_id: &str, id: &str| {
+        let mut entry = record(
+            sequence,
+            EventKind::TurnStart(TurnStartData {
+                turn_id: turn_id.into(),
+            }),
+        );
+        Arc::make_mut(&mut entry.event).id = id.into();
+        entry
+    };
+    let start = |sequence: u64, through: u64| {
+        record(
+            sequence,
+            EventKind::ContextCompactionStart(ContextCompactionStartData {
+                turn_id: Some("one".into()),
+                request_id: None,
+                command: None,
+                through,
+                trigger: CompactionTrigger::Threshold,
+                strategy: "summary".into(),
+            }),
+        )
+    };
+    let events = vec![
+        turn(1, "one", "turn-one"),
+        text(2, "a"),
+        start(3, 1),
+        turn(4, "two", "turn-two"),
+        text(5, "b"),
+        turn(6, "three", "turn-three"),
+        text(7, "c"),
+        turn(8, "four", "turn-four"),
+        text(9, "d"),
+    ];
+    append(&sqlite, key("session", "main"), events.clone())
+        .await
+        .unwrap();
+    memory
+        .append(
+            key("session", "main"),
+            events,
+            Box::new(|result| assert!(result.is_ok())),
+        )
+        .unwrap();
+    let read = |order: &dim_agent_runtime::PolicyOrder| -> Vec<(String, bool, Option<u64>)> {
+        order
+            .events
+            .iter()
+            .map(|event| (event.id.clone(), event.turn_start, event.compaction_start))
+            .collect()
+    };
+    let windowed = sqlite
+        .policy_order(&key("session", "main"), 5..=9, 9)
+        .await
+        .unwrap();
+    let memory_windowed = memory
+        .policy_order(&key("session", "main"), 5..=9, 9)
+        .await
+        .unwrap();
+    assert_eq!(read(&windowed), read(&memory_windowed));
+    assert_eq!(
+        read(&windowed),
+        [
+            ("event-3".to_owned(), false, Some(1)),
+            ("turn-three".to_owned(), true, None),
+            ("turn-four".to_owned(), true, None),
+        ],
+        "the window, the last compaction start and its through"
+    );
+
+    // An empty window still reads the last turn start: the manual limit's
+    // candidate, and the position a cut id resolves through.
+    let empty = sqlite
+        .policy_order(&key("session", "main"), 9..=9, 9)
+        .await
+        .unwrap();
+    let memory_empty = memory
+        .policy_order(&key("session", "main"), 9..=9, 9)
+        .await
+        .unwrap();
+    assert_eq!(read(&empty), read(&memory_empty));
+    assert_eq!(
+        read(&empty),
+        [
+            ("event-3".to_owned(), false, Some(1)),
+            ("turn-four".to_owned(), true, None),
+        ]
+    );
     db.close().await.unwrap();
 }
 
@@ -7423,38 +7549,78 @@ async fn output_ownership_survives_a_fork_and_a_source_delete() {
 }
 
 #[tokio::test]
-async fn the_history_window_index_is_created_at_open_without_a_format_step() {
+async fn the_derived_indexes_are_created_at_open_without_a_format_step() {
     let database = Database::new();
     let db = SqliteStorage::open(database.0.clone()).unwrap();
     assert_eq!(db.upgraded_from(), None);
     db.close().await.unwrap();
     let connection = Connection::open(&database.0).unwrap();
-    let indexed: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='timeline_history_anchors')",
-            [],
-            |row| row.get(0),
-        )
+    let indexed = |connection: &Connection, name: &str| -> bool {
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name=?1)",
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert!(indexed(&connection, "timeline_history_anchors"));
+    assert!(indexed(&connection, "timeline_policy_turns"));
+    assert!(indexed(&connection, "timeline_events_by_kind"));
+    let columns: Vec<String> = connection
+        .prepare("SELECT name FROM pragma_index_info('timeline_policy_turns')")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
         .unwrap();
-    assert!(indexed);
+    assert_eq!(
+        columns,
+        ["session_id", "branch_id", "kind", "sequence", "event_id"],
+        "the policy read takes event_id from the index"
+    );
+    let plan: Vec<String> = connection
+        .prepare(
+            "EXPLAIN QUERY PLAN SELECT event_id, sequence FROM timeline_events \
+             WHERE session_id=?1 AND branch_id=?2 AND kind='turn/start' \
+             AND sequence BETWEEN ?3 AND ?4 AND event_id IS NOT NULL ORDER BY sequence",
+        )
+        .unwrap()
+        .query_map(params!["session", "main", 1, 2], |row| row.get(3))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(
+        plan.iter()
+            .any(|step| step.contains("COVERING INDEX timeline_policy_turns")),
+        "the policy read does not touch the table: {plan:?}"
+    );
     assert_eq!(marker(&connection), [i64::from(STORE_FORMAT)]);
     connection
-        .execute_batch("DROP INDEX timeline_history_anchors")
+        .execute_batch("DROP INDEX timeline_history_anchors; DROP INDEX timeline_policy_turns")
         .unwrap();
     drop(connection);
 
     let db = SqliteStorage::open(database.0.clone()).unwrap();
-    assert_eq!(db.upgraded_from(), None, "the index is not a format step");
+    assert_eq!(
+        db.upgraded_from(),
+        None,
+        "the indexes are not a format step"
+    );
     db.close().await.unwrap();
     let connection = Connection::open(&database.0).unwrap();
-    let indexed: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='timeline_history_anchors')",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(indexed, "a later open recreates the index");
+    assert!(
+        indexed(&connection, "timeline_history_anchors"),
+        "a later open recreates the index"
+    );
+    assert!(
+        indexed(&connection, "timeline_policy_turns"),
+        "a later open recreates the index"
+    );
+    assert!(
+        indexed(&connection, "timeline_events_by_kind"),
+        "a later open recreates the index"
+    );
     assert_eq!(marker(&connection), [i64::from(STORE_FORMAT)]);
     drop(connection);
 
@@ -7617,5 +7783,1637 @@ async fn a_history_window_read_rejects_a_through_inside_a_batch() {
 
     drop(store);
     drop(sessions);
+    db.close().await.unwrap();
+}
+
+/// One stored fact for the query flows, with its atomic batch's last
+/// sequence.
+fn query_record(sequence: u64, batch_end: u64, id: &str, kind: EventKind) -> StoredEvent {
+    StoredEvent {
+        event: Arc::new(AgentEvent {
+            id: id.into(),
+            sequence,
+            create_at: 1000 + sequence,
+            tags: None,
+            kind,
+        }),
+        trace: None,
+        batch_end,
+    }
+}
+
+/// Queues one batch and waits until the store publishes it.
+async fn publish_records(
+    store: &Arc<dyn TimelineStore>,
+    key: TimelineKey,
+    records: Vec<StoredEvent>,
+) {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    store
+        .append(
+            key,
+            records,
+            Box::new(move |result| {
+                let _ = sender.send(result);
+            }),
+        )
+        .unwrap();
+    tokio::time::timeout(PUBLISHED, receiver)
+        .await
+        .expect("the writer did not publish the write")
+        .unwrap()
+        .unwrap();
+}
+
+fn marked(data: serde_json::Value) -> EventKind {
+    EventKind::Extension(ExtensionEvent::new("test", "marked", data).unwrap())
+}
+
+fn delta(text: &str) -> EventKind {
+    EventKind::Text(DeltaData {
+        turn_id: "turn".into(),
+        request_id: "request".into(),
+        delta: text.into(),
+    })
+}
+
+/// The same facts in `store`: `main` with two singles, a branch create, one
+/// atomic batch of two text deltas and a closing single, and `child` cut at
+/// `main`'s second fact.
+async fn query_histories(store: Arc<dyn TimelineStore>) -> (Timeline, Timeline) {
+    store
+        .create_session("query", &SessionConfig::default())
+        .await
+        .unwrap();
+    let main = key("query", "main");
+    publish_records(
+        &store,
+        main.clone(),
+        vec![query_record(
+            1,
+            1,
+            "main-1",
+            EventKind::InputMessage(InputMessageData::text("one", None)),
+        )],
+    )
+    .await;
+    publish_records(
+        &store,
+        main.clone(),
+        vec![query_record(
+            2,
+            2,
+            "main-2",
+            marked(serde_json::json!({"tool": "search", "nested": {"level": 3}})),
+        )],
+    )
+    .await;
+    publish_records(
+        &store,
+        main.clone(),
+        vec![query_record(
+            3,
+            3,
+            "main-3",
+            EventKind::BranchCreate(BranchCreateData {
+                at: BranchCreateAt::Sequence { sequence: 2 },
+                source: BranchSource::Host {
+                    operation_id: "query".into(),
+                },
+                branch: "child".into(),
+                prompt: "continue".into(),
+            }),
+        )],
+    )
+    .await;
+    publish_records(
+        &store,
+        main.clone(),
+        vec![
+            query_record(4, 5, "main-4", delta("a")),
+            query_record(5, 5, "main-5", delta("b")),
+        ],
+    )
+    .await;
+    publish_records(
+        &store,
+        main,
+        vec![query_record(
+            6,
+            6,
+            "main-6",
+            EventKind::StopInterrupt(StopInterruptData {
+                reason: "stop".into(),
+                scope: InterruptScope::Turn,
+            }),
+        )],
+    )
+    .await;
+    let child = key("query", "child");
+    publish_records(
+        &store,
+        child.clone(),
+        vec![query_record(
+            1,
+            1,
+            "child-1",
+            marked(serde_json::json!({"tool": "search"})),
+        )],
+    )
+    .await;
+    publish_records(
+        &store,
+        child,
+        vec![
+            query_record(
+                2,
+                3,
+                "child-2",
+                EventKind::InputMessage(InputMessageData::text("two", None)),
+            ),
+            query_record(
+                3,
+                3,
+                "child-3",
+                EventKind::InputMessage(InputMessageData::text("three", None)),
+            ),
+        ],
+    )
+    .await;
+    let ctx = rutis::Ctx::root().unwrap();
+    let child = Timeline::restore(
+        ctx.clone(),
+        key("query", "child"),
+        vec![("main".into(), 2)],
+        store.clone(),
+    )
+    .await
+    .unwrap();
+    let main = Timeline::restore(ctx, key("query", "main"), vec![], store)
+        .await
+        .unwrap();
+    (main, child)
+}
+
+fn query_ids(reply: &dim_agent_runtime::TimelineQueryReply) -> Vec<String> {
+    reply.events.iter().map(|event| event.id.clone()).collect()
+}
+
+fn query(
+    scope: dim_agent_runtime::TimelineQueryScope,
+    limit: u64,
+) -> dim_agent_runtime::TimelineQuery {
+    dim_agent_runtime::TimelineQuery {
+        scope,
+        from_event: None,
+        from_sequence: None,
+        order_by: Default::default(),
+        direction: Default::default(),
+        kinds: vec![],
+        flags: vec![],
+        event_id: None,
+        predicate: None,
+        limit: std::num::NonZeroU64::new(limit).unwrap(),
+        offset: 0,
+    }
+}
+
+fn predicate(path: &str, value: serde_json::Value) -> dim_agent_runtime::TimelineQueryPredicate {
+    dim_agent_runtime::TimelineQueryPredicate {
+        path: path.into(),
+        value,
+    }
+}
+
+/// `main` with five facts whose last is the `child` branch create at 5, and
+/// `child` cut at that head with `child_facts` input facts.
+async fn tall_chain_histories(
+    store: Arc<dyn TimelineStore>,
+    child_facts: u64,
+) -> (Timeline, Timeline) {
+    store
+        .create_session("tall", &SessionConfig::default())
+        .await
+        .unwrap();
+    let main = key("tall", "main");
+    for sequence in 1..=4u64 {
+        publish_records(
+            &store,
+            main.clone(),
+            vec![query_record(
+                sequence,
+                sequence,
+                &format!("main-{sequence}"),
+                EventKind::InputMessage(InputMessageData::text("fact", None)),
+            )],
+        )
+        .await;
+    }
+    publish_records(
+        &store,
+        main.clone(),
+        vec![query_record(
+            5,
+            5,
+            "main-5",
+            EventKind::BranchCreate(BranchCreateData {
+                at: BranchCreateAt::Sequence { sequence: 5 },
+                source: BranchSource::Host {
+                    operation_id: "tall".into(),
+                },
+                branch: "child".into(),
+                prompt: "continue".into(),
+            }),
+        )],
+    )
+    .await;
+    let child = key("tall", "child");
+    for sequence in 1..=child_facts {
+        publish_records(
+            &store,
+            child.clone(),
+            vec![query_record(
+                sequence,
+                sequence,
+                &format!("child-{sequence}"),
+                EventKind::InputMessage(InputMessageData::text("fact", None)),
+            )],
+        )
+        .await;
+    }
+    let ctx = rutis::Ctx::root().unwrap();
+    let child = Timeline::restore(ctx.clone(), child, vec![("main".into(), 5)], store.clone())
+        .await
+        .unwrap();
+    let main = Timeline::restore(ctx, main, vec![], store).await.unwrap();
+    (main, child)
+}
+
+fn position_pairs(reply: &dim_agent_runtime::TimelineQueryReply) -> Vec<(String, u64)> {
+    reply
+        .positions
+        .iter()
+        .map(|position| (position.branch_id.clone(), position.sequence))
+        .collect()
+}
+
+/// `main` with `turn/start` and `step/model-start` facts interleaved, each in
+/// its own atomic batch, so an unordered row fetch cannot pass for a
+/// sequence-ordered read.
+async fn interleaved_histories(store: Arc<dyn TimelineStore>) -> Timeline {
+    store
+        .create_session("mixed", &SessionConfig::default())
+        .await
+        .unwrap();
+    let main = key("mixed", "main");
+    let kinds = [
+        EventKind::TurnStart(TurnStartData {
+            turn_id: "turn".into(),
+        }),
+        EventKind::ModelStart(StepData {
+            turn_id: "turn".into(),
+            request_id: "request".into(),
+        }),
+        EventKind::TurnStart(TurnStartData {
+            turn_id: "turn".into(),
+        }),
+        EventKind::ModelStart(StepData {
+            turn_id: "turn".into(),
+            request_id: "request".into(),
+        }),
+    ];
+    for (index, kind) in kinds.into_iter().enumerate() {
+        let sequence = index as u64 + 1;
+        publish_records(
+            &store,
+            main.clone(),
+            vec![query_record(
+                sequence,
+                sequence,
+                &format!("mixed-{sequence}"),
+                kind,
+            )],
+        )
+        .await;
+    }
+    Timeline::restore(rutis::Ctx::root().unwrap(), main, vec![], store)
+        .await
+        .unwrap()
+}
+
+/// Reads `scope` in pages, skipping the facts each page returned, until a page
+/// shorter than `limit` ends the selection.
+async fn paged(
+    timeline: &Timeline,
+    scope: dim_agent_runtime::TimelineQueryScope,
+    direction: dim_agent_runtime::TimelineQueryDirection,
+    limit: u64,
+) -> Vec<Vec<String>> {
+    let mut pages = Vec::new();
+    let mut offset = 0;
+    loop {
+        let reply = timeline
+            .query(dim_agent_runtime::TimelineQuery {
+                direction,
+                limit: std::num::NonZeroU64::new(limit).unwrap(),
+                offset,
+                ..query(scope, limit)
+            })
+            .await
+            .unwrap();
+        let ids = query_ids(&reply);
+        if ids.is_empty() {
+            return pages;
+        }
+        let short = ids.len() as u64 != limit;
+        offset += ids.len() as u64;
+        pages.push(ids);
+        if short {
+            return pages;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_query_selects_kinds_flags_and_a_predicate_from_sqlite() {
+    use dim_agent_runtime::TimelineQueryFlag::{Render, State};
+    use dim_agent_runtime::TimelineQueryScope::Branch;
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let (main, _) = query_histories(store.clone()).await;
+
+    let all = main.query(query(Branch, 16)).await.unwrap();
+    assert_eq!(
+        query_ids(&all),
+        ["main-1", "main-2", "main-3", "main-4", "main-5", "main-6"]
+    );
+
+    let mut kinded = query(Branch, 16);
+    kinded.kinds = vec!["step/text".into()];
+    assert_eq!(
+        query_ids(&main.query(kinded).await.unwrap()),
+        ["main-4", "main-5"]
+    );
+
+    let with_flags = |flags| dim_agent_runtime::TimelineQuery {
+        flags,
+        ..query(Branch, 16)
+    };
+    let render = main.query(with_flags(vec![Render])).await.unwrap();
+    assert_eq!(query_ids(&render), ["main-4", "main-5"]);
+    let state = main.query(with_flags(vec![State])).await.unwrap();
+    assert_eq!(query_ids(&state), ["main-1", "main-4", "main-5"]);
+    let union = main.query(with_flags(vec![Render, State])).await.unwrap();
+    assert_eq!(
+        query_ids(&union),
+        ["main-1", "main-4", "main-5"],
+        "naming both flags selects the union: an event carrying one matches"
+    );
+
+    let with = |path: &str, value: serde_json::Value| dim_agent_runtime::TimelineQuery {
+        predicate: Some(predicate(path, value)),
+        ..query(Branch, 16)
+    };
+    let tool = main
+        .query(with("tool", serde_json::json!("search")))
+        .await
+        .unwrap();
+    assert_eq!(query_ids(&tool), ["main-2"]);
+    let nested = main
+        .query(with("nested.level", serde_json::json!(3)))
+        .await
+        .unwrap();
+    assert_eq!(query_ids(&nested), ["main-2"]);
+    let merged = main
+        .query(with("delta", serde_json::json!("b")))
+        .await
+        .unwrap();
+    assert_eq!(
+        query_ids(&merged),
+        ["main-5"],
+        "a predicate selects one record of a merged output row"
+    );
+    for (path, value) in [
+        ("nested.absent", serde_json::json!(3)),
+        ("tool", serde_json::json!("absent")),
+    ] {
+        let reply = main.query(with(path, value)).await.unwrap();
+        assert!(
+            reply.events.is_empty(),
+            "{path}: a path or value that matches no fact selects no rows"
+        );
+    }
+
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// The start is a bound on every read, not only on the by-id one: both stores
+/// begin at it, so a page of the branch after a position is the same page.
+#[tokio::test]
+async fn a_query_begins_at_its_start_in_both_stores() {
+    use dim_agent_runtime::TimelineQueryScope::Branch;
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store: std::sync::Arc<dyn TimelineStore> = SqliteTimelineStore::new(db.clone());
+    let memory_store: std::sync::Arc<dyn TimelineStore> =
+        std::sync::Arc::new(dim_agent_runtime::MemoryTimelineStore::default());
+    for target in [store.clone(), memory_store.clone()] {
+        target
+            .create_session("query", &SessionConfig::default())
+            .await
+            .unwrap();
+        for sequence in 1..=4u64 {
+            publish_records(
+                &target,
+                key("query", "main"),
+                vec![query_record(
+                    sequence,
+                    sequence,
+                    &format!("fact-{sequence}"),
+                    delta(&format!("d{sequence}")),
+                )],
+            )
+            .await;
+        }
+    }
+    let sqlite = Timeline::restore(
+        rutis::Ctx::root().unwrap(),
+        key("query", "main"),
+        vec![],
+        store.clone(),
+    )
+    .await
+    .unwrap();
+    let memory = Timeline::restore(
+        rutis::Ctx::root().unwrap(),
+        key("query", "main"),
+        vec![],
+        memory_store,
+    )
+    .await
+    .unwrap();
+
+    let mut request = query(Branch, 8);
+    request.from_sequence = Some(3);
+    let from_sqlite = sqlite.query(request.clone()).await.unwrap();
+    let from_memory = memory.query(request).await.unwrap();
+    assert_eq!(query_ids(&from_sqlite), ["fact-3", "fact-4"], "sqlite");
+    assert_eq!(query_ids(&from_memory), ["fact-3", "fact-4"], "memory");
+
+    let mut skipped = query(Branch, 8);
+    skipped.from_sequence = Some(3);
+    skipped.offset = 1;
+    let from_sqlite = sqlite.query(skipped.clone()).await.unwrap();
+    let from_memory = memory.query(skipped).await.unwrap();
+    assert_eq!(
+        query_ids(&from_sqlite),
+        ["fact-4"],
+        "the skip counts from the start"
+    );
+    assert_eq!(query_ids(&from_memory), ["fact-4"]);
+    db.close().await.unwrap();
+}
+
+/// `1`, `1.0` and `true` are three values: a predicate that compares with one
+/// of them must not spend its page on the other two, or a page of one fact
+/// comes back empty and the caller reads that as the end of the selection.
+#[tokio::test]
+async fn a_query_compares_a_json_scalar_by_its_type() {
+    use dim_agent_runtime::TimelineQueryDirection::{Ascending, Descending};
+    use dim_agent_runtime::TimelineQueryScope::Branch;
+
+    let values = |sequence: u64| {
+        [
+            (1u64, serde_json::json!(true)),
+            (2, serde_json::json!(1)),
+            (3, serde_json::json!(1.0)),
+        ]
+        .into_iter()
+        .find(|(at, _)| *at == sequence)
+        .map(|(_, value)| value)
+        .unwrap()
+    };
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store: std::sync::Arc<dyn TimelineStore> = SqliteTimelineStore::new(db.clone());
+    let memory_store: std::sync::Arc<dyn TimelineStore> =
+        std::sync::Arc::new(dim_agent_runtime::MemoryTimelineStore::default());
+    for target in [store.clone(), memory_store.clone()] {
+        target
+            .create_session("query", &SessionConfig::default())
+            .await
+            .unwrap();
+        for sequence in 1..=3u64 {
+            publish_records(
+                &target,
+                key("query", "main"),
+                vec![query_record(
+                    sequence,
+                    sequence,
+                    &format!("value-{sequence}"),
+                    marked(serde_json::json!({"value": values(sequence)})),
+                )],
+            )
+            .await;
+        }
+    }
+    let sqlite = Timeline::restore(
+        rutis::Ctx::root().unwrap(),
+        key("query", "main"),
+        vec![],
+        store.clone(),
+    )
+    .await
+    .unwrap();
+    let memory = Timeline::restore(
+        rutis::Ctx::root().unwrap(),
+        key("query", "main"),
+        vec![],
+        memory_store,
+    )
+    .await
+    .unwrap();
+
+    for (direction, value, expected) in [
+        (Ascending, serde_json::json!(1), "value-2"),
+        (Ascending, serde_json::json!(1.0), "value-3"),
+        (Descending, serde_json::json!(true), "value-1"),
+    ] {
+        let mut request = query(Branch, 1);
+        request.direction = direction;
+        request.predicate = Some(predicate("value", value));
+        let from_sqlite = sqlite.query(request.clone()).await.unwrap();
+        let from_memory = memory.query(request).await.unwrap();
+        assert_eq!(query_ids(&from_sqlite), [expected], "{direction:?} sqlite");
+        assert_eq!(query_ids(&from_memory), [expected], "{direction:?} memory");
+    }
+    db.close().await.unwrap();
+}
+
+/// An integer above `i64` is a value SQLite's extraction rounds, so a page of
+/// one must not be spent on the neighbouring integer.
+#[tokio::test]
+async fn a_query_compares_a_large_integer_exactly() {
+    use dim_agent_runtime::TimelineQueryScope::Branch;
+
+    let small = serde_json::json!(18_446_744_073_709_551_614u64);
+    let large = serde_json::json!(18_446_744_073_709_551_615u64);
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store: std::sync::Arc<dyn TimelineStore> = SqliteTimelineStore::new(db.clone());
+    let memory_store: std::sync::Arc<dyn TimelineStore> =
+        std::sync::Arc::new(dim_agent_runtime::MemoryTimelineStore::default());
+    for target in [store.clone(), memory_store.clone()] {
+        target
+            .create_session("query", &SessionConfig::default())
+            .await
+            .unwrap();
+        for (sequence, value) in [(1u64, small.clone()), (2, large.clone())] {
+            publish_records(
+                &target,
+                key("query", "main"),
+                vec![query_record(
+                    sequence,
+                    sequence,
+                    &format!("value-{sequence}"),
+                    marked(serde_json::json!({"value": value})),
+                )],
+            )
+            .await;
+        }
+    }
+    let sqlite = Timeline::restore(
+        rutis::Ctx::root().unwrap(),
+        key("query", "main"),
+        vec![],
+        store.clone(),
+    )
+    .await
+    .unwrap();
+    let memory = Timeline::restore(
+        rutis::Ctx::root().unwrap(),
+        key("query", "main"),
+        vec![],
+        memory_store,
+    )
+    .await
+    .unwrap();
+
+    let mut request = query(Branch, 1);
+    request.predicate = Some(predicate("value", large));
+    let from_sqlite = sqlite.query(request.clone()).await.unwrap();
+    let from_memory = memory.query(request).await.unwrap();
+    assert_eq!(query_ids(&from_sqlite), ["value-2"], "sqlite");
+    assert_eq!(query_ids(&from_memory), ["value-2"], "memory agrees");
+    db.close().await.unwrap();
+}
+
+/// A merged output row may hold records past the read point. Only the covered
+/// records count as matches, or the page is spent on facts the read then drops.
+#[tokio::test]
+async fn a_query_ignores_records_beyond_the_read_bound() {
+    use dim_agent_runtime::TimelineQueryDirection::Descending;
+    use dim_agent_runtime::TimelineQueryScope::Branch;
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store: std::sync::Arc<dyn TimelineStore> = SqliteTimelineStore::new(db.clone());
+    let memory_store: std::sync::Arc<dyn TimelineStore> =
+        std::sync::Arc::new(dim_agent_runtime::MemoryTimelineStore::default());
+    for target in [store.clone(), memory_store.clone()] {
+        target
+            .create_session("query", &SessionConfig::default())
+            .await
+            .unwrap();
+        for (sequence, kind) in [
+            (1u64, delta("hit")),
+            (2, marked(serde_json::json!({"marker": true}))),
+            (3, delta("miss")),
+            (4, delta("hit")),
+        ] {
+            publish_records(
+                &target,
+                key("query", "main"),
+                vec![query_record(
+                    sequence,
+                    sequence,
+                    &format!("fact-{sequence}"),
+                    kind,
+                )],
+            )
+            .await;
+        }
+    }
+    let mut request = query(Branch, 1);
+    request.direction = Descending;
+    request.predicate = Some(predicate("delta", serde_json::json!("hit")));
+    let sqlite_page = store
+        .query(&key("query", "main"), &request, 1, 3)
+        .await
+        .unwrap();
+    let memory_page = memory_store
+        .query(&key("query", "main"), &request, 1, 3)
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlite_page
+            .events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        [1],
+        "a record past the read point does not spend the page"
+    );
+    assert_eq!(
+        memory_page
+            .events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        [1]
+    );
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_query_selects_an_output_rows_turn_id_and_request_id() {
+    use dim_agent_runtime::TimelineQueryScope::Branch;
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let (main, _) = query_histories(store.clone()).await;
+    let memory = Arc::new(MemoryTimelineStore::default());
+    let (memory_main, _) = query_histories(memory.clone()).await;
+
+    let with = |path: &str, value: serde_json::Value| dim_agent_runtime::TimelineQuery {
+        predicate: Some(predicate(path, value)),
+        ..query(Branch, 16)
+    };
+    for path in ["turn_id", "request_id"] {
+        let value = if path == "turn_id" { "turn" } else { "request" };
+        let reply = main
+            .query(with(path, serde_json::json!(value)))
+            .await
+            .unwrap();
+        assert_eq!(
+            query_ids(&reply),
+            ["main-4", "main-5"],
+            "{path}: write_batch moves the field into the output row's header, so the predicate reads it there"
+        );
+        assert_eq!(
+            query_ids(
+                &memory_main
+                    .query(with(path, serde_json::json!(value)))
+                    .await
+                    .unwrap()
+            ),
+            query_ids(&reply),
+            "{path}: the memory store agrees"
+        );
+        assert!(
+            main.query(with(path, serde_json::json!("absent")))
+                .await
+                .unwrap()
+                .events
+                .is_empty(),
+            "{path}: a value no header carries selects no rows"
+        );
+    }
+
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_query_event_id_applies_the_whole_selection() {
+    use dim_agent_runtime::TimelineQueryFlag::Render;
+    use dim_agent_runtime::TimelineQueryScope::Branch;
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let (main, _) = query_histories(store.clone()).await;
+
+    let by_id = main
+        .query(dim_agent_runtime::TimelineQuery {
+            event_id: Some("main-2".into()),
+            ..query(Branch, 16)
+        })
+        .await
+        .unwrap();
+    assert_eq!(query_ids(&by_id), ["main-2"]);
+    assert_eq!(
+        by_id.positions,
+        vec![TimelinePosition {
+            branch_id: "main".into(),
+            sequence: 2
+        }],
+        "a by-id lookup reports the branch the event lives on"
+    );
+
+    let absent = main
+        .query(dim_agent_runtime::TimelineQuery {
+            event_id: Some("absent".into()),
+            ..query(Branch, 16)
+        })
+        .await
+        .unwrap();
+    assert!(absent.events.is_empty() && absent.positions.is_empty());
+
+    let wrong_kind = main
+        .query(dim_agent_runtime::TimelineQuery {
+            event_id: Some("main-2".into()),
+            kinds: vec!["step/text".into()],
+            ..query(Branch, 16)
+        })
+        .await
+        .unwrap();
+    assert!(
+        wrong_kind.events.is_empty(),
+        "an id the kinds exclude selects nothing, even through the id index"
+    );
+
+    let wrong_flags = main
+        .query(dim_agent_runtime::TimelineQuery {
+            event_id: Some("main-1".into()),
+            flags: vec![Render],
+            ..query(Branch, 16)
+        })
+        .await
+        .unwrap();
+    assert!(
+        wrong_flags.events.is_empty(),
+        "an id the flags exclude selects nothing"
+    );
+
+    let merged = main
+        .query(dim_agent_runtime::TimelineQuery {
+            event_id: Some("main-4".into()),
+            predicate: Some(predicate("delta", serde_json::json!("a"))),
+            ..query(Branch, 16)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        query_ids(&merged),
+        ["main-4"],
+        "a merged row's event is found through the page, and the predicate still holds"
+    );
+    let merged_other = main
+        .query(dim_agent_runtime::TimelineQuery {
+            event_id: Some("main-4".into()),
+            predicate: Some(predicate("delta", serde_json::json!("b"))),
+            ..query(Branch, 16)
+        })
+        .await
+        .unwrap();
+    assert!(
+        merged_other.events.is_empty(),
+        "the predicate is re-checked against the record the merged row holds"
+    );
+
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_query_skips_to_its_page_and_its_pages_compose() {
+    use dim_agent_runtime::TimelineQueryDirection::Ascending;
+    use dim_agent_runtime::TimelineQueryScope::{Branch, Chain};
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let (main, child) = query_histories(store.clone()).await;
+
+    let whole = main.query(query(Branch, 16)).await.unwrap();
+    assert_eq!(whole.positions.len(), 6);
+
+    let pages = paged(&main, Branch, Ascending, 2).await;
+    assert_eq!(
+        pages,
+        vec![
+            vec!["main-1".to_owned(), "main-2".to_owned()],
+            vec!["main-3".to_owned(), "main-4".to_owned()],
+            vec!["main-5".to_owned(), "main-6".to_owned()],
+        ],
+        "a page starts after the facts it skips"
+    );
+    assert_eq!(
+        pages.concat(),
+        query_ids(&whole),
+        "the pages compose to the single-page read, every fact exactly once"
+    );
+    let skipped = main
+        .query(dim_agent_runtime::TimelineQuery {
+            offset: 1,
+            limit: std::num::NonZeroU64::new(3).unwrap(),
+            ..query(Branch, 16)
+        })
+        .await
+        .unwrap();
+    assert_eq!(query_ids(&skipped), ["main-2", "main-3", "main-4"]);
+    let past = main
+        .query(dim_agent_runtime::TimelineQuery {
+            offset: 6,
+            ..query(Branch, 16)
+        })
+        .await
+        .unwrap();
+    assert!(past.events.is_empty() && past.positions.is_empty());
+
+    let chain = child.query(query(Chain, 16)).await.unwrap();
+    assert_eq!(
+        query_ids(&chain),
+        ["main-1", "main-2", "child-1", "child-2", "child-3"],
+        "the ancestor reads to its cut and the branch to its head"
+    );
+    let spanning = child
+        .query(dim_agent_runtime::TimelineQuery {
+            offset: 1,
+            limit: std::num::NonZeroU64::new(2).unwrap(),
+            ..query(Chain, 16)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        query_ids(&spanning),
+        ["main-2", "child-1"],
+        "a chain page carries the rest of its skip into the next segment"
+    );
+    let into_child = child
+        .query(dim_agent_runtime::TimelineQuery {
+            offset: 3,
+            limit: std::num::NonZeroU64::new(1).unwrap(),
+            ..query(Chain, 16)
+        })
+        .await
+        .unwrap();
+    assert_eq!(query_ids(&into_child), ["child-2"]);
+    let chain_pages = paged(&child, Chain, Ascending, 2).await;
+    assert_eq!(
+        chain_pages.concat(),
+        query_ids(&chain),
+        "the chain pages compose to the single-page chain read"
+    );
+
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_query_page_reports_the_facts_it_skipped() {
+    use dim_agent_runtime::TimelineQueryScope::Branch;
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let timeline_store: Arc<dyn TimelineStore> = store.clone();
+    store
+        .create_session("skip", &SessionConfig::default())
+        .await
+        .unwrap();
+    for sequence in 1..=4 {
+        publish_records(
+            &timeline_store,
+            key("skip", "main"),
+            vec![query_record(
+                sequence,
+                sequence,
+                &format!("skip-{sequence}"),
+                EventKind::InputMessage(InputMessageData::text("fact", None)),
+            )],
+        )
+        .await;
+    }
+
+    let page = store
+        .query(
+            &key("skip", "main"),
+            &dim_agent_runtime::TimelineQuery {
+                offset: 3,
+                ..query(Branch, 16)
+            },
+            1,
+            1_000,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        page.events
+            .iter()
+            .map(|event| event.id.as_str())
+            .collect::<Vec<_>>(),
+        ["skip-4"]
+    );
+    assert_eq!(page.skipped, 3);
+
+    let past = store
+        .query(
+            &key("skip", "main"),
+            &dim_agent_runtime::TimelineQuery {
+                offset: 9,
+                ..query(Branch, 16)
+            },
+            1,
+            1_000,
+        )
+        .await
+        .unwrap();
+    assert!(past.events.is_empty());
+    assert_eq!(
+        past.skipped, 4,
+        "a store reports the facts it passed over, not the skip it was asked for"
+    );
+
+    let limited = store
+        .query(
+            &key("skip", "main"),
+            &dim_agent_runtime::TimelineQuery {
+                offset: 1,
+                limit: std::num::NonZeroU64::new(2).unwrap(),
+                ..query(Branch, 16)
+            },
+            1,
+            1_000,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        limited
+            .positions
+            .iter()
+            .map(|position| position.sequence)
+            .collect::<Vec<_>>(),
+        [2, 3]
+    );
+    assert_eq!(limited.skipped, 1);
+
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_descending_page_takes_the_newest_fact() {
+    use dim_agent_runtime::TimelineQueryDirection::Descending;
+    use dim_agent_runtime::TimelineQueryScope::Branch;
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("descending", &SessionConfig::default())
+        .await
+        .unwrap();
+    let history = key("descending", "main");
+    let timeline_store: Arc<dyn TimelineStore> = store.clone();
+    publish_records(
+        &timeline_store,
+        history.clone(),
+        vec![
+            query_record(
+                1,
+                2,
+                "one",
+                EventKind::InputMessage(InputMessageData::text("one", None)),
+            ),
+            query_record(
+                2,
+                2,
+                "two",
+                EventKind::TurnStart(TurnStartData {
+                    turn_id: "turn".into(),
+                }),
+            ),
+        ],
+    )
+    .await;
+    publish_records(
+        &timeline_store,
+        history.clone(),
+        vec![
+            query_record(
+                3,
+                4,
+                "three",
+                EventKind::InputMessage(InputMessageData::text("three", None)),
+            ),
+            query_record(
+                4,
+                4,
+                "four",
+                EventKind::TurnStart(TurnStartData {
+                    turn_id: "turn".into(),
+                }),
+            ),
+        ],
+    )
+    .await;
+    let timeline = Timeline::restore(rutis::Ctx::root().unwrap(), history, vec![], store.clone())
+        .await
+        .unwrap();
+
+    let newest = timeline
+        .query(dim_agent_runtime::TimelineQuery {
+            direction: Descending,
+            limit: std::num::NonZeroU64::new(1).unwrap(),
+            ..query(Branch, 16)
+        })
+        .await
+        .unwrap();
+    assert_eq!(query_ids(&newest), ["four"]);
+    let inside_a_batch = timeline
+        .query(dim_agent_runtime::TimelineQuery {
+            direction: Descending,
+            offset: 1,
+            limit: std::num::NonZeroU64::new(1).unwrap(),
+            ..query(Branch, 16)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        query_ids(&inside_a_batch),
+        ["three"],
+        "a page may start inside an atomic batch"
+    );
+
+    let ascending = query_ids(&timeline.query(query(Branch, 16)).await.unwrap());
+    let mut reversed: Vec<String> = ascending;
+    reversed.reverse();
+    let pages = paged(&timeline, Branch, Descending, 1).await;
+    assert_eq!(
+        pages.concat(),
+        reversed,
+        "the descending pages compose to the ascending read reversed"
+    );
+
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_query_pages_a_selection_wider_than_one_reader_window() {
+    use dim_agent_runtime::TimelineQueryScope::Branch;
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("wide", &SessionConfig::default())
+        .await
+        .unwrap();
+    let history = key("wide", "main");
+    let timeline_store: Arc<dyn TimelineStore> = store.clone();
+    let mut sequence = 0;
+    for batch in 0..3u64 {
+        let records = (0..100)
+            .map(|_| {
+                sequence += 1;
+                query_record(
+                    sequence,
+                    (batch + 1) * 100,
+                    &format!("wide-{sequence}"),
+                    EventKind::StopInterrupt(StopInterruptData {
+                        reason: "filler".into(),
+                        scope: InterruptScope::Turn,
+                    }),
+                )
+            })
+            .collect();
+        publish_records(&timeline_store, history.clone(), records).await;
+    }
+    let timeline = Timeline::restore(rutis::Ctx::root().unwrap(), history, vec![], store.clone())
+        .await
+        .unwrap();
+
+    let across = timeline
+        .query(dim_agent_runtime::TimelineQuery {
+            offset: 250,
+            limit: std::num::NonZeroU64::new(10).unwrap(),
+            ..query(Branch, 16)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        across
+            .events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        (251..=260).collect::<Vec<_>>(),
+        "a page past one reader window starts where its skip ends"
+    );
+
+    let window = timeline
+        .query(dim_agent_runtime::TimelineQuery {
+            offset: 50,
+            limit: std::num::NonZeroU64::new(200).unwrap(),
+            ..query(Branch, 16)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        window
+            .events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        (51..=250).collect::<Vec<_>>()
+    );
+
+    let last = timeline
+        .query(dim_agent_runtime::TimelineQuery {
+            offset: 299,
+            limit: std::num::NonZeroU64::new(16).unwrap(),
+            ..query(Branch, 16)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        query_ids(&last),
+        ["wide-300"],
+        "a short page ends the selection at the published head"
+    );
+
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_query_page_ends_only_when_no_more_facts_match() {
+    use dim_agent_runtime::TimelineQueryScope::Branch;
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("merged", &SessionConfig::default())
+        .await
+        .unwrap();
+    let history = key("merged", "main");
+    let timeline_store: Arc<dyn TimelineStore> = store.clone();
+    for batch in 0..3u64 {
+        let base = batch * 2 + 1;
+        let records = vec![
+            query_record(base, base + 1, &format!("merged-{base}"), delta("plain")),
+            query_record(
+                base + 1,
+                base + 1,
+                &format!("merged-{}", base + 1),
+                delta("hit"),
+            ),
+        ];
+        publish_records(&timeline_store, history.clone(), records).await;
+    }
+    publish_records(
+        &timeline_store,
+        history.clone(),
+        vec![query_record(7, 7, "merged-7", delta("plain"))],
+    )
+    .await;
+    let timeline = Timeline::restore(rutis::Ctx::root().unwrap(), history, vec![], store.clone())
+        .await
+        .unwrap();
+
+    let hit = |offset: u64| dim_agent_runtime::TimelineQuery {
+        predicate: Some(predicate("delta", serde_json::json!("hit"))),
+        offset,
+        limit: std::num::NonZeroU64::new(1).unwrap(),
+        ..query(Branch, 16)
+    };
+    for (offset, expected) in [(0, "merged-2"), (1, "merged-4"), (2, "merged-6")] {
+        let reply = timeline.query(hit(offset)).await.unwrap();
+        assert_eq!(
+            query_ids(&reply),
+            [expected],
+            "offset {offset}: the page looks past a merged row's other events"
+        );
+    }
+    let exhausted = timeline.query(hit(3)).await.unwrap();
+    assert!(
+        exhausted.events.is_empty(),
+        "a short page means the read reached the end of its scope"
+    );
+
+    let page = store
+        .query(
+            &key("merged", "main"),
+            &dim_agent_runtime::TimelineQuery {
+                predicate: Some(predicate("delta", serde_json::json!("hit"))),
+                offset: 1,
+                limit: std::num::NonZeroU64::new(1).unwrap(),
+                ..query(Branch, 16)
+            },
+            1,
+            1_000,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        page.events
+            .iter()
+            .map(|event| event.id.as_str())
+            .collect::<Vec<_>>(),
+        ["merged-4"]
+    );
+    assert_eq!(
+        page.skipped, 1,
+        "only the matching records of a merged row count as skipped"
+    );
+
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_paged_chain_read_returns_every_ancestor_fact_once_from_sqlite() {
+    use dim_agent_runtime::TimelineQueryDirection::Ascending;
+    use dim_agent_runtime::TimelineQueryScope::Chain;
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let (_, child) = tall_chain_histories(store.clone(), 3).await;
+
+    let whole = child.query(query(Chain, 16)).await.unwrap();
+    assert_eq!(
+        whole.positions.len(),
+        8,
+        "five ancestor facts and three local ones"
+    );
+
+    let pages = paged(&child, Chain, Ascending, 2).await;
+    assert_eq!(
+        pages,
+        vec![
+            vec!["main-1".to_owned(), "main-2".to_owned()],
+            vec!["main-3".to_owned(), "main-4".to_owned()],
+            vec!["main-5".to_owned(), "child-1".to_owned()],
+            vec!["child-2".to_owned(), "child-3".to_owned()],
+        ],
+        "the third page starts in the ancestor and continues into the branch"
+    );
+    assert_eq!(
+        pages.concat(),
+        query_ids(&whole),
+        "the pages compose to the single-page read, every ancestor fact exactly once"
+    );
+
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_paged_descending_chain_read_returns_every_fact_once_from_sqlite() {
+    use dim_agent_runtime::TimelineQueryDirection::Descending;
+    use dim_agent_runtime::TimelineQueryScope::Chain;
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let (_, child) = tall_chain_histories(store.clone(), 3).await;
+
+    let whole = child.query(query(Chain, 16)).await.unwrap();
+    let pages = paged(&child, Chain, Descending, 2).await;
+    assert_eq!(
+        pages.first(),
+        Some(&vec!["child-3".to_owned(), "child-2".to_owned()]),
+        "the first descending page takes the newest facts"
+    );
+    assert_eq!(
+        pages[1],
+        vec!["child-1".to_owned(), "main-5".to_owned()],
+        "a descending page continues from the branch into its ancestor"
+    );
+
+    let mut reversed = query_ids(&whole);
+    reversed.reverse();
+    assert_eq!(
+        pages.concat(),
+        reversed,
+        "the descending pages compose to the ascending read reversed"
+    );
+
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_chain_read_on_an_empty_branch_returns_its_ancestor_facts_from_sqlite() {
+    use dim_agent_runtime::TimelineQueryScope::Chain;
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let (_, child) = tall_chain_histories(store.clone(), 0).await;
+
+    let reply = child.query(query(Chain, 16)).await.unwrap();
+    assert_eq!(
+        position_pairs(&reply),
+        [
+            ("main".into(), 1),
+            ("main".into(), 2),
+            ("main".into(), 3),
+            ("main".into(), 4),
+            ("main".into(), 5)
+        ],
+        "a read branch with no facts still reaches its ancestors"
+    );
+
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_kind_filtered_query_plan_uses_the_kind_index() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    db.close().await.unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    let mut statement = connection
+        .prepare(
+            "EXPLAIN QUERY PLAN SELECT sequence, last_sequence, kind, body FROM timeline_events \
+             WHERE session_id=?1 AND branch_id=?2 \
+             AND sequence >= coalesce((SELECT max(sequence) FROM timeline_events \
+               WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3), ?3) \
+             AND sequence<=?4 AND last_sequence>=?3 AND kind IN ('step/text') ORDER BY sequence",
+        )
+        .unwrap();
+    let plan: Vec<String> = statement
+        .query_map(params!["session", "main", 1, 2], |row| row.get(3))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(
+        plan.iter()
+            .any(|detail| detail.contains("timeline_events_by_kind")),
+        "the kind-filtered query plan uses the derived index: {plan:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_query_reads_interleaved_kinds_in_sequence_order() {
+    use dim_agent_runtime::TimelineQueryDirection::{Ascending, Descending};
+    use dim_agent_runtime::TimelineQueryScope::Branch;
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let sqlite = interleaved_histories(store.clone()).await;
+    let memory = interleaved_histories(Arc::new(MemoryTimelineStore::default())).await;
+
+    let mixed = |direction, offset| dim_agent_runtime::TimelineQuery {
+        direction,
+        kinds: vec!["turn/start".into(), "step/model-start".into()],
+        offset,
+        limit: std::num::NonZeroU64::new(1).unwrap(),
+        ..query(Branch, 1)
+    };
+    let cases = [
+        (Ascending, 0, "mixed-1"),
+        (Ascending, 1, "mixed-2"),
+        (Descending, 0, "mixed-4"),
+        (Descending, 1, "mixed-3"),
+    ];
+    for (direction, offset, id) in cases {
+        let sqlite_reply = sqlite.query(mixed(direction, offset)).await.unwrap();
+        let memory_reply = memory.query(mixed(direction, offset)).await.unwrap();
+        assert_eq!(
+            query_ids(&sqlite_reply),
+            [id],
+            "{direction:?} at offset {offset}: the page is in sequence order"
+        );
+        assert_eq!(query_ids(&memory_reply), query_ids(&sqlite_reply));
+        assert_eq!(
+            position_pairs(&sqlite_reply),
+            position_pairs(&memory_reply),
+            "{direction:?} at offset {offset}"
+        );
+    }
+
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// What a query returned or how it failed, as text two stores can compare.
+async fn comparable(timeline: &Timeline, query: dim_agent_runtime::TimelineQuery) -> String {
+    match timeline.query(query).await {
+        Ok(reply) => format!("{:?} {:?}", query_ids(&reply), position_pairs(&reply)),
+        Err(AgentError::InvalidInput(message)) => format!("invalid: {message}"),
+        Err(error) => format!("error: {error:?}"),
+    }
+}
+
+#[tokio::test]
+async fn the_memory_and_sqlite_stores_agree_on_a_query() {
+    use dim_agent_runtime::TimelineQueryDirection::Descending;
+    use dim_agent_runtime::TimelineQueryScope::{Branch, Chain};
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let sqlite = SqliteTimelineStore::new(db.clone());
+    let memory = Arc::new(MemoryTimelineStore::default());
+    let (sqlite_main, sqlite_child) = query_histories(sqlite.clone()).await;
+    let (memory_main, memory_child) = query_histories(memory).await;
+
+    let paged = |offset, limit, direction| dim_agent_runtime::TimelineQuery {
+        direction,
+        offset,
+        limit: std::num::NonZeroU64::new(limit).unwrap(),
+        ..query(Branch, 16)
+    };
+    let mut main_cases = vec![
+        query(Branch, 16),
+        query(Branch, 1),
+        paged(0, 2, Default::default()),
+        paged(1, 2, Default::default()),
+        paged(3, 2, Default::default()),
+        paged(6, 16, Default::default()),
+        paged(99, 2, Default::default()),
+        paged(0, 2, Descending),
+        paged(2, 2, Descending),
+        paged(0, 1, Descending),
+        dim_agent_runtime::TimelineQuery {
+            ..query(Branch, 16)
+        },
+        dim_agent_runtime::TimelineQuery {
+            ..query(Branch, 16)
+        },
+        dim_agent_runtime::TimelineQuery {
+            ..query(Branch, 16)
+        },
+        dim_agent_runtime::TimelineQuery {
+            ..query(Branch, 16)
+        },
+        dim_agent_runtime::TimelineQuery {
+            direction: Descending,
+            ..paged(0, 2, Descending)
+        },
+        dim_agent_runtime::TimelineQuery {
+            event_id: Some("main-5".into()),
+            ..query(Branch, 16)
+        },
+        dim_agent_runtime::TimelineQuery {
+            event_id: Some("main-5".into()),
+            offset: 1,
+            ..query(Branch, 16)
+        },
+        dim_agent_runtime::TimelineQuery {
+            event_id: Some("main-4".into()),
+            predicate: Some(predicate("delta", serde_json::json!("b"))),
+            ..query(Branch, 16)
+        },
+        dim_agent_runtime::TimelineQuery {
+            event_id: Some("main-2".into()),
+            kinds: vec!["step/text".into()],
+            ..query(Branch, 16)
+        },
+        dim_agent_runtime::TimelineQuery {
+            event_id: Some("absent".into()),
+            ..query(Branch, 16)
+        },
+    ];
+    let mut kinded = query(Branch, 16);
+    kinded.kinds = vec!["step/text".into()];
+    main_cases.push(kinded);
+    let mut kinded_offset = query(Branch, 16);
+    kinded_offset.kinds = vec!["test/marked".into()];
+    kinded_offset.offset = 1;
+    kinded_offset.limit = std::num::NonZeroU64::new(1).unwrap();
+    main_cases.push(kinded_offset);
+    for flags in [
+        vec![dim_agent_runtime::TimelineQueryFlag::Render],
+        vec![dim_agent_runtime::TimelineQueryFlag::State],
+        vec![
+            dim_agent_runtime::TimelineQueryFlag::Render,
+            dim_agent_runtime::TimelineQueryFlag::State,
+        ],
+    ] {
+        main_cases.push(dim_agent_runtime::TimelineQuery {
+            flags,
+            ..query(Branch, 16)
+        });
+    }
+    for (path, value) in [
+        ("tool", serde_json::json!("search")),
+        ("nested.level", serde_json::json!(3)),
+        ("delta", serde_json::json!("b")),
+        ("turn_id", serde_json::json!("turn")),
+        ("request_id", serde_json::json!("request")),
+        ("nested.absent", serde_json::json!(3)),
+    ] {
+        main_cases.push(dim_agent_runtime::TimelineQuery {
+            predicate: Some(predicate(path, value)),
+            ..query(Branch, 16)
+        });
+    }
+
+    let chain = |offset, limit, direction| dim_agent_runtime::TimelineQuery {
+        direction,
+        offset,
+        limit: std::num::NonZeroU64::new(limit).unwrap(),
+        ..query(Chain, 16)
+    };
+    let mut child_cases = vec![
+        query(Chain, 16),
+        query(Chain, 2),
+        query(Branch, 16),
+        chain(0, 2, Default::default()),
+        chain(1, 2, Default::default()),
+        chain(3, 1, Default::default()),
+        chain(5, 16, Default::default()),
+        chain(0, 2, Descending),
+        chain(2, 4, Descending),
+        dim_agent_runtime::TimelineQuery { ..query(Chain, 16) },
+        dim_agent_runtime::TimelineQuery { ..query(Chain, 16) },
+        dim_agent_runtime::TimelineQuery { ..query(Chain, 16) },
+        dim_agent_runtime::TimelineQuery { ..query(Chain, 16) },
+        dim_agent_runtime::TimelineQuery {
+            direction: Descending,
+            ..query(Chain, 16)
+        },
+        dim_agent_runtime::TimelineQuery {
+            event_id: Some("main-2".into()),
+            ..query(Chain, 16)
+        },
+        dim_agent_runtime::TimelineQuery {
+            event_id: Some("child-2".into()),
+            ..query(Chain, 16)
+        },
+        dim_agent_runtime::TimelineQuery {
+            event_id: Some("absent".into()),
+            ..query(Chain, 16)
+        },
+        dim_agent_runtime::TimelineQuery {
+            predicate: Some(predicate("tool", serde_json::json!("search"))),
+            ..query(Chain, 16)
+        },
+    ];
+    let mut chain_kinds = query(Chain, 16);
+    chain_kinds.kinds = vec!["input/message".into()];
+    chain_kinds.offset = 1;
+    child_cases.push(chain_kinds);
+
+    for (index, case) in main_cases.iter().enumerate() {
+        assert_eq!(
+            comparable(&sqlite_main, case.clone()).await,
+            comparable(&memory_main, case.clone()).await,
+            "main case {index}: {case:?}"
+        );
+    }
+    for (index, case) in child_cases.iter().enumerate() {
+        assert_eq!(
+            comparable(&sqlite_child, case.clone()).await,
+            comparable(&memory_child, case.clone()).await,
+            "child case {index}: {case:?}"
+        );
+    }
+
+    sqlite.close().await.unwrap();
     db.close().await.unwrap();
 }

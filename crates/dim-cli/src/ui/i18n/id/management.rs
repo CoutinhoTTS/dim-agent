@@ -39,14 +39,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Ctrl+T run" => "Ctrl+T jalankan",
         "Ctrl+X remove" => "Ctrl+X hapus",
         "Tab inspect" => "Tab periksa",
-        "Remove {name}? Enter confirm · Esc cancel" => {
-            "Hapus {name}? Enter konfirmasi · Esc batal"
-        }
+        "Remove {name}?" => "Hapus {name}?",
         "↑↓ scroll · Esc back" => "↑↓ gulir · Esc kembali",
         "Added." => "Ditambahkan.",
         "Removed {name}." => "{name} dihapus.",
         "unavailable" => "tidak tersedia",
-        "Reset {name}? Enter confirm · Esc cancel" => "Reset {name}? Enter konfirmasi · Esc batal",
+        "Reset {name}?" => "Reset {name}?",
+        "Enter confirm" => "Enter konfirmasi",
+        "Esc cancel" => "Esc batal",
         "Reset {name} to its catalog entry." => "{name} direset ke entri katalog.",
         "Ran {name}." => "{name} dijalankan.",
         "The user document changed since it was read; nothing was written." => {

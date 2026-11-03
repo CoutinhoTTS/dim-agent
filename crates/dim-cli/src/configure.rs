@@ -11,11 +11,21 @@ struct Configured {
     outcome: String,
 }
 
+/// The adopted model's advertised reasoning efforts and effective selection.
+#[derive(Debug, PartialEq)]
+pub struct EffortChoices {
+    pub model: String,
+    pub current: Option<String>,
+    pub choices: Vec<String>,
+}
+
 /// What a configuration command did.
 pub struct Report {
     pub lines: Vec<String>,
     /// The Session's configuration changed, so its history has new events.
     pub changed: bool,
+    /// Present for a bare reasoning-effort query.
+    pub effort: Option<EffortChoices>,
 }
 
 /// Whether `text` reaches for the Session: every configuration command
@@ -35,6 +45,7 @@ pub async fn run(
     text: &str,
 ) -> Result<Report> {
     let mut lines = Vec::new();
+    let mut effort = None;
     let words: Vec<_> = text.split_whitespace().collect();
     let command = words[0];
     if words.len() > 2 {
@@ -72,6 +83,7 @@ pub async fn run(
             return Ok(Report {
                 lines,
                 changed: false,
+                effort,
             });
         }
     } else {
@@ -154,6 +166,14 @@ pub async fn run(
                         choices.join(", ")
                     }
                 ));
+                effort = Some(EffortChoices {
+                    model: format!("{} / {}", model.provider_id, model.model_id),
+                    current: model
+                        .model_preferences
+                        .as_ref()
+                        .and_then(|preferences| preferences.reasoning_effort.clone()),
+                    choices,
+                });
                 None
             }
         };
@@ -178,11 +198,13 @@ pub async fn run(
             return Ok(Report {
                 lines,
                 changed: false,
+                effort,
             });
         }
     }
     Ok(Report {
         lines,
         changed: true,
+        effort,
     })
 }

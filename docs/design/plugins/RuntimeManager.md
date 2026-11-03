@@ -174,7 +174,7 @@ The release archive and each npm platform package carry, beside `bin/`:
 ```text
 bin/dimcode[.exe]
 default-plugins.json        # PluginManager §2.3, with `runtimes` (§2.2)
-plugins/<name>/             # goal, web, session-title, workflow, scheduler with production node_modules; plugin-authoring
+plugins/<name>/             # goal, web, workflow, scheduler with production node_modules; plugin-authoring
 LICENSE  NOTICE  release-manifest.json
 ```
 

@@ -129,11 +129,19 @@ not the user source.
   write, the patch semantics and the values they redact.
 - `mcp.inspect({source,id,cwd?})` returns `{enabled,configuration,connections}`. Configuration
   is the effective entry a Session runs, with a project or plugin entry's stdio `cwd` resolved.
-  Each connection contains `state: {status,expired?}` and
+  Each connection contains `state: {status,expired?}`, `failure: string | null` and
   `tools: [{name,description,inputSchema}] | null`: its last complete successful discovery,
   or null before discovery. Status is `disconnected`, `connecting`, `connected`, `failed`,
-  `closed` or `auth_required` (with `expired`). These are existing connection generations,
-  not a host-global connection state. Inspection does not connect or contact the server.
+  `closed` or `auth_required` (with `expired`). `failure` is the last start or transport
+  failure, such as a stdio server's exit status and bounded stderr tail or a remote server's
+  HTTP status; it is status only and never enters a model request. A closed connection starts
+  again on its next use. A failed start waits for a cooldown that doubles from 1 second to 5
+  minutes and resets after a connection succeeds; `failed` is reported only while that cooldown
+  holds, and discovery starts a failed server again after each cooldown. A remote server that
+  answers HTTP 404 to a request carrying its session id starts a new session and the request is
+  replayed once; a second 404 in a row fails the call. These are existing
+  connection generations, not a host-global connection state. Inspection does not connect or
+  contact the server.
 - `mcp.test` probes one configuration without attaching a Session; the
   [MCP configuration management](../../docs/design/appserver/mcp-management.md#45-probe-mcptest)
   contract defines its outcome, latency, tools and auth report.
@@ -185,8 +193,11 @@ blindly. Use these methods rather than editing imported user files. `skills.set_
 persists in SQLite; legacy `skills.json` is only an import source. Private server configuration
 stays inside its owning service and is excluded from catalog replies, notifications and diagnostics.
 
-A stdio server's stderr is discarded: arbitrary server output may contain secrets, so it never
-reaches tracing or the daemon log.
+A stdio server's stderr is drained, retaining at most 20 lines within 4 KiB for
+connection diagnostics. Failure messages, including remote errors, are bounded
+to 4 KiB on UTF-8 boundaries. Status and inspection replies may expose text the
+server wrote, including secrets; it never enters model requests, tracing or the
+daemon log.
 
 ### MCP tool declarations
 
@@ -387,7 +398,7 @@ dim_app_server::cli::process_entry(args, Some(ManagedProviderRow(Arc::new(|built
 
 `ManagedProviderRow` registers the plugin's process row given the product root's FileStorage index and returns the row name; `ServerConfig.managed_provider` carries it for embedders. It is installed only with a product home, beside `ManagedProviderBinding`, which hands the provider to `ManagedProviders`. The plugin owns its account schema, authentication, token refresh and catalog normalization; the host does not interpret supplier-specific responses. Files it keeps under the product root go through FileStorage; `auth.json` is plain JSON shared with the native subscription providers, each owning its own root fields.
 
-`process_entry` is the process entry: on Unix it closes every descriptor above standard error that the process inherited, then calls `run_with`, so a process `main` calls it before it opens anything. Linux closes the range in one `close_range` call; where that call is unavailable, and on the other Unix systems, the daemon lists `/proc/self/fd` (Linux) or `/dev/fd` and closes every number the listing names; when no listing can be read it closes 3 up to the process's descriptor limit, which is the soft limit, else the hard limit, else `sysconf(_SC_OPEN_MAX)`, else 65,536, so no inherited descriptor stays open. `run_with` and `run` do not touch the descriptors the process has open and are the entries for an embedder that keeps its own.
+`process_entry` is the process entry: on Unix it closes every descriptor above standard error that the process inherited, then calls `run_with`, so a process `main` calls it before it opens anything. Linux closes the range in one `close_range` call; where that call is unavailable, and on the other Unix systems, the daemon lists `/proc/self/fd` (Linux) or `/dev/fd` and closes every number the listing names; when no listing can be read it closes 3 up to the process's descriptor limit, which is the soft limit, else the hard limit, else `sysconf(_SC_OPEN_MAX)`, else 65,536, so no inherited descriptor stays open. `run_with` and `run` do not touch the descriptors the process has open and are the entries for an embedder that keeps its own. `process_entry` and `run_with` take a native-profile installer, `fn(&mut AgentBuilder)`, called when the product-home or model-config execution profile is assembled. It contributes host-selected plugins through the existing builder API. `run` and the standalone server choose no additional native plugins; `dimcode` installs its product plugins from their own crates.
 
 The Dim account (`dimcode-api-oauth`) is such a plugin, in [`crates/dim-oauth`](../dim-oauth/README.md); `dimcode` built with the account's client IDs is the account build. See the [development contract](../../docs/architecture/development.md#managed-provider-boundary) and [release packaging](../../docs/release/README.md#local-packaging).
 
@@ -607,7 +618,7 @@ existing `--node` and `--js-runtime` flags, and `--python PATH` for `py:` rows. 
 array of ordinary loader rows, one per plugin; it is also the anchor, so package names in the
 rows resolve from its location and `py:` modules are imported from its directory. Rows are
 validated as they are for an embedding host; nothing is installed by default. Optional packages such as
-[SessionTitle](../../runtime/plugins/session-title/README.md) and Goal are enabled this way:
+Goal is enabled this way. The `dimcode` product profile installs SessionTitle from the independent `dim-session-title` crate without a foreign runtime. An embedding host installs it explicitly; the App Server library and standalone executable contain no title plugin implementation:
 
 ```sh
 dim-app-server --product-home /absolute/product-home --home /absolute/product-home/rust \

@@ -1659,11 +1659,19 @@ impl Worker {
                     return Ok(());
                 }
                 let model = self.model.clone();
-                match configure::run(&mut self.client, &self.session_id, model.as_ref(), &text)
-                    .await
-                {
-                    Ok(report) => self.report(report.lines.join("\n"), false),
-                    Err(error) => self.report(error.to_string(), true),
+                let result =
+                    configure::run(&mut self.client, &self.session_id, model.as_ref(), &text).await;
+                if matches!(text.as_str(), "/effort" | "/reasoning") {
+                    self.send(Update::EffortChoices(
+                        result
+                            .map(|report| report.effort.expect("bare effort query has choices"))
+                            .map_err(|error| error.to_string()),
+                    ));
+                } else {
+                    match result {
+                        Ok(report) => self.report(report.lines.join("\n"), false),
+                        Err(error) => self.report(error.to_string(), true),
+                    }
                 }
             }
             Command::SelectModel {

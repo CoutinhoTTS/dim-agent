@@ -1,10 +1,10 @@
 //! The tool calls of one model response drawn as one group (port of
 //! `blocks/tool-group.ts` and `tool-group-render.ts`).
 //!
-//! Collapsed, the default, is the summary row alone
-//! (`✓ Ran 1 command, ran 1 search, read 1 file · 1 failed`). Expanded (the
-//! `/tools` toggle) adds a row per call with the bodies that matter: command
-//! output, edit diffs. The live region and the committed block both draw
+//! Collapsed, the default, keeps the group header and member cards. Summary
+//! adds one truncated row per call, without output, diffs or script bodies.
+//! Expanded adds the full calls, command output and edit diffs. `/tools`
+//! cycles these forms. The live region and the committed block both draw
 //! through [`render_group`], so a group that settles lands on exactly the rows
 //! it occupied while it ran.
 
@@ -30,6 +30,7 @@ const TAIL_MAX_ROWS: usize = 15;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Detail {
     Collapsed,
+    Summary,
     Expanded,
 }
 
@@ -134,8 +135,7 @@ fn body_line(indent: usize, text: impl Into<String>, tone: Tone, overflow: Overf
     }
 }
 
-/// One batch of tool calls, projected for drawing. Both projections are kept,
-/// so a click flips a committed group without its rows.
+/// A tool batch in collapsed, summary and expanded forms.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolGroup {
     pub state: State,
@@ -143,6 +143,7 @@ pub struct ToolGroup {
     /// The delegations its member cards show, by request event id.
     pub cards: Vec<String>,
     collapsed: Vec<Line>,
+    summary: Vec<Line>,
     expanded: Vec<Line>,
 }
 
@@ -150,16 +151,33 @@ impl ToolGroup {
     fn lines(&self) -> &[Line] {
         match self.detail {
             Detail::Collapsed => &self.collapsed,
+            Detail::Summary => &self.summary,
             Detail::Expanded => &self.expanded,
         }
     }
 }
 
 impl Detail {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Collapsed => "collapsed",
+            Self::Summary => "summary",
+            Self::Expanded => "expanded",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Collapsed => Self::Summary,
+            Self::Summary => Self::Expanded,
+            Self::Expanded => Self::Collapsed,
+        }
+    }
+
     pub fn flipped(self) -> Self {
         match self {
             Detail::Collapsed => Detail::Expanded,
-            Detail::Expanded => Detail::Collapsed,
+            Detail::Summary | Detail::Expanded => Detail::Collapsed,
         }
     }
 }
@@ -332,6 +350,10 @@ pub fn project_group(rows: &[&ViewRow], detail: Detail) -> ToolGroup {
             Tone::Danger,
         ));
     }
+    let mut summary = vec![header_line(0, mark, header.clone())];
+    for item in &items {
+        append_summary(&mut summary, item);
+    }
     let mut collapsed = vec![header_line(0, mark, header)];
     let now = now_ms();
     for item in &items {
@@ -349,8 +371,63 @@ pub fn project_group(rows: &[&ViewRow], detail: Detail) -> ToolGroup {
             .filter_map(|item| Some(item.call().member?.task.id.clone()))
             .collect(),
         collapsed,
+        summary,
         expanded,
     }
+}
+
+fn append_summary(lines: &mut Vec<Line>, item: &Item<'_>) {
+    let call = item.call();
+    let mut spans = match item {
+        Item::Edit { .. } => edit_header(&[item]),
+        _ => {
+            let detail = if let Item::Agent { detail, .. } = item {
+                detail.clone()
+            } else {
+                match call.name.as_str() {
+                    "exec" | "execute" | "bash" => {
+                        let command = normalize(call.string("command").unwrap_or(""));
+                        let mut preview = first_line(Some(&command));
+                        if command.trim().lines().count() > 1 {
+                            preview.push_str(" …");
+                        }
+                        preview
+                    }
+                    "read" => call.path().to_owned(),
+                    "grep" => [
+                        call.path().to_owned(),
+                        quote(
+                            call.string("pattern")
+                                .or_else(|| call.string("query"))
+                                .unwrap_or(""),
+                        ),
+                    ]
+                    .into_iter()
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                    _ => summarize_input(call.input),
+                }
+            };
+            let mut spans = vec![span(normalize(&call.name), Tone::Text)];
+            if !detail.is_empty() {
+                spans.push(span(
+                    format!(" · {}", first_line(Some(&detail))),
+                    Tone::Muted,
+                ));
+            }
+            spans
+        }
+    };
+    if let Some(first) = spans.first_mut() {
+        first.text = capitalize(&first.text);
+    }
+    let mut line = header_line(2, state_mark(call.state), spans);
+    line.action = call.member.and_then(|card| {
+        matches!(card.task.kind, TaskKind::Member(MemberTarget::Session(_)))
+            .then(|| card.task.id.clone())
+    });
+    lines.push(line);
 }
 
 fn classify(call: Call<'_>) -> Item<'_> {
@@ -1558,7 +1635,7 @@ fn lay_out_group(
         let disclosure = if at == 0 {
             Some(match group.detail {
                 Detail::Collapsed => "▸",
-                Detail::Expanded => "▾",
+                Detail::Summary | Detail::Expanded => "▾",
             })
         } else {
             (line.mark.is_some()

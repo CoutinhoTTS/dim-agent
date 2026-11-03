@@ -1,7 +1,8 @@
 use super::keys::KeyFilter;
 use crate::{
     AgentError, BoxFuture, BranchCursor, BranchLifecycle, BranchPage, FaultReporter, PolicyFacts,
-    PolicyOrder, PolicyOrderEvent, PolicyWindow, Result, StoredEvent, TimelineKey, TimelineStore,
+    PolicyOrder, PolicyOrderEvent, PolicyWindow, Result, StoredEvent, TimelineKey, TimelineQuery,
+    TimelineQueryDirection, TimelineQueryReply, TimelineQueryScope, TimelineStore,
 };
 use dim_agent_types::{
     AgentEvent, EventDraft, EventKind, InputMessageData, ProjectionCheckpoint, RecoverySnapshot,
@@ -22,6 +23,18 @@ use std::{
 };
 use tokio::sync::{OnceCell, watch};
 use uuid::Uuid;
+
+/// Which turn starts a policy order read keeps.
+#[derive(Debug, Clone, Copy)]
+pub enum PolicyTurns<'a> {
+    /// Only each segment's last turn start, next to its last compaction
+    /// start: the anchors a streamed context resolves cut ids against.
+    Anchors,
+    /// Every turn start of every segment.
+    All,
+    /// Every turn start after this chain position.
+    After(&'a TimelinePosition),
+}
 
 /// One draft offered to the branch's `before` middleware. Each wrapper records
 /// the step it applied, so steps follow the order the transforms took effect.
@@ -133,6 +146,8 @@ impl Data {
         !self.closing && self.failure.is_none() && self.allocated == self.published
     }
 }
+/// The reply from one reply per segment: facts in chain order and then
+/// sequence, each with its position in the same order.
 #[service]
 impl Timeline {
     /// A writable Timeline outside the branch tree, for tests that craft
@@ -727,6 +742,175 @@ impl Timeline {
             .flatten()
             .collect())
     }
+    /// One bounded read over this branch or over its chain ([ADR 019](../../../../docs/adr/019-event-query.md),
+    /// [plugin contract §5.4](../../../../docs/design/plugin-contract.md#54-the-event-query)):
+    /// the direction, kinds, flags, event id, predicate, limit and offset
+    /// select the facts, and the reply is up to `limit` of them in chain order
+    /// and then sequence, in the query's direction, each with its position. A
+    /// chain read is each ancestor to its cut and then this branch, root first
+    /// ascending and this branch first descending; the offset the earlier
+    /// segment did not use moves to the next one, so paging is skipping and a
+    /// page shorter than the limit means the selection is exhausted. The read
+    /// never returns a fact above a branch's coverage: an ancestor to its cut,
+    /// this branch to its published head.
+    pub async fn query(&self, query: TimelineQuery) -> Result<TimelineQueryReply> {
+        use TimelineQueryDirection::Descending;
+
+        query.validate()?;
+        let published = self.sequence();
+        let clips: Vec<(String, u64)> = match query.scope {
+            TimelineQueryScope::Branch => vec![(self.0.key.branch_id.clone(), published)],
+            TimelineQueryScope::Chain => self
+                .0
+                .ancestors
+                .iter()
+                .filter(|(_, cut)| *cut > 0)
+                .cloned()
+                .chain(std::iter::once((self.0.key.branch_id.clone(), published)))
+                .collect(),
+        };
+        let anchor = match (&query.from_event, query.from_sequence) {
+            (None, None) => None,
+            (None, Some(sequence)) => Some((
+                match query.scope {
+                    TimelineQueryScope::Branch => None,
+                    TimelineQueryScope::Chain => Some(self.0.key.branch_id.clone()),
+                },
+                sequence,
+            )),
+            (Some(event_id), None) => {
+                let mut found = None;
+                for (branch, clip) in &clips {
+                    let key = TimelineKey {
+                        session_id: self.0.key.session_id.clone(),
+                        branch_id: branch.clone(),
+                    };
+                    let probe = TimelineQuery {
+                        scope: TimelineQueryScope::Branch,
+                        from_event: None,
+                        from_sequence: None,
+                        order_by: query.order_by,
+                        direction: TimelineQueryDirection::Ascending,
+                        kinds: Vec::new(),
+                        flags: Vec::new(),
+                        event_id: Some(event_id.clone()),
+                        predicate: None,
+                        limit: std::num::NonZeroU64::new(1).expect("one is nonzero"),
+                        offset: 0,
+                    };
+                    let page = self.0.store.query(&key, &probe, 1, *clip).await?;
+                    if let Some(position) = page.positions.first() {
+                        found = Some((Some(branch.clone()), position.sequence));
+                        break;
+                    }
+                }
+                found
+            }
+            (Some(_), Some(_)) => unreachable!("validate rejects two anchors"),
+        };
+        if query.from_event.is_some() && anchor.is_none() {
+            return Ok(TimelineQueryReply {
+                events: Vec::new(),
+                positions: Vec::new(),
+            });
+        }
+        let anchor_index = match &anchor {
+            Some((Some(branch), _)) => Some(
+                clips
+                    .iter()
+                    .position(|(name, _)| name == branch)
+                    .ok_or_else(|| {
+                        AgentError::InvalidInput(format!(
+                            "query start names branch {branch}, which the scope does not cover"
+                        ))
+                    })?,
+            ),
+            _ => None,
+        };
+        let order: Vec<usize> = match query.direction {
+            TimelineQueryDirection::Ascending => (0..clips.len()).collect(),
+            Descending => (0..clips.len()).rev().collect(),
+        };
+        let limit = usize::try_from(query.limit.get()).unwrap_or(usize::MAX);
+        let mut skip = query.offset;
+        let mut events = Vec::new();
+        let mut positions = Vec::new();
+        for index in order {
+            if events.len() >= limit {
+                break;
+            }
+            let (branch, clip) = &clips[index];
+            let from = match (&anchor, anchor_index, query.direction) {
+                (None, _, _) => 1,
+                (
+                    Some((Some(_), sequence)),
+                    Some(start_index),
+                    TimelineQueryDirection::Ascending,
+                ) => {
+                    if index < start_index {
+                        continue;
+                    }
+                    if index == start_index { *sequence } else { 1 }
+                }
+                (Some((Some(_), _)), Some(start_index), TimelineQueryDirection::Descending) => {
+                    if index > start_index {
+                        continue;
+                    }
+                    1
+                }
+                (Some((None, sequence)), _, TimelineQueryDirection::Ascending) => *sequence,
+                (Some((None, _)), _, TimelineQueryDirection::Descending) => 1,
+                (Some(_), None, _) => 1,
+            };
+            let bound = match (&anchor, anchor_index, query.direction) {
+                (
+                    Some((Some(_), sequence)),
+                    Some(start_index),
+                    TimelineQueryDirection::Descending,
+                ) if index == start_index => (*clip).min(*sequence),
+                (Some((None, sequence)), _, TimelineQueryDirection::Descending) => {
+                    (*clip).min(*sequence)
+                }
+                _ => *clip,
+            };
+            let key = TimelineKey {
+                session_id: self.0.key.session_id.clone(),
+                branch_id: branch.clone(),
+            };
+            let page = self
+                .0
+                .store
+                .query(
+                    &key,
+                    &TimelineQuery {
+                        scope: TimelineQueryScope::Branch,
+                        from_event: None,
+                        from_sequence: None,
+                        order_by: query.order_by,
+                        direction: query.direction,
+                        kinds: query.kinds.clone(),
+                        flags: query.flags.clone(),
+                        event_id: query.event_id.clone(),
+                        predicate: query.predicate.clone(),
+                        limit: std::num::NonZeroU64::new(
+                            u64::try_from(limit - events.len())
+                                .unwrap_or(u64::MAX)
+                                .max(1),
+                        )
+                        .expect("a read keeps one event of its limit"),
+                        offset: skip,
+                    },
+                    from,
+                    bound,
+                )
+                .await?;
+            let reached = page.skipped + page.events.len() as u64;
+            skip = skip.saturating_sub(reached);
+            events.extend(page.events);
+            positions.extend(page.positions);
+        }
+        Ok(TimelineQueryReply { events, positions })
+    }
     /// The first page of a backward, kind-filtered read of the branch chain
     /// at a published `through`.
     #[service(skip)]
@@ -1044,9 +1228,11 @@ impl Timeline {
         self.0.store.last_event(key, cut).await
     }
 
-    /// The event order for legal compaction cuts.
+    /// The event order for legal compaction cuts: each segment's boundary, its
+    /// last turn start and its last compaction start at its cut, and the turn
+    /// starts `turns` keeps.
     #[service(skip)]
-    pub async fn policy_order(&self, through: u64) -> Result<PolicyOrder> {
+    pub async fn policy_order(&self, through: u64, turns: PolicyTurns<'_>) -> Result<PolicyOrder> {
         let through = self.through(Some(through))?;
         let segments: Vec<_> = self
             .0
@@ -1055,9 +1241,15 @@ impl Timeline {
             .cloned()
             .chain(std::iter::once((self.0.key.branch_id.clone(), through)))
             .collect();
+        let rank = |branch: &str| segments.iter().position(|(name, _)| name == branch);
+        let window = match turns {
+            PolicyTurns::Anchors => None,
+            PolicyTurns::All => Some(None),
+            PolicyTurns::After(at) => Some(rank(&at.branch_id).map(|index| (index, at.sequence))),
+        };
         let mut events = Vec::new();
         let mut branches = Vec::new();
-        for (branch, cut) in segments {
+        for (index, (branch, cut)) in segments.into_iter().enumerate() {
             if cut == 0 {
                 continue;
             }
@@ -1066,7 +1258,14 @@ impl Timeline {
                 branch_id: branch.clone(),
             };
             branches.push(branch.clone());
-            events.extend(self.0.store.policy_order(&key, cut).await?.events);
+            let turns = match window {
+                None => cut.saturating_add(1)..=cut,
+                Some(None) => 1..=cut,
+                Some(Some((rank, _))) if index > rank => 1..=cut,
+                Some(Some((rank, sequence))) if index == rank => sequence.saturating_add(1)..=cut,
+                Some(Some(_)) => cut.saturating_add(1)..=cut,
+            };
+            events.extend(self.0.store.policy_order(&key, turns, cut).await?.events);
             if let Some(boundary) = self.boundary_event(&key, cut).await? {
                 events.push(PolicyOrderEvent {
                     id: boundary.id.clone(),
@@ -1102,7 +1301,6 @@ impl Timeline {
             .policy_window(&self.0.key, through, turn_id, cut)
             .await?;
         let current = std::mem::take(&mut window.tool_results);
-        let mut cut_sequence = window.cut_sequence;
         for (branch, segment_through) in &self.0.ancestors {
             if *segment_through == 0 {
                 continue;
@@ -1116,8 +1314,8 @@ impl Timeline {
                 .store
                 .policy_window(&key, *segment_through, turn_id, cut)
                 .await?;
-            if cut_sequence == 0 {
-                cut_sequence = ancestor.cut_sequence;
+            if window.cut_position.is_none() {
+                window.cut_position = ancestor.cut_position;
             }
             if !window.events.iter().any(|event| event.id == cut) {
                 window.events.extend(
@@ -1128,18 +1326,25 @@ impl Timeline {
                         .cloned(),
                 );
             }
-            for event in ancestor.tool_results {
-                if !window.tool_results.iter().any(|seen| seen.id == event.id) {
-                    window.tool_results.push(event);
+            for result in ancestor.tool_results {
+                if !window
+                    .tool_results
+                    .iter()
+                    .any(|seen| seen.event.id == result.event.id)
+                {
+                    window.tool_results.push(result);
                 }
             }
         }
-        for event in current {
-            if !window.tool_results.iter().any(|seen| seen.id == event.id) {
-                window.tool_results.push(event);
+        for result in current {
+            if !window
+                .tool_results
+                .iter()
+                .any(|seen| seen.event.id == result.event.id)
+            {
+                window.tool_results.push(result);
             }
         }
-        window.cut_sequence = cut_sequence;
         Ok(window)
     }
     /// The latest interpreter-compatible checkpoint at `through`, if one is

@@ -25,8 +25,19 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "line {id}" => "线 {id}",
         "jump to a message of the shown line" => "跳到当前线的某条消息",
         "Timeline" => "时间线",
-        "Enter jump · e edit · q quote · b branch · f fork · Esc close" => {
-            "Enter 跳转 · e 编辑 · q 引用 · b 分支 · f 派生 · Esc 关闭"
+        "Enter actions · Esc close" => "Enter 操作 · Esc 关闭",
+        "Timeline actions" => "时间线操作",
+        "↑↓ select · Enter confirm · Esc cancel" => "↑↓ 选择 · Enter 确认 · Esc 取消",
+        "Jump to message" => "跳转到消息",
+        "Edit as a new draft" => "编辑为新草稿",
+        "Quote message" => "引用消息",
+        "Create branch from here" => "从这里创建分支",
+        "Before this message" => "在这条消息之前",
+        "Fork session" => "派生会话",
+        "1. Create fork" => "1. 创建派生会话",
+        "2. Cancel" => "2. 取消",
+        "Creates a new session; the current session stays unchanged." => {
+            "创建新会话，当前会话保持不变。"
         }
         "No messages yet." => "还没有消息。",
         "Already on screen above; /tui jumps to it" => "已在上方；/tui 可直接跳转",
@@ -34,8 +45,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "更早的 {count} 条消息 · Enter 或点击加载"
         }
         "follow, talk to and end this session's lines" => "查看、对话并结束本会话的线",
-        "End line" => "结束线",
-        "y/N" => "y/N",
+        "End line {id}?" => "结束线 {id}？",
+        "y end it" => "y 结束",
+        "n cancel" => "n 取消",
         "main is the session itself; a line ends, main does not" => {
             "main 就是会话本身；线可以结束，main 不能"
         }
@@ -47,8 +59,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "e edit · b branch · f fork" => "e 编辑 · b 分支 · f 派生",
         "e edit" => "e 编辑",
-        "Fork the session before “{message}”? (y/N)" => "在“{message}”之前派生会话？(y/N)",
-        "Fork the session after the last turn? (y/N)" => "在最近一个回合之后派生会话？(y/N)",
+        "Fork the session before “{message}”?" => "在“{message}”之前派生会话？",
+        "Fork the session after the last turn?" => "在最近一个回合之后派生会话？",
         "⑂ new line from {id} · Esc cancel" => "⑂ 从 {id} 开新线 · Esc 取消",
         "A fork copies main; b opens a line here" => "派生只复制 main；按 b 在这里开线",
         "A line opens from text; images and files were not included" => {
@@ -254,6 +266,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "run" => "运行",
         "view" => "视图",
         "model" => "模型",
+        "extensions" => "扩展",
         "app" => "应用",
         "skill" => "技能",
         "start a new session" => "开始新会话",
@@ -271,9 +284,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "滚动到顶部",
         "scroll to the bottom" => "滚动到底部",
         "pick an earlier message to edit or quote" => "选择较早的消息进行编辑或引用",
-        "collapse or expand tool details and compaction summaries" => {
-            "折叠或展开工具详情与压缩摘要"
-        }
+        "cycle tool details and compaction summaries" => "循环切换工具详情与压缩摘要",
         "switch between fullscreen and scrollback" => "在全屏和回滚界面之间切换",
         "switch theme" => "切换主题",
         "switch language" => "切换语言",

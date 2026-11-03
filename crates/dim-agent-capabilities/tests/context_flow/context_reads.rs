@@ -20,6 +20,9 @@ pub(super) struct CountContextReads {
     /// The branch, cursor and number of events of every `read_page`, in
     /// call order.
     pub(super) pages: std::sync::Mutex<Vec<(String, u64, usize)>>,
+    /// The window, event count and turn-start count of every `policy_order`,
+    /// in call order.
+    pub(super) policy_orders: std::sync::Mutex<Vec<(RangeInclusive<u64>, usize, usize)>>,
     /// Fails the given occurrence of a read of this branch and range with a
     /// storage error, counted from when it is set.
     pub(super) fail_range: std::sync::Mutex<Option<ReadOccurrence>>,
@@ -285,6 +288,25 @@ impl TimelineStore for CountContextReads {
             Ok(page)
         })
     }
+    fn policy_order<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        turns: RangeInclusive<u64>,
+        through: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<dim_agent_runtime::PolicyOrder>> {
+        Box::pin(async move {
+            let order = self
+                .memory
+                .policy_order(key, turns.clone(), through)
+                .await?;
+            let turn_starts = order.events.iter().filter(|event| event.turn_start).count();
+            self.policy_orders
+                .lock()
+                .unwrap()
+                .push((turns, order.events.len(), turn_starts));
+            Ok(order)
+        })
+    }
     fn read_segments<'a>(
         &'a self,
         session_id: &'a str,
@@ -372,6 +394,15 @@ impl TimelineStore for CountContextReads {
             }
             self.memory.latest_snapshot(key, through, interpreter).await
         })
+    }
+    fn query<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        query: &'a dim_agent_runtime::TimelineQuery,
+        from: u64,
+        through: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<dim_agent_runtime::TimelineQueryPage>> {
+        self.memory.query(key, query, from, through)
     }
 }
 
@@ -1569,6 +1600,64 @@ async fn a_steer_during_the_context_read_ends_the_request_before_it_is_handed_ov
             .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
             .count(),
         1
+    );
+    agent.close().await.unwrap();
+}
+
+/// A preparation that stays below the threshold reads only the policy
+/// anchors: its order carries one turn start per segment, not the branch's
+/// past turns, so the metadata it builds does not grow with the stored
+/// history (#914).
+#[tokio::test]
+async fn a_below_threshold_preparation_reads_no_growing_turn_order() {
+    let store = Arc::new(CountContextReads::default());
+    let mut builder = builder_with_context(
+        Arc::new(EchoModel),
+        HistoryRenderer::default(),
+        Context {
+            threshold: Some(1_000_000.),
+            ..Context::default()
+        },
+    );
+    builder.timeline_store(store.clone());
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    let mut per_turn: Vec<Vec<(RangeInclusive<u64>, usize, usize)>> = Vec::new();
+    for index in 0..12 {
+        let before = store.policy_orders.lock().unwrap().len();
+        session
+            .submit(format!("turn {index}"), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let calls = store.policy_orders.lock().unwrap()[before..].to_vec();
+        assert!(!calls.is_empty(), "the preparation reads the policy order");
+        per_turn.push(calls);
+    }
+    for (window, events, turn_starts) in per_turn.iter().flatten() {
+        assert!(
+            window.is_empty(),
+            "a below-threshold preparation reads no turn window: {window:?}"
+        );
+        assert!(
+            *turn_starts <= 1,
+            "the anchors keep one turn start per segment, not every turn: {turn_starts} of {events}"
+        );
+    }
+    let size = |calls: &[(RangeInclusive<u64>, usize, usize)]| {
+        calls
+            .iter()
+            .map(|(_, events, _)| *events)
+            .max()
+            .unwrap_or(0)
+    };
+    assert_eq!(
+        size(&per_turn[0]),
+        size(&per_turn[per_turn.len() - 1]),
+        "the policy metadata of a turn does not grow with the stored history: {per_turn:?}"
     );
     agent.close().await.unwrap();
 }

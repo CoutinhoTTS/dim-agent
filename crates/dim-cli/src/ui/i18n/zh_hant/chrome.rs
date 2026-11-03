@@ -26,8 +26,19 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "line {id}" => "線 {id}",
         "jump to a message of the shown line" => "跳到目前線的某則訊息",
         "Timeline" => "時間線",
-        "Enter jump · e edit · q quote · b branch · f fork · Esc close" => {
-            "Enter 跳轉 · e 編輯 · q 引用 · b 分支 · f 派生 · Esc 關閉"
+        "Enter actions · Esc close" => "Enter 操作 · Esc 關閉",
+        "Timeline actions" => "時間線操作",
+        "↑↓ select · Enter confirm · Esc cancel" => "↑↓ 選擇 · Enter 確認 · Esc 取消",
+        "Jump to message" => "跳轉到訊息",
+        "Edit as a new draft" => "編輯為新草稿",
+        "Quote message" => "引用訊息",
+        "Create branch from here" => "從這裡建立分支",
+        "Before this message" => "在這則訊息之前",
+        "Fork session" => "派生會話",
+        "1. Create fork" => "1. 建立派生會話",
+        "2. Cancel" => "2. 取消",
+        "Creates a new session; the current session stays unchanged." => {
+            "建立新會話，目前會話保持不變。"
         }
         "No messages yet." => "還沒有訊息。",
         "Already on screen above; /tui jumps to it" => "已在上方；/tui 可直接跳轉",
@@ -35,8 +46,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "較早的 {count} 則訊息 · Enter 或點擊載入"
         }
         "follow, talk to and end this session's lines" => "查看、對話並結束此工作階段的線",
-        "End line" => "結束線",
-        "y/N" => "y/N",
+        "End line {id}?" => "結束線 {id}？",
+        "y end it" => "y 結束",
+        "n cancel" => "n 取消",
         "main is the session itself; a line ends, main does not" => {
             "main 就是工作階段本身；線可以結束，main 不能"
         }
@@ -48,8 +60,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "e edit · b branch · f fork" => "e 編輯 · b 分支 · f 派生",
         "e edit" => "e 編輯",
-        "Fork the session before “{message}”? (y/N)" => "在「{message}」之前派生會話？(y/N)",
-        "Fork the session after the last turn? (y/N)" => "在最近一個回合之後派生會話？(y/N)",
+        "Fork the session before “{message}”?" => "在「{message}」之前派生會話？",
+        "Fork the session after the last turn?" => "在最近一個回合之後派生會話？",
         "⑂ new line from {id} · Esc cancel" => "⑂ 從 {id} 開新線 · Esc 取消",
         "A fork copies main; b opens a line here" => "派生只複製 main；按 b 在這裡開線",
         "A line opens from text; images and files were not included" => {
@@ -256,6 +268,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "run" => "執行",
         "view" => "檢視",
         "model" => "模型",
+        "extensions" => "擴充",
         "app" => "應用程式",
         "skill" => "技能",
         // composer/commands.rs: descriptions
@@ -274,9 +287,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "捲動到頂端",
         "scroll to the bottom" => "捲動到底端",
         "pick an earlier message to edit or quote" => "選擇較早的訊息來編輯或引用",
-        "collapse or expand tool details and compaction summaries" => {
-            "收合或展開工具詳情與壓縮摘要"
-        }
+        "cycle tool details and compaction summaries" => "循環切換工具詳情與壓縮摘要",
         "switch between fullscreen and scrollback" => "在全螢幕與回捲模式間切換",
         "switch theme" => "切換主題",
         "switch language" => "切換語言",
