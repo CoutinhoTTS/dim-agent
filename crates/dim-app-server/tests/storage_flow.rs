@@ -7280,7 +7280,7 @@ async fn policy_facts_selects_latest_completed_compaction_in_both_stores() {
 }
 
 #[tokio::test]
-async fn policy_order_reads_the_last_anchors_and_the_turn_window_in_both_stores() {
+async fn policy_order_reads_the_last_anchors_in_both_stores() {
     let database = Database::new();
     let db = SqliteStorage::open(database.0.clone()).unwrap();
     let sqlite = SqliteTimelineStore::new(db.clone());
