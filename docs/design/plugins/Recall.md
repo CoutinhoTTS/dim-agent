@@ -65,18 +65,22 @@ execution, sub-agents and calls that never ran are not in it. Recall therefore h
 projection over events. It selects what counts with the same rules as context assembly (§3.3),
 and it tells it in its own shape.
 
-### 3.1 The pinned read
+### 3.1 The read and its head
 
-At the start of each call the tool pins `head = branch.sequence()` (the published
-sequence) and reads that pinned history backwards in pages: `branch.page_cursor()`
-and `branch.page(cursor, PAGE_ROWS, KINDS)` return the newest stored rows whose kind
-the projection folds (§3.2), at or below `head`, and the tool continues from the
-oldest sequence of each page until its answer is met (§5.3). For a child branch the
-pages run through the parent's events up to the fork point (the inherited prefix)
-and then its own; for a forked Session's `main` they run through the copied facts
-and then its `session/forked` and its own events. Both are history from before the
-fork, and Recall reads them like any other.
-Everything is computed from this one pinned head, so a call never mixes two heads. The pattern
+Each call reads the calling branch's chain backwards through `branch.query()`: the
+chain scope, sequence order, the descending direction and the kinds the projection
+folds (§3.2), one page of `PAGE_EVENTS` events at a time, carrying the page's offset
+into the next read until its answer is met (§5.3). The chain is the branch's own
+facts and its ancestors up to the fork point (the inherited prefix); for a forked
+Session's `main` it is the copied facts and then its `session/forked` and its own
+events. Both are history from before the fork, and Recall reads them like any other.
+
+A page is bounded at the head it runs at, so a page taken after a write repeats facts
+the read already holds and returns the ones published above it. The read drops every
+fact at or above the oldest sequence it has folded of that fact's branch, which leaves
+the collected events one contiguous suffix of the chain below the head of the first
+page: a fact published while the read runs is left out, never told out of order.
+Everything is computed from that one head, so a call never mixes two heads. The pattern
 is the one `wait` already uses ([wait.rs](../../../crates/dim-agent-capabilities/src/wait.rs)): a
 Session tool that resolves the calling branch from `ToolExecutionContext.branch_id` through
 `TreeCommands`. Recall does not apply compaction: it walks the whole pinned history the pages
@@ -377,7 +381,7 @@ format (§3.4), so a page of 20 entries stays under 13,000 characters. The turn 
 Characters are Unicode scalar values, so CJK text is never cut inside a character. A turn's lines
 only grow at its end, so an offset returned once keeps pointing at the same line.
 
-The read that feeds these pages takes `PAGE_ROWS` stored rows at a time (§3.1). That size is a
+The read that feeds these pages takes `PAGE_EVENTS` events at a time (§3.1). That size is a
 constant of the tool as well; it never decides an answer, only how many pages the read takes.
 
 ### 5.4 Model-facing texts
@@ -530,12 +534,13 @@ type change.
 
 ## 12. Requirements raised to mechanism owners
 
-- **A paged, kind-filtered history read on the facade.** Recall reads its pages through
-  `Branch::page_cursor` and `Branch::page`: the runtime returns the newest stored rows of the
-  kinds Recall names, at or below the pinned head, as one contiguous suffix of the branch chain.
-  The facade gains no cache and no projection rule; the read is
+- **A bounded, kind-filtered chain read on the facade.** Recall reads its pages through
+  `Branch::query` and a `TimelineQuery`: the runtime returns the newest events of the kinds
+  Recall names as one contiguous suffix of the branch chain, each with the branch and sequence it
+  was read from, and the page's offset continues the read. The facade gains no cache and no
+  projection rule; the read is
   [timeline storage §5](../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描)'s,
-  and `TimelineStore::read_kind_page` states its page and row bounds.
+  and `TimelineStore::query` states its page and skip bounds.
 
 Considered and not needed:
 
