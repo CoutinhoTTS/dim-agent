@@ -167,10 +167,11 @@ impl dim_agent_runtime::TimelineStore for DeferredInputs {
         &'a self,
         key: &'a dim_agent_runtime::TimelineKey,
         query: &'a dim_agent_runtime::TimelineQuery,
+        through: u64,
     ) -> dim_agent_runtime::BoxFuture<
         'a,
-        dim_agent_runtime::Result<dim_agent_runtime::TimelineQueryReply>,
+        dim_agent_runtime::Result<dim_agent_runtime::TimelineQueryPage>,
     > {
-        self.inner.query(key, query)
+        self.inner.query(key, query, through)
     }
 }

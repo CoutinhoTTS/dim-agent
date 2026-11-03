@@ -14675,17 +14675,13 @@
       "from": "dim_agent_runtime::core::timeline",
       "to": "dim_agent_runtime::timeline_query",
       "references": [
-        "path TimelineCursor",
         "path TimelineQuery",
-        "path TimelineQueryPosition::Cursor",
-        "path TimelineQueryPosition::Range",
+        "path TimelineQueryDirection::Ascending",
         "path TimelineQueryReply",
         "path TimelineQueryScope::Branch",
         "path TimelineQueryScope::Chain",
-        "use crate::TimelineCursor",
         "use crate::TimelineQuery",
         "use crate::TimelineQueryDirection",
-        "use crate::TimelineQueryPosition",
         "use crate::TimelineQueryReply",
         "use crate::TimelineQueryScope"
       ]
@@ -14790,19 +14786,13 @@
       "from": "dim_agent_runtime::memory_timeline_store",
       "to": "dim_agent_runtime::timeline_query",
       "references": [
-        "path TimelineCursor",
         "path TimelineQuery",
-        "path TimelineQueryDirection::Ascending",
         "path TimelineQueryDirection::Descending",
-        "path TimelineQueryPosition::Cursor",
-        "path TimelineQueryPosition::Range",
-        "path TimelineQueryReply",
+        "path TimelineQueryPage",
         "path TimelineQueryScope::Branch",
-        "use crate::TimelineCursor",
         "use crate::TimelineQuery",
         "use crate::TimelineQueryDirection",
-        "use crate::TimelineQueryPosition",
-        "use crate::TimelineQueryReply",
+        "use crate::TimelineQueryPage",
         "use crate::TimelineQueryScope"
       ]
     },
@@ -15241,9 +15231,9 @@
       "to": "dim_agent_runtime::timeline_query",
       "references": [
         "path TimelineQuery",
-        "path TimelineQueryReply",
+        "path TimelineQueryPage",
         "use crate::TimelineQuery",
-        "use crate::TimelineQueryReply"
+        "use crate::TimelineQueryPage"
       ]
     },
     {
@@ -16799,7 +16789,7 @@
       "to": "dim_agent_runtime::timeline_query",
       "references": [
         "path dim_agent_runtime::TimelineQuery",
-        "path dim_agent_runtime::TimelineQueryReply"
+        "path dim_agent_runtime::TimelineQueryPage"
       ]
     },
     {
@@ -24023,22 +24013,17 @@
       "from": "dim_app_server::storage::timeline",
       "to": "dim_agent_runtime::timeline_query",
       "references": [
-        "path TimelineCursor",
         "path TimelineQuery",
         "path TimelineQueryDirection::Descending",
         "path TimelineQueryFlag",
         "path TimelineQueryFlag::Render",
         "path TimelineQueryFlag::State",
-        "path TimelineQueryPosition::Cursor",
-        "path TimelineQueryPosition::Range",
-        "path TimelineQueryReply",
+        "path TimelineQueryPage",
         "path TimelineQueryScope::Branch",
-        "use dim_agent_runtime::TimelineCursor",
         "use dim_agent_runtime::TimelineQuery",
         "use dim_agent_runtime::TimelineQueryDirection",
         "use dim_agent_runtime::TimelineQueryFlag",
-        "use dim_agent_runtime::TimelineQueryPosition",
-        "use dim_agent_runtime::TimelineQueryReply",
+        "use dim_agent_runtime::TimelineQueryPage",
         "use dim_agent_runtime::TimelineQueryScope"
       ]
     },

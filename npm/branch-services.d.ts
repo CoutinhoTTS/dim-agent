@@ -234,29 +234,12 @@ export type TimelineQueryScope =
   | /** The branch chain: each ancestor up to its cut, root first, then the queried branch. */ "chain"
 
 /**
- * An opaque position: the branch of an event a query returned and that
- * branch's sequence. The same sequence on a parent and on its child are
- * different positions. A cursor ends an atomic batch: an ascending page ends
- * at one, and a descending page starts at one.
- */
-export interface TimelineCursor {
-  branch_id: string
-  sequence: number | bigint
-}
-
-/** Where a query starts. */
-export type TimelineQueryPosition =
-  | /** Sequences `start..=end`, both included. `end` defaults to each branch's own coverage; when it is named it is bounded by the scope's coverage: the branch's published head for a branch scope, the largest ancestor cut or head for a chain scope. In a chain read the range applies to each branch's own sequence space, to that branch's cut or the end, whichever is lower. */ { kind: "range"; start: number | bigint; end?: number | bigint | null }
-  | /** Continues from `cursor` in the query's direction, through `through` when it is named: ascending reads above the cursor through it, and descending reads below the cursor down through it. Without it, every branch is read to its own coverage, an ancestor to its cut and the queried branch to its published head, so pages compose to the read `Range { end: None }` makes. */ { kind: "cursor"; cursor: TimelineCursor; through?: number | bigint | null }
-
-/**
  * The end a page is taken from. A reply is always ordered by chain position
- * and then sequence, ascending; the direction only decides which end of the
- * remaining range the page comes from.
+ * and then sequence, in this direction; the offset counts from that end.
  */
 export type TimelineQueryDirection =
-  | /** Oldest first: the page starts at the range's start, or after the cursor, and ends at an atomic batch boundary. */ "ascending"
-  | /** Newest first: the page starts at the range's end, or before the cursor, and ends at an atomic batch boundary. */ "descending"
+  | /** Oldest first: the page is the oldest matching facts, and `offset` starts it further along. */ "ascending"
+  | /** Newest first: the page is the newest matching facts, and `offset` starts it further back. */ "descending"
 
 /**
  * One of the envelope's two context flags a query may name. Naming either
@@ -278,13 +261,15 @@ export interface TimelineQueryPredicate {
 }
 
 /**
- * One bounded read of a branch's facts: what it covers, where it starts, what
- * it accepts and how many events it targets.
+ * One bounded read of a branch's facts: what it covers, at which published
+ * sequence, what it accepts, and how much of the result it returns.
  */
 export interface TimelineQuery {
   scope: TimelineQueryScope
-  position: TimelineQueryPosition
-  /** Which end a page is taken from; ascending is the default. */
+  /**
+   * The end a page is taken from; ascending is the default. A reply is
+   * ordered by chain position and then sequence in this direction.
+   */
   direction?: TimelineQueryDirection
   /** Event kinds (`domain/name`) the read accepts; empty accepts every kind. */
   kinds?: string[]
@@ -297,17 +282,15 @@ export interface TimelineQuery {
   event_id?: string | null
   /** One equality the event's data must satisfy. */
   predicate?: TimelineQueryPredicate | null
-  /**
-   * The target number of events. A reply ends at an atomic batch boundary,
-   * so its final batch may take it above the limit.
-   */
+  /** How many matching events the page returns; nonzero by type. */
   limit: number | bigint
+  /** How many matching events the read skips before the page. */
+  offset?: number | bigint
 }
 
 /**
- * The facts a query read, in chain order and then sequence, ascending, each
- * event's position in the same order, and the cursor after them. `next` is
- * absent only when the read reached the end of its scope.
+ * The facts a query read, in chain order and then sequence, in the query's
+ * direction, each with its position in the same order.
  */
 export interface TimelineQueryReply {
   events: import('./plugin.js').BranchEvent[]
@@ -316,7 +299,6 @@ export interface TimelineQueryReply {
    * read from and its sequence there.
    */
   positions: ({ branch_id: string; sequence: number | bigint })[]
-  next?: TimelineCursor | null
 }
 
 export interface TraceStep {
@@ -356,18 +338,15 @@ export interface Timeline {
   /**
    * One bounded read over this branch or over its chain ([ADR 019](../../../../docs/adr/019-event-query.md),
    * [plugin contract §5.4](../../../../docs/design/plugin-contract.md#54-the-event-query)):
-   * the position, direction, kinds, flags, event id, predicate and limit
-   * select the facts, and the reply is those facts in chain order and then
-   * sequence, ascending, with each event's position and the cursor after
-   * them. A chain read is each ancestor to its cut and then this branch to
-   * its published head, root first; a range applies to each branch's own
-   * sequence space and is bounded by the chain's coverage, not this
-   * branch's head alone, and a position without an end means each branch to
-   * its own coverage, so pages compose to the read. A descending page is
-   * taken from the newest end, and the reply is ordered ascending all the
-   * same. The read never returns a fact above a branch's published head,
-   * and a cursor that names a branch the scope does not cover is invalid
-   * input.
+   * the direction, kinds, flags, event id, predicate, limit and offset
+   * select the facts, and the reply is up to `limit` of them in chain order
+   * and then sequence, in the query's direction, each with its position. A
+   * chain read is each ancestor to its cut and then this branch, root first
+   * ascending and this branch first descending; the offset the earlier
+   * segment did not use moves to the next one, so paging is skipping and a
+   * page shorter than the limit means the selection is exhausted. The read
+   * never returns a fact above a branch's coverage: an ancestor to its cut,
+   * this branch to its published head.
    * @throws {AgentErrorThrown}
    */
   query(query: TimelineQuery): Promise<TimelineQueryReply>

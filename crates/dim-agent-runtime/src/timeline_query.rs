@@ -3,8 +3,8 @@
 //!
 //! A capability names what it accepts; storage selects, orders and bounds the
 //! events ([ADR 019 D3](../../../docs/adr/019-event-query.md#d3-the-query-addresses-the-event-contract-not-the-storage)).
-//! The request, the reply and the cursor are serde data: they cross languages
-//! through the `timeline` service.
+//! The request and the reply are serde data: they cross languages through the
+//! `timeline` service.
 
 use crate::{AgentError, Result};
 use dim_agent_types::{AgentEvent, TimelinePosition};
@@ -23,17 +23,16 @@ pub enum TimelineQueryScope {
 }
 
 /// The end a page is taken from. A reply is always ordered by chain position
-/// and then sequence, ascending; the direction only decides which end of the
-/// remaining range the page comes from.
+/// and then sequence, in this direction; the offset counts from that end.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TimelineQueryDirection {
-    /// Oldest first: the page starts at the range's start, or after the
-    /// cursor, and ends at an atomic batch boundary.
+    /// Oldest first: the page is the oldest matching facts, and `offset`
+    /// starts it further along.
     #[default]
     Ascending,
-    /// Newest first: the page starts at the range's end, or before the
-    /// cursor, and ends at an atomic batch boundary.
+    /// Newest first: the page is the newest matching facts, and `offset`
+    /// starts it further back.
     Descending,
 }
 
@@ -57,45 +56,6 @@ impl TimelineQueryFlag {
             Self::State => flags.1,
         }
     }
-}
-
-/// Where a query starts.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-pub enum TimelineQueryPosition {
-    /// Sequences `start..=end`, both included. `end` defaults to each
-    /// branch's own coverage; when it is named it is bounded by the scope's
-    /// coverage: the branch's published head for a branch scope, the largest
-    /// ancestor cut or head for a chain scope. In a chain read the range
-    /// applies to each branch's own sequence space, to that branch's cut or
-    /// the end, whichever is lower.
-    Range {
-        start: u64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        end: Option<u64>,
-    },
-    /// Continues from `cursor` in the query's direction, through `through`
-    /// when it is named: ascending reads above the cursor through it, and
-    /// descending reads below the cursor down through it. Without it, every
-    /// branch is read to its own coverage, an ancestor to its cut and the
-    /// queried branch to its published head, so pages compose to the read
-    /// `Range { end: None }` makes.
-    Cursor {
-        cursor: TimelineCursor,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        through: Option<u64>,
-    },
-}
-
-/// An opaque position: the branch of an event a query returned and that
-/// branch's sequence. The same sequence on a parent and on its child are
-/// different positions. A cursor ends an atomic batch: an ascending page ends
-/// at one, and a descending page starts at one.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TimelineCursor {
-    pub branch_id: String,
-    pub sequence: u64,
 }
 
 /// One equality against one JSON scalar of an event's data.
@@ -161,14 +121,14 @@ impl TimelineQueryPredicate {
     }
 }
 
-/// One bounded read of a branch's facts: what it covers, where it starts, what
-/// it accepts and how many events it targets.
+/// One bounded read of a branch's facts: what it covers, at which published
+/// sequence, what it accepts, and how much of the result it returns.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TimelineQuery {
     pub scope: TimelineQueryScope,
-    pub position: TimelineQueryPosition,
-    /// Which end a page is taken from; ascending is the default.
+    /// The end a page is taken from; ascending is the default. A reply is
+    /// ordered by chain position and then sequence in this direction.
     #[serde(default)]
     pub direction: TimelineQueryDirection,
     /// Event kinds (`domain/name`) the read accepts; empty accepts every kind.
@@ -184,42 +144,30 @@ pub struct TimelineQuery {
     /// One equality the event's data must satisfy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub predicate: Option<TimelineQueryPredicate>,
-    /// The target number of events. A reply ends at an atomic batch boundary,
-    /// so its final batch may take it above the limit.
+    /// How many matching events the page returns; nonzero by type.
     pub limit: NonZeroU64,
+    /// How many matching events the read skips before the page.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub offset: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 impl TimelineQuery {
     /// Checks the input a caller can get wrong before any storage read: the
-    /// predicate's spelling and value, and the position's shape. Atomic batch
-    /// boundaries are the store's, which sees the batches.
+    /// predicate's spelling and value. The read point is the store's to bound.
     pub fn validate(&self) -> Result<()> {
         if let Some(predicate) = &self.predicate {
             predicate.validate()?;
-        }
-        match &self.position {
-            TimelineQueryPosition::Range { start, .. } => {
-                if *start == 0 {
-                    return Err(AgentError::InvalidInput(
-                        "timeline sequences start at 1".into(),
-                    ));
-                }
-            }
-            TimelineQueryPosition::Cursor { cursor, .. } => {
-                if cursor.sequence == 0 {
-                    return Err(AgentError::InvalidInput(
-                        "a query cursor names a committed sequence".into(),
-                    ));
-                }
-            }
         }
         Ok(())
     }
 }
 
-/// The facts a query read, in chain order and then sequence, ascending, each
-/// event's position in the same order, and the cursor after them. `next` is
-/// absent only when the read reached the end of its scope.
+/// The facts a query read, in chain order and then sequence, in the query's
+/// direction, each with its position in the same order.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TimelineQueryReply {
@@ -227,6 +175,14 @@ pub struct TimelineQueryReply {
     /// One position per event, in the same order: the branch the event was
     /// read from and its sequence there.
     pub positions: Vec<TimelinePosition>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next: Option<TimelineCursor>,
+}
+
+/// What one branch's read returned: the page, and how many matching events it
+/// passed over first, so a chain read can carry the remaining skip into the
+/// next branch.
+#[derive(Debug, Clone)]
+pub struct TimelineQueryPage {
+    pub events: Vec<Arc<AgentEvent>>,
+    pub positions: Vec<TimelinePosition>,
+    pub skipped: u64,
 }

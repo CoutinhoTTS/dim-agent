@@ -377,8 +377,9 @@ impl TimelineStore for CountContextReads {
         &'a self,
         key: &'a TimelineKey,
         query: &'a dim_agent_runtime::TimelineQuery,
-    ) -> dim_agent_runtime::BoxFuture<'a, Result<dim_agent_runtime::TimelineQueryReply>> {
-        self.memory.query(key, query)
+        through: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<dim_agent_runtime::TimelineQueryPage>> {
+        self.memory.query(key, query, through)
     }
 }
 

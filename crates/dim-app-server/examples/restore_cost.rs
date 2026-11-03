@@ -261,9 +261,10 @@ impl TimelineStore for Probe {
         &'a self,
         key: &'a TimelineKey,
         query: &'a dim_agent_runtime::TimelineQuery,
-    ) -> BoxFuture<'a, Result<dim_agent_runtime::TimelineQueryReply>> {
-        self.timed(Op::Other, self.inner.query(key, query), |reply| {
-            reply.events.len()
+        through: u64,
+    ) -> BoxFuture<'a, Result<dim_agent_runtime::TimelineQueryPage>> {
+        self.timed(Op::Other, self.inner.query(key, query, through), |page| {
+            page.events.len()
         })
     }
 }

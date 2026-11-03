@@ -1,6 +1,5 @@
 use crate::{
-    BoxFuture, BranchRecord, Result, SessionConfig, TimelineQuery, TimelineQueryReply,
-    TimelineTrace,
+    BoxFuture, BranchRecord, Result, SessionConfig, TimelineQuery, TimelineQueryPage, TimelineTrace,
 };
 use dim_agent_types::{
     AgentEvent, ContextCompactionResult, EventKind, RecoverySnapshot, TimelinePosition,
@@ -430,38 +429,29 @@ pub trait TimelineStore: Send + Sync + 'static {
         self.read_page(key, after, limit, through)
     }
     /// One per-branch read for [`TimelineQuery`] (ADR 019, plugin contract
-    /// §5.4): applies the position, direction, kinds, flags, event id,
-    /// predicate and limit to `key`'s branch and returns the decoded facts in
-    /// sequence order, ascending, with each event's position and the cursor
-    /// after them.
+    /// §5.4): applies the read point, direction, kinds, flags, event id,
+    /// predicate, limit and offset to `key`'s branch and returns up to `limit`
+    /// matching facts, ordered by sequence in the query's direction, each with
+    /// its position.
     ///
-    /// `query.scope` must be [`TimelineQueryScope::Branch`]. The Timeline
-    /// service composes [`TimelineQueryScope::Chain`] by reading each
-    /// ancestor and then the queried branch with this method. The read never
-    /// crosses an atomic batch: an ascending page ends at a batch end, so its
-    /// cursor must end one, and a descending page starts at a batch end, so
-    /// its cursor must start one (or name no sequence to read). A range end,
-    /// or a cursor's named through when it bounds the read from above, must
-    /// end a batch; in a descending read the through is the lower bound and
-    /// may fall inside one, and an absent through reads down to sequence 1.
-    /// The limit is a target: a reply ends at an atomic batch boundary, so its
-    /// last batch may take it above the limit. The page bounds the work: the
-    /// selection is applied by the store, so a read costs the page plus the
-    /// batch it ends in, not the range it selects from.
+    /// `query.scope` must be `TimelineQueryScope::Branch`. The Timeline
+    /// service composes the chain by reading each ancestor and then the
+    /// queried branch with this method, carrying the offset the earlier
+    /// segment did not use. Paging is skipping: `offset` matching facts are
+    /// passed over before the page, so a page shorter than the limit means the
+    /// selection is exhausted, and a page may end inside an atomic batch.
+    /// `skipped` is the number of matching facts the read passed over, at most
+    /// `offset`, so a caller can carry the rest into its next segment.
     ///
-    /// `next` is present whenever the read stopped before the end of its
-    /// position, so a caller never mistakes a short page for the end of its
-    /// scope; it is absent only when the read reached that end.
-    ///
-    /// A position past the branch head, a range end inside a batch, a cursor
-    /// that does not name an atomic batch boundary, a cursor on another branch
-    /// and any other scope are invalid input. A kind, flag, id or data path
-    /// the store does not know selects no rows; it is not an error.
+    /// A read point past the branch's published head and any other scope are
+    /// invalid input. A kind, flag, id or data path the store does not know
+    /// selects no rows; it is not an error.
     fn query<'a>(
         &'a self,
         key: &'a TimelineKey,
         query: &'a TimelineQuery,
-    ) -> BoxFuture<'a, Result<TimelineQueryReply>>;
+        through: u64,
+    ) -> BoxFuture<'a, Result<TimelineQueryPage>>;
     /// Decodes all segments in one read scope, sharing content across branches.
     fn read_segments<'a>(
         &'a self,
