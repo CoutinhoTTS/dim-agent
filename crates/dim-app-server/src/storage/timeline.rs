@@ -2264,6 +2264,7 @@ fn query_rows(
             value,
         ]);
     }
+    sql.push_str(" ORDER BY sequence");
     let mut statement = connection.prepare(&sql).map_err(error)?;
     statement
         .query_map(params_from_iter(parameters), |row| {
