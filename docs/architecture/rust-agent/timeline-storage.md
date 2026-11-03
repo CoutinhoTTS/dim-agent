@@ -117,7 +117,7 @@ fork 与 Session 删除在复制连接上分块提交（事件与快照每 256 �
 | `context/compaction` 的 `Completed` | 不可变历史事实，随原子批次提交与发布 | source `through`、`cursor`、`summary`、`context_baseline`、diagnostics；不含快照 |
 | `RecoverySnapshot` | 可丢弃的派生缓存，存于 `timeline_snapshots` | `{sequence, event_id, interpreter, state}`：锚定已提交 completed 压缩事件；`state` 由解释器编码，存储不解析 |
 
-默认解释器 `dim/context-projection/v2`（`HistoryRenderer`）把 `ProjectionCheckpoint` 编码为带 SHA-256 摘要的 state：
+默认解释器 `dim/context-projection/v4`（`HistoryRenderer`）把 `ProjectionCheckpoint` 编码为带 SHA-256 摘要的 state：
 
 | 字段 | 内容 |
 | --- | --- |
