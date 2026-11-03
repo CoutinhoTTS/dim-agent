@@ -22,7 +22,7 @@ const HINT: &str = "type filter · enter select · esc clear/close";
 /// a name containing it, a description word starting with it, then three
 /// or more of the query's letters in order through the name (`stg` for
 /// `settings`).
-/// Registry task order breaks ties; a match inside a
+/// Registry order breaks ties; a match inside a
 /// description word is noise and is left out.
 pub fn filter_commands(query: &str, context: Context) -> Vec<&'static Command> {
     let normalized = query.trim().to_lowercase();
@@ -425,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn both_modes_list_only_visible_slash_commands_in_usage_order() {
+    fn both_modes_list_only_visible_slash_commands_in_curated_order() {
         let expected = [
             "new",
             "resume",
@@ -480,13 +480,6 @@ mod tests {
             let commands = filter_commands("/", context);
             let listed = names("/", context);
             assert_eq!(listed, expected);
-            let categories: Vec<_> = commands.iter().map(|c| c.category).collect();
-            assert_eq!(&categories[..2], ["session"; 2]);
-            assert_eq!(categories[2], "model");
-            assert_eq!(categories[9], "app");
-            assert_eq!(&categories[20..29], ["extensions"; 9]);
-            assert_eq!(&categories[29..33], ["view"; 4]);
-            assert_eq!(&categories[33..], ["app"; 2]);
             assert!(commands.iter().all(|command| command.slash));
             for hidden in [
                 "interrupt",
