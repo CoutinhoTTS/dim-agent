@@ -206,7 +206,6 @@ A part reads facts through its branch's `timeline` service with one bounded quer
 | Element | What it says |
 | --- | --- |
 | Scope | This branch, or the branch chain: each ancestor up to its cut, root first, then this branch to its head |
-| Read point | The published sequence the read is taken at, never past the branch's head. The runtime supplies it; an ancestor is read up to its cut |
 | Kinds and flags | The event kinds it accepts (`domain/name`), and the envelope's context flags (§5.1) it selects on |
 | Event id | An equality on the event id: one id selects that event, so a caller reads one event or looks up its position without paging |
 | Predicate | One equality against one JSON scalar. The path is a sequence of field names inside the event's data joined by dots, with no array indexing and no wildcards |
@@ -229,7 +228,9 @@ The path's spelling is fixed here and not in a binding: there is one form, the o
 storage translates that form. A binding writes this path syntax and invents no other.
 
 The selection is what the query is for. Its elements describe events, not a slice of the store, so
-the store executes them where the events are kept and returns the page those events form. A
+the store executes them where the events are kept and returns the page those events form. A read
+never returns a fact above the coverage of the branch it reads: an ancestor to its cut, this branch
+to what is published, which the service bounds and no caller states. A
 selection the store can execute directly costs the page; one it cannot, an equality on a field it
 holds no index for, is evaluated as the store reads and proves the end of the scope the same way. A
 chain page reaches one segment after another, so it costs what it reaches. The reply carries each

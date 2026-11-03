@@ -26,8 +26,8 @@ contract between stores, not an interface for a capability.
 ### D1. One bounded query over events
 
 The Timeline exposes one read for capabilities: the scope (this branch, or the branch chain —
-each ancestor up to its cut, root first, then this branch to its head), the read point (the
-published sequence the read is taken at), the accepted event kinds plus the envelope's two
+each ancestor up to its cut, root first, then this branch to its head), the accepted event kinds
+plus the envelope's two
 context flags, one event id, one equality predicate over a data field, the order, and the page:
 how many matching events it skips and how many it returns, the second nonzero by type. It returns
 decoded events, each with its chain position.
