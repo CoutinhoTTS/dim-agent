@@ -552,7 +552,9 @@ pub(crate) fn assert_paired(events: &[Arc<AgentEvent>]) {
 /// The messages a preparation at the head would start from.
 async fn projected(timeline_session: &Session, branch: &str) -> Vec<Message> {
     let through = timeline_session.sequence(branch).unwrap();
-    let context = timeline_session.context(branch, through).await.unwrap();
+    let context = read_context_in(timeline_session, branch, through)
+        .await
+        .unwrap();
     let history = project_context_history(&context).unwrap();
     context_messages(&context, &history)
         .into_iter()
@@ -712,7 +714,7 @@ async fn a_checkpointed_step_renders_its_context_once() {
         .find(|event| event.id == snapshot.event_id)
         .unwrap();
     let checkpoint = (default.decode_checkpoint)(&snapshot, anchor).unwrap();
-    store.ranges.lock().unwrap().clear();
+    store.context_pages.lock().unwrap().clear();
     RENDERS.store(0, Ordering::SeqCst);
     let command = session
         .service::<AgentLoop>("main")
@@ -722,9 +724,12 @@ async fn a_checkpointed_step_renders_its_context_once() {
     let events = until(&session, |events| result_for(events, command).is_some()).await;
     assert!(result_for(&events, command).is_some());
     assert!(
-        store.ranges.lock().unwrap().iter().any(|(branch, range)| {
-            branch == "main" && *range.start() == checkpoint.resume.sequence
-        }),
+        store
+            .context_pages
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|page| page.branch == "main" && page.from == checkpoint.resume.sequence),
         "the step must read from the checkpoint's resume"
     );
     assert_eq!(
@@ -1070,7 +1075,7 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
             .unwrap();
         session.idle(&child).await.unwrap();
     }
-    let context = session.context("main", fact).await.unwrap();
+    let context = read_context_in(&session, "main", fact).await.unwrap();
     let renamed = renamed_history(&context).unwrap();
     assert_eq!(
         context_messages(&context, &renamed)
@@ -1204,7 +1209,7 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
             .unwrap()
             .contains(&("main".into(), 1..=published))
     );
-    let timeline_context = session.context("main", fact).await.unwrap();
+    let timeline_context = read_context_in(&session, "main", fact).await.unwrap();
     let history = renamed_history(&timeline_context).unwrap();
     assert_eq!(
         context_messages(&timeline_context, &history)

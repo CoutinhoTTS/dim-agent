@@ -1445,7 +1445,7 @@ impl AgentIndex {
             let boundary =
                 dim_agent_capabilities::history::validate_context_boundary_in(session, "main", at)
                     .await?;
-            let prefix = session.context("main", at).await?;
+            let prefix = session.history("main", Some(at)).await?;
             Ok::<_, AgentError>((boundary, prefix))
         }
         .await;
@@ -1454,7 +1454,7 @@ impl AgentIndex {
         }
         let (boundary, prefix) = checked?;
         boundary
-            .and_then(|()| rest_point(&prefix.events))
+            .and_then(|()| rest_point(&prefix))
             .map_err(AgentError::InvalidInput)?;
         let version = self
             .version_of(source)

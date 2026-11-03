@@ -150,10 +150,6 @@ impl Branch {
     pub async fn batch_end(&self, sequence: u64) -> Result<()> {
         self.0.timeline().batch_end(sequence).await
     }
-    pub async fn context(&self, through: u64) -> Result<ContextHistory> {
-        let through = self.published(Some(through))?;
-        self.0.timeline().context(through).await
-    }
     /// One bounded read of this branch's facts: the request selects them and
     /// the reply carries each event's position. The read stops at what is
     /// published.

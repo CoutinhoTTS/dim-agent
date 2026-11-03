@@ -636,8 +636,11 @@ impl ContextPreparation {
             return Ok(None);
         }
         let mut tail: Vec<(String, Vec<Arc<dim_agent_types::AgentEvent>>)> = Vec::new();
-        let mut read =
-            crate::history::FoldRead::new(&self.timeline, Some(call.event.id.clone()), through);
+        let mut read = crate::history::FoldRead::timeline(
+            &self.timeline,
+            Some(call.event.id.clone()),
+            through,
+        );
         loop {
             let Some(page) = read.next(256).await.map_err(ContextOpError::Read)? else {
                 break;

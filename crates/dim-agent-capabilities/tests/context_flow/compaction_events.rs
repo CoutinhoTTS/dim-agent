@@ -93,15 +93,24 @@ async fn snapshot_codecs_preserve_completed_compaction_even_when_saving_fails() 
             )
             .await
             .unwrap();
-            let accelerated = timeline
-                .context_with_checkpoint(timeline.sequence(), interpreter, decode)
+            let renderer = HistoryRenderer {
+                checkpoint_interpreter: interpreter,
+                decode_checkpoint: decode,
+                ..Default::default()
+            };
+            let accelerated = renderer
+                .context(&timeline, timeline.sequence())
                 .await
                 .unwrap();
             assert!(accelerated.checkpoint.is_some());
             assert_eq!(
                 project_context_history(&accelerated).unwrap(),
-                project_context_history(&timeline.context(timeline.sequence()).await.unwrap())
-                    .unwrap()
+                project_context_history(
+                    &replay_context(&timeline, timeline.sequence())
+                        .await
+                        .unwrap()
+                )
+                .unwrap()
             );
             dim_agent_runtime::core::close_timeline(&timeline)
                 .await

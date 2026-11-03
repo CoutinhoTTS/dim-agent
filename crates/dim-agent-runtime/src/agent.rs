@@ -521,9 +521,6 @@ impl Session {
         }
         idle
     }
-    pub async fn context(&self, branch: &str, through: u64) -> Result<ContextHistory> {
-        self.published(branch)?.context(through).await
-    }
     /// See [`Branch::query`].
     pub async fn query(&self, branch: &str, query: TimelineQuery) -> Result<TimelineQueryReply> {
         self.published(branch)?.query(query).await

@@ -16,7 +16,6 @@ pub(super) struct CountContextReads {
     /// and the streaming path does not.
     pub(super) positions: AtomicUsize,
     attempts: AtomicUsize,
-    earliest_read: std::sync::atomic::AtomicU64,
     /// Each segment of every `read` and `read_segments`, in call order.
     pub(super) ranges: std::sync::Mutex<Vec<(String, RangeInclusive<u64>)>>,
     /// The branch, cursor and number of events of every `read_page`, in
@@ -31,8 +30,8 @@ pub(super) struct CountContextReads {
     /// Holds the given occurrence of a read of this branch and range:
     /// signals `entered`, then waits for `release`.
     pub(super) hold_range: std::sync::Mutex<Option<ReadOccurrence>>,
-    /// The branch, start and skip of every context query, in call order.
-    pub(super) context_pages: std::sync::Mutex<Vec<(String, u64, u64)>>,
+    /// Every page a context fold read, in call order.
+    pub(super) context_pages: std::sync::Mutex<Vec<ContextPageRead>>,
     fail_at: AtomicUsize,
     reject_at: AtomicUsize,
     pause_at: AtomicUsize,
@@ -46,6 +45,16 @@ pub(super) struct CountContextReads {
 }
 /// A branch, a range and which read of it, counted from 1.
 pub(super) type ReadOccurrence = (String, RangeInclusive<u64>, usize);
+
+/// One page a context fold read: the branch it read, where it began, the skip
+/// it asked for, and where it ended.
+#[derive(Clone, Debug)]
+pub(super) struct ContextPageRead {
+    pub branch: String,
+    pub from: u64,
+    pub offset: u64,
+    pub last: Option<u64>,
+}
 
 tokio::task_local! {
     /// While set, also receives each segment that a read made by the task
@@ -167,8 +176,6 @@ impl CountContextReads {
     /// Records a read of `range` of `branch`, then fails or holds it when it
     /// is the occurrence set for that.
     async fn record(&self, branch: &str, range: &RangeInclusive<u64>) -> Result<()> {
-        self.earliest_read
-            .fetch_min(*range.start(), Ordering::SeqCst);
         if *range.end() == u64::MAX {
             self.reads.fetch_add(1, Ordering::SeqCst);
         }
@@ -398,14 +405,16 @@ impl TimelineStore for CountContextReads {
             if query.event_id.is_some() {
                 self.positions.fetch_add(1, Ordering::SeqCst);
             }
+            let page = self.memory.query(key, query, from, through).await?;
             if query.flags.len() == 2 {
-                self.context_pages.lock().unwrap().push((
-                    key.branch_id.clone(),
+                self.context_pages.lock().unwrap().push(ContextPageRead {
+                    branch: key.branch_id.clone(),
                     from,
-                    query.offset,
-                ));
+                    offset: query.offset,
+                    last: page.positions.last().map(|position| position.sequence),
+                });
             }
-            self.memory.query(key, query, from, through).await
+            Ok(page)
         })
     }
 }
@@ -851,15 +860,21 @@ async fn each_model_step_reads_full_context_for_policy_and_streams_otherwise() {
                 )
                 .await
                 .unwrap();
-                store.earliest_read.store(u64::MAX, Ordering::SeqCst);
+                store.context_pages.lock().unwrap().clear();
                 let (recovered, _) = renderer
                     .rendered_context(&timeline, timeline.sequence())
                     .await
                     .unwrap();
                 assert!(recovered.checkpoint.is_some());
                 assert_eq!(
-                    store.earliest_read.load(Ordering::SeqCst),
-                    checkpoint.resume.sequence
+                    store
+                        .context_pages
+                        .lock()
+                        .unwrap()
+                        .first()
+                        .map(|page| page.from),
+                    Some(checkpoint.resume.sequence),
+                    "the fold begins at the resume event"
                 );
                 dim_agent_runtime::core::close_timeline(&timeline)
                     .await
@@ -977,7 +992,7 @@ async fn a_second_compaction_saves_a_snapshot_that_decodes() {
     let timeline = Timeline::restore(Ctx::root().unwrap(), key, vec![], store.clone())
         .await
         .unwrap();
-    store.earliest_read.store(u64::MAX, Ordering::SeqCst);
+    store.context_pages.lock().unwrap().clear();
     let (recovered, restored) = renderer
         .rendered_context(&timeline, timeline.sequence())
         .await
@@ -987,11 +1002,21 @@ async fn a_second_compaction_saves_a_snapshot_that_decodes() {
         "the restore resumes from a checkpoint"
     );
     assert_eq!(
-        store.earliest_read.load(Ordering::SeqCst),
-        checkpoint.resume.sequence
+        store
+            .context_pages
+            .lock()
+            .unwrap()
+            .first()
+            .map(|page| page.from),
+        Some(checkpoint.resume.sequence),
+        "the fold begins at the resume event"
     );
-    let full = project_context_history(&timeline.context(timeline.sequence()).await.unwrap())
-        .expect("the full replay renders");
+    let full = project_context_history(
+        &replay_context(&timeline, timeline.sequence())
+            .await
+            .unwrap(),
+    )
+    .expect("the full replay renders");
     assert_eq!(
         restored
             .iter()
@@ -1676,6 +1701,126 @@ async fn a_below_threshold_preparation_reads_no_growing_turn_order() {
     agent.close().await.unwrap();
 }
 
+/// An ancestor's pages cost the page: each begins at the event the previous
+/// one ended at, read by id, and never re-selects the prefix with a growing
+/// skip. The fold's projection is the one the full render gives.
+#[tokio::test]
+async fn an_ancestor_fold_continues_from_the_event_its_page_ended_at() {
+    let store = Arc::new(CountContextReads::default());
+    store
+        .create_session("fold", &SessionConfig::default())
+        .await
+        .unwrap();
+    let parent = Timeline::new(
+        Ctx::root().unwrap(),
+        TimelineKey {
+            session_id: "fold".into(),
+            branch_id: "main".into(),
+        },
+        vec![],
+        store.clone(),
+    );
+    let mut facts = Vec::new();
+    for index in 0..6 {
+        let input = parent
+            .append(
+                EventKind::InputMessage(InputMessageData::text(format!("parent {index}"), None))
+                    .into(),
+            )
+            .unwrap();
+        facts.push(input.clone());
+        facts.push(
+            parent
+                .append(
+                    EventKind::InputConsumed(InputConsumedData {
+                        input_id: input.id.clone(),
+                    })
+                    .into(),
+                )
+                .unwrap(),
+        );
+    }
+    let cut = parent.sequence();
+    parent
+        .append(
+            EventKind::BranchCreate(BranchCreateData {
+                at: BranchCreateAt::Create {},
+                source: BranchSource::Host {
+                    operation_id: "test-branch".into(),
+                },
+                branch: "child".into(),
+                prompt: "child".into(),
+            })
+            .into(),
+        )
+        .unwrap();
+    let child = Timeline::new(
+        Ctx::root().unwrap(),
+        TimelineKey {
+            session_id: "fold".into(),
+            branch_id: "child".into(),
+        },
+        vec![("main".into(), cut)],
+        store.clone(),
+    );
+    for index in 0..2 {
+        let input = child
+            .append(
+                EventKind::InputMessage(InputMessageData::text(format!("child {index}"), None))
+                    .into(),
+            )
+            .unwrap();
+        child
+            .append(
+                EventKind::InputConsumed(InputConsumedData {
+                    input_id: input.id.clone(),
+                })
+                .into(),
+            )
+            .unwrap();
+    }
+    let through = child.sequence();
+    let renderer = HistoryRenderer::default();
+    let (_, full) = renderer.rendered_context(&child, through).await.unwrap();
+    store.context_pages.lock().unwrap().clear();
+    let streamed = renderer.rendered_stream(&child, through, 2).await.unwrap();
+    assert_eq!(streamed.history, full);
+    let pages: Vec<_> = store
+        .context_pages
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|page| page.branch == "main")
+        .cloned()
+        .collect();
+    assert!(
+        pages.len() > 1,
+        "the ancestor prefix is read in more than one page: {pages:?}"
+    );
+    assert!(
+        pages.iter().all(|page| page.offset == 0),
+        "an ancestor page starts at an event, not at a growing skip: {pages:?}"
+    );
+    assert_eq!(
+        pages.first().map(|page| page.from),
+        facts.first().map(|event| event.sequence),
+        "the first ancestor page begins at the branch's first fact: {pages:?}"
+    );
+    for pair in pages.windows(2) {
+        assert_eq!(
+            Some(pair[1].from),
+            pair[0].last,
+            "an ancestor page begins at the event the previous one ended at: {pages:?}"
+        );
+    }
+    dim_agent_runtime::core::close_timeline(&child)
+        .await
+        .unwrap();
+    dim_agent_runtime::core::close_timeline(&parent)
+        .await
+        .unwrap();
+}
+
 /// A streamed context resumes at the event its checkpoint names
 /// ([ADR 020](../../../../docs/adr/020-timeline-read-convergence.md) D5): the
 /// fold reads the chain from that event, never from the chain's start, and its
@@ -1718,7 +1863,11 @@ async fn a_streamed_context_resumes_at_the_event_its_checkpoint_names() {
     let renderer = HistoryRenderer::default();
     let fact = append(completed(&cut.id, "summary", through, vec![]));
     let saved = renderer
-        .snapshot(&timeline.context(through).await.unwrap(), &cut.id, &fact)
+        .snapshot(
+            &replay_context(&timeline, through).await.unwrap(),
+            &cut.id,
+            &fact,
+        )
         .unwrap();
     timeline.save_snapshot(saved).await.unwrap();
     let resume = timeline
@@ -1745,12 +1894,12 @@ async fn a_streamed_context_resumes_at_the_event_its_checkpoint_names() {
     assert_eq!(streamed.history, full);
     let pages = store.context_pages.lock().unwrap().clone();
     assert_eq!(
-        pages.first().map(|(_, from, _)| *from),
+        pages.first().map(|page| page.from),
         Some(resume.sequence),
         "the fold begins at the resume event: {pages:?}"
     );
     assert!(
-        pages.iter().all(|(_, from, _)| *from >= resume.sequence),
+        pages.iter().all(|page| page.from >= resume.sequence),
         "{pages:?}"
     );
 }
@@ -1871,7 +2020,7 @@ async fn a_cut_after_a_compaction_reads_only_its_tail_and_keeps_the_verdict() {
         end.sequence,
     ] {
         let expected = dim_agent_capabilities::history::validate_context_boundary(
-            &timeline.context(at).await.unwrap(),
+            &replay_context(&timeline, at).await.unwrap(),
         );
         let actual = dim_agent_capabilities::history::validate_context_boundary_at(&timeline, at)
             .await
@@ -1888,14 +2037,12 @@ async fn a_cut_after_a_compaction_reads_only_its_tail_and_keeps_the_verdict() {
     );
     let pages = store.context_pages.lock().unwrap().clone();
     assert_eq!(
-        pages
-            .first()
-            .map(|(branch, from, _)| (branch.as_str(), *from)),
+        pages.first().map(|page| (page.branch.as_str(), page.from)),
         Some(("main", cut.sequence)),
         "{pages:?}"
     );
     assert!(
-        pages.iter().all(|(_, from, _)| *from >= cut.sequence),
+        pages.iter().all(|page| page.from >= cut.sequence),
         "{pages:?}"
     );
 
@@ -1919,11 +2066,11 @@ async fn a_cut_after_a_compaction_reads_only_its_tail_and_keeps_the_verdict() {
     );
     let pages = store.context_pages.lock().unwrap().clone();
     assert_eq!(
-        pages.first().map(|(_, from, _)| *from),
+        pages.first().map(|page| page.from),
         Some(consumed.sequence),
         "{pages:?}"
     );
-    assert_eq!(pages.last().map(|(_, from, _)| *from), Some(1), "{pages:?}");
+    assert_eq!(pages.last().map(|page| page.from), Some(1), "{pages:?}");
 
     let batch = timeline
         .append_batch_registered(
@@ -2006,7 +2153,7 @@ async fn a_malformed_compaction_cut_replays_the_segment_and_keeps_the_verdict() 
 
     for at in [open.sequence + 1, turn.sequence] {
         let expected = dim_agent_capabilities::history::validate_context_boundary(
-            &timeline.context(at).await.unwrap(),
+            &replay_context(&timeline, at).await.unwrap(),
         );
         assert!(
             expected.is_err(),

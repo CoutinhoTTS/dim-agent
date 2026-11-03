@@ -680,6 +680,28 @@ impl HoldingStore {
     pub fn release_read(&self) {
         self.gate.add_permits(1);
     }
+    /// Whether this read is the one the flow holds, and arms nothing after it.
+    fn held(&self, branch: &str) -> bool {
+        let mut selected = self.read_branch.lock().unwrap();
+        let Some((held, skip)) = selected.as_mut().filter(|(held, _)| held == branch) else {
+            return false;
+        };
+        if *skip > 1 {
+            *skip -= 1;
+            return false;
+        }
+        *selected = None;
+        true
+    }
+    /// Parks the read after saying so, until the flow releases it.
+    async fn enter_held_read(&self) {
+        self.read_entered.notify_one();
+        self.gate
+            .acquire()
+            .await
+            .expect("the read gate stays open")
+            .forget();
+    }
     /// The segments read since the last call, by branch.
     pub fn take(&self) -> Vec<(String, std::ops::RangeInclusive<u64>)> {
         std::mem::take(&mut *self.reads.lock().unwrap())
@@ -749,32 +771,13 @@ impl TimelineStore for HoldingStore {
         id: &'a str,
         segments: Vec<(String, std::ops::RangeInclusive<u64>)>,
     ) -> BoxFuture<'a, Result<Vec<Vec<StoredEvent>>>> {
-        let hold = {
-            let mut selected = self.read_branch.lock().unwrap();
-            let mut hold = false;
-            if let Some((branch, skip)) = selected.as_mut()
-                && segments.iter().any(|(read, _)| read == branch)
-            {
-                if *skip <= 1 {
-                    hold = true;
-                } else {
-                    *skip -= 1;
-                }
-            }
-            if hold {
-                *selected = None;
-            }
-            hold
-        };
+        let hold = segments
+            .iter()
+            .fold(false, |held, (branch, _)| self.held(branch) || held);
         self.reads.lock().unwrap().extend(segments.iter().cloned());
         Box::pin(async move {
             if hold {
-                self.read_entered.notify_one();
-                self.gate
-                    .acquire()
-                    .await
-                    .expect("the read gate stays open")
-                    .forget();
+                self.enter_held_read().await;
             }
             self.memory.read_segments(id, segments).await
         })
@@ -793,6 +796,16 @@ impl TimelineStore for HoldingStore {
         from: u64,
         through: u64,
     ) -> BoxFuture<'a, Result<dim_agent_runtime::TimelineQueryPage>> {
-        self.memory.query(key, query, from, through)
+        let hold = self.held(&key.branch_id);
+        self.reads
+            .lock()
+            .unwrap()
+            .push((key.branch_id.clone(), from..=through));
+        Box::pin(async move {
+            if hold {
+                self.enter_held_read().await;
+            }
+            self.memory.query(key, query, from, through).await
+        })
     }
 }

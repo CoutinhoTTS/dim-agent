@@ -41,7 +41,7 @@ fn reply_usage() -> Usage {
 /// The messages a preparation at the head would start from.
 async fn projected(session: &dim_agent_runtime::Session, branch: &str) -> Vec<Message> {
     let through = session.sequence(branch).unwrap();
-    let context = session.context(branch, through).await.unwrap();
+    let context = read_context_in(session, branch, through).await.unwrap();
     let history = project_context_history(&context).unwrap();
     context_messages(&context, &history)
         .into_iter()

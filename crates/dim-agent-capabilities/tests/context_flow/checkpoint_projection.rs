@@ -252,7 +252,7 @@ async fn a_streamed_context_from_a_snapshot_matches_the_full_render() {
         )
         .unwrap();
     let through = timeline.sequence();
-    let context = timeline.context(through).await.unwrap();
+    let context = replay_context(&timeline, through).await.unwrap();
     let renderer = HistoryRenderer::default();
     let snapshot = renderer.snapshot(&context, &cut.id, &consumed).unwrap();
     timeline.save_snapshot(snapshot).await.unwrap();
@@ -357,7 +357,7 @@ async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
         .unwrap();
     let through = timeline.sequence();
     let checkpoint =
-        projection_checkpoint(&timeline.context(through).await.unwrap(), &cut.id).unwrap();
+        projection_checkpoint(&replay_context(&timeline, through).await.unwrap(), &cut.id).unwrap();
     let fact = timeline
         .append(completed(&cut.id, "authoritative", through, vec![]).into())
         .unwrap();
@@ -417,7 +417,11 @@ async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
     timeline
         .save_snapshot(
             renderer
-                .snapshot(&timeline.context(through).await.unwrap(), &cut.id, &fact)
+                .snapshot(
+                    &replay_context(&timeline, through).await.unwrap(),
+                    &cut.id,
+                    &fact,
+                )
                 .unwrap(),
         )
         .await
@@ -432,14 +436,18 @@ async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
         (renderer.render)(&accelerated).unwrap(),
         (renderer.render)(&replay).unwrap()
     );
-    let full = timeline.context(fact.sequence).await.unwrap();
+    let full = replay_context(&timeline, fact.sequence).await.unwrap();
     assert!(full.checkpoint.is_none());
     assert_eq!(full.events, replay.events);
     assert_eq!(full.positions, replay.positions);
 
     let renderer = HistoryRenderer::default();
     let saved = renderer
-        .snapshot(&timeline.context(through).await.unwrap(), &cut.id, &fact)
+        .snapshot(
+            &replay_context(&timeline, through).await.unwrap(),
+            &cut.id,
+            &fact,
+        )
         .unwrap();
     assert_eq!(
         (renderer.decode_checkpoint)(&saved, &fact),
@@ -495,7 +503,7 @@ async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
     fallback(
         renderer
             .snapshot(
-                &timeline.context(through).await.unwrap(),
+                &replay_context(&timeline, through).await.unwrap(),
                 &cut.id,
                 &consumed,
             )
@@ -570,10 +578,14 @@ async fn a_checkpoint_whose_render_fails_falls_back_to_full_replay() {
         .append(completed(&cut.id, "authoritative", through, vec![]).into())
         .unwrap();
     let saved = HistoryRenderer::default()
-        .snapshot(&timeline.context(through).await.unwrap(), &cut.id, &fact)
+        .snapshot(
+            &replay_context(&timeline, through).await.unwrap(),
+            &cut.id,
+            &fact,
+        )
         .unwrap();
     timeline.save_snapshot(saved).await.unwrap();
-    let full = timeline.context(fact.sequence).await.unwrap();
+    let full = replay_context(&timeline, fact.sequence).await.unwrap();
     let (accelerated, _) = HistoryRenderer::default()
         .rendered_context(&timeline, fact.sequence)
         .await
