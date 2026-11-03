@@ -6,8 +6,9 @@ use crate::{
 use dim_agent_runtime::{
     AgentError, Branch, BranchLifecycle, BranchOptions, Dispatcher, Names, Result, SessionIdentity,
     StoredBranch, StoredEvent, Timeline, TimelineContext, TimelineFactory, TimelineIdentity,
-    TimelineInfo, TimelineKey, TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
-    TimelineQueryPredicate, TimelineQueryScope, TimelineStore, TimelineTreeControl, rebuild_facts,
+    TimelineInfo, TimelineKey, TimelineQuery, TimelineQueryBound, TimelineQueryDirection,
+    TimelineQueryOrderBy, TimelineQueryPredicate, TimelineQueryScope, TimelineStore,
+    TimelineTreeControl, rebuild_facts,
 };
 use dim_agent_types::*;
 use futures_util::{FutureExt, future::join_all};
@@ -572,6 +573,7 @@ impl TimelineTree {
                             let reply = tokio::select! {
                                 result = tokio::time::timeout(owner.factory.startup_timeout(), context.timeline().query(TimelineQuery {
                                     scope: TimelineQueryScope::Branch,
+                                    bound: TimelineQueryBound::Published,
                                     from_event: None,
                                     from_sequence: Some(from),
                                     order_by: TimelineQueryOrderBy::Sequence,
@@ -2357,6 +2359,7 @@ impl BranchTool {
                     let reply = parent
                         .query(TimelineQuery {
                             scope: TimelineQueryScope::Branch,
+                            bound: TimelineQueryBound::Published,
                             from_event: None,
                             from_sequence: Some(from),
                             order_by: TimelineQueryOrderBy::Sequence,

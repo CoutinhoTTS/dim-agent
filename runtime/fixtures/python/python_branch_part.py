@@ -38,6 +38,7 @@ async def apply(ctx, config):
         while True:
             query = {
                 "scope": "branch",
+                "bound": "committed",
                 "order_by": "sequence",
                 "direction": "ascending",
                 "kinds": ["input/message", "turn/start", "turn/end"],
@@ -46,7 +47,7 @@ async def apply(ctx, config):
             }
             if start is not None:
                 query["from_sequence"] = start
-            page = await timeline.queryWithTail(query)
+            page = await timeline.query(query)
             events = page["events"]
             for event in events:
                 step(event, False)

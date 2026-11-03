@@ -221,8 +221,9 @@ impl DynPlugin for TailPart {
                 };
                 let published = timeline.sequence();
                 let reply = timeline
-                    .query_with_tail(TimelineQuery {
+                    .query(TimelineQuery {
                         scope: TimelineQueryScope::Branch,
+                        bound: TimelineQueryBound::Committed,
                         from_event: None,
                         from_sequence: None,
                         order_by: TimelineQueryOrderBy::Sequence,
@@ -355,9 +356,11 @@ fn draft(kind: EventKind, id: &str) -> EventDraft {
     EventDraft::from(kind).with_id(id)
 }
 
-fn page(offset: u64) -> TimelineQuery {
+/// Two facts of this branch, published or with the branch's committed tail.
+fn page(offset: u64, bound: TimelineQueryBound) -> TimelineQuery {
     TimelineQuery {
         scope: TimelineQueryScope::Branch,
+        bound,
         from_event: None,
         from_sequence: None,
         order_by: TimelineQueryOrderBy::Sequence,
@@ -396,7 +399,10 @@ async fn a_tail_page_continues_the_published_page_and_marks_the_end_short() {
     }
     let mut pages = Vec::new();
     for offset in [0, 2, 4] {
-        let reply = timeline.query_with_tail(page(offset)).await.unwrap();
+        let reply = timeline
+            .query(page(offset, TimelineQueryBound::Committed))
+            .await
+            .unwrap();
         assert_eq!(reply.through, 5);
         pages.push(
             reply
@@ -412,10 +418,10 @@ async fn a_tail_page_continues_the_published_page_and_marks_the_end_short() {
         "the tail continues the published page, and a short page ends the selection"
     );
     let descending = timeline
-        .query_with_tail(TimelineQuery {
+        .query(TimelineQuery {
             direction: TimelineQueryDirection::Descending,
             offset: 2,
-            ..page(0)
+            ..page(0, TimelineQueryBound::Committed)
         })
         .await
         .unwrap();
@@ -429,10 +435,10 @@ async fn a_tail_page_continues_the_published_page_and_marks_the_end_short() {
         "a descending page starts in the tail and continues into the published facts"
     );
     let started = timeline
-        .query_with_tail(TimelineQuery {
+        .query(TimelineQuery {
             from_sequence: Some(4),
             limit: std::num::NonZeroU64::new(2).expect("a limit"),
-            ..page(0)
+            ..page(0, TimelineQueryBound::Committed)
         })
         .await
         .unwrap();
@@ -446,9 +452,9 @@ async fn a_tail_page_continues_the_published_page_and_marks_the_end_short() {
         "a start in the tail begins the read there"
     );
     let from_tail_event = timeline
-        .query_with_tail(TimelineQuery {
+        .query(TimelineQuery {
             from_event: Some("5".into()),
-            ..page(0)
+            ..page(0, TimelineQueryBound::Committed)
         })
         .await
         .unwrap();
@@ -461,6 +467,67 @@ async fn a_tail_page_continues_the_published_page_and_marks_the_end_short() {
         ["5"],
         "an event id the published head does not hold is found in the tail"
     );
+}
+
+#[tokio::test]
+async fn one_selection_reads_to_either_bound() {
+    let store = Arc::new(Held::default());
+    store
+        .create_session("bounds", &SessionConfig::default())
+        .await
+        .unwrap();
+    let timeline = Timeline::new(
+        Ctx::root().unwrap(),
+        TimelineKey {
+            session_id: "bounds".into(),
+            branch_id: "main".into(),
+        },
+        vec![],
+        store.clone(),
+    );
+    for id in ["1", "2", "3"] {
+        timeline.append(input(id).with_id(id)).unwrap();
+    }
+    store.hold();
+    for id in ["4", "5"] {
+        timeline.append(input(id).with_id(id)).unwrap();
+    }
+    let published = timeline.sequence();
+    let committed = timeline.committed();
+    let selection = TimelineQuery {
+        limit: std::num::NonZeroU64::new(16).expect("a limit"),
+        ..page(0, TimelineQueryBound::Published)
+    };
+    let ids = |reply: &TimelineQueryReply| {
+        reply
+            .events
+            .iter()
+            .map(|event| event.id.clone())
+            .collect::<Vec<_>>()
+    };
+    let at_published = timeline.query(selection.clone()).await.unwrap();
+    assert_eq!(ids(&at_published), vec!["1", "2", "3"]);
+    assert_eq!(
+        at_published.through, published,
+        "a published read stops at what is published and reports that cutoff"
+    );
+    let at_committed = timeline
+        .query(TimelineQuery {
+            bound: TimelineQueryBound::Committed,
+            ..selection
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        ids(&at_committed),
+        vec!["1", "2", "3", "4", "5"],
+        "the committed read joins the unpublished tail to the published page"
+    );
+    assert_eq!(
+        at_committed.through, committed,
+        "a committed read reports the write head it started at"
+    );
+    store.release();
 }
 
 /// The kinds each rebuilding part folds ([audit §2.3](../../../docs/design/timeline-read-entries.md#23-what-the-eleven-rebuilds-fold)):

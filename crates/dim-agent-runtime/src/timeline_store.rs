@@ -182,7 +182,9 @@ pub trait TimelineStore: Send + Sync + 'static {
     /// passed over before the page, so a page shorter than the limit means the
     /// selection is exhausted, and a page may end inside an atomic batch.
     /// `skipped` is the number of matching facts the read passed over, at most
-    /// `offset`, so a caller can carry the rest into its next segment.
+    /// `offset`, so a caller can carry the rest into its next segment. The
+    /// query's `bound` is the service's: the cut arrives as `from` and
+    /// `through`.
     ///
     /// A read point past the branch's published head and any other scope are
     /// invalid input. A kind, flag, id or data path the store does not know

@@ -20,8 +20,8 @@ use crate::{
 };
 use dim_agent_runtime::{
     AgentError, Dispatcher, Names, Registration, Registrations, SessionConfig, SessionIdentity,
-    StateCell, Timeline, TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
-    TimelineQueryScope,
+    StateCell, Timeline, TimelineQuery, TimelineQueryBound, TimelineQueryDirection,
+    TimelineQueryOrderBy, TimelineQueryScope,
 };
 use dim_agent_types::{
     AgentEvent, ApprovalCallData, BranchSource, COMMAND_SEPARATORS, CommandMatch, CommandRule,
@@ -533,8 +533,9 @@ impl Permission {
     async fn rebuild(&self) -> dim_agent_runtime::Result<u64> {
         let reply = self
             .timeline
-            .query_with_tail(TimelineQuery {
+            .query(TimelineQuery {
                 scope: TimelineQueryScope::Chain,
+                bound: TimelineQueryBound::Committed,
                 from_event: None,
                 from_sequence: None,
                 order_by: TimelineQueryOrderBy::Sequence,

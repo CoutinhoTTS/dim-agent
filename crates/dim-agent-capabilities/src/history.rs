@@ -1,8 +1,8 @@
 use crate::prompt_state::PromptSnapshot;
 use dim_agent_runtime::{
-    AgentError, ContextHistory, Session, Timeline, TimelineQuery, TimelineQueryDirection,
-    TimelineQueryFlag, TimelineQueryOrderBy, TimelineQueryPredicate, TimelineQueryReply,
-    TimelineQueryScope,
+    AgentError, ContextHistory, Session, Timeline, TimelineQuery, TimelineQueryBound,
+    TimelineQueryDirection, TimelineQueryFlag, TimelineQueryOrderBy, TimelineQueryPredicate,
+    TimelineQueryReply, TimelineQueryScope,
 };
 use dim_agent_types::*;
 use serde::{Deserialize, Serialize};
@@ -13,6 +13,7 @@ use std::{collections::HashMap, num::NonZeroU64, sync::Arc};
 pub(crate) fn chain_by_id(id: &str) -> TimelineQuery {
     TimelineQuery {
         scope: TimelineQueryScope::Chain,
+        bound: TimelineQueryBound::Published,
         from_event: None,
         from_sequence: None,
         order_by: TimelineQueryOrderBy::Sequence,
@@ -38,6 +39,7 @@ pub(crate) fn newest_chain(
 ) -> TimelineQuery {
     TimelineQuery {
         scope: TimelineQueryScope::Chain,
+        bound: TimelineQueryBound::Published,
         from_event: None,
         from_sequence: from_sequence.filter(|sequence| *sequence > 0),
         order_by: TimelineQueryOrderBy::Sequence,
@@ -61,6 +63,7 @@ pub(crate) fn rising_chain(
 ) -> TimelineQuery {
     TimelineQuery {
         scope: TimelineQueryScope::Chain,
+        bound: TimelineQueryBound::Published,
         from_event: from_event.map(str::to_owned),
         from_sequence: None,
         order_by: TimelineQueryOrderBy::Sequence,
@@ -100,6 +103,7 @@ fn context_read(
 ) -> TimelineQuery {
     TimelineQuery {
         scope,
+        bound: TimelineQueryBound::Published,
         from_event,
         from_sequence,
         order_by: TimelineQueryOrderBy::Sequence,
@@ -185,8 +189,9 @@ impl<'a> FoldRead<'a> {
     }
 
     /// Also reads this branch's own facts written above the published head, up
-    /// to the fold's bound ([ADR 020 D3](../../../docs/adr/020-timeline-read-convergence.md)).
-    /// A Session facade has no such read, so a fold through it stays at the
+    /// to the fold's bound: a page then asks the query for its committed bound
+    /// ([ADR 020 D3](../../../docs/adr/020-timeline-read-convergence.md)). A
+    /// Session facade has no such read, so a fold through it stays at the
     /// published head.
     pub(crate) fn tail(mut self) -> Self {
         self.tail = true;
@@ -208,22 +213,17 @@ impl<'a> FoldRead<'a> {
         loop {
             let repeated = u64::from(self.last.is_some());
             let asked = limit - page.events.len() as u64 + repeated;
-            let query = match self.sequence {
+            let mut query = match self.sequence {
                 Some(sequence) => context_branch(sequence, asked),
                 None => context_chain(self.begin.as_deref(), 0, asked),
             };
-            let reply = match &self.reads {
-                ContextReads::Timeline(timeline)
-                    if self.tail && self.through > timeline.sequence() =>
-                {
-                    let tail = timeline.query_with_tail(query).await?;
-                    TimelineQueryReply {
-                        events: tail.events,
-                        positions: tail.positions,
-                    }
-                }
-                reads => reads.query(query).await?,
-            };
+            if self.tail
+                && let ContextReads::Timeline(timeline) = &self.reads
+                && self.through > timeline.sequence()
+            {
+                query.bound = TimelineQueryBound::Committed;
+            }
+            let reply = self.reads.query(query).await?;
             let Some(mut read) = bounded(reply, &self.own, self.through) else {
                 break;
             };
@@ -1455,6 +1455,7 @@ impl ContextReads<'_> {
         let Some(compaction) = self
             .query(TimelineQuery {
                 scope: TimelineQueryScope::Branch,
+                bound: TimelineQueryBound::Published,
                 from_event: None,
                 from_sequence: Some(through),
                 order_by: TimelineQueryOrderBy::Sequence,

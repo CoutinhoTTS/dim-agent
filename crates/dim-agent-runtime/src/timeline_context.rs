@@ -407,6 +407,7 @@ impl TimelineContext {
         self.timeline
             .query(TimelineQuery {
                 scope: TimelineQueryScope::Branch,
+                bound: TimelineQueryBound::Published,
                 from_event: None,
                 from_sequence: None,
                 order_by: TimelineQueryOrderBy::Sequence,

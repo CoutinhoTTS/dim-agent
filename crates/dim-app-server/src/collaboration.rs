@@ -25,7 +25,8 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::{
     AgentBuilder, AgentError, BranchLifecycle, CollaborationRole, Dispatcher, Names, Session,
     SessionConfig, SessionHold, SessionIdentity, SessionLifecycle, Timeline, TimelineIdentity,
-    TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryScope,
+    TimelineQuery, TimelineQueryBound, TimelineQueryDirection, TimelineQueryOrderBy,
+    TimelineQueryScope,
 };
 use dim_agent_types::*;
 use futures_util::{
@@ -1078,6 +1079,7 @@ impl CollaborationSession {
         let reply = match timeline
             .query(TimelineQuery {
                 scope: TimelineQueryScope::Branch,
+                bound: TimelineQueryBound::Published,
                 from_event: None,
                 from_sequence: None,
                 order_by: TimelineQueryOrderBy::Sequence,

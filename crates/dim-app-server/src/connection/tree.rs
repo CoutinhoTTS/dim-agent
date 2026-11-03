@@ -4,7 +4,7 @@ use dim_agent_capabilities::input_queue::{
     CheckInterrupted, SubmitCheckReply, SubmitCheckRequest, SubmitChecks, SubmitEntry,
     append_blocks,
 };
-use dim_agent_runtime::BranchOptions;
+use dim_agent_runtime::{BranchOptions, TimelineQueryBound};
 use dim_agent_types::{BranchSource, EventKind, InputMode};
 
 impl Connection {
@@ -381,6 +381,7 @@ async fn turn_window(
                 from: Option<u64>,
                 event_id: Option<String>| TimelineQuery {
         scope: TimelineQueryScope::Branch,
+        bound: TimelineQueryBound::Published,
         from_event: None,
         from_sequence: from,
         order_by: TimelineQueryOrderBy::Sequence,

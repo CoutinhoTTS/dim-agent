@@ -20,6 +20,7 @@ type Dispatcher = {
 }
 type TimelineQuery = {
   scope: 'branch' | 'chain'
+  bound?: 'published' | 'committed'
   from_event?: string
   from_sequence?: number | bigint
   order_by?: 'sequence'
@@ -33,8 +34,7 @@ type TimelineQuery = {
 }
 type TimelineReply = { events: AgentEvent[]; positions: { branch_id: string; sequence: number | bigint }[] }
 type Timeline = {
-  query(query: TimelineQuery): Promise<TimelineReply>
-  queryWithTail(query: TimelineQuery): Promise<TimelineReply & { through: number | bigint }>
+  query(query: TimelineQuery): Promise<TimelineReply & { through: number | bigint }>
 }
 type BranchOptions = { prompt: string; source: { kind: 'host'; operation_id: string } }
 type TimelineInfo = {
@@ -338,8 +338,9 @@ export default definePlugin({
       let from: bigint | undefined
       let through = 0n
       for (;;) {
-        const reply = await timeline.queryWithTail({
+        const reply = await timeline.query({
           scope: 'branch',
+          bound: 'committed',
           ...(from === undefined ? {} : { from_sequence: from }),
           order_by: 'sequence',
           direction: 'ascending',

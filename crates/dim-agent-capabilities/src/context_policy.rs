@@ -6,8 +6,8 @@ use crate::{
     host::*,
 };
 use dim_agent_runtime::{
-    ContextHistory, Timeline, TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
-    TimelineQueryPredicate, TimelineQueryScope,
+    ContextHistory, Timeline, TimelineQuery, TimelineQueryBound, TimelineQueryDirection,
+    TimelineQueryOrderBy, TimelineQueryPredicate, TimelineQueryScope,
 };
 use dim_agent_types::*;
 use serde_json::json;
@@ -796,8 +796,9 @@ impl ContextPolicy {
         loop {
             let reply = self
                 .timeline
-                .query_with_tail(TimelineQuery {
+                .query(TimelineQuery {
                     scope: TimelineQueryScope::Branch,
+                    bound: TimelineQueryBound::Committed,
                     from_event: None,
                     from_sequence: Some(from),
                     order_by: TimelineQueryOrderBy::Sequence,

@@ -151,8 +151,7 @@ async function loadGoalBranch(read, options = {}) {
       committed: async () => branch.sequence,
     }),
     timeline: counted({
-      query: queryTimeline,
-      queryWithTail: async query => ({ ...(await queryTimeline(query)), through: branch.sequence }),
+      query: async query => ({ ...(await queryTimeline(query)), through: branch.sequence }),
     }),
     settings: counted({ read }),
     treeCommands: counted({
