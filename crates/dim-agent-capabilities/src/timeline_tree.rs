@@ -235,6 +235,55 @@ impl TreeCommands {
         Ok(created?.id().to_owned())
     }
 }
+/// One page of an open line's own facts after `after`, at most `limit`, never
+/// past `through`, ending on an atomic batch: a page that reaches its limit
+/// inside one runs to that batch's end, so an open and an ended line's pages
+/// keep the same shape.
+async fn open_page(
+    timeline: &Timeline,
+    after: u64,
+    limit: usize,
+    through: u64,
+) -> Result<Vec<Arc<AgentEvent>>> {
+    let mut events = timeline.query(line_page(after, limit)).await?.events;
+    events.retain(|event| event.sequence <= through);
+    while let Some(last) = events.last() {
+        if last.sequence >= through {
+            break;
+        }
+        match timeline.batch_end(last.sequence).await {
+            Ok(()) => break,
+            Err(AgentError::InvalidInput(_)) => {}
+            Err(error) => return Err(error),
+        }
+        let next = timeline.query(line_page(last.sequence, 1)).await?.events;
+        let Some(event) = next.into_iter().find(|event| event.sequence <= through) else {
+            break;
+        };
+        events.push(event);
+    }
+    Ok(events)
+}
+
+/// The facts after `after` a page asks for, up to `limit`.
+fn line_page(after: u64, limit: usize) -> TimelineQuery {
+    TimelineQuery {
+        scope: TimelineQueryScope::Branch,
+        bound: TimelineQueryBound::Published,
+        from_event: None,
+        from_sequence: Some(after.saturating_add(1)),
+        order_by: TimelineQueryOrderBy::Sequence,
+        direction: TimelineQueryDirection::Ascending,
+        kinds: Vec::new(),
+        flags: Vec::new(),
+        event_id: None,
+        predicate: None,
+        limit: std::num::NonZeroU64::new(u64::try_from(limit).unwrap_or(u64::MAX).max(1))
+            .expect("a page keeps one fact"),
+        offset: 0,
+    }
+}
+
 impl TimelineTree {
     fn create_failed(info: &TimelineInfo, error: &AgentError) -> BranchCreateFailedData {
         let branch = info.id.clone();
@@ -689,6 +738,9 @@ impl TimelineTree {
             .ok_or_else(|| AgentError::UnknownBranch(id.into()))?;
         if through <= after {
             return Ok(Vec::new());
+        }
+        if let Some(context) = self.owned_context(id) {
+            return open_page(context.timeline(), after, limit, through).await;
         }
         let key = TimelineKey {
             session_id: self.session_id.clone(),
