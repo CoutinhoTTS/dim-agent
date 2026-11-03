@@ -31,8 +31,8 @@ pub(super) struct CountContextReads {
     /// Holds the given occurrence of a read of this branch and range:
     /// signals `entered`, then waits for `release`.
     pub(super) hold_range: std::sync::Mutex<Option<ReadOccurrence>>,
-    /// The branch and cursor of every context page read, in call order.
-    pub(super) context_pages: std::sync::Mutex<Vec<(String, u64)>>,
+    /// The branch, start and skip of every context query, in call order.
+    pub(super) context_pages: std::sync::Mutex<Vec<(String, u64, u64)>>,
     fail_at: AtomicUsize,
     reject_at: AtomicUsize,
     pause_at: AtomicUsize,
@@ -321,23 +321,6 @@ impl TimelineStore for CountContextReads {
             self.memory.read_segments(session_id, segments).await
         })
     }
-    fn read_context_page<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        after: u64,
-        limit: usize,
-        through: u64,
-    ) -> dim_agent_runtime::BoxFuture<'a, Result<Vec<StoredEvent>>> {
-        Box::pin(async move {
-            self.context_pages
-                .lock()
-                .unwrap()
-                .push((key.branch_id.clone(), after));
-            self.memory
-                .read_context_page(key, after, limit, through)
-                .await
-        })
-    }
     fn trace<'a>(
         &'a self,
         key: &'a TimelineKey,
@@ -404,10 +387,19 @@ impl TimelineStore for CountContextReads {
         from: u64,
         through: u64,
     ) -> dim_agent_runtime::BoxFuture<'a, Result<dim_agent_runtime::TimelineQueryPage>> {
-        if query.event_id.is_some() {
-            self.positions.fetch_add(1, Ordering::SeqCst);
-        }
-        self.memory.query(key, query, from, through)
+        Box::pin(async move {
+            if query.event_id.is_some() {
+                self.positions.fetch_add(1, Ordering::SeqCst);
+            }
+            if query.flags.len() == 2 {
+                self.context_pages.lock().unwrap().push((
+                    key.branch_id.clone(),
+                    from,
+                    query.offset,
+                ));
+            }
+            self.memory.query(key, query, from, through).await
+        })
     }
 }
 
@@ -1677,6 +1669,85 @@ async fn a_below_threshold_preparation_reads_no_growing_turn_order() {
     agent.close().await.unwrap();
 }
 
+/// A streamed context resumes at the event its checkpoint names
+/// ([ADR 020](../../../../docs/adr/020-timeline-read-convergence.md) D5): the
+/// fold reads the chain from that event, never from the chain's start, and its
+/// projection is the one the full render gives.
+#[tokio::test]
+async fn a_streamed_context_resumes_at_the_event_its_checkpoint_names() {
+    use super::checkpoint_projection::completed;
+
+    let store = Arc::new(CountContextReads::default());
+    store
+        .create_session("resume", &SessionConfig::default())
+        .await
+        .unwrap();
+    let timeline = Timeline::new(
+        Ctx::root().unwrap(),
+        TimelineKey {
+            session_id: "resume".into(),
+            branch_id: "main".into(),
+        },
+        vec![],
+        store.clone(),
+    );
+    let append = |kind: EventKind| timeline.append(kind.into()).unwrap();
+    let first = append(EventKind::InputMessage(InputMessageData::text(
+        "first", None,
+    )));
+    append(EventKind::InputConsumed(InputConsumedData {
+        input_id: first.id.clone(),
+    }));
+    let cut = append(EventKind::TurnStart(TurnStartData {
+        turn_id: "turn-1".into(),
+    }));
+    let kept = append(EventKind::InputMessage(InputMessageData::text(
+        "kept", None,
+    )));
+    append(EventKind::InputConsumed(InputConsumedData {
+        input_id: kept.id.clone(),
+    }));
+    let through = timeline.sequence();
+    let renderer = HistoryRenderer::default();
+    let fact = append(completed(&cut.id, "summary", through, vec![]));
+    let saved = renderer
+        .snapshot(&timeline.context(through).await.unwrap(), &cut.id, &fact)
+        .unwrap();
+    timeline.save_snapshot(saved).await.unwrap();
+    let resume = timeline
+        .checkpoint(
+            fact.sequence,
+            renderer.checkpoint_interpreter,
+            renderer.decode_checkpoint,
+        )
+        .await
+        .unwrap()
+        .expect("the checkpoint is usable")
+        .resume;
+    assert!(resume.sequence > 1, "the resume is inside the branch");
+
+    let (_, full) = renderer
+        .rendered_context(&timeline, fact.sequence)
+        .await
+        .unwrap();
+    store.context_pages.lock().unwrap().clear();
+    let streamed = renderer
+        .rendered_stream(&timeline, fact.sequence, 8)
+        .await
+        .unwrap();
+    assert_eq!(streamed.history, full);
+    let pages = store.context_pages.lock().unwrap().clone();
+    assert_eq!(
+        pages.first().map(|(_, from, _)| *from),
+        Some(resume.sequence),
+        "the fold begins at the resume event: {pages:?}"
+    );
+    assert!(
+        pages.iter().all(|(_, from, _)| *from >= resume.sequence),
+        "{pages:?}"
+    );
+}
+
 /// A boundary check after a completed compaction folds only the events after
 /// its cut, and its verdict is the one the whole prefix gives. A cut whose
 /// tail cannot start the state fold (a consumed input's event) falls back to
@@ -1812,12 +1883,12 @@ async fn a_cut_after_a_compaction_reads_only_its_tail_and_keeps_the_verdict() {
     assert_eq!(
         pages
             .first()
-            .map(|(branch, after)| (branch.as_str(), *after)),
-        Some(("main", cut.sequence - 1)),
+            .map(|(branch, from, _)| (branch.as_str(), *from)),
+        Some(("main", cut.sequence)),
         "{pages:?}"
     );
     assert!(
-        pages.iter().all(|(_, after)| *after >= cut.sequence - 1),
+        pages.iter().all(|(_, from, _)| *from >= cut.sequence),
         "{pages:?}"
     );
 
@@ -1841,11 +1912,11 @@ async fn a_cut_after_a_compaction_reads_only_its_tail_and_keeps_the_verdict() {
     );
     let pages = store.context_pages.lock().unwrap().clone();
     assert_eq!(
-        pages.first().map(|(_, after)| *after),
-        Some(consumed.sequence - 1),
+        pages.first().map(|(_, from, _)| *from),
+        Some(consumed.sequence),
         "{pages:?}"
     );
-    assert_eq!(pages.last().map(|(_, after)| *after), Some(0), "{pages:?}");
+    assert_eq!(pages.last().map(|(_, from, _)| *from), Some(1), "{pages:?}");
 
     let batch = timeline
         .append_batch_registered(

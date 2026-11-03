@@ -142,12 +142,12 @@ compaction（[agent_loop.rs:359](../../crates/dim-agent-capabilities/src/agent_l
 不保留投影 cache，也不把整段历史装进 `ContextHistory.events`。每次 prepare 按批读取事件，
 边读边投影，投影之外的批立即释放。没有跨 prepare 的派生状态，也没有缓存失效规则。
 
-- **读取**：`Timeline::stored_context_page_in` 读取某个位置之后、带上下文开关的完整原子批次，
-  目标是一批的事件数、永不在原子批次中间结束；`HistoryRenderer::rendered_stream`
-  以 256 条为默认批大小，从快照的恢复位置或第一个有效段的段首顺序读取；不经过 hot cache，
+- **读取**：`HistoryRenderer::rendered_stream` 用事件查询按页读取链上带上下文开关的事件
+  （`Render` 与 `State` 的并集），从快照记录的恢复事件或第一个有效段的段首顺序读取，
+  默认每页 256 条；页按事件数截断，不与原子批次对齐，按序折叠即可；不经过 hot cache，
   不保留事件体。
 - **投影**：`project_batch` 接受上一批的 `ProjectionCheckpointState`，返回新的 entries/state；
-  `rendered_stream` 合并 entries，事件只活到当前批。
+  `rendered_stream` 合并 entries，事件只活到当前页。
 - **压缩**：批次内遇到 completed compaction 时按 `retain_from` 裁剪已累计的 history；
   cut 在更早批次时按 `PolicyOrder` 在累计 history 上裁剪；找不到 cut 或数据损坏时报错，
   不再回退全量。
