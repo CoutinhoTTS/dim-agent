@@ -136,10 +136,10 @@ Each row was read from the consumer's source: what it takes from the Timeline, h
 | Permission rebuild (`permission.rs:522`) | The last `permission/changed` among the ancestors; each event overwrites the policy, so only the last counts | All ancestor events of that kind, folded | One event: chain, that kind, descending, limit 1 |
 | File reads (`file_reads.rs:136`) | The latest completed compaction after `established`, and whether its `retain_from` lies after that point | `local(established+1..=committed())`, then a search | One compaction event and one by-id position. The upper bound is `committed()`, so it reads events that may not be published yet |
 | Manual compaction wait (`context_methods.rs:81`) | One `context/compaction` whose `command` equals a value | `local(after+1..=head)`, then `find` | Branch, kind, `command` equality, from `after+1`, limit 1 |
-| Compaction policy reuse (`context_policy.rs:531`) | The compaction and budget facts already written for this prepare, matched on `turn_id` | `local(through+1..)`, then a filter | Kind, start and `turn_id` are expressible; `through` equality on the compaction stays with the caller. Whether these facts are published when read is not verified |
+| Compaction policy reuse (`context_policy.rs:531`) | The `context/compaction` and `context/budget` facts an earlier attempt of the same prepare wrote, matched on `turn_id` | `local(through+1..)`, then a filter | Expressible: branch, both kinds, from_sequence `through+1`, predicate `turn_id`; the compaction `through` equality stays with the caller. Whether those facts are published when read was not verified; the read happens before this attempt writes its own budget fact (`context_policy.rs:553`) |
 | Branch resume (`timeline_tree.rs:566`) | `branch/create-failed`, `branch/create`, `branch/ended`, folded into sets | `local(..=head)`, the whole branch | Three kinds, not the whole branch |
 | Collaboration result fetch (`collaboration.rs:1080`) | One event whose id is known | A `results` table for the sequence, then `local(seq..=seq)`, then `find` | A by-id read; the `results` table exists for this read only |
-| Session summary (`agents.rs:1003`) | The first `SUMMARY_SCAN_LIMIT` events and the one at `through` | `local_page` and `local(through..=through)` | Not verified: what it computes from them was not read |
+| Session summary (`agents.rs:1003`) | The preview text of the first operator input, and the time of the event at `through` | `local_page` of the first 256 events, then `local(through..=through)` | The first `input/message` that has a `user`, ascending, stopping there (the `user` check stays with the caller); the update time is one point read at `through`. Not 256 events |
 | Replay `follow` (`dispatcher.rs:194`) | Rebuild a part's own state from the branch's events up to `S = committed()` | `local(..=S)`, whole | Depends on the part: seven rebuild from kinds they do not subscribe to, and some need only a few kinds |
 | Submission index at restore (`timeline.rs:309`) | The `submission_id` of every restored input | `local(1..=restored_sequence)` | One kind, `input/message` |
 | Committed input (`timeline_context.rs:411`) | The event at a known sequence | `local(seq..=seq).pop()` | A point read |
@@ -179,8 +179,8 @@ Read from each part rebuild. The follow key list is what a part subscribes to; t
 | Wait | turn/start, turn/end | the last event |
 | Approval | approval/request, approval/respond, approval/cancelled | unclosed pairs |
 | ToolExecutor | step/tool-call, step/tool-result, stop/interrupt, turn/start, turn/end | unclosed pairs |
-| ModelProvider | model/call, step/tool-use-start, step/tool-use, step/model-output-end, stop/interrupt, turn/start, turn/end; also steer.apply, whose kinds were not read | unclosed pairs |
-| ContextPreparation | context/prepare, model/call, step/model-output-end, context/compaction-start, context/compaction, stop/interrupt, turn/start, turn/end; also steer.apply | unclosed pairs |
+| ModelProvider | model/call, step/tool-use-start, step/tool-use, step/model-output-end, stop/interrupt, turn/start, turn/end; also steer.apply, which reads step/model-start and input/applied with a non-append mode | unclosed pairs |
+| ContextPreparation | context/prepare, model/call, step/model-output-end, context/compaction-start, context/compaction, stop/interrupt, turn/start, turn/end; also steer.apply (step/model-start, input/applied) | unclosed pairs |
 | BackgroundExec | exec/started, exec/ended, stop/interrupt, tagged input/message | unclosed pairs and unposted wakes |
 | InputQueue | input/*, turn/*, stop/interrupt through state.step | accumulated |
 | BranchLine | branch/*, input/*, stop/interrupt, step/tool-use, step/tool-result, turn/end | accumulated |
@@ -195,13 +195,13 @@ What this shows:
 - Replay hands every part the whole branch prefix to the committed position, unfiltered. The decode of that prefix is shared during Loading (restore-shared-read.md), which lowers its cost but not its size.
 - The hot window holds events until they are dispatched, not only until they are published. The tail a rebuild must add to a stored read is the events not yet dispatched.
 
-Not verified: whether each unclosed pair can cross a turn, so whether reading from the latest turn/start is enough; the kinds steer.apply reads; the second half of the Loop rebuild; how long the undispatched tail is during an opening.
+Not verified: whether each unclosed pair can cross a turn, so whether reading from the latest turn/start is enough; the second half of the Loop rebuild; how long the undispatched tail is during an opening.
 
 ## 3. What it does not express
 
 | Need | Who | Why |
 | --- | --- | --- |
-| Read up to the *committed* position | Dispatcher replay, `goal/branch.ts`, the collaboration rebuild `collaboration.rs:2726` | the query clips at the published head |
+| Read up to the *committed* position | goal (`goal/branch.ts:104`, `:176`), the collaboration rebuild `collaboration.rs:2726`, file reads `file_reads.rs:136` | the query clips at the published head; replay no longer needs this if it is removed (section 2.3) |
 | Whether a position ends an atomic batch | cut validation, `history.rs:981` | batch ends are storage rows, not event content |
 | A chain start by branch and sequence | policy reads at an ancestor's cut, a checkpoint `resume` on an ancestor | `from_sequence` names the queried branch only |
 | More than one equality | two reads in `agents.rs` | the predicate is one equality |
@@ -212,17 +212,19 @@ Not verified: whether each unclosed pair can cross a turn, so whether reading fr
 2. Does the cut validation need to know a batch end now that a page may end inside a batch?
 3. Does the checkpoint store the resume event id so a chain read can start by `from_event`?
 4. The reads in §1.4 bypass the service. Which migration owns them?
-5. Proposed exits, not decided: `Branch` and `Agent` keep one `query` that only forwards, with no `history`, `local`, `context` or `page`; the Dispatcher has no reads, and goal takes the Timeline service; the App Server keeps one store read for sessions that are not loaded, with the same page shape as `query`. goal's binding to the Timeline service has not been verified.
+5. Proposed exits, not decided: `Branch` and `Agent` keep one `query` that only forwards, with no `history`, `local`, `context` or `page`; the Dispatcher has no reads, and goal takes the Timeline service; the App Server keeps one store read for sessions that are not loaded, with the same page shape as `query`. goal's binding to the Timeline service: the name `timeline` exists in `Services`, resolution for a branch part was not verified.
+6. Goal, file reads and the collaboration rebuild read to the committed position. Proposed: file reads and goal move to the published head only after their facts are shown to be published when read; until then they keep a read that reaches the undispatched tail.
 
 ## 5. Order of work
 
-The order follows dependency. Steps 4 and 5 wait on the answers to §4.
+The order follows dependency. Steps 3 to 6 wait on the answers in section 4.
 
-1. #942, #996 (merged) and #975 land first: the query, its start, and the contract text.
-2. Reads with no dependency on §4: by-id reads, `compaction_cut`, and deleting `stored_page`, `stored_local` and `trace`, which have no production caller.
-3. Consumers that need one or two events: permission, manual compaction wait, collaboration result, committed input, budget lookup.
-4. Consumers that fold a few kinds: branch resume, submission index, recall, context folding. Folding from a checkpoint depends on §4 question 3.
-5. Replay, collaboration rebuild, the reads that bypass the service, and finally the `Branch`, `Agent` and Dispatcher reads. These depend on §4 questions 1 and 2.
+1. #942, #996 (merged) and #975 land first.
+2. Reads with no dependency on section 4: by-id reads, `compaction_cut`, and deleting `stored_page`, `stored_local` and `trace`.
+3. Consumers of one or two events: permission, manual compaction wait, collaboration result, committed input, budget lookup, session summary.
+4. Consumers that fold a few kinds: branch resume, submission index, recall, compaction policy reuse, context folding. Folding from a checkpoint depends on question 3.
+5. Rebuild without replay, one part at a time: Permission and Wait first (the last event only), then the parts that fold unclosed pairs, then the three that accumulate. It needs the handover from the query to live delivery (question 1) and a test showing that the old and new rebuild give the same part state.
+6. Collaboration rebuild, file reads, goal, the bypass reads, and finally the `Branch`, `Agent` and Dispatcher reads (questions 2 to 4).
 
 ## 6. Target design
 
@@ -263,13 +265,15 @@ flowchart LR
   SS -.-> Sql
 ```
 
+Rebuild: each part queries the kinds its rebuild folds (section 2.3), adds the undispatched tail from the hot window, and then receives live events. The handover must neither drop nor repeat an event; it is not designed yet (section 4, question 1).
+
 ### 6.3 API by layer
 
 | Layer | Provides | Does not provide |
 | --- | --- | --- |
 | Timeline service | `query`, `append`, `sequence()`, branch segments, snapshot save and read | `history`, `local`, `page`, `page_cursor`, `context`, `policy_*`, `event_by_id`, `event_position`, `compaction_cut`, `ancestor_events_of_kind`, `stored_*` |
 | Branch and Session facade | `query`, forwarding only, bounded at the published head | every other read |
-| Dispatcher | `subscribe`, `follow`, `consume`, `sequence`, `committed` | `local`, `history` |
+| Dispatcher | `subscribe`, `sequence`, `committed`; live delivery only | `local`, `history`, and the replay of `follow` and `consume`, which are removed or reduced to live delivery if replay is removed (section 4, question 1) |
 | Store port | `query(key, query, from, through)`, `append`, `head`, `read` and `read_segments` for restore and export, snapshots | reads shaped for one consumer |
 | SessionStore | a paged read for sessions that are not loaded, with the page shape of `query` | anything for loaded sessions |
 
@@ -286,17 +290,21 @@ The request carries no read point. The service passes each segment its bound: an
 ### 6.5 Wiring
 
 - Capability parts declare a dependency on the branch's Timeline service and call `query` on it. The facades are not in their path.
-- The goal plugin injects the Timeline service instead of `dispatcher` for reads and calls `Timeline.query`. `npm/branch-services.d.ts` already declares `query` on `Timeline`. Whether the goal binding can obtain that service has not been verified.
+- The goal plugin injects the Timeline service instead of `dispatcher` for reads and calls `Timeline.query`. `npm/branch-services.d.ts` already declares `query` on `Timeline`. The `Services` interface in `npm/branch-services.d.ts` lists `timeline: Timeline`, so the name exists. Goal injects dispatcher, timelineIdentity, treeCommands, settings, branchLifecycle and sessionLifecycle today; whether the binding resolves `timeline` for a branch part was not verified. Goal also reads to the committed position (`dispatcher.committed()` :104, `local(turnStart, through)` :176), so it belongs to the same open question as file reads and the collaboration rebuild.
 - The App Server reads a loaded session through `Session::query(branch, query)`, which forwards to `Branch::query` and then to the Timeline service.
 - The App Server reads an unloaded session through `SessionStore`, because no Timeline service exists for it. The page shape matches `query`, so loading a session does not change the protocol.
 - After the reads are deleted, `xtask types` regenerates `npm/branch-services.d.ts` and `xtask graph` regenerates `catalog.md`; nothing else in the generated files may change.
 
 ### 6.6 Not verified
 
-- Session summary (`agents.rs:1003`): what it computes from the events it reads.
-- Compaction policy reuse (`context_policy.rs:531`): whether those facts are published when read.
-- The goal plugin binding to the Timeline service.
+- Whether each unclosed pair can cross a turn, so whether reading from the latest `turn/start` is enough.
+- The second half of the Loop rebuild, and the full folds of BranchLine and Hooks.
+- How long the undispatched tail is during an opening.
+- Whether the compaction and budget facts read at `context_policy.rs:531` are published when read.
+- Whether the goal binding resolves `timeline` for a branch part.
 - The Mermaid diagrams in this document have not been rendered.
+
+Verified in this revision: `steer.apply` reads only `step/model-start` and `input/applied`; the session summary needs the first operator input and one point read; goal injects `dispatcher` and reads to the committed position.
 
 ## 7. Confirmed integration
 
@@ -339,3 +347,7 @@ This section holds only what is decided. What is not decided stays in section 4.
 ### 7.4 Reads removed after the moves
 
 On Timeline, Branch, Agent and Dispatcher: history, local, page, page_cursor, context, context_with_checkpoint, event_by_id, event_position, compaction_cut, ancestor_events_of_kind, stored_page, stored_local, stored_context_page and its _in form, and the policy reads once their own migration lands. Then xtask types and xtask graph regenerate the generated files, and nothing else in them may change.
+
+### 7.5 Not decided
+
+Removing replay, the committed-position reads of goal, file reads and the collaboration rebuild, the cut validation, and the checkpoint resume event id are in section 4. None is a decision yet.
