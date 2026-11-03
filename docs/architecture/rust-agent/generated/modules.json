@@ -38103,6 +38103,13 @@
     },
     {
       "from": "dim_migration::settings",
+      "to": "dim_app_server::mcp::config",
+      "references": [
+        "path dim_app_server::mcp::config::decode_entry"
+      ]
+    },
+    {
+      "from": "dim_migration::settings",
       "to": "dim_migration",
       "references": [
         "path Error::Deferred",

@@ -849,6 +849,11 @@ fn validate_settings(source: &str, value: &Value) -> Result<()> {
             use dim_app_server::settings::BusinessDocument;
             let document: dim_app_server::mcp::config::McpSettings =
                 serde_json::from_value(value.clone()).map_err(|_| invalid())?;
+            // Migration writes only entries that decode; a converted group
+            // that still holds a broken entry is not written.
+            if !document.invalid_entries().is_empty() {
+                return Err(invalid());
+            }
             document.validate().map_err(|_| invalid())?;
         }
         "collaboration" => {
