@@ -8,7 +8,7 @@
 //! │ › node      download  auto on   24.21.0   ready   │
 //! │   python    system    auto on   3.12.15   off     │
 //! │                                                   │
-//! │   4 plugins wait for node: goal, session-title, … │
+//! │   3 plugins wait for node: goal, workflow, … │
 //! ╰─ Enter install or apply · s source · a auto ──────╯
 //! ```
 

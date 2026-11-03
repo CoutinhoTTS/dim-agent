@@ -154,6 +154,197 @@ async fn login(providers: &ManagedProviders, directory: &str) -> AccountSnapshot
     .unwrap()
 }
 
+async fn title_call(
+    root: &Ctx,
+    provider: &str,
+    cancel: CancellationToken,
+) -> dim_session_title::GenerateTitleReply {
+    use rutis_bridge::session::{Value as V, host_key, settle};
+    let service = root
+        .get_at(&host_key(dim_session_title::GENERATOR))
+        .unwrap();
+    let callback = V::callback(move |_| {
+        let cancel = cancel.clone();
+        Ok(V::cancellable_future(async move {
+            cancel.cancelled().await;
+            Ok(V::Undefined)
+        }))
+    });
+    let call = service
+        .invoke(
+            "generate",
+            V::List(vec![
+                json!({"providerId":provider,"text":"the opening user request"}).into(),
+                callback,
+            ]),
+        )
+        .unwrap();
+    serde_json::from_value(settle(call).await.unwrap().json().unwrap()).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn optional_title_service_owns_authentication_rejection_and_cancellation() {
+    use dim_session_title::{GenerateTitleReply as Reply, TitleUnavailableReason as Reason};
+    let fixture = oauth::start().await;
+    let home = home();
+    let Process { root, providers } = process(&home).await;
+    assert_eq!(
+        title_call(&root, "other-provider", cancel()).await,
+        Reply::Unavailable {
+            reason: Reason::UnsupportedProvider
+        }
+    );
+    assert_eq!(
+        title_call(&root, PROVIDER, cancel()).await,
+        Reply::Unavailable {
+            reason: Reason::AccountUnavailable
+        }
+    );
+    assert_eq!(fixture.service.calls("POST /v1/session/rename"), 0);
+    let service = root
+        .get_at(&rutis_bridge::session::host_key(
+            dim_session_title::GENERATOR,
+        ))
+        .unwrap();
+    for request in [
+        json!({"providerId":PROVIDER,"text":""}),
+        json!({"providerId":PROVIDER,"text":"a".repeat(2001)}),
+        json!({"providerId":PROVIDER,"text":"valid","issuer":"https://injected.example"}),
+    ] {
+        assert!(service.invoke("generate", json!([request]).into()).is_err());
+    }
+    login(&providers, &fixture.base).await;
+    assert_eq!(
+        title_call(&root, PROVIDER, cancel()).await,
+        Reply::Generated {
+            title: "Account title".into()
+        }
+    );
+    {
+        let requests = fixture.service.title_requests.lock().unwrap();
+        assert_eq!(requests[0].0, "access-0");
+        assert_eq!(
+            requests[0].1,
+            json!({"messages":[{"role":"user","content":"the opening user request"}]})
+        );
+    }
+    fixture
+        .service
+        .rejected
+        .lock()
+        .unwrap()
+        .push("access-0".into());
+    assert_eq!(
+        title_call(&root, PROVIDER, cancel()).await,
+        Reply::Generated {
+            title: "Account title".into()
+        }
+    );
+    assert_eq!(fixture.service.refreshes.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fixture
+            .service
+            .title_requests
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .0,
+        "access-1"
+    );
+    for (code, reason) in [
+        ("session_rename_disabled", Reason::Disabled),
+        ("session_rename_not_entitled", Reason::NotEntitled),
+        ("session_rename_quota_exhausted", Reason::QuotaExhausted),
+    ] {
+        *fixture.service.title_response.lock().unwrap() = Some((
+            axum::http::StatusCode::FORBIDDEN,
+            json!({"error":{"code":code,"message":"private upstream message"}}),
+        ));
+        assert_eq!(
+            title_call(&root, PROVIDER, cancel()).await,
+            Reply::Unavailable { reason }
+        );
+    }
+    assert!(
+        providers
+            .status(PROVIDER, &cancel())
+            .await
+            .unwrap()
+            .account
+            .is_some()
+    );
+    assert_eq!(fixture.service.refreshes.load(Ordering::SeqCst), 1);
+    *fixture.service.title_response.lock().unwrap() =
+        Some((axum::http::StatusCode::OK, json!({"title":4})));
+    assert_eq!(title_call(&root, PROVIDER, cancel()).await, Reply::Failed);
+
+    fixture
+        .service
+        .rejected
+        .lock()
+        .unwrap()
+        .push("access-1".into());
+    fixture.service.refresh_wait.store(true, Ordering::SeqCst);
+    let cancellation = cancel();
+    let pending = {
+        let root = root.clone();
+        let cancellation = cancellation.clone();
+        tokio::spawn(async move { title_call(&root, PROVIDER, cancellation).await })
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while fixture.service.refreshes.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    cancellation.cancel();
+    fixture.service.refresh_release.notify_one();
+    assert_eq!(pending.await.unwrap(), Reply::Cancelled);
+    assert_eq!(
+        auth(&home)["nextApiOauth"]["access"],
+        "access-2",
+        "title cancellation settles and persists an accepted token rotation"
+    );
+    fixture.service.refresh_wait.store(false, Ordering::SeqCst);
+
+    fixture.service.title_wait.store(true, Ordering::SeqCst);
+    for closing in [false, true] {
+        let calls = fixture.service.calls("POST /v1/session/rename");
+        let cancellation = cancel();
+        let pending = {
+            let root = root.clone();
+            let cancellation = cancellation.clone();
+            tokio::spawn(async move { title_call(&root, PROVIDER, cancellation).await })
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while fixture.service.calls("POST /v1/session/rename") == calls {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        if closing {
+            tokio::time::timeout(Duration::from_secs(10), root.shutdown())
+                .await
+                .unwrap()
+                .unwrap();
+        } else {
+            cancellation.cancel();
+        }
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), pending)
+                .await
+                .unwrap()
+                .unwrap(),
+            Reply::Cancelled
+        );
+        fixture.service.title_release.notify_waiters();
+    }
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn device_login_publishes_identity_catalog_usage_and_leases() {
     let fixture = oauth::start().await;
