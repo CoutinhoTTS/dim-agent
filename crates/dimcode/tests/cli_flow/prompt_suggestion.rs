@@ -14,14 +14,23 @@ fn offer(wire: &mut Wire, turn: &str, text: &str) {
 }
 
 /// The startup a terminal keeps: a created and attached Session holding
-/// `history`, and the two reads the interface makes after attaching.
+/// `history`, and the reads the interface makes after attaching.
 fn opened(wire: &mut Wire, features: &[&str], history: Vec<Value>) {
+    opened_with_methods(wire, features, history, true);
+}
+
+/// [`opened`] with a method table that lists the suggestion methods, or
+/// without them.
+fn opened_with_methods(wire: &mut Wire, features: &[&str], history: Vec<Value>, listed: bool) {
     let mut features = features.to_vec();
     features.push("session.methods");
     wire.hello(&features);
     wire.created();
     let attach = wire.read("session.attach");
     wire.reply(&attach, attach_record(&attach));
+    // The interface reads the method table once per Session, before
+    // anything can ask for an offer or probe the settings source.
+    methods(wire, listed);
     let page = wire.read("session.history");
     wire.reply(
         &page,
@@ -60,7 +69,6 @@ fn completed(wire: &mut Wire, turn: &str) {
 
 /// Waits for the request of `turn` and answers that it was accepted.
 fn accepts(wire: &mut Wire, turn: &str) {
-    methods(wire, true);
     let request = wire.read("session.suggestion.request");
     assert_eq!(
         request["params"],
@@ -114,9 +122,8 @@ fn a_daemon_that_does_not_list_the_method_is_never_asked() {
     let home = Home::new();
     let (settled, settle) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
-        opened(wire, &[], vec![]);
+        opened_with_methods(wire, &[], vec![], false);
         completed(wire, "turn-1");
-        methods(wire, false);
         wire.quiet(Duration::from_millis(300));
         settled.send(()).unwrap();
         wire.hold();
@@ -393,7 +400,6 @@ fn the_pause_is_announced_once_per_session() {
     let daemon = home.daemon(move |wire| {
         opened(wire, &[], vec![]);
         completed(wire, "turn-1");
-        methods(wire, true);
         let request = wire.read("session.suggestion.request");
         wire.reply(&request, json!({"accepted":false,"reason":"throttled"}));
         completed(wire, "turn-2");
@@ -416,6 +422,43 @@ fn the_pause_is_announced_once_per_session() {
             .matches("Suggestions paused in this session")
             .count(),
         1
+    );
+}
+
+/// A daemon that does not list the suggestion methods opens `/settings`
+/// with no read of the source and no error notice, and the panel has no
+/// Prompt suggestion switch.
+#[test]
+fn settings_shows_no_suggestion_row_without_the_methods() {
+    let home = Home::new();
+    let (arm, ready) = std::sync::mpsc::channel();
+    let (settled, settle) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        opened_with_methods(wire, &["settings.read", "settings.update"], vec![], false);
+        ready.recv_timeout(PATIENCE).unwrap();
+        wire.quiet(Duration::from_millis(300));
+        settled.send(()).unwrap();
+        wire.hold();
+    });
+    let mut command = home.command();
+    command.arg("--scrollback");
+    sized(&mut command, 100, 40);
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / model");
+    terminal.write(b"/settings\r");
+    arm.send(()).unwrap();
+    settle.recv_timeout(PATIENCE).unwrap();
+    terminal.until("Startup UI form");
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(150));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+    assert!(
+        !terminal.transcript.contains("Prompt suggestion"),
+        "{}",
+        terminal.transcript
     );
 }
 

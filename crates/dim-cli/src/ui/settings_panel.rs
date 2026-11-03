@@ -42,6 +42,9 @@ pub struct Values {
     pub mouse: bool,
     pub notify: bool,
     pub acp_sessions: bool,
+    /// Whether the daemon lists the suggestion methods: without them the row
+    /// is absent.
+    pub prompt_suggestion_supported: bool,
     /// `Some` is the switch as the daemon reported it; `None` is a read that
     /// has not happened or failed, which the row shows rather than a value.
     pub prompt_suggestion: Option<bool>,
@@ -118,7 +121,7 @@ impl SettingsPanel {
         let row = |setting: Setting, label: &'static str, value: String| {
             Item::new(setting.id(), t(label), value)
         };
-        let items = vec![
+        let mut items = vec![
             Item::heading(t("Interface")),
             row(Setting::Theme, "Theme", link(&values.theme)),
             row(Setting::Language, "Language", link(&values.language)),
@@ -162,14 +165,18 @@ impl SettingsPanel {
                 "Show ACP sessions",
                 on_off(values.acp_sessions).to_owned(),
             ),
-            row(
+        ];
+        if values.prompt_suggestion_supported {
+            items.push(row(
                 Setting::PromptSuggestion,
                 "Prompt suggestion",
                 match values.prompt_suggestion {
                     Some(on) => on_off(on).to_owned(),
                     None => t("Not available").to_owned(),
                 },
-            ),
+            ));
+        }
+        items.extend([
             Item::heading(t("Permissions")),
             row(
                 Setting::FileAccess,
@@ -178,7 +185,7 @@ impl SettingsPanel {
             ),
             row(Setting::Approvals, "Tool approval", link(&values.approvals)),
             row(Setting::Isolation, "Process isolation", link("")),
-        ];
+        ]);
         let mut list = ListPanel::new(
             "Settings",
             "↑↓ move · Enter select · ←→/Space change · Esc close",

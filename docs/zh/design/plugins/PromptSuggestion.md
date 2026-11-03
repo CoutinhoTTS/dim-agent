@@ -264,7 +264,7 @@ CLI 只在看到该轮 `turn/end` 为 `Completed` 之后、且输入框为空、
 | 任何编辑 | 隐藏提示并发送 `respond dismiss` |
 | 新一轮或新输入 | daemon 的通知清除提示 |
 
-`/settings` 增加 `Prompt suggestion` 开关，由 daemon 对 `prompt-suggestion` 来源的 `settings.read`/`settings.update` 支撑，其状态就是来源的 `enabled`。客户端按部件自己的类型读取文档：文档缺失、格式错误或缺少成员都是行内显示的错误，绝不是客户端编造的默认值。客户端新增的每个字符串都在全部十种语言中存在。请求以 `throttled` 被拒绝时，客户端在每个 Session 中只播报一次建议已暂停、以及在 `/settings` 中关闭再开启即可恢复；同一 Session 中后续的拒绝保持安静。
+`/settings` 增加 `Prompt suggestion` 开关，由 daemon 对 `prompt-suggestion` 来源的 `settings.read`/`settings.update` 支撑，其状态就是来源的 `enabled`。只有当 Session 的方法表列出建议方法（每个 Session 读取一次）时，该行和它背后的读取才存在：没有这些方法的 daemon 从不被探测，也不显示该行。客户端按部件自己的类型读取文档：文档缺失、格式错误或缺少成员都是行内显示的错误，绝不是客户端编造的默认值。客户端新增的每个字符串都在全部十种语言中存在。请求以 `throttled` 被拒绝时，客户端在每个 Session 中只播报一次建议已暂停、以及在 `/settings` 中关闭再开启即可恢复；同一 Session 中后续的拒绝保持安静。
 
 ## 12. 规则检查
 

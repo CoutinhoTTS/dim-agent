@@ -995,6 +995,9 @@ struct App {
     /// The `prompt-suggestion` switch as last read or written; none until a
     /// read answers.
     suggestion_setting: Option<SuggestionSetting>,
+    /// Whether this Session's method table lists the suggestion methods:
+    /// without them, `/settings` neither probes the source nor shows the row.
+    suggestion_methods: bool,
     /// A flip asked for before the switch was known: the read that answers
     /// it sends the flip.
     suggestion_flip: bool,
@@ -1296,6 +1299,7 @@ impl App {
             recovering: Vec::new(),
             suggestion: None,
             suggestion_setting: None,
+            suggestion_methods: false,
             suggestion_flip: false,
         }
     }
@@ -2263,6 +2267,12 @@ impl App {
             Update::IsolationBackend(result) => {
                 if let Some(Prompt::Isolation(panel)) = &mut self.prompt {
                     panel.set_backend(result);
+                }
+            }
+            Update::SuggestionMethods(offered) => {
+                self.suggestion_methods = offered;
+                if let Some(Prompt::Settings(panel)) = &self.prompt {
+                    self.open_settings(panel.selected());
                 }
             }
             Update::SuggestionSetting(result) => match result {
@@ -3449,7 +3459,9 @@ impl App {
         let mut words = args.split_whitespace();
         match (words.next(), words.next(), words.next()) {
             (None, _, _) => {
-                self.host.send(Command::ReadSuggestionSetting);
+                if self.suggestion_methods {
+                    self.host.send(Command::ReadSuggestionSetting);
+                }
                 self.open_settings(Setting::Theme);
             }
             (Some("recording"), None, None) => {
@@ -3485,6 +3497,7 @@ impl App {
             mouse: self.mouse,
             notify: self.notify,
             acp_sessions: crate::ui::config::saved_show_acp(&self.home),
+            prompt_suggestion_supported: self.suggestion_methods,
             prompt_suggestion: self
                 .suggestion_setting
                 .as_ref()
@@ -7658,6 +7671,7 @@ mod tests {
             "/work".into(),
         );
         let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
+        app.apply(Update::SuggestionMethods(true));
         app.run_command("settings", "");
         assert!(matches!(
             sent.borrow().first(),
@@ -7721,6 +7735,7 @@ mod tests {
             home.path().to_path_buf(),
             "/work".into(),
         );
+        app.apply(Update::SuggestionMethods(true));
         app.run_command("settings", "");
         app.apply(Update::SuggestionSetting(Err(
             "prompt suggestion settings: missing field `maxChars`".into(),

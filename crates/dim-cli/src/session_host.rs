@@ -849,7 +849,12 @@ impl Worker {
         self.session_title = stored_title(attached.title.as_deref()).map(str::to_owned);
         self.title_revision = attached.title_revision;
         self.session_id = session_id.clone();
-        self.suggestion_methods = None;
+        // The method table is read once per Session, before anything can ask
+        // for an offer or probe the settings source: a Session that does not
+        // list the methods is never asked.
+        let offered = self.suggestion_offered().await;
+        self.suggestion_methods = Some(offered);
+        self.send(Update::SuggestionMethods(offered));
         self.suggestion_throttle_noted = false;
         self.session_cwd = attached.cwd;
         self.register_ui().await;

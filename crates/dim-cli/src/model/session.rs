@@ -1100,6 +1100,9 @@ pub enum Update {
     /// Read once with the switches; a failed read adds no line and leaves the
     /// switches usable.
     IsolationBackend(Result<SandboxBackend, String>),
+    /// Whether the Session's method table lists `session.suggestion.request`:
+    /// without it the interface neither asks for an offer nor shows the row.
+    SuggestionMethods(bool),
     /// The `prompt-suggestion` switch, as last read or written.
     SuggestionSetting(Result<SuggestionSetting, String>),
     /// A turn completed on `main`: the interface may ask for the next
