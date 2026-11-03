@@ -1806,3 +1806,68 @@ async fn the_wire_prefix_is_the_turns_own_for_every_protocol() {
     server._server.abort();
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// Unloading the Session part ends its tasks before it settles: the held
+/// model call is cancelled and the unload waits for the request task.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unloading_the_part_waits_for_its_request_task() {
+    let fixture = serve_fixture(Reply::Text("run the tests".into())).await;
+    let (mut client, id) = create(&fixture, true).await;
+    submit(&mut client, &id, "add a test").await;
+    let turn = latest_turn(&mut client, &id).await;
+    configure(&mut client, json!({"enabled":true})).await;
+
+    let completion = prompt_suggestion::testing::hold_next_completion(&id);
+    let _gate = fixture.model.holds_next();
+    assert_eq!(
+        suggest(&mut client, &id, &turn).await,
+        json!({"accepted": true})
+    );
+    fixture.model.wait_suggestions(1).await;
+    // Nothing holds the Session, so the idle-unload pass may release it
+    // while the request is still running.
+    assert_ok(&client.rpc("session.detach", json!({"sessionId":id})).await);
+
+    let agent = fixture.server.agent().unwrap();
+    let sid = id.clone();
+    let mut unloading = tokio::spawn(async move {
+        // The idle-unload pass: release the instance as soon as it is idle.
+        loop {
+            match agent.get_session(&sid) {
+                None => break,
+                Some(session) => {
+                    let _ = session.unload_if_idle().await;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+    // The endpoint's held call is cancelled: its connection closes.
+    fixture.model.wait_cancellations(1).await;
+    // The request task returns from the cancelled call and waits at the
+    // barrier, so it is still running while the unload proceeds.
+    completion.entered().await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut unloading)
+            .await
+            .is_err(),
+        "the unload settled while its request task was still running"
+    );
+    completion.release();
+    completion.passed().await;
+    tokio::time::timeout(Duration::from_secs(10), unloading)
+        .await
+        .expect("the unload settles once the request task ends")
+        .expect("the unload task ran");
+    let record = prompt_suggestion::testing::unload_record(&id)
+        .expect("the part records what its tracker held when it unloaded");
+    assert!(
+        record.live >= 1,
+        "the request task was still running when the unload closed the tracker: {record:?}"
+    );
+    assert_eq!(
+        record.remaining, 0,
+        "no task of the old part remains after its unload: {record:?}"
+    );
+    fixture.end().await;
+}

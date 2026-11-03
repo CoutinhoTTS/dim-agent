@@ -479,11 +479,21 @@ impl DynPlugin for PromptSuggestionPlugin {
                     tree,
                 },
                 ctx: ctx.clone(),
+                stopping: ctx.cancellation_token().child_token(),
                 tasks: TaskTracker::new(),
             });
             let owner = part.clone();
             ctx.effect(move || async move {
+                // The part ends before it is replaced: nothing it started may
+                // outlive it and run beside the part that replaces it.
                 owner.stop();
+                owner.stopping.cancel();
+                #[cfg(feature = "testing")]
+                let live = owner.tasks.len();
+                owner.tasks.close();
+                owner.tasks.wait().await;
+                #[cfg(feature = "testing")]
+                testing::unloaded(&owner.session_id, live, owner.tasks.len());
                 Ok(())
             })?;
             let listener = {
@@ -516,8 +526,13 @@ impl DynPlugin for PromptSuggestionPlugin {
                 let owner = part.clone();
                 let lifecycle = (*lifecycle).clone();
                 part.tasks.spawn(async move {
-                    lifecycle.closing().await;
-                    owner.stop_with_notice();
+                    // The Session's close is announced; the part's own unload
+                    // ends the waiter without a notice, as it ends every task.
+                    tokio::select! {
+                        biased;
+                        _ = lifecycle.closing() => owner.stop_with_notice(),
+                        _ = owner.stopping.cancelled() => {}
+                    }
                 });
             }
             methods.register(
@@ -548,6 +563,9 @@ struct Part {
     state: Mutex<State>,
     hosts: Hosts,
     ctx: Ctx,
+    /// Ends with the part: the closing waiter, every task and the settings
+    /// reads that outlive a request are bounded by it.
+    stopping: CancellationToken,
     tasks: TaskTracker,
 }
 
@@ -603,7 +621,9 @@ impl Part {
     /// switch on ends the pause the unused count caused, so a user who
     /// stopped seeing offers can resume without ending the Session.
     async fn settings_changed(self: Arc<Self>) {
-        let Ok(settings) = self.read_settings(CancellationToken::new()).await else {
+        // The read ends with the part, not with a Session that closes while
+        // it runs; the change it reports no longer matters then.
+        let Ok(settings) = self.read_settings(self.stopping.child_token()).await else {
             return;
         };
         let mut state = self.state.lock().unwrap();
@@ -773,9 +793,10 @@ impl Part {
         }
         // The preflight awaited: the start is decided again against the
         // settings and the state as they are now, never the snapshot above.
-        // The read takes a token of its own: a cancelled request still reads
-        // and answers a reason rather than a service error.
-        let settings = match self.read_settings(CancellationToken::new()).await {
+        // The read is bounded by the part, not by the request: a cancelled
+        // request still reads and answers a reason rather than a service
+        // error, and only the part's unload cuts the read short.
+        let settings = match self.read_settings(self.stopping.child_token()).await {
             Ok(settings) => settings,
             Err(error) => {
                 self.finish_invocation(invocation);
@@ -1133,6 +1154,35 @@ pub mod testing {
         pub(crate) fn passed_now(&self) {
             self.passed.notify_one();
         }
+    }
+
+    /// What a part's unload saw in its task tracker: the tasks still there
+    /// when it closed the tracker, and those left after it waited.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct UnloadRecord {
+        pub live: usize,
+        pub remaining: usize,
+    }
+
+    static UNLOADS: Mutex<Vec<(String, UnloadRecord)>> = Mutex::new(Vec::new());
+
+    pub(crate) fn unloaded(session_id: &str, live: usize, remaining: usize) {
+        UNLOADS
+            .lock()
+            .unwrap()
+            .push((session_id.to_owned(), UnloadRecord { live, remaining }));
+    }
+
+    /// The newest unload record of `session_id`, or `None` while no part of
+    /// it has unloaded.
+    pub fn unload_record(session_id: &str) -> Option<UnloadRecord> {
+        UNLOADS
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(held, _)| held == session_id)
+            .map(|(_, record)| *record)
     }
 
     static NEXT: Mutex<Option<(String, Arc<Completion>)>> = Mutex::new(None);

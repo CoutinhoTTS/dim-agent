@@ -10950,7 +10950,8 @@
       "to": "dim_agent_capabilities::prompt_suggestion::testing",
       "references": [
         "mod testing",
-        "path testing::completion"
+        "path testing::completion",
+        "path testing::unloaded"
       ]
     },
     {

@@ -65,6 +65,8 @@ All state is in memory, per Session, and lost on unload:
 
 Nothing is stored, replayed or exported, and no `model/usage` event is written: the suggestion is not a turn. The request identity is the suggestion's own ([§5](#5-the-request-and-the-cache)); the logs carry numbers and reason codes, never the text or the conversation.
 
+The part holds one cancellation token that ends with it: unloading cancels the token, closes the task tracker and waits for its tasks, so a replaced part leaves no request running while its replacement starts. A request the unload cancels announces nothing.
+
 ## 4. Flow
 
 ### 4.1 A request and its offer
