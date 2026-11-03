@@ -343,6 +343,64 @@ pub struct AgentIndex {
     #[cfg(feature = "testing")]
     idle_admitted: Arc<tokio::sync::Notify>,
 }
+/// One page of `branch`'s own facts after `after` through its Session's query:
+/// at most `limit`, never past `through`, ending on an atomic batch.
+async fn session_history_page(
+    session: &Session,
+    branch: &str,
+    after: u64,
+    limit: usize,
+    through: u64,
+) -> dim_agent_runtime::Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
+    if after > 0 {
+        session.batch_end(branch, after).await?;
+    }
+    session.batch_end(branch, through).await?;
+    let mut events = session
+        .query(branch, history_page_query(after, limit))
+        .await?
+        .events;
+    events.retain(|event| event.sequence <= through);
+    while let Some(sequence) = events.last().map(|event| event.sequence) {
+        if sequence >= through {
+            break;
+        }
+        match session.batch_end(branch, sequence).await {
+            Ok(()) => break,
+            Err(AgentError::InvalidInput(_)) => {}
+            Err(error) => return Err(error),
+        }
+        let next = session
+            .query(branch, history_page_query(sequence, 1))
+            .await?
+            .events;
+        let Some(event) = next.into_iter().find(|event| event.sequence <= through) else {
+            break;
+        };
+        events.push(event);
+    }
+    Ok(events)
+}
+
+/// The facts after `after` a page asks for, up to `limit`.
+fn history_page_query(after: u64, limit: usize) -> dim_agent_runtime::TimelineQuery {
+    dim_agent_runtime::TimelineQuery {
+        scope: dim_agent_runtime::TimelineQueryScope::Branch,
+        bound: dim_agent_runtime::TimelineQueryBound::Published,
+        from_event: None,
+        from_sequence: Some(after.saturating_add(1)),
+        order_by: dim_agent_runtime::TimelineQueryOrderBy::Sequence,
+        direction: dim_agent_runtime::TimelineQueryDirection::Ascending,
+        kinds: Vec::new(),
+        flags: Vec::new(),
+        event_id: None,
+        predicate: None,
+        limit: NonZeroU64::new(u64::try_from(limit).unwrap_or(u64::MAX).max(1))
+            .expect("a page keeps one fact"),
+        offset: 0,
+    }
+}
+
 impl AgentIndex {
     /// Whether this profile resolves Session models through a host.
     pub(crate) fn selects_models(&self) -> bool {
@@ -667,7 +725,7 @@ impl AgentIndex {
             return Ok((
                 through,
                 store
-                    .read_page_without_request_bodies(id, after, limit, through)
+                    .read_page_without_request_bodies(id, "main", after, limit, through)
                     .await?,
             ));
         }
@@ -677,8 +735,49 @@ impl AgentIndex {
         let through = through.unwrap_or(session.sequence("main")?);
         Ok((
             through,
-            session.local_page("main", after, limit, through).await?,
+            session_history_page(&session, "main", after, limit, through).await?,
         ))
+    }
+    /// One page of `branch`'s own facts after `after`, at most `limit`, never
+    /// past `through`, ending on an atomic batch.
+    ///
+    /// A loaded line pages through its Session's query, which asks the store
+    /// whether the page's last fact ends a batch ([ADR 020 D4]); a line whose
+    /// Session this process does not hold, or an ended one when the host keeps
+    /// no store of its own, reads through a page read instead: the tree owns
+    /// the ended lines and serves them at their fixed head ([ADR 020 D6]).
+    pub(crate) async fn history_page(
+        &self,
+        id: &str,
+        branch: &str,
+        after: u64,
+        limit: usize,
+        through: u64,
+    ) -> dim_agent_runtime::Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
+        if let Some((_, session)) = self.session(id)
+            && !session.is_unloading()
+        {
+            if session.ended_head(branch).is_none() {
+                match session_history_page(&session, branch, after, limit, through).await {
+                    Err(AgentError::BranchEnded(_)) => {}
+                    result => return result,
+                }
+            } else if self.session_store.is_none() {
+                let page = session
+                    .session_service::<dim_agent_capabilities::timeline_tree::TreeCommands>()?
+                    .page(branch.to_owned(), after, limit)
+                    .await?;
+                return Ok(page
+                    .into_iter()
+                    .filter(|event| event.sequence <= through)
+                    .collect());
+            }
+        }
+        self.session_store
+            .as_ref()
+            .ok_or_else(|| AgentError::Closed(id.into()))?
+            .read_page_without_request_bodies(id, branch, after, limit, through)
+            .await
     }
     /// The stored events of `event_ids` in one read; ids the store does not
     /// hold are absent.

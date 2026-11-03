@@ -121,6 +121,10 @@ async function loadGoalBranch(read, options = {}) {
         : selected.filter(entry => entry.event.sequence >= at)
     }
     if (query.kinds?.length) selected = selected.filter(entry => query.kinds.includes(`${entry.event.type}/${entry.event.name}`))
+    if (query.predicate) {
+      const path = query.predicate.path.split('.')
+      selected = selected.filter(entry => path.reduce((value, part) => value?.[part], entry.event.data) === query.predicate.value)
+    }
     if (query.direction === 'descending') selected.reverse()
     const offset = Number(query.offset ?? 0)
     const page = selected.slice(offset, offset + Number(query.limit))
@@ -147,8 +151,6 @@ async function loadGoalBranch(read, options = {}) {
         covered = BigInt(await call(rebuild, []))
         for (const event of held) if (event.sequence > covered) await handler(event)
       },
-      local: async (start, through) => branch.events.filter(event => event.sequence >= BigInt(start) && event.sequence <= BigInt(through)),
-      committed: async () => branch.sequence,
     }),
     timeline: counted({
       query: async query => ({ ...(await queryTimeline(query)), through: branch.sequence }),

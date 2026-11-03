@@ -18,12 +18,13 @@ and is served by `Connection::history`
 1. It pins `through`: the request's value, or the branch's published head. A
    value beyond the branch's dispatched position fails `invalid`; the call then
    waits until the branch dispatches up to `through`.
-2. It reads `Session::local_page(branch, after, limit, through)`
-   ([agent.rs:530](../../../crates/dim-agent-runtime/src/agent.rs#L530)), which
-   rejects a `through` beyond the published head, then calls the store's
-   `read_page` ([timeline_store.rs:156](../../../crates/dim-agent-runtime/src/timeline_store.rs#L156),
-   SQLite [storage/timeline.rs:2623](../../../crates/dim-app-server/src/storage/timeline.rs#L2623)).
-   `after` must end a batch. `limit` is required and must be positive; the v3
+2. It reads the page through `AgentIndex::history_page`
+   ([agents.rs](../../../crates/dim-app-server/src/agents.rs)): a loaded line
+   pages through the branch's query and the store's `batch_end`, a line that
+   has ended through `TreeCommands.page`, and a line the process does not hold
+   through the App Server's page read
+   ([storage/timeline.rs](../../../crates/dim-app-server/src/storage/timeline.rs)).
+   `after` and `through` must end a batch. `limit` is required and must be positive; the v3
    method sets no upper bound today, and clients send 256 or 512. A page takes
    `limit` events and then runs to the end of that batch, so it can exceed
    `limit`; it never passes `through`.

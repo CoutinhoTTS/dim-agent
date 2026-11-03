@@ -5,16 +5,23 @@
 //! Overwriting an existing file requires a binding from this branch whose
 //! operation is still in the model's context (#524).
 
-use crate::host::HostError;
-use dim_agent_runtime::{Names, Timeline};
+use crate::{history::chain_by_id, host::HostError};
+use dim_agent_runtime::{
+    Names, Timeline, TimelineQuery, TimelineQueryBound, TimelineQueryDirection,
+    TimelineQueryOrderBy, TimelineQueryScope,
+};
 use dim_agent_types::{ContextCompactionResult, EventKind};
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use std::{
     collections::HashMap,
+    num::NonZeroU64,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
+
+/// How many compaction facts one page of the check reads.
+const COMPACTION_PAGE: u64 = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TextEncoding {
@@ -132,29 +139,75 @@ impl FileReads {
     /// `established` is the branch's last sequence when the operation started,
     /// after its tool call committed, and no legal cut separates a tool call
     /// from its result. So a `retain_from` in this range lies after the
-    /// operation's result, and one before it keeps the result (#524).
+    /// operation's result, and one before it keeps the result (#524). The
+    /// compactions this check folds are published before it runs: the model
+    /// call that led to the write tool was written after them, and a batch is
+    /// published only after every batch committed before it.
     async fn in_context(&self, established: u64) -> Result<bool, HostError> {
-        let now = self.timeline.committed();
+        let now = self.timeline.sequence();
         if now <= established {
             return Ok(true);
         }
-        let events = self
+        let Some(retain_from) = self.latest_completed(established).await? else {
+            return Ok(true);
+        };
+        let cut = self
             .timeline
-            .local(established + 1..=now)
+            .query(chain_by_id(&retain_from))
             .await
             .map_err(|error| {
                 HostError::failed(format!("Failed to read the branch timeline: {error}"))
-            })?;
-        let Some(retain_from) = events.iter().rev().find_map(|event| match &event.kind {
-            EventKind::ContextCompaction(data) => match &data.outcome {
-                ContextCompactionResult::Completed { retain_from, .. } => Some(retain_from),
-                _ => None,
-            },
-            _ => None,
-        }) else {
-            return Ok(true);
-        };
-        Ok(!events.iter().any(|event| event.id == *retain_from))
+            })?
+            .positions
+            .into_iter()
+            .next();
+        Ok(cut.is_none_or(|cut| {
+            cut.branch_id != self.timeline.branch_id() || cut.sequence <= established
+        }))
+    }
+    /// The newest completed compaction on this branch above `established`,
+    /// read newest first: a compaction that completed earlier always cuts
+    /// before a later one, so the newest completed one decides whether the
+    /// operation survived.
+    async fn latest_completed(&self, established: u64) -> Result<Option<String>, HostError> {
+        let mut offset = 0;
+        loop {
+            let reply = self
+                .timeline
+                .query(TimelineQuery {
+                    scope: TimelineQueryScope::Branch,
+                    bound: TimelineQueryBound::Published,
+                    from_event: None,
+                    from_sequence: None,
+                    order_by: TimelineQueryOrderBy::Sequence,
+                    direction: TimelineQueryDirection::Descending,
+                    kinds: vec!["context/compaction".into()],
+                    flags: Vec::new(),
+                    event_id: None,
+                    predicate: None,
+                    limit: NonZeroU64::new(COMPACTION_PAGE)
+                        .expect("a page keeps at least one compaction"),
+                    offset,
+                })
+                .await
+                .map_err(|error| {
+                    HostError::failed(format!("Failed to read the branch timeline: {error}"))
+                })?;
+            for event in &reply.events {
+                if event.sequence <= established {
+                    return Ok(None);
+                }
+                if let EventKind::ContextCompaction(data) = &event.kind
+                    && let ContextCompactionResult::Completed { retain_from, .. } = &data.outcome
+                {
+                    return Ok(Some(retain_from.clone()));
+                }
+            }
+            if (reply.events.len() as u64) < COMPACTION_PAGE {
+                return Ok(None);
+            }
+            offset += reply.events.len() as u64;
+        }
     }
 }
 
