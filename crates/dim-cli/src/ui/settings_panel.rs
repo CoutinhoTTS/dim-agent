@@ -18,10 +18,9 @@
 //! │   Show ACP sessions      off                 │
 //! │   Prompt suggestion      off                 │
 //! │   Permissions                                │
-//! │   File access            Workspace read/write › │
-//! │   Tool approval          Ask ›               │
+//! │   Permission             Workspace write ›   │
 //! │   Process isolation      ›                   │
-//! │ 1 / 9 · ↑↓ move · enter select · ←→/space change · esc close │
+//! │ 1 / 10 · ↑↓ move · enter select · ←→/space change · esc close │
 //! ╰──────────────────────────────────────────────╯
 //! ```
 
@@ -48,8 +47,7 @@ pub struct Values {
     /// `Some` is the switch as the daemon reported it; `None` is a read that
     /// has not happened or failed, which the row shows rather than a value.
     pub prompt_suggestion: Option<bool>,
-    pub file_access: String,
-    pub approvals: String,
+    pub permission: String,
 }
 
 /// One row: a switch flips in place, a link opens its picker.
@@ -64,12 +62,11 @@ pub enum Setting {
     Notify,
     AcpSessions,
     PromptSuggestion,
-    FileAccess,
-    Approvals,
+    Permission,
     Isolation,
 }
 
-const ROWS: [(Setting, &str); 12] = [
+const ROWS: [(Setting, &str); 11] = [
     (Setting::Theme, "theme"),
     (Setting::Language, "language"),
     (Setting::StartupForm, "startup-form"),
@@ -79,8 +76,7 @@ const ROWS: [(Setting, &str); 12] = [
     (Setting::Notify, "notify"),
     (Setting::AcpSessions, "acp-sessions"),
     (Setting::PromptSuggestion, "prompt-suggestion"),
-    (Setting::FileAccess, "file-access"),
-    (Setting::Approvals, "approvals"),
+    (Setting::Permission, "permission"),
     (Setting::Isolation, "isolation"),
 ];
 
@@ -178,12 +174,7 @@ impl SettingsPanel {
         }
         items.extend([
             Item::heading(t("Permissions")),
-            row(
-                Setting::FileAccess,
-                "File access",
-                link(&values.file_access),
-            ),
-            row(Setting::Approvals, "Tool approval", link(&values.approvals)),
+            row(Setting::Permission, "Permission", link(&values.permission)),
             row(Setting::Isolation, "Process isolation", link("")),
         ]);
         let mut list = ListPanel::new(
