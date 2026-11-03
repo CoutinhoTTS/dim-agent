@@ -182,12 +182,16 @@ impl RecallTool {
             Err(message) => return Ok(ToolResult::error(message)),
         };
         let mut read = Read::new(&arguments, &context.branch_id);
-        // Newest first and bounded at the head of each page: the kinds the
-        // narrative folds, over the whole chain.
+        // The head is read once, before the first page: every page starts at
+        // that sequence, so a fact published while the read runs stays outside
+        // the selection and the pages remain one contiguous suffix (§3.1).
+        let head = branch.sequence();
+        // Newest first and bounded at that head: the kinds the narrative
+        // folds, over the whole chain.
         let mut query = TimelineQuery {
             scope: TimelineQueryScope::Chain,
             from_event: None,
-            from_sequence: None,
+            from_sequence: Some(head),
             order_by: TimelineQueryOrderBy::Sequence,
             direction: TimelineQueryDirection::Descending,
             kinds: KINDS.iter().map(|kind| (*kind).to_owned()).collect(),
@@ -256,11 +260,6 @@ struct Read<'a> {
     distance: usize,
     own_oldest: bool,
     complete: bool,
-    /// The oldest sequence folded of each branch read. Each page is bounded at
-    /// the head when it runs, so a page taken after a write repeats facts and
-    /// holds ones published above the first page; a fact at or above the
-    /// oldest sequence of its branch is one of those and is dropped.
-    folded: HashMap<String, u64>,
     /// Distance of the oldest `turn/end` read: the fold tells nothing before
     /// it.
     turn_end: Option<usize>,
@@ -347,7 +346,6 @@ impl<'a> Read<'a> {
             distance: 0,
             own_oldest: false,
             complete: false,
-            folded: HashMap::new(),
             turn_end: None,
             turn_starts: Vec::new(),
             candidates: Vec::new(),
@@ -361,36 +359,18 @@ impl<'a> Read<'a> {
     /// a page shorter than the read asked for ends it.
     fn push(&mut self, page: TimelineQueryReply) -> bool {
         self.complete = page.events.len() < PAGE_EVENTS;
-        let folded = &self.folded;
-        let mut events = Vec::new();
-        let mut positions = Vec::new();
-        for (event, position) in page.events.into_iter().zip(page.positions) {
-            if folded
-                .get(&position.branch_id)
-                .is_some_and(|oldest| position.sequence >= *oldest)
-            {
-                continue;
-            }
-            events.push(event);
-            positions.push(position);
-        }
-        for position in &positions {
-            self.folded
-                .entry(position.branch_id.clone())
-                .and_modify(|oldest| *oldest = (*oldest).min(position.sequence))
-                .or_insert(position.sequence);
-        }
-        if let Some(oldest) = positions.last() {
-            self.own_oldest = oldest.branch_id == self.branch;
-        }
+        self.own_oldest = page
+            .positions
+            .last()
+            .is_some_and(|oldest| oldest.branch_id == self.branch);
+        let mut events = page.events;
         for event in &events {
             self.visit(event);
             self.distance += 1;
         }
-        let mut older = events;
-        older.reverse();
-        older.append(&mut self.events);
-        self.events = older;
+        events.reverse();
+        events.append(&mut self.events);
+        self.events = events;
         self.complete
     }
 

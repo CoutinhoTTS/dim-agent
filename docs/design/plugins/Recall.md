@@ -75,16 +75,20 @@ facts and its ancestors up to the fork point (the inherited prefix); for a forke
 Session's `main` it is the copied facts and then its `session/forked` and its own
 events. Both are history from before the fork, and Recall reads them like any other.
 
-A page is bounded at the head it runs at, so a page taken after a write repeats facts
-the read already holds and returns the ones published above it. The read drops every
-fact at or above the oldest sequence it has folded of that fact's branch, which leaves
-the collected events one contiguous suffix of the chain below the head of the first
-page: a fact published while the read runs is left out, never told out of order.
-Everything is computed from that one head, so a call never mixes two heads. The pattern
-is the one `wait` already uses ([wait.rs](../../../crates/dim-agent-capabilities/src/wait.rs)): a
-Session tool that resolves the calling branch from `ToolExecutionContext.branch_id` through
-`TreeCommands`. Recall does not apply compaction: it walks the whole pinned history the pages
-reach.
+The read fixes its selection before the first page: it reads the calling branch's
+published sequence once and starts every page at that sequence (`from_sequence`), so
+each page bounds that branch at the lesser of its head when the page runs and the
+sequence the call fixed. The bound comes from the branch itself, not from a position
+among the returned facts, so it holds even when the first page holds no fact of that
+branch. The collected events are one contiguous suffix of the chain below that head: a
+fact published while the read runs is outside the selection, never returned and never
+told out of order, and the page's offset keeps counting from the same place.
+Everything is computed from that one head, so a call never mixes two heads. An
+ancestor is still read to its cut. The pattern is the one `wait` already uses
+([wait.rs](../../../crates/dim-agent-capabilities/src/wait.rs)): a Session tool that
+resolves the calling branch from `ToolExecutionContext.branch_id` through
+`TreeCommands`. Recall does not apply compaction: it walks the whole pinned history the
+pages reach.
 
 The read does not fold while it pages. It stops when the collected pages reach the turn or the
 count the answer needs: the turn of the id it opens, 21 entries for the index, 21 candidate things
@@ -383,6 +387,8 @@ only grow at its end, so an offset returned once keeps pointing at the same line
 
 The read that feeds these pages takes `PAGE_EVENTS` events at a time (§3.1). That size is a
 constant of the tool as well; it never decides an answer, only how many pages the read takes.
+Each page continues the selection the first read fixed at the calling branch's head, so a
+write during the call neither adds a page nor moves an offset.
 
 ### 5.4 Model-facing texts
 
@@ -537,8 +543,11 @@ type change.
 - **A bounded, kind-filtered chain read on the facade.** Recall reads its pages through
   `Branch::query` and a `TimelineQuery`: the runtime returns the newest events of the kinds
   Recall names as one contiguous suffix of the branch chain, each with the branch and sequence it
-  was read from, and the page's offset continues the read. The facade gains no cache and no
-  projection rule; the read is
+  was read from, and the page's offset continues the read. A chain read that names the calling
+  branch and a sequence in `from_sequence` starts that branch there and bounds it at the lesser
+  of its published head and the sequence, so every page keeps the selection the first page fixed;
+  the ancestors are still read to their cuts. The facade gains no cache and no projection rule;
+  the read is
   [timeline storage §5](../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描)'s,
   and `TimelineStore::query` states its page and skip bounds.
 
@@ -611,7 +620,9 @@ in `crates/dim-app-server/tests` that finds `recall` in the tool table of both t
    page. A call with 1,000 scalar arguments and a 1,000-character tool name, an input with 50
    blocks and a turn that called 100 different tools each give a line of at most 600 characters,
    every variable part cut at 120 with `…`; the Timeline gains only
-   the events ToolExecutor writes for any tool call.
+   the events ToolExecutor writes for any tool call. A fact written to the branch while a call
+   pages is not returned, and the pages stay one contiguous suffix below the head the call read
+   first.
 10. **Permission.** Under the read-only preset the tool runs without an approval request.
 11. **A long turn.** A turn longer than one page ends with `More of this turn: open=<turn>
     offset=<n>.`; following each returned continuation reaches the end of the turn, every line

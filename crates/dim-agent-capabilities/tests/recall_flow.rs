@@ -2918,12 +2918,22 @@ fn the_arguments_and_the_paginations_say_how_to_fix_the_call() {
     assert_eq!(page.lines().last(), Some("No more."));
 }
 
-/// A memory store that counts the events a query page returns.
+/// A memory store that counts the events a query page returns, records the ids
+/// of one read's pages and can write a fact between two of them.
 #[derive(Default)]
 struct PageReads {
     memory: MemoryTimelineStore,
     events: std::sync::atomic::AtomicUsize,
     pages: std::sync::atomic::AtomicUsize,
+    /// The Session and branch a first page writes to, armed by the test
+    /// before the call whose selection must not move.
+    inject: std::sync::Mutex<Option<(Session, String)>>,
+    /// The id that page wrote.
+    injected: std::sync::Mutex<Option<String>>,
+    /// The kinds the first page named.
+    kinds: std::sync::Mutex<Vec<String>>,
+    /// The ids the pages returned in read order, while the pinned call runs.
+    read: std::sync::Mutex<Option<Vec<String>>>,
 }
 
 impl TimelineStore for PageReads {
@@ -2986,6 +2996,38 @@ impl TimelineStore for PageReads {
             self.events
                 .fetch_add(page.events.len(), std::sync::atomic::Ordering::SeqCst);
             self.pages.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let first_page = query.direction == TimelineQueryDirection::Descending
+                && query.event_id.is_none()
+                && !query.kinds.is_empty()
+                && query.offset == 0;
+            let pinned = if first_page {
+                let mut inject = self.inject.lock().unwrap();
+                match inject.as_ref() {
+                    Some((_, branch)) if branch == &key.branch_id => inject.take(),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if pinned.is_some() {
+                *self.kinds.lock().unwrap() = query.kinds.clone();
+                *self.read.lock().unwrap() = Some(Vec::new());
+            }
+            if let Some(ids) = self.read.lock().unwrap().as_mut()
+                && query.direction == TimelineQueryDirection::Descending
+                && !query.kinds.is_empty()
+            {
+                ids.extend(page.events.iter().map(|event| event.id.clone()));
+            }
+            if let Some((session, branch)) = pinned {
+                let event = session
+                    .input(
+                        InputMessageData::text("late task", Some(InputMode::Queue)),
+                        &branch,
+                    )
+                    .await?;
+                *self.injected.lock().unwrap() = Some(event.id.clone());
+            }
             Ok(page)
         })
     }
@@ -3012,6 +3054,19 @@ impl PageReads {
     }
     fn pages(&self) -> usize {
         self.pages.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    /// Writes once to `branch` of `session` after the next first page.
+    fn pin_head(&self, session: &Session, branch: &str) {
+        *self.inject.lock().unwrap() = Some((session.clone(), branch.to_owned()));
+        *self.injected.lock().unwrap() = None;
+        self.kinds.lock().unwrap().clear();
+        *self.read.lock().unwrap() = None;
+    }
+    fn injected(&self) -> Option<String> {
+        self.injected.lock().unwrap().clone()
+    }
+    fn take_read(&self) -> Vec<String> {
+        self.read.lock().unwrap().take().unwrap_or_default()
     }
 }
 
@@ -3053,6 +3108,51 @@ async fn recall_is_the_whole_fold(
     (text, read)
 }
 
+/// The ids one descending read of `branch` selects below the head it pins, in
+/// page order: the whole chain that is pinned at the call's last tool result,
+/// newest first, in the kinds the first query names, without the event the
+/// store wrote between two pages.
+async fn selected_ids(session: &Session, branch: &str, reads: &PageReads) -> Vec<String> {
+    let history = session.history(branch, None).await.unwrap();
+    let pinned = &history[..history
+        .iter()
+        .rposition(|event| matches!(event.kind, EventKind::ToolResult(_)))
+        .expect("the recall call's result")];
+    let kinds = reads.kinds.lock().unwrap().clone();
+    let injected = reads.injected();
+    pinned
+        .iter()
+        .rev()
+        .filter(|event| Some(&event.id) != injected.as_ref())
+        .filter(|event| kinds.iter().any(|kind| kind == event.kind.key()))
+        .map(|event| event.id.clone())
+        .collect()
+}
+
+/// Checks that the pages of one call are one contiguous suffix below the head
+/// the call read first, and that the event written between two of them is not
+/// in them.
+async fn assert_one_suffix(session: &Session, reads: &PageReads, branch: &str) {
+    let read = reads.take_read();
+    let expected = selected_ids(session, branch, reads).await;
+    let injected = reads.injected().expect("the write between pages");
+    assert!(
+        !read.contains(&injected),
+        "a page returned the event written after its first page: {injected}"
+    );
+    assert!(
+        !read.is_empty() && read.len() <= expected.len(),
+        "the pages returned {} of {} selected events",
+        read.len(),
+        expected.len()
+    );
+    assert_eq!(
+        read,
+        expected[..read.len()],
+        "the pages are not one contiguous suffix below the head"
+    );
+}
+
 /// The `before=` id a page ends with.
 fn before_of(page: &str) -> String {
     let at = page.find("before=").expect("a page handle") + "before=".len();
@@ -3084,7 +3184,9 @@ async fn a_long_history_is_answered_from_bounded_pages_read_backwards() {
             history.len()
         );
 
+        reads.pin_head(&session, "main");
         let (index, read) = recall_is_the_whole_fold(&session, &reads, "main", json!({})).await;
+        assert_one_suffix(&session, &reads, "main").await;
         assert!(index.contains("Earlier: before="), "{index}");
         assert!(
             read < history.len() / 2,
@@ -3194,7 +3296,9 @@ async fn a_child_branch_pages_through_its_inherited_prefix() {
         }
         let history = session.history(&child, None).await.unwrap();
 
+        reads.pin_head(&session, &child);
         let (index, read) = recall_is_the_whole_fold(&session, &reads, &child, json!({})).await;
+        assert_one_suffix(&session, &reads, &child).await;
         assert!(index.contains("Earlier: before="), "{index}");
         assert!(
             read < history.len(),
