@@ -309,11 +309,11 @@ fn same_schema(actual: &[(String, String)], mut expected: Vec<(&str, String)>) -
             })
 }
 /// The read indexes the daemon creates at open: the latest-turn window's
-/// ([session-history-window §5.1](../../../../docs/design/appserver/session-history-window.md#51-the-derived-index))
-/// and the event query's by kind, which carries the event id so a kind read
-/// needs no table body for it (ADR 019 D4). They carry no data and no decode
-/// rule, so they are not part of the format: `schema` and the format gate
-/// ignore them, and every open recreates them.
+/// ([session-history-window §5.1](../../../../docs/design/appserver/session-history-window.md#51-the-derived-index)),
+/// the policy window's turn starts, and the event query's by kind, which carries
+/// the event id so a kind read needs no table body for it (ADR 019 D4). They
+/// carry no data and no decode rule, so they are not part of the format: `schema`
+/// and the format gate ignore them, and every open recreates them.
 const DERIVED_INDEXES: &[(&str, &str)] = &[
     (
         "timeline_history_anchors",
@@ -322,6 +322,10 @@ const DERIVED_INDEXES: &[(&str, &str)] = &[
     (
         "timeline_events_by_kind",
         "CREATE INDEX IF NOT EXISTS timeline_events_by_kind ON timeline_events(session_id, branch_id, kind, sequence, event_id)",
+    ),
+    (
+        "timeline_policy_turns",
+        "CREATE INDEX IF NOT EXISTS timeline_policy_turns ON timeline_events(session_id, branch_id, kind, sequence, event_id) WHERE kind = 'turn/start'",
     ),
 ];
 /// The schema objects of `connection`'s database that belong to the format,
@@ -338,13 +342,19 @@ fn schema(connection: &Connection) -> Result<Vec<(String, String)>> {
              WHERE name NOT LIKE 'sqlite_%' AND name NOT IN ({placeholders}) ORDER BY name"
         ))
         .map_err(storage)?;
-    query
+    let objects = query
         .query_map(rusqlite::params_from_iter(derived), |row| {
             Ok((row.get(0)?, row.get(1)?))
         })
         .map_err(storage)?
-        .collect::<rusqlite::Result<_>>()
-        .map_err(storage)
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(storage)?;
+    Ok(objects
+        .into_iter()
+        .filter(|(name, _): &(String, String)| {
+            !DERIVED_INDEXES.iter().any(|(derived, _)| derived == name)
+        })
+        .collect())
 }
 /// The format whose exact schema `actual` is: the current format, or one an
 /// upgrade step starts from.

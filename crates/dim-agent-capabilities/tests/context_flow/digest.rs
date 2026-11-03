@@ -896,3 +896,88 @@ async fn the_digest_escapes_every_line_terminator_and_has_no_blank_line() {
     );
     agent.close().await.unwrap();
 }
+
+/// A threshold compaction at a turn start keeps the digest of the compacted
+/// turn's tool effects: the window places each result by chain position, not
+/// through an order that carries only anchors and turn starts (#914,
+/// ContextCompaction §5.10).
+#[tokio::test]
+async fn a_turn_start_cut_keeps_the_digest_of_the_compacted_turn() {
+    let script = Arc::new(Script::default());
+    let (agent, session) = effects_session(
+        script.clone(),
+        Context {
+            threshold: Some(15_000.),
+            ..facts(40_960.)
+        },
+    )
+    .await;
+    turn(
+        &script,
+        &session,
+        &"x".repeat(12_000),
+        vec![
+            Step::Calls(vec![(
+                "declare",
+                json!({"effects": [
+                    {"kind": "fileWritten", "path": "/work/a.rs"},
+                    {"kind": "commandRun", "command": "cargo test", "exitCode": 0},
+                ]}),
+            )]),
+            Step::Says(Box::leak("y".repeat(12_000).into_boxed_str())),
+        ],
+    )
+    .await;
+    turn(&script, &session, "second", vec![Step::Says("ok")]).await;
+    let events = session.history("main", None).await.unwrap();
+    let (retain_from, digest, replacement) = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextCompaction(ContextCompactionData {
+                outcome:
+                    ContextCompactionResult::Completed {
+                        retain_from,
+                        digest_entries,
+                        replacement,
+                        ..
+                    },
+                ..
+            }) => Some((
+                retain_from.clone(),
+                digest_entries.clone(),
+                replacement.clone(),
+            )),
+            _ => None,
+        })
+        .expect("a threshold compaction");
+    let cut = events
+        .iter()
+        .position(|event| event.id == retain_from)
+        .expect("the cut is an event");
+    assert!(
+        matches!(events[cut].kind, EventKind::TurnStart(_)),
+        "the cut is a turn start: {:?}",
+        events[cut].kind
+    );
+    let digest = digest.expect("a digest");
+    assert_eq!(
+        digest.entries,
+        [
+            ToolEffect::FileWritten {
+                path: "/work/a.rs".into()
+            },
+            ToolEffect::CommandRun {
+                command: "cargo test".into(),
+                exit_code: Some(0),
+                signal: None,
+            },
+        ],
+        "the compacted turn's effects"
+    );
+    let sent = serde_json::to_string(&replacement).unwrap();
+    assert!(
+        sent.contains("/work/a.rs") && sent.contains("cargo test"),
+        "the replacement carries the digest: {sent}"
+    );
+    agent.close().await.unwrap();
+}
