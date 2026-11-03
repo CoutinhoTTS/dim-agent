@@ -14,7 +14,7 @@ use crate::{
 };
 use dim_agent_runtime::{
     AgentBuilder, AgentError, CAPABILITY_RELOADING, Dispatcher, Names, Timeline, TimelineQuery,
-    TimelineQueryBound, TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryScope,
+    TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryScope,
 };
 use dim_agent_types::*;
 use rutis::Ctx;
@@ -93,7 +93,7 @@ impl Wait {
         let reply = timeline
             .query(TimelineQuery {
                 scope: TimelineQueryScope::Branch,
-                bound: TimelineQueryBound::Committed,
+                include_publishing: true,
                 from_event: None,
                 from_sequence: None,
                 order_by: TimelineQueryOrderBy::Sequence,

@@ -7,7 +7,7 @@ use crate::{
     timeline_tree::TreeCommands,
 };
 use dim_agent_runtime::{
-    Branch, Names, TimelineQuery, TimelineQueryBound, TimelineQueryDirection, TimelineQueryOrderBy,
+    Branch, Names, TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
     TimelineQueryPredicate, TimelineQueryScope,
 };
 use dim_agent_types::*;
@@ -83,7 +83,7 @@ async fn compact(branch: &Branch, cancel: &CancellationToken) -> Result<Value, R
             let result = branch
                 .query(TimelineQuery {
                     scope: TimelineQueryScope::Branch,
-                    bound: TimelineQueryBound::Published,
+                    include_publishing: false,
                     from_event: None,
                     from_sequence: Some(after + 1),
                     order_by: TimelineQueryOrderBy::Sequence,

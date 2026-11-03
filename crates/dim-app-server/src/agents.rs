@@ -8,7 +8,7 @@ use crate::{
 use dim_agent_capabilities::host::ModelSelectionHost;
 use dim_agent_runtime::{
     AGENT_GROUP, Agent, AgentBuilder, AgentError, CollaborationRole, InUse, Modules, Names,
-    NoConfig, Session, SessionConfig, TimelineKey, TimelineQuery, TimelineQueryBound,
+    NoConfig, Session, SessionConfig, TimelineKey, TimelineQuery,
     TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryScope,
 };
 pub use dim_agent_types::AgentProfile;
@@ -386,7 +386,7 @@ async fn session_history_page(
 fn history_page_query(after: u64, limit: usize) -> dim_agent_runtime::TimelineQuery {
     dim_agent_runtime::TimelineQuery {
         scope: dim_agent_runtime::TimelineQueryScope::Branch,
-        bound: dim_agent_runtime::TimelineQueryBound::Published,
+        include_publishing: false,
         from_event: None,
         from_sequence: Some(after.saturating_add(1)),
         order_by: dim_agent_runtime::TimelineQueryOrderBy::Sequence,
@@ -1092,7 +1092,7 @@ impl AgentIndex {
     ) -> dim_agent_runtime::Result<(Option<String>, u64)> {
         let inputs = TimelineQuery {
             scope: TimelineQueryScope::Branch,
-            bound: TimelineQueryBound::Published,
+            include_publishing: false,
             from_event: None,
             from_sequence: None,
             order_by: TimelineQueryOrderBy::Sequence,

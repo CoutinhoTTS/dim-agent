@@ -1,6 +1,6 @@
 use crate::prompt_state::PromptSnapshot;
 use dim_agent_runtime::{
-    AgentError, ContextHistory, Session, Timeline, TimelineQuery, TimelineQueryBound,
+    AgentError, ContextHistory, Session, Timeline, TimelineQuery,
     TimelineQueryDirection, TimelineQueryFlag, TimelineQueryOrderBy, TimelineQueryPredicate,
     TimelineQueryReply, TimelineQueryScope,
 };
@@ -13,7 +13,7 @@ use std::{collections::HashMap, num::NonZeroU64, sync::Arc};
 pub(crate) fn chain_by_id(id: &str) -> TimelineQuery {
     TimelineQuery {
         scope: TimelineQueryScope::Chain,
-        bound: TimelineQueryBound::Published,
+        include_publishing: false,
         from_event: None,
         from_sequence: None,
         order_by: TimelineQueryOrderBy::Sequence,
@@ -39,7 +39,7 @@ pub(crate) fn newest_chain(
 ) -> TimelineQuery {
     TimelineQuery {
         scope: TimelineQueryScope::Chain,
-        bound: TimelineQueryBound::Published,
+        include_publishing: false,
         from_event: None,
         from_sequence: from_sequence.filter(|sequence| *sequence > 0),
         order_by: TimelineQueryOrderBy::Sequence,
@@ -63,7 +63,7 @@ pub(crate) fn rising_chain(
 ) -> TimelineQuery {
     TimelineQuery {
         scope: TimelineQueryScope::Chain,
-        bound: TimelineQueryBound::Published,
+        include_publishing: false,
         from_event: from_event.map(str::to_owned),
         from_sequence: None,
         order_by: TimelineQueryOrderBy::Sequence,
@@ -103,7 +103,7 @@ fn context_read(
 ) -> TimelineQuery {
     TimelineQuery {
         scope,
-        bound: TimelineQueryBound::Published,
+        include_publishing: false,
         from_event,
         from_sequence,
         order_by: TimelineQueryOrderBy::Sequence,
@@ -221,7 +221,7 @@ impl<'a> FoldRead<'a> {
                 && let ContextReads::Timeline(timeline) = &self.reads
                 && self.through > timeline.sequence()
             {
-                query.bound = TimelineQueryBound::Committed;
+                query.include_publishing = true;
             }
             let reply = self.reads.query(query).await?;
             let Some(mut read) = bounded(reply, &self.own, self.through) else {
@@ -1455,7 +1455,7 @@ impl ContextReads<'_> {
         let Some(compaction) = self
             .query(TimelineQuery {
                 scope: TimelineQueryScope::Branch,
-                bound: TimelineQueryBound::Published,
+                include_publishing: false,
                 from_event: None,
                 from_sequence: Some(through),
                 order_by: TimelineQueryOrderBy::Sequence,

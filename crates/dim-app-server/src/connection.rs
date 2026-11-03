@@ -13,7 +13,7 @@ use dim_agent_capabilities::{
     workspace_tools::background::{BackgroundExec, TaskError},
 };
 use dim_agent_runtime::{
-    AgentError, Names, Session, TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
+    AgentError, Names, Session, TimelineQueryDirection, TimelineQueryOrderBy,
     TimelineQueryScope,
 };
 use dim_agent_types::{ContentBlock, InputMessageData, UserInput};

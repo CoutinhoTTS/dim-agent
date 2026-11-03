@@ -6,7 +6,7 @@ use crate::{
 use dim_agent_runtime::{
     AgentError, Branch, BranchLifecycle, BranchOptions, Dispatcher, Names, Result, SessionIdentity,
     StoredBranch, StoredEvent, Timeline, TimelineContext, TimelineFactory, TimelineIdentity,
-    TimelineInfo, TimelineKey, TimelineQuery, TimelineQueryBound, TimelineQueryDirection,
+    TimelineInfo, TimelineKey, TimelineQuery, TimelineQueryDirection,
     TimelineQueryOrderBy, TimelineQueryPredicate, TimelineQueryScope, TimelineStore,
     TimelineTreeControl, rebuild_facts,
 };
@@ -269,7 +269,7 @@ async fn open_page(
 fn line_page(after: u64, limit: usize) -> TimelineQuery {
     TimelineQuery {
         scope: TimelineQueryScope::Branch,
-        bound: TimelineQueryBound::Published,
+        include_publishing: false,
         from_event: None,
         from_sequence: Some(after.saturating_add(1)),
         order_by: TimelineQueryOrderBy::Sequence,
@@ -622,7 +622,7 @@ impl TimelineTree {
                             let reply = tokio::select! {
                                 result = tokio::time::timeout(owner.factory.startup_timeout(), context.timeline().query(TimelineQuery {
                                     scope: TimelineQueryScope::Branch,
-                                    bound: TimelineQueryBound::Published,
+                                    include_publishing: false,
                                     from_event: None,
                                     from_sequence: Some(from),
                                     order_by: TimelineQueryOrderBy::Sequence,
@@ -2411,7 +2411,7 @@ impl BranchTool {
                     let reply = parent
                         .query(TimelineQuery {
                             scope: TimelineQueryScope::Branch,
-                            bound: TimelineQueryBound::Published,
+                            include_publishing: false,
                             from_event: None,
                             from_sequence: Some(from),
                             order_by: TimelineQueryOrderBy::Sequence,

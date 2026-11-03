@@ -38,7 +38,7 @@ async def apply(ctx, config):
         while True:
             query = {
                 "scope": "branch",
-                "bound": "committed",
+                "include_publishing": True,
                 "order_by": "sequence",
                 "direction": "ascending",
                 "kinds": ["input/message", "turn/start", "turn/end"],

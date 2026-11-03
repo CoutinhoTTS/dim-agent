@@ -107,7 +107,7 @@ rows):
 | Wait, BackgroundExec, Collaboration (product assembly, not in `restore_cost`) | `local(..=S)` | own `1..=S` | apply |
 
 The rows that name `read_context` are met by event-query pages since #942, not by the copy: `Timeline::query`, at the
-published or the committed bound, reads the store's pages directly, and the context projection folds through them
+published or the branch's publishing facts, reads the store's pages directly, and the context projection folds through them
 (`history::read_context`, from a checkpoint's `resume` or from the chain's start). The copy serves the range reads that remain — `local`,
 `history`, the checkpoint's anchor read (`Timeline::checkpoint`) and their wrappers on `Dispatcher`, `Branch` and
 `Session`.

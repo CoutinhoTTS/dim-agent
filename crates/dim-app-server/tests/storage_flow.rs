@@ -2,7 +2,7 @@ use dim_agent_capabilities::file_storage::FileStoragePlugin;
 use dim_agent_capabilities::history::{HistoryRenderer, read_context, replay_context};
 use dim_agent_runtime::{
     AgentBuilder, AgentConfig, AgentError, MemoryTimelineStore, SessionConfig, StoredEvent,
-    Timeline, TimelineKey, TimelineQueryBound, TimelineStore, TimelineTrace, TraceStep,
+    Timeline, TimelineKey, TimelineStore, TimelineTrace, TraceStep,
     testing::MinimalHost,
 };
 use dim_agent_types::{
@@ -1595,7 +1595,7 @@ async fn extension_events_store_the_switches_their_producer_sets() {
             &key("session", "main"),
             &dim_agent_runtime::TimelineQuery {
                 scope: dim_agent_runtime::TimelineQueryScope::Branch,
-                bound: TimelineQueryBound::Published,
+                include_publishing: false,
                 from_event: None,
                 from_sequence: None,
                 order_by: dim_agent_runtime::TimelineQueryOrderBy::Sequence,
@@ -7835,7 +7835,7 @@ fn query(
 ) -> dim_agent_runtime::TimelineQuery {
     dim_agent_runtime::TimelineQuery {
         scope,
-        bound: TimelineQueryBound::Published,
+        include_publishing: false,
         from_event: None,
         from_sequence: None,
         order_by: Default::default(),

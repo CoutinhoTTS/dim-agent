@@ -7798,13 +7798,11 @@
       "to": "dim_agent_runtime::timeline_query",
       "references": [
         "path TimelineQuery",
-        "path TimelineQueryBound::Published",
         "path TimelineQueryDirection::Ascending",
         "path TimelineQueryOrderBy::Sequence",
         "path TimelineQueryPredicate",
         "path TimelineQueryScope::Branch",
         "use dim_agent_runtime::TimelineQuery",
-        "use dim_agent_runtime::TimelineQueryBound",
         "use dim_agent_runtime::TimelineQueryDirection",
         "use dim_agent_runtime::TimelineQueryOrderBy",
         "use dim_agent_runtime::TimelineQueryPredicate",
@@ -7928,13 +7926,11 @@
       "to": "dim_agent_runtime::timeline_query",
       "references": [
         "path TimelineQuery",
-        "path TimelineQueryBound::Committed",
         "path TimelineQueryDirection::Ascending",
         "path TimelineQueryOrderBy::Sequence",
         "path TimelineQueryPredicate",
         "path TimelineQueryScope::Branch",
         "use dim_agent_runtime::TimelineQuery",
-        "use dim_agent_runtime::TimelineQueryBound",
         "use dim_agent_runtime::TimelineQueryDirection",
         "use dim_agent_runtime::TimelineQueryOrderBy",
         "use dim_agent_runtime::TimelineQueryPredicate",
@@ -8852,8 +8848,6 @@
       "to": "dim_agent_runtime::timeline_query",
       "references": [
         "path TimelineQuery",
-        "path TimelineQueryBound::Committed",
-        "path TimelineQueryBound::Published",
         "path TimelineQueryDirection::Ascending",
         "path TimelineQueryDirection::Descending",
         "path TimelineQueryOrderBy::Sequence",
@@ -8863,7 +8857,6 @@
         "path TimelineQueryScope::Branch",
         "path TimelineQueryScope::Chain",
         "use dim_agent_runtime::TimelineQuery",
-        "use dim_agent_runtime::TimelineQueryBound",
         "use dim_agent_runtime::TimelineQueryDirection",
         "use dim_agent_runtime::TimelineQueryFlag",
         "use dim_agent_runtime::TimelineQueryOrderBy",
@@ -10419,12 +10412,10 @@
       "to": "dim_agent_runtime::timeline_query",
       "references": [
         "path TimelineQuery",
-        "path TimelineQueryBound::Committed",
         "path TimelineQueryDirection::Descending",
         "path TimelineQueryOrderBy::Sequence",
         "path TimelineQueryScope::Chain",
         "use dim_agent_runtime::TimelineQuery",
-        "use dim_agent_runtime::TimelineQueryBound",
         "use dim_agent_runtime::TimelineQueryDirection",
         "use dim_agent_runtime::TimelineQueryOrderBy",
         "use dim_agent_runtime::TimelineQueryScope"
@@ -11270,13 +11261,11 @@
       "to": "dim_agent_runtime::timeline_query",
       "references": [
         "path TimelineQuery",
-        "path TimelineQueryBound::Published",
         "path TimelineQueryDirection::Descending",
         "path TimelineQueryOrderBy::Sequence",
         "path TimelineQueryReply",
         "path TimelineQueryScope::Chain",
         "use dim_agent_runtime::TimelineQuery",
-        "use dim_agent_runtime::TimelineQueryBound",
         "use dim_agent_runtime::TimelineQueryDirection",
         "use dim_agent_runtime::TimelineQueryOrderBy",
         "use dim_agent_runtime::TimelineQueryReply",
@@ -12606,14 +12595,12 @@
       "to": "dim_agent_runtime::timeline_query",
       "references": [
         "path TimelineQuery",
-        "path TimelineQueryBound::Published",
         "path TimelineQueryDirection::Ascending",
         "path TimelineQueryOrderBy::Sequence",
         "path TimelineQueryPredicate",
         "path TimelineQueryScope::Branch",
         "path rebuild_facts",
         "use dim_agent_runtime::TimelineQuery",
-        "use dim_agent_runtime::TimelineQueryBound",
         "use dim_agent_runtime::TimelineQueryDirection",
         "use dim_agent_runtime::TimelineQueryOrderBy",
         "use dim_agent_runtime::TimelineQueryPredicate",
@@ -13159,12 +13146,10 @@
       "to": "dim_agent_runtime::timeline_query",
       "references": [
         "path TimelineQuery",
-        "path TimelineQueryBound::Committed",
         "path TimelineQueryDirection::Descending",
         "path TimelineQueryOrderBy::Sequence",
         "path TimelineQueryScope::Branch",
         "use dim_agent_runtime::TimelineQuery",
-        "use dim_agent_runtime::TimelineQueryBound",
         "use dim_agent_runtime::TimelineQueryDirection",
         "use dim_agent_runtime::TimelineQueryOrderBy",
         "use dim_agent_runtime::TimelineQueryScope"
@@ -13679,12 +13664,10 @@
       "to": "dim_agent_runtime::timeline_query",
       "references": [
         "path TimelineQuery",
-        "path TimelineQueryBound::Published",
         "path TimelineQueryDirection::Descending",
         "path TimelineQueryOrderBy::Sequence",
         "path TimelineQueryScope::Branch",
         "use dim_agent_runtime::TimelineQuery",
-        "use dim_agent_runtime::TimelineQueryBound",
         "use dim_agent_runtime::TimelineQueryDirection",
         "use dim_agent_runtime::TimelineQueryOrderBy",
         "use dim_agent_runtime::TimelineQueryScope"
@@ -14915,7 +14898,6 @@
       "to": "dim_agent_runtime::timeline_query",
       "references": [
         "path TimelineQuery",
-        "path TimelineQueryBound::Committed",
         "path TimelineQueryReply"
       ]
     },
@@ -15124,8 +15106,6 @@
       "to": "dim_agent_runtime::timeline_query",
       "references": [
         "path TimelineQuery",
-        "path TimelineQueryBound::Committed",
-        "path TimelineQueryBound::Published",
         "path TimelineQueryDirection::Ascending",
         "path TimelineQueryDirection::Descending",
         "path TimelineQueryOrderBy::Sequence",
@@ -15134,7 +15114,6 @@
         "path TimelineQueryScope::Branch",
         "path TimelineQueryScope::Chain",
         "use crate::TimelineQuery",
-        "use crate::TimelineQueryBound",
         "use crate::TimelineQueryDirection",
         "use crate::TimelineQueryOrderBy",
         "use crate::TimelineQueryPage",
@@ -15599,7 +15578,6 @@
       "to": "dim_agent_runtime::timeline_query",
       "references": [
         "path TimelineQuery",
-        "path TimelineQueryBound::Published",
         "path TimelineQueryDirection::Ascending",
         "path TimelineQueryOrderBy::Sequence",
         "path TimelineQueryScope::Branch"
@@ -16783,17 +16761,14 @@
       "to": "dim_agent_runtime::timeline_query",
       "references": [
         "path TimelineQuery",
-        "path TimelineQueryBound::Published",
         "path TimelineQueryDirection::Ascending",
         "path TimelineQueryOrderBy::Sequence",
         "path TimelineQueryScope::Branch",
         "path dim_agent_runtime::TimelineQuery",
-        "path dim_agent_runtime::TimelineQueryBound::Published",
         "path dim_agent_runtime::TimelineQueryDirection::Ascending",
         "path dim_agent_runtime::TimelineQueryOrderBy::Sequence",
         "path dim_agent_runtime::TimelineQueryScope::Branch",
         "use dim_agent_runtime::TimelineQuery",
-        "use dim_agent_runtime::TimelineQueryBound",
         "use dim_agent_runtime::TimelineQueryDirection",
         "use dim_agent_runtime::TimelineQueryOrderBy",
         "use dim_agent_runtime::TimelineQueryScope"
@@ -18111,13 +18086,11 @@
       "to": "dim_agent_runtime::timeline_query",
       "references": [
         "path TimelineQuery",
-        "path TimelineQueryBound::Published",
         "path TimelineQueryDirection::Ascending",
         "path TimelineQueryOrderBy::Sequence",
         "path TimelineQueryScope::Branch",
         "path rebuild_facts",
         "use dim_agent_runtime::TimelineQuery",
-        "use dim_agent_runtime::TimelineQueryBound",
         "use dim_agent_runtime::TimelineQueryDirection",
         "use dim_agent_runtime::TimelineQueryOrderBy",
         "use dim_agent_runtime::TimelineQueryScope",
@@ -18652,7 +18625,6 @@
       "from": "dim_app_server::connection",
       "to": "dim_agent_runtime::timeline_query",
       "references": [
-        "use dim_agent_runtime::TimelineQuery",
         "use dim_agent_runtime::TimelineQueryDirection",
         "use dim_agent_runtime::TimelineQueryOrderBy",
         "use dim_agent_runtime::TimelineQueryScope"
@@ -19277,13 +19249,12 @@
       "to": "dim_agent_runtime::timeline_query",
       "references": [
         "path TimelineQuery",
-        "path TimelineQueryBound::Published",
         "path TimelineQueryDirection",
         "path TimelineQueryDirection::Ascending",
         "path TimelineQueryDirection::Descending",
         "path TimelineQueryOrderBy::Sequence",
         "path TimelineQueryScope::Branch",
-        "use dim_agent_runtime::TimelineQueryBound"
+        "use dim_agent_runtime::TimelineQuery"
       ]
     },
     {

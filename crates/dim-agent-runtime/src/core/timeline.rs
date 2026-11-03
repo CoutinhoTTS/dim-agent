@@ -1,7 +1,7 @@
 use super::keys::KeyFilter;
 use crate::{
     AgentError, BoxFuture, BranchLifecycle, FaultReporter, Result, StoredEvent, TimelineKey,
-    TimelineQuery, TimelineQueryBound, TimelineQueryDirection, TimelineQueryOrderBy,
+    TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
     TimelineQueryPage, TimelineQueryReply, TimelineQueryScope, TimelineStore,
 };
 use dim_agent_types::{
@@ -316,7 +316,7 @@ impl Timeline {
             let reply = self
                 .query(TimelineQuery {
                     scope: TimelineQueryScope::Branch,
-                    bound: TimelineQueryBound::Published,
+                    include_publishing: false,
                     from_event: None,
                     from_sequence: Some(from),
                     order_by: TimelineQueryOrderBy::Sequence,
@@ -799,9 +799,10 @@ impl Timeline {
     /// above the cutoff ([ADR 020 D3](../../../../docs/adr/020-timeline-read-convergence.md)).
     pub async fn query(&self, query: TimelineQuery) -> Result<TimelineQueryReply> {
         let published = self.sequence();
-        let through = match query.bound {
-            TimelineQueryBound::Published => published,
-            TimelineQueryBound::Committed => self.committed(),
+        let through = if query.include_publishing {
+            self.committed()
+        } else {
+            published
         };
         self.query_page(query, published, through).await
     }
@@ -862,7 +863,7 @@ impl Timeline {
                         from_sequence: None,
                         order_by: query.order_by,
                         direction: TimelineQueryDirection::Ascending,
-                        bound: TimelineQueryBound::Published,
+                        include_publishing: false,
                         kinds: Vec::new(),
                         flags: Vec::new(),
                         event_id: Some(event_id.clone()),
@@ -1172,7 +1173,7 @@ impl Timeline {
     async fn resume_position(&self, resume: &ResumePoint) -> Result<Option<TimelinePosition>> {
         let query = TimelineQuery {
             scope: TimelineQueryScope::Chain,
-            bound: TimelineQueryBound::Published,
+            include_publishing: false,
             from_event: Some(resume.event_id.clone()),
             from_sequence: None,
             order_by: TimelineQueryOrderBy::Sequence,

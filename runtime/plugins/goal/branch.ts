@@ -18,7 +18,7 @@ type Dispatcher = {
 }
 type TimelineQuery = {
   scope: 'branch' | 'chain'
-  bound?: 'published' | 'committed'
+  include_publishing?: boolean
   from_event?: string
   from_sequence?: number | bigint
   order_by?: 'sequence'
@@ -134,7 +134,7 @@ export default definePlugin({
       // read adds the facts written and not yet published.
       const page = await timeline.query({
         scope: 'branch',
-        bound: 'committed',
+        include_publishing: true,
         from_sequence: after,
         order_by: 'sequence',
         direction: 'ascending',
@@ -369,7 +369,7 @@ export default definePlugin({
       for (;;) {
         const reply = await timeline.query({
           scope: 'branch',
-          bound: 'committed',
+          include_publishing: true,
           ...(from === undefined ? {} : { from_sequence: from }),
           order_by: 'sequence',
           direction: 'ascending',

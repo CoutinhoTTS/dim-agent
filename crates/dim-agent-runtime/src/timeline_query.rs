@@ -36,18 +36,6 @@ pub enum TimelineQueryDirection {
     Descending,
 }
 
-/// How far a read reaches on the queried branch.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TimelineQueryBound {
-    /// The published head: no fact whose publication has not completed.
-    #[default]
-    Published,
-    /// The committed head: the branch's own facts written above the published
-    /// head belong to the read, and the reply's `through` is where they end.
-    Committed,
-}
-
 /// The key a read orders by; a chain read orders by chain position first, so
 /// `sequence` is the sequence within an event's own branch.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,11 +150,11 @@ pub struct TimelineQuery {
     /// The end a page is taken from; ascending is the default.
     #[serde(default)]
     pub direction: TimelineQueryDirection,
-    /// How far the read reaches on the queried branch: what is published when
-    /// it runs, or the committed head, which adds the branch's facts written
-    /// but not yet published. An ancestor is read to its cut either way.
+    /// Whether the queried branch's own facts written above the published head
+    /// belong to the read, up to the point the reply reports as `through`. An
+    /// ancestor is read to its cut either way.
     #[serde(default)]
-    pub bound: TimelineQueryBound,
+    pub include_publishing: bool,
     /// Event kinds (`domain/name`) the read accepts; empty accepts every kind.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kinds: Vec<String>,
@@ -274,7 +262,7 @@ pub async fn rebuild_facts(timeline: &Timeline, kinds: &[&str]) -> Result<Timeli
         from_sequence: None,
         order_by: TimelineQueryOrderBy::Sequence,
         direction: TimelineQueryDirection::Ascending,
-        bound: TimelineQueryBound::Committed,
+        include_publishing: true,
         kinds: kinds.iter().map(|kind| (*kind).to_owned()).collect(),
         flags: Vec::new(),
         event_id: None,

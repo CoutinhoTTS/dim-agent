@@ -6,7 +6,7 @@ use crate::{
     host::*,
 };
 use dim_agent_runtime::{
-    ContextHistory, Timeline, TimelineQuery, TimelineQueryBound, TimelineQueryDirection,
+    ContextHistory, Timeline, TimelineQuery, TimelineQueryDirection,
     TimelineQueryOrderBy, TimelineQueryPredicate, TimelineQueryScope,
 };
 use dim_agent_types::*;
@@ -798,7 +798,7 @@ impl ContextPolicy {
                 .timeline
                 .query(TimelineQuery {
                     scope: TimelineQueryScope::Branch,
-                    bound: TimelineQueryBound::Committed,
+                    include_publishing: true,
                     from_event: None,
                     from_sequence: Some(from),
                     order_by: TimelineQueryOrderBy::Sequence,

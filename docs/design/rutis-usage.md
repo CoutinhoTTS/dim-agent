@@ -594,7 +594,7 @@ async def apply(ctx, config):
 ```
 
 ```ts
-// A Capability that rebuilds from the query at its committed bound, then
+// A Capability that rebuilds from the query including its publishing facts, then
 // follows live events (plugin contract §5.2).
 export default definePlugin({
   name: 'ExampleCounter',
@@ -609,7 +609,7 @@ export default definePlugin({
     }
     await dispatcher.consume('example-counter', ['input/message'], async () => {
       const page = await timeline.query({
-        scope: 'branch', bound: 'committed', direction: 'ascending', kinds: ['input/message'], limit: 1024n, offset: 0n,
+        scope: 'branch', include_publishing: true, direction: 'ascending', kinds: ['input/message'], limit: 1024n, offset: 0n,
       })
       page.events.forEach(fold)
       return BigInt(page.through)

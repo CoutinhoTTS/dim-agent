@@ -245,11 +245,6 @@ export type TimelineQueryDirection =
   | /** Oldest first: the page is the oldest matching facts, and `offset` starts it further along. */ "ascending"
   | /** Newest first: the page is the newest matching facts, and `offset` starts it further back. */ "descending"
 
-/** How far a read reaches on the queried branch. */
-export type TimelineQueryBound =
-  | /** The published head: no fact whose publication has not completed. */ "published"
-  | /** The committed head: the branch's own facts written above the published head belong to the read, and the reply's `through` is where they end. */ "committed"
-
 /**
  * One of the envelope's two context flags a query may name. Naming either
  * returns the events that carry at least one named flag.
@@ -290,11 +285,11 @@ export interface TimelineQuery {
   /** The end a page is taken from; ascending is the default. */
   direction?: TimelineQueryDirection
   /**
-   * How far the read reaches on the queried branch: what is published when
-   * it runs, or the committed head, which adds the branch's facts written
-   * but not yet published. An ancestor is read to its cut either way.
+   * Whether the queried branch's own facts written above the published head
+   * belong to the read, up to the point the reply reports as `through`. An
+   * ancestor is read to its cut either way.
    */
-  bound?: TimelineQueryBound
+  include_publishing?: boolean
   /** Event kinds (`domain/name`) the read accepts; empty accepts every kind. */
   kinds?: string[]
   /**

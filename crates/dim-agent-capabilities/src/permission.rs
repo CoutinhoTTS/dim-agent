@@ -20,7 +20,7 @@ use crate::{
 };
 use dim_agent_runtime::{
     AgentError, Dispatcher, Names, Registration, Registrations, SessionConfig, SessionIdentity,
-    StateCell, Timeline, TimelineQuery, TimelineQueryBound, TimelineQueryDirection,
+    StateCell, Timeline, TimelineQuery, TimelineQueryDirection,
     TimelineQueryOrderBy, TimelineQueryScope,
 };
 use dim_agent_types::{
@@ -535,7 +535,7 @@ impl Permission {
             .timeline
             .query(TimelineQuery {
                 scope: TimelineQueryScope::Chain,
-                bound: TimelineQueryBound::Committed,
+                include_publishing: true,
                 from_event: None,
                 from_sequence: None,
                 order_by: TimelineQueryOrderBy::Sequence,

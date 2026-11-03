@@ -48,7 +48,7 @@ Paging is skipping, not a cursor: the caller repeats the query with a larger ski
 shorter than the count is what says the selection is exhausted. A page therefore does not align
 with an atomic batch — it may end inside one, and the next page carries the rest, which a
 consumer folding in order handles. A read is taken at what is published when it runs, so a consumer
-that folds several pages drops what it has already folded. A read that asks for the committed bound
+that folds several pages drops what it has already folded. A read that asks for the facts still publishing
 is the exception: it takes the write head when it starts, so a part whose rebuild must see its own
 unpublished facts reads them in the same query, and the reply's cutoff is where that read ends.
 

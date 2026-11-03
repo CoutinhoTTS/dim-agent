@@ -7,7 +7,7 @@
 
 use crate::{history::chain_by_id, host::HostError};
 use dim_agent_runtime::{
-    Names, Timeline, TimelineQuery, TimelineQueryBound, TimelineQueryDirection,
+    Names, Timeline, TimelineQuery, TimelineQueryDirection,
     TimelineQueryOrderBy, TimelineQueryScope,
 };
 use dim_agent_types::{ContextCompactionResult, EventKind};
@@ -176,7 +176,7 @@ impl FileReads {
                 .timeline
                 .query(TimelineQuery {
                     scope: TimelineQueryScope::Branch,
-                    bound: TimelineQueryBound::Published,
+                    include_publishing: false,
                     from_event: None,
                     from_sequence: None,
                     order_by: TimelineQueryOrderBy::Sequence,

@@ -170,7 +170,7 @@ rebuilds reads its own history (§5.4). A new generation rebuilds as the
 
 A part that rebuilds registers once for both (R1), under the name `consume` in every binding: it
 subscribes to the keys first, holds the matching facts, runs its rebuild, which reads the facts it
-folds through the branch's `timeline` query at the committed bound (§5.4) and returns the cutoff
+folds through the branch's `timeline` query including its publishing facts (§5.4) and returns the cutoff
 that read took; then it delivers the held facts above the cutoff and each later matching fact, in
 sequence order and none twice. Live facts wait until the rebuild returns, so the work the rebuild
 leaves, such as failing the operations a previous generation left open, is done before them. The
@@ -221,7 +221,7 @@ A part reads facts through its branch's `timeline` service with one bounded quer
 | Predicate | One equality against one JSON scalar. The path is a sequence of field names inside the event's data joined by dots, with no array indexing and no wildcards |
 | From | Where the read begins, named by an event id or by a sequence; the event it names is part of the read. A branch read takes it on that branch; a chain read begins in the segment it names and carries on, skipping the segments before it |
 | Order | The key the reply is ordered by — the sequence — and the direction: ascending (oldest first) or descending (newest first). A chain read orders by chain position first |
-| Bound | How far the read reaches on the queried branch: what is published when it runs, the default, or the committed head, which adds the branch's own facts written but not yet published (§5.2). An ancestor is read to its cut either way |
+| Publishing facts | Whether the queried branch's own facts written but not yet published are part of the read (§5.2); by default they are not. An ancestor is read to its cut either way |
 | Page | How many matching events the read skips, and how many it returns; the second is nonzero by type, so no read is unbounded. Both count events, not storage rows |
 
 The elements combine: an event is selected when it satisfies all of them, and flags named together
@@ -233,8 +233,8 @@ first event of its scope, and a flag it does not name constrains nothing: no omi
 Paging is skipping: a caller repeats the query with a larger skip, and a page shorter than the
 count is what says the selection is exhausted. A page does not align with an atomic batch — it may
 end inside one and the next page carries the rest, which a consumer folding in order handles. A
-read is taken at what is published when it runs, unless it asks for the committed bound, which
-takes the write head instead; either way a consumer that folds several pages drops what it has
+read is taken at what is published when it runs, unless it asks for the facts still publishing,
+which takes the write head instead; either way a consumer that folds several pages drops what it has
 already folded.
 
 The path's spelling is fixed here and not in a binding: there is one form, the one above, and the
@@ -243,8 +243,7 @@ storage translates that form. A binding writes this path syntax and invents no o
 The selection is what the query is for. Its elements describe events, not a slice of the store, so
 the store executes them where the events are kept and returns the page those events form. A read
 never returns a fact above the coverage of the branch it reads: an ancestor to its cut, this branch
-to the bound the request names, which the service turns into a cutoff and no caller states as a
-sequence. A
+to the cutoff the service takes, which no caller states as a sequence. A
 selection the store can execute from an index costs the page; one it cannot — an equality on a field
 it holds no index for, a flag set with no index of its own, or any selection in a store that filters
 in memory — costs the scoped range and proves the end of the scope the same way. A
@@ -255,11 +254,11 @@ The query returns facts; it does not fold, project or aggregate them. What a par
 is its own state and stays with it ([ADR 002](../adr/002-plugin-scope.md) D1). A part that needs a
 whole prefix reads pages and folds them itself.
 
-A part that rebuilds reads the same query at the committed bound
+A part that rebuilds asks the same query for its publishing facts
 ([ADR 020](../adr/020-timeline-read-convergence.md) D3). That read answers what the query would,
 plus this branch's facts written before it ran that are not yet published, in sequence order and
 without overlapping the published page. The reply carries `through`, the cutoff the read took: the
-published head, or the committed head the request asked for. A rebuild that then receives live
+published head, or the write head when the request asked for them. A rebuild that then receives live
 events from that cutoff loses and repeats nothing. The cutoff belongs to the read: a caller that
 fixes an earlier one replays what lies between the two. Paging is skipping over both parts, the
 published page first.
@@ -369,7 +368,7 @@ design is merged. R4–R7 concern how Dim uses rutis and are in
   not, since each language passes its own.
 - **Needed:** `consume`, one registration in every language, which subscribes and holds the matching
   facts, calls the rebuild — the part reads the facts it folds through the Timeline query at the
-  committed bound and returns the cutoff — then delivers the held facts above the cutoff and each
+  publishing facts and returns the cutoff — then delivers the held facts above the cutoff and each
   later matching fact, in sequence order. Live facts wait until the rebuild returns, so the failure
   terminals a rebuild writes come before them. It carries no business meaning. The handler and the
   rebuild are closures in the Rust binding and functions in the others; that is a binding

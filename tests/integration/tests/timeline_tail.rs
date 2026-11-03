@@ -223,7 +223,7 @@ impl DynPlugin for TailPart {
                 let reply = timeline
                     .query(TimelineQuery {
                         scope: TimelineQueryScope::Branch,
-                        bound: TimelineQueryBound::Committed,
+                        include_publishing: true,
                         from_event: None,
                         from_sequence: None,
                         order_by: TimelineQueryOrderBy::Sequence,
@@ -357,10 +357,10 @@ fn draft(kind: EventKind, id: &str) -> EventDraft {
 }
 
 /// Two facts of this branch, published or with the branch's committed tail.
-fn page(offset: u64, bound: TimelineQueryBound) -> TimelineQuery {
+fn page(offset: u64, include_publishing: bool) -> TimelineQuery {
     TimelineQuery {
         scope: TimelineQueryScope::Branch,
-        bound,
+        include_publishing,
         from_event: None,
         from_sequence: None,
         order_by: TimelineQueryOrderBy::Sequence,
@@ -400,7 +400,7 @@ async fn a_tail_page_continues_the_published_page_and_marks_the_end_short() {
     let mut pages = Vec::new();
     for offset in [0, 2, 4] {
         let reply = timeline
-            .query(page(offset, TimelineQueryBound::Committed))
+            .query(page(offset, true))
             .await
             .unwrap();
         assert_eq!(reply.through, 5);
@@ -421,7 +421,7 @@ async fn a_tail_page_continues_the_published_page_and_marks_the_end_short() {
         .query(TimelineQuery {
             direction: TimelineQueryDirection::Descending,
             offset: 2,
-            ..page(0, TimelineQueryBound::Committed)
+            ..page(0, true)
         })
         .await
         .unwrap();
@@ -438,7 +438,7 @@ async fn a_tail_page_continues_the_published_page_and_marks_the_end_short() {
         .query(TimelineQuery {
             from_sequence: Some(4),
             limit: std::num::NonZeroU64::new(2).expect("a limit"),
-            ..page(0, TimelineQueryBound::Committed)
+            ..page(0, true)
         })
         .await
         .unwrap();
@@ -454,7 +454,7 @@ async fn a_tail_page_continues_the_published_page_and_marks_the_end_short() {
     let from_tail_event = timeline
         .query(TimelineQuery {
             from_event: Some("5".into()),
-            ..page(0, TimelineQueryBound::Committed)
+            ..page(0, true)
         })
         .await
         .unwrap();
@@ -496,7 +496,7 @@ async fn one_selection_reads_to_either_bound() {
     let committed = timeline.committed();
     let selection = TimelineQuery {
         limit: std::num::NonZeroU64::new(16).expect("a limit"),
-        ..page(0, TimelineQueryBound::Published)
+        ..page(0, false)
     };
     let ids = |reply: &TimelineQueryReply| {
         reply
@@ -513,7 +513,7 @@ async fn one_selection_reads_to_either_bound() {
     );
     let at_committed = timeline
         .query(TimelineQuery {
-            bound: TimelineQueryBound::Committed,
+            include_publishing: true,
             ..selection
         })
         .await

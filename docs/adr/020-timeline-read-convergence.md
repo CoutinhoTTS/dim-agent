@@ -20,7 +20,7 @@ One equality is pushed down to the store. A further condition is applied by the 
 
 ### D3. Replay is removed
 
-The Dispatcher delivers live events only and no longer reads history. A part rebuilds from the query, limited to the kinds its rebuild folds, which are not always the kinds it subscribes to. A part that must also see facts written but not yet dispatched asks the same query for its committed bound, which adds the branch's undispatched tail and reports the cutoff; a part with no such need reads the published bound. The handover is: subscribe and hold live events, take the cutoff, read the query up to it, then release the held events above it. It is checked against the subscription mechanism in the first migration, with a test that the old and new rebuild give the same part state.
+The Dispatcher delivers live events only and no longer reads history. A part rebuilds from the query, limited to the kinds its rebuild folds, which are not always the kinds it subscribes to. A part that must also see facts written but not yet dispatched asks the same query for the facts still publishing, which adds the branch's own facts written but not yet published and reports the cutoff; a part with no such need reads only published facts. The handover is: subscribe and hold live events, take the cutoff, read the query up to it, then release the held events above it. It is checked against the subscription mechanism in the first migration, with a test that the old and new rebuild give the same part state.
 
 ### D4. Batch structure stays on the store port
 
@@ -69,4 +69,4 @@ Refines [ADR 019](019-event-query.md) D5 and follows [ADR 006](006-plugin-contra
 
 ## Requirements raised to mechanism owners
 
-The Dispatcher owner removes history reads and replay and keeps live delivery. The Timeline owner provides the bound that adds the undispatched tail and keeps the batch-end check on the store port. The storage owners keep merged rows inside the store and decide the checkpoint format change. The owner of each consumer moves its reads and states what it folds.
+The Dispatcher owner removes history reads and replay and keeps live delivery. The Timeline owner provides the read that includes facts still publishing and keeps the batch-end check on the store port. The storage owners keep merged rows inside the store and decide the checkpoint format change. The owner of each consumer moves its reads and states what it folds.

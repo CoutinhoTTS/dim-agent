@@ -155,7 +155,7 @@ impl Branch {
     /// published: the branch's own committed tail belongs to the part that
     /// folds it, through the branch's Timeline.
     pub async fn query(&self, query: TimelineQuery) -> Result<TimelineQueryReply> {
-        if query.bound == TimelineQueryBound::Committed {
+        if query.include_publishing {
             return Err(AgentError::InvalidInput(
                 "a facade read stops at the published head".into(),
             ));

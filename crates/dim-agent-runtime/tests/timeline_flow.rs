@@ -1,6 +1,6 @@
 use dim_agent_runtime::{
     AgentError, BoxFuture, MemoryTimelineStore, PublishCallback, Result, SessionConfig,
-    StoredBranch, StoredEvent, Timeline, TimelineKey, TimelineQueryBound, TimelineStore,
+    StoredBranch, StoredEvent, Timeline, TimelineKey, TimelineStore,
     TimelineTrace,
 };
 use dim_agent_types::*;
@@ -908,7 +908,7 @@ async fn last_event_reads_a_cut_inside_an_atomic_batch() {
 fn branch_query(scope: dim_agent_runtime::TimelineQueryScope) -> dim_agent_runtime::TimelineQuery {
     dim_agent_runtime::TimelineQuery {
         scope,
-        bound: TimelineQueryBound::Published,
+        include_publishing: false,
         from_event: None,
         from_sequence: None,
         order_by: Default::default(),
@@ -1647,7 +1647,7 @@ fn the_query_crosses_languages_with_its_serde_shape() {
 
     let query = dim_agent_runtime::TimelineQuery {
         scope: TimelineQueryScope::Chain,
-        bound: TimelineQueryBound::Published,
+        include_publishing: false,
         from_event: None,
         from_sequence: None,
         order_by: Default::default(),
@@ -1667,7 +1667,7 @@ fn the_query_crosses_languages_with_its_serde_shape() {
     };
     let wire = serde_json::to_value(&query).unwrap();
     assert_eq!(wire["scope"], "chain");
-    assert_eq!(wire["bound"], "published");
+    assert_eq!(wire["include_publishing"], false);
     assert_eq!(wire["direction"], "descending");
     assert_eq!(wire["flags"], serde_json::json!(["render", "state"]));
     assert_eq!(wire["event_id"], "event-1");
@@ -1688,7 +1688,7 @@ fn the_query_crosses_languages_with_its_serde_shape() {
         dim_agent_runtime::TimelineQueryDirection::Ascending,
         "ascending is the default"
     );
-    assert_eq!(defaulted.bound, TimelineQueryBound::Published);
+    assert!(!defaulted.include_publishing);
     assert_eq!(defaulted.offset, 0);
     assert_eq!(defaulted.kinds, Vec::<String>::new());
     assert_eq!(defaulted.flags, Vec::new());
