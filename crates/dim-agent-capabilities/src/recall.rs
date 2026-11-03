@@ -18,7 +18,8 @@ use crate::{
 use chrono::{DateTime, TimeZone, Utc};
 use dim_agent_runtime::{
     AgentBuilder, AgentError, CAPABILITY_RELOADING, Feature, Names, TimelineQuery,
-    TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryReply, TimelineQueryScope,
+    TimelineQueryBound, TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryReply,
+    TimelineQueryScope,
 };
 use dim_agent_types::*;
 use rutis::Ctx;
@@ -190,6 +191,7 @@ impl RecallTool {
         // folds, over the whole chain.
         let mut query = TimelineQuery {
             scope: TimelineQueryScope::Chain,
+            bound: TimelineQueryBound::Published,
             from_event: None,
             from_sequence: Some(head),
             order_by: TimelineQueryOrderBy::Sequence,

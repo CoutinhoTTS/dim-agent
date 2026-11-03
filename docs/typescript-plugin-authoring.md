@@ -85,8 +85,8 @@ const counter = definePlugin({
     await dispatcher.consume('example-counter', ['input/message'], async () => {
       let from: bigint | undefined
       for (;;) {
-        const page = await timeline.queryWithTail({
-          scope: 'branch', ...(from === undefined ? {} : { from_sequence: from }),
+        const page = await timeline.query({
+          scope: 'branch', bound: 'committed', ...(from === undefined ? {} : { from_sequence: from }),
           direction: 'ascending', kinds: ['input/message'], limit: 256n, offset: 0n,
         })
         page.events.forEach(fold)
@@ -684,7 +684,7 @@ parts.
 
 | Service | Contract |
 | --- | --- |
-| `dispatcher` | `consume(name, keys, rebuild, handler)` registers an ordered consumer on the calling part's context. It subscribes first and holds the matching facts, calls `rebuild` once — the part reads the facts it folds through `timeline.queryWithTail` and returns the cutoff that read took — then delivers the held facts above the cutoff and each later matching fact, in sequence order, and none twice. `listen(name, keys, handler)` registers a live consumer only, for a part that does not rebuild. A handler's throw/rejection follows the native branch failure path. `committed/local/history` read committed history. `notify/sequence/changed` expose native dispatch progress and wakeups, not an ordered event subscription. |
+| `dispatcher` | `consume(name, keys, rebuild, handler)` registers an ordered consumer on the calling part's context. It subscribes first and holds the matching facts, calls `rebuild` once — the part reads the facts it folds through `timeline.query` at the committed bound and returns the cutoff that read took — then delivers the held facts above the cutoff and each later matching fact, in sequence order, and none twice. `listen(name, keys, handler)` registers a live consumer only, for a part that does not rebuild. A handler's throw/rejection follows the native branch failure path. `committed/local/history` read committed history. `notify/sequence/changed` expose native dispatch progress and wakeups, not an ordered event subscription. |
 | `treeCommands` | Session directory `list/info`, validated `input` by branch id and `create`. These are the Rust data methods, not the process `sessions` request envelopes. |
 | `branchLifecycle` | Background work waits for `activated()` and releases its resources when `closing()` resolves. Never wait for activation inside a Dispatcher callback. |
 | `timelineIdentity` | `get()` returns the original Session and branch ids. |
@@ -713,8 +713,8 @@ export const counter = definePlugin({
     await dispatcher.consume('example-counter', ['input/message'], async () => {
       let from: bigint | undefined
       for (;;) {
-        const page = await timeline.queryWithTail({
-          scope: 'branch', ...(from === undefined ? {} : { from_sequence: from }),
+        const page = await timeline.query({
+          scope: 'branch', bound: 'committed', ...(from === undefined ? {} : { from_sequence: from }),
           direction: 'ascending', kinds: ['input/message'], limit: 256n, offset: 0n,
         })
         page.events.forEach(fold)
@@ -828,8 +828,8 @@ export const checkpoints = definePlugin({
     await dispatcher.consume('example-checkpoints', ['myplugin/*', 'turn/end'], async () => {
       let from: bigint | undefined
       for (;;) {
-        const page = await timeline.queryWithTail({
-          scope: 'branch', ...(from === undefined ? {} : { from_sequence: from }),
+        const page = await timeline.query({
+          scope: 'branch', bound: 'committed', ...(from === undefined ? {} : { from_sequence: from }),
           direction: 'ascending', kinds: ['myplugin/*'], limit: 256n, offset: 0n,
         })
         page.events.forEach(fold)

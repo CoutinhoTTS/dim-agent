@@ -75,8 +75,7 @@
 
 | API | 语义 |
 | --- | --- |
-| `Timeline::query(query).await` | 一次有界事件读取：范围、种类、上下文标志、事件 id、一条谓词、顺序与分页（[插件契约 §5.4](../../design/plugin-contract.md#54-事件查询)） |
-| `Timeline::query_with_tail(query).await` | 同一读取，加上本分支已写入、尚未发布的事实，并回报所用截止序号（[ADR 020](../../adr/020-timeline-read-convergence.md) D3） |
+| `Timeline::query(query).await` | 一次有界事件读取：范围、种类、上下文标志、事件 id、一条谓词、顺序、界与分页；界为已提交时加上本分支已写入、尚未发布的事实。回复带上所用截点 `through`（[插件契约 §5.4](../../design/plugin-contract.md#54-事件查询)、[ADR 020](../../adr/020-timeline-read-convergence.md) D3） |
 | `Timeline::checkpoint(through, interpreter, decode).await` | 选取 sequence 不大于 `through`、解释器相同的最近恢复快照，校验锚点事实并把 `resume` 解析成链上位置 |
 | `Timeline::history(through).await` | 祖先链加本分支截至 `through` 的完整固定历史 |
 | `Timeline::local(range).await` | 本分支已写入事件的区间（默认终点 `committed()`），可分页 |
@@ -84,7 +83,7 @@
 
 上下文投影的折叠在投影的所有者（`dim-agent-capabilities` 的 `history`）：`read_context` 先取 `Timeline::checkpoint` 选出的快照，再从 `resume` 起用事件查询分页折叠携带上下文标志的事实，没有可用快照时从祖先链起点折叠，快照不可用（状态渲染失败，或按 id 找不到 resume 事件）时回退为完整事实重放；`replay_context` 是同一折叠而不选快照。
 
-`through` 不得超过已写入位置（`Timeline::bound` 检查）。区间读取的终点须为原子批次边界，事件查询的页可以落在批次内部。区间在热窗口内时直接取自内存；否则已发布部分读取 `TimelineStore`，其后尚未发布的部分取自热窗口（热窗口保留全部未分发事件，未发布事件一定在其中）。`Branch` 与 `Session` 的同名读取以已发布位置为上限；事件查询由服务自己按各段截点或已发布位置设界。
+`through` 不得超过已写入位置（`Timeline::bound` 检查）。区间读取的终点须为原子批次边界，事件查询的页可以落在批次内部。区间在热窗口内时直接取自内存；否则已发布部分读取 `TimelineStore`，其后尚未发布的部分取自热窗口（热窗口保留全部未分发事件，未发布事件一定在其中）。`Branch` 与 `Session` 的同名读取以已发布位置为上限（它们不接受已提交界）；事件查询由服务自己按各段截点或请求所给的界设界。
 
 ### 有界读取与恢复扫描
 

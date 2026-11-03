@@ -14,7 +14,7 @@ use crate::{
 };
 use dim_agent_runtime::{
     AgentBuilder, AgentError, CAPABILITY_RELOADING, Dispatcher, Names, Timeline, TimelineQuery,
-    TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryScope,
+    TimelineQueryBound, TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryScope,
 };
 use dim_agent_types::*;
 use rutis::Ctx;
@@ -91,8 +91,9 @@ impl Wait {
     /// turn is open.
     async fn rebuild(&self, timeline: &Timeline) -> dim_agent_runtime::Result<u64> {
         let reply = timeline
-            .query_with_tail(TimelineQuery {
+            .query(TimelineQuery {
                 scope: TimelineQueryScope::Branch,
+                bound: TimelineQueryBound::Committed,
                 from_event: None,
                 from_sequence: None,
                 order_by: TimelineQueryOrderBy::Sequence,

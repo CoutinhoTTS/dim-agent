@@ -245,6 +245,11 @@ export type TimelineQueryDirection =
   | /** Oldest first: the page is the oldest matching facts, and `offset` starts it further along. */ "ascending"
   | /** Newest first: the page is the newest matching facts, and `offset` starts it further back. */ "descending"
 
+/** How far a read reaches on the queried branch. */
+export type TimelineQueryBound =
+  | /** The published head: no fact whose publication has not completed. */ "published"
+  | /** The committed head: the branch's own facts written above the published head belong to the read, and the reply's `through` is where they end. */ "committed"
+
 /**
  * One of the envelope's two context flags a query may name. Naming either
  * returns the events that carry at least one named flag.
@@ -265,8 +270,8 @@ export interface TimelineQueryPredicate {
 }
 
 /**
- * One bounded read of a branch's facts: what it covers, at which published
- * sequence, what it accepts, and how much of the result it returns.
+ * One bounded read of a branch's facts: what it covers, how far it reaches,
+ * what it accepts, and how much of the result it returns.
  */
 export interface TimelineQuery {
   scope: TimelineQueryScope
@@ -284,6 +289,12 @@ export interface TimelineQuery {
   order_by?: TimelineQueryOrderBy
   /** The end a page is taken from; ascending is the default. */
   direction?: TimelineQueryDirection
+  /**
+   * How far the read reaches on the queried branch: what is published when
+   * it runs, or the committed head, which adds the branch's facts written
+   * but not yet published. An ancestor is read to its cut either way.
+   */
+  bound?: TimelineQueryBound
   /** Event kinds (`domain/name`) the read accepts; empty accepts every kind. */
   kinds?: string[]
   /**
@@ -312,21 +323,11 @@ export interface TimelineQueryReply {
    * read from and its sequence there.
    */
   positions: ({ branch_id: string; sequence: number | bigint })[]
-}
-
-/**
- * The facts a read that adds the branch's unpublished tail returned, and the
- * cutoff it took.
- */
-export interface TimelineTailReply {
-  /** The page, in the query's order, each fact with its position. */
-  events: import('./plugin.js').BranchEvent[]
-  /** One position per event, in the same order. */
-  positions: ({ branch_id: string; sequence: number | bigint })[]
   /**
-   * The committed sequence the page is cut at: no fact above it was read,
-   * and a fact written after the read started is above it. A caller
-   * holding live events releases the ones above this sequence.
+   * The sequence the read is cut at on the queried branch: what was
+   * published when it ran, or the committed head it asked for. No fact
+   * above it was read; an ancestor is read to its cut. A caller holding
+   * live events releases the ones above this sequence.
    */
   through: number | bigint
 }
@@ -365,23 +366,19 @@ export interface Timeline {
    * segment did not use moves to the next one, so paging is skipping and a
    * page shorter than the limit means the selection is exhausted. The read
    * never returns a fact above a branch's coverage: an ancestor to its cut,
-   * this branch to its published head.
+   * this branch to the published head, or to the committed head when the
+   * query asks for it, in which case this branch's own facts in
+   * `published+1..=through` are part of the same page.
+   *
+   * The reply's `through` is the cutoff the read took on this branch: the
+   * published head, or the committed head the query asked for, which is
+   * read when the call starts, so a write during the call stays out of the
+   * page. The published part and the tail are disjoint in sequence, so each
+   * fact is returned once. A caller that holds live events releases the ones
+   * above the cutoff ([ADR 020 D3](../../../../docs/adr/020-timeline-read-convergence.md)).
    * @throws {AgentErrorThrown}
    */
   query(query: TimelineQuery): Promise<TimelineQueryReply>
-  /**
-   * [`Self::query`] plus this branch's own facts written above the
-   * published head: one page of the same selection, with the branch's
-   * facts in `published+1..=through` joined to its own segment in sequence
-   * order. The cutoff `through` is the branch's committed sequence when the
-   * call starts, so a write during the call stays out of this page, and no
-   * fact above it is returned. The published part and the tail are disjoint
-   * in sequence, so each fact is returned once. The reply reports the cutoff
-   * it took; a caller that holds live events releases the ones above it
-   * ([ADR 020 D3](../../../../docs/adr/020-timeline-read-convergence.md)).
-   * @throws {AgentErrorThrown}
-   */
-  queryWithTail(query: TimelineQuery): Promise<TimelineTailReply>
 }
 
 /** The scope a part is registered for. */

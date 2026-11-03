@@ -152,8 +152,14 @@ impl Branch {
     }
     /// One bounded read of this branch's facts: the request selects them and
     /// the reply carries each event's position. The read stops at what is
-    /// published.
+    /// published: the branch's own committed tail belongs to the part that
+    /// folds it, through the branch's Timeline.
     pub async fn query(&self, query: TimelineQuery) -> Result<TimelineQueryReply> {
+        if query.bound == TimelineQueryBound::Committed {
+            return Err(AgentError::InvalidInput(
+                "a facade read stops at the published head".into(),
+            ));
+        }
         self.0.timeline().query(query).await
     }
 }

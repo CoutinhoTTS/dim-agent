@@ -36,6 +36,18 @@ pub enum TimelineQueryDirection {
     Descending,
 }
 
+/// How far a read reaches on the queried branch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TimelineQueryBound {
+    /// The published head: no fact whose publication has not completed.
+    #[default]
+    Published,
+    /// The committed head: the branch's own facts written above the published
+    /// head belong to the read, and the reply's `through` is where they end.
+    Committed,
+}
+
 /// The key a read orders by; a chain read orders by chain position first, so
 /// `sequence` is the sequence within an event's own branch.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,8 +142,8 @@ impl TimelineQueryPredicate {
     }
 }
 
-/// One bounded read of a branch's facts: what it covers, at which published
-/// sequence, what it accepts, and how much of the result it returns.
+/// One bounded read of a branch's facts: what it covers, how far it reaches,
+/// what it accepts, and how much of the result it returns.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TimelineQuery {
@@ -150,6 +162,11 @@ pub struct TimelineQuery {
     /// The end a page is taken from; ascending is the default.
     #[serde(default)]
     pub direction: TimelineQueryDirection,
+    /// How far the read reaches on the queried branch: what is published when
+    /// it runs, or the committed head, which adds the branch's facts written
+    /// but not yet published. An ancestor is read to its cut either way.
+    #[serde(default)]
+    pub bound: TimelineQueryBound,
     /// Event kinds (`domain/name`) the read accepts; empty accepts every kind.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kinds: Vec<String>,
@@ -224,20 +241,10 @@ pub struct TimelineQueryReply {
     /// One position per event, in the same order: the branch the event was
     /// read from and its sequence there.
     pub positions: Vec<TimelinePosition>,
-}
-
-/// The facts a read that adds the branch's unpublished tail returned, and the
-/// cutoff it took.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TimelineTailReply {
-    /// The page, in the query's order, each fact with its position.
-    pub events: Vec<Arc<AgentEvent>>,
-    /// One position per event, in the same order.
-    pub positions: Vec<TimelinePosition>,
-    /// The committed sequence the page is cut at: no fact above it was read,
-    /// and a fact written after the read started is above it. A caller
-    /// holding live events releases the ones above this sequence.
+    /// The sequence the read is cut at on the queried branch: what was
+    /// published when it ran, or the committed head it asked for. No fact
+    /// above it was read; an ancestor is read to its cut. A caller holding
+    /// live events releases the ones above this sequence.
     pub through: u64,
 }
 
@@ -255,18 +262,19 @@ pub struct TimelineQueryPage {
 const REBUILD_PAGE: u64 = 1024;
 
 /// Every fact of `kinds` on this branch through its committed head, in
-/// sequence order and each once: the published selection read a page at a
-/// time, each page with the branch's unpublished tail, and the reply's cutoff
-/// the one the last page took. A rebuild folds the facts and hands the cutoff
-/// back as the point live delivery continues from
+/// sequence order and each once: the selection read a page at a time at that
+/// bound, and the reply's cutoff the one the last page took. A rebuild folds
+/// the facts and hands the cutoff back as the point live delivery continues
+/// from
 /// ([ADR 020 D3](../../../docs/adr/020-timeline-read-convergence.md#d3-replay-is-removed)).
-pub async fn rebuild_facts(timeline: &Timeline, kinds: &[&str]) -> Result<TimelineTailReply> {
+pub async fn rebuild_facts(timeline: &Timeline, kinds: &[&str]) -> Result<TimelineQueryReply> {
     let mut query = TimelineQuery {
         scope: TimelineQueryScope::Branch,
         from_event: None,
         from_sequence: None,
         order_by: TimelineQueryOrderBy::Sequence,
         direction: TimelineQueryDirection::Ascending,
+        bound: TimelineQueryBound::Committed,
         kinds: kinds.iter().map(|kind| (*kind).to_owned()).collect(),
         flags: Vec::new(),
         event_id: None,
@@ -277,7 +285,7 @@ pub async fn rebuild_facts(timeline: &Timeline, kinds: &[&str]) -> Result<Timeli
     let mut events = Vec::new();
     let mut positions = Vec::new();
     loop {
-        let reply = timeline.query_with_tail(query.clone()).await?;
+        let reply = timeline.query(query.clone()).await?;
         let through = reply.through;
         let short = (reply.events.len() as u64) < REBUILD_PAGE;
         let last = reply.positions.last().map(|position| position.sequence);
@@ -286,7 +294,7 @@ pub async fn rebuild_facts(timeline: &Timeline, kinds: &[&str]) -> Result<Timeli
         match last {
             Some(last) if !short => query.from_sequence = Some(last + 1),
             _ => {
-                return Ok(TimelineTailReply {
+                return Ok(TimelineQueryReply {
                     events,
                     positions,
                     through,

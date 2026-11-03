@@ -8,8 +8,8 @@ use crate::{
 use dim_agent_capabilities::host::ModelSelectionHost;
 use dim_agent_runtime::{
     AGENT_GROUP, Agent, AgentBuilder, AgentError, CollaborationRole, InUse, Modules, Names,
-    NoConfig, Session, SessionConfig, TimelineKey, TimelineQuery, TimelineQueryDirection,
-    TimelineQueryOrderBy, TimelineQueryScope,
+    NoConfig, Session, SessionConfig, TimelineKey, TimelineQuery, TimelineQueryBound,
+    TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryScope,
 };
 pub use dim_agent_types::AgentProfile;
 use dim_agent_types::{ContentBlock, EventKind};
@@ -993,6 +993,7 @@ impl AgentIndex {
     ) -> dim_agent_runtime::Result<(Option<String>, u64)> {
         let inputs = TimelineQuery {
             scope: TimelineQueryScope::Branch,
+            bound: TimelineQueryBound::Published,
             from_event: None,
             from_sequence: None,
             order_by: TimelineQueryOrderBy::Sequence,
