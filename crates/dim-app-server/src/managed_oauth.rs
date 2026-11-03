@@ -1,5 +1,5 @@
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use dim_agent_capabilities::file_storage::{FileLease, FileStorage, FileStorageError};
+use dim_agent_capabilities::file_storage::{FileLease, FilePath, FileStorage, FileStorageError};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -228,7 +228,7 @@ enum AttemptKind {
 
 pub struct Service {
     files: Arc<FileStorage>,
-    root: usize,
+    path: FilePath,
     key: &'static str,
     state_key: &'static str,
     config: Config,
@@ -366,8 +366,8 @@ impl Service {
             .build()
             .map_err(|_| OAuthError::Config("HTTP client"))?;
         Ok(Arc::new(Self {
+            path: files.path(root, AUTH_FILE)?,
             files,
-            root,
             key,
             state_key,
             config,
@@ -385,12 +385,11 @@ impl Service {
             .as_millis() as u64
     }
     async fn lease(&self, cancel: &CancellationToken) -> Result<FileLease> {
-        let path = self.files.path(self.root, AUTH_FILE)?;
         loop {
             if cancel.is_cancelled() || self.stopping.is_cancelled() {
                 return Err(OAuthError::Closed);
             }
-            match self.files.lock(&path, cancel).await {
+            match self.files.lock(&self.path, cancel).await {
                 Ok(x) => return Ok(x),
                 Err(FileStorageError::Locked) => tokio::select! {
                     _ = self.stopping.cancelled() => return Err(OAuthError::Closed),
@@ -403,14 +402,27 @@ impl Service {
     }
     async fn read(&self, lease: &mut FileLease, cancel: &CancellationToken) -> Result<Record> {
         let document = match lease.read(cancel).await {
-            Ok(bytes) => serde_json::from_slice::<Value>(&bytes)
-                .ok()
-                .and_then(|x| x.as_object().cloned())
-                .ok_or(OAuthError::InvalidStore("root must be an object")),
+            Ok(bytes) => Self::document(&bytes),
             Err(FileStorageError::Io(e)) if e.kind() == io::ErrorKind::NotFound => Ok(Map::new()),
             Err(e) => Err(e.into()),
         }?;
         self.parse_record(document)
+    }
+    /// Reads the current record without the account lease: writes are atomic
+    /// replaces, so a fresh record never needs the marker or its fsync.
+    async fn read_current(&self, cancel: &CancellationToken) -> Result<Record> {
+        let document = match self.files.read(&self.path, cancel).await {
+            Ok(bytes) => Self::document(&bytes),
+            Err(FileStorageError::Io(e)) if e.kind() == io::ErrorKind::NotFound => Ok(Map::new()),
+            Err(e) => Err(e.into()),
+        }?;
+        self.parse_record(document)
+    }
+    fn document(bytes: &[u8]) -> Result<Map<String, Value>> {
+        serde_json::from_slice::<Value>(bytes)
+            .ok()
+            .and_then(|x| x.as_object().cloned())
+            .ok_or(OAuthError::InvalidStore("root must be an object"))
     }
     async fn write(lease: &mut FileLease, doc: Map<String, Value>) -> Result<()> {
         let mut bytes = serde_json::to_vec_pretty(&Value::Object(doc))
@@ -956,8 +968,28 @@ impl Service {
         rejected: Option<&CredentialLease>,
         cancel: &CancellationToken,
     ) -> Result<CredentialLease> {
+        // A fresh record is read without the account lease, so another
+        // provider's refresh does not block it. Anything else re-reads under
+        // the lease, where the decision and any rotation are serialized.
+        if let Ok(record) = self.read_current(cancel).await
+            && let Some(lease) = self.reusable(&record, rejected)?
+        {
+            return Ok(lease);
+        }
         let mut lease = self.lease(cancel).await?;
         let record = self.read(&mut lease, cancel).await?;
+        if let Some(lease) = self.reusable(&record, rejected)? {
+            return Ok(lease);
+        }
+        self.refresh(&mut lease, record, false, cancel).await
+    }
+    /// The record's lease when it needs no token request, after checking that
+    /// it still belongs to the rejected account.
+    fn reusable(
+        &self,
+        record: &Record,
+        rejected: Option<&CredentialLease>,
+    ) -> Result<Option<CredentialLease>> {
         record.revision()?;
         let tokens = record.tokens.as_ref().ok_or(OAuthError::Missing)?;
         let state = record.state.as_ref().ok_or(OAuthError::RecoveryRequired)?;
@@ -972,9 +1004,9 @@ impl Service {
         if rejected.is_some_and(|x| x.revision != state.credential_revision && fresh)
             || (rejected.is_none() && fresh)
         {
-            return Ok(to_lease(record.tokens.unwrap(), state, self.key));
+            return Ok(Some(to_lease(tokens.clone(), state, self.key)));
         }
-        self.refresh(&mut lease, record, false, cancel).await
+        Ok(None)
     }
     async fn refresh(
         &self,

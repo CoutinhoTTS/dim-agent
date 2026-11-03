@@ -19196,11 +19196,13 @@
       "to": "dim_agent_capabilities::file_storage",
       "references": [
         "path FileLease",
+        "path FilePath",
         "path FileStorage",
         "path FileStorageError",
         "path FileStorageError::Io",
         "path FileStorageError::Locked",
         "use dim_agent_capabilities::file_storage::FileLease",
+        "use dim_agent_capabilities::file_storage::FilePath",
         "use dim_agent_capabilities::file_storage::FileStorage",
         "use dim_agent_capabilities::file_storage::FileStorageError"
       ]
