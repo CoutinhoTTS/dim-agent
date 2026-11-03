@@ -30,6 +30,11 @@ the domain new ones enter.
 | `S:SessionIdentity` | Session-specific output directory. |
 | `S:SessionMethods` | Register the `session.exec.output` namespace, until this part unloads. |
 
+Exec looks up the optional `S:FileAccessFacts` service when preparing a process,
+to recognize its resolved cwd and obtain confirmed additional workspace roots
+([worktree access R3](../../../design/worktree-access.md#r3-新进程的工作目录与隔离范围)).
+Its absence retains the original workspace boundary and does not gate loading.
+
 ### Events and lifetime
 
 No direct Dispatcher subscription. Tool results return to ToolExecutor;
@@ -88,7 +93,7 @@ tool-result code is preserved, with instructions to fix the file and retry.
 Exec takes no input that selects a boundary. The user's `Process isolation` control in
 `/permissions` or `/settings` selects the existing `sandbox` and `network` settings
 ([process isolation](../../../design/host-platform-isolation.md#process-isolation));
-File access and Tool approval do not change them. `exec` passes nothing and cannot widen the boundary. A call
+File access and Tool approval do not change them. The model cannot supply extra roots or widen the boundary. A call
 that still sends `sandbox` is rejected as `exec_invalid_request`, and the background handoff
 keeps the boundary the process started with
 ([HostPlatform](HostPlatform.md#events-and-lifetime)).

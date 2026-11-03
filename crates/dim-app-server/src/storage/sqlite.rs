@@ -15,7 +15,7 @@ use std::{
 };
 
 /// The native store format this daemon creates and opens.
-pub const FORMAT: u32 = 32;
+pub const FORMAT: u32 = 33;
 /// The oldest schema the startup transaction upgrades: the first step of
 /// `UPGRADES`, which is ordered oldest first.
 const MIN_FORMAT: u32 = UPGRADES[0].0;
@@ -54,7 +54,7 @@ const LEGACY_INDEXES: &[(&str, &str, u32, u32)] = &[
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 32))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 33))",
     ),
     (
         "settings_documents",
@@ -157,6 +157,18 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
         "CREATE INDEX session_output_owners_by_path ON session_output_owners(path)",
     ),
     (
+        "worktree_directories",
+        "CREATE TABLE worktree_directories (repository TEXT NOT NULL, root TEXT NOT NULL, PRIMARY KEY (repository, root))",
+    ),
+    (
+        "session_worktrees",
+        "CREATE TABLE session_worktrees (session_id TEXT NOT NULL REFERENCES agent_sessions(session_id), repository TEXT NOT NULL, root TEXT NOT NULL, subtree TEXT NOT NULL, PRIMARY KEY (session_id, repository, root), FOREIGN KEY (repository, root) REFERENCES worktree_directories(repository, root))",
+    ),
+    (
+        "session_worktrees_by_directory",
+        "CREATE INDEX session_worktrees_by_directory ON session_worktrees(repository, root, session_id)",
+    ),
+    (
         "session_metadata",
         "CREATE TABLE session_metadata (session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), revision INTEGER NOT NULL CHECK (revision > 0), title TEXT, title_source TEXT CHECK (title_source IN ('auto', 'manual')), CHECK ((title IS NULL) = (title_source IS NULL)))",
     ),
@@ -200,7 +212,7 @@ ALTER TABLE timeline_events ADD COLUMN context_state INTEGER NOT NULL DEFAULT 0;
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 18] = [
+const UPGRADES: [(u32, &[&str]); 19] = [
     (
         13,
         &[
@@ -259,6 +271,14 @@ const UPGRADES: [(u32, &[&str]); 18] = [
     (30, &["timeline_events_positions"]),
     // #605: one partial index over both reading switches replaces the two.
     (31, &["timeline_events_context"]),
+    (
+        32,
+        &[
+            "worktree_directories",
+            "session_worktrees",
+            "session_worktrees_by_directory",
+        ],
+    ),
 ];
 
 fn format_table(version: u32) -> String {

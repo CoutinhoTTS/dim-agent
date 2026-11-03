@@ -132,8 +132,8 @@ fn an_incompatible_store_reports_the_startup_note() {
     rusqlite::Connection::open(&database)
         .unwrap()
         .execute_batch(
-            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 33));
-             INSERT INTO agent_store_format VALUES (33);",
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 34));
+             INSERT INTO agent_store_format VALUES (34);",
         )
         .unwrap();
     let original = fs::read(&database).unwrap();
@@ -145,10 +145,10 @@ fn an_incompatible_store_reports_the_startup_note() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("Cannot open native store"), "{stderr}");
-    assert!(stderr.contains("Store format: v33"), "{stderr}");
-    assert!(stderr.contains("Daemon format: v32"), "{stderr}");
+    assert!(stderr.contains("Store format: v34"), "{stderr}");
+    assert!(stderr.contains("Daemon format: v33"), "{stderr}");
     assert!(stderr.contains("Existing data was preserved"), "{stderr}");
-    assert!(stderr.contains("Run a build supporting v33"), "{stderr}");
+    assert!(stderr.contains("Run a build supporting v34"), "{stderr}");
     assert!(stderr.contains("Details:"), "{stderr}");
     assert!(!stderr.contains("App Server exited"), "{stderr}");
     assert_eq!(fs::read(&database).unwrap(), original);

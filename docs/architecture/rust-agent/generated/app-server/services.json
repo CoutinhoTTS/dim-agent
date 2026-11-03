@@ -2388,6 +2388,12 @@
         "removing": false
       },
       {
+        "service": "dim_agent_capabilities::file_access::WorktreeAssociations",
+        "provider": 7,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dim_agent_capabilities::file_storage::FileStorage",
         "provider": 4,
         "generation": 1,

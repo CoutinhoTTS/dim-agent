@@ -2421,3 +2421,6 @@ async fn unmounted_management_preserves_mock_sessions_and_wire_admission() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+#[path = "transport_flow/worktrees.rs"]
+mod worktrees;

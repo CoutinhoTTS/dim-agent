@@ -440,6 +440,9 @@
       "file": "crates/dim-agent-capabilities/src/file_access.rs",
       "unexpandedMacros": [
         "format",
+        "matches",
+        "tokio::select",
+        "tokio::try_join",
         "vec"
       ]
     },
@@ -6860,7 +6863,8 @@
       "to": "dim_agent_capabilities::file_access",
       "references": [
         "mod file_access",
-        "path file_access::FileAccessFacts"
+        "path file_access::FileAccessFacts",
+        "path file_access::WorktreeAssociations"
       ]
     },
     {
@@ -8455,6 +8459,8 @@
       "from": "dim_agent_capabilities::file_access",
       "to": "dim_agent_capabilities::host",
       "references": [
+        "path HostError",
+        "path HostError::Cancelled",
         "path HostError::failed",
         "path HostFuture",
         "path SessionFilesHost",
@@ -8468,7 +8474,9 @@
       "to": "dim_agent_capabilities::host_platform",
       "references": [
         "path HostPlatform",
-        "use crate::host_platform::HostPlatform"
+        "path ProcessSpec",
+        "use crate::host_platform::HostPlatform",
+        "use crate::host_platform::ProcessSpec"
       ]
     },
     {
@@ -8500,7 +8508,13 @@
       "to": "dim_agent_runtime::config",
       "references": [
         "path SessionConfig",
-        "use dim_agent_runtime::SessionConfig"
+        "path SessionIdentity",
+        "path SessionLifecycle",
+        "path SessionPhase::Active",
+        "use dim_agent_runtime::SessionConfig",
+        "use dim_agent_runtime::SessionIdentity",
+        "use dim_agent_runtime::SessionLifecycle",
+        "use dim_agent_runtime::SessionPhase"
       ]
     },
     {
@@ -11295,6 +11309,13 @@
     },
     {
       "from": "dim_agent_capabilities::shell_session",
+      "to": "dim_agent_capabilities::file_access",
+      "references": [
+        "path crate::file_access::FileAccessFacts"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::shell_session",
       "to": "dim_agent_capabilities::host",
       "references": [
         "path HostError",
@@ -12804,6 +12825,13 @@
         "path ToolResult::error",
         "path ToolResult::text",
         "path ToolSource::Extension"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools",
+      "to": "dim_agent_capabilities::file_access",
+      "references": [
+        "path crate::file_access::FileAccessFacts"
       ]
     },
     {
@@ -23386,6 +23414,13 @@
     },
     {
       "from": "dim_app_server::storage",
+      "to": "dim_agent_capabilities::file_access",
+      "references": [
+        "use dim_agent_capabilities::file_access::WorktreeDirectory"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage",
       "to": "dim_app_server::storage::catalog",
       "references": [
         "mod catalog",
@@ -23455,7 +23490,8 @@
         "use timeline::SessionStore",
         "use timeline::SessionStorePlugin",
         "use timeline::SqliteTimelineStore",
-        "use timeline::TurnWindow"
+        "use timeline::TurnWindow",
+        "use timeline::WorktreeUsage"
       ]
     },
     {
@@ -23978,9 +24014,25 @@
     },
     {
       "from": "dim_app_server::storage::timeline",
+      "to": "dim_agent_capabilities::file_access",
+      "references": [
+        "path AssociateWorktree",
+        "path WorktreeAssociations",
+        "path WorktreeDirectory",
+        "use dim_agent_capabilities::file_access::AssociateWorktree",
+        "use dim_agent_capabilities::file_access::WorktreeAssociations",
+        "use super::WorktreeDirectory"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::timeline",
       "to": "dim_agent_capabilities::host",
       "references": [
+        "path HostError::failed",
+        "path HostFuture",
         "path SessionFilesHost",
+        "use dim_agent_capabilities::host::HostError",
+        "use dim_agent_capabilities::host::HostFuture",
         "use dim_agent_capabilities::host::SessionFilesHost"
       ]
     },

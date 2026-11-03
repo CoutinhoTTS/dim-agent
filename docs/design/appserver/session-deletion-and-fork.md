@@ -145,7 +145,7 @@ are Rust methods over the native store, not services: only Agents calls them.
    every database in the directory, so the directory of an id without rows here may belong to
    another database's Session (§4).
 4. **Rows.** One `IMMEDIATE` transaction removes what makes S visible: `session_file_owners` (S5a releases its files),
-   `session_output_owners`, `session_grants`, S5b's title metadata (§14), `session_catalog`
+   `session_output_owners`, `session_grants`, `session_worktrees`, S5b's title metadata (§14), `session_catalog`
    ([#556's catalog projection](native-storage-format.md#556-v23-格式决定)), `session_owners`,
    `timeline_branches` and `agent_sessions`. `timeline_snapshots`, `timeline_events` and `timeline_content` then go
    in bounded transactions on a copy connection, each removing at most 256 rows, so other Sessions' commits and
@@ -172,6 +172,7 @@ are Rust methods over the native store, not services: only Agents calls them.
 | Title metadata | Native store, S5b's `session_metadata` row ([title metadata](session-title-metadata.md#9-lifecycle)) | Step 4, same transaction |
 | File grants | Native store, `session_grants` rows (v28, [ADR 012](../../adr/012-session-grants.md) D1) | Step 4, same transaction |
 | Output ownership | Native store, `session_output_owners` rows (v29, [ADR 013](../../adr/013-command-output-ownership.md) D1) | Step 4, same transaction |
+| Worktree usage associations | Native store, `session_worktrees` rows ([worktree access §4](../worktree-access.md#4-持久使用关联与清理边界)) | Step 4, same transaction; directory records and worktree files remain |
 | Exec output, offloaded `read` results and persistent shell logs | `<database directory>/command-output/<S>/` and every directory named by S's output rows | Step 3. A directory another Session in this database still names is kept |
 | Loaded instance, leases, subscriptions, in-flight uses | Process memory | Step 2 |
 | Protocol version, admission slot, unavailable-Session entry | Agents, in memory | Step 6 |
@@ -179,6 +180,7 @@ are Rust methods over the native store, not services: only Agents calls them.
 
 A delete does not remove:
 
+- **Worktree directories or their records.** Usage is not file ownership or deletion authority. The last association's removal leaves its directory record as a candidate for a separately authorized cleanup.
 - **Other owners' records that name S**, such as Scheduler and Workflow run records in `pluginFiles`. When their
   owners use the id, they get `session_closed`, as for a closed Session.
 - **Other Sessions.** A fork of S is a Session with its own rows. A deleted leader's members and the Agents it owns are
@@ -731,6 +733,29 @@ S5c's own owners.
 | D6 | A prepared creation (`session.create`, a member's creation, `session.fork`) holds the new id's admission gate from before its prepare step commits the rows until the Session is published and its protocol version recorded (`AgentIndex::admit`); a failed creation keeps no slot | A Session's rows are listed from their commit, while the runtime still builds it. A delete that skipped the building Session could commit after the build read its branches, and the build would publish a loaded Session without rows, whose appends violate the foreign keys; a fork would also record the deleted id's protocol version again. A creation is a load, so it takes the gate a restore takes, and the delete orders after it ([#97 review](https://github.com/arcships/dim/pull/97)) |
 | D7 | The fork transaction writes `session/forked` (empty data) at `at + 1` after the copied facts (not at `0`), and owners that fold a branch's own history start after it. Earlier this design wrote no Timeline event and left Goal a fallback on its first load | Decided with Goal A11 (#209): a forked Session starts with no goal, and the boundary must be a fact its owner writes when the fork happens, so a crash between the commit and F's first opening cannot lose it and a consumer decides on it like any event |
 
+## 17. Worktree usage records
+
+SessionStore owns the durable records required by [worktree access R2](../worktree-access.md#r2-关联存储与-session-删除).
+A directory is identified by its canonical repository common directory and worktree root. An association
+identifies a Session, that directory and the canonical inherited subtree. Directory records are deduplicated
+by repository and root; associations by Session and directory. Repeated registration replaces that
+Session's subtree with the newly verified one, without changing another Session's association.
+
+The typed association operation accepts a Session id, directory and subtree. Its caller supplies Git-verified
+canonical paths; the storage boundary requires absolute UTF-8 paths without parent traversal and a subtree
+inside the worktree root. Storage performs no Git discovery, filesystem mutation or permission decision.
+It checks that the Session still exists and commits the directory and association in one transaction.
+Missing Sessions fail as Closed; encoding, invalid path and storage failures leave both records unchanged.
+The operation shares the existing delete/fork ownership gate, so it waits for an in-progress deletion and
+cannot recreate a deleted Session's association. Creation rollback removes associations in its row transaction too.
+
+Typed queries list recorded directories and the Session/subtree associations of a named directory, including
+directories with no associations. Results describe usage only; callers must reverify external state before
+using them for recognition or a separately authorized cleanup. Session close preserves the records. A fork
+copies neither associations nor recognition state; its first use must establish its own relationship.
+These operations produce no Timeline event and no client notification. They add no plugin.
+The native format decision belongs to [storage v33](native-storage-format.md#911-v33-格式决定).
+
 ## Appendix A. Rust binding
 
 In dim-app-server:
@@ -780,3 +805,10 @@ pub const COMMAND_OUTPUT_DIRECTORY: &str = "command-output";
 under that root, the directory the daemon gives WorkspaceTools as its output root
 ([main.rs](../../../crates/dim-app-server/src/main.rs)); `COMMAND_OUTPUT_DIRECTORY` is the one definition of its name. The creation rollback
 path (`TimelineStore::rollback_session`) calls the same row removal as `delete_session`.
+
+### Worktree association port
+
+SessionStore provides the process service `worktreeAssociations` to the Session file-facts owner.
+Its typed `associate(session, directory, subtree)` operation has the same atomicity and errors as
+§17. `directory` has one shared definition in the file-access contract, containing repository common
+directory and worktree root. The port writes usage only and performs no Git discovery or authorization.
