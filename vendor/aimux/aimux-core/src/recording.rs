@@ -1563,16 +1563,13 @@ fn writer_loop(
                     damaged.note_dropped_evicted_event(&call_id);
                     continue;
                 }
-                entry_or_init(
-                    &mut w,
-                    &mut pending,
-                    &mut pending_order,
-                    &mut evicted_calls,
-                    &call_id,
-                    &damaged,
-                    &write_error,
-                )
-                .transport_closed = true;
+                // A call the writer no longer holds was already written; both
+                // the outcome wrapper and the HTTP layer declare closure, so a
+                // second event must not recreate an empty entry for it.
+                let Some(recording) = pending.get_mut(&call_id) else {
+                    continue;
+                };
+                recording.transport_closed = true;
                 try_finalize(
                     &mut w,
                     &mut pending,

@@ -616,6 +616,45 @@ fn overlapping_recorders_append_complete_jsonl_lines() {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
+#[test]
+fn a_repeated_transport_close_does_not_append_an_incomplete_line() {
+    use aimux_core::recording::{JsonlRecorder, OutcomeRecord, OutcomeStatus, Recorder};
+
+    let directory =
+        std::env::temp_dir().join(format!("dim-recording-close-{}", uuid::Uuid::new_v4()));
+    let recorder = JsonlRecorder::try_new(&directory).unwrap();
+    let options = aimux_core::options::CallOptions::new(
+        aimux_core::language_model_message::convert_to_language_model_prompt(
+            &[aimux_core::message::ModelMessage::user("hi")],
+            None,
+            None,
+        )
+        .unwrap(),
+    );
+    recorder.record_input("call-1", &options, "openai", "test-model");
+    recorder.record_outcome(
+        "call-1",
+        &OutcomeRecord {
+            status: OutcomeStatus::Success,
+            ..OutcomeRecord::default()
+        },
+    );
+    recorder.record_transport_closed("call-1");
+    // The outcome wrapper and the HTTP layer both declare closure.
+    recorder.record_transport_closed("call-1");
+    recorder.try_flush().unwrap();
+    drop(recorder);
+    let content = std::fs::read_to_string(directory.join("recordings.jsonl")).unwrap();
+    let records: Vec<Value> = content
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.len(), 1, "{content}");
+    assert_eq!(records[0]["callId"], "call-1");
+    assert_eq!(records[0]["complete"], true);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn recorded_requests_write_their_wire_exchange() {
     tokio::time::timeout(Duration::from_secs(20), async {
