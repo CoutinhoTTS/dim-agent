@@ -312,7 +312,6 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
     };
     let server = serve(builder, config).await.unwrap();
     let mut client = Client::new_version(&server, false, 3).await;
-    super::session_title::configure(&mut client, json!({"enabled":false})).await;
     let opened = client.rpc("web.open", json!({"port":0})).await;
     assert_ok(&opened);
     let address = opened["result"]["address"].as_str().unwrap();
