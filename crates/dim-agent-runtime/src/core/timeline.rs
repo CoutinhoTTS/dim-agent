@@ -17,6 +17,7 @@ use rutis::{Ctx, Disposer, Event};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
+    num::NonZeroU64,
     ops::{Bound, RangeBounds},
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Mutex, OnceLock, Weak},
@@ -24,6 +25,9 @@ use std::{
 };
 use tokio::sync::{OnceCell, watch};
 use uuid::Uuid;
+
+/// Inputs one page of the restored submission index keeps.
+const SUBMISSION_PAGE: u64 = 256;
 
 /// Which turn starts a policy order read keeps.
 #[derive(Debug, Clone, Copy)]
@@ -312,15 +316,41 @@ impl Timeline {
         }
     }
     /// Indexes the submission ids of the inputs the branch was restored
-    /// with. The branch's build calls it before the branch accepts input; it
-    /// reads the opening's copy of the branch's own history.
+    /// with. The branch's build calls it before the branch accepts input, so
+    /// the published head is the restored head and nothing of this branch is
+    /// written and not yet published.
     pub(crate) async fn index_submissions(&self) -> Result<()> {
         if self.0.restored.get().is_some() {
             return Ok(());
         }
         let mut restored = HashMap::new();
-        for event in self.local(1..=self.0.restored_sequence).await? {
-            index_submission(&mut restored, &event);
+        let mut from = 1;
+        loop {
+            let reply = self
+                .query(TimelineQuery {
+                    scope: TimelineQueryScope::Branch,
+                    from_event: None,
+                    from_sequence: Some(from),
+                    order_by: TimelineQueryOrderBy::Sequence,
+                    direction: TimelineQueryDirection::Ascending,
+                    kinds: vec!["input/message".into()],
+                    flags: Vec::new(),
+                    event_id: None,
+                    predicate: None,
+                    limit: NonZeroU64::new(SUBMISSION_PAGE)
+                        .expect("a page keeps at least one input"),
+                    offset: 0,
+                })
+                .await?;
+            let short = (reply.events.len() as u64) < SUBMISSION_PAGE;
+            let last = reply.events.last().map(|event| event.sequence);
+            for event in &reply.events {
+                index_submission(&mut restored, event);
+            }
+            match last {
+                Some(last) if !short => from = last + 1,
+                _ => break,
+            }
         }
         let _ = self.0.restored.set(restored);
         Ok(())
