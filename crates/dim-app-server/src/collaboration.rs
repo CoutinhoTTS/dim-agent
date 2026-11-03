@@ -77,7 +77,7 @@ fn member_create_failed(detail: String) -> Failure {
 /// a whole text in place of its built-in one (Collaboration §3).
 #[derive(Debug, Clone, Default)]
 pub struct CollaborationConfig {
-    /// The leader's `agent` description in place of [`LEADER_DESCRIPTION`].
+    /// The leader's `agent` description in place of the built-in leader text.
     pub leader_description: Option<Arc<str>>,
     /// The member's `agent` description in place of [`MEMBER_DESCRIPTION`].
     pub member_description: Option<Arc<str>>,
@@ -2412,7 +2412,7 @@ enum Input {
     },
 }
 
-const LEADER_DESCRIPTION: &str = "Work with other agents as a team you lead.
+const LEADER_DESCRIPTION_HEAD: &str = "Work with other agents as a team you lead.
 - request: give a task to a new member (agentId or profile) or to one of your members
   (agentId + sessionId). An agentId is copied exactly from list's agents[].agentId; an
   Agent's name, such as \"default\", is not an agentId. A profile creates a temporary
@@ -2424,8 +2424,13 @@ const LEADER_DESCRIPTION: &str = "Work with other agents as a team you lead.
   receiver sees in its next step without interrupting it. Use mode \"steer\" only when the
   receiver must change course now.
 - read: view a team member's recent activity. list: show your team and the agents you
-  can use. inspect: show one agent's full profile (instructions, tools, model).
-- models: query the models this Session can start an agent with.
+  can use. inspect: show one agent's full profile (instructions, tools, model).";
+/// The `models` bullet, between [`LEADER_DESCRIPTION_HEAD`] and
+/// [`LEADER_DESCRIPTION_TAIL`]: only a deployment with Provider's selectable
+/// read offers the action.
+const LEADER_MODELS: &str = "
+- models: query the models this Session can start an agent with.";
+const LEADER_DESCRIPTION_TAIL: &str = "
 - result: read a complete result by resultId from a report, even after closing the member.
 Address members with agentId + sessionId from earlier results.";
 
@@ -2478,20 +2483,22 @@ fn agent_definition(
             if models {
                 actions.push("models");
             }
-            (
-                actions,
-                factory
-                    .leader_description
-                    .as_deref()
-                    .unwrap_or(LEADER_DESCRIPTION),
-            )
+            let description = match factory.leader_description.as_deref() {
+                Some(text) => text.to_owned(),
+                None => format!(
+                    "{LEADER_DESCRIPTION_HEAD}{}{LEADER_DESCRIPTION_TAIL}",
+                    if models { LEADER_MODELS } else { "" }
+                ),
+            };
+            (actions, description)
         }
         CollaborationRole::Member => (
             vec!["message", "read", "list"],
             factory
                 .member_description
                 .as_deref()
-                .unwrap_or(MEMBER_DESCRIPTION),
+                .unwrap_or(MEMBER_DESCRIPTION)
+                .to_owned(),
         ),
     };
     properties["action"] = json!({"type": "string", "enum": actions});
@@ -2529,7 +2536,7 @@ fn agent_definition(
     }
     definition(
         AGENT_TOOL,
-        description,
+        &description,
         json!({"type": "object", "required": ["action"], "additionalProperties": false,
             "properties": properties, "anyOf": variants}),
     )

@@ -145,9 +145,16 @@ disappears from the next call.
 
 **Availability.** The Session part reads the port when it mounts, and the deployment either has it
 or does not: a profile without Provider lists no models, and there the leader's declaration offers
-no `models` action, because naming one would promise a read that cannot answer. The member
-declaration never carries the action: a member cannot delegate. A factory that replaces the leader
-description states the action in its own text, as it does for every other action (§3).
+no `models` action, because naming one would promise a read that cannot answer, and the built-in
+leader text carries the bullet only when the action is offered. The member declaration never
+carries the action: a member cannot delegate. A factory that replaces the leader description is one
+whole text and states the action itself, as it does for every other action (§3).
+
+The read stays optional rather than declared as a gating dependency: the part takes it with the
+runtime's optional read at mount, because declaring it in `injects` would keep Collaboration from
+loading wherever Provider is absent, which is a supported profile. An optional dependency is a
+snapshot taken when the part loads; a Provider reload does not reload this part, and a later call
+answers with the owner's own error until the Session or its part reloads.
 
 **Reply.** One object, as for `list` and `inspect`:
 
