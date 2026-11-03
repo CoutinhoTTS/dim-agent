@@ -189,7 +189,7 @@ Read from each part rebuild. The follow key list is what a part subscribes to; t
 
 What this shows:
 
-- No part folds step/text or step/thinking, so a rebuild never meets a merged row.
+- No part rebuilt from replay folds step/text or step/thinking, so a replay rebuild never meets a merged row. The context projection does fold them (history.rs replay), so a checkpoint resume read does meet merged rows.
 - Two parts need only the last event (Permission, Wait). Six fold unclosed pairs. Three accumulate.
 - A part folds kinds it does not subscribe to (Approval, ToolExecutor, ModelProvider, ContextPreparation, Loop), so its read selection must be written from its rebuild, not copied from its follow keys.
 - Replay hands every part the whole branch prefix to the committed position, unfiltered. The decode of that prefix is shared during Loading (restore-shared-read.md), which lowers its cost but not its size.
@@ -210,7 +210,7 @@ Not verified: whether each unclosed pair can cross a turn, so whether reading fr
 
 1. Proposed: replay is removed. Each part rebuilds with its own query over the kinds its rebuild folds, and the undispatched tail comes from the hot window. This needs the pair-across-turn check above, and a handover from the rebuild to live delivery that neither drops nor repeats an event.
 2. Does the cut validation need to know a batch end now that a page may end inside a batch?
-3. Does the checkpoint store the resume event id so a chain read can start by `from_event`?
+3. Proposed, adopt: the checkpoint stores the resume event id and the caller continues with from_event, which names its branch. Section 7.6 shows the resume event is never step/text on the normal path.
 4. The reads in §1.4 bypass the service. Which migration owns them?
 5. Proposed exits, not decided: `Branch` and `Agent` keep one `query` that only forwards, with no `history`, `local`, `context` or `page`; the Dispatcher has no reads, and goal takes the Timeline service; the App Server keeps one store read for sessions that are not loaded, with the same page shape as `query`. goal's binding to the Timeline service: the name `timeline` exists in `Services`, resolution for a branch part was not verified.
 6. Goal, file reads and the collaboration rebuild read to the committed position. Proposed: file reads and goal move to the published head only after their facts are shown to be published when read; until then they keep a read that reaches the undispatched tail.
@@ -351,3 +351,11 @@ On Timeline, Branch, Agent and Dispatcher: history, local, page, page_cursor, co
 ### 7.5 Not decided
 
 Removing replay, the committed-position reads of goal, file reads and the collaboration rebuild, the cut validation, and the checkpoint resume event id are in section 4. None is a decision yet.
+
+### 7.6 Checkpoint resume and the undispatched queue (read from source)
+
+- Legal compaction cuts are turn starts, boundary events and the source events of history entries (context_policy.rs:2130), so retain_from is never step/text.
+- projection_checkpoint sets resume to the source event of the first kept entry (history.rs:934-961). Entries are produced at input/consumed, model/output-end and step/tool-result (history.rs:618-749); step/text only fills a buffer. If no entry is kept, resume falls back to the last event of the context (history.rs:944), whose kind is not restricted. How often that happens was not measured.
+- stream_checkpoint sets resume to the cut itself (history.rs:222).
+- So storing the resume event id and reading with from_event works: these kinds are one event per row and their id is in the event_id column.
+- The hot window is the undispatched queue. Dispatcher::run reads it through Timeline::read and pops with dispatched(); idle and close wait for dispatcher.sequence() to reach the tail. It stays. Parts see it only through Timeline reads, as the tail after a query. Its length during an opening was not measured.
