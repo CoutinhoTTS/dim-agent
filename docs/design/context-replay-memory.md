@@ -62,7 +62,7 @@ Linux x86_64，glibc 2.39，运行约 1.5 小时。只读观察，未改产品�
 ## 3. 现状：一次 prepare 实际造了几份
 
 ```text
-Timeline::context_from
+HistoryRenderer::read_context（折叠 Timeline::query 的页）
   └─ events: Vec<Arc<AgentEvent>>          整段历史物化              (1)
        └─ HistoryEntry { message: Message } 文本复制                  (2)
             ├─ context_messages()           整份克隆：前缀校验         (3)
@@ -75,7 +75,7 @@ Timeline::context_from
 
 | 位置 | 行为 |
 | --- | --- |
-| [timeline.rs:805](../../crates/dim-agent-runtime/src/core/timeline.rs#L805) `context_from` | 从 sequence 1 的整段历史装进 `ContextHistory.events` 和 `positions` |
+| [history.rs](../../crates/dim-agent-capabilities/src/history.rs) `HistoryRenderer::read_context` | 从祖先链起点（或检查点的 `resume`）的整段历史装进 `ContextHistory.events` 和 `positions` |
 | [history.rs:10](../../crates/dim-agent-capabilities/src/history.rs#L10) `HistoryEntry` | `message: Message`，文本由事件复制而来 |
 | [history.rs:555](../../crates/dim-agent-capabilities/src/history.rs#L555) `context_messages` | 对每条消息 `entry.message.clone()`；有压缩时还克隆 `replacement` 和 `context_baseline[].message`（两者仍是 `Message`） |
 | [context_preparation.rs:542](../../crates/dim-agent-capabilities/src/context_preparation.rs#L542) | 为校验前缀整份克隆 |
@@ -171,7 +171,7 @@ policy 需要的事实和窗口单独查询，不经过 `ContextHistory.events`�
 
 #### 与快照的关系
 
-持久快照和 `context_with_checkpoint` 保持原样；流式读取不依赖快照。
+持久快照和 `Timeline::checkpoint` 保持原样；流式读取不依赖快照。
 `stream_checkpoint` 只在需要写新 snapshot 时重放到 cut，不把完整 history 留在内存。
 
 ### P4 冷重建分段（并入 P3）

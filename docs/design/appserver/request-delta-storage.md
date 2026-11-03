@@ -584,7 +584,7 @@ between 30 and 42 were written before any snapshot chose it, and their lists rea
 
 A checkpoint read starts at 30 as today. Its first request row there is rebuilt by walking that row's own list: content
 rows only, in holds of at most 256 node loads. No row that ends before 30 is read, and no request row before 30, which
-is the `context_with_checkpoint` convention of
+is the checkpoint read's convention of
 [timeline-storage §4](../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描). The nodes it loads are the
 messages of the requests the read returns, which v16 loads through those rows' references. The rows after it, the new
 list at 43 included, continue from the kept request in order.
