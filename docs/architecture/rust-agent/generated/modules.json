@@ -2104,6 +2104,7 @@
       "parent": "dim_app_server::mcp::server",
       "file": "crates/dim-app-server/src/mcp/server/stdio.rs",
       "unexpandedMacros": [
+        "format",
         "tokio::select"
       ]
     },
@@ -19606,6 +19607,7 @@
         "path server::McpTool",
         "path server::Result",
         "path server::ViewFailure",
+        "path server::bounded_diagnostic",
         "use server::McpServer",
         "use server::McpServerError"
       ]
@@ -20357,11 +20359,13 @@
       "from": "dim_app_server::mcp::server::stdio",
       "to": "dim_app_server::mcp::server",
       "references": [
+        "path DIAGNOSTIC_BYTES",
         "path McpServerError",
         "path McpServerError::Cleanup",
         "path McpServerError::Configuration",
-        "path McpServerError::RequestFailed",
+        "path McpServerError::StartFailed",
         "path Result",
+        "use super::DIAGNOSTIC_BYTES",
         "use super::McpServerError",
         "use super::Result"
       ]
@@ -20537,6 +20541,7 @@
         "path McpServerState",
         "path McpServerState::AuthRequired",
         "path McpServerState::Closed",
+        "path McpServerState::Disconnected",
         "path McpServerState::Failed",
         "path McpTool",
         "path ToolScope::App",
