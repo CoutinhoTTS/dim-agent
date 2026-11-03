@@ -336,7 +336,7 @@ impl DynPlugin for WaitBranch {
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             let dispatcher = ctx.require_at(&self.dispatcher)?;
-            /* dispatcher.follow(ctx, "Wait", keys, handler).await?, the Rust form of `consume`
+            /* dispatcher.consume(ctx, "Wait", keys, rebuild, handler).await?
                (plugin contract §5.2), then ctx.provide_at(self.wait.clone(), wait) */
             Ok(Effect::Done)
         })
@@ -469,28 +469,32 @@ async def apply(ctx, config):
 ```
 
 ```ts
-// A Capability that rebuilds from history, then follows live events (plugin contract §5.2).
+// A Capability that rebuilds from the query with its unpublished tail, then
+// follows live events (plugin contract §5.2).
 export default definePlugin({
   name: 'ExampleCounter',
-  inject: ['dispatcher'],
+  inject: ['dispatcher', 'timeline'],
   provides: { exampleCounter: { get: 'sync' } },
   async apply(ctx) {
     const dispatcher = ctx.use<Services['dispatcher']>('dispatcher')
+    const timeline = ctx.use<Services['timeline']>('timeline')
     let count = 0
     const fold = (event: BranchEvent) => {
       if (event.type === 'input' && event.name === 'message') count++
     }
-    await dispatcher.consume('example-counter', ['input/message'], delivery => {
-      if ('live' in delivery) fold(delivery.live)
-      else delivery.replay.forEach(fold)
-    })
+    await dispatcher.consume('example-counter', ['input/message'], async () => {
+      const page = await timeline.queryWithTail({
+        scope: 'branch', direction: 'ascending', kinds: ['input/message'], limit: 1024n, offset: 0n,
+      })
+      page.events.forEach(fold)
+      return BigInt(page.through)
+    }, event => fold(event))
     ctx.provide('exampleCounter', { get: () => ({ count }) })
   },
 })
 ```
 
-手写形式仍然有效：先 `listen`，再取 `committed()`，在处理函数等待期间从 `local` 重建到该截止点，
-并跳过重建已覆盖的实时事件。
+不读取历史的部件用 `listen` 注册，它只投递实时事实；需要重建的部件用 `consume`。
 
-仓库的 fixture 展示了两种语言和两种形式：`runtime/fixtures/branch-part.ts` 手写重建，
-`runtime/fixtures/python/python_branch_part.py` 与 `runtime/plugins/goal/branch.ts` 使用 `consume`。
+仓库的 fixture 展示了两种语言的同一形式：`runtime/fixtures/branch-part.ts`、
+`runtime/fixtures/python/python_branch_part.py` 与 `runtime/plugins/goal/branch.ts` 都这样消费分支。

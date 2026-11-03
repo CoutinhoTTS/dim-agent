@@ -92,7 +92,7 @@ async function loadGoalBranch(read, options = {}) {
   let call
   const emit = async (type, name, data) => {
     const event = branch.commit(type, name, data)
-    await call(listener, [{ live: event }])
+    await call(listener, [event])
     return event
   }
   const create = options.create ?? defaultCreate
@@ -105,40 +105,54 @@ async function loadGoalBranch(read, options = {}) {
     })
     return id
   }
+  // The inherited prefix is `options.inherited`, the parent's facts, in
+  // chain order before this branch's own; the query keeps the position of
+  // each fact, which is how the part tells the two apart.
+  const queryTimeline = async query => {
+    const chain = [
+      ...(options.inherited ?? []).map(event => ({ event, branch: B })),
+      ...branch.events.map(event => ({ event, branch: branchId })),
+    ]
+    let selected = query.scope === 'branch' ? chain.filter(entry => entry.branch === branchId) : chain
+    if (query.from_sequence !== undefined) {
+      const at = BigInt(query.from_sequence)
+      selected = query.direction === 'descending' && query.scope === 'chain'
+        ? selected.filter(entry => entry.branch !== branchId || entry.event.sequence <= at)
+        : selected.filter(entry => entry.event.sequence >= at)
+    }
+    if (query.kinds?.length) selected = selected.filter(entry => query.kinds.includes(`${entry.event.type}/${entry.event.name}`))
+    if (query.direction === 'descending') selected.reverse()
+    const offset = Number(query.offset ?? 0)
+    const page = selected.slice(offset, offset + Number(query.limit))
+    return {
+      events: page.map(entry => entry.event),
+      positions: page.map(entry => ({ branch_id: entry.branch, sequence: entry.event.sequence })),
+    }
+  }
   const h = host({ services: {
     timelineIdentity: { get: async () => ({ branchId }) },
     branchLifecycle: { activated: async () => true, closing: () => closing.promise },
     sessionLifecycle,
     dispatcher: counted({
-      consume: async (_name, _keys, handler) => { listener = handler },
+      consume: async (_name, _keys, rebuild, handler) => {
+        const held = []
+        let covered
+        listener = event => {
+          if (covered === undefined) {
+            held.push(event)
+            return
+          }
+          return handler(event)
+        }
+        covered = BigInt(await call(rebuild, []))
+        for (const event of held) if (event.sequence > covered) await handler(event)
+      },
       local: async (start, through) => branch.events.filter(event => event.sequence >= BigInt(start) && event.sequence <= BigInt(through)),
       committed: async () => branch.sequence,
     }),
-    // The inherited prefix is `options.inherited`, the parent's facts, in
-    // chain order before this branch's own; the query keeps the position of
-    // each fact, which is how the part tells the two apart.
     timeline: counted({
-      query: async query => {
-        const chain = [
-          ...(options.inherited ?? []).map(event => ({ event, branch: B })),
-          ...branch.events.map(event => ({ event, branch: branchId })),
-        ]
-        let selected = query.scope === 'branch' ? chain.filter(entry => entry.branch === branchId) : chain
-        if (query.from_sequence !== undefined) {
-          const at = BigInt(query.from_sequence)
-          selected = query.direction === 'descending' && query.scope === 'chain'
-            ? selected.filter(entry => entry.branch !== branchId || entry.event.sequence <= at)
-            : selected.filter(entry => entry.event.sequence >= at)
-        }
-        if (query.kinds?.length) selected = selected.filter(entry => query.kinds.includes(`${entry.event.type}/${entry.event.name}`))
-        if (query.direction === 'descending') selected.reverse()
-        const offset = Number(query.offset ?? 0)
-        const page = selected.slice(offset, offset + Number(query.limit))
-        return {
-          events: page.map(entry => entry.event),
-          positions: page.map(entry => ({ branch_id: entry.branch, sequence: entry.event.sequence })),
-        }
-      },
+      query: queryTimeline,
+      queryWithTail: async query => ({ ...(await queryTimeline(query)), through: branch.sequence }),
     }),
     settings: counted({ read }),
     treeCommands: counted({
@@ -164,10 +178,11 @@ async function loadGoalBranch(read, options = {}) {
       },
     }),
   } })
-  await h.load(goalBranch, { config: TEXTS })
+  // The driver comes first: the part folds its branch in `apply`, and a
+  // decision that follows may write before `load` returns.
   const driver = await h.load(driveCallback)
   call = (fn, args) => driver.service('driveCallback').call(fn, args)
-  await call(listener, [{ replay: [...branch.events] }])
+  await h.load(goalBranch, { config: TEXTS })
   let unloaded = false
   return { unload: async () => { if (unloaded) return; unloaded = true; closing.resolve(); await h.unload() }, branch, emit, writes, sent, creates, ends,
     turn: async input => {

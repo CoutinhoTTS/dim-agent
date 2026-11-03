@@ -81,18 +81,12 @@ fn panic(failures: &Dispatcher, name: &str, payload: Box<dyn std::any::Any + Sen
     ))
 }
 
-/// What an ordered consumer registered with [`Dispatcher::follow`] receives:
-/// the replay once, then live events.
-#[derive(Clone, Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Delivery {
-    /// The branch's own committed events through the cutoff, as
-    /// [`Dispatcher::local`] reads them. They are not filtered by the keys:
-    /// a rebuild also reads facts it does not consume live, such as the
-    /// terminals of its own operations.
-    Replay(Vec<Arc<AgentEvent>>),
-    /// A committed event after the cutoff that matches the keys.
-    Live(Arc<AgentEvent>),
+/// The facts a rebuilding consumer holds while its read runs, and the cutoff
+/// the read took: facts at or below it were folded already.
+struct Held {
+    holding: bool,
+    covered: u64,
+    events: Vec<Arc<AgentEvent>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -157,42 +151,71 @@ impl Dispatcher {
             .map_err(AgentError::from)?;
         Ok(())
     }
-    /// Registers an ordered consumer that rebuilds from history: the
-    /// subscribe and rebuild steps of the capability reload protocol as one
-    /// registration. It subscribes like [`Self::subscribe`], fixes the cutoff
-    /// `S` = [`Self::committed`], hands the handler [`Delivery::Replay`] of
-    /// `local(..=S)`, then [`Delivery::Live`] for each matching event after
-    /// `S`, in sequence order. It returns once the replay is handled, and
-    /// live events wait until then, so work the replay leaves to do, such as
-    /// terminals for open operations, is done in the replay call. A replay
-    /// failure is returned and lets no live event through; live failures and
-    /// the lifetime are [`Self::subscribe`]'s.
-    #[service(skip)]
-    pub async fn follow(
+    /// Registers an ordered consumer that rebuilds: the subscribe and rebuild
+    /// steps of the capability reload protocol as one registration (plugin
+    /// contract §5.2). It subscribes like [`Self::subscribe`] and holds the
+    /// facts that match the keys, calls `rebuild` once, which reads the facts
+    /// the part folds through this branch's `timeline` and returns the cutoff
+    /// that read took, then delivers the held facts and every later matching
+    /// fact above that cutoff, in sequence order and none twice. Live facts
+    /// wait until `rebuild` returns, so work it leaves to do, such as terminals
+    /// for open operations, is done before them. A `rebuild` failure is
+    /// returned and lets no live fact through; live failures and the lifetime
+    /// are [`Self::subscribe`]'s.
+    pub async fn consume(
         &self,
         ctx: &Ctx,
-        name: impl Into<String>,
-        keys: &[&str],
-        handler: impl Fn(Delivery) -> BoxFuture<'static, Result<()>> + Send + Sync + 'static,
+        name: String,
+        keys: Vec<String>,
+        rebuild: Arc<dyn Fn() -> BoxFuture<'static, Result<u64>> + Send + Sync>,
+        handler: Arc<dyn Fn(AgentEvent) -> BoxFuture<'static, Result<()>> + Send + Sync>,
     ) -> Result<()> {
-        let handler = Arc::new(handler);
-        let cutoff = Arc::new(tokio::sync::Mutex::new(u64::MAX));
-        let mut replayed = cutoff.lock().await;
+        let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+        let handler: Arc<Handler> = Arc::new(move |event: Arc<AgentEvent>| {
+            let handler = handler.clone();
+            Box::pin(async move { handler((*event).clone()).await })
+        });
+        let held = Arc::new(std::sync::Mutex::new(Held {
+            holding: true,
+            covered: 0,
+            events: Vec::new(),
+        }));
         let live = handler.clone();
-        let covered = cutoff.clone();
-        self.subscribe(ctx, name, keys, move |event| {
+        let staging = held.clone();
+        self.subscribe(ctx, name, &keys, move |event| {
             let live = live.clone();
-            let covered = covered.clone();
+            let staging = staging.clone();
             Box::pin(async move {
-                if event.sequence <= *covered.lock().await {
-                    return Ok(());
+                {
+                    let mut held = staging.lock().unwrap();
+                    if held.holding {
+                        held.events.push(event);
+                        return Ok(());
+                    }
+                    if event.sequence <= held.covered {
+                        return Ok(());
+                    }
                 }
-                live(Delivery::Live(event)).await
+                live(event).await
             })
         })?;
-        let through = self.committed();
-        handler(Delivery::Replay(self.timeline.local(..=through).await?)).await?;
-        *replayed = through;
+        let through = rebuild().await?;
+        held.lock().unwrap().covered = through;
+        loop {
+            let batch = {
+                let mut held = held.lock().unwrap();
+                if held.events.is_empty() {
+                    held.holding = false;
+                    break;
+                }
+                std::mem::take(&mut held.events)
+            };
+            for event in batch {
+                if event.sequence > through {
+                    handler(event).await?;
+                }
+            }
+        }
         Ok(())
     }
     /// Registers a bus listener for every committed event of this branch;
@@ -224,29 +247,8 @@ impl Dispatcher {
             Box::pin(async move { handler((*event).clone()).await.map_err(AgentError::from) })
         })
     }
-    /// [`Self::follow`] in data form, for parts in other languages: the
-    /// calling row's `ctx`, the keys, and a handler taking each delivery by
-    /// value whose failure is the replay's or the subscriber's handler
-    /// failure. It resolves once the replay is handled.
-    pub async fn consume(
-        &self,
-        ctx: &Ctx,
-        name: String,
-        keys: Vec<String>,
-        handler: Arc<
-            dyn Fn(Delivery) -> BoxFuture<'static, std::result::Result<(), Error>> + Send + Sync,
-        >,
-    ) -> std::result::Result<(), AgentError> {
-        let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
-        self.follow(ctx, name, &keys, move |delivery| {
-            let handler = handler.clone();
-            Box::pin(async move { handler(delivery).await.map_err(AgentError::from) })
-        })
-        .await
-    }
-    /// The branch's committed sequence: a subscriber's rebuild cutoff. It
-    /// rebuilds from [`Self::local`] through it and skips live events at or
-    /// below it.
+    /// Last sequence assigned on this branch, published or not: the end a
+    /// rebuild's read reaches, and the position live delivery continues from.
     pub fn committed(&self) -> u64 {
         self.timeline.committed()
     }

@@ -982,6 +982,7 @@ impl DynPlugin for OpeningReads {
             let identity = ctx.require_at(&self.identity)?;
             let store = &self.store;
             if !self.armed.load(Ordering::SeqCst) {
+                timeline.local(..=timeline.committed()).await?;
                 return Ok(Effect::Done);
             }
             if identity.branch_id != "main" {
@@ -998,6 +999,13 @@ impl DynPlugin for OpeningReads {
                 *self.reads.lock().unwrap() = Some((reads, resume.unwrap_or_default()));
                 return Ok(Effect::Done);
             }
+            let held = timeline.clone();
+            let reader = tokio::spawn(async move { held.local(..=held.committed()).await });
+            ctx.effect(move || async move {
+                reader.abort();
+                let _ = reader.await;
+                Ok(())
+            })?;
             store.entered.notified().await;
             timeline.local(2..).await?;
             let (whole, ()) = tokio::join!(timeline.local(..=timeline.committed()), async {
@@ -1173,11 +1181,9 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
         context_reads.iter().all(|(branch, _)| *branch == child),
         "{context_reads:?}"
     );
-    assert_eq!(
-        from_start(&child),
-        [1..=child_head, 1..=child_head],
-        "{reads:?}"
-    );
+    let child_starts = from_start(&child);
+    assert_eq!(child_starts.len(), 1, "{reads:?}");
+    assert_eq!(child_starts[0], 1..=child_head, "{reads:?}");
     let pages = std::mem::take(&mut *store.pages.lock().unwrap());
     assert!(
         matches!(&pages[..], [(branch, 0, events)] if *branch == child && (*events as u64) < child_head),
@@ -1196,6 +1202,7 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
             || *range.start() > main_head
             || *range == (2..=main_head)
             || *range.start() == *range.end()
+            || *range.end() == main_head
             || *range.end() == cut),
         "{reads:?}"
     );
@@ -1242,6 +1249,7 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
     };
     let before = [generation("main"), generation(&child)].map(|loop_| loop_.unwrap().0);
     store.ranges.lock().unwrap().clear();
+    store.queries.lock().unwrap().clear();
     let view = reload.0.lock().unwrap().last().cloned().unwrap();
     view.restart().await.unwrap();
     for (branch, before) in ["main", child.as_str()].into_iter().zip(before) {
@@ -1254,10 +1262,11 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
     let through = session.sequence("main").unwrap();
     assert!(
         store
-            .ranges
+            .queries
             .lock()
             .unwrap()
-            .contains(&("main".into(), 1..=through))
+            .contains(&("main".into(), 1..=through)),
+        "the reloaded Loop reads the branch from its start"
     );
     agent.close().await.unwrap();
 }

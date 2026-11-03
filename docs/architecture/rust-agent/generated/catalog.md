@@ -118,7 +118,7 @@ The parts that inject `dispatcher` or `timeline` ([plugin contract §6](../../..
 | --- | --- | --- |
 | Approval | branch | `dispatcher`, `timeline` |
 | BackgroundExec | branch | `dispatcher`, `timeline` |
-| BranchLine | branch | `dispatcher` |
+| BranchLine | branch | `dispatcher`, `timeline` |
 | CollaborationTimeline | branch | `dispatcher`, `timeline` |
 | ContextPreparation | branch | `dispatcher`, `timeline` |
 | FileReads | branch | `timeline` |
@@ -131,4 +131,4 @@ The parts that inject `dispatcher` or `timeline` ([plugin contract §6](../../..
 | ToolBinding | branch | `dispatcher`, `timeline` |
 | ToolExecutor | branch | `dispatcher`, `timeline` |
 | TreeTimeline | branch | `dispatcher`, `timeline` |
-| WaitBranch | branch | `dispatcher` |
+| WaitBranch | branch | `dispatcher`, `timeline` |

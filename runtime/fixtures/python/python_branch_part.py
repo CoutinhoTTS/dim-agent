@@ -1,13 +1,16 @@
-"""A branch part in Python: it rebuilds from committed history, follows live
-events in order and, after the first turn ends, writes one marked input to
-its own branch naming the branch and the events it has seen.
-`python_plugin` registers it."""
+"""A branch part in Python: it consumes the branch's facts, folding them
+through the cutoff of its own read and then live in order, and, after the first
+turn ends, writes one marked input to its own branch naming the branch and the
+events it has seen. `python_plugin` registers it."""
 
 from rutis import define_plugin
+
+PAGE = 1024
 
 
 async def apply(ctx, config):
     dispatcher = ctx.use("dispatcher")
+    timeline = ctx.use("timeline")
     tree = ctx.use("treeCommands")
     identity = await ctx.use("timelineIdentity").get()
     session, branch = identity["sessionId"], identity["branchId"]
@@ -25,18 +28,39 @@ async def apply(ctx, config):
             return tree.input(branch, {"blocks": [{"type": "raw", "text": marker}], "mode": "queue"})
         return None
 
-    async def handler(delivery):
-        if "replay" in delivery:
-            for event in delivery["replay"]:
-                step(event, False)
-            return
-        written = step(delivery["live"], True)
+    async def release(event):
+        written = step(event, True)
         if written is not None:
             await written
 
-    await dispatcher.consume("python-branch-fixture", ["input/message", "turn/start", "turn/end"], handler)
+    async def rebuild():
+        start = None
+        while True:
+            query = {
+                "scope": "branch",
+                "order_by": "sequence",
+                "direction": "ascending",
+                "kinds": ["input/message", "turn/start", "turn/end"],
+                "limit": PAGE,
+                "offset": 0,
+            }
+            if start is not None:
+                query["from_sequence"] = start
+            page = await timeline.queryWithTail(query)
+            events = page["events"]
+            for event in events:
+                step(event, False)
+            if not events or len(events) < PAGE:
+                return int(page["through"])
+            start = int(events[-1]["sequence"]) + 1
+
+    await dispatcher.consume(
+        "python-branch-fixture", ["input/message", "turn/start", "turn/end"], rebuild, release
+    )
 
 
 part = define_plugin(
-    apply, inject=["dispatcher", "timelineIdentity", "treeCommands"], name="PythonBranchPart"
+    apply,
+    inject=["dispatcher", "timeline", "timelineIdentity", "treeCommands"],
+    name="PythonBranchPart",
 )

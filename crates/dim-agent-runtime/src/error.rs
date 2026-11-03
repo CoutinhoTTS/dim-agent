@@ -137,6 +137,11 @@ impl From<rutis::Error> for AgentError {
         Self::Framework(Arc::new(error.into_kind()))
     }
 }
+impl From<rutis::host::CallError> for AgentError {
+    fn from(error: rutis::host::CallError) -> Self {
+        Self::from(rutis::Error::from(error))
+    }
+}
 impl From<Arc<rutis::host::ErrorKind>> for AgentError {
     fn from(error: Arc<rutis::host::ErrorKind>) -> Self {
         Self::Framework(error)

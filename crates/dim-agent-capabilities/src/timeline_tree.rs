@@ -4,11 +4,10 @@ use crate::{
     tool_registry::{ToolContribution, ToolHandler, ToolRegistry},
 };
 use dim_agent_runtime::{
-    AgentError, Branch, BranchLifecycle, BranchOptions, Delivery, Dispatcher, Names, Result,
-    SessionIdentity, StoredBranch, StoredEvent, Timeline, TimelineContext, TimelineFactory,
-    TimelineIdentity, TimelineInfo, TimelineKey, TimelineQuery, TimelineQueryDirection,
-    TimelineQueryOrderBy, TimelineQueryPredicate, TimelineQueryScope, TimelineStore,
-    TimelineTreeControl,
+    AgentError, Branch, BranchLifecycle, BranchOptions, Dispatcher, Names, Result, SessionIdentity,
+    StoredBranch, StoredEvent, Timeline, TimelineContext, TimelineFactory, TimelineIdentity,
+    TimelineInfo, TimelineKey, TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
+    TimelineQueryPredicate, TimelineQueryScope, TimelineStore, TimelineTreeControl, rebuild_facts,
 };
 use dim_agent_types::*;
 use futures_util::{FutureExt, future::join_all};
@@ -1745,6 +1744,7 @@ const BRANCH_MESSAGE_ENTRY: &str = r#"<dim-branch-message from="C" to="main">: a
 
 pub struct BranchLinePlugin {
     line: Key<BranchLine>,
+    timeline: Key<Timeline>,
     dispatcher: Key<Dispatcher>,
     identity: Key<TimelineIdentity>,
     lifecycle: Key<BranchLifecycle>,
@@ -1761,6 +1761,7 @@ impl BranchLinePlugin {
     pub fn with_config(names: &Names<'_>, config: BranchToolConfig) -> rutis::Result<Self> {
         Ok(Self {
             line: names.key()?,
+            timeline: names.key()?,
             dispatcher: names.key()?,
             identity: names.key()?,
             lifecycle: names.key()?,
@@ -1776,6 +1777,7 @@ impl DynPlugin for BranchLinePlugin {
     }
     fn injects(&self) -> Vec<TypeKey> {
         vec![
+            self.timeline.erase(),
             self.dispatcher.erase(),
             self.identity.erase(),
             self.lifecycle.erase(),
@@ -1785,6 +1787,7 @@ impl DynPlugin for BranchLinePlugin {
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
             let dispatcher = ctx.require_at(&self.dispatcher)?;
             let identity = ctx.require_at(&self.identity)?;
             let lifecycle = ctx.require_at(&self.lifecycle)?;
@@ -1819,11 +1822,13 @@ impl DynPlugin for BranchLinePlugin {
                 stop: CancellationToken::new(),
             });
             let consumer = line.clone();
+            let read = line.clone();
+            let read_timeline = timeline.clone();
             dispatcher
-                .follow(
+                .consume(
                     ctx,
-                    "BranchLine",
-                    &[
+                    "BranchLine".into(),
+                    [
                         "branch/create",
                         "branch/create-failed",
                         "branch/ended",
@@ -1836,17 +1841,42 @@ impl DynPlugin for BranchLinePlugin {
                         "turn/end",
                         "step/tool-use",
                         "step/tool-result",
-                    ],
-                    move |delivery| {
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                    Arc::new(move || {
+                        let read = read.clone();
+                        let timeline = read_timeline.clone();
+                        Box::pin(async move {
+                            let reply = rebuild_facts(
+                                &timeline,
+                                &[
+                                    "branch/create",
+                                    "branch/create-failed",
+                                    "branch/ended",
+                                    "branch/end",
+                                    "input/message",
+                                    "input/applied",
+                                    "input/consumed",
+                                    "input/deleted",
+                                    "stop/interrupt",
+                                    "turn/end",
+                                    "step/tool-use",
+                                    "step/tool-result",
+                                ],
+                            )
+                            .await?;
+                            read.rebuild(&reply.events);
+                            Ok(reply.through)
+                        })
+                    }),
+                    Arc::new(move |event| {
                         let consumer = consumer.clone();
                         Box::pin(async move {
-                            match delivery {
-                                Delivery::Replay(events) => consumer.rebuild(&events),
-                                Delivery::Live(event) => consumer.consume(&event),
-                            }
+                            consumer.consume(&event);
                             Ok(())
                         })
-                    },
+                    }),
                 )
                 .await?;
             line.want(Decision::Roster);

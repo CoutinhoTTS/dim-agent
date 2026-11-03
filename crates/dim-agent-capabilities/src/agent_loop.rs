@@ -6,8 +6,8 @@ use crate::{
     tool_binding::ToolBinding,
 };
 use dim_agent_runtime::{
-    AgentError, CAPABILITY_RELOADING, Delivery, Dispatcher, LoopPhase, LoopSnapshot, LoopState,
-    Names, PolicyFacts, Result, StateCell, Timeline, TimelineIdentity,
+    AgentError, CAPABILITY_RELOADING, Dispatcher, LoopPhase, LoopSnapshot, LoopState, Names,
+    PolicyFacts, Result, StateCell, Timeline, TimelineIdentity, rebuild_facts,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
@@ -1244,11 +1244,13 @@ impl DynPlugin for LoopPlugin {
                 Ok(())
             })?;
             let owner = service.clone();
+            let read = service.clone();
+            let read_timeline = service.timeline.clone();
             dispatcher
-                .follow(
+                .consume(
                     ctx,
-                    "Loop",
-                    &[
+                    "Loop".into(),
+                    [
                         "input/applied",
                         "input/consumed",
                         "stop/interrupt",
@@ -1263,25 +1265,48 @@ impl DynPlugin for LoopPlugin {
                         "step/tool-result",
                         "context/compact",
                         "context/compaction",
-                    ],
-                    move |delivery| {
-                        let result = match delivery {
-                            Delivery::Replay(events) => {
-                                let mut slot = owner.turn.lock().unwrap();
-                                let rebuilt = owner.rebuild(&mut slot, &events);
-                                if rebuilt.is_ok() {
-                                    owner.binding.retain_only(
-                                        slot.as_ref()
-                                            .and_then(|turn| turn.request.as_ref())
-                                            .map(|request| request.id.as_str()),
-                                    );
-                                }
-                                rebuilt
-                            }
-                            Delivery::Live(event) => owner.on_event(event),
-                        };
-                        Box::pin(async { result })
-                    },
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                    Arc::new(move || {
+                        let read = read.clone();
+                        let timeline = read_timeline.clone();
+                        Box::pin(async move {
+                            let reply = rebuild_facts(
+                                &timeline,
+                                &[
+                                    "input/applied",
+                                    "input/consumed",
+                                    "context/compact",
+                                    "context/compaction-start",
+                                    "context/compaction",
+                                    "stop/interrupt",
+                                    "turn/start",
+                                    "turn/end",
+                                    "step/model-start",
+                                    "context/prepare",
+                                    "step/tool-use-start",
+                                    "step/tool-use",
+                                    "step/model-output-end",
+                                    "step/tool-call",
+                                    "step/tool-result",
+                                ],
+                            )
+                            .await?;
+                            let mut slot = read.turn.lock().unwrap();
+                            read.rebuild(&mut slot, &reply.events)?;
+                            read.binding.retain_only(
+                                slot.as_ref()
+                                    .and_then(|turn| turn.request.as_ref())
+                                    .map(|request| request.id.as_str()),
+                            );
+                            Ok(reply.through)
+                        })
+                    }),
+                    Arc::new(move |event| {
+                        let owner = owner.clone();
+                        Box::pin(async move { owner.on_event(Arc::new(event)) })
+                    }),
                 )
                 .await?;
             ctx.provide_at(self.state.clone(), service.observable.clone())?;

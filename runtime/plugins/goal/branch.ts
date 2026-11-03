@@ -7,27 +7,34 @@ import {
   truncate, writes,
 } from './goal.ts'
 
-type Delivery = { replay: AgentEvent[] } | { live: AgentEvent }
 type TurnEnd = { turn_id: string; status: string }
 type Dispatcher = {
-  consume(name: string, keys: string[], handler: (delivery: Delivery) => void | Promise<void>): Promise<void>
+  consume(
+    name: string,
+    keys: string[],
+    rebuild: () => number | bigint | Promise<number | bigint>,
+    handler: (event: AgentEvent) => void | Promise<void>,
+  ): Promise<void>
   local(start: number | bigint, through: number | bigint): Promise<AgentEvent[]>
   committed(): Promise<number | bigint>
 }
+type TimelineQuery = {
+  scope: 'branch' | 'chain'
+  from_event?: string
+  from_sequence?: number | bigint
+  order_by?: 'sequence'
+  direction?: 'ascending' | 'descending'
+  kinds?: string[]
+  flags?: ('render' | 'state')[]
+  event_id?: string
+  predicate?: { path: string; value: unknown }
+  limit: number | bigint
+  offset?: number | bigint
+}
+type TimelineReply = { events: AgentEvent[]; positions: { branch_id: string; sequence: number | bigint }[] }
 type Timeline = {
-  query(query: {
-    scope: 'branch' | 'chain'
-    from_event?: string
-    from_sequence?: number | bigint
-    order_by?: 'sequence'
-    direction?: 'ascending' | 'descending'
-    kinds?: string[]
-    flags?: ('render' | 'state')[]
-    event_id?: string
-    predicate?: { path: string; value: unknown }
-    limit: number | bigint
-    offset?: number | bigint
-  }): Promise<{ events: AgentEvent[]; positions: { branch_id: string; sequence: number | bigint }[] }>
+  query(query: TimelineQuery): Promise<TimelineReply>
+  queryWithTail(query: TimelineQuery): Promise<TimelineReply & { through: number | bigint }>
 }
 type BranchOptions = { prompt: string; source: { kind: 'host'; operation_id: string } }
 type TimelineInfo = {
@@ -49,6 +56,9 @@ const KEYS = ['branch/start', 'session/forked', 'branch/create', 'branch/create-
 
 /** Inherited `input/message` facts one page of the new-branch check keeps. */
 const INHERITED_PAGE = 64n
+
+/** Facts one page of the rebuild reads. */
+const REBUILD_PAGE = 256n
 
 const codeOf = (error: unknown): string =>
   typeof error === 'object' && error !== null && 'code' in error
@@ -288,7 +298,7 @@ export default definePlugin({
         })
       }
     }
-    const consume = (event: AgentEvent, live: boolean) => {
+    const ingest = (event: AgentEvent, live: boolean) => {
       const turnStart = fold.turnStart
       fold.apply(event)
       const sequence = BigInt(event.sequence)
@@ -322,14 +332,34 @@ export default definePlugin({
       }
     }
 
-    // Fold the replayed history; the decisions the previous generation owed
-    // are taken once, before any live event (A.6 Load).
-    await dispatcher.consume('Goal', KEYS, delivery => {
-      if ('live' in delivery) return consume(delivery.live, true)
-      for (const event of delivery.replay) consume(event, false)
+    // Fold this branch's facts through the cutoff of one read, unpublished
+    // tail included, and release only what lies above it (A.6 Load).
+    await dispatcher.consume('Goal', KEYS, async () => {
+      let from: bigint | undefined
+      let through = 0n
+      for (;;) {
+        const reply = await timeline.queryWithTail({
+          scope: 'branch',
+          ...(from === undefined ? {} : { from_sequence: from }),
+          order_by: 'sequence',
+          direction: 'ascending',
+          limit: REBUILD_PAGE,
+          offset: 0n,
+        })
+        for (const event of reply.events) ingest(event, false)
+        const last = reply.events.at(-1)
+        if (last === undefined || BigInt(reply.events.length) < REBUILD_PAGE) {
+          through = BigInt(reply.through)
+          break
+        }
+        from = BigInt(last.sequence) + 1n
+      }
+      // The decisions the previous generation owed are taken once, before any
+      // live event.
       decideEnd()
       settle()
       if (start !== undefined) decideStart(start)
-    })
+      return through
+    }, event => ingest(event, true))
   },
 })
