@@ -137,6 +137,7 @@ Commands
   /compact     compact the context of the shown line
   /usage       show the context window usage
   /effort      show or set the reasoning effort
+  $commit      write a commit message for the staged changes
 
 / + Enter          -> start a new session
 /ex + Enter        -> /exit (completion only)
