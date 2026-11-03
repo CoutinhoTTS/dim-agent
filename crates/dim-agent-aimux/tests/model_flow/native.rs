@@ -2987,3 +2987,70 @@ async fn responses_refusal_deltas_are_visible_text() {
     assert_eq!(text, "Cannot comply.");
     root.shutdown().await.unwrap();
 }
+
+/// Signed Gemini text parts keep their own blocks, and text closes before a
+/// function call (vendored patch for arcships/aimux#467).
+#[tokio::test]
+async fn gemini_signed_text_parts_keep_their_blocks() {
+    use aimux_core::language_model::LanguageModel;
+    use aimux_core::language_model_message::convert_to_language_model_prompt;
+    use aimux_core::message::ModelMessage;
+    use aimux_core::options::CallOptions;
+    use aimux_core::stream_part::StreamPart;
+    use aimux_providers::google::{GoogleProviderSettings, create_google};
+    use futures::StreamExt;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    let chunk = json!({"candidates":[{"content":{"role":"model","parts":[
+        {"text":"before","thoughtSignature":"sig-before"},
+        {"text":"after","thoughtSignature":"sig-after"},
+        {"functionCall":{"id":"call-1","name":"echo","args":{"text":"x"}},"thoughtSignature":"sig-tool"}
+    ]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}});
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(vec![chunk])),
+        )
+        .mount(&server)
+        .await;
+    let model = create_google(GoogleProviderSettings {
+        api_key: Some("test-key".into()),
+        base_url: Some(format!("{}/v1beta", server.uri())),
+        ..Default::default()
+    })
+    .unwrap()
+    .generative_ai("gemini-2.5-pro");
+    let options = CallOptions::new(
+        convert_to_language_model_prompt(&[ModelMessage::user("hi")], None, None).unwrap(),
+    );
+    let mut result = model.do_stream(&options).await.unwrap();
+    let mut trace = Vec::new();
+    while let Some(part) = result.stream.next().await {
+        match part.unwrap() {
+            StreamPart::TextStart { id, .. } => trace.push(format!("start:{id}")),
+            StreamPart::TextEnd { .. } => trace.push("end".into()),
+            StreamPart::ToolCall(call) => trace.push(format!("tool:{}", call.tool_call_id)),
+            StreamPart::Finish { .. } => trace.push("finish".into()),
+            _ => {}
+        }
+    }
+    let starts = trace
+        .iter()
+        .filter(|line| line.starts_with("start:"))
+        .count();
+    assert_eq!(starts, 2, "{trace:?}");
+    let end = trace
+        .iter()
+        .position(|line| line == "end")
+        .expect("text closes");
+    let tool = trace
+        .iter()
+        .position(|line| line.starts_with("tool:"))
+        .expect("tool call");
+    assert!(
+        end < tool,
+        "text must close before the function call: {trace:?}"
+    );
+}

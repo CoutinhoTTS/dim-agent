@@ -184,15 +184,16 @@ fn convert_assistant_parts(content: &[AssistantPart], namespace: Namespace) -> V
                 text,
                 provider_options,
             }) => {
-                if !text.is_empty() {
+                let signature = namespace
+                    .read_part(provider_options.as_ref())
+                    .and_then(|g| g.get("thoughtSignature"))
+                    .and_then(|v| v.as_str());
+                // An empty part that carries a signature is kept.
+                if !text.is_empty() || signature.is_some() {
                     let mut p = json!({ "text": text });
                     // Echo thoughtSignature from provider_options if present
                     // (upstream convert-to-google-messages.ts:355-377).
-                    if let Some(sig) = namespace
-                        .read_part(provider_options.as_ref())
-                        .and_then(|g| g.get("thoughtSignature"))
-                        .and_then(|v| v.as_str())
-                    {
+                    if let Some(sig) = signature {
                         p["thoughtSignature"] = json!(sig);
                     }
                     parts.push(p);

@@ -305,6 +305,8 @@ struct GoogleLanguageModelStream {
     namespace: Namespace,
     code_execution_tool_name: String,
     text_id: Option<String>,
+    /// Signature of the open text block, when its first part carried one.
+    text_signature: Option<String>,
     reasoning_id: Option<String>,
     block_counter: usize,
     final_usage: Usage,
@@ -419,23 +421,9 @@ impl GoogleLanguageModelStream {
 
                 // text part
                 if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
-                    if text.is_empty() {
-                        // Empty-text part may carry a thoughtSignature
-                        // (upstream :784-794): emit as a zero-length
-                        // delta with the signature metadata on
-                        // whichever block is open — text or
-                        // reasoning (mirrors the non-streaming
-                        // path, which attaches to the last
-                        // content item regardless of type).
-                        if let Some(meta) = &thought_sig_meta
-                            && let Some(id) = &self.text_id
-                        {
-                            controller.enqueue(StreamPart::TextDelta {
-                                id: id.clone(),
-                                delta: String::new(),
-                                provider_metadata: Some(meta.clone()),
-                            });
-                        }
+                    let signature = part.get("thoughtSignature").and_then(|v| v.as_str());
+                    if text.is_empty() && signature.is_none() {
+                        // An empty part without a signature carries nothing.
                     } else {
                         let is_thought = part
                             .get("thought")
@@ -445,6 +433,7 @@ impl GoogleLanguageModelStream {
                             // Close any open text block before starting reasoning
                             if let Some(id) = self.text_id.take() {
                                 controller.text_end(id);
+                                self.text_signature = None;
                             }
                             // Start a reasoning block if not already active
                             if self.reasoning_id.is_none() {
@@ -468,6 +457,21 @@ impl GoogleLanguageModelStream {
                             if let Some(id) = self.reasoning_id.take() {
                                 controller.reasoning_end(id);
                             }
+                            // A part with a signature starts a new block when
+                            // the open block holds a different signature. An
+                            // unsigned part continues the open block.
+                            if self.text_id.is_some()
+                                && signature.is_some()
+                                && self
+                                    .text_signature
+                                    .as_deref()
+                                    .is_some_and(|previous| Some(previous) != signature)
+                            {
+                                if let Some(id) = self.text_id.take() {
+                                    controller.text_end(id);
+                                }
+                                self.text_signature = None;
+                            }
                             if self.text_id.is_none() {
                                 let id = format!("{}", self.block_counter);
                                 self.block_counter += 1;
@@ -476,6 +480,9 @@ impl GoogleLanguageModelStream {
                                     id,
                                     provider_metadata: thought_sig_meta.clone(),
                                 });
+                            }
+                            if let Some(signature) = signature {
+                                self.text_signature = Some(signature.to_string());
                             }
                             if let Some(id) = &self.text_id {
                                 controller.enqueue(StreamPart::TextDelta {
@@ -588,6 +595,7 @@ impl GoogleLanguageModelStream {
                     // Close any open text/reasoning block before file.
                     if let Some(id) = self.text_id.take() {
                         controller.text_end(id);
+                        self.text_signature = None;
                     }
                     if let Some(id) = self.reasoning_id.take() {
                         controller.reasoning_end(id);
@@ -615,14 +623,19 @@ impl GoogleLanguageModelStream {
                             },
                         );
                     }
-                }
-            }
-            // Function calls come after the other parts, as upstream.
-            for part in parts {
-                if let Some(call) = part.get("functionCall")
-                    && !self.function_call(call, part, controller)
-                {
-                    return;
+                } else if let Some(call) = part.get("functionCall") {
+                    // Text and reasoning close before the call, in part
+                    // order; a text part after the call starts a new block.
+                    if let Some(id) = self.text_id.take() {
+                        controller.text_end(id);
+                        self.text_signature = None;
+                    }
+                    if let Some(id) = self.reasoning_id.take() {
+                        controller.reasoning_end(id);
+                    }
+                    if !self.function_call(call, part, controller) {
+                        return;
+                    }
                 }
             }
         }
@@ -830,6 +843,7 @@ impl GoogleLanguageModelStream {
         // Close any remaining open text/reasoning segment.
         if let Some(id) = self.text_id.take() {
             controller.text_end(id);
+            self.text_signature = None;
         }
         if let Some(id) = self.reasoning_id.take() {
             controller.reasoning_end(id);
