@@ -22,12 +22,13 @@ use config::{
     McpSecrets, McpServerSettings, McpSettings,
 };
 use dim_agent_capabilities::file_storage::FileStorage;
+use dim_agent_capabilities::host::{CredentialVariables, CredentialVariablesHost};
 use dim_agent_runtime::Names;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
 use server::{McpServer, McpServerError};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     future::Future,
     sync::{
         Arc, Mutex,
@@ -355,6 +356,7 @@ impl Drop for McpConnection {
 
 pub struct McpService {
     settings: Arc<SettingsService>,
+    credentials: Arc<dyn CredentialVariables>,
     /// Why the last registration of a plugin was refused, by plugin id.
     refused: Mutex<BTreeMap<String, String>>,
     publication: Arc<publication::Publication>,
@@ -363,6 +365,11 @@ pub struct McpService {
     tasks: TaskTracker,
 }
 impl McpService {
+    /// The credential variable names the daemon owns now.
+    pub(crate) fn protected(&self) -> BTreeSet<String> {
+        self.credentials.credential_variables()
+    }
+
     /// Acquire a generation in an explicit owner's loader subtree.
     pub async fn server(
         self: &Arc<Self>,
@@ -539,7 +546,9 @@ impl McpService {
         cancel: &CancellationToken,
     ) -> Result<McpCatalog> {
         self.publication.refresh();
+        let credentials = self.credentials.clone();
         self.run(cancel, move |settings, cancel| async move {
+            let protected = credentials.credential_variables();
             let mut catalog = McpCatalog {
                 user_revision: String::new(),
                 project_revision: None,
@@ -578,12 +587,13 @@ impl McpService {
                                 scope: None,
                                 id: &id,
                                 secret: None,
+                                origin: config::Origin::Plugin,
                                 enablement: &McpProjectEnablement::default(),
                                 environment: &daemon_environment,
+                                protected: &protected,
                             },
                         )?;
-                        if let Some((key, _)) = auth::credential_key(&id, &expansion.configuration)
-                        {
+                        if let Some((key, _)) = auth::credential_key(&id, &expansion.configuration) {
                             catalog.credentials.insert(id.clone(), key);
                         }
                         catalog.servers.insert(
@@ -613,6 +623,10 @@ impl McpService {
                     let secret = workspace
                         .as_ref()
                         .and_then(|workspace| secrets.get(workspace, &id));
+                    let origin = match scope {
+                        SettingsScope::User => config::Origin::User,
+                        SettingsScope::Project(_) => config::Origin::Workspace { overlay: secret },
+                    };
                     let expansion = config::connected(
                         &settings,
                         configuration.clone(),
@@ -620,8 +634,10 @@ impl McpService {
                             scope: Some(scope),
                             id: &id,
                             secret,
+                            origin,
                             enablement: &enablement,
                             environment: &daemon_environment,
+                            protected: &protected,
                         },
                     )?;
                     let configuration = config::viewed(
@@ -676,7 +692,9 @@ impl McpService {
         id: String,
         cancel: &CancellationToken,
     ) -> Result<McpResolvedEntry> {
+        let credentials = self.credentials.clone();
         self.run(cancel, move |settings, cancel| async move {
+            let protected = credentials.credential_variables();
             let Some(scope) = source.scope() else {
                 let configuration = settings
                     .read::<McpPluginServers>(SettingsScope::User, &cancel)
@@ -693,8 +711,10 @@ impl McpService {
                         scope: None,
                         id: &id,
                         secret: None,
+                        origin: config::Origin::Plugin,
                         enablement: &McpProjectEnablement::default(),
                         environment: &daemon_environment,
+                        protected: &protected,
                     },
                 )?;
                 return Ok(McpResolvedEntry {
@@ -717,6 +737,12 @@ impl McpService {
             };
             let secret = secret(&settings, source, &id, &cancel).await?;
             let enablement = enablement(&settings, source, &cancel).await;
+            let origin = match source {
+                SettingsScope::User => config::Origin::User,
+                SettingsScope::Project(_) => config::Origin::Workspace {
+                    overlay: secret.as_ref(),
+                },
+            };
             let expansion = config::connected(
                 &settings,
                 configuration.clone(),
@@ -724,8 +750,10 @@ impl McpService {
                     scope: Some(source),
                     id: &id,
                     secret: secret.as_ref(),
+                    origin,
                     enablement: &enablement,
                     environment: &daemon_environment,
+                    protected: &protected,
                 },
             )?;
             let configuration = config::viewed(
@@ -842,26 +870,38 @@ impl McpService {
     }
 
     /// The configuration a connection runs, from the declared one a client
-    /// reads and patches.
+    /// reads and patches. `overlay` replaces the stored overlay only for the
+    /// guard question; the stored overlay is still what is merged.
     pub(crate) async fn connected(
         &self,
         scope: SettingsScope,
         id: String,
         configuration: McpServerSettings,
+        overlay: Option<McpSecretEntry>,
         cancel: &CancellationToken,
     ) -> Result<config::Expanded> {
+        let protected = self.protected();
         self.run(cancel, move |settings, cancel| async move {
-            let secret = secret(&settings, scope, &id, &cancel).await?;
+            let stored = secret(&settings, scope, &id, &cancel).await?;
             let enablement = enablement(&settings, scope, &cancel).await;
+            let guard = overlay.or(stored.clone());
+            let origin = match scope {
+                SettingsScope::User => config::Origin::User,
+                SettingsScope::Project(_) => config::Origin::Workspace {
+                    overlay: guard.as_ref(),
+                },
+            };
             Ok(config::connected(
                 &settings,
                 configuration,
                 config::Connection {
                     scope: Some(scope),
                     id: &id,
-                    secret: secret.as_ref(),
+                    secret: stored.as_ref(),
+                    origin,
                     enablement: &enablement,
                     environment: &daemon_environment,
+                    protected: &protected,
                 },
             )?)
         })
@@ -1389,6 +1429,7 @@ pub struct McpPlugin {
     files: Key<FileStorage>,
     methods: Key<crate::methods::ManagementMethods>,
     parts: Key<dim_agent_runtime::PartRegistry>,
+    credentials: Key<CredentialVariablesHost>,
 }
 impl McpPlugin {
     pub fn new(names: &Names<'_>, home_root: usize) -> rutis::Result<Self> {
@@ -1399,6 +1440,7 @@ impl McpPlugin {
             files: names.key()?,
             methods: names.key()?,
             parts: names.key()?,
+            credentials: names.key()?,
         })
     }
 }
@@ -1413,6 +1455,7 @@ impl DynPlugin for McpPlugin {
             self.files.erase(),
             self.methods.erase(),
             self.parts.erase(),
+            self.credentials.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -1422,6 +1465,7 @@ impl DynPlugin for McpPlugin {
             let files = ctx.require_at(&self.files)?;
             let methods = ctx.require_at(&self.methods)?;
             let parts = ctx.require_at(&self.parts)?;
+            let credentials = ctx.require_at(&self.credentials)?;
             settings.register::<McpSettings>(ctx)?;
             settings.register::<McpProjectEnablement>(ctx)?;
             settings.register::<McpPluginServers>(ctx)?;
@@ -1429,6 +1473,7 @@ impl DynPlugin for McpPlugin {
             let auth = McpAuth::new(files, self.home_root).map_err(ErrorKind::PluginFailed)?;
             let service = Arc::new(McpService {
                 settings,
+                credentials: credentials.0.clone(),
                 refused: Mutex::default(),
                 publication,
                 stopping: ctx.cancellation_token(),

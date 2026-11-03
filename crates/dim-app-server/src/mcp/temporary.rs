@@ -7,6 +7,7 @@ use super::{
     session::contribution,
 };
 use dim_agent_capabilities::{
+    host::{CredentialVariables, CredentialVariablesHost},
     methods::{self, Interruption, MethodDecl, RpcError, SessionMethods},
     tool_registry::{
         ToolProvider, ToolProviderChanged, ToolRegistry, ToolSourceSet, tool_provider_changes,
@@ -83,6 +84,7 @@ pub(super) struct TemporaryMcp {
     config: Key<SessionConfig>,
     tools: Key<ToolRegistry>,
     lifecycle: Key<SessionLifecycle>,
+    credentials: Key<CredentialVariablesHost>,
 }
 impl TemporaryMcp {
     pub(super) fn new(names: &Names<'_>) -> rutis::Result<Self> {
@@ -92,6 +94,7 @@ impl TemporaryMcp {
             config: names.key()?,
             tools: names.key()?,
             lifecycle: names.key()?,
+            credentials: names.key()?,
         })
     }
 }
@@ -104,6 +107,7 @@ impl DynPlugin for TemporaryMcp {
             self.methods.erase(),
             self.lifecycle.erase(),
             self.config.erase(),
+            self.credentials.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -111,6 +115,8 @@ impl DynPlugin for TemporaryMcp {
             let methods = ctx.require_at(&self.methods)?;
             let lifecycle = ctx.require_at(&self.lifecycle)?;
             let config = ctx.require_at(&self.config)?;
+            let credentials: Arc<dyn CredentialVariables> =
+                ctx.require_at(&self.credentials)?.0.clone();
             let bindings: Bindings = Arc::default();
             let changed = Arc::new(Notify::new());
             let mutation = Arc::new(tokio::sync::Mutex::new(()));
@@ -157,15 +163,16 @@ impl DynPlugin for TemporaryMcp {
             let (session, tools, lifecycle) =
                 (self.session, self.tools.clone(), self.lifecycle.clone());
             methods.register(ctx, NAMESPACE, ["attach","renew","detach"].into_iter().map(|name| MethodDecl::new(&format!("{NAMESPACE}.{name}"), true, Interruption::Drain)).collect(), Arc::new(move |method, params, cancelled, _| {
-                let (bindings, changed, mutation, ctx, cwd, tools, lifecycle) = (bindings.clone(), changed.clone(), mutation.clone(), context.clone(), config.cwd.clone(), tools.clone(), lifecycle.clone());
+                let (bindings, changed, mutation, ctx, cwd, tools, lifecycle, credentials) = (bindings.clone(), changed.clone(), mutation.clone(), context.clone(), config.cwd.clone(), tools.clone(), lifecycle.clone(), credentials.clone());
                 Box::pin(async move {
                     if method.ends_with(".attach") {
                         let mut input: Attach = methods::params(params)?;
                         if input.servers.is_empty() { return Ok(json!({})); }
+                        let protected = credentials.credential_variables();
                         for (name, configuration) in &mut input.servers {
                             if name.trim().is_empty() { return Err(RpcError::invalid("Empty MCP server name")); }
                             if let McpServerSettings::Stdio { cwd: directory, .. } = configuration { *directory = Some(cwd.clone()); }
-                            let expanded = config::expand(configuration, &daemon_environment).configuration;
+                            let expanded = config::expand(configuration, config::Origin::User, &daemon_environment, &protected).configuration;
                             McpServerPlugin::new(name, expanded, Key::of()).map_err(|_| RpcError::invalid("Invalid temporary MCP configuration"))?;
                         }
                         let guard = mutation.lock().await;
@@ -183,7 +190,7 @@ impl DynPlugin for TemporaryMcp {
                                 binding.clone()
                             } else {
                                 let (ready, received) = watch::channel(None);
-                                let plugin = BindingPlugin { id: input.binding_id, session, servers: input.servers.clone(), tools, lifecycle, ready, changed: changed.clone() };
+                                let plugin = BindingPlugin { id: input.binding_id, session, servers: input.servers.clone(), tools, lifecycle, ready, changed: changed.clone(), credentials: credentials.clone() };
                                 let view = ctx.plugin(Box::new(plugin) as Box<dyn DynPlugin>);
                                 let binding = Arc::new(Binding { servers: input.servers, view, ready: received, deadline: Mutex::new(Instant::now()+LEASE) });
                                 bindings.insert(input.binding_id, binding.clone());
@@ -247,6 +254,7 @@ struct BindingPlugin {
     lifecycle: Key<SessionLifecycle>,
     ready: watch::Sender<Option<Result<(), RpcError>>>,
     changed: Arc<Notify>,
+    credentials: Arc<dyn CredentialVariables>,
 }
 impl DynPlugin for BindingPlugin {
     fn name(&self) -> &str {
@@ -272,10 +280,17 @@ impl DynPlugin for BindingPlugin {
             let sets = Arc::new(Mutex::new(Vec::new()));
             registry.register_source(ctx, &prefix, Arc::new(Tools(sets.clone())))?;
             let mut connections = Vec::new();
+            let protected = self.credentials.credential_variables();
             for (name, configuration) in &self.servers {
                 let id = format!("temporary:{}:{name}", self.id);
                 let key = Key::<McpServer>::dynamic(id.clone()).instance(self.session);
-                let expanded = config::expand(configuration, &daemon_environment).configuration;
+                let expanded = config::expand(
+                    configuration,
+                    config::Origin::User,
+                    &daemon_environment,
+                    &protected,
+                )
+                .configuration;
                 let plugin = McpServerPlugin::new(&id, expanded, key.clone())
                     .map_err(|_| ErrorKind::PluginFailed("Invalid temporary MCP server".into()))?;
                 let view = ctx.plugin(plugin);

@@ -9,6 +9,7 @@ use super::{
     sources_in_precedence,
 };
 use crate::settings::{SettingsScope, SettingsService};
+use dim_agent_capabilities::host::{CredentialVariables, CredentialVariablesHost};
 use dim_agent_runtime::{
     Modules, Names, SessionLifecycle, SessionLoader, SessionPhase, StateCell,
     names::ServiceCatalog, register_part,
@@ -218,17 +219,20 @@ impl Publication {
 
 pub struct McpPublication {
     settings: Key<SettingsService>,
+    credentials: Key<CredentialVariablesHost>,
 }
 struct Worker {
     port: Arc<Publication>,
     commands: mpsc::Receiver<Command>,
     released: watch::Receiver<()>,
     settings_changed: watch::Receiver<()>,
+    credentials: Arc<dyn CredentialVariables>,
 }
 impl McpPublication {
     pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
             settings: names.key()?,
+            credentials: names.key()?,
         })
     }
     /// Registers the process row, keyed from `catalog`, and returns its name.
@@ -257,6 +261,7 @@ impl Worker {
     async fn run(mut self, settings: Arc<SettingsService>, stop: CancellationToken) -> Result<()> {
         let mut projection = Projection {
             port: self.port.clone(),
+            credentials: self.credentials.clone(),
             sources: BTreeMap::new(),
             generations: BTreeMap::new(),
             disconnected: BTreeMap::new(),
@@ -338,11 +343,12 @@ impl DynPlugin for McpPublication {
         "McpPublication"
     }
     fn injects(&self) -> Vec<TypeKey> {
-        vec![self.settings.erase()]
+        vec![self.settings.erase(), self.credentials.erase()]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             let settings = ctx.require_at(&self.settings)?;
+            let credentials = ctx.require_at(&self.credentials)?;
             let (commands, receiver) = mpsc::channel(64);
             let (released, releases) = watch::channel(());
             let port = Arc::new(Publication {
@@ -355,6 +361,7 @@ impl DynPlugin for McpPublication {
                 commands: receiver,
                 released: releases,
                 settings_changed: config::settings_changes(ctx)?,
+                credentials: credentials.0.clone(),
             };
             ctx.provide_as::<Publication>(port)?;
             let stop = ctx.cancellation_token();
@@ -395,6 +402,7 @@ struct Generation {
 }
 struct Projection {
     port: Arc<Publication>,
+    credentials: Arc<dyn CredentialVariables>,
     sources: BTreeMap<McpSource, Source>,
     generations: BTreeMap<String, Generation>,
     disconnected: BTreeMap<(McpSource, String), String>,
@@ -502,6 +510,7 @@ impl Projection {
             if project_unresolved {
                 error = Some("MCP configuration could not be resolved");
             }
+            let protected = self.credentials.credential_variables();
             for (id, config) in servers {
                 if project_unresolved {
                     continue;
@@ -509,6 +518,11 @@ impl Projection {
                 let secret = workspace
                     .as_ref()
                     .and_then(|workspace| secrets.get(workspace, &id));
+                let origin = match source {
+                    McpSource::User => config::Origin::User,
+                    McpSource::Plugins => config::Origin::Plugin,
+                    McpSource::Project(_) => config::Origin::Workspace { overlay: secret },
+                };
                 let expansion = config::connected(
                     settings,
                     config,
@@ -516,8 +530,10 @@ impl Projection {
                         scope: source.scope(),
                         id: &id,
                         secret,
+                        origin,
                         enablement: &enablement,
                         environment: &daemon_environment,
+                        protected: &protected,
                     },
                 );
                 let Ok(expansion) = expansion else {
@@ -786,6 +802,13 @@ mod tests {
     };
     use tokio::sync::Notify;
 
+    struct NoCredentials;
+    impl CredentialVariables for NoCredentials {
+        fn credential_variables(&self) -> BTreeSet<String> {
+            BTreeSet::new()
+        }
+    }
+
     #[derive(Default)]
     struct Faults {
         fail: AtomicBool,
@@ -853,6 +876,8 @@ mod tests {
             )
             .unwrap();
             let root = Ctx::root().unwrap();
+            root.provide(CredentialVariablesHost(Arc::new(NoCredentials)))
+                .unwrap();
             let faults = Arc::new(Faults::default());
             let catalog = crate::catalog();
             let mut builtins = Modules::new();

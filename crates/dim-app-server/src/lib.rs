@@ -587,6 +587,16 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         tokio::runtime::Handle::current(),
         Arc::new(|error| tracing::error!(%error, "App Server runtime error")),
     );
+    root.provide(dim_agent_capabilities::host::CredentialVariablesHost(
+        Arc::new(CredentialVariableNames(
+            config
+                .model_catalog
+                .as_ref()
+                .map(|models| models.api_key_envs())
+                .unwrap_or_default(),
+        )),
+    ))
+    .map_err(|error| ServerError::Runtime(error.into()))?;
     let control = ServerControlPlugin::new();
     let handle = control.0.clone();
     let mut startup = Startup {
@@ -608,15 +618,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     builder.process_value(Arc::new(dim_agent_capabilities::methods::ReservedMethods(
         methods::reserved_for_sessions(),
     )));
-    builder.process_value(Arc::new(
-        dim_agent_capabilities::host::CredentialVariablesHost(Arc::new(CredentialVariableNames(
-            config
-                .model_catalog
-                .as_ref()
-                .map(|models| models.api_key_envs())
-                .unwrap_or_default(),
-        ))),
-    ));
     let mut rows = vec![register_part(
         &mut builtins,
         builder.catalog(),

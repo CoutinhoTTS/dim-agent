@@ -579,6 +579,7 @@ pub(super) fn provide(
                                     SettingsScope::User,
                                     p.id.clone(),
                                     configuration,
+                                    None,
                                     &stopping,
                                 )
                                 .await
@@ -590,13 +591,38 @@ pub(super) fn provide(
                             if !matches!(source, McpSource::User) && !entry.enabled {
                                 return Err(error(McpError::Disabled));
                             }
+                            // The members this patch sets are the user's own
+                            // text; the rest of a workspace entry is guarded.
+                            let mut overlay = entry.secret.clone().unwrap_or_default();
+                            if patch.url.is_some() {
+                                overlay.url = Some(String::new());
+                            }
+                            if let Some(headers) = &patch.headers {
+                                let user = overlay.headers.get_or_insert_with(Default::default);
+                                for (name, value) in headers {
+                                    if value.is_some() {
+                                        user.insert(name.clone(), String::new());
+                                    }
+                                }
+                            }
+                            if matches!(&patch.bearer, Some(BearerPatch::Set { .. })) {
+                                overlay.auth = Some(BearerAuth::Bearer {
+                                    token: String::new(),
+                                });
+                            }
                             patch_configuration(&mut entry.configuration, patch)?;
                             let configuration = entry
                                 .configuration
                                 .canonical(&p.id)
                                 .map_err(|entry| error(McpError::InvalidEntry(entry)))?;
                             let expansion = directory
-                                .connected(scope, p.id.clone(), configuration, &stopping)
+                                .connected(
+                                    scope,
+                                    p.id.clone(),
+                                    configuration,
+                                    Some(overlay),
+                                    &stopping,
+                                )
                                 .await
                                 .map_err(error)?;
                             expansion.configuration

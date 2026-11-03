@@ -27,7 +27,7 @@ use rutis::host::{BoxFuture, DynPlugin, Effect, Key, TypeKey};
 use rutis_loader::resolve::Build;
 use serde_json::{Value, json};
 use std::{
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     convert::Infallible,
     path::{Path, PathBuf},
     sync::{
@@ -383,6 +383,14 @@ async fn authorize_project(host: &MinimalHost, home: &Path) {
         .await
         .unwrap();
 }
+/// The credential variable names a test host reports to MCP.
+struct CredentialNames(BTreeSet<String>);
+impl dim_agent_capabilities::host::CredentialVariables for CredentialNames {
+    fn credential_variables(&self) -> BTreeSet<String> {
+        self.0.clone()
+    }
+}
+
 impl Env {
     async fn new() -> Self {
         Self::with(|_, _| {}).await
@@ -413,6 +421,15 @@ impl Env {
     async fn with_config(
         configure: impl FnOnce(&mut AgentBuilder, &Arc<Remote>),
         configuration: impl FnOnce(&str, &Path) -> Value,
+    ) -> Self {
+        Self::with_config_protected(configure, configuration, BTreeSet::new()).await
+    }
+
+    /// `credential_names` is the set the daemon's credential owner reports.
+    async fn with_config_protected(
+        configure: impl FnOnce(&mut AgentBuilder, &Arc<Remote>),
+        configuration: impl FnOnce(&str, &Path) -> Value,
+        credential_names: BTreeSet<String>,
     ) -> Self {
         let remote = Remote::new();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -461,7 +478,15 @@ impl Env {
         mcp::install(&mut builder);
         mcp_host_rows(&mut builder, &home);
         configure(&mut builder, &remote);
-        let agent = MinimalHost::start(&builder).await.unwrap();
+        let agent = MinimalHost::start_with(&builder, |root, _| {
+            root.provide(CredentialVariablesHost(Arc::new(CredentialNames(
+                credential_names,
+            ))))
+            .map_err(|error| AgentError::Build(error.to_string()))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
         authorize_project(&agent, &home).await;
         let directory = agent.root().get::<McpService>().unwrap();
         Self {
@@ -1133,6 +1158,84 @@ async fn expansion_from_the_daemon_environment_at_connect() {
         seen.iter()
             .any(|(_, authorization)| authorization == "Bearer made-up-token"),
         "the connection did not carry the expanded bearer token: {seen:?}"
+    );
+    env.close().await;
+}
+
+/// #952: the user's own document is not guarded, so a protected name expands
+/// there.
+#[tokio::test]
+async fn expansion_in_the_user_document_is_not_guarded() {
+    let env = Env::with_config(
+        |_, _| {},
+        |url, _| {
+            unsafe {
+                std::env::set_var("DIMCODE_TEST_952_USER_TOKEN", "made-up-user-value");
+            }
+            json!({"mcpServers":{"docs":{
+                "type":"http",
+                "url":url,
+                "headers":{"X-Generation":"${DIMCODE_TEST_952_USER_TOKEN}"}
+            }}})
+        },
+    )
+    .await;
+    let session = env.session(false, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    assert!(
+        env.remote
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(generation, _)| generation == "made-up-user-value"),
+        "the user entry did not expand the protected name"
+    );
+    env.close().await;
+}
+
+/// #952: a workspace `.mcp.json` cannot expand a protected name into a remote
+/// header, even when the daemon has it set.
+#[tokio::test]
+async fn expansion_in_a_workspace_document_is_guarded() {
+    unsafe {
+        std::env::set_var(
+            "DIMCODE_TEST_952_WORKSPACE_TOKEN",
+            "made-up-workspace-value",
+        );
+    }
+    let env = Env::new().await;
+    env.update(
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::Put(
+            serde_json::from_value(json!({
+                "type":"http",
+                "url":env.url,
+                "headers":{"X-Generation":"${DIMCODE_TEST_952_WORKSPACE_TOKEN}"}
+            }))
+            .unwrap(),
+        ),
+    )
+    .await;
+    env.update(
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::SetEnabled(true),
+    )
+    .await;
+    let session = env.session(true, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    let seen = env.remote.seen();
+    assert!(
+        seen.iter().any(|(generation, _)| generation.is_empty()),
+        "the workspace entry did not empty the protected name: {seen:?}"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|(generation, _)| generation == "made-up-workspace-value"),
+        "the workspace entry expanded the protected name"
     );
     env.close().await;
 }
@@ -2155,7 +2258,15 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
         builder
             .plugin(|_| Ok(Box::new(AimuxPlugin)))
             .plugin(move |_| Ok(Box::new(ConfiguredModelsPlugin(models.clone()))));
-        let agent = MinimalHost::start(&builder).await.unwrap();
+        let agent = MinimalHost::start_with(&builder, |root, _| {
+            root.provide(CredentialVariablesHost(Arc::new(CredentialNames(
+                BTreeSet::new(),
+            ))))
+            .map_err(|error| AgentError::Build(error.to_string()))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
         authorize_project(&agent, &home).await;
 
         let session = agent
@@ -2714,6 +2825,114 @@ async fn a_temporary_binding_expands_references_unguarded() {
     )
     .await
     .unwrap();
+    env.close().await;
+}
+
+/// #952: the daemon's own credential names are guarded in a workspace entry
+/// even when they are not on the fixed list, and still expand in the user's
+/// own document.
+#[tokio::test]
+async fn expansion_guards_a_configured_api_key_env() {
+    unsafe {
+        std::env::set_var("TEST_PROVIDER_KEY", "made-up-provider-key");
+    }
+    let env = Env::with_config_protected(
+        |_, _| {},
+        |url, _| {
+            json!({"mcpServers":{"docs":{
+                "type":"http",
+                "url":url,
+                "headers":{"X-Generation":"${TEST_PROVIDER_KEY}"}
+            }}})
+        },
+        BTreeSet::from(["TEST_PROVIDER_KEY".to_owned()]),
+    )
+    .await;
+    env.update(
+        SettingsScope::Project(1),
+        "keyed",
+        McpChange::Put(
+            serde_json::from_value(json!({
+                "type":"http",
+                "url":env.url,
+                "headers":{"X-Generation":"${TEST_PROVIDER_KEY}"}
+            }))
+            .unwrap(),
+        ),
+    )
+    .await;
+    env.update(
+        SettingsScope::Project(1),
+        "keyed",
+        McpChange::SetEnabled(true),
+    )
+    .await;
+    let session = env.session(true, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let seen = env.remote.seen();
+            let guarded = seen.iter().any(|(generation, _)| generation.is_empty());
+            let user = seen
+                .iter()
+                .any(|(generation, _)| generation == "made-up-provider-key");
+            if guarded && user {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("both entries connect");
+    env.close().await;
+}
+
+/// #952: a probe of a workspace entry guards a protected name the same way
+/// the entry's own connection does.
+#[tokio::test]
+async fn a_probe_expands_references_with_the_entry_origin() {
+    unsafe {
+        std::env::set_var("DIMCODE_TEST_952_PROBE_TOKEN", "made-up-probe-guard");
+    }
+    let env = Env::new().await;
+    env.update(
+        SettingsScope::Project(1),
+        "probe",
+        McpChange::Put(
+            serde_json::from_value(json!({
+                "type":"http",
+                "url":env.url,
+                "headers":{"X-Generation":"${DIMCODE_TEST_952_PROBE_TOKEN}"}
+            }))
+            .unwrap(),
+        ),
+    )
+    .await;
+    env.update(
+        SettingsScope::Project(1),
+        "probe",
+        McpChange::SetEnabled(true),
+    )
+    .await;
+    let probe = management(
+        &env.agent,
+        "mcp.test",
+        json!({"source":"project","id":"probe","cwd":env.home.join("project")}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(probe["status"], "connected", "{probe}");
+    let seen = env.remote.seen();
+    assert!(
+        seen.iter().any(|(generation, _)| generation.is_empty()),
+        "the probe did not guard the protected name: {seen:?}"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|(generation, _)| generation == "made-up-probe-guard"),
+        "the probe expanded the protected name"
+    );
     env.close().await;
 }
 

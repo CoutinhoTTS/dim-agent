@@ -20082,6 +20082,16 @@
     },
     {
       "from": "dim_app_server::mcp",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path CredentialVariables",
+        "path CredentialVariablesHost",
+        "use dim_agent_capabilities::host::CredentialVariables",
+        "use dim_agent_capabilities::host::CredentialVariablesHost"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp",
       "to": "dim_agent_capabilities::settings",
       "references": [
         "path SettingsScope",
@@ -20163,6 +20173,9 @@
         "path McpSettings::from_value",
         "path config::Connection",
         "path config::Expanded",
+        "path config::Origin::Plugin",
+        "path config::Origin::User",
+        "path config::Origin::Workspace",
         "path config::connected",
         "path config::effective",
         "path config::merge_secret",
@@ -20464,6 +20477,7 @@
       "to": "dim_app_server::mcp::config",
       "references": [
         "path BearerAuth::Bearer",
+        "path Expanded",
         "path McpOAuthSettings",
         "path McpSecretEntry",
         "path McpServerSettings",
@@ -20471,6 +20485,10 @@
         "path McpServerSettings::Stdio",
         "path McpSettings",
         "path McpSettings::from_file",
+        "path Origin::Plugin",
+        "path Origin::User",
+        "path Origin::Workspace",
+        "path PROTECTED_NAMES",
         "path RemoteTransport::Http",
         "path Stdio::Stdio",
         "path decode_entry",
@@ -20623,6 +20641,16 @@
     },
     {
       "from": "dim_app_server::mcp::publication",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path CredentialVariables",
+        "path CredentialVariablesHost",
+        "use dim_agent_capabilities::host::CredentialVariables",
+        "use dim_agent_capabilities::host::CredentialVariablesHost"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication",
       "to": "dim_agent_capabilities::settings",
       "references": [
         "path SettingsScope::Project",
@@ -20730,6 +20758,9 @@
         "path McpSettings",
         "path config",
         "path config::Connection",
+        "path config::Origin::Plugin",
+        "path config::Origin::User",
+        "path config::Origin::Workspace",
         "path config::connected",
         "path config::settings_changes",
         "path config::workspace",
@@ -20778,6 +20809,14 @@
       "to": "dim_agent_capabilities::file_storage",
       "references": [
         "path dim_agent_capabilities::file_storage::FileStoragePlugin::new"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication::tests",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path CredentialVariables",
+        "path CredentialVariablesHost"
       ]
     },
     {
@@ -21194,6 +21233,16 @@
     },
     {
       "from": "dim_app_server::mcp::temporary",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path CredentialVariables",
+        "path CredentialVariablesHost",
+        "use dim_agent_capabilities::host::CredentialVariables",
+        "use dim_agent_capabilities::host::CredentialVariablesHost"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::temporary",
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path Interruption::Drain",
@@ -21270,6 +21319,7 @@
         "path McpServerSettings",
         "path McpServerSettings::Stdio",
         "path config",
+        "path config::Origin::User",
         "path config::expand",
         "use super::config",
         "use super::config::McpServerSettings"

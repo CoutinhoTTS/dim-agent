@@ -95,6 +95,7 @@ impl Fixture {
     }
     async fn open(home: PathBuf, reversed: bool) -> Self {
         let root = Ctx::root().unwrap();
+        mcp_host::provide_credentials(&root);
         let catalog = dim_app_server::catalog();
         let build = Build::default();
         let names = Names::copy(&catalog, &build);
