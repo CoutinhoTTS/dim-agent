@@ -6,11 +6,15 @@ use crate::{
     host::*,
 };
 use dim_agent_runtime::{
-    ContextHistory, PolicyFacts, PolicyOrder, PolicyOrderEvent, PolicyTurns, PolicyWindow, Timeline,
+    ContextHistory, PolicyFacts, PolicyOrder, PolicyOrderEvent, PolicyTurns, PolicyWindow,
+    Timeline, TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryPredicate,
+    TimelineQueryScope,
 };
 use dim_agent_types::*;
+use serde_json::json;
 use std::{
     collections::HashMap,
+    num::NonZeroU64,
     sync::{Arc, Mutex},
     time::Instant,
 };
@@ -31,6 +35,9 @@ const BOUND_SHARE: f64 = 0.5;
 /// Share of the input budget the digest part may take (ContextCompaction
 /// §5.10); provisional (#428).
 const DIGEST_SHARE: f64 = 0.05;
+
+/// Facts one page of the compaction-reuse read keeps.
+const REUSE_PAGE: u64 = 64;
 
 /// Characters of a command the digest keeps before the cut is marked (§5.10).
 const DIGEST_COMMAND_CHARS: usize = 200;
@@ -529,20 +536,43 @@ impl ContextPolicy {
         cancelled: &(dyn Fn() -> String + Sync),
     ) -> Result<(Arc<ModelRequest>, f64), HostError> {
         let boundary = history.last().map(|entry| entry.id.clone());
-        let reusable = self
-            .timeline
-            .local(source.through.saturating_add(1)..)
-            .await
-            .map_err(|e| HostError::failed(e.to_string()))?
-            .into_iter()
-            .filter(|event| match &event.kind {
-                EventKind::ContextCompaction(data) => {
-                    data.through == source.through && data.turn_id.as_ref() == Some(&source.turn_id)
-                }
-                EventKind::ContextBudget(data) => data.turn_id == source.turn_id,
-                _ => false,
-            })
-            .collect();
+        // An earlier attempt of this turn wrote these facts; they may still be
+        // waiting for publication, so the read adds the branch's tail.
+        let mut reusable = Vec::new();
+        let mut from = source.through.saturating_add(1);
+        loop {
+            let reply = self
+                .timeline
+                .query_with_tail(TimelineQuery {
+                    scope: TimelineQueryScope::Branch,
+                    from_event: None,
+                    from_sequence: Some(from),
+                    order_by: TimelineQueryOrderBy::Sequence,
+                    direction: TimelineQueryDirection::Ascending,
+                    kinds: vec!["context/compaction".into(), "context/budget".into()],
+                    flags: Vec::new(),
+                    event_id: None,
+                    predicate: Some(TimelineQueryPredicate {
+                        path: "turn_id".into(),
+                        value: json!(source.turn_id),
+                    }),
+                    limit: NonZeroU64::new(REUSE_PAGE).expect("a page keeps at least one event"),
+                    offset: 0,
+                })
+                .await
+                .map_err(|e| HostError::failed(e.to_string()))?;
+            let short = (reply.events.len() as u64) < REUSE_PAGE;
+            let last = reply.events.last().map(|event| event.sequence);
+            reusable.extend(reply.events.into_iter().filter(|event| match &event.kind {
+                EventKind::ContextCompaction(data) => data.through == source.through,
+                EventKind::ContextBudget(_) => true,
+                _ => unreachable!("the read selects the two compaction facts"),
+            }));
+            match last {
+                Some(last) if !short => from = last + 1,
+                _ => break,
+            }
+        }
         let view = self
             .view(request, context, history, facts, reusable)
             .await?;
