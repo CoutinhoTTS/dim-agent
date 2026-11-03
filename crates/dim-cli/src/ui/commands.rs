@@ -1,11 +1,14 @@
 //! The command palette registry: the actions the native interface runs,
-//! listed in task order. A slash command is also typed as
+//! listed most-used first. A slash command is also typed as
 //! `/name`; the other entries are actions reached only by their keys.
 
 #[derive(Debug)]
 pub struct Command {
     /// The id `run_command` dispatches on; the typed name of a slash command.
     pub name: &'static str,
+    /// What the command manages; the palette lists commands by order and
+    /// draws no column for it.
+    #[allow(dead_code)]
     pub category: &'static str,
     pub description: &'static str,
     pub aliases: &'static [&'static str],
@@ -131,6 +134,74 @@ pub const COMMANDS: &[Command] = &[
         &["sessions"],
         Needs::Nothing,
     ),
+    slash("models", "model", "select a model", &[], Needs::Nothing),
+    slash(
+        "compact",
+        "session",
+        "compact the context of the shown line",
+        &[],
+        Needs::Session,
+    ),
+    slash(
+        "usage",
+        "session",
+        "show the context window usage",
+        &[],
+        Needs::Session,
+    ),
+    slash(
+        "effort",
+        "model",
+        "show or set the reasoning effort",
+        &["reasoning"],
+        Needs::Nothing,
+    ),
+    slash(
+        "fast",
+        "model",
+        "show or set the priority service tier (on|off)",
+        &[],
+        Needs::Nothing,
+    ),
+    slash(
+        "agent",
+        "model",
+        "list agents or switch this session's agent",
+        &[],
+        Needs::Nothing,
+    ),
+    slash(
+        "permissions",
+        "model",
+        "choose the permission preset and manage command rules",
+        &["approvals", "approval"],
+        Needs::Nothing,
+    ),
+    slash("settings", "app", "open settings", &[], Needs::Nothing),
+    Command {
+        argument: Some("<prompt>"),
+        ..slash(
+            "branch",
+            "session",
+            "open a line from the end of the shown line",
+            &[],
+            Needs::Session,
+        )
+    },
+    slash(
+        "fork",
+        "session",
+        "fork the session at its last finished turn",
+        &[],
+        Needs::Session,
+    ),
+    slash(
+        "lines",
+        "session",
+        "follow, talk to and end this session's lines",
+        &[],
+        Needs::Session,
+    ),
     slash(
         "timeline",
         "session",
@@ -152,44 +223,6 @@ pub const COMMANDS: &[Command] = &[
         &["background"],
         Needs::Session,
     ),
-    slash(
-        "lines",
-        "session",
-        "follow, talk to and end this session's lines",
-        &[],
-        Needs::Session,
-    ),
-    Command {
-        argument: Some("<prompt>"),
-        ..slash(
-            "branch",
-            "session",
-            "open a line from the end of the shown line",
-            &[],
-            Needs::Session,
-        )
-    },
-    slash(
-        "fork",
-        "session",
-        "fork the session at its last finished turn",
-        &[],
-        Needs::Session,
-    ),
-    slash(
-        "compact",
-        "session",
-        "compact the context of the shown line",
-        &[],
-        Needs::Session,
-    ),
-    slash(
-        "usage",
-        "session",
-        "show the context window usage",
-        &[],
-        Needs::Session,
-    ),
     Command {
         argument: Some("<title>"),
         ..slash(
@@ -205,35 +238,6 @@ pub const COMMANDS: &[Command] = &[
         "session",
         "open this session in the browser",
         &[],
-        Needs::Nothing,
-    ),
-    slash("models", "model", "select a model", &[], Needs::Nothing),
-    slash(
-        "agent",
-        "model",
-        "list agents or switch this session's agent",
-        &[],
-        Needs::Nothing,
-    ),
-    slash(
-        "effort",
-        "model",
-        "show or set the reasoning effort",
-        &["reasoning"],
-        Needs::Nothing,
-    ),
-    slash(
-        "fast",
-        "model",
-        "show or set the priority service tier (on|off)",
-        &[],
-        Needs::Nothing,
-    ),
-    slash(
-        "permissions",
-        "model",
-        "choose the permission preset and manage command rules",
-        &["approvals", "approval"],
         Needs::Nothing,
     ),
     slash(
@@ -252,6 +256,13 @@ pub const COMMANDS: &[Command] = &[
         Needs::Nothing,
     ),
     slash(
+        "reload-skills",
+        "extensions",
+        "rescan the Skills of this workspace",
+        &[],
+        Needs::Nothing,
+    ),
+    slash(
         "mcp",
         "extensions",
         "manage MCP servers, sign in or out (/mcp login ID)",
@@ -263,6 +274,13 @@ pub const COMMANDS: &[Command] = &[
         "extensions",
         "list plugins, turn them on or off, reload (install PATH)",
         &["plugin"],
+        Needs::Nothing,
+    ),
+    slash(
+        "runtime",
+        "extensions",
+        "show, install or configure the plugin runtimes",
+        &[],
         Needs::Nothing,
     ),
     slash(
@@ -294,28 +312,6 @@ pub const COMMANDS: &[Command] = &[
         Needs::Nothing,
     ),
     slash(
-        "reload-skills",
-        "extensions",
-        "rescan the Skills of this workspace",
-        &[],
-        Needs::Nothing,
-    ),
-    slash(
-        "runtime",
-        "extensions",
-        "show, install or configure the plugin runtimes",
-        &[],
-        Needs::Nothing,
-    ),
-    slash("theme", "view", "switch theme", &[], Needs::Nothing),
-    slash(
-        "language",
-        "view",
-        "switch language",
-        &["lang", "locale"],
-        Needs::Nothing,
-    ),
-    slash(
         "tools",
         "view",
         "cycle tool details and compaction summaries",
@@ -329,7 +325,14 @@ pub const COMMANDS: &[Command] = &[
         &[],
         Needs::Nothing,
     ),
-    slash("settings", "app", "open settings", &[], Needs::Nothing),
+    slash("theme", "view", "switch theme", &[], Needs::Nothing),
+    slash(
+        "language",
+        "view",
+        "switch language",
+        &["lang", "locale"],
+        Needs::Nothing,
+    ),
     slash("keys", "app", "show the key bindings", &[], Needs::Nothing),
     Command {
         key: Some("Ctrl+C Ctrl+C"),

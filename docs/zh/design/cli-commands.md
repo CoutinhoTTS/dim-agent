@@ -10,18 +10,20 @@ CLI 接口；当前可执行文件由[原生 CLI 合同](../../../crates/dim-cli
 
 ## 命令菜单
 
-scrollback 与 fullscreen TUI 都按固定的任务顺序分组：会话、模型与权限、扩展与自动化、界面、应用。
-分类内也使用以下固定顺序，不按字母或最近使用顺序排列：
+scrollback 与 fullscreen TUI 都按同一个固定顺序列出 slash 命令，常用的在前，不按字母或最近使用顺序排列。
+菜单不画分类列，分组只由顺序体现：
 
-| 分类 | 命令顺序 |
-| --- | --- |
-| `session` | `/new`、`/resume`、`/timeline`、`/goal`、`/tasks`、`/lines`、`/branch`、`/fork`、`/compact`、`/usage`、`/rename`、`/web` |
-| `model` | `/models`、`/agent`、`/effort`、`/fast`、`/permissions`、`/connect`、`/login` |
-| `extensions` | `/skills`、`/mcp`、`/plugins`、`/hooks`、`/scheduled`、`/workflow`、`/workflow:save`、`/reload-skills`、`/runtime` |
-| `view` | `/theme`、`/language`、`/tools`、`/tui` |
-| `app` | `/settings`、`/keys`、`/exit` |
+```text
+/new /resume /models /compact /usage
+/effort /fast /agent /permissions /settings
+/branch /fork /lines /timeline /goal
+/tasks /rename /web /connect /login
+/skills /reload-skills /mcp /plugins /runtime
+/hooks /scheduled /workflow /workflow:save
+/tools /tui /theme /language /keys /exit
+```
 
-`/fast` 仅在模型声明支持服务层级时列出。搜索时匹配程度优先，同等匹配保持上述任务顺序。
+`/fast` 仅在模型声明支持服务层级时列出。搜索时匹配程度优先，同等匹配保持上述顺序。
 排序不受界面语言影响；打开 `/` 默认选中 `/new`，Enter 会新建会话。未筛选列表中的 `/exit` 始终在最后。
 退出必须完整匹配命令名或别名才执行：选择不完整匹配时只补全命令名并保留输入框。
 完整输入的命令（包括隐藏命令）仍走各自的处理流程。
@@ -30,11 +32,11 @@ scrollback 与 fullscreen TUI 都按固定的任务顺序分组：会话、模�
 菜单不列出运行、排队和 steer 的按键，它们只由按键触发。菜单只列出斜杠命令：选择较早消息、滚动到顶部或底部等视图操作也不列出；
 `Tab`、`Home`、`End` 保留各自的绑定。
 
-两种模式下，菜单都适应终端可用的列数和行数。命令名优先于分类标签、描述和快捷键标签；必要时缩短
-分类标签以保留完整命令名。快捷键标签会挤占命令名时省略标签，但不改变按键绑定。
+两种模式下，菜单都适应终端可用的列数和行数。命令名优先于描述和快捷键标签。
+快捷键标签会挤占命令名时省略标签，但不改变按键绑定。
 短屏幕少显示一些命令，可见窗口跟随选择。
 Scrollback 保留菜单上方的命令草稿，必要时省略菜单标题和页脚；fullscreen 保留输入框上方的
-命令面板查询行和选中项。分类分组和排序不随终端尺寸变化。
+命令面板查询行和选中项。顺序不随终端尺寸变化。
 
 当通常的历史保留空间使实时区域不足八行时，实时控件优先：两种渲染器都可为实时区域使用最多八行，
 但不超过终端高度。Fullscreen 先减少输入框的空白内边距和命令面板查询行的留白，避免两个输入区域
@@ -63,12 +65,12 @@ Scrollback 保留菜单上方的命令草稿，必要时省略菜单标题和页
 
 ```text
 Commands
-  session /new         start a new session
-  session /resume      resume a previous session
-  session /timeline    jump to a message of the shown line
-  session /goal        follow or change the shown line's goal
-  session /tasks       view command output or interrupt a member
-  session /lines       follow, talk to and end this session's lines
+  /new         start a new session
+  /resume      resume a previous session
+  /models      select a model
+  /compact     compact the context of the shown line
+  /usage       show the context window usage
+  /effort      show or set the reasoning effort
 
 / + Enter          -> start a new session
 /ex + Enter        -> /exit (completion only)
@@ -80,10 +82,10 @@ Commands
 Fullscreen, 8 rows             Scrollback, 8 rows
 +- Command Palette -------+
 | >                       |   +- input -----------------+
-| session /new            |   | > /                     |
+| /new                    |   | > /                     |
 +-------------------------+   +-------------------------+
                               +-------------------------+
-+- input -----------------+   | session /new            |
++- input -----------------+   | /new                    |
 |                         |   +-------------------------+
 +-------------------------+   AGENT
 ```
@@ -155,7 +157,7 @@ Home / End          滚动（fullscreen，草稿为空） 滚动（fullscreen，
 
 `/goal` 读取当前显示线的目标，并通过 Goal 注册的方法写入它。方法、标记块和读取目标的规则属于
 [Goal](plugins/Goal.md#a2-session-方法)（A.2、A.3）和 [Pursuit](plugins/Pursuit.md#3-对-goal-的修改)；
-本节规定原生客户端用它们做什么。该命令作为 `session` 分类列在命令菜单里，与 `/compact` 相同。
+本节规定原生客户端用它们做什么。该命令与 `/compact` 一样列在命令菜单里。
 
 两种 TUI 模式中，用 Enter 或 Tab 选择 `/goal` 只会把 `/goal ` 填入输入框并关闭命令面板，
 不会执行。用户再次提交空参数草稿时，先打印 Dim 支持的用法，再显示当前目标及状态，或该线没有目标的提示。

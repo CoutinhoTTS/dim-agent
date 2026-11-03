@@ -589,7 +589,6 @@ pub fn render(
         .iter()
         .map(|candidate| Row {
             kind: Kind::Item,
-            category: String::new(),
             label: format!("@{}", candidate.text),
             detail: String::new(),
             key: None,
