@@ -656,9 +656,6 @@ impl Session {
     ) -> Result<rutis::host::diagnostics::RuntimeDiagnostics> {
         Ok(self.published(branch)?.diagnostics())
     }
-    pub async fn trace(&self, branch: &str, sequence: u64) -> Result<Option<TimelineTrace>> {
-        self.published(branch)?.trace(sequence).await
-    }
     pub fn get<S: Clone + Send + Sync + 'static>(&self, branch: &str) -> Result<Option<S>> {
         Ok(self.published(branch)?.get::<S>())
     }

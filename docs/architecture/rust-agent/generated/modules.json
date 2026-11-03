@@ -7795,6 +7795,7 @@
       "references": [
         "path HistoryEntry",
         "path HistoryRenderer",
+        "path chain_by_id",
         "path context_compaction",
         "path context_configuration",
         "path crate::history::StreamedContext",
@@ -7806,6 +7807,7 @@
         "path user_message",
         "use crate::history::HistoryEntry",
         "use crate::history::HistoryRenderer",
+        "use crate::history::chain_by_id",
         "use crate::history::context_compaction",
         "use crate::history::context_configuration",
         "use crate::history::digest_message",
@@ -8094,6 +8096,20 @@
       "references": [
         "path Names",
         "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_preparation",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQuery",
+        "path TimelineQueryDirection::Ascending",
+        "path TimelineQueryOrderBy::Sequence",
+        "path TimelineQueryScope::Branch",
+        "use dim_agent_runtime::TimelineQuery",
+        "use dim_agent_runtime::TimelineQueryDirection",
+        "use dim_agent_runtime::TimelineQueryOrderBy",
+        "use dim_agent_runtime::TimelineQueryScope"
       ]
     },
     {
@@ -8767,6 +8783,26 @@
         "path AgentError::fault",
         "path dim_agent_runtime::Result",
         "use dim_agent_runtime::AgentError"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::history",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQuery",
+        "path TimelineQueryDirection::Ascending",
+        "path TimelineQueryDirection::Descending",
+        "path TimelineQueryOrderBy::Sequence",
+        "path TimelineQueryPredicate",
+        "path TimelineQueryReply",
+        "path TimelineQueryScope::Branch",
+        "path TimelineQueryScope::Chain",
+        "use dim_agent_runtime::TimelineQuery",
+        "use dim_agent_runtime::TimelineQueryDirection",
+        "use dim_agent_runtime::TimelineQueryOrderBy",
+        "use dim_agent_runtime::TimelineQueryPredicate",
+        "use dim_agent_runtime::TimelineQueryReply",
+        "use dim_agent_runtime::TimelineQueryScope"
       ]
     },
     {
@@ -14234,7 +14270,6 @@
       "references": [
         "path ContextHistory",
         "path TailLock::freeze",
-        "path TimelineTrace",
         "path crate::core::unix_millis",
         "use crate::core::TailLock"
       ]
@@ -14295,6 +14330,14 @@
       "to": "dim_agent_runtime::scope",
       "references": [
         "path PublicService"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::agent",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQuery",
+        "path TimelineQueryReply"
       ]
     },
     {
@@ -14500,8 +14543,7 @@
       "to": "dim_agent_runtime::core::timeline",
       "references": [
         "path ContextHistory",
-        "path Timeline",
-        "path TimelineTrace"
+        "path Timeline"
       ]
     },
     {
@@ -14525,6 +14567,14 @@
       "to": "dim_agent_runtime::timeline_context",
       "references": [
         "path TimelineContext"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::branch",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQuery",
+        "path TimelineQueryReply"
       ]
     },
     {
@@ -15211,6 +15261,16 @@
       "references": [
         "path StateCell",
         "path state"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::timeline_context",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQuery",
+        "path TimelineQueryDirection::Ascending",
+        "path TimelineQueryOrderBy::Sequence",
+        "path TimelineQueryScope::Branch"
       ]
     },
     {
@@ -24127,7 +24187,6 @@
       "from": "dim_app_server::storage::timeline",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
-        "path CompactionCut",
         "path PolicyEvent",
         "path PolicyFacts",
         "path PolicyOrder",
@@ -24138,7 +24197,6 @@
         "path StoredEvent",
         "path TimelineKey",
         "path TimelineStore",
-        "use dim_agent_runtime::CompactionCut",
         "use dim_agent_runtime::PolicyEvent",
         "use dim_agent_runtime::PolicyFacts",
         "use dim_agent_runtime::PolicyOrder",

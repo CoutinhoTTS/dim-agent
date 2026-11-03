@@ -185,8 +185,4 @@ impl Branch {
             .stored_context_page(after, limit, through)
             .await
     }
-    pub async fn trace(&self, sequence: u64) -> Result<Option<TimelineTrace>> {
-        self.published(Some(sequence))?;
-        self.0.timeline().trace(sequence).await
-    }
 }

@@ -1020,28 +1020,6 @@ impl Timeline {
         let end = self.through(Some(end))?;
         self.records(&self.0.key.branch_id, start, end).await
     }
-    /// Reads complete batches after `after`, targeting `limit` events and
-    /// never ending inside an atomic batch. Projection reads do not use
-    /// stored requests, so `context/prepare` and `model/call` records carry
-    /// an empty request.
-    #[service(skip)]
-    pub async fn stored_page(
-        &self,
-        after: u64,
-        limit: usize,
-        through: u64,
-    ) -> Result<Vec<Arc<AgentEvent>>> {
-        let through = self.through(Some(through))?;
-        Ok(self
-            .0
-            .store
-            .read_page_without_request_bodies(&self.0.key, after, limit, through)
-            .await?
-            .into_iter()
-            .map(|record| record.event)
-            .collect())
-    }
-
     /// The branch chain the context covers, root first: each ancestor to its
     /// fixed cut and the local branch to `through`.
     #[service(skip)]
@@ -1119,34 +1097,6 @@ impl Timeline {
             .map(|record| record.event)
             .collect())
     }
-    /// A local event range read from the store, bypassing the hot cache.
-    #[service(skip)]
-    pub async fn stored_local<R: RangeBounds<u64> + Send>(
-        &self,
-        range: R,
-    ) -> Result<Vec<Arc<AgentEvent>>> {
-        let start = match range.start_bound() {
-            Bound::Included(n) => *n,
-            Bound::Excluded(n) => n.saturating_add(1),
-            Bound::Unbounded => 1,
-        }
-        .max(1);
-        let end = match range.end_bound() {
-            Bound::Included(n) => *n,
-            Bound::Excluded(n) => n.saturating_sub(1),
-            Bound::Unbounded => self.committed(),
-        };
-        let end = self.through(Some(end))?;
-        Ok(self
-            .0
-            .store
-            .read(&self.0.key, start..=end)
-            .await?
-            .into_iter()
-            .map(|record| record.event)
-            .collect())
-    }
-
     /// Full fact replay; no interpreter or snapshot is required.
     #[service(skip)]
     pub async fn context(&self, through: u64) -> Result<ContextHistory> {
@@ -1450,16 +1400,6 @@ impl Timeline {
                 .map_err(|_| AgentError::Closed(self.0.key.branch_id.clone()))?;
         }
         self.0.store.save_snapshot(&self.0.key, snapshot).await
-    }
-    pub async fn trace(&self, sequence: u64) -> Result<Option<TimelineTrace>> {
-        self.through(Some(sequence))?;
-        {
-            let data = self.0.data.lock().unwrap();
-            if let Some(record) = data.hot.iter().find(|r| r.event.sequence == sequence) {
-                return Ok(record.trace.clone());
-            }
-        }
-        self.0.store.trace(&self.0.key, sequence).await
     }
     pub(crate) fn read(&self, after: u64) -> EventReader {
         self.0.data.lock().unwrap().reader_active = true;

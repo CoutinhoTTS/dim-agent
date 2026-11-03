@@ -294,15 +294,8 @@ async fn model_receives_the_committed_before_result_and_fixed_history() {
             .iter()
             .find(|event| matches!(event.kind, EventKind::ModelCall(_)))
             .unwrap();
-        assert_eq!(
-            session
-                .trace("main", call.sequence)
-                .await
-                .unwrap()
-                .unwrap()
-                .steps
-                .len(),
-            1
+        assert!(
+            matches!(&call.kind, EventKind::ModelCall(data) if data.request.model_id == "final-model")
         );
         agent.close().await.unwrap();
     })

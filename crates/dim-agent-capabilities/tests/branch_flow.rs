@@ -2132,24 +2132,6 @@ async fn final_prompt_position_and_fixed_ancestor_prefix_drive_creation() {
             .iter()
             .any(|event| event.id == create.id)
     );
-    let main_timeline = probe
-        .commands
-        .lock()
-        .unwrap()
-        .as_ref()
-        .unwrap()
-        .get("main")
-        .unwrap();
-    let trace = main_timeline.trace(create.sequence).await.unwrap().unwrap();
-    assert!(matches!(
-        trace.original.kind,
-        EventKind::BranchCreate(BranchCreateData {
-            at: BranchCreateAt::Create {},
-            source: BranchSource::Host { .. },
-            ..
-        })
-    ));
-
     *probe.rewrite.lock().unwrap() =
         Rewrite::Business(BranchCreateAt::Create {}, "tail prompt".into());
     let tail = soon(session.branch("main".into(), 0, options("ignored")))

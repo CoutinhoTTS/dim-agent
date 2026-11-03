@@ -175,21 +175,25 @@ async fn before_pipeline_is_atomic_and_branch_snapshots_share_only_fixed_prefix(
             Err(AgentError::fault("extension", "failed"))
         })
         .unwrap();
+    let main = TimelineKey {
+        session_id: "session".into(),
+        branch_id: "main".into(),
+    };
     let original = timeline.append(input("one")).unwrap();
     assert_eq!(original.kind, input("one").kind);
-    assert!(timeline.trace(1).await.unwrap().is_none());
+    assert!(store.trace(&main, 1).await.unwrap().is_none());
     let boundary = timeline.history(Some(original.sequence)).await.unwrap();
     assert_eq!(boundary.len(), 1);
     assert_eq!(boundary[0].kind, input("one").kind);
     failing.dispose().await.unwrap();
     let changed = timeline.append(input("two")).unwrap();
     assert_eq!(changed.kind, input("two changed").kind);
-    assert_eq!(timeline.trace(2).await.unwrap().unwrap().steps.len(), 1);
+    assert_eq!(store.trace(&main, 2).await.unwrap().unwrap().steps.len(), 1);
     let unchanged = timeline
         .before(&ctx, "identity", &["input/message"], Ok)
         .unwrap();
     let traced = timeline.append(input("trace")).unwrap();
-    let trace = timeline.trace(traced.sequence).await.unwrap().unwrap();
+    let trace = store.trace(&main, traced.sequence).await.unwrap().unwrap();
     let handlers: Vec<_> = trace
         .steps
         .iter()
@@ -474,7 +478,7 @@ async fn closing_scope_commits_the_original_event_without_before() {
             branch_id: "main".into(),
         },
         vec![],
-        store,
+        store.clone(),
     );
     let _hook = timeline
         .before(&ctx, "change", &["input/message"], |mut draft| {
@@ -492,7 +496,19 @@ async fn closing_scope_commits_the_original_event_without_before() {
     let closing = ctx.shutdown();
     let event = timeline.append(input("late")).unwrap();
     assert_eq!(event.kind, input("late").kind);
-    assert!(timeline.trace(event.sequence).await.unwrap().is_none());
+    assert!(
+        store
+            .trace(
+                &TimelineKey {
+                    session_id: "session".into(),
+                    branch_id: "main".into(),
+                },
+                event.sequence,
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
     closing.await.unwrap();
 }
 
