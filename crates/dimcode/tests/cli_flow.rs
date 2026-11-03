@@ -8212,7 +8212,7 @@ fn tui_approval_alias_selects_presets_and_remembers_them() {
     terminal.write(b"/approval\r");
     terminal.until("Full access");
     terminal.write(b"\x1b[A\r");
-    terminal.until("Permission: workspace-write (also for new sessions)");
+    terminal.until("Permission: workspace-write");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();

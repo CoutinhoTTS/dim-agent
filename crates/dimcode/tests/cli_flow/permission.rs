@@ -991,6 +991,8 @@ fn real_daemon_always_allow_saves_an_exact_rule_until_approvals_removes_it() {
     terminal.until("permission: read-only");
     terminal.editor();
     terminal.write(b"/permissions full-access\n");
+    terminal.until("Switch the main branch to full-access? [y/N] ");
+    terminal.write(b"y\n");
     terminal.until("permission: full-access");
     terminal.editor();
     let mark = terminal.transcript.len();
@@ -1007,7 +1009,7 @@ fn real_daemon_always_allow_saves_an_exact_rule_until_approvals_removes_it() {
     terminal.editor();
     let mark = terminal.transcript.len();
     terminal.write(b"exec: printf ask-ran\n");
-    terminal.until("requires approval under Ask tool approval");
+    terminal.until("requires approval for starting processes under the workspace-write preset");
     terminal.until("Allow once, always, or deny? [y/a/N] ");
     terminal.write(b"n\n");
     terminal.editor();
