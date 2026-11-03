@@ -37,7 +37,7 @@ Settings or assembly mechanism. The policy is owned by the
   parser, no `ask` decision. Each legacy kind is rejected, not deferred
   ([§10.1](#101-legacy-rule-kinds)).
 - No rules for other tools. `allowedTools`/`disallowedTools` in the Session policy already cover
-  whole tools; allowing a tool does not bypass [workspace write admission](../../architecture/rust-agent/plugins/Permission.md#workspace-write-targets).
+  whole tools; allowing a tool does not bypass [workspace write admission](../../architecture/rust-agent/plugins/Permission.md#write-targets-without-the-facts).
 - No change to the execution shell setting. The feature list puts "execution Shell" next to
   command rules, but it is HostPlatform's business configuration (ADR 002, "Existing plugins").
 - Not a sandbox. Like presets, rules are admission logic; isolation is HostPlatform's separate work.
@@ -344,8 +344,8 @@ Decided by the maintainer:
 3. **Wildcards, glob, regular expressions or a shell parser:** rejected. Word-wise `exact`/`prefix`
    with `*` as a literal word, plus the separator check (§5.1); only the migration maps a trailing
    `*` to `prefix` ([§10.1](#101-legacy-rule-kinds)).
-4. **`ask` rules:** rejected. A rule decides `allow` or `deny`; asking is the policy's
-   `toolApproval` choice ([§10.1](#101-legacy-rule-kinds)).
+4. **`ask` rules:** rejected. A rule decides `allow` or `deny`; asking is the preset's choice
+   ([ADR 018](../../adr/018-permission-is-the-preset.md), [§10.1](#101-legacy-rule-kinds)).
 5. **Dedicated methods vs S8b `settings.read`/`settings.update`:** decided when S8b is designed;
    F2 keeps `permission.rules`/`permission.set_rules`.
 6. **Binding:** the Session port `Keyed<CommandRulesHost>` per profile (§4.2), not a process
@@ -360,13 +360,13 @@ The legacy command permissions had three behaviors this source does not: rules s
 or a workspace, wildcard or regular-expression patterns, and an `ask` decision with
 `defaultAction`. Each is rejected for the current contract. The migration importer
 (`crates/dim-migration/src/settings/permissions.rs`) is the only path from a legacy home, and the
-only legacy form it preserves is a trailing `*` as `prefix`.
+only legacy pattern form it preserves is a trailing `*` as `prefix`.
 
 | Legacy kind | Decision and user-visible effect | Where it lives |
 | --- | --- | --- |
 | Project-file or per-workspace scope | Rejected. Rules are one user-scope list for every workspace. The Permissions page has no scope selector, and a `.dimcode/permission.json` in the workspace is not read | §3.1, §7; [ADR 003](../../adr/003-approval-scope.md) D3 |
 | Wildcard, glob or regular-expression pattern | Rejected. `command` is compared word by word as written, `*` included; only `exact` and `prefix` exist. No pattern syntax, preview or parser | §3.1, §5.1 |
-| `ask` decision, with `defaultAction` | Rejected. A rule is `allow` or `deny`, and an unmatched command follows the Session preset. Asking every tool call is the policy's `toolApproval: "ask"` ([ADR 017](../../adr/017-independent-permission-controls.md)), and an allow rule answers that question | §5.2; [Permission policy contract](../../architecture/rust-agent/plugins/Permission.md#policy-contract) |
+| `ask` decision, with `defaultAction` | Rejected. A rule is `allow` or `deny`, and an unmatched command follows the Session preset. Asking is the preset's decision alone ([ADR 018](../../adr/018-permission-is-the-preset.md)); there is no `toolApproval` field, and an allow rule answers only the question the preset already asks | §5.2; [Permission policy contract](../../architecture/rust-agent/plugins/Permission.md#policy-contract) |
 
 **Authority.** A project file does not authorize its own commands. [ADR 003](../../adr/003-approval-scope.md)
 D3 keeps a project-sourced configuration's enablement with the user, not the project; applying the
@@ -381,28 +381,30 @@ The one list already applies everywhere. Reopening the split is a design change 
 (source keying, read path and the cross-scope precedence), with a new ADR only if that precedence
 changes an accepted decision.
 
-**Precedence and matching.** The order is §5.2: tool lists, a deny rule, the file gate, an
-allow-list, the preset, then an allow rule answering the remaining tool question. List order and
-pattern specificity have no meaning; a deny rule wins over an allow rule. The legacy precedence the
-migration importer preserves ranked overlapping patterns by specificity, so `deny git *` with
-`allow git push *` allowed the push; that ordering is not restored, because a deny would then
-depend on comparing rules and an allow could lift a deny. Matching stays word-wise, and only a
-simple command can match `allow` (§5.1); `deny` is checked against every separated segment.
+**Precedence and matching.** The order is §5.2: `disallowedTools`, a deny rule, the file gate,
+`allowedTools`, the preset, then an allow rule answering the remaining tool question. List order and
+pattern specificity have no meaning; a deny rule wins over an allow rule. The migration importer
+evaluates the legacy specificity order only to decide whether a rule has a native equivalent, so
+`deny git *` with `allow git push *` — where the legacy winner was the allow — is not imported;
+the ordering itself is not restored. Matching stays word-wise, and only a simple command can match
+`allow` (§5.1); `deny` is checked against every separated segment.
 
 **Existing configuration.** A legacy `permissions.json` is read only by the migration importer. It
-maps a trailing `*` to `prefix`, an exact pattern to `exact`, and keeps `allow`/`deny`. A wildcard
-anywhere else, an empty pattern, an `ask` rule, a pattern containing a separator, and any rule
-whose legacy specificity order does not also deny are reported `unsupported`; no approximation is
-written, and rules whose precedence depends on a rejected one are rejected too.
-`defaultAction` is reported unsupported and does not become a preset. The native `permission`
-source has no field for any of them.
+maps a trailing `*` to `prefix`, an exact pattern to `exact`, and keeps `allow`/`deny`. A `*`
+anywhere except a trailing `*` makes the whole file unsupported: the importer records
+`unsupported("permissions.json", … "no command rules are applied")` and applies no command rules,
+so even a valid sibling rule is not imported. Per rule, an empty pattern, an `ask` rule, a pattern
+containing a separator, and a rule whose legacy winner is an allow, or an `ask` against a non-`ask`,
+are reported `unsupported`; no approximation is written, and rules whose precedence depends on a
+rejected one are rejected too. `defaultAction` is reported unsupported and does not become a
+preset. The native `permission` source has no field for any of them.
 
-**Known losses and replacements.** None of the three rejections leaves the need without an
-alternative: one user list replaces per-workspace lists, `exact`/`prefix` replaces pattern
-shortcuts, and `toolApproval: "ask"` with allow rules for the commands that should run replaces a
-per-command `ask`. The remaining loss is convenience: a command family needs one rule per form
-rather than a pattern, and a per-command ask under a permissive preset needs an allow rule for every
-command that should run.
+**Known losses and replacements.** The first two rejections leave a working alternative: one user
+list replaces per-workspace lists, and `exact`/`prefix` replaces pattern shortcuts. A per-command
+`ask` has no such replacement after [ADR 018](../../adr/018-permission-is-the-preset.md) made the
+preset the only control and removed `toolApproval`: asking is the preset's decision alone, and a
+rule only `allow`s or `deny`s. The remaining loss is convenience: a command family needs one rule
+per form rather than a pattern, and a command can no longer be made to ask while its neighbors run.
 
 **Typed owner and Web admission.** There is no new read or write. `permission.rules` and
 `permission.set_rules` remain the only rule surface, CAS on the Settings revision; a stale write is
@@ -410,11 +412,12 @@ command that should run.
 no rule state in the browser; no generic settings write or namespace-wide admission reaches the
 source.
 
-**New ADR.** None: these decisions keep ADR 003's authority, ADR 017's policy-level Ask, and ADRs
-009 and 014's admission and facts. A later project-file scope needs a new ADR because it changes
-who may grant authority. A later per-workspace user list, a pattern engine that keeps deny-wins, or
-a per-command Ask is a change to this document and, for Ask, the Permission policy contract; add a
-new ADR only if it changes an accepted decision.
+**New ADR.** None: these decisions keep ADR 003's authority, ADR 018's preset as the single Ask
+control, and ADRs 009 and 014's admission and facts. A later project-file scope needs a new ADR
+because it changes who may grant authority. A later per-workspace user list, a pattern engine that
+keeps deny-wins, or a per-command Ask is a change to this document and, for Ask, the
+[ADR 018](../../adr/018-permission-is-the-preset.md) policy contract; add a new ADR only if it
+changes an accepted decision.
 
 ## 11. Acceptance (flow tests)
 

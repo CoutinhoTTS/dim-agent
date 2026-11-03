@@ -316,8 +316,8 @@ allow 规则不能解除预设拒绝或文件检查，deny 规则在所有预设
 2. **按工作区的用户规则：** 拒绝。同一份用户列表适用于每个工作区（[§10.1](#101-遗留规则类型)）。
 3. **通配、glob、正则或 shell 解析器：** 拒绝。按词的 `exact`/`prefix`，`*` 是普通词，加分隔字符
    检查（§5.1）；只有迁移把结尾的 `*` 映射为 `prefix`（[§10.1](#101-遗留规则类型)）。
-4. **`ask` 规则：** 拒绝。规则只决定 `allow` 或 `deny`；询问是策略的 `toolApproval` 选择
-   （[§10.1](#101-遗留规则类型)）。
+4. **`ask` 规则：** 拒绝。规则只决定 `allow` 或 `deny`；询问是预设的选择
+   （[ADR 018](../../../adr/018-permission-is-the-preset.md)、[§10.1](#101-遗留规则类型)）。
 5. **专用方法与 S8b 的 `settings.read`/`settings.update`：** 在设计 S8b 时决定；F2 保留
    `permission.rules`/`permission.set_rules`。
 6. **绑定：** 按配置在 Session 级绑定端口 `Keyed<CommandRulesHost>`（§4.2），不依赖进程服务；
@@ -329,14 +329,14 @@ allow 规则不能解除预设拒绝或文件检查，deny 规则在所有预设
 
 遗留命令权限有三种本来源不支持的行为：按项目或工作区限定作用域的规则、通配或正则模式，以及带
 `defaultAction` 的 `ask` 决定。它们都按当前合同被拒绝。迁移导入器
-（`crates/dim-migration/src/settings/permissions.rs`）是遗留 home 的唯一入口，它保留的唯一遗留形式是
+（`crates/dim-migration/src/settings/permissions.rs`）是遗留 home 的唯一入口，它保留的唯一遗留模式形式是
 把结尾的 `*` 当作 `prefix`。
 
 | 遗留类型 | 决定与用户可见效果 | 归属 |
 | --- | --- | --- |
 | 项目文件或按工作区作用域 | 拒绝。规则是适用于每个工作区的一份用户作用域列表。Permissions 页面没有作用域选择器，工作区里的 `.dimcode/permission.json` 不被读取 | §3.1、§7；[ADR 003](../../../adr/003-approval-scope.md) D3 |
 | 通配、glob 或正则模式 | 拒绝。`command` 按写入的词逐个比较，`*` 也照原样；只有 `exact` 与 `prefix`。没有模式语法、预览或解析器 | §3.1、§5.1 |
-| `ask` 决定及 `defaultAction` | 拒绝。规则只有 `allow` 或 `deny`，未命中的命令遵循 Session 预设。让每次工具调用都询问是策略的 `toolApproval: "ask"`（[ADR 017](../../../adr/017-independent-permission-controls.md)），命中的 allow 规则回答该问题 | §5.2；[Permission 策略合同](../../../architecture/rust-agent/plugins/Permission.md#policy-contract) |
+| `ask` 决定及 `defaultAction` | 拒绝。规则只有 `allow` 或 `deny`，未命中的命令遵循 Session 预设。询问只由预设决定（[ADR 018](../../../adr/018-permission-is-the-preset.md)），没有 `toolApproval` 字段，命中的 allow 规则只回答预设本来就会提出的问题 | §5.2；[Permission 策略合同](../../../architecture/rust-agent/plugins/Permission.md#policy-contract) |
 
 **权限。** 项目文件不能给自己的命令授权。[ADR 003](../../../adr/003-approval-scope.md) D3 把来自项目的
 配置的启用权留给用户而不是项目；这里沿用同一权限归属，规则的写入权在用户本地配置，预设由 Session
@@ -347,30 +347,32 @@ allow 规则不能解除预设拒绝或文件检查，deny 规则在所有预设
 拆分是本文档的设计改动（来源键、读取路径和跨作用域优先级）；只有该优先级改变已接受的决定时才需要新
 ADR。
 
-**优先级与匹配。** 顺序是 §5.2：工具列表、命中的 deny 规则、文件门禁、allow 列表、预设，最后由命中的
-allow 规则回答剩余的工具问题。列表顺序和模式具体程度都没有意义；deny 规则优先于 allow 规则。迁移导入器
-保留的遗留优先级按具体程度排列重叠模式，所以 `deny git *` 加 `allow git push *` 会允许 push；这个顺序
-不恢复，因为那样 deny 就取决于比较规则，allow 也能解除 deny。匹配仍按词，只有简单命令能命中 `allow`
-（§5.1）；`deny` 对命令被分隔后的每一段检查。
+**优先级与匹配。** 顺序是 §5.2：`disallowedTools`、命中的 deny 规则、文件门禁、`allowedTools`、预设，最后
+由命中的 allow 规则回答剩余的工具问题。列表顺序和模式具体程度都没有意义；deny 规则优先于 allow 规则。迁移
+导入器只在决定一条规则是否有原生等价物时评估遗留具体程度顺序，所以 `deny git *` 加 `allow git push *`
+（遗留胜者是 allow）不会被导入；该顺序本身也不恢复。匹配仍按词，只有简单命令能命中 `allow`（§5.1）；`deny`
+对命令被分隔后的每一段检查。
 
 **现有配置。** 遗留 `permissions.json` 只由迁移导入器读取。它把结尾的 `*` 映射为 `prefix`，精确模式
-映射为 `exact`，并保留 `allow`/`deny`。其他位置的 `*`、空模式、`ask` 规则、含分隔字符的模式，以及遗留
-具体程度顺序不会同样得到 deny 的规则，都报告为 `unsupported`；不写入近似结果，依赖被拒规则的规则也
-一并拒绝。`defaultAction` 报告为 unsupported，不转成预设。原生 `permission` 来源没有这些字段。
+映射为 `exact`，并保留 `allow`/`deny`。除结尾 `*` 之外的任何 `*` 都会让整个文件不受支持：导入器记录
+`unsupported("permissions.json", … "no command rules are applied")`，不应用任何命令规则，因此连有效的同级
+规则也不会被导入。按规则来看，空模式、`ask` 规则、含分隔字符的模式，以及遗留胜者是 allow、或 `ask` 胜过
+非 `ask` 的规则，都报告为 `unsupported`；不写入近似结果，依赖被拒规则的规则也一并拒绝。`defaultAction`
+报告为 unsupported，不转成预设。原生 `permission` 来源没有这些字段。
 
-**已知损失与替代。** 三种拒绝都没有让需求无处落地：一份用户列表替代按工作区列表，`exact`/`prefix`
-替代模式捷径，`toolApproval: "ask"` 加上为应运行命令添加的 allow 规则替代按命令的 `ask`。剩下的损失是
-便利性：一类命令要按每种形式写一条规则，而不是一个模式；在其余命令直接运行的预设下，要让一条命令询问，
-就得为所有应运行的命令写 allow 规则。
+**已知损失与替代。** 前两种拒绝都有替代：一份用户列表替代按工作区列表，`exact`/`prefix` 替代模式捷径。
+按命令的 `ask` 没有替代：[ADR 018](../../../adr/018-permission-is-the-preset.md) 让预设成为唯一控制并移除了
+`toolApproval`，所以询问只由预设决定，规则只能 `allow` 或 `deny`。剩下的损失是便利性：一类命令要按每种
+形式写一条规则，而不是一个模式；一条命令无法再被单独设为询问而让同类命令运行。
 
 **类型化所有者与 Web 准入。** 没有新的读取或写入。`permission.rules` 与 `permission.set_rules` 仍是
 唯一的规则界面，以 Settings 修订号做 CAS；过期写入返回 `permission_rules_conflict`。Web 页面只准入
 这两个方法用于该列表，浏览器不保留规则状态；没有通用 settings 写入或命名空间级准入能到达这个来源。
 
-**新 ADR。** 不需要：这些决定保持 ADR 003 的权限、ADR 017 的策略级 Ask，以及 ADR 009 与 014 的准入和
-事实。以后若要项目文件作用域，需要新 ADR，因为它改变谁可以授予权限。以后若要按工作区的用户列表、保持
-deny 优先的模式引擎，或按命令的 Ask，则是本文档（Ask 还涉及 Permission 策略合同）的改动；只有改变已
-接受的决定时才需要新 ADR。
+**新 ADR。** 不需要：这些决定保持 ADR 003 的权限、ADR 018 的预设作为唯一 Ask 控制，以及 ADR 009 与 014
+的准入和事实。以后若要项目文件作用域，需要新 ADR，因为它改变谁可以授予权限。以后若要按工作区的用户列
+表、保持 deny 优先的模式引擎，或按命令的 Ask，则是本文档（Ask 还涉及 [ADR 018](../../../adr/018-permission-is-the-preset.md)
+的 Permission 策略合同）的改动；只有改变已接受的决定时才需要新 ADR。
 
 ## 11. 验收（流程测试）
 

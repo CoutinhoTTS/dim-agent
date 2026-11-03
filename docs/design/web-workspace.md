@@ -376,14 +376,15 @@ them.
 | --- | --- | --- |
 | Project or workspace scope | One user-scope `permission` source; a project file is not read | No scope selector; the page says the rules are user-level and apply to every Session |
 | Wildcard, glob or regular expression | Word-wise `exact`/`prefix`; `*` is a literal word; deny wins regardless of specificity | No pattern field, preview or parser; the form says matching is by words |
-| `ask` decision, including `defaultAction` | `allow` or `deny`; asking is the policy's `toolApproval: "ask"`, and an unmatched command follows the Session preset | No Ask choice in the rule row; Tool approval stays the composer's control |
+| `ask` decision, including `defaultAction` | `allow` or `deny`; an unmatched command follows the Session preset, and asking is the preset's decision alone ([ADR 018](../adr/018-permission-is-the-preset.md)) | No Ask choice in the rule row; the preset is the only tool-approval control |
 
-**Known losses and replacements.** Per-workspace lists, pattern shortcuts, and
-asking for one command under a preset that otherwise runs are gone. Each has a
-replacement: one user list, exact or prefix rules, and `toolApproval: "ask"` with
-allow rules for what should run. Nothing is browser-only: the page reads and
-writes `permission.rules`/`permission.set_rules` at the Settings revision, reports
-a conflict without retrying, and keeps no rule it has not saved.
+**Known losses and replacements.** Per-workspace lists and pattern shortcuts are
+gone with replacements: one user list and exact or prefix rules. Asking for one
+command under a preset that otherwise runs is also gone, and after
+[ADR 018](../adr/018-permission-is-the-preset.md) it has no replacement: asking is
+the preset's decision alone. Nothing is browser-only: the page reads and writes
+`permission.rules`/`permission.set_rules` at the Settings revision, reports a
+conflict without retrying, and keeps no rule it has not saved.
 
 #### MCP scope migration
 
