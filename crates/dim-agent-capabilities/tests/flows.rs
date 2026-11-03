@@ -193,6 +193,62 @@ async fn closed_default_memory_sessions_release_history_but_shared_stores_retain
     }
 }
 
+#[tokio::test]
+async fn the_prompt_projection_covers_the_facts_a_restored_branch_published() {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::mock_hosts(&mut builder);
+    defaults::install(&mut builder);
+    builder.timeline_store(std::sync::Arc::new(MemoryTimelineStore::default()));
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    let model = |model_id: &str| ConfigureUpdate {
+        model: Some(ModelSelection {
+            provider_id: "test".into(),
+            model_id: model_id.into(),
+            capability_snapshot: None,
+            config: None,
+            metadata: None,
+        }),
+        ..Default::default()
+    };
+    session.configure(model("first"), "main").await.unwrap();
+    let projection = |session: &Session| {
+        session
+            .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>("main")
+            .unwrap()
+            .unwrap()
+    };
+    let loaded = projection(&session);
+    assert_eq!(
+        loaded
+            .configuration
+            .as_ref()
+            .map(|configuration| configuration.model_id.as_str()),
+        Some("first")
+    );
+    let id = session.id().to_owned();
+    session.close().await.unwrap();
+    let restored = agent.restore_session(id).await.unwrap();
+    assert_eq!(
+        projection(&restored),
+        loaded,
+        "the projection at load reads every fact the branch published"
+    );
+    restored.configure(model("second"), "main").await.unwrap();
+    assert_eq!(
+        projection(&restored)
+            .configuration
+            .as_ref()
+            .map(|configuration| configuration.model_id.as_str()),
+        Some("second"),
+        "a fact published after the load reaches the projection once"
+    );
+    agent.close().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn repeated_idle_release_checks_never_reject_a_running_turn() {
     const TURNS: usize = 60;
