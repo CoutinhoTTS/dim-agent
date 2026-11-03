@@ -238,7 +238,7 @@ whole prefix reads pages and folds them itself.
 
 | Input | Result |
 | --- | --- |
-| A position past the published head | Invalid input |
+| A position past the published head | Invalid input. The head is the scope's: a branch read compares against that branch's published head, a chain read against its coverage, the largest ancestor cut or the read branch's head, so a read branch with little local history still reaches its ancestors, and only a bound past every branch's coverage is invalid |
 | A range end or a named cursor through inside an atomic batch | Invalid input |
 | A cursor that does not name an atomic batch boundary | Invalid input |
 | A cursor that names a branch the read's scope does not cover | Invalid input |
