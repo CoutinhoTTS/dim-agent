@@ -1760,13 +1760,17 @@ fn acp_stdio_runs_against_the_production_daemon_and_a_local_model() {
     let address = listener.local_addr().unwrap();
     listener.set_nonblocking(true).unwrap();
     let model = thread::spawn(move || {
-        for (prompt, response) in [
+        let expected = [
             ("ACP_REAL_LIMIT", "ACP_PARTIAL"),
             ("ACP_REAL_REQUEST", "ACP_REAL_OK"),
             ("ACP_REAL_FOLLOWUP", "ACP_REAL_FOLLOWUP_OK"),
             ("ACP_NEW_REQUEST", "ACP_NEW_OK"),
             ("CLI_REAL_LIMIT", "CLI_PARTIAL"),
-        ] {
+        ];
+        let first_inputs = ["ACP_NEW_REQUEST", "ACP_REAL_LIMIT", "CLI_REAL_LIMIT"];
+        let mut next = 0;
+        let mut titles = Vec::new();
+        while next < expected.len() || titles.len() < first_inputs.len() {
             let deadline = Instant::now() + PATIENCE;
             let stream = loop {
                 match listener.accept() {
@@ -1774,7 +1778,12 @@ fn acp_stdio_runs_against_the_production_daemon_and_a_local_model() {
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         assert!(
                             Instant::now() < deadline,
-                            "The production daemon did not request the model"
+                            "{}",
+                            if next == expected.len() {
+                                "every new Session's first input must be titled"
+                            } else {
+                                "The production daemon did not request the model"
+                            }
                         );
                         thread::sleep(Duration::from_millis(10));
                     }
@@ -1803,52 +1812,69 @@ fn acp_stdio_runs_against_the_production_daemon_and_a_local_model() {
             stream.read_exact(&mut bytes).unwrap();
             let request: Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(request["model"], "fixture-model");
-            assert!(
-                request["messages"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|message| message["role"] == "user"
-                        && message["content"].to_string().contains(prompt))
-            );
-            if prompt == "ACP_REAL_FOLLOWUP" {
-                assert!(
-                    request["messages"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .any(|message| message["role"] == "assistant"
+            let tools = request["tools"].as_array().map_or(0, Vec::len);
+            let messages = request["messages"].as_array().unwrap();
+            let (response, finish) = if tools == 0 {
+                assert_eq!(
+                    messages.len(),
+                    2,
+                    "a title request carries only its system text and the input: {request}"
+                );
+                assert_eq!(messages[0]["role"], "system", "{request}");
+                assert_eq!(messages[1]["role"], "user", "{request}");
+                titles.push(
+                    messages[1]["content"]
+                        .as_str()
+                        .expect("the title request's user message is the input text")
+                        .to_owned(),
+                );
+                ("ACP_TITLE", "stop")
+            } else {
+                let (prompt, response) = expected[next];
+                assert!(messages.iter().any(|message| message["role"] == "user"
+                    && message["content"].to_string().contains(prompt)));
+                if prompt == "ACP_REAL_FOLLOWUP" {
+                    assert!(
+                        messages.iter().any(|message| message["role"] == "assistant"
                             && message["content"].to_string().contains("ACP_REAL_OK")),
-                    "A follow-up must retain the Session's earlier reply"
-                );
-                assert!(request["messages"].to_string().contains("ACP_REAL_REQUEST"));
-            } else if prompt == "ACP_NEW_REQUEST" {
-                let messages = request["messages"].to_string();
-                assert!(
-                    !messages.contains("ACP_REAL_REQUEST")
-                        && !messages.contains("ACP_REAL_FOLLOWUP")
-                        && !messages.contains("ACP_REAL_OK"),
-                    "A new Session must not inherit the other Session's context"
-                );
-            }
+                        "A follow-up must retain the Session's earlier reply"
+                    );
+                    assert!(request["messages"].to_string().contains("ACP_REAL_REQUEST"));
+                } else if prompt == "ACP_NEW_REQUEST" {
+                    let context = request["messages"].to_string();
+                    assert!(
+                        !context.contains("ACP_REAL_REQUEST")
+                            && !context.contains("ACP_REAL_FOLLOWUP")
+                            && !context.contains("ACP_REAL_OK"),
+                        "A new Session must not inherit the other Session's context"
+                    );
+                }
+                next += 1;
+                (
+                    response,
+                    if prompt.ends_with("_LIMIT") {
+                        "length"
+                    } else {
+                        "stop"
+                    },
+                )
+            };
             let chunk = |delta: Value, finish: Value| {
                 json!({"id":"fixture-response","object":"chat.completion.chunk","model":"fixture-model","choices":[{"index":0,"delta":delta,"finish_reason":finish}]}).to_string()
             };
             let data = format!(
                 "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
                 chunk(json!({"role":"assistant","content":response}), Value::Null),
-                chunk(
-                    json!({}),
-                    json!(if prompt.ends_with("_LIMIT") {
-                        "length"
-                    } else {
-                        "stop"
-                    })
-                )
+                chunk(json!({}), json!(finish))
             );
             write!(stream.get_mut(), "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{data}", data.len()).unwrap();
             stream.get_mut().flush().unwrap();
         }
+        titles.sort();
+        assert_eq!(
+            titles, first_inputs,
+            "each new Session's first input is titled with the configured model"
+        );
     });
     let config = home.0.join("model.json");
     fs::write(&config, json!({"defaultModel":{"providerId":"local","modelId":"fixture-model"},"providers":[{"id":"local","kind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"models":[{"id":"fixture-model","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":256}}]}]}).to_string()).unwrap();
