@@ -10898,6 +10898,14 @@
     },
     {
       "from": "dim_agent_capabilities::recall",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path BranchPage",
+        "use dim_agent_runtime::BranchPage"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::recall",
       "to": "dim_agent_types",
       "references": [
         "path JsonObject",
@@ -10928,6 +10936,7 @@
         "path CollaborationOutcome::Cancelled",
         "path CollaborationOutcome::Completed",
         "path CollaborationOutcome::Failed",
+        "path EventKind",
         "path EventKind::ApprovalCancelled",
         "path EventKind::ApprovalRequest",
         "path EventKind::ApprovalRespond",
@@ -10996,6 +11005,7 @@
         "path ToolResult::error",
         "path ToolResult::text",
         "path ToolSource::Extension",
+        "path kind",
         "path tool"
       ]
     },
@@ -11005,6 +11015,8 @@
       "references": [
         "path Fold",
         "path Fold::new",
+        "path super::Arguments::parse",
+        "path super::FOLDS",
         "use super::Narrative"
       ]
     },
@@ -11029,6 +11041,7 @@
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolResult",
+        "path ToolResult::error",
         "use dim_agent_types::ToolResult"
       ]
     },
@@ -14434,6 +14447,14 @@
     },
     {
       "from": "dim_agent_runtime::branch",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path BranchCursor",
+        "path BranchPage"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::branch",
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
@@ -14636,6 +14657,8 @@
       "from": "dim_agent_runtime::core::timeline",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
+        "path BranchCursor",
+        "path BranchPage",
         "path PolicyFacts",
         "path PolicyOrder",
         "path PolicyOrderEvent",
@@ -14643,6 +14666,8 @@
         "path StoredEvent",
         "path TimelineKey",
         "path TimelineStore",
+        "use crate::BranchCursor",
+        "use crate::BranchPage",
         "use crate::PolicyFacts",
         "use crate::PolicyOrder",
         "use crate::PolicyOrderEvent",
