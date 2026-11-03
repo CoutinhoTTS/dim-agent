@@ -8,7 +8,8 @@ use crate::{
 };
 use dim_agent_runtime::{
     AgentError, BranchLifecycle, BranchPhase, CAPABILITY_RELOADING, Delivery, Dispatcher, Names,
-    PolicyFacts, Timeline, TimelineIdentity,
+    PolicyFacts, Timeline, TimelineIdentity, TimelineQuery, TimelineQueryDirection,
+    TimelineQueryOrderBy, TimelineQueryScope,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
@@ -679,9 +680,24 @@ impl ContextPreparation {
                         Some(fact.event.clone())
                     } else {
                         self.timeline
-                            .event_by_id(&data.input_id)
+                            .query(TimelineQuery {
+                                scope: TimelineQueryScope::Branch,
+                                from_event: None,
+                                from_sequence: None,
+                                order_by: TimelineQueryOrderBy::Sequence,
+                                direction: TimelineQueryDirection::Ascending,
+                                kinds: Vec::new(),
+                                flags: Vec::new(),
+                                event_id: Some(data.input_id.clone()),
+                                predicate: None,
+                                limit: std::num::NonZeroU64::MIN,
+                                offset: 0,
+                            })
                             .await
                             .map_err(ContextOpError::Read)?
+                            .events
+                            .into_iter()
+                            .next()
                     };
                     if let Some(input) = input {
                         supplied.push(input);

@@ -165,11 +165,11 @@ impl Branch {
         let through = self.published(Some(through))?;
         self.0.timeline().context(through).await
     }
-    /// The cut of the latest completed compaction at or below `through` on this
-    /// branch, when it is one of its own events.
-    pub async fn compaction_cut(&self, through: u64) -> Result<Option<u64>> {
-        let through = self.published(Some(through))?;
-        self.0.timeline().compaction_cut(through).await
+    /// One bounded read of this branch's facts: the request selects them and
+    /// the reply carries each event's position. The read stops at what is
+    /// published.
+    pub async fn query(&self, query: TimelineQuery) -> Result<TimelineQueryReply> {
+        self.0.timeline().query(query).await
     }
     /// One page of the rows the context projection consumes after `after`; the
     /// cursor may fall inside an atomic batch and the event limit is a target.

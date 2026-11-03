@@ -1,7 +1,7 @@
 use crate::{
     history::{
-        HistoryEntry, HistoryRenderer, context_compaction, context_configuration, digest_message,
-        truncate_middle, user_message,
+        HistoryEntry, HistoryRenderer, chain_by_id, context_compaction, context_configuration,
+        digest_message, truncate_middle, user_message,
     },
     host::*,
 };
@@ -432,9 +432,12 @@ impl ContextPolicy {
                 Err(_) => {
                     let Some(position) = self
                         .timeline
-                        .event_position(&checkpoint.retain_from)
+                        .query(chain_by_id(&checkpoint.retain_from))
                         .await
                         .map_err(|error| HostError::failed(error.to_string()))?
+                        .positions
+                        .into_iter()
+                        .next()
                     else {
                         continue;
                     };

@@ -103,11 +103,17 @@ struct Inner {
     changed: watch::Sender<(u64, bool)>,
     faults: FaultReporter,
 }
-/// The inputs a branch holds for one submission id: one, by its sequence,
-/// or several, written before the branch accepted each id once.
-#[derive(Debug, Clone, Copy)]
+/// The committed input one submission id names.
+#[derive(Debug, Clone)]
+pub(crate) struct SubmissionInput {
+    pub id: String,
+    pub sequence: u64,
+}
+/// The inputs a branch holds for one submission id: one, by its event id and
+/// sequence, or several, written before the branch accepted each id once.
+#[derive(Debug, Clone)]
 enum Submission {
-    Input(u64),
+    Input(SubmissionInput),
     Ambiguous,
 }
 fn index_submission(index: &mut HashMap<String, Submission>, event: &AgentEvent) {
@@ -119,7 +125,12 @@ fn index_submission(index: &mut HashMap<String, Submission>, event: &AgentEvent)
         index
             .entry(id.clone())
             .and_modify(|found| *found = Submission::Ambiguous)
-            .or_insert(Submission::Input(event.sequence));
+            .or_insert_with(|| {
+                Submission::Input(SubmissionInput {
+                    id: event.id.clone(),
+                    sequence: event.sequence,
+                })
+            });
     }
 }
 /// What [`Timeline::input`] did.
@@ -275,9 +286,9 @@ impl Timeline {
         let _append = AppendGuard::enter()?;
         let _commit = self.0.commit.lock().unwrap();
         if let Some(id) = &data.submission_id
-            && let Some(sequence) = self.submission(id)?
+            && let Some(input) = self.submission(id)?
         {
-            return Ok(Appended::Existing(sequence));
+            return Ok(Appended::Existing(input.sequence));
         }
         admit()?;
         let mut events = self.commit(vec![EventKind::InputMessage(data).into()], |_| Ok(()))?;
@@ -285,16 +296,17 @@ impl Timeline {
             events.pop().expect("single-event batch returned one event"),
         ))
     }
-    /// The sequence of the committed input with submission id `id`.
-    pub(crate) fn submission(&self, id: &str) -> Result<Option<u64>> {
+    /// The committed input with submission id `id`: its event id and sequence.
+    pub(crate) fn submission(&self, id: &str) -> Result<Option<SubmissionInput>> {
         let restored = self.0.restored.get().ok_or_else(|| {
             AgentError::fault("timeline.input", "restored submissions are not indexed")
         })?;
         let committed = self.0.submissions.lock().unwrap();
         match (restored.get(id), committed.get(id)) {
             (None, None) => Ok(None),
-            (Some(Submission::Input(sequence)), None)
-            | (None, Some(Submission::Input(sequence))) => Ok(Some(*sequence)),
+            (Some(Submission::Input(input)), None) | (None, Some(Submission::Input(input))) => {
+                Ok(Some(input.clone()))
+            }
             _ => Err(AgentError::AmbiguousSubmission(id.into())),
         }
     }
@@ -1060,60 +1072,6 @@ impl Timeline {
             events.extend(self.0.store.events_of_kind(&key, kind, *cut).await?);
         }
         Ok(events)
-    }
-
-    /// The event with this id on the local branch.
-    #[service(skip)]
-    pub async fn event_by_id(&self, id: &str) -> Result<Option<Arc<AgentEvent>>> {
-        self.0.store.event_by_id(&self.0.key, id).await
-    }
-
-    /// The position of one event anywhere in the branch chain.
-    #[service(skip)]
-    pub async fn event_position(&self, id: &str) -> Result<Option<TimelinePosition>> {
-        for (branch, _) in self
-            .0
-            .ancestors
-            .iter()
-            .cloned()
-            .chain(std::iter::once((self.0.key.branch_id.clone(), 0)))
-        {
-            let key = TimelineKey {
-                session_id: self.0.key.session_id.clone(),
-                branch_id: branch.clone(),
-            };
-            if let Some(event) = self.0.store.event_by_id(&key, id).await? {
-                return Ok(Some(TimelinePosition {
-                    branch_id: branch,
-                    sequence: event.sequence,
-                }));
-            }
-        }
-        Ok(None)
-    }
-
-    /// The cut of the latest completed compaction at or below `through`, when
-    /// it is one of this branch's own events before the fact that names it. A
-    /// completed compaction's cut is a validated context boundary, so a read
-    /// may start there. A stored reference that names another branch's event or
-    /// a later one is ignored: a read then replays from the segment start
-    /// instead of folding a tail that never covered `through`.
-    #[service(skip)]
-    pub async fn compaction_cut(&self, through: u64) -> Result<Option<u64>> {
-        let through = self.through(Some(through))?;
-        let Some(cut) = self
-            .0
-            .store
-            .last_compaction_cut(&self.0.key, through)
-            .await?
-        else {
-            return Ok(None);
-        };
-        let Some(position) = self.event_position(&cut.retain_from).await? else {
-            return Ok(None);
-        };
-        let usable = position.branch_id == self.0.key.branch_id && position.sequence < cut.sequence;
-        Ok(usable.then_some(position.sequence))
     }
 
     /// One filtered page of `branch`, which may be an ancestor.

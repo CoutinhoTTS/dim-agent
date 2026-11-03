@@ -1282,25 +1282,6 @@ async fn a_cut_check_starts_at_the_last_completed_compaction() {
     )
     .await
     .unwrap();
-    assert_eq!(
-        store
-            .last_compaction_cut(&key("session", "main"), 14)
-            .await
-            .unwrap(),
-        Some(dim_agent_runtime::CompactionCut {
-            retain_from: "event-8".into(),
-            sequence: 9,
-        }),
-        "a cancelled compaction after the completed one is not a cut"
-    );
-    assert_eq!(
-        store
-            .last_compaction_cut(&key("session", "main"), 8)
-            .await
-            .unwrap(),
-        None
-    );
-    assert_eq!(timeline.compaction_cut(14).await.unwrap(), Some(8));
     for at in [4, 8, 12, 14] {
         let expected = dim_agent_capabilities::history::validate_context_boundary(
             &timeline.context(at).await.unwrap(),
@@ -1394,7 +1375,6 @@ async fn a_cut_on_another_branch_replays_the_segment() {
     )
     .await
     .unwrap();
-    assert_eq!(timeline.compaction_cut(4).await.unwrap(), None);
     for at in [3, 4] {
         let expected = dim_agent_capabilities::history::validate_context_boundary(
             &timeline.context(at).await.unwrap(),

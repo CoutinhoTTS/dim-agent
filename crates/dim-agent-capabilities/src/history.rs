@@ -1,9 +1,29 @@
 use crate::prompt_state::PromptSnapshot;
-use dim_agent_runtime::{AgentError, ContextHistory, Session, Timeline};
+use dim_agent_runtime::{
+    AgentError, ContextHistory, Session, Timeline, TimelineQuery, TimelineQueryDirection,
+    TimelineQueryOrderBy, TimelineQueryPredicate, TimelineQueryReply, TimelineQueryScope,
+};
 use dim_agent_types::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, num::NonZeroU64, sync::Arc};
+
+/// The read that selects one event and returns its chain position.
+pub(crate) fn chain_by_id(id: &str) -> TimelineQuery {
+    TimelineQuery {
+        scope: TimelineQueryScope::Chain,
+        from_event: None,
+        from_sequence: None,
+        order_by: TimelineQueryOrderBy::Sequence,
+        direction: TimelineQueryDirection::Ascending,
+        kinds: Vec::new(),
+        flags: Vec::new(),
+        event_id: Some(id.to_owned()),
+        predicate: None,
+        limit: NonZeroU64::MIN,
+        offset: 0,
+    }
+}
 
 /// An ephemeral view of a fixed timeline prefix, never a second history store.
 #[derive(Debug, Clone, PartialEq)]
@@ -160,7 +180,13 @@ impl HistoryRenderer {
             ));
         }
         let segments = timeline.segments(through)?;
-        let Some(cut) = timeline.event_position(retain_from).await? else {
+        let Some(cut) = timeline
+            .query(chain_by_id(retain_from))
+            .await?
+            .positions
+            .into_iter()
+            .next()
+        else {
             return Err(AgentError::InvalidInput(
                 "Compaction cut is outside the branch chain".into(),
             ));
@@ -335,12 +361,18 @@ impl HistoryRenderer {
                     else {
                         continue;
                     };
-                    let cut = timeline.event_position(retain_from).await?.ok_or_else(|| {
-                        AgentError::fault(
-                            "History",
-                            "Compaction cut is outside the stream".to_owned(),
-                        )
-                    })?;
+                    let cut = timeline
+                        .query(chain_by_id(retain_from))
+                        .await?
+                        .positions
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| {
+                            AgentError::fault(
+                                "History",
+                                "Compaction cut is outside the stream".to_owned(),
+                            )
+                        })?;
                     let Some(end) = segments
                         .iter()
                         .find(|(name, _)| name == &cut.branch_id)
@@ -984,11 +1016,66 @@ impl CutReads<'_> {
             }
         }
     }
-    async fn cut(&self, through: u64) -> dim_agent_runtime::Result<Option<u64>> {
+    /// One bounded read of the branch's facts.
+    async fn query(&self, request: TimelineQuery) -> dim_agent_runtime::Result<TimelineQueryReply> {
         match self {
-            Self::Timeline(timeline) => timeline.compaction_cut(through).await,
-            Self::Session(session, branch) => session.compaction_cut(branch, through).await,
+            Self::Timeline(timeline) => timeline.query(request).await,
+            Self::Session(session, branch) => session.query(branch, request).await,
         }
+    }
+    /// The latest completed compaction at or below `through`, when its cut is
+    /// one of this branch's own events before the fact that names it. A
+    /// completed compaction's cut is a validated context boundary, so a read
+    /// may start there. A cut that names another branch's event or a later one
+    /// is ignored: a read then replays from the segment start instead of
+    /// folding a tail that never covered `through`.
+    async fn cut(&self, through: u64) -> dim_agent_runtime::Result<Option<u64>> {
+        if through == 0 {
+            return Ok(None);
+        }
+        let Some(compaction) = self
+            .query(TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                from_event: None,
+                from_sequence: Some(through),
+                order_by: TimelineQueryOrderBy::Sequence,
+                direction: TimelineQueryDirection::Descending,
+                kinds: vec!["context/compaction".into()],
+                flags: Vec::new(),
+                event_id: None,
+                predicate: Some(TimelineQueryPredicate {
+                    path: "status".into(),
+                    value: serde_json::Value::String("completed".into()),
+                }),
+                limit: NonZeroU64::MIN,
+                offset: 0,
+            })
+            .await?
+            .events
+            .into_iter()
+            .next()
+        else {
+            return Ok(None);
+        };
+        let EventKind::ContextCompaction(data) = &compaction.kind else {
+            return Ok(None);
+        };
+        let ContextCompactionResult::Completed { retain_from, .. } = &data.outcome else {
+            return Ok(None);
+        };
+        let Some(cut) = self
+            .query(chain_by_id(retain_from))
+            .await?
+            .positions
+            .into_iter()
+            .next()
+        else {
+            return Ok(None);
+        };
+        Ok(
+            (cut.branch_id == self.branch() && cut.sequence < compaction.sequence)
+                .then_some(cut.sequence),
+        )
     }
     async fn page(
         &self,
