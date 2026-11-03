@@ -3,6 +3,7 @@
 //! `replacement_parts` locates them (ContextCompaction §4.3).
 use super::*;
 use dim_agent_capabilities::history::summary_message;
+use dim_agent_runtime::testing::chain_events;
 
 /// Emits a `wait` call carrying `text` when the last message asks for the
 /// tool, at most twice: the wait holds the turn long enough for a steer to
@@ -62,7 +63,7 @@ async fn turn_with_steer(session: &dim_agent_runtime::Session, steer: &str) {
         .unwrap();
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(session, "main", ..).await.unwrap();
             if events
                 .iter()
                 .any(|event| matches!(event.kind, EventKind::ToolCall(_)))
@@ -185,7 +186,7 @@ async fn a_cut_inside_the_running_turn_pins_its_input_verbatim() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let (_, replacement, parts) = completed(&events);
     assert_eq!(replacement.len(), 2, "{replacement:?}");
     assert_eq!(replacement[0], summary_message("short"));
@@ -239,7 +240,7 @@ async fn a_steer_that_joined_the_turn_is_pinned_in_order() {
     let (agent, session) = tool_session(model, 3_000.).await;
     turn_with_steer(&session, "use the tool").await;
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let (_, replacement, parts) = completed(&events);
     assert_eq!(replacement.len(), 3, "{replacement:?}");
     assert_eq!(replacement[0], summary_message("short"));
@@ -352,7 +353,7 @@ async fn a_queued_input_consumed_at_the_next_turns_start_is_pinned() {
         .unwrap();
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             if events
                 .iter()
                 .any(|event| matches!(event.kind, EventKind::ToolCall(_)))
@@ -369,7 +370,7 @@ async fn a_queued_input_consumed_at_the_next_turns_start_is_pinned() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let input = queued(&events, "run two");
     let consumed = events
         .iter()
@@ -424,7 +425,7 @@ async fn an_input_consumed_at_the_cut_is_not_duplicated() {
     let (agent, session) = tool_session(model, 3_000.).await;
     turn_with_steer(&session, "STEER-MARKER").await;
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let (_, replacement, parts) = completed(&events);
     assert_eq!(
         replacement,
@@ -493,7 +494,7 @@ async fn a_compaction_with_no_running_turn_pins_nothing() {
         .unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             if events.iter().any(|event| {
                 matches!(&event.kind,
                     EventKind::ContextCompaction(data) if data.command == Some(command))
@@ -505,7 +506,7 @@ async fn a_compaction_with_no_running_turn_pins_nothing() {
     })
     .await
     .unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let (data, replacement, parts) = completed(&events);
     assert_eq!(data.command, Some(command));
     assert_eq!(replacement, vec![summary_message("short")]);
@@ -631,7 +632,7 @@ async fn until(
 ) -> Vec<Arc<AgentEvent>> {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(session, "main", ..).await.unwrap();
             if done(&events) {
                 return events;
             }
@@ -655,7 +656,7 @@ async fn a_running_turns_pins_do_not_depend_on_a_snapshot() {
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         agent.close().await.unwrap();
         replacements(&events)
     };
@@ -699,7 +700,7 @@ async fn a_steer_after_a_compaction_is_pinned_after_the_carried_pin() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let all = replacements(&events);
     let second = all
         .iter()
@@ -752,7 +753,7 @@ async fn a_merged_pin_over_the_share_keeps_each_inputs_handle() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let all = replacements(&events);
     let second = all
         .iter()

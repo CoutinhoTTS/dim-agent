@@ -430,13 +430,28 @@ impl TimelineContext {
     }
     /// The input at `sequence`, a submission this branch already holds. The
     /// duplicate may arrive while its first write is still in flight, so the
-    /// read takes the hot window and not the published head the query bounds
-    /// ([ADR 020 D3](../../../docs/adr/020-timeline-read-convergence.md#d3-replay-is-removed)).
+    /// read asks for the facts still publishing and not only what the query
+    /// bounds by default ([ADR 020 D3](../../../docs/adr/020-timeline-read-convergence.md#d3-replay-is-removed)).
     async fn committed_input(&self, sequence: u64) -> Result<Arc<AgentEvent>> {
         self.timeline
-            .local(sequence..=sequence)
+            .query(TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                include_publishing: true,
+                from_event: None,
+                from_sequence: Some(sequence),
+                order_by: TimelineQueryOrderBy::Sequence,
+                direction: TimelineQueryDirection::Ascending,
+                kinds: Vec::new(),
+                flags: Vec::new(),
+                event_id: None,
+                predicate: None,
+                limit: std::num::NonZeroU64::MIN,
+                offset: 0,
+            })
             .await?
-            .pop()
+            .events
+            .into_iter()
+            .next()
             .ok_or_else(|| AgentError::Storage(format!("committed input {sequence} is missing")))
     }
     /// Waits until Loop has dispatched the Timeline tail and has no unclosed

@@ -1,8 +1,9 @@
 use dim_agent_capabilities::file_storage::FileStoragePlugin;
 use dim_agent_capabilities::history::{HistoryRenderer, read_context, replay_context};
+use dim_agent_runtime::testing::{chain_events, timeline_events};
 use dim_agent_runtime::{
     AgentBuilder, AgentConfig, AgentError, MemoryTimelineStore, SessionConfig, StoredEvent,
-    Timeline, TimelineKey, TimelineStore, TimelineTrace, TraceStep,
+    Timeline, TimelineKey, TimelineQueryScope, TimelineStore, TimelineTrace, TraceStep,
     testing::MinimalHost,
 };
 use dim_agent_types::{
@@ -638,7 +639,13 @@ async fn documented_native_records_restore_with_legacy_snapshot_bypassed() {
         .unwrap();
     let saved: ProjectionCheckpoint = serde_json::from_str(&saved.state).unwrap();
     assert_eq!(saved, generated);
-    let full = project_history(&main.history(Some(7)).await.unwrap(), "main").unwrap();
+    let full = project_history(
+        &timeline_events(&main, TimelineQueryScope::Chain, ..=7)
+            .await
+            .unwrap(),
+        "main",
+    )
+    .unwrap();
     let recovered = read_context(&main, 7).await.unwrap();
     assert!(recovered.checkpoint.is_none());
     let compacted = project_context_history(&recovered).unwrap();
@@ -930,7 +937,13 @@ async fn committed_history_round_trips_requests_outputs_traces_and_branch_direct
     .await
     .unwrap();
     assert_eq!(timeline.sequence(), 10);
-    assert_eq!(timeline.history(None).await.unwrap().len(), 10);
+    assert_eq!(
+        timeline_events(&timeline, TimelineQueryScope::Chain, ..)
+            .await
+            .unwrap()
+            .len(),
+        10
+    );
     timeline
         .append(EventDraft::new(EventKind::StopInterrupt(
             StopInterruptData {
@@ -1086,7 +1099,7 @@ async fn output_block_start_id_roundtrips_through_the_merged_row() {
     builder.timeline_store(store.clone());
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent.restore_session("session".into()).await.unwrap();
-    let restored = session.history("main", Some(2)).await.unwrap();
+    let restored = chain_events(&session, "main", ..=2).await.unwrap();
     let text: Vec<_> = restored
         .iter()
         .filter(|event| matches!(event.kind, EventKind::Text(_)))
@@ -1697,7 +1710,7 @@ async fn extension_events_keep_their_own_rows_and_restore_unchanged() {
     builder.timeline_store(store.clone());
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent.restore_session("session".into()).await.unwrap();
-    let restored = session.history("main", Some(3)).await.unwrap();
+    let restored = chain_events(&session, "main", ..=3).await.unwrap();
     let written: Vec<_> = written.iter().map(|entry| entry.event.clone()).collect();
     assert_eq!(
         serde_json::to_string(&restored).unwrap(),
@@ -1840,7 +1853,7 @@ async fn branch_end_events_restore_unchanged_and_the_line_stays_ended() {
     builder.timeline_store(store.clone());
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent.restore_session("session".into()).await.unwrap();
-    let restored = session.history("main", Some(5)).await.unwrap();
+    let restored = chain_events(&session, "main", ..=5).await.unwrap();
     assert!(
         restored
             .iter()
@@ -1848,7 +1861,13 @@ async fn branch_end_events_restore_unchanged_and_the_line_stays_ended() {
     );
     assert!(!session.branches().iter().any(|line| line.id == "child"));
     assert_eq!(session.sequence("child").unwrap(), 2);
-    let line = session.local_page("child", 0, 8, 2).await.unwrap();
+    let line = store
+        .read_page_without_request_bodies(&key("session", "child"), 0, 8, 2)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|record| record.event)
+        .collect::<Vec<_>>();
     assert_eq!(line.len(), 2);
     assert_eq!(line[1].kind, end);
     assert!(matches!(
@@ -2590,7 +2609,13 @@ async fn paging_reads_do_not_rebuild_request_bodies() {
     session.idle("main").await.unwrap();
     store.take_node_loads();
 
-    let page = session.local_page("main", 0, 8, 3).await.unwrap();
+    let page = store
+        .read_page_without_request_bodies(&main, 0, 8, 3)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|record| record.event)
+        .collect::<Vec<_>>();
     assert_eq!(page.len(), 3);
     assert_eq!(
         store.take_node_loads(),
@@ -2622,7 +2647,13 @@ async fn paging_reads_do_not_rebuild_request_bodies() {
         ),
         "a read that uses the requests checks their content"
     );
-    let page = session.local_page("main", 0, 8, 3).await.unwrap();
+    let page = store
+        .read_page_without_request_bodies(&main, 0, 8, 3)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|record| record.event)
+        .collect::<Vec<_>>();
     assert_eq!(
         page.iter().map(|event| event.sequence).collect::<Vec<_>>(),
         vec![1, 2, 3]
@@ -2862,7 +2893,7 @@ async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_o
         assert_eq!(store.writer_memo_requests(&bad_id), 0);
         assert!(agent.get_session(&bad_id).is_none());
         assert!(agent.get_session(good.id()).is_some());
-        let bad_history = bad.history("main", None).await.unwrap();
+        let bad_history = chain_events(&bad, "main", ..).await.unwrap();
         assert!(
             bad_history
                 .iter()
@@ -2879,7 +2910,7 @@ async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_o
                 .to_string()
                 .contains("injected output commit failure")
         );
-        assert!(good.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("healthy output"))));
+        assert!(chain_events(&good, "main", ..).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("healthy output"))));
         connection
             .execute_batch("DROP TRIGGER fail_output; DROP TABLE injected_session")
             .unwrap();
@@ -2935,14 +2966,14 @@ async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_o
         settled("the healthy branch idles after recovery", good.idle("main"))
             .await
             .unwrap();
-        assert!(good.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("still healthy"))));
+        assert!(chain_events(&good, "main", ..).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("still healthy"))));
         settled(
             "the restored branch settles the orphaned turn",
             session.idle("main"),
         )
         .await
         .unwrap();
-        let history = session.history("main", None).await.unwrap();
+        let history = chain_events(&session, "main", ..).await.unwrap();
         assert!(history.iter().any(|event| matches!(&event.kind, EventKind::ModelOutputEnd(data) if matches!(data.outcome, ModelOutputOutcome::Failed { .. }))));
         assert!(history.iter().any(|event| matches!(&event.kind, EventKind::TurnEnd(data) if matches!(data.outcome, TurnOutcome::Failed { .. }))));
         session
@@ -2952,7 +2983,7 @@ async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_o
         settled("the restored branch ends its turn", session.idle("main"))
             .await
             .unwrap();
-        assert!(session.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("after recovery"))));
+        assert!(chain_events(&session, "main", ..).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("after recovery"))));
         assert_eq!(store.writer_memo_requests(session.id()), 1);
         assert!(session.unload_if_idle().await.unwrap());
         settled("the unloaded Session closes", session.closed())
@@ -4240,7 +4271,7 @@ async fn a_v21_store_upgrades_in_place_once_and_restores_typeless_tool_schemas()
     builder.timeline_store(store.clone());
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent.restore_session("schema".into()).await.unwrap();
-    let restored = session.history("main", Some(2)).await.unwrap();
+    let restored = chain_events(&session, "main", ..=2).await.unwrap();
     assert_eq!(restored[0], configured.event);
     assert_eq!(restored[1], called.event);
     agent.close().await.unwrap();
@@ -4347,7 +4378,7 @@ async fn a_type_array_tool_schema_round_trips_on_the_current_store_without_an_up
     builder.timeline_store(store.clone());
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent.restore_session("schema".into()).await.unwrap();
-    let restored = session.history("main", Some(2)).await.unwrap();
+    let restored = chain_events(&session, "main", ..=2).await.unwrap();
     assert_eq!(restored[0], configured.event);
     assert_eq!(restored[1], called.event);
     agent.close().await.unwrap();
@@ -5626,10 +5657,22 @@ async fn nested_branches_read_fixed_ancestor_checkpoints_after_their_parents_clo
             Message::text(Role::User, "queued across compaction")
         ]
     );
-    let history = grandchild.history(None).await.unwrap();
+    let history = timeline_events(&grandchild, TimelineQueryScope::Chain, ..)
+        .await
+        .unwrap();
     assert_eq!(history.len(), 6);
-    assert_eq!(history[..4], main.local(..=4).await.unwrap());
-    assert_eq!(history[4..], child.local(..=2).await.unwrap());
+    assert_eq!(
+        history[..4],
+        timeline_events(&main, TimelineQueryScope::Branch, ..=4)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        history[4..],
+        timeline_events(&child, TimelineQueryScope::Branch, ..=2)
+            .await
+            .unwrap()
+    );
     assert_eq!(store.branches("nested").await.unwrap().len(), 4);
     dim_agent_runtime::core::close_timeline(&early)
         .await
@@ -5762,11 +5805,11 @@ async fn a_cold_read_failure_preserves_the_record_and_other_session_progress() {
         bad.idle("main").await.unwrap();
         let connection = Connection::open(&database.0).unwrap();
         assert!(connection.execute("UPDATE timeline_content SET body = 'unreadable external bytes' WHERE session_id = ?1", [bad.id()]).unwrap() > 0);
-        assert!(matches!(bad.history("main", None).await, Err(AgentError::Storage(_))));
+        assert!(matches!(chain_events(&bad, "main", ..).await, Err(AgentError::Storage(_))));
         assert!(bad.failure().is_none(), "a read error belongs to its operation");
         good.submit("healthy progress".into(), InputMode::Queue, "main").await.unwrap();
         good.idle("main").await.unwrap();
-        assert!(good.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("healthy progress"))));
+        assert!(chain_events(&good, "main", ..).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("healthy progress"))));
         assert_eq!(connection.query_row("SELECT body FROM timeline_content WHERE session_id = ?1 LIMIT 1", [bad.id()], |row| row.get::<_, String>(0)).unwrap(), "unreadable external bytes");
         agent.close().await.unwrap();
         assert!(matches!(store.branches(bad.id()).await, Err(AgentError::Storage(_))));
@@ -6425,7 +6468,9 @@ async fn native_continuation_survives_sqlite_checkpoint_request_and_child_restor
                     .collect::<Vec<_>>(),
                 vec![&assistant]
             );
-            let events = timeline.history(None).await.unwrap();
+            let events = timeline_events(&timeline, TimelineQueryScope::Chain, ..)
+                .await
+                .unwrap();
             assert!(events.iter().any(|e|matches!(&e.kind,EventKind::ModelCall(call) if call.request.messages[0].as_ref()==&assistant)));
             dim_agent_runtime::core::close_timeline(&timeline)
                 .await
@@ -6444,12 +6489,15 @@ async fn native_continuation_survives_sqlite_checkpoint_request_and_child_restor
         )
         .await
         .unwrap();
-        let anchor = timeline
-            .local(saved.sequence..=saved.sequence)
-            .await
-            .unwrap()
-            .pop()
-            .unwrap();
+        let anchor = timeline_events(
+            &timeline,
+            TimelineQueryScope::Branch,
+            saved.sequence..=saved.sequence,
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
         dim_agent_runtime::core::close_timeline(&timeline)
             .await
             .unwrap();

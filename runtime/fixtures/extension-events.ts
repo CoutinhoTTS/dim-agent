@@ -51,7 +51,18 @@ export const part = definePlugin({
       ['turn/end', 'fixture/*'],
       async () => {
         const through = BigInt(await dispatcher.committed())
-        if (through > 0n) for (const event of await dispatcher.local(0, through)) await step(event, false)
+        if (through > 0n) {
+          const page = await timeline.query({
+            scope: 'branch',
+            include_publishing: true,
+            from_sequence: 1n,
+            order_by: 'sequence',
+            direction: 'ascending',
+            limit: through,
+            offset: 0n,
+          })
+          for (const event of page.events) await step(event, false)
+        }
         return through
       },
       async event => step(event, true),

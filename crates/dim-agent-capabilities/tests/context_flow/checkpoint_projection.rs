@@ -6,6 +6,7 @@ use dim_agent_capabilities::{
     },
     prompt_state::PromptSnapshot,
 };
+use dim_agent_runtime::testing::chain_events;
 
 fn fixed(events: Vec<EventKind>) -> ContextHistory {
     let events: Vec<_> = events
@@ -81,7 +82,7 @@ async fn keyed_blocks_replay_verbatim_after_repeated_compaction_until_retired() 
             .unwrap();
         session.idle("main").await.unwrap();
     }
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let compactions: Vec<_> = events
         .iter()
         .filter_map(|event| match &event.kind {

@@ -3,6 +3,7 @@
 use super::deletion::{Store, eventually, session, turn};
 use super::*;
 use dim_agent_runtime::Session;
+use dim_agent_runtime::testing::{branch_events, chain_events};
 use dim_agent_types::AgentEvent;
 
 /// Kinds that would mean the fork ran work on its own.
@@ -38,7 +39,7 @@ fn forked(reply: &Value) -> String {
     reply["result"]["sessionId"].as_str().unwrap().to_owned()
 }
 async fn history(session: &Session, branch: &str) -> Vec<Arc<AgentEvent>> {
-    session.history(branch, None).await.unwrap()
+    chain_events(session, branch, ..).await.unwrap()
 }
 fn keys(events: &[Arc<AgentEvent>]) -> Vec<&str> {
     events.iter().map(|event| event.kind.key()).collect()
@@ -153,7 +154,7 @@ async fn a_fork_copies_main_through_a_rest_point_and_starts_nothing() {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let prefix = source.history("main", Some(at)).await.unwrap();
+    let prefix = chain_events(&source, "main", ..=at).await.unwrap();
     let encode = |events: &[Arc<AgentEvent>]| -> Vec<Value> {
         events
             .iter()
@@ -873,7 +874,7 @@ async fn a_fork_waits_for_background_work_and_keeps_preset_and_model() {
     )
     .await;
     tokio::time::timeout(Duration::from_secs(10), async {
-        while !keys(&source.local(&child, ..).await.unwrap()).contains(&"exec/started") {
+        while !keys(&branch_events(&source, &child, ..).await.unwrap()).contains(&"exec/started") {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -941,7 +942,7 @@ async fn a_fork_waits_for_background_work_and_keeps_preset_and_model() {
         0
     );
     assert!(
-        !keys(&source.local(&child, ..).await.unwrap()).contains(&"exec/ended"),
+        !keys(&branch_events(&source, &child, ..).await.unwrap()).contains(&"exec/ended"),
         "the source's task still runs"
     );
     turn(&mut client, &fid, "in the fork").await;

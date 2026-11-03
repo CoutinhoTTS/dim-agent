@@ -1,6 +1,7 @@
 //! Workflow's actual row, which registers its Session part, through Settings,
 //! files, S2 and C1.
 use super::*;
+use dim_agent_runtime::testing::branch_events;
 use std::path::{Path, PathBuf};
 
 /// The `dim-workflow` entry (Workflow §5.2), byte for byte.
@@ -66,8 +67,7 @@ fn stored(home: &Path) -> Value {
 }
 
 async fn report_count(session: &dim_agent_runtime::Session, run: &str) -> usize {
-    session
-        .local("main", ..)
+    branch_events(session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -294,8 +294,7 @@ async fn report_crash(phase: &str, fault: ReportFault) {
     if matches!(fault, ReportFault::Resubmitted) {
         let persisted = stored(&home);
         let submission = persisted["runs"][0]["report"]["submission_id"].as_str();
-        let report = target
-            .local("main", ..)
+        let report = branch_events(&target, "main", ..)
             .await
             .unwrap()
             .iter()
@@ -626,10 +625,7 @@ async fn node_workflow_sources_stages_policy_and_report_use_the_real_package() {
         })
         .await
         .unwrap();
-        let reports = agent
-            .get_session(starter)
-            .unwrap()
-            .local("main", ..)
+        let reports = branch_events(&agent.get_session(starter).unwrap(), "main", ..)
             .await
             .unwrap()
             .into_iter()
@@ -701,8 +697,7 @@ async fn tool_result(
             .rpc("session.idle", json!({"sessionId":id,"branchId":"main"}))
             .await,
     );
-    session
-        .local("main", ..)
+    branch_events(session, "main", ..)
         .await
         .unwrap()
         .into_iter()
@@ -1498,8 +1493,7 @@ async fn node_workflow_stop_and_reload_settle_held_consumed_and_completed_work()
             stage.idle("main").await.unwrap();
         } else {
             tokio::time::timeout(Duration::from_secs(5), async {
-                while !stage
-                    .local("main", ..)
+                while !branch_events(&stage, "main", ..)
                     .await
                     .unwrap()
                     .iter()
@@ -1544,8 +1538,7 @@ async fn node_workflow_stop_and_reload_settle_held_consumed_and_completed_work()
         }
         if mode == "reload" {
             let original_instance = stage.instance().unwrap();
-            let stops_before_reload = stage
-                .local("main", ..)
+            let stops_before_reload = branch_events(&stage, "main", ..)
                 .await
                 .unwrap()
                 .iter()
@@ -1594,8 +1587,7 @@ async fn node_workflow_stop_and_reload_settle_held_consumed_and_completed_work()
                 "recovery leaves the stage's existing approval and turn untouched"
             );
             assert_eq!(
-                stage
-                    .local("main", ..)
+                branch_events(&stage, "main", ..)
                     .await
                     .unwrap()
                     .iter()
@@ -1642,7 +1634,7 @@ async fn node_workflow_stop_and_reload_settle_held_consumed_and_completed_work()
         assert_eq!(stopped["result"]["stages"][1]["state"], "skipped");
         assert_eq!(stopped["result"]["report"]["state"], "none");
         assert_eq!(report_count(&starter, id.as_str().unwrap()).await, 0);
-        let events = stage.local("main", ..).await.unwrap();
+        let events = branch_events(&stage, "main", ..).await.unwrap();
         let own = stopped["result"]["stages"][0]["input_event_id"]
             .as_str()
             .unwrap();
@@ -1831,7 +1823,7 @@ async fn node_workflow_report_wakes_wait_and_is_adopted_after_its_start_batch() 
         .await
         .unwrap()
         .unwrap();
-    let events = starter.local("main", ..).await.unwrap();
+    let events = branch_events(&starter, "main", ..).await.unwrap();
     let (result, batch) = events
         .iter()
         .find_map(|event| {
@@ -2002,8 +1994,7 @@ async fn native_retention(fault: &str) {
         .to_owned();
     let original = agent.get_session(&owned).unwrap();
     original.idle("main").await.unwrap();
-    let cutoff = original
-        .local("main", ..)
+    let cutoff = branch_events(&original, "main", ..)
         .await
         .unwrap()
         .last()
@@ -2540,7 +2531,7 @@ async fn node_workflow_factory_texts_reach_the_report_and_the_refusal() {
         assert_eq!(run["state"], "completed", "{run}");
         let text = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let history = starter_session.local("main", ..).await.unwrap();
+                let history = branch_events(&starter_session, "main", ..).await.unwrap();
                 if let Some(text) = history.iter().find_map(|event| match &event.kind {
                     EventKind::InputMessage(data) => data.blocks.first().and_then(
                         |dim_agent_types::InputBlock::Raw { text, .. }| {

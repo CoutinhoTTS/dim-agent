@@ -18,6 +18,7 @@ use dim_agent_capabilities::{
     timeline_tree::TreeCommands,
 };
 use dim_agent_runtime::testing::MinimalHost;
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -494,8 +495,7 @@ pub fn system_text(prompt: &SystemPrompt) -> String {
 
 /// Every model request of `branch`, oldest first.
 pub async fn requests(session: &Session) -> Vec<Arc<ModelRequest>> {
-    session
-        .history("main", None)
+    chain_events(session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -531,8 +531,7 @@ pub fn request_text(request: &ModelRequest) -> String {
 
 /// The input messages of `main`, oldest first.
 pub async fn inputs(session: &Session) -> Vec<InputMessageData> {
-    session
-        .history("main", None)
+    chain_events(session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -564,8 +563,7 @@ pub fn state_value(input: &InputMessageData, source: &str) -> Option<Option<Stri
 
 /// Tool results of `main`, oldest first.
 pub async fn tool_results(session: &Session) -> Vec<ToolResult> {
-    session
-        .history("main", None)
+    chain_events(session, "main", ..)
         .await
         .unwrap()
         .iter()

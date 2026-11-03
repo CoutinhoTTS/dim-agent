@@ -6,9 +6,8 @@ use crate::{
 use dim_agent_runtime::{
     AgentError, Branch, BranchLifecycle, BranchOptions, Dispatcher, Names, Result, SessionIdentity,
     StoredBranch, StoredEvent, Timeline, TimelineContext, TimelineFactory, TimelineIdentity,
-    TimelineInfo, TimelineKey, TimelineQuery, TimelineQueryDirection,
-    TimelineQueryOrderBy, TimelineQueryPredicate, TimelineQueryScope, TimelineStore,
-    TimelineTreeControl, rebuild_facts,
+    TimelineInfo, TimelineKey, TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
+    TimelineQueryPredicate, TimelineQueryScope, TimelineStore, TimelineTreeControl, rebuild_facts,
 };
 use dim_agent_types::*;
 use futures_util::{FutureExt, future::join_all};

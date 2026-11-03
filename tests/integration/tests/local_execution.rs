@@ -25,6 +25,7 @@ use dim_agent_capabilities::{
     },
 };
 use dim_agent_runtime::testing::MinimalHost;
+use dim_agent_runtime::testing::{branch_events, timeline_events};
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use process_support::{alive, gone, pid_in};
@@ -442,7 +443,7 @@ impl Harness {
 }
 
 async fn local_events(session: &Session) -> Vec<Arc<AgentEvent>> {
-    session.local("main", ..).await.unwrap()
+    branch_events(session, "main", ..).await.unwrap()
 }
 
 async fn until(
@@ -1419,7 +1420,9 @@ async fn closing_a_branch_cancels_only_its_tasks_without_a_wake() {
         .await
         .unwrap();
     assert!(gone(&pid).await);
-    let child_events = timeline.local(..).await.unwrap();
+    let child_events = timeline_events(&timeline, TimelineQueryScope::Branch, ..)
+        .await
+        .unwrap();
     let ends = ended(&child_events);
     assert_eq!(ends.len(), 1);
     assert_eq!(ends[0].1.status, ExecStatus::Cancelled);
@@ -1428,7 +1431,15 @@ async fn closing_a_branch_cancels_only_its_tasks_without_a_wake() {
     assert!(ended(&local_events(&session).await).is_empty());
     session.close().await.unwrap();
     assert!(gone(&main).await);
-    let ends = ended(&harness.seen.timeline("main").local(..).await.unwrap());
+    let ends = ended(
+        &timeline_events(
+            &harness.seen.timeline("main"),
+            TimelineQueryScope::Branch,
+            ..,
+        )
+        .await
+        .unwrap(),
+    );
     assert_eq!(ends.len(), 1);
     assert_eq!(ends[0].1.status, ExecStatus::Cancelled);
     harness.shutdown().await;
@@ -1704,7 +1715,13 @@ async fn a_reload_or_a_closing_session_refuses_a_start_and_leaves_no_hold() {
     drop(held);
     closing.await.unwrap();
     assert!(gone(&pid).await);
-    let events = harness.seen.timeline("main").local(..).await.unwrap();
+    let events = timeline_events(
+        &harness.seen.timeline("main"),
+        TimelineQueryScope::Branch,
+        ..,
+    )
+    .await
+    .unwrap();
     assert_eq!(count(&events, "exec/started"), 0);
     harness.shutdown().await;
 }

@@ -1,7 +1,8 @@
 use super::deletion::Store;
 use super::*;
 use dim_agent_capabilities::prompt_state::PromptSnapshot;
-use dim_agent_runtime::{Agent, CollaborationRole, Session};
+use dim_agent_runtime::testing::{branch_events, chain_events, timeline_events};
+use dim_agent_runtime::{Agent, CollaborationRole, Session, TimelineQueryScope};
 use dim_agent_types::{
     AgentEvent, CollaborationDelivery, CollaborationOutcome, ContentBlock, EventKind, InputBlock,
     InputMessageData, MessageContent, ToolContent,
@@ -542,7 +543,7 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
             .await
             .unwrap();
         session.idle(&child).await.unwrap();
-        let denied = last_error(&session.local(&child, ..).await.unwrap());
+        let denied = last_error(&branch_events(&session, &child, ..).await.unwrap());
         assert!(!denied.is_empty(), "a result from main must be denied on child");
 
         session
@@ -554,8 +555,7 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
             .await
             .unwrap();
         poll("child result", async || {
-            session
-                .local(&child, ..)
+            branch_events(&session, &child, ..)
                 .await
                 .unwrap()
                 .iter()
@@ -568,7 +568,7 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
         })
         .await;
         session.idle(&child).await.unwrap();
-        let child_events = session.local(&child, ..).await.unwrap();
+        let child_events = branch_events(&session, &child, ..).await.unwrap();
         let (child_result_id, child_member) = child_events
             .iter()
             .find_map(|event| match &event.kind {
@@ -596,7 +596,7 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
             .await
             .unwrap();
         session.idle(&child).await.unwrap();
-        let child_result = last_ok(&session.local(&child, ..).await.unwrap());
+        let child_result = last_ok(&branch_events(&session, &child, ..).await.unwrap());
         assert_eq!(child_result["resultId"], child_result_id);
         assert_eq!(
             child_result["result"]["text"],
@@ -664,7 +664,7 @@ fn tool(input: Value) -> String {
 }
 
 async fn events(session: &Session) -> Vec<Arc<AgentEvent>> {
-    session.history("main", None).await.unwrap()
+    chain_events(session, "main", ..).await.unwrap()
 }
 
 /// Content of every agent tool result, in Timeline order.
@@ -2028,7 +2028,7 @@ async fn leader_stop_and_close_settle_requests() {
             .rpc("session.close", json!({"sessionId": lead}))
             .await,
     );
-    let closed = lead_session.local("main", ..).await.unwrap();
+    let closed = branch_events(&lead_session, "main", ..).await.unwrap();
     assert_eq!(
         result_of(&closed, &earlier).last(),
         Some(&CollaborationOutcome::Cancelled {
@@ -3356,8 +3356,7 @@ async fn launch_gated_with(
 /// Committed events of the gated branch hold one of `kind`.
 async fn committed_has(timeline: &dim_agent_runtime::Timeline, kind: &str) -> bool {
     let through = timeline.committed();
-    timeline
-        .local(..=through)
+    timeline_events(timeline, TimelineQueryScope::Branch, ..=through)
         .await
         .unwrap()
         .iter()
@@ -4524,7 +4523,7 @@ async fn every_settlement_of_a_request_releases_its_leader() {
             .rpc("session.close", json!({"sessionId": lead}))
             .await,
     );
-    let closed_timeline = lead_session.local("main", ..).await.unwrap();
+    let closed_timeline = branch_events(&lead_session, "main", ..).await.unwrap();
     assert_eq!(
         result_of(&closed_timeline, &last),
         [CollaborationOutcome::Cancelled {
@@ -4612,7 +4611,7 @@ async fn a_closing_leader_gives_no_hold_and_refuses_the_request() {
     interrupt_release.notify_one();
     closing.await.unwrap().unwrap();
 
-    let closed = lead_session.local("main", ..).await.unwrap();
+    let closed = branch_events(&lead_session, "main", ..).await.unwrap();
     let delivery = closed
         .iter()
         .find_map(|event| match &event.kind {
@@ -5161,7 +5160,7 @@ async fn member_tool_approval_reviews_the_original_action_and_settles_cancelled_
         assert_eq!(detail["result"]["descriptor"]["call"]["input"]["command"], "child action");
         assert_ok(&client.rpc("approval.respond", json!({"sessionId":lead,"branchId":child,"requestId":request_id,"decision":"allow"})).await);
         poll("child approval report", async || {
-            leader.local(&child, ..).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::InputMessage(data) if report(data).is_some())).then_some(())
+            branch_events(&leader, &child, ..).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::InputMessage(data) if report(data).is_some())).then_some(())
         }).await;
         leader.idle(&child).await.unwrap();
         assert_eq!(runs.load(Ordering::SeqCst), 2);
@@ -5225,11 +5224,11 @@ async fn new_members_sample_requesting_branch_policy_and_reused_members_keep_the
         lead_session.submit(tool(json!({"action":"request","agentId":agent_id,"prompt":"hello"})), dim_agent_types::InputMode::Queue, &branch).await.unwrap();
         lead_session.idle(&branch).await.unwrap();
         let member_id = poll("child member delivered", async || {
-            lead_session.history(&branch, None).await.unwrap().iter().find_map(|event| match &event.kind { EventKind::CollaborationDelivered(data) => match &data.delivery { CollaborationDelivery::Ok { session_id, .. } => Some(session_id.clone()), _ => None }, _ => None })
+            chain_events(&lead_session, &branch, ..).await.unwrap().iter().find_map(|event| match &event.kind { EventKind::CollaborationDelivered(data) => match &data.delivery { CollaborationDelivery::Ok { session_id, .. } => Some(session_id.clone()), _ => None }, _ => None })
         }).await;
         let member = agent.get_session(&member_id).unwrap();
         poll("child delegation completed before member reuse", async || {
-            lead_session.local(&branch, ..).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::InputMessage(data) if report(data).is_some())).then_some(())
+            branch_events(&lead_session, &branch, ..).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::InputMessage(data) if report(data).is_some())).then_some(())
         }).await;
         lead_session.idle(&branch).await.unwrap();
         assert_eq!(serde_json::to_value(&member.config().permission_policy).unwrap(), policy);
@@ -5280,7 +5279,7 @@ async fn member_approval_cancellation_and_policy_tightening_never_execute_a_late
                     if action == "cancel" {
                         leader.submit(format!("tool:member_approval_allow {}", json!({"approvalId":detail["result"]["approvalId"]})), dim_agent_types::InputMode::Queue, &control).await.unwrap();
                         leader.idle(&control).await.unwrap();
-                        let calls = results(&leader.local(&control, ..).await.unwrap());
+                        let calls = results(&branch_events(&leader, &control, ..).await.unwrap());
                         let (_, result) = calls.last().unwrap();
                         let result: Value = serde_json::from_str(result).unwrap();
                         assert_eq!(result["code"], "not_pending");
@@ -5469,7 +5468,13 @@ async fn member_routes_are_authorized_only_after_the_owning_branch_consumes_the_
         entered.notified().await;
         let timeline = gate.contexts.lock().unwrap().get(lead).unwrap().1.clone();
         let (input_event, input, route) = poll("member request is committed behind the dispatch gate", async || {
-            let events = timeline.local(..=timeline.committed()).await.unwrap();
+            let events = timeline_events(
+                &timeline,
+                TimelineQueryScope::Branch,
+                ..=timeline.committed(),
+            )
+            .await
+            .unwrap();
             events.into_iter().find_map(|event| {
                 let EventKind::InputMessage(input) = &event.kind else { return None; };
                 let Some(InputBlock::Raw { text, .. }) = input.blocks.first() else { return None; };

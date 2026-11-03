@@ -1,6 +1,7 @@
+use dim_agent_runtime::testing::timeline_events;
 use dim_agent_runtime::{
     AgentError, BoxFuture, MemoryTimelineStore, PublishCallback, Result, SessionConfig,
-    StoredBranch, StoredEvent, Timeline, TimelineKey, TimelineStore,
+    StoredBranch, StoredEvent, Timeline, TimelineKey, TimelineQueryScope, TimelineStore,
     TimelineTrace,
 };
 use dim_agent_types::*;
@@ -204,7 +205,9 @@ async fn before_pipeline_is_atomic_and_branch_snapshots_share_only_fixed_prefix(
     let original = timeline.append(input("one")).unwrap();
     assert_eq!(original.kind, input("one").kind);
     assert!(store.trace(&main, 1).await.unwrap().is_none());
-    let boundary = timeline.history(Some(original.sequence)).await.unwrap();
+    let boundary = timeline_events(&timeline, TimelineQueryScope::Chain, ..=original.sequence)
+        .await
+        .unwrap();
     assert_eq!(boundary.len(), 1);
     assert_eq!(boundary[0].kind, input("one").kind);
     failing.dispose().await.unwrap();
@@ -248,7 +251,9 @@ async fn before_pipeline_is_atomic_and_branch_snapshots_share_only_fixed_prefix(
     );
     timeline.append(input("later")).unwrap();
     let local = branch.append(input("branch")).unwrap();
-    let snapshot = branch.history(None).await.unwrap();
+    let snapshot = timeline_events(&branch, TimelineQueryScope::Chain, ..)
+        .await
+        .unwrap();
     assert_eq!(snapshot.len(), 2);
     assert!(Arc::ptr_eq(&snapshot[0], &original));
     assert_eq!(local.sequence, 1);
@@ -277,24 +282,26 @@ async fn history_has_no_byte_quota_and_atomic_cuts_stay_fixed() {
         .unwrap();
     assert_eq!(timeline.sequence(), 3);
     assert!(matches!(
-        timeline.history(Some(batch[0].sequence)).await,
-        Err(AgentError::InvalidInput(_))
-    ));
-    assert!(matches!(
-        timeline.local(..=batch[0].sequence).await,
+        timeline.batch_end(batch[0].sequence).await,
         Err(AgentError::InvalidInput(_))
     ));
     assert_eq!(
-        timeline
-            .history(Some(batch[1].sequence))
+        timeline_events(&timeline, TimelineQueryScope::Branch, ..)
             .await
             .unwrap()
             .len(),
         3
     );
-    assert_eq!(timeline.local(2..=3).await.unwrap().len(), 2);
+    assert!(timeline.batch_end(batch[1].sequence).await.is_ok());
+    assert_eq!(
+        timeline_events(&timeline, TimelineQueryScope::Branch, 2..=3)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
     assert!(matches!(
-        timeline.history(Some(4)).await,
+        timeline.bound(4),
         Err(AgentError::InvalidInput(_))
     ));
     dim_agent_runtime::core::close_timeline(&timeline)
@@ -411,7 +418,13 @@ async fn panicking_before_keeps_the_original_fact_and_the_branch_usable() {
         serde_json::to_value(second.kind.clone()).unwrap(),
         serde_json::to_value(next.kind).unwrap()
     );
-    assert_eq!(timeline.local(..).await.unwrap().len(), 2);
+    assert_eq!(
+        timeline_events(&timeline, TimelineQueryScope::Branch, ..)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
     dim_agent_runtime::core::close_timeline(&timeline)
         .await
         .unwrap();

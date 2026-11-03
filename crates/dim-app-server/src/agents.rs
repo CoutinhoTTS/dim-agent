@@ -8,8 +8,8 @@ use crate::{
 use dim_agent_capabilities::host::ModelSelectionHost;
 use dim_agent_runtime::{
     AGENT_GROUP, Agent, AgentBuilder, AgentError, CollaborationRole, InUse, Modules, Names,
-    NoConfig, Session, SessionConfig, TimelineKey, TimelineQuery,
-    TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryScope,
+    NoConfig, Session, SessionConfig, TimelineKey, TimelineQuery, TimelineQueryDirection,
+    TimelineQueryOrderBy, TimelineQueryScope,
 };
 pub use dim_agent_types::AgentProfile;
 use dim_agent_types::{ContentBlock, EventKind};
@@ -401,6 +401,35 @@ fn history_page_query(after: u64, limit: usize) -> dim_agent_runtime::TimelineQu
     }
 }
 
+/// How many facts one page of a prefix read holds.
+const PREFIX_PAGE: u64 = 4096;
+
+/// The facts of the session's `main` chain through `at`, in chain order: the
+/// fork's rest-point check folds them as one history.
+async fn chain_through(
+    session: &Session,
+    at: u64,
+) -> dim_agent_runtime::Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
+    let mut query = history_page_query(0, PREFIX_PAGE as usize);
+    query.scope = dim_agent_runtime::TimelineQueryScope::Chain;
+    let mut events: Vec<Arc<dim_agent_types::AgentEvent>> = Vec::new();
+    loop {
+        let reply = session.query("main", query.clone()).await?;
+        let short = (reply.events.len() as u64) < PREFIX_PAGE;
+        let last = reply.positions.last().map(|position| position.sequence);
+        events.extend(reply.events);
+        if events.last().is_some_and(|event| event.sequence >= at) {
+            break;
+        }
+        match (short, last) {
+            (false, Some(last)) => query.from_sequence = Some(last + 1),
+            _ => break,
+        }
+    }
+    events.retain(|event| event.sequence <= at);
+    Ok(events)
+}
+
 impl AgentIndex {
     /// Whether this profile resolves Session models through a host.
     pub(crate) fn selects_models(&self) -> bool {
@@ -418,6 +447,8 @@ impl AgentIndex {
     /// How many `input/message` facts a session summary's preview scan keeps.
     const SUMMARY_SCAN_LIMIT: u64 = 256;
     const SUMMARY_PREVIEW_CHARS: usize = 120;
+    /// How many `step/tool-use-start` facts one read of a call's start holds.
+    const TOOL_USE_START_PAGE: u64 = 1024;
     /// Process Session defaults that Agent profiles apply on top of.
     pub fn session_defaults(&self) -> &SessionConfig {
         &self.session_defaults
@@ -792,13 +823,32 @@ impl AgentIndex {
         let (_, session) = self
             .session(id)
             .ok_or_else(|| AgentError::Closed(id.into()))?;
-        Ok(session
-            .history("main", None)
-            .await?
-            .into_iter()
-            .filter(|event| event_ids.contains(&event.id))
-            .map(|event| (event.id.clone(), event))
-            .collect())
+        let mut found = HashMap::with_capacity(event_ids.len());
+        for event_id in event_ids {
+            let reply = session
+                .query(
+                    "main",
+                    TimelineQuery {
+                        scope: TimelineQueryScope::Branch,
+                        include_publishing: false,
+                        from_event: None,
+                        from_sequence: None,
+                        order_by: TimelineQueryOrderBy::Sequence,
+                        direction: TimelineQueryDirection::Ascending,
+                        kinds: Vec::new(),
+                        flags: Vec::new(),
+                        event_id: Some(event_id.clone()),
+                        predicate: None,
+                        limit: NonZeroU64::MIN,
+                        offset: 0,
+                    },
+                )
+                .await?;
+            if let Some(event) = reply.events.into_iter().next() {
+                found.insert(event.id.clone(), event);
+            }
+        }
+        Ok(found)
     }
     /// The main-branch `step/tool-use-start` of each `(request_id, call_id)`
     /// in one read; calls the store does not hold are absent.
@@ -815,13 +865,40 @@ impl AgentIndex {
             .session(id)
             .ok_or_else(|| AgentError::Closed(id.into()))?;
         let mut starts = HashMap::with_capacity(keys.len());
-        for event in session.history("main", None).await? {
-            let key = match &event.kind {
-                EventKind::ToolUseStart(start) => (start.request_id.clone(), start.call_id.clone()),
-                _ => continue,
-            };
-            if keys.contains(&key) {
-                starts.insert(key, event);
+        let mut query = TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            include_publishing: false,
+            from_event: None,
+            from_sequence: Some(1),
+            order_by: TimelineQueryOrderBy::Sequence,
+            direction: TimelineQueryDirection::Ascending,
+            kinds: vec!["step/tool-use-start".into()],
+            flags: Vec::new(),
+            event_id: None,
+            predicate: None,
+            limit: NonZeroU64::new(Self::TOOL_USE_START_PAGE)
+                .expect("a page keeps at least one tool use"),
+            offset: 0,
+        };
+        loop {
+            let reply = session.query("main", query.clone()).await?;
+            let short = (reply.events.len() as u64) < Self::TOOL_USE_START_PAGE;
+            let last = reply.positions.last().map(|position| position.sequence);
+            for event in reply.events {
+                let EventKind::ToolUseStart(start) = &event.kind else {
+                    continue;
+                };
+                let key = (start.request_id.clone(), start.call_id.clone());
+                if keys.contains(&key) {
+                    starts.insert(key, event);
+                }
+            }
+            if short || starts.len() == keys.len() {
+                break;
+            }
+            match last {
+                Some(last) => query.from_sequence = Some(last + 1),
+                None => break,
             }
         }
         Ok(starts)
@@ -1108,7 +1185,32 @@ impl AgentIndex {
         let loaded = match self.session(id) {
             Some((_, session)) => match async {
                 let events = session.query("main", inputs.clone()).await?.events;
-                let last = session.local("main", through..=through).await?.pop();
+                let last = if through == 0 {
+                    None
+                } else {
+                    session
+                        .query(
+                            "main",
+                            TimelineQuery {
+                                scope: TimelineQueryScope::Branch,
+                                include_publishing: false,
+                                from_event: None,
+                                from_sequence: Some(through),
+                                order_by: TimelineQueryOrderBy::Sequence,
+                                direction: TimelineQueryDirection::Ascending,
+                                kinds: Vec::new(),
+                                flags: Vec::new(),
+                                event_id: None,
+                                predicate: None,
+                                limit: NonZeroU64::MIN,
+                                offset: 0,
+                            },
+                        )
+                        .await?
+                        .events
+                        .into_iter()
+                        .next()
+                };
                 Ok::<_, AgentError>((events, last))
             }
             .await
@@ -1545,7 +1647,7 @@ impl AgentIndex {
             let boundary =
                 dim_agent_capabilities::history::validate_context_boundary_in(session, "main", at)
                     .await?;
-            let prefix = session.history("main", Some(at)).await?;
+            let prefix = chain_through(session, at).await?;
             Ok::<_, AgentError>((boundary, prefix))
         }
         .await;

@@ -4,7 +4,7 @@
 //! every fact is folded exactly once both when the tail is empty and when a
 //! fact is written but not yet published.
 
-use dim_agent_runtime::testing::MinimalHost;
+use dim_agent_runtime::testing::{MinimalHost, timeline_events};
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use rutis::Ctx;
@@ -399,10 +399,7 @@ async fn a_tail_page_continues_the_published_page_and_marks_the_end_short() {
     }
     let mut pages = Vec::new();
     for offset in [0, 2, 4] {
-        let reply = timeline
-            .query(page(offset, true))
-            .await
-            .unwrap();
+        let reply = timeline.query(page(offset, true)).await.unwrap();
         assert_eq!(reply.through, 5);
         pages.push(
             reply
@@ -701,7 +698,13 @@ async fn every_rebuild_selection_folds_what_the_replay_folded() {
         published < through,
         "the tail is written and not published: {published} < {through}"
     );
-    let replay = timeline.local(..=timeline.committed()).await.unwrap();
+    let replay = timeline_events(
+        &timeline,
+        TimelineQueryScope::Branch,
+        ..=timeline.committed(),
+    )
+    .await
+    .unwrap();
     assert_eq!(replay.len(), 7, "the old replay read the whole branch");
     for kinds in REBUILDS {
         let expected: Vec<_> = replay

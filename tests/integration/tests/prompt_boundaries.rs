@@ -1,4 +1,5 @@
 use dim_agent_capabilities::{defaults, host::*, prompt_state::PromptSnapshot};
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::{testing::MinimalHost, *};
 use dim_agent_types::*;
 use rutis::Ctx;
@@ -105,8 +106,7 @@ async fn rejected_prompt_load_does_not_publish_or_poison_the_pending_load() {
         }
     });
     started.notified().await;
-    let requests_before = session
-        .history("main", None)
+    let requests_before = chain_events(&session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -127,8 +127,7 @@ async fn rejected_prompt_load_does_not_publish_or_poison_the_pending_load() {
     )
     .await
     .expect("registration rejection must be immediate");
-    let requests_after = session
-        .history("main", None)
+    let requests_after = chain_events(&session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -235,8 +234,7 @@ async fn rewritten_control_identity_is_registered_without_leaking_activity() {
         .expect("rewritten control must settle the caller");
         assert_eq!(result.unwrap(), ConfigureOutcome::Adopted);
         assert!(
-            session
-                .history("main", None)
+            chain_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()
@@ -367,8 +365,7 @@ async fn scope_ended_in_committed_tail_supersedes_loading_result() {
     assert_eq!(result, ConfigureOutcome::Superseded);
     session.idle("main").await.unwrap();
     assert!(
-        !session
-            .history("main", None)
+        !chain_events(&session, "main", ..)
             .await
             .unwrap()
             .iter()

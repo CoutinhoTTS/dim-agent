@@ -1,5 +1,6 @@
 use dim_agent_capabilities::{defaults, history::project_messages};
 use dim_agent_runtime::testing::MinimalHost;
+use dim_agent_runtime::testing::{branch_events, chain_events};
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use std::time::Duration;
@@ -20,13 +21,13 @@ async fn echo_tools_and_observable_state_follow_the_public_flow() {
         let session = agent.create_session(SessionConfig::default()).await.unwrap();
         session.submit("hello".into(), InputMode::Queue, "main").await.unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(events.iter().any(|e| matches!(&e.kind, EventKind::Text(data) if data.delta == "Echo: hello")));
         assert!(matches!(events.last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })));
         assert_eq!(session.get::<LoopSnapshot>("main").unwrap().unwrap().phase, LoopPhase::Idle);
         session.submit("tool:echo {\"text\":\"tool-result\"}".into(), InputMode::Queue, "main").await.unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(events.iter().any(|e| matches!(&e.kind, EventKind::ToolResult(data) if data.results[0].result.content == ToolContent::Text("tool-result".into()))));
         let messages = project_messages(&events, "main").unwrap();
         assert!(messages.iter().any(|m| m.role == Role::ToolResult));
@@ -62,7 +63,7 @@ async fn stop_ends_the_turn_and_a_waiting_queue_input_runs_next() {
             .unwrap();
         session.stop("main", "test stop".into()).await.unwrap();
         session.idle("main").await.unwrap();
-        let after = session.history("main", None).await.unwrap();
+        let after = chain_events(&session, "main", ..).await.unwrap();
         let position = |predicate: &dyn Fn(&EventKind) -> bool| {
             after
                 .iter()
@@ -110,7 +111,7 @@ async fn branch_tool_reuses_capabilities_without_replaying_ancestor_inputs() {
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let prefix = session.history("main", None).await.unwrap();
+        let prefix = chain_events(&session, "main", ..).await.unwrap();
         session
             .submit(
                 "tool:branch {\"action\":\"create\",\"prompt\":\"child\"}".into(),
@@ -123,7 +124,7 @@ async fn branch_tool_reuses_capabilities_without_replaying_ancestor_inputs() {
         let branches = session.branches();
         let child = branches.iter().find(|branch| branch.id != "main").unwrap();
         session.idle(&child.id).await.unwrap();
-        let child_events = session.local(&child.id, ..).await.unwrap();
+        let child_events = branch_events(&session, &child.id, ..).await.unwrap();
         assert!(matches!(
             child_events.first().unwrap().kind,
             EventKind::BranchStart(_)
@@ -143,7 +144,7 @@ async fn branch_tool_reuses_capabilities_without_replaying_ancestor_inputs() {
                         && d.delta.contains("parent=\"main\" source=\"tool\">")
                         && d.delta.contains("Your purpose, as main wrote it:\nchild")))
         );
-        let history = session.history(&child.id, None).await.unwrap();
+        let history = chain_events(&session, &child.id, ..).await.unwrap();
         assert!(history.starts_with(&prefix));
         assert_eq!(
             session
@@ -184,7 +185,7 @@ async fn closed_default_memory_sessions_release_history_but_shared_stores_retain
         let restored = agent.restore_session(id).await;
         if shared {
             let session = restored.unwrap();
-            assert!(session.history("main", None).await.unwrap().iter().any(|event|
+            assert!(chain_events(&session, "main", ..).await.unwrap().iter().any(|event|
                 matches!(&event.kind, EventKind::Text(data) if data.delta.contains("retention policy"))));
         } else {
             assert!(matches!(restored, Err(AgentError::Storage(_))));
@@ -303,8 +304,7 @@ async fn repeated_idle_release_checks_never_reject_a_running_turn() {
         assert!(checks.await.unwrap() > 0);
         session.idle("main").await.unwrap();
         assert!(session.failure().is_none());
-        let outcomes: Vec<_> = session
-            .history("main", None)
+        let outcomes: Vec<_> = chain_events(&session, "main", ..)
             .await
             .unwrap()
             .into_iter()
@@ -353,8 +353,7 @@ async fn a_refused_idle_release_reopens_the_branch_for_the_running_turn() {
         assert!(!session.unload_if_idle().await.unwrap());
         session.idle("main").await.unwrap();
         assert!(matches!(
-            session
-                .history("main", None)
+            chain_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .last()
