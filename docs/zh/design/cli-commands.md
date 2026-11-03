@@ -25,6 +25,7 @@ scrollback 与 fullscreen TUI 都按固定的任务顺序分组：会话、模�
 排序不受界面语言影响；打开 `/` 默认选中 `/new`，Enter 会新建会话。未筛选列表中的 `/exit` 始终在最后。
 退出必须完整匹配命令名或别名才执行：选择不完整匹配时只补全命令名并保留输入框。
 完整输入的命令（包括隐藏命令）仍走各自的处理流程。
+菜单选择即使完整匹配命令名，也可能只补全：带行内参数的命令和 `/goal` 会填入输入框，等待另一次提交。
 菜单中的权限入口为 `/permissions`；`/approvals` 和 `/approval` 是完整输入时仍可使用的兼容别名。
 菜单不列出运行、排队和 steer 的按键，它们只由按键触发。菜单只列出斜杠命令：选择较早消息、滚动到顶部或底部等视图操作也不列出；
 `Tab`、`Home`、`End` 保留各自的绑定。
@@ -156,9 +157,22 @@ Home / End          滚动（fullscreen，草稿为空） 滚动（fullscreen，
 [Goal](plugins/Goal.md#a2-session-方法)（A.2、A.3）和 [Pursuit](plugins/Pursuit.md#3-对-goal-的修改)；
 本节规定原生客户端用它们做什么。该命令作为 `session` 分类列在命令菜单里，与 `/compact` 相同。
 
+两种 TUI 模式中，用 Enter 或 Tab 选择 `/goal` 只会把 `/goal ` 填入输入框并关闭命令面板，
+不会执行。用户再次提交空参数草稿时，先打印 Dim 支持的用法，再显示当前目标及状态，或该线没有目标的提示。
+行模式下直接提交 `/goal` 也显示相同的帮助和状态。
+
+```text
+palette: goal + Enter -> /goal |          (completion only)
+/goal fix build + Enter -> set/edit goal
+/goal + Space + Enter   -> usage + current goal
+
+Usage: /goal [OBJECTIVE | set OBJECTIVE | edit OBJECTIVE | pause | resume | clear]
+No goal on main.
+```
+
 | 形式 | 调用 |
 | --- | --- |
-| `/goal` | 无调用：当前显示线上的目标，或它没有目标 |
+| `/goal` | 无调用：先显示用法，再显示当前线上的目标，或它没有目标 |
 | `/goal OBJECTIVE` | 目标处于进行中或暂停时 `session.goal.edit`，否则 `session.goal.set` |
 | `/goal set OBJECTIVE` | `session.goal.set` |
 | `/goal edit OBJECTIVE` | `session.goal.edit` |
@@ -182,7 +196,7 @@ Home / End          滚动（fullscreen，草稿为空） 滚动（fullscreen，
 **读取目标。** 客户端按 Goal A.3 的规则，从它本来就在读的分支事件中折叠目标：最新存活的
 `goal:objective` 块是目标文本，最新存活的 `goal:status` 块是状态，`clear` 退役两者，`edit` 保留裁判，
 被 InputQueue 删除的输入会使折叠跳过它的块。它不新增查询方法，也不向 Goal 询问任何东西。不带参数的 `/goal`
-打印这个折叠结果。在 `set` 与 `edit` 之间选择之前，客户端先把该线读到已发布的头部，写入之后再读一次才打印：
+先打印用法，再打印这个折叠结果。在 `set` 与 `edit` 之间选择之前，客户端先把该线读到已发布的头部，写入之后再读一次才打印：
 显示的状态与选择的方法都来自事件，而不是从回复猜出来的状态。折叠在该线自己的开场事件处重新开始——它的 `branch/start`，
 或分叉在复制完事实之后写入的 `session/forked`——所以新开的线没有目标，分叉 Session 的 `main` 也从不显示
 复制来的目标（Goal §2、A11）。v3 客户端会收到这个开场事件，因此分叉在客户端与 Goal 里的读法一致。
@@ -196,6 +210,7 @@ Home / End          滚动（fullscreen，草稿为空） 滚动（fullscreen，
 
 ```text
 > /goal
+Usage: /goal [OBJECTIVE | set OBJECTIVE | edit OBJECTIVE | pause | resume | clear]
 No goal on main.
 
 > /goal Make the CLI tests pass
@@ -211,6 +226,7 @@ Goal paused on main · paused (user)
   Keep the CLI tests green
 
 > /goal
+Usage: /goal [OBJECTIVE | set OBJECTIVE | edit OBJECTIVE | pause | resume | clear]
 Goal on main · paused (user)
   Keep the CLI tests green
 
@@ -222,9 +238,11 @@ Goal resumed on main · active
 Goal cleared on main.
 ```
 
-第一行给出实际调用的方法、目标所属的线和当前状态；`edited` 表示找到已有目标、只改了目标文本的那种形式。
+不带参数的 `/goal` 先打印用法，随后显示状态报告。写入形式直接显示状态报告，给出实际调用的方法、
+目标所属的线和当前状态；`edited` 表示找到已有目标、只改了目标文本的那种形式。
 目标由 Pursuit 的裁判判定时，状态后跟 `evaluator judge`。暂停状态给出原因：`user`、`interrupted`、
-`limit`、`turn failed` 或 `evaluation failed`。目标文本另起一行，按它自身的换行输出。目标已清除或该线没有目标时只打印一行。
+`limit`、`turn failed` 或 `evaluation failed`。目标文本另起一行，按它自身的换行输出。
+清除目标时只打印一行确认；在没有目标的线上提交空参数 `/goal` 则打印两行：用法和没有目标的提示。
 
 行客户端和两种终端 UI 模式都打印这些行；在终端 UI 里它们是一段报告，因此更早的报告仍能在上方读到。
 当前显示线跟随目标（进行中或暂停）时，状态区带一个短元素，完成、受阻或已清除的目标没有：

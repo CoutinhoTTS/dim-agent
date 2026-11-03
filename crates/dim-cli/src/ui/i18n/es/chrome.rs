@@ -34,8 +34,21 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "line {id}" => "línea {id}",
         "jump to a message of the shown line" => "saltar a un mensaje de la línea mostrada",
         "Timeline" => "Cronología",
-        "Enter jump · e edit · q quote · b branch · f fork · Esc close" => {
-            "Enter saltar · e editar · q citar · b rama · f bifurcar · Esc cerrar"
+        "Enter actions · Esc close" => "Enter acciones · Esc cerrar",
+        "Timeline actions" => "Acciones de cronología",
+        "↑↓ select · Enter confirm · Esc cancel" => {
+            "↑↓ elegir · Enter confirmar · Esc cancelar"
+        }
+        "Jump to message" => "Ir al mensaje",
+        "Edit as a new draft" => "Editar como nuevo borrador",
+        "Quote message" => "Citar mensaje",
+        "Create branch from here" => "Crear rama desde aquí",
+        "Before this message" => "Antes de este mensaje",
+        "Fork session" => "Bifurcar sesión",
+        "1. Create fork" => "1. Crear bifurcación",
+        "2. Cancel" => "2. Cancelar",
+        "Creates a new session; the current session stays unchanged." => {
+            "Crea una sesión nueva; la actual permanece sin cambios."
         }
         "No messages yet." => "Aún no hay mensajes.",
         "Already on screen above; /tui jumps to it" => "Ya está arriba; /tui salta hasta él",
@@ -59,12 +72,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "e edit · b branch · f fork" => "e editar · b rama · f bifurcar",
         "e edit" => "e editar",
-        "Fork the session before “{message}”? (y/N)" => {
-            "¿Bifurcar la sesión antes de «{message}»? (y/N)"
-        }
-        "Fork the session after the last turn? (y/N)" => {
-            "¿Bifurcar la sesión tras el último turno? (y/N)"
-        }
+        "Fork the session before “{message}”?" => "¿Bifurcar la sesión antes de «{message}»?",
+        "Fork the session after the last turn?" => "¿Bifurcar la sesión tras el último turno?",
         "⑂ new line from {id} · Esc cancel" => "⑂ nueva línea desde {id} · Esc cancelar",
         "A fork copies main; b opens a line here" => {
             "Una bifurcación copia main; b abre una línea aquí"
@@ -338,8 +347,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "ir al principio",
         "scroll to the bottom" => "ir al final",
         "pick an earlier message to edit or quote" => "elegir mensaje anterior para editar o citar",
-        "collapse or expand tool details and compaction summaries" => {
-            "plegar/desplegar detalles de herramientas y resúmenes de compresión"
+        "cycle tool details and compaction summaries" => {
+            "alternar detalles de herramientas y resúmenes de compactación"
         }
         "switch between fullscreen and scrollback" => "alternar pantalla completa y desplazamiento",
         "switch theme" => "cambiar tema",

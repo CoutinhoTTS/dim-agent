@@ -324,6 +324,97 @@ mod tests {
     }
 
     #[test]
+    fn summaries_show_each_call_in_order_without_bodies_or_wrapping() {
+        let mut failed = call(
+            "execute",
+            json!({"command": format!("CARGO_TARGET_DIR=/tmp/check cargo clippy {}", "--locked ".repeat(25))}),
+            Some("compiler output must stay hidden"),
+        );
+        failed.result_is_error = true;
+        failed.exit_code = Some(101);
+        let mut edit = call("edit", json!({"path": "src/main.rs"}), Some("ok"));
+        edit.diff =
+            Some("@@ -1,1 +1,2 @@\n-secret old body\n+secret new body\n+another line".into());
+        let mut waiting = call("wait", json!({"taskId": "task-42"}), None);
+        waiting.pending = true;
+        let rows = [
+            failed,
+            call(
+                "read",
+                json!({"path": "docs/中文/👩‍💻/README.md"}),
+                Some("private file body"),
+            ),
+            call(
+                "grep",
+                json!({"path": "crates/", "pattern": "BranchLifecycle"}),
+                Some("  private match body"),
+            ),
+            edit,
+            call(
+                "exec",
+                json!({"command": "\npython3 - <<'PY'\nprint('script body')\nPY"}),
+                Some("script output"),
+            ),
+            call(
+                "bash",
+                json!({"command": "cargo check"}),
+                Some("build output"),
+            ),
+            call(
+                "mcp__docs__search",
+                json!({"query": "timeline ownership"}),
+                Some("web result body"),
+            ),
+            waiting,
+        ];
+        let lines = drawn(&rows, Detail::Summary, 200);
+        assert_eq!(lines.len(), rows.len() + 1);
+        assert!(lines[0].contains("1 failed"), "{lines:?}");
+        assert!(
+            lines[1].starts_with("  ✗ Execute · CARGO_TARGET_DIR=/tmp/check cargo clippy"),
+            "{lines:?}"
+        );
+        assert_eq!(lines[2], "  ✓ Read · docs/中文/👩‍💻/README.md");
+        assert_eq!(lines[3], "  ✓ Grep · crates/ \"BranchLifecycle\"");
+        assert_eq!(lines[4], "  ✓ Edited src/main.rs (+2 -1)");
+        assert_eq!(lines[5], "  ✓ Exec · python3 - <<'PY' …");
+        assert_eq!(lines[6], "  ✓ Bash · cargo check");
+        assert_eq!(lines[7], "  ✓ Mcp__docs__search · timeline ownership");
+        assert!(lines[8].ends_with("Wait · task-42"), "{lines:?}");
+        let text = lines.join("\n");
+        for hidden in [
+            "compiler output",
+            "private file body",
+            "private match body",
+            "secret old body",
+            "secret new body",
+            "script body",
+            "script output",
+            "build output",
+            "web result body",
+        ] {
+            assert!(!text.contains(hidden), "{hidden}: {text}");
+        }
+        for width in 12..100 {
+            let narrow = drawn(&rows, Detail::Summary, width);
+            assert_eq!(narrow.len(), rows.len() + 1);
+            assert!(narrow[0].ends_with(" ▾"), "{width}: {narrow:?}");
+            assert!(
+                narrow
+                    .iter()
+                    .all(|line| crate::ui::text::display_width(line) <= width),
+                "{width}: {narrow:?}"
+            );
+        }
+        assert_eq!(drawn(&rows, Detail::Collapsed, 100).len(), 1);
+        assert!(
+            drawn(&rows, Detail::Expanded, 100)
+                .join("\n")
+                .contains("print('script body')")
+        );
+    }
+
+    #[test]
     fn tool_output_cannot_emit_terminal_commands_or_links() {
         let attack = "visible\x1b]52;c;clipboard-payload\x07\x1b]8;;file:///tmp/unsafe-link\x07label\x1b]8;;\x07\x1b[2J";
         let name = "exec";
@@ -557,10 +648,9 @@ mod tests {
                     "▎ The cache lock moved into a RwLock.",
                 ]
             );
-            assert_eq!(
-                compaction_rows(&rows, Detail::Collapsed),
-                ["✓ Context compacted ▸"]
-            );
+            for detail in [Detail::Collapsed, Detail::Summary] {
+                assert_eq!(compaction_rows(&rows, detail), ["✓ Context compacted ▸"]);
+            }
         }
         for text in [
             "Keep <dim-summary> literal.",
