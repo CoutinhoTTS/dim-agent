@@ -59,7 +59,7 @@ All state is in memory, per Session, and lost on unload:
 | Turn request | The turn's last `model/call`: `{turnId, requestId, request}` | `model/call` |
 | Turn content | The turn's last `model/content`: `{requestId, content}` | `model/content` |
 | Newer input | Whether an `input/message` or `input/applied` followed the latest turn's end | `input/message`, `input/applied` |
-| In-flight | At most one: `{turnId, cancellation token}` | `session.suggestion.request` |
+| In-flight | At most one: `{turnId, invocation, cancellation token}`, and whether it has passed its preflight | `session.suggestion.request` |
 | Offer | At most one: `{turnId, text}` | a completed request |
 | Unused count | Offers cleared without an accept since the last accept or turn-on of the switch | `cleared`, `respond` and a settings change |
 
@@ -188,6 +188,10 @@ The context gate reads `main`'s usage through `ContextPreparation` exactly as `s
 
 A committed write that leaves the switch on cancels nothing: the shown offer and the request in flight were valid when they began, and the next request reads the new `maxChars`.
 
+Every accepted request carries its own invocation identity: a completion changes the slot and emits a notice only when the slot still holds that invocation, so a cancelled request that returns later changes nothing and announces nothing.
+
+A request registers in the slot, with its cancellation token, before its asynchronous preflight (`compaction_due`). A settings change, a new input, a dismissal and the Session's close cancel it there as they cancel one in flight; the start afterwards is decided again against the state and the settings as they are then, never against the values read before the preflight. A request cancelled during its preflight starts no model call, answers `{accepted: false, reason}` with the gate it now fails (or `dismissed`) and announces nothing.
+
 Cancellation always keeps the Session's one in-flight slot consistent, and each one emits `cleared` with its reason when an offer is showing or a request was accepted:
 
 | Trigger | Clearing reason |
@@ -202,7 +206,7 @@ Cancellation always keeps the Session's one in-flight slot consistent, and each 
 | A model error, a tool call or a cancelled stream | `failed` |
 | The validator rejects the reply | `invalid` |
 
-A request in flight that is cancelled emits `cleared` with the cancelling reason; a request that never produced an offer because it failed, timed out or was invalid emits `cleared` with `failed`, `timeout` or `invalid`. Every accepted request therefore ends in exactly one `offer` or one `cleared`.
+A request in flight that is cancelled emits `cleared` with the cancelling reason; a request that never produced an offer because it failed, timed out or was invalid emits `cleared` with `failed`, `timeout` or `invalid`. Every accepted request therefore ends in exactly one `offer` or one `cleared`. The notices are emitted under the part's state lock, so the order of notices matches the order of the state changes they report: an `offer` can never follow the `cleared` that withdrew it.
 
 Every reason is a stable `snake_case` code: `disabled`, `not_root`, `not_latest_turn`, `turn_not_completed`, `no_text`, `throttled`, `compaction_due`, `new_input`, `turn_started`, `dismissed`, `accepted`, `session_closed`, `timeout`, `failed`, `invalid`.
 
@@ -332,7 +336,7 @@ Transport flows (`crates/dim-app-server/tests/transport_flow/prompt_suggestion.r
 1. For each of `anthropic`, `openai-compatible` and `openai-responses`, a turn and a suggestion against a recording endpoint: the suggestion body's `system`, `tools` and every earlier message's text equal the turn's last request's, exactly the assistant message and the instruction follow, and `max_tokens`, reasoning, tool choice and service tier are equal. On `anthropic` the comparison ignores the automatic `cache_control` marker, which the converter places on the last user message and so moves to the instruction.
 2. The branch's events are the same before and after a suggestion, and the next real request is identical with and without one.
 3. One flow per gate: disabled, not the latest turn, no text in the last content, a non-root Session. A turn that took a steer still offers, and an input after a completed turn refuses that turn as `not_latest_turn`.
-4. One flow per cancellation: new input, a turn start, a newer request, dismissal, Session close. The deadline is not pinned by waiting 30 s.
+4. One flow per cancellation: new input, a turn start, a newer request, dismissal, Session close. The deadline is not pinned by waiting 30 s. The preflight is pinned too: a switch turned off or a dismissal while the usage check is pending starts no model call and refuses the request, and a cancelled predecessor returning after a newer request for the same turn announces nothing.
 5. The validator: a multi-line reply, a leading `/`, `<none>`, a refusal and a repeat of the last user message each clear with `invalid`.
 6. The unused counter: 20 unused offers then `throttled`; an accept resets it, and so does turning the switch off and on.
 7. The context gate: a model whose usage puts `main`'s head over its threshold makes `request` answer `compaction_due` and start no model request.

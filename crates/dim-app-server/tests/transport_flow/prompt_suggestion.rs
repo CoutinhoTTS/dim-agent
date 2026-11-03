@@ -321,8 +321,73 @@ impl ContextModel for Tiny {
     }
 }
 
+/// A window with room to spare: a request's usage check passes once the
+/// resolver returns it.
+struct Room;
+impl ContextModel for Room {
+    fn context_window(&self) -> f64 {
+        100_000.
+    }
+    fn output_tokens(&self) -> f64 {
+        4_096.
+    }
+    fn threshold_tokens(&self) -> f64 {
+        50_000.
+    }
+    fn count_tokens(&self, _: &ModelRequest) -> f64 {
+        10.
+    }
+}
+
+/// A window whose next resolution the test can hold, to pin a request inside
+/// its preflight.
+#[derive(Default)]
+struct Held {
+    armed: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl Held {
+    /// Holds the next resolution.
+    fn hold(&self) {
+        self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    /// Resolves once a resolution waits at the barrier.
+    async fn entered(&self) {
+        self.entered.notified().await;
+    }
+    fn release(&self) {
+        self.release.notify_one();
+    }
+}
+
+impl ResolveContextModel for Held {
+    fn resolve(
+        &self,
+        _: Arc<ModelRequest>,
+        _: CancellationToken,
+    ) -> HostFuture<'_, Arc<dyn ContextModel>> {
+        Box::pin(async move {
+            if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            Ok(Arc::new(Room) as Arc<dyn ContextModel>)
+        })
+    }
+}
+
 /// [`serve_fixture`] with the product's compaction installed.
 async fn serve_compaction_fixture(reply: Reply) -> Fixture {
+    serve_compaction_fixture_with(reply, Arc::new(TinyWindow)).await
+}
+
+/// [`serve_compaction_fixture`] with the window resolver the test controls.
+async fn serve_compaction_fixture_with(
+    reply: Reply,
+    resolver: Arc<dyn ResolveContextModel>,
+) -> Fixture {
     use std::os::unix::fs::DirBuilderExt;
     let home = std::path::PathBuf::from("/tmp").join(format!("ps-{}", uuid::Uuid::new_v4()));
     std::fs::DirBuilder::new()
@@ -353,7 +418,7 @@ async fn serve_compaction_fixture(reply: Reply) -> Fixture {
                 Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
-    capability_defaults::install_compaction(&mut builder, Arc::new(TinyWindow), Default::default());
+    capability_defaults::install_compaction(&mut builder, resolver, Default::default());
     let server = serve(
         builder,
         ServerConfig {
@@ -441,6 +506,18 @@ async fn idle(client: &mut Client, id: &str) {
 async fn submit(client: &mut Client, id: &str, text: &str) {
     send(client, id, text, None).await;
     idle(client, id).await;
+}
+
+/// A second client attached to `session_id`, for a call that runs while the
+/// first one waits.
+async fn attach(fixture: &Fixture, session_id: &str) -> Client {
+    let mut client = Client::new_version(&fixture.server, false, 3).await;
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId": session_id}))
+            .await,
+    );
+    client
 }
 
 /// The `turnId` of the newest `turn/end` on `main`.
@@ -860,6 +937,140 @@ async fn a_dismissal_and_a_new_input_cancel_a_request() {
     fixture.model.wait_cancellations(2).await;
     drop(gate);
     assert_eq!(fixture.model.suggestions().len(), 2, "one model call each");
+    fixture.end().await;
+}
+
+/// A request cancelled while it returns cannot settle the next request for
+/// the same turn: the predecessor's turn id matches, its invocation does not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_request_cannot_settle_a_new_one_for_the_same_turn() {
+    let fixture = serve_fixture(Reply::Text("run the tests".into())).await;
+    let (mut client, id) = create(&fixture, true).await;
+    submit(&mut client, &id, "add a test").await;
+    let turn = latest_turn(&mut client, &id).await;
+    configure(&mut client, json!({"enabled":true})).await;
+
+    // A finishes its model call and waits at the barrier, so its result is
+    // still returning when B is accepted for the same turn.
+    let completion = prompt_suggestion::testing::hold_next_completion(&id);
+    assert_eq!(
+        suggest(&mut client, &id, &turn).await,
+        json!({"accepted": true})
+    );
+    completion.entered().await;
+    fixture
+        .model
+        .set_reply(Reply::Text("check the logs".into()));
+    respond(&mut client, &id, &turn, "dismiss").await;
+    let gate = fixture.model.holds_next();
+    assert_eq!(
+        suggest(&mut client, &id, &turn).await,
+        json!({"accepted": true})
+    );
+    // A returns after B took the slot: it changes nothing and announces
+    // nothing, so B's offer is the only one.
+    completion.release();
+    completion.passed().await;
+    gate.notify_one();
+    let offer = suggestion_notice(&mut client, "offer").await;
+    assert_eq!(offer["params"]["data"]["text"], "check the logs");
+    assert_eq!(fixture.model.suggestions().len(), 2, "one model call each");
+    fixture.end().await;
+}
+
+/// Turning the switch off while a request waits in its usage check starts no
+/// model call and refuses the request with `disabled`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disabling_during_the_usage_check_starts_no_request() {
+    let held = Arc::new(Held::default());
+    let fixture =
+        serve_compaction_fixture_with(Reply::Text("run the tests".into()), held.clone()).await;
+    let (mut client, id) = create(&fixture, true).await;
+    submit(&mut client, &id, "add a test").await;
+    let turn = latest_turn(&mut client, &id).await;
+    configure(&mut client, json!({"enabled":true})).await;
+    let mut other = attach(&fixture, &id).await;
+
+    held.hold();
+    let asked = (id.clone(), turn.clone());
+    let request = tokio::spawn(async move { suggest(&mut client, &asked.0, &asked.1).await });
+    held.entered().await;
+    configure(&mut other, json!({"enabled":false})).await;
+    held.release();
+    assert_eq!(
+        request.await.unwrap(),
+        json!({"accepted": false, "reason": "disabled"})
+    );
+    assert!(fixture.model.suggestions().is_empty(), "no model call");
+    fixture.end().await;
+}
+
+/// Dismissing while a request waits in its usage check cancels it: it starts
+/// no model call and answers `dismissed`, so no offer follows the dismissal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dismissing_during_the_usage_check_starts_no_request() {
+    let held = Arc::new(Held::default());
+    let fixture =
+        serve_compaction_fixture_with(Reply::Text("run the tests".into()), held.clone()).await;
+    let (mut client, id) = create(&fixture, true).await;
+    submit(&mut client, &id, "add a test").await;
+    let turn = latest_turn(&mut client, &id).await;
+    configure(&mut client, json!({"enabled":true})).await;
+    let mut other = attach(&fixture, &id).await;
+
+    held.hold();
+    let asked = (id.clone(), turn.clone());
+    let request = tokio::spawn(async move { suggest(&mut client, &asked.0, &asked.1).await });
+    held.entered().await;
+    respond(&mut other, &id, &turn, "dismiss").await;
+    held.release();
+    assert_eq!(
+        request.await.unwrap(),
+        json!({"accepted": false, "reason": "dismissed"})
+    );
+    assert!(fixture.model.suggestions().is_empty(), "no model call");
+    fixture.end().await;
+}
+
+/// A dismissal while the model call runs settles the request with `cleared`,
+/// and the returning request emits nothing: no offer follows its clearing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dismissed_request_offers_nothing_after_its_clearing() {
+    let fixture = serve_fixture(Reply::Text("run the tests".into())).await;
+    let (mut client, id) = create(&fixture, true).await;
+    submit(&mut client, &id, "add a test").await;
+    let turn = latest_turn(&mut client, &id).await;
+    configure(&mut client, json!({"enabled":true})).await;
+
+    let completion = prompt_suggestion::testing::hold_next_completion(&id);
+    assert_eq!(
+        suggest(&mut client, &id, &turn).await,
+        json!({"accepted": true})
+    );
+    completion.entered().await;
+    respond(&mut client, &id, &turn, "dismiss").await;
+    let cleared = suggestion_notice(&mut client, "cleared").await;
+    assert_eq!(cleared["params"]["data"]["reason"], "dismissed");
+    completion.release();
+    completion.passed().await;
+    // A round trip drains anything the returning request sent.
+    assert_ok(
+        &client
+            .rpc(
+                "session.history",
+                json!({"sessionId":id,"branchId":"main","after":0,"limit":1}),
+            )
+            .await,
+    );
+    assert!(
+        client.notices.iter().all(|notice| {
+            notice["method"] != "session.notice"
+                || notice["params"]["source"] != "PromptSuggestion"
+                || notice["params"]["kind"] != "offer"
+        }),
+        "an offer followed its clearing: {:?}",
+        client.notices
+    );
     fixture.end().await;
 }
 

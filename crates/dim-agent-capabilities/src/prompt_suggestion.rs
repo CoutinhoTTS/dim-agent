@@ -324,7 +324,15 @@ struct Offer {
 
 struct InFlight {
     turn_id: String,
+    /// The identity of this invocation, told apart from another request for
+    /// the same turn: only the invocation still in the slot may change it or
+    /// announce anything.
+    invocation: u64,
     cancel: CancellationToken,
+    /// Whether the request passed its check after the preflight. A request
+    /// cancelled before that answers its caller and announces nothing; only
+    /// a started request is settled with `cleared` when it is cancelled.
+    started: bool,
 }
 
 #[derive(Default)]
@@ -338,16 +346,25 @@ struct State {
     offer: Option<Offer>,
     in_flight: Option<InFlight>,
     unused: u32,
+    /// The last invocation identity handed out.
+    invocations: u64,
     /// The switch as the part last read it: a change listener compares the
     /// document it reads against this to tell a turn-off from a rewrite.
     enabled: Option<bool>,
 }
 
 impl State {
-    fn cancel_in_flight(&mut self) -> Option<String> {
+    /// Takes the in-flight slot: the turn it was for and whether it had
+    /// started. A taken slot's token is cancelled.
+    fn cancel_in_flight(&mut self) -> Option<(String, bool)> {
         let flight = self.in_flight.take()?;
         flight.cancel.cancel();
-        Some(flight.turn_id)
+        Some((flight.turn_id, flight.started))
+    }
+    /// The next invocation identity; never reused within the part.
+    fn next_invocation(&mut self) -> u64 {
+        self.invocations += 1;
+        self.invocations
     }
     fn take_offer(&mut self) -> Option<String> {
         let offer = self.offer.take()?;
@@ -561,17 +578,16 @@ enum Action {
 impl Part {
     fn stop(&self) {
         let mut state = self.state.lock().unwrap();
-        state.cancel_in_flight();
+        let _ = state.cancel_in_flight();
         state.offer = None;
     }
 
     fn stop_with_notice(&self) {
-        let clear = {
-            let mut state = self.state.lock().unwrap();
-            let flight = state.cancel_in_flight();
-            let offer = state.take_offer();
-            offer.or(flight)
-        };
+        // The notice is emitted under the state lock, so the order of
+        // notices matches the order of the state changes they report.
+        let mut state = self.state.lock().unwrap();
+        let flight = state.cancel_in_flight().filter(|(_, started)| *started);
+        let clear = state.take_offer().or(flight.map(|(turn_id, _)| turn_id));
         if let Some(turn_id) = clear {
             self.notice(
                 "cleared",
@@ -590,23 +606,23 @@ impl Part {
         let Ok(settings) = self.read_settings(CancellationToken::new()).await else {
             return;
         };
-        let clear = {
-            let mut state = self.state.lock().unwrap();
-            let before = state.enabled.replace(settings.enabled);
-            if settings.enabled {
-                if before != Some(true) {
-                    state.unused = 0;
-                }
-                None
-            } else if before == Some(false) {
-                None
-            } else {
-                let cleared = state.take_offer().map(|turn_id| (turn_id, "disabled"));
-                let flight = state.cancel_in_flight();
-                cleared.or(flight.map(|turn_id| (turn_id, "disabled")))
+        let mut state = self.state.lock().unwrap();
+        let before = state.enabled.replace(settings.enabled);
+        if settings.enabled {
+            if before != Some(true) {
+                state.unused = 0;
             }
-        };
-        if let Some((turn_id, reason)) = clear {
+            return;
+        }
+        if before == Some(false) {
+            return;
+        }
+        let cleared = state.take_offer().map(|turn_id| (turn_id, "disabled"));
+        let flight = state
+            .cancel_in_flight()
+            .filter(|(_, started)| *started)
+            .map(|(turn_id, _)| (turn_id, "disabled"));
+        if let Some((turn_id, reason)) = cleared.or(flight) {
             self.notice("cleared", json!({"turnId": turn_id, "reason": reason}));
         }
     }
@@ -646,68 +662,70 @@ impl Part {
         if branch_id != "main" {
             return;
         }
+        // The notice is emitted under the state lock, so the order of
+        // notices matches the order of the state changes they report.
+        let mut state = self.state.lock().unwrap();
         let mut clear: Option<(String, &'static str)> = None;
-        {
-            let mut state = self.state.lock().unwrap();
-            match &event.kind {
-                EventKind::TurnStart(data) => {
-                    clear = state
-                        .cancel_in_flight()
-                        .map(|turn| (turn, "turn_started"))
-                        .or_else(|| state.take_offer().map(|turn| (turn, "turn_started")));
-                    state.latest_turn = Some(data.turn_id.clone());
-                    state.completed = false;
-                    state.call = None;
-                    state.content = None;
-                    state.streamed = None;
-                    state.newer_input = false;
-                }
-                EventKind::TurnEnd(data) => {
-                    if state.latest_turn.as_deref() == Some(data.turn_id.as_str()) {
-                        state.completed = matches!(data.outcome, TurnOutcome::Completed { .. });
-                    }
-                }
-                EventKind::ModelCall(data) => {
-                    if state.latest_turn.as_deref() == Some(data.turn_id.as_str()) {
-                        state.call = Some(Call {
-                            turn_id: data.turn_id.clone(),
-                            request_id: data.request_id.clone(),
-                            request: data.request.clone(),
-                        });
-                        state.streamed = None;
-                    }
-                }
-                EventKind::Thinking(data) => {
-                    fold_streamed(&mut state, &data.turn_id, &data.request_id, &event.kind);
-                }
-                EventKind::Text(data) => {
-                    fold_streamed(&mut state, &data.turn_id, &data.request_id, &event.kind);
-                }
-                EventKind::ToolUseStart(data) => {
-                    fold_streamed(&mut state, &data.turn_id, &data.request_id, &event.kind);
-                }
-                EventKind::ToolUse(data) => {
-                    fold_streamed(&mut state, &data.turn_id, &data.request_id, &event.kind);
-                }
-                EventKind::ModelContent(data) => {
-                    if state.latest_turn.as_deref() == Some(data.turn_id.as_str()) {
-                        state.content = Some((data.request_id.clone(), data.content.clone()));
-                    }
-                }
-                EventKind::InputMessage(_) | EventKind::InputApplied(_) => {
-                    // Input the running turn consumes, such as a steer,
-                    // arrives before the turn's end; only input after that
-                    // end means the user has moved on.
-                    if state.completed {
-                        state.newer_input = true;
-                    }
-                    clear = state
-                        .cancel_in_flight()
-                        .map(|turn| (turn, "new_input"))
-                        .or_else(|| state.take_offer().map(|turn| (turn, "new_input")));
-                }
-                _ => {}
+        match &event.kind {
+            EventKind::TurnStart(data) => {
+                clear = state
+                    .cancel_in_flight()
+                    .filter(|(_, started)| *started)
+                    .map(|(turn, _)| (turn, "turn_started"))
+                    .or_else(|| state.take_offer().map(|turn| (turn, "turn_started")));
+                state.latest_turn = Some(data.turn_id.clone());
+                state.completed = false;
+                state.call = None;
+                state.content = None;
+                state.streamed = None;
+                state.newer_input = false;
             }
+            EventKind::TurnEnd(data) => {
+                if state.latest_turn.as_deref() == Some(data.turn_id.as_str()) {
+                    state.completed = matches!(data.outcome, TurnOutcome::Completed { .. });
+                }
+            }
+            EventKind::ModelCall(data) => {
+                if state.latest_turn.as_deref() == Some(data.turn_id.as_str()) {
+                    state.call = Some(Call {
+                        turn_id: data.turn_id.clone(),
+                        request_id: data.request_id.clone(),
+                        request: data.request.clone(),
+                    });
+                    state.streamed = None;
+                }
+            }
+            EventKind::Thinking(data) => {
+                fold_streamed(&mut state, &data.turn_id, &data.request_id, &event.kind);
+            }
+            EventKind::Text(data) => {
+                fold_streamed(&mut state, &data.turn_id, &data.request_id, &event.kind);
+            }
+            EventKind::ToolUseStart(data) => {
+                fold_streamed(&mut state, &data.turn_id, &data.request_id, &event.kind);
+            }
+            EventKind::ToolUse(data) => {
+                fold_streamed(&mut state, &data.turn_id, &data.request_id, &event.kind);
+            }
+            EventKind::ModelContent(data) => {
+                if state.latest_turn.as_deref() == Some(data.turn_id.as_str()) {
+                    state.content = Some((data.request_id.clone(), data.content.clone()));
+                }
+            }
+            EventKind::InputMessage(_) | EventKind::InputApplied(_) => {
+                // Input the running turn consumes, such as a steer,
+                // arrives before the turn's end; only input after that
+                // end means the user has moved on.
+                if state.completed {
+                    state.newer_input = true;
+                }
+                clear = state
+                    .cancel_in_flight()
+                    .filter(|(_, started)| *started)
+                    .map(|(turn, _)| (turn, "new_input"))
+                    .or_else(|| state.take_offer().map(|turn| (turn, "new_input")));
+            }
+            _ => {}
         }
         if let Some((turn_id, reason)) = clear {
             self.notice("cleared", json!({"turnId": turn_id, "reason": reason}));
@@ -720,49 +738,128 @@ impl Part {
         cancel: CancellationToken,
     ) -> Result<Value, RpcError> {
         let params: RequestParams = params(value)?;
-        let settings = self.read_settings(cancel.clone()).await?;
+        // The request's own token: a child of the RPC's, so the caller's
+        // cancellation reaches it, and cancelled by every invalidation the
+        // Session reports.
+        let token = cancel.child_token();
+        let settings = self.read_settings(token.clone()).await?;
         let max_chars = settings.max_chars.clamp(10, 200);
-        let first = {
+        let invocation = {
             let mut state = self.state.lock().unwrap();
             state.enabled = Some(settings.enabled);
-            self.decision(&state, &params.turn_id, &settings)
-        };
-        let (call, content) = match first {
-            Decision::Refused(reason) => return Ok(refused(reason)),
-            Decision::Shared => return Ok(json!({"accepted": true})),
-            Decision::Ready(call, content) => (call, content),
-        };
-        if self.compaction_due(max_chars, cancel.clone()).await {
-            return Ok(refused("compaction_due"));
-        }
-        let token = CancellationToken::new();
-        {
-            let mut state = self.state.lock().unwrap();
-            match self.decision(&state, &params.turn_id, &settings) {
+            match self.decision(&state, &params.turn_id, &settings, None) {
                 Decision::Refused(reason) => return Ok(refused(reason)),
                 Decision::Shared => return Ok(json!({"accepted": true})),
-                Decision::Ready(_, _) => {}
+                Decision::Ready(_, _) => {
+                    let invocation = state.next_invocation();
+                    let _ = state.cancel_in_flight();
+                    state.take_offer();
+                    state.in_flight = Some(InFlight {
+                        turn_id: params.turn_id.clone(),
+                        invocation,
+                        cancel: token.clone(),
+                        started: false,
+                    });
+                    invocation
+                }
             }
-            state.cancel_in_flight();
-            state.take_offer();
-            state.in_flight = Some(InFlight {
-                turn_id: params.turn_id.clone(),
-                cancel: token.clone(),
-            });
+        };
+        // The pending registration holds the slot across the preflight, so a
+        // settings change, a new input, a dismissal or the Session's close
+        // cancels this request like one already in flight.
+        if self.compaction_due(max_chars, token.clone()).await {
+            self.finish_invocation(invocation);
+            return Ok(refused("compaction_due"));
         }
+        // The preflight awaited: the start is decided again against the
+        // settings and the state as they are now, never the snapshot above.
+        // The read takes a token of its own: a cancelled request still reads
+        // and answers a reason rather than a service error.
+        let settings = match self.read_settings(CancellationToken::new()).await {
+            Ok(settings) => settings,
+            Err(error) => {
+                self.finish_invocation(invocation);
+                return Err(error);
+            }
+        };
+        let max_chars = settings.max_chars.clamp(10, 200);
+        let (call, content) = {
+            let mut state = self.state.lock().unwrap();
+            let ours = state
+                .in_flight
+                .as_ref()
+                .is_some_and(|flight| flight.invocation == invocation);
+            if !ours || token.is_cancelled() {
+                if ours {
+                    state.in_flight = None;
+                }
+                return Ok(refused(self.cancelled_reason(
+                    &state,
+                    &params.turn_id,
+                    &settings,
+                    invocation,
+                )));
+            }
+            let ready = match self.decision(&state, &params.turn_id, &settings, Some(invocation)) {
+                Decision::Refused(reason) => {
+                    state.in_flight = None;
+                    return Ok(refused(reason));
+                }
+                Decision::Shared => return Ok(json!({"accepted": true})),
+                Decision::Ready(call, content) => (call, content),
+            };
+            state.enabled = Some(settings.enabled);
+            if let Some(flight) = state.in_flight.as_mut() {
+                flight.started = true;
+            }
+            ready
+        };
         let part = self.clone();
         let turn_id = params.turn_id.clone();
         self.tasks.spawn(async move {
-            part.run(turn_id, call, content, max_chars, token).await;
+            part.run(turn_id, call, content, max_chars, invocation, token)
+                .await;
         });
         Ok(json!({"accepted": true}))
     }
 
+    /// Removes an invocation's pending registration when the slot still
+    /// holds it; every exit path after registration ends here.
+    fn finish_invocation(&self, invocation: u64) {
+        let mut state = self.state.lock().unwrap();
+        if state
+            .in_flight
+            .as_ref()
+            .is_some_and(|flight| flight.invocation == invocation)
+        {
+            state.in_flight = None;
+        }
+    }
+
+    /// What a request cancelled during its preflight answers. The gates see
+    /// the current state and settings; a cancellation that leaves them open
+    /// is a dismissal.
+    fn cancelled_reason(
+        &self,
+        state: &State,
+        turn_id: &str,
+        settings: &PromptSuggestionSettings,
+        invocation: u64,
+    ) -> &'static str {
+        match self.decision(state, turn_id, settings, Some(invocation)) {
+            Decision::Refused(reason) => reason,
+            Decision::Shared | Decision::Ready(_, _) => "dismissed",
+        }
+    }
+
+    /// `own` names the invocation whose pending registration this decision
+    /// is about: the gates ask whether a *different* request is in flight.
     fn decision(
         &self,
         state: &State,
         turn_id: &str,
         settings: &PromptSuggestionSettings,
+        own: Option<u64>,
     ) -> Decision {
         if !settings.enabled {
             return Decision::Refused("disabled");
@@ -779,7 +876,7 @@ impl Part {
         if state
             .in_flight
             .as_ref()
-            .is_some_and(|flight| flight.turn_id == turn_id)
+            .is_some_and(|flight| flight.turn_id == turn_id && Some(flight.invocation) != own)
         {
             return Decision::Shared;
         }
@@ -843,6 +940,7 @@ impl Part {
         call: Call,
         content: Vec<MessagePart>,
         max_chars: u32,
+        invocation: u64,
         token: CancellationToken,
     ) {
         let outcome =
@@ -858,27 +956,35 @@ impl Part {
                 Ok(Err(reason)) => Err(reason),
                 Err(_) => Err("timeout"),
             };
+        #[cfg(feature = "testing")]
+        let completion = testing::completion(&self.session_id).await;
+        // Only the invocation still in the slot may change it or announce
+        // anything, and the notice is emitted under the state lock: the
+        // order of notices matches the order of the state changes they
+        // report, so an offer can never follow the clearing that withdrew it.
         let mut state = self.state.lock().unwrap();
-        if state
+        let current = state
             .in_flight
             .as_ref()
-            .is_none_or(|flight| flight.turn_id != turn_id)
-        {
-            return;
+            .is_some_and(|flight| flight.invocation == invocation);
+        if current {
+            state.in_flight = None;
+            match outcome {
+                Ok(text) => {
+                    state.offer = Some(Offer {
+                        turn_id: turn_id.clone(),
+                    });
+                    self.notice("offer", json!({"turnId": turn_id, "text": text}));
+                }
+                Err(reason) => {
+                    self.notice("cleared", json!({"turnId": turn_id, "reason": reason}));
+                }
+            }
         }
-        state.in_flight = None;
-        match outcome {
-            Ok(text) => {
-                state.offer = Some(Offer {
-                    turn_id: turn_id.clone(),
-                });
-                drop(state);
-                self.notice("offer", json!({"turnId": turn_id, "text": text}));
-            }
-            Err(reason) => {
-                drop(state);
-                self.notice("cleared", json!({"turnId": turn_id, "reason": reason}));
-            }
+        drop(state);
+        #[cfg(feature = "testing")]
+        if let Some(completion) = &completion {
+            completion.passed_now();
         }
     }
 
@@ -915,13 +1021,13 @@ impl Part {
 
     fn respond(&self, value: Value) -> Result<Value, RpcError> {
         let params: RespondParams = params(value)?;
+        // The notice is emitted under the state lock, so the order of
+        // notices matches the order of the state changes they report.
         let mut state = self.state.lock().unwrap();
         match params.action {
             Action::Accept => {
                 state.unused = 0;
-                let shown = state.remove_offer(&params.turn_id);
-                drop(state);
-                if shown {
+                if state.remove_offer(&params.turn_id) {
                     self.notice(
                         "cleared",
                         json!({"turnId": params.turn_id, "reason": "accepted"}),
@@ -929,16 +1035,20 @@ impl Part {
                 }
             }
             Action::Dismiss => {
-                let in_flight = state
+                let flight = state
                     .in_flight
                     .as_ref()
                     .is_some_and(|flight| flight.turn_id == params.turn_id);
-                if in_flight {
-                    state.cancel_in_flight();
+                let started = flight
+                    && state
+                        .in_flight
+                        .as_ref()
+                        .is_some_and(|flight| flight.started);
+                if flight {
+                    let _ = state.cancel_in_flight();
                 }
                 let shown = state.take_offer_for(&params.turn_id).is_some();
-                drop(state);
-                if shown || in_flight {
+                if shown || started {
                     self.notice(
                         "cleared",
                         json!({"turnId": params.turn_id, "reason": "dismissed"}),
@@ -988,4 +1098,66 @@ fn breaks_line(text: &str) -> bool {
     let mut lines = text.split('\n');
     lines.next();
     lines.any(|line| !line.trim().is_empty())
+}
+
+/// Barriers the transport flows use to pin an interleaving between a
+/// request's model call and the state it changes. Feature `testing` only;
+/// production builds have none.
+#[cfg(feature = "testing")]
+pub mod testing {
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::Notify;
+
+    /// One request held between its model call and its state lock, until the
+    /// test releases it.
+    pub struct Completion {
+        entered: Notify,
+        release: Notify,
+        passed: Notify,
+    }
+
+    impl Completion {
+        /// Resolves once a request waits at the barrier.
+        pub async fn entered(&self) {
+            self.entered.notified().await;
+        }
+        /// Lets the waiting request take its state lock.
+        pub fn release(&self) {
+            self.release.notify_one();
+        }
+        /// Resolves once the released request has checked the slot and
+        /// announced what its outcome changes.
+        pub async fn passed(&self) {
+            self.passed.notified().await;
+        }
+        pub(crate) fn passed_now(&self) {
+            self.passed.notify_one();
+        }
+    }
+
+    static NEXT: Mutex<Option<(String, Arc<Completion>)>> = Mutex::new(None);
+
+    /// Holds the next request of `session_id` that finishes its model call.
+    pub fn hold_next_completion(session_id: &str) -> Arc<Completion> {
+        let completion = Arc::new(Completion {
+            entered: Notify::new(),
+            release: Notify::new(),
+            passed: Notify::new(),
+        });
+        *NEXT.lock().unwrap() = Some((session_id.to_owned(), completion.clone()));
+        completion
+    }
+
+    pub(crate) async fn completion(session_id: &str) -> Option<Arc<Completion>> {
+        let completion = {
+            let mut next = NEXT.lock().unwrap();
+            match next.as_ref() {
+                Some((held, _)) if held == session_id => next.take().map(|(_, held)| held),
+                _ => None,
+            }
+        }?;
+        completion.entered.notify_one();
+        completion.release.notified().await;
+        Some(completion)
+    }
 }

@@ -806,6 +806,13 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::prompt_suggestion::testing",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::prompt_suggestion",
+      "file": "crates/dim-agent-capabilities/src/prompt_suggestion.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_agent_capabilities::recall",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -10936,6 +10943,14 @@
         "use crate::methods::SessionMethods",
         "use crate::methods::params",
         "use crate::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_suggestion",
+      "to": "dim_agent_capabilities::prompt_suggestion::testing",
+      "references": [
+        "mod testing",
+        "path testing::completion"
       ]
     },
     {

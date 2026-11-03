@@ -59,7 +59,7 @@ Session 部件通过既有的广播观察自己的 Session（[ADR 002 D2](../../
 | 轮次请求 | 该轮最后一次 `model/call`：`{turnId, requestId, request}` | `model/call` |
 | 轮次内容 | 该轮最后一次 `model/content`：`{requestId, content}` | `model/content` |
 | 更新的输入 | 最近轮次结束后是否出现过 `input/message` 或 `input/applied` | `input/message`、`input/applied` |
-| 在途 | 至多一个：`{turnId, 取消令牌}` | `session.suggestion.request` |
+| 在途 | 至多一个：`{turnId, 调用标识, 取消令牌}`，以及它是否已通过预检 | `session.suggestion.request` |
 | 提示 | 至多一个：`{turnId, text}` | 一次完成的请求 |
 | 未采用计数 | 自上次采用或开关开启以来未采用就被清除的提示数 | `cleared`、`respond` 与设置变更 |
 
@@ -188,6 +188,10 @@ session.notice {sessionId, source: "PromptSuggestion", kind: "cleared", data: {t
 
 保持开关开启的提交写入不取消任何东西：正在显示的提示和在途请求在开始时就已有效，下一次请求读取新的 `maxChars`。
 
+每个被接受的请求都有自己的调用标识：只有槽中仍是该标识时，完成才会修改槽并发出通知，因此被取消的请求稍后返回时不改变任何东西，也不发出任何通知。
+
+请求在异步预检（`compaction_due`）之前连同取消令牌一起登记到槽中。设置变更、新输入、拒绝与 Session 关闭会像取消在途请求一样取消它；预检之后的启动再次依据当时的状态与设置决定，绝不依据预检之前读到的值。在预检期间被取消的请求不发起模型调用，以它现在未能通过的门（或 `dismissed`）答复 `{accepted: false, reason}`，且不发通知。
+
 取消始终让 Session 唯一的在途槽保持一致；当提示正在显示或请求已被接受时，每种取消都会发 `cleared` 并带原因：
 
 | 触发 | 清除原因 |
@@ -202,7 +206,7 @@ session.notice {sessionId, source: "PromptSuggestion", kind: "cleared", data: {t
 | 模型错误、工具调用或被取消的流 | `failed` |
 | 校验拒绝回复 | `invalid` |
 
-在途请求被取消时发出带取消原因的 `cleared`；因失败、超时或非法而从未产生提示的请求发出 `failed`、`timeout` 或 `invalid`。因此每个被接受的请求最终恰好以一个 `offer` 或一个 `cleared` 结束。
+在途请求被取消时发出带取消原因的 `cleared`；因失败、超时或非法而从未产生提示的请求发出 `failed`、`timeout` 或 `invalid`。因此每个被接受的请求最终恰好以一个 `offer` 或一个 `cleared` 结束。通知在部件的状态锁内发出，因此通知的顺序与它所报告的状态变更顺序一致：`offer` 绝不会出现在撤回它的 `cleared` 之后。
 
 所有原因都是稳定的 `snake_case` 码：`disabled`、`not_root`、`not_latest_turn`、`turn_not_completed`、`no_text`、`throttled`、`compaction_due`、`new_input`、`turn_started`、`dismissed`、`accepted`、`session_closed`、`timeout`、`failed`、`invalid`。
 
@@ -332,7 +336,7 @@ metadata：turnId 与 extensions.requestId 加 "/suggestion"
 1. 对 `anthropic`、`openai-compatible`、`openai-responses` 三种协议各跑一轮与一次建议，记录端点收到：建议请求体的 `system`、`tools` 与每条更早消息的文本与该轮最后一次请求相等，其后恰好是助手消息与指令，且 `max_tokens`、推理、工具选择与 service tier 相等。`anthropic` 上比较忽略自动 `cache_control` 标记，因为转换器把它放在最后一条 user 消息上，因而会移到指令上。
 2. 分支的事件在建议前后相同，下一次真实请求有无建议都相同。
 3. 每个门一个流程：关闭、不是最新轮次、最后一次内容没有文本、非根 Session。接受了 steer 的轮次仍然提供；轮次结束后写入的输入会以 `not_latest_turn` 拒绝该轮。
-4. 每种取消一个流程：新输入、轮次开始、更新的请求、拒绝、Session 关闭。截止不用等待 30 秒来固定。
+4. 每种取消一个流程：新输入、轮次开始、更新的请求、拒绝、Session 关闭。截止不用等待 30 秒来固定。预检也被固定：在用量检查挂起时关闭开关或拒绝，不会发起模型调用并拒绝该请求；被取消的前任在同一轮的新请求之后返回时不发任何通知。
 5. 校验：多行回复、以 `/` 开头、`<none>`、拒绝语与重复上一条用户消息，各自以 `invalid` 清除。
 6. 未采用计数：连续 20 次未采用后 `throttled`；一次采用后重置，关闭再开启开关同样重置。
 7. 上下文门：模型的用量让 `main` 的头超过阈值时，`request` 答复 `compaction_due` 且不发出任何模型请求。
