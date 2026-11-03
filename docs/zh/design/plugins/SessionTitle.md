@@ -6,7 +6,9 @@ SessionTitle 是一个 Session 插件，为交互式 leader Session 提供经 Se
 
 ## 0. 实施边界
 
-基础 CLI 以 Rust 内置插件提供 `session-title`。进程行通过既有部件注册表注册 Settings 来源和
+基础 CLI 从独立的 `dim-session-title` Rust crate 安装 `session-title`。
+`dimcode` 产品 profile 经 AgentBuilder 安装插件；App Server 仅提供通用 CLI profile 回调和既有所有者服务。
+生成契约由独立插件 crate 公开，DimOAuth 从该 crate 引用契约。进程行通过既有部件注册表注册 Settings 来源和
 Session 部分，每个 Session 挂载一份副本。其可用性不依赖 `--defaults`、打包的 TypeScript 包、
 Node/Python 安装或语言运行时获取。辅助调用和标题元数据仍分别归 Provider 与存储所有者管理。
 
@@ -40,7 +42,8 @@ atLeast 与 through，直接使用原生 HistoryPage/AgentEvent。S2 稳定目�
 
 沿用[插件绑定合同](../rutis-usage.md)：插件的唯一一行注入 `partRegistry`，
 注册 Session 部分，每个 Session 挂载一份副本。该部分注入
-`sessionMethods`，并在 `apply` 中把 `session.rename` 注册到它；它不提供服务。`apply` 读取 Session 标识和创建配置，
+`sessionMethods`，并在 `apply` 中把 `session.rename` 注册到它；它不提供服务。
+插件仅依赖 Settings 与 SessionStore 的既有公开 Rust 绑定；历史回复在本插件的命名服务边界解析一次。App Server 只有用于公开流程夹具的开发依赖，没有对该插件的生产依赖。`apply` 读取 Session 标识和创建配置，
 登记观察/清理，不启动异步初始化任务；创建配置不可变。同一部分声明全部依赖：进程服务
 `sessions`、`settings`、`sessionMetadata` 和 `auxiliaryModel`，以及 Session 服务 `sessionIdentity`、
 `sessionConfig`、`sessionLifecycle` 和 `sessionMethods`。产品装配独立于外语插件行安装原生插件。
@@ -406,7 +409,7 @@ A1–A12 是首版实现采用的策略。
 | 语言中立 | Rust |
 | --- | --- |
 | 注册到 `sessionMethods` 的命名空间 `session.rename` | Session 部分在 `Key<SessionMethods>` 依赖上调用 `methods.register(ctx, "session.rename", Vec<MethodDecl>, handler)` |
-| 已发布历史 | 稳定目录绑定上的 `SessionsService::history(HistoryRequest)` |
+| 已发布历史 | 稳定目录绑定上的 既有具名 `sessions.history` HostDispatch（在插件边界解析外部回复） |
 | 标题元数据 | `SessionStore::metadata` 与 `SessionStore::set_title` |
 | 辅助调用 | 既有 `AuxiliaryModelHost.0.complete` 与取消 token |
 | Session 广播监听器 | `session_channel(session_id)` 上针对 `Event` 记录的监听器，由 `ctx.effect` 移除 |

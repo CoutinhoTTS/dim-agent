@@ -6,7 +6,10 @@ SessionTitle is a Session plugin that gives an interactive leader Session a titl
 
 ## 0. Implementation boundary
 
-The base CLI provides `session-title` as a built-in Rust plugin. Its process row registers
+The base CLI provides `session-title` from the independent `dim-session-title` Rust crate.
+The `dimcode` product profile installs it through `AgentBuilder::plugin`; the App Server
+provides only its generic CLI profile callback and existing owner services. The plugin owns
+its public generation contract. DimOAuth imports that contract from this crate. Its process row registers
 the Settings source and the Session part through the existing part registry; every Session
 mounts one copy. Availability does not depend on `--defaults`, a staged TypeScript package,
 Node/Python installation or language-runtime acquisition. Provider and storage remain the
@@ -41,14 +44,15 @@ it does not await Settings/history/model work. Native EventReader delivers only 
 and SessionBroadcast forwards that Dispatcher stream. Thus the existing history({atLeast:N}) read
 can capture published T >= N while the branch exists: no extra publication wait, polling or Core
 API. Retain T and page with through=T and after=the last returned sequence; never send atLeast and
-through together. Use native HistoryPage/AgentEvent data. S2's stable directory reads the index per
-call, so index reload does not reload this consumer.
+through together. Use native HistoryPage/AgentEvent data. The existing named sessions service reads the current index on each call, so index reload does not reload this consumer.
 
 Use the [plugin binding contract](../rutis-usage.md): the plugin's one row injects `partRegistry`
 and registers the Session part; each Session mounts a copy. The part injects
 `sessionMethods` and registers `session.rename` with it from `apply`; it provides no service.
 `apply` reads the Session identity and creation configuration and registers observation/cleanup;
 it does not start an asynchronous initialization job. Its creation configuration is immutable.
+The plugin depends on the existing public Rust Settings and SessionStore bindings; it does not expose or alter their implementations. Named history replies are decoded once at this plugin boundary. The App Server has only a development dependency for the public-flow fixtures, not a production dependency on this crate.
+
 The part declares all its dependencies: the process services `sessions`,
 `settings`, `sessionMetadata` and `auxiliaryModel`, and the Session services `sessionIdentity`,
 `sessionConfig`, `sessionLifecycle` and `sessionMethods`. The product assembly installs the native
@@ -434,10 +438,10 @@ auxiliary binding use the owner contracts in §0. The optional service contract 
 | Neutral | Rust |
 | --- | --- |
 | Namespace `session.rename` registered with `sessionMethods` | The Session part calls `methods.register(ctx, "session.rename", Vec<MethodDecl>, handler)` on a `Key<SessionMethods>` dependency |
-| Published history | `SessionsService::history(HistoryRequest)` through the stable directory binding |
+| Published history | The existing named `sessions.history` HostDispatch contract; decode the external reply at the plugin boundary |
 | Title metadata | `SessionStore::metadata` and `SessionStore::set_title` |
 | Auxiliary call | `AuxiliaryModelHost.0.complete` with its cancellation token |
-| Optional generation | `ctx.get_at(&host_key("sessionTitleGenerator"))` at use; `HostDispatch.generate` with a cancellable callback promise, using the request/reply types exported by `session_title` |
+| Optional generation | `ctx.get_at(&host_key("sessionTitleGenerator"))` at use; `HostDispatch.generate` with a cancellable callback promise, using the request/reply types exported by `dim-session-title` |
 | Session broadcast listener | Listener on `session_channel(session_id)` for `Event` records, removed by `ctx.effect` |
 | Generation task | Spawned under `ctx.effect` |
 

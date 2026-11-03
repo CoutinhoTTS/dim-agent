@@ -1230,6 +1230,7 @@ dependencies = [
  "dim-agent-runtime",
  "dim-agent-types",
  "dim-app-server",
+ "dim-session-title",
  "encoding_rs",
  "flate2",
  "foldhash 0.2.0",
@@ -1363,6 +1364,7 @@ dependencies = [
  "dim-agent-capabilities",
  "dim-agent-runtime",
  "dim-app-server",
+ "dim-session-title",
  "getrandom 0.3.4",
  "regex",
  "reqwest 0.12.28",
@@ -1379,6 +1381,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "dim-session-title"
+version = "0.1.0-alpha.8"
+dependencies = [
+ "dim-agent-capabilities",
+ "dim-agent-runtime",
+ "dim-agent-types",
+ "dim-app-server",
+ "regex",
+ "rutis",
+ "rutis-bridge",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "dimcode"
 version = "0.1.0-alpha.8"
 dependencies = [
@@ -1390,6 +1410,7 @@ dependencies = [
  "dim-app-server",
  "dim-cli",
  "dim-oauth",
+ "dim-session-title",
  "image",
  "libc",
  "rusqlite",
@@ -5572,6 +5593,7 @@ dependencies = [
  "dim-agent-types",
  "dim-app-server",
  "dim-client",
+ "dim-session-title",
  "futures-util",
  "rusqlite",
  "rutis",

@@ -1177,7 +1177,7 @@ impl DynPlugin for DimOAuthPlugin {
             })?;
             service.0.tasks.spawn(service.0.clone().keep_fresh());
             ctx.provide_at(
-                rutis_bridge::session::host_key(dim_app_server::session_title::GENERATOR),
+                rutis_bridge::session::host_key(dim_session_title::GENERATOR),
                 service.clone() as Arc<dyn rutis_bridge::session::HostDispatch>,
             )?;
             ctx.provide_as::<dyn ManagedProvider>(service)?;

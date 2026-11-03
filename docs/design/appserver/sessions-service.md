@@ -906,10 +906,6 @@ changes are included; Scheduler and Workflow keep the existing S2 interface.
 
 ## Appendix A. Rust binding
 
-The stable `SessionsService` is also provided as the Rust `sessionsService` binding by the
-Agent directory. Its typed `history(HistoryRequest)` reads through the current index on each
-call, like the named `sessions.history`; consumers do not retain or depend on an index generation.
-
 The types live next to `AgentIndex` in [agents/sessions.rs](../../../crates/dim-app-server/src/agents/sessions.rs). A Rust
 plugin in another crate uses the named service.
 

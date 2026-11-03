@@ -39,14 +39,14 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           }
@@ -69,14 +69,14 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           }
@@ -99,14 +99,14 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           }
@@ -129,14 +129,14 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           }
@@ -159,14 +159,14 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           }
@@ -189,14 +189,14 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           }
@@ -219,14 +219,14 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           }
@@ -249,14 +249,14 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           }
@@ -279,14 +279,14 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           }
@@ -309,14 +309,14 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           }
@@ -339,14 +339,14 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           }
@@ -369,14 +369,14 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           }
@@ -399,14 +399,14 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           }
@@ -429,14 +429,14 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           }
@@ -459,14 +459,14 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           }
@@ -489,14 +489,14 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           }
@@ -519,14 +519,14 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           }
@@ -549,14 +549,14 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           }
@@ -579,14 +579,14 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           }
@@ -609,14 +609,14 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           }
@@ -639,14 +639,14 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           }
@@ -669,14 +669,14 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           }
@@ -684,6 +684,53 @@
       },
       {
         "id": 40,
+        "parent": 2,
+        "name": "session-title",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_agent_runtime::parts::PartRegistry",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_app_server::settings::SettingsService",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_agent_runtime::parts::PartRegistry",
+            "scope": null,
+            "provider": 39,
+            "generation": 1
+          },
+          {
+            "service": "dim_app_server::settings::SettingsService",
+            "scope": null,
+            "provider": 16,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_agent_runtime::parts::PartRegistry",
+            "provider": 39,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_app_server::settings::SettingsService",
+            "provider": 16,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 39,
         "parent": 2,
         "name": "PartRegistry",
         "state": "Active",
@@ -693,7 +740,7 @@
         "reads": []
       },
       {
-        "id": 39,
+        "id": 38,
         "parent": 2,
         "name": "Transport",
         "state": "Active",
@@ -719,7 +766,7 @@
           {
             "service": "dim_app_server::connection::ConnectionHub",
             "scope": null,
-            "provider": 37,
+            "provider": 36,
             "generation": 1
           },
           {
@@ -738,7 +785,7 @@
         "reads": [
           {
             "service": "dim_app_server::connection::ConnectionHub",
-            "provider": 37,
+            "provider": 36,
             "declared": true,
             "external": true
           },
@@ -751,7 +798,7 @@
         ]
       },
       {
-        "id": 38,
+        "id": 37,
         "parent": 2,
         "name": "Rpc",
         "state": "Active",
@@ -792,19 +839,19 @@
           {
             "service": "dim_app_server::agents::AgentIndex",
             "scope": null,
-            "provider": 34,
+            "provider": 33,
             "generation": 1
           },
           {
             "service": "dim_app_server::collaboration::Collaboration",
             "scope": null,
-            "provider": 35,
+            "provider": 34,
             "generation": 1
           },
           {
             "service": "dim_app_server::connection::ConnectionHub",
             "scope": null,
-            "provider": 37,
+            "provider": 36,
             "generation": 1
           },
           {
@@ -829,13 +876,13 @@
         "reads": [
           {
             "service": "dim_app_server::agents::AgentIndex",
-            "provider": 34,
+            "provider": 33,
             "declared": true,
             "external": true
           },
           {
             "service": "dim_app_server::connection::ConnectionHub",
-            "provider": 37,
+            "provider": 36,
             "declared": true,
             "external": true
           },
@@ -860,7 +907,7 @@
         ]
       },
       {
-        "id": 37,
+        "id": 36,
         "parent": 2,
         "name": "Connection",
         "state": "Active",
@@ -887,7 +934,7 @@
           {
             "service": "dim_app_server::ui_host::UiHost",
             "scope": null,
-            "provider": 36,
+            "provider": 35,
             "generation": 1
           }
         ],
@@ -900,14 +947,14 @@
           },
           {
             "service": "dim_app_server::ui_host::UiHost",
-            "provider": 36,
+            "provider": 35,
             "declared": true,
             "external": true
           }
         ]
       },
       {
-        "id": 36,
+        "id": 35,
         "parent": 2,
         "name": "UiHost",
         "state": "Active",
@@ -917,7 +964,7 @@
         "reads": []
       },
       {
-        "id": 35,
+        "id": 34,
         "parent": 2,
         "name": "Collaboration",
         "state": "Active",
@@ -948,19 +995,19 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           },
           {
             "service": "dim_app_server::agents::AgentIndex",
             "scope": null,
-            "provider": 34,
+            "provider": 33,
             "generation": 1
           },
           {
             "service": "dim_app_server::collaboration::CollaborationDirectory",
             "scope": null,
-            "provider": 33,
+            "provider": 32,
             "generation": 1
           },
           {
@@ -973,19 +1020,19 @@
         "reads": [
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           },
           {
             "service": "dim_app_server::agents::AgentIndex",
-            "provider": 34,
+            "provider": 33,
             "declared": true,
             "external": true
           },
           {
             "service": "dim_app_server::collaboration::CollaborationDirectory",
-            "provider": 33,
+            "provider": 32,
             "declared": true,
             "external": true
           },
@@ -998,7 +1045,7 @@
         ]
       },
       {
-        "id": 34,
+        "id": 33,
         "parent": 2,
         "name": "Agents",
         "state": "Active",
@@ -1039,13 +1086,13 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           },
           {
             "service": "dim_app_server::agents::AgentDirectory",
             "scope": null,
-            "provider": 32,
+            "provider": 31,
             "generation": 1
           },
           {
@@ -1076,13 +1123,13 @@
         "reads": [
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           },
           {
             "service": "dim_app_server::agents::AgentDirectory",
-            "provider": 32,
+            "provider": 31,
             "declared": true,
             "external": true
           },
@@ -1113,7 +1160,7 @@
         ]
       },
       {
-        "id": 33,
+        "id": 32,
         "parent": 2,
         "name": "CollaborationDirectory",
         "state": "Active",
@@ -1123,7 +1170,7 @@
         "reads": []
       },
       {
-        "id": 32,
+        "id": 31,
         "parent": 2,
         "name": "AgentDirectory",
         "state": "Active",
@@ -1133,7 +1180,7 @@
         "reads": []
       },
       {
-        "id": 31,
+        "id": 30,
         "parent": 2,
         "name": "PluginManager",
         "state": "Active",
@@ -1159,7 +1206,7 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           },
           {
@@ -1178,7 +1225,7 @@
         "reads": [
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           },
@@ -1197,7 +1244,7 @@
         ]
       },
       {
-        "id": 30,
+        "id": 29,
         "parent": 2,
         "name": "CollaborationModelPolicy",
         "state": "Active",
@@ -1244,7 +1291,7 @@
         ]
       },
       {
-        "id": 29,
+        "id": 28,
         "parent": 2,
         "name": "HooksSettings",
         "state": "Active",
@@ -1308,7 +1355,7 @@
         ]
       },
       {
-        "id": 28,
+        "id": 27,
         "parent": 2,
         "name": "PermissionRules",
         "state": "Active",
@@ -1355,7 +1402,7 @@
         ]
       },
       {
-        "id": 27,
+        "id": 26,
         "parent": 2,
         "name": "SkillsCatalog",
         "state": "Active",
@@ -1386,13 +1433,13 @@
           {
             "service": "dim_agent_capabilities::host_platform::HostPlatform",
             "scope": null,
-            "provider": 24,
+            "provider": 23,
             "generation": 1
           },
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           },
           {
@@ -1411,13 +1458,13 @@
         "reads": [
           {
             "service": "dim_agent_capabilities::host_platform::HostPlatform",
-            "provider": 24,
+            "provider": 23,
             "declared": true,
             "external": true
           },
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           },
@@ -1436,7 +1483,7 @@
         ]
       },
       {
-        "id": 26,
+        "id": 25,
         "parent": 2,
         "name": "ExecutionBackend",
         "state": "Active",
@@ -1457,7 +1504,7 @@
           {
             "service": "dim_agent_capabilities::host_platform::HostPlatform",
             "scope": null,
-            "provider": 24,
+            "provider": 23,
             "generation": 1
           },
           {
@@ -1470,7 +1517,7 @@
         "reads": [
           {
             "service": "dim_agent_capabilities::host_platform::HostPlatform",
-            "provider": 24,
+            "provider": 23,
             "declared": true,
             "external": true
           },
@@ -1483,7 +1530,7 @@
         ]
       },
       {
-        "id": 25,
+        "id": 24,
         "parent": 2,
         "name": "ExecShellSettings",
         "state": "Active",
@@ -1504,7 +1551,7 @@
           {
             "service": "dim_agent_capabilities::host_platform::HostPlatform",
             "scope": null,
-            "provider": 24,
+            "provider": 23,
             "generation": 1
           },
           {
@@ -1517,7 +1564,7 @@
         "reads": [
           {
             "service": "dim_agent_capabilities::host_platform::HostPlatform",
-            "provider": 24,
+            "provider": 23,
             "declared": true,
             "external": true
           },
@@ -1530,7 +1577,7 @@
         ]
       },
       {
-        "id": 24,
+        "id": 23,
         "parent": 2,
         "name": "HostPlatform",
         "state": "Active",
@@ -1551,7 +1598,7 @@
           {
             "service": "dim_agent_capabilities::execution_settings::ExecutionSettingsHost",
             "scope": null,
-            "provider": 23,
+            "provider": 22,
             "generation": 1
           },
           {
@@ -1564,7 +1611,7 @@
         "reads": [
           {
             "service": "dim_agent_capabilities::execution_settings::ExecutionSettingsHost",
-            "provider": 23,
+            "provider": 22,
             "declared": true,
             "external": true
           },
@@ -1577,7 +1624,7 @@
         ]
       },
       {
-        "id": 23,
+        "id": 22,
         "parent": 2,
         "name": "ExecutionSettings",
         "state": "Active",
@@ -1607,7 +1654,7 @@
         ]
       },
       {
-        "id": 22,
+        "id": 21,
         "parent": 2,
         "name": "Mcp",
         "state": "Active",
@@ -1649,13 +1696,13 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           },
           {
             "service": "dim_app_server::mcp::publication::Publication",
             "scope": null,
-            "provider": 21,
+            "provider": 20,
             "generation": 1
           },
           {
@@ -1680,13 +1727,13 @@
           },
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           },
           {
             "service": "dim_app_server::mcp::publication::Publication",
-            "provider": 21,
+            "provider": 20,
             "declared": true,
             "external": true
           },
@@ -1705,7 +1752,7 @@
         ]
       },
       {
-        "id": 21,
+        "id": 20,
         "parent": 2,
         "name": "McpPublication",
         "state": "Active",
@@ -1735,7 +1782,7 @@
         ]
       },
       {
-        "id": 20,
+        "id": 19,
         "parent": 2,
         "name": "ModelLog",
         "state": "Active",
@@ -1782,53 +1829,6 @@
         ]
       },
       {
-        "id": 19,
-        "parent": 2,
-        "name": "session-title",
-        "state": "Active",
-        "generation": 1,
-        "injects": [
-          {
-            "service": "dim_agent_runtime::parts::PartRegistry",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_app_server::settings::SettingsService",
-            "scope": null,
-            "status": "Ready"
-          }
-        ],
-        "resolved": [
-          {
-            "service": "dim_agent_runtime::parts::PartRegistry",
-            "scope": null,
-            "provider": 40,
-            "generation": 1
-          },
-          {
-            "service": "dim_app_server::settings::SettingsService",
-            "scope": null,
-            "provider": 16,
-            "generation": 1
-          }
-        ],
-        "reads": [
-          {
-            "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_app_server::settings::SettingsService",
-            "provider": 16,
-            "declared": true,
-            "external": true
-          }
-        ]
-      },
-      {
         "id": 18,
         "parent": 2,
         "name": "web",
@@ -1850,7 +1850,7 @@
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
-            "provider": 40,
+            "provider": 39,
             "generation": 1
           },
           {
@@ -1863,7 +1863,7 @@
         "reads": [
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 40,
+            "provider": 39,
             "declared": true,
             "external": true
           },
@@ -2430,7 +2430,7 @@
     "bindings": [
       {
         "service": "dim_agent_capabilities::execution_settings::ExecutionSettingsHost",
-        "provider": 23,
+        "provider": 22,
         "generation": 1,
         "removing": false
       },
@@ -2478,43 +2478,37 @@
       },
       {
         "service": "dim_agent_capabilities::host_platform::HostPlatform",
-        "provider": 24,
+        "provider": 23,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog",
-        "provider": 27,
+        "provider": 26,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_runtime::parts::PartRegistry",
-        "provider": 40,
+        "provider": 39,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_app_server::agents::AgentDirectory",
-        "provider": 32,
+        "provider": 31,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_app_server::agents::AgentIndex",
-        "provider": 34,
+        "provider": 33,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_app_server::agents::sessions::SessionPermissions",
-        "provider": 32,
-        "generation": 1,
-        "removing": false
-      },
-      {
-        "service": "dim_app_server::agents::sessions::SessionsService",
-        "provider": 32,
+        "provider": 31,
         "generation": 1,
         "removing": false
       },
@@ -2526,19 +2520,19 @@
       },
       {
         "service": "dim_app_server::collaboration::Collaboration",
-        "provider": 35,
+        "provider": 34,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_app_server::collaboration::CollaborationDirectory",
-        "provider": 33,
+        "provider": 32,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_app_server::connection::ConnectionHub",
-        "provider": 37,
+        "provider": 36,
         "generation": 1,
         "removing": false
       },
@@ -2556,7 +2550,7 @@
       },
       {
         "service": "dim_app_server::hooks_settings::HooksService",
-        "provider": 29,
+        "provider": 28,
         "generation": 1,
         "removing": false
       },
@@ -2568,19 +2562,19 @@
       },
       {
         "service": "dim_app_server::mcp::McpService",
-        "provider": 22,
+        "provider": 21,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_app_server::mcp::auth::McpAuth",
-        "provider": 22,
+        "provider": 21,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_app_server::mcp::publication::Publication",
-        "provider": 21,
+        "provider": 20,
         "generation": 1,
         "removing": false
       },
@@ -2622,13 +2616,13 @@
       },
       {
         "service": "dim_app_server::transport::ListenAddresses",
-        "provider": 39,
+        "provider": 38,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_app_server::ui_host::UiHost",
-        "provider": 36,
+        "provider": 35,
         "generation": 1,
         "removing": false
       },
@@ -2658,7 +2652,7 @@
       },
       {
         "service": "dyn rutis_bridge::session::services::HostDispatch#partRegistry",
-        "provider": 40,
+        "provider": 39,
         "generation": 1,
         "removing": false
       },
@@ -2682,13 +2676,13 @@
       },
       {
         "service": "dyn rutis_bridge::session::services::HostDispatch#sessionPermissions",
-        "provider": 32,
+        "provider": 31,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dyn rutis_bridge::session::services::HostDispatch#sessions",
-        "provider": 32,
+        "provider": 31,
         "generation": 1,
         "removing": false
       },

@@ -1245,6 +1245,7 @@ async fn node_python_plugin_installs_and_reloads_through_its_link() {
 /// mount Skills and MCP.
 pub(super) fn product_builder() -> AgentBuilder {
     let mut builder = AgentBuilder::new(AgentConfig::default());
+    dim_session_title::install(&mut builder);
     defaults::install_local_execution(
         &mut builder,
         dim_agent_capabilities::model_provider::ModelProviderPlugin::new,

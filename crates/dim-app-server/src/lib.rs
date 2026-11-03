@@ -28,7 +28,6 @@ pub mod protocol;
 pub mod provider;
 pub mod runtime_manager;
 pub mod session_grants;
-pub mod session_title;
 pub mod session_typescript;
 pub mod settings;
 pub mod settings_methods;
@@ -709,9 +708,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         rows.push(register_part(&mut builtins, builder.catalog(), |names| {
             Ok(Box::new(web::WebPlugin::new(names)?))
         })?);
-        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-            Ok(Box::new(session_title::SessionTitlePlugin::new(names)?))
-        })?);
         if config.model_catalog.is_some() || product_root.is_some() {
             rows.push(register_part(
                 &mut builtins,
@@ -1163,7 +1159,6 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<storage::SessionStore>(catalog, None);
     register::<agents::AgentDirectory>(catalog, None);
     register::<AgentIndex>(catalog, None);
-    register::<agents::SessionsService>(catalog, None);
     register::<rutis_loader::Loader>(catalog, None);
     register::<collaboration::CollaborationDirectory>(catalog, None);
     register::<collaboration::Collaboration>(catalog, None);
@@ -1194,7 +1189,6 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
         "sessions",
         "sessionMetadata",
         "auxiliaryModel",
-        "sessionTitleGenerator",
         "settings",
     ] {
         catalog.register_shared(name);

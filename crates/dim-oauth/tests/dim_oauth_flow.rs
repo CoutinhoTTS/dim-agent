@@ -155,10 +155,10 @@ async fn title_call(
     root: &Ctx,
     provider: &str,
     cancel: CancellationToken,
-) -> dim_app_server::session_title::GenerateTitleReply {
+) -> dim_session_title::GenerateTitleReply {
     use rutis_bridge::session::{Value as V, host_key, settle};
     let service = root
-        .get_at(&host_key(dim_app_server::session_title::GENERATOR))
+        .get_at(&host_key(dim_session_title::GENERATOR))
         .unwrap();
     let callback = V::callback(move |_| {
         let cancel = cancel.clone();
@@ -181,9 +181,7 @@ async fn title_call(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn optional_title_service_owns_authentication_rejection_and_cancellation() {
-    use dim_app_server::session_title::{
-        GenerateTitleReply as Reply, TitleUnavailableReason as Reason,
-    };
+    use dim_session_title::{GenerateTitleReply as Reply, TitleUnavailableReason as Reason};
     let fixture = oauth::start().await;
     let home = home();
     let Process { root, providers } = process(&home).await;
@@ -202,7 +200,7 @@ async fn optional_title_service_owns_authentication_rejection_and_cancellation()
     assert_eq!(fixture.service.calls("POST /v1/session/rename"), 0);
     let service = root
         .get_at(&rutis_bridge::session::host_key(
-            dim_app_server::session_title::GENERATOR,
+            dim_session_title::GENERATOR,
         ))
         .unwrap();
     for request in [

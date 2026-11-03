@@ -1,7 +1,5 @@
 use crate::{DimOAuth, Inner, ManagedError, PROVIDER_ID, http::text};
-use dim_app_server::session_title::{
-    GenerateTitleReply, GenerateTitleRequest, TitleUnavailableReason,
-};
+use dim_session_title::{GenerateTitleReply, GenerateTitleRequest, TitleUnavailableReason};
 use rutis_bridge::session::{HostDispatch, Reply, Value, arg, settle};
 use serde_json::json;
 use std::{sync::Arc, time::Duration};

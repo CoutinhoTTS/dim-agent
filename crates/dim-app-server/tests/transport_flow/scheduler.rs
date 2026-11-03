@@ -912,6 +912,7 @@ async fn node_scheduler_installed_mid_session_carries_its_entry() {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
+    dim_session_title::install(&mut builder);
     defaults::install_local_execution(
         &mut builder,
         ModelProviderPlugin::new,

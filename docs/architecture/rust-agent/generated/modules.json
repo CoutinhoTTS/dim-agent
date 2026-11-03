@@ -1,7 +1,7 @@
 {
   "analysis": {
     "source": "syn AST: mod declarations, use trees, item definitions and symbol paths",
-    "scope": "dim-agent-*, dim-app-server, dim-client, dim-acp, dim-cli and dim-migration library/binary targets; cfg branches are conservatively included",
+    "scope": "dim-agent-*, dim-app-server, dim-client, dim-acp, dim-cli, dim-migration and dim-session-title library/binary targets; cfg branches are conservatively included",
     "glob": "glob/re-export chains are resolved for referenced names; an unused glob does not create every possible dependency",
     "limitations": [
       "Macros are not expanded; unexpandedMacros names are reported per module",
@@ -2452,20 +2452,6 @@
         "format",
         "serde_json::json",
         "unreachable",
-        "vec"
-      ]
-    },
-    {
-      "id": "dim_app_server::session_title",
-      "crate": "dim_app_server",
-      "parent": "dim_app_server",
-      "file": "crates/dim-app-server/src/session_title.rs",
-      "unexpandedMacros": [
-        "json",
-        "matches",
-        "tokio::pin",
-        "tokio::select",
-        "tracing::info",
         "vec"
       ]
     },
@@ -5489,6 +5475,20 @@
         "vec",
         "write",
         "writeln"
+      ]
+    },
+    {
+      "id": "dim_session_title",
+      "crate": "dim_session_title",
+      "parent": null,
+      "file": "crates/dim-session-title/src/lib.rs",
+      "unexpandedMacros": [
+        "json",
+        "matches",
+        "tokio::pin",
+        "tokio::select",
+        "tracing::info",
+        "vec"
       ]
     }
   ],
@@ -15735,13 +15735,6 @@
     },
     {
       "from": "dim_app_server",
-      "to": "dim_app_server::agents::sessions",
-      "references": [
-        "path agents::SessionsService"
-      ]
-    },
-    {
-      "from": "dim_app_server",
       "to": "dim_app_server::approval",
       "references": [
         "mod approval"
@@ -16012,14 +16005,6 @@
       "to": "dim_app_server::session_grants",
       "references": [
         "mod session_grants"
-      ]
-    },
-    {
-      "from": "dim_app_server",
-      "to": "dim_app_server::session_title",
-      "references": [
-        "mod session_title",
-        "path session_title::SessionTitlePlugin::new"
       ]
     },
     {
@@ -16332,11 +16317,9 @@
       "references": [
         "mod sessions",
         "path SessionPermissions",
-        "path SessionsService",
         "path sessions",
-        "use sessions::HistoryRequest",
-        "use sessions::SessionPermissions",
-        "use sessions::SessionsService"
+        "path sessions::SessionsService",
+        "use sessions::SessionPermissions"
       ]
     },
     {
@@ -17104,6 +17087,7 @@
       "from": "dim_app_server::cli",
       "to": "dim_agent_runtime::assembly",
       "references": [
+        "path AgentBuilder",
         "path AgentBuilder::new",
         "use dim_agent_runtime::AgentBuilder"
       ]
@@ -22635,164 +22619,6 @@
     },
     {
       "from": "dim_app_server::session_grants",
-      "to": "dim_app_server::storage::timeline",
-      "references": [
-        "path SessionStore",
-        "use crate::storage::SessionStore"
-      ]
-    },
-    {
-      "from": "dim_app_server::session_title",
-      "to": "dim_agent_capabilities::host",
-      "references": [
-        "path AuxiliaryModelHost",
-        "path AuxiliaryRequest",
-        "use dim_agent_capabilities::host::AuxiliaryModelHost",
-        "use dim_agent_capabilities::host::AuxiliaryRequest"
-      ]
-    },
-    {
-      "from": "dim_app_server::session_title",
-      "to": "dim_agent_capabilities::methods",
-      "references": [
-        "path RpcError",
-        "path RpcError::app",
-        "path RpcError::invalid",
-        "path SessionMethods",
-        "path reply",
-        "use dim_agent_capabilities::methods::Interruption",
-        "use dim_agent_capabilities::methods::MethodDecl",
-        "use dim_agent_capabilities::methods::RpcError",
-        "use dim_agent_capabilities::methods::SessionMethods",
-        "use dim_agent_capabilities::methods::reply"
-      ]
-    },
-    {
-      "from": "dim_app_server::session_title",
-      "to": "dim_agent_capabilities::session_broadcast",
-      "references": [
-        "path SessionBroadcast",
-        "path SessionBroadcastEvent::Event",
-        "path session_channel",
-        "use dim_agent_capabilities::session_broadcast::SessionBroadcast",
-        "use dim_agent_capabilities::session_broadcast::SessionBroadcastEvent",
-        "use dim_agent_capabilities::session_broadcast::session_channel"
-      ]
-    },
-    {
-      "from": "dim_app_server::session_title",
-      "to": "dim_agent_capabilities::settings",
-      "references": [
-        "path SettingsScope::User",
-        "use crate::settings::SettingsScope"
-      ]
-    },
-    {
-      "from": "dim_app_server::session_title",
-      "to": "dim_agent_runtime::config",
-      "references": [
-        "path CollaborationRole::Leader",
-        "path SessionConfig",
-        "path SessionIdentity",
-        "path SessionLifecycle",
-        "use dim_agent_runtime::CollaborationRole",
-        "use dim_agent_runtime::SessionConfig",
-        "use dim_agent_runtime::SessionIdentity",
-        "use dim_agent_runtime::SessionLifecycle"
-      ]
-    },
-    {
-      "from": "dim_app_server::session_title",
-      "to": "dim_agent_runtime::names",
-      "references": [
-        "path Names",
-        "use dim_agent_runtime::Names"
-      ]
-    },
-    {
-      "from": "dim_app_server::session_title",
-      "to": "dim_agent_runtime::parts",
-      "references": [
-        "path PartRegistry",
-        "path PartScope::Session",
-        "use dim_agent_runtime::PartRegistry",
-        "use dim_agent_runtime::PartScope"
-      ]
-    },
-    {
-      "from": "dim_app_server::session_title",
-      "to": "dim_agent_types::content",
-      "references": [
-        "path ContentBlock::Text",
-        "use dim_agent_types::ContentBlock",
-        "use dim_agent_types::Message",
-        "use dim_agent_types::Role"
-      ]
-    },
-    {
-      "from": "dim_app_server::session_title",
-      "to": "dim_agent_types::events",
-      "references": [
-        "path EventKind::ContextConfigured",
-        "path EventKind::InputApplied",
-        "path EventKind::InputMessage",
-        "path UserInput",
-        "use dim_agent_types::EventKind",
-        "use dim_agent_types::UserInput"
-      ]
-    },
-    {
-      "from": "dim_app_server::session_title",
-      "to": "dim_agent_types::profile",
-      "references": [
-        "path ModelId",
-        "use dim_agent_types::ModelId"
-      ]
-    },
-    {
-      "from": "dim_app_server::session_title",
-      "to": "dim_app_server::agents::sessions",
-      "references": [
-        "path HistoryRequest",
-        "path SessionsService",
-        "use crate::agents::HistoryRequest",
-        "use crate::agents::SessionsService"
-      ]
-    },
-    {
-      "from": "dim_app_server::session_title",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path SettingsService",
-        "use crate::settings::SettingsService"
-      ]
-    },
-    {
-      "from": "dim_app_server::session_title",
-      "to": "dim_app_server::settings::declared",
-      "references": [
-        "path SourceDeclaration",
-        "use crate::settings::SourceDeclaration"
-      ]
-    },
-    {
-      "from": "dim_app_server::session_title",
-      "to": "dim_app_server::storage::metadata",
-      "references": [
-        "path MetadataError",
-        "path MetadataError::Conflict",
-        "path MetadataError::NotFound",
-        "path MetadataError::Storage",
-        "path Title",
-        "path TitleSource::Auto",
-        "path TitleSource::Manual",
-        "use crate::storage::MetadataError",
-        "use crate::storage::Title",
-        "use crate::storage::TitleSource"
-      ]
-    },
-    {
-      "from": "dim_app_server::session_title",
       "to": "dim_app_server::storage::timeline",
       "references": [
         "path SessionStore",
@@ -37969,6 +37795,164 @@
         "use crate::Progress",
         "use crate::Result",
         "use crate::TaskReport"
+      ]
+    },
+    {
+      "from": "dim_session_title",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path AuxiliaryModelHost",
+        "path AuxiliaryRequest",
+        "use dim_agent_capabilities::host::AuxiliaryModelHost",
+        "use dim_agent_capabilities::host::AuxiliaryRequest"
+      ]
+    },
+    {
+      "from": "dim_session_title",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path RpcError",
+        "path RpcError::app",
+        "path RpcError::invalid",
+        "path SessionMethods",
+        "path reply",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::SessionMethods",
+        "use dim_agent_capabilities::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_session_title",
+      "to": "dim_agent_capabilities::session_broadcast",
+      "references": [
+        "path SessionBroadcast",
+        "path SessionBroadcastEvent::Event",
+        "path session_channel",
+        "use dim_agent_capabilities::session_broadcast::SessionBroadcast",
+        "use dim_agent_capabilities::session_broadcast::SessionBroadcastEvent",
+        "use dim_agent_capabilities::session_broadcast::session_channel"
+      ]
+    },
+    {
+      "from": "dim_session_title",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path SettingsScope::User",
+        "use dim_app_server::settings::SettingsScope"
+      ]
+    },
+    {
+      "from": "dim_session_title",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path AgentBuilder",
+        "use dim_agent_runtime::AgentBuilder"
+      ]
+    },
+    {
+      "from": "dim_session_title",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path CollaborationRole::Leader",
+        "path SessionConfig",
+        "path SessionIdentity",
+        "path SessionLifecycle",
+        "use dim_agent_runtime::CollaborationRole",
+        "use dim_agent_runtime::SessionConfig",
+        "use dim_agent_runtime::SessionIdentity",
+        "use dim_agent_runtime::SessionLifecycle"
+      ]
+    },
+    {
+      "from": "dim_session_title",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_session_title",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path PartRegistry",
+        "path PartScope::Session",
+        "use dim_agent_runtime::PartRegistry",
+        "use dim_agent_runtime::PartScope"
+      ]
+    },
+    {
+      "from": "dim_session_title",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ContentBlock::Text",
+        "use dim_agent_types::ContentBlock",
+        "use dim_agent_types::Message",
+        "use dim_agent_types::Role"
+      ]
+    },
+    {
+      "from": "dim_session_title",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path AgentEvent",
+        "path EventKind::ContextConfigured",
+        "path EventKind::InputApplied",
+        "path EventKind::InputMessage",
+        "path UserInput",
+        "use dim_agent_types::AgentEvent",
+        "use dim_agent_types::EventKind",
+        "use dim_agent_types::UserInput"
+      ]
+    },
+    {
+      "from": "dim_session_title",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path ModelId",
+        "use dim_agent_types::ModelId"
+      ]
+    },
+    {
+      "from": "dim_session_title",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path SettingsService",
+        "use dim_app_server::settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_session_title",
+      "to": "dim_app_server::settings::declared",
+      "references": [
+        "path SourceDeclaration",
+        "use dim_app_server::settings::SourceDeclaration"
+      ]
+    },
+    {
+      "from": "dim_session_title",
+      "to": "dim_app_server::storage::metadata",
+      "references": [
+        "path MetadataError",
+        "path MetadataError::Conflict",
+        "path MetadataError::NotFound",
+        "path MetadataError::Storage",
+        "path Title",
+        "path TitleSource::Auto",
+        "path TitleSource::Manual",
+        "use dim_app_server::storage::MetadataError",
+        "use dim_app_server::storage::Title",
+        "use dim_app_server::storage::TitleSource"
+      ]
+    },
+    {
+      "from": "dim_session_title",
+      "to": "dim_app_server::storage::timeline",
+      "references": [
+        "path SessionStore",
+        "use dim_app_server::storage::SessionStore"
       ]
     }
   ],

@@ -699,18 +699,6 @@ impl AgentIndex {
 /// object, calls the current index and replies with one envelope,
 /// `{ok: true, value}` or `{ok: false, error: {code, message, retryable}}`.
 pub(crate) struct SessionsService(pub(crate) Ctx);
-impl SessionsService {
-    pub(crate) async fn history(
-        &self,
-        request: HistoryRequest,
-    ) -> Result<HistoryPage, SessionsError> {
-        self.0
-            .get::<AgentIndex>()
-            .ok_or_else(|| SessionsError::reloading("the Agents index"))?
-            .history(request)
-            .await
-    }
-}
 impl HostDispatch for SessionsService {
     fn methods(&self) -> Option<serde_json::Value> {
         Some(json!({

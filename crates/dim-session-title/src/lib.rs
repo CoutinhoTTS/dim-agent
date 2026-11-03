@@ -1,22 +1,21 @@
-use crate::{
-    agents::{HistoryRequest, SessionsService},
-    settings::{SettingsScope, SettingsService, SourceDeclaration},
-    storage::{MetadataError, SessionStore, Title, TitleSource},
-};
 use dim_agent_capabilities::{
     host::{AuxiliaryModelHost, AuxiliaryRequest},
     methods::{Interruption, MethodDecl, RpcError, SessionMethods, reply},
     session_broadcast::{SessionBroadcast, SessionBroadcastEvent, session_channel},
 };
 use dim_agent_runtime::{
-    CollaborationRole, Names, PartRegistry, PartScope, SessionConfig, SessionIdentity,
-    SessionLifecycle,
+    AgentBuilder, CollaborationRole, Names, PartRegistry, PartScope, SessionConfig,
+    SessionIdentity, SessionLifecycle,
 };
-use dim_agent_types::{ContentBlock, EventKind, Message, ModelId, Role, UserInput};
+use dim_agent_types::{AgentEvent, ContentBlock, EventKind, Message, ModelId, Role, UserInput};
+use dim_app_server::{
+    settings::{SettingsScope, SettingsService, SourceDeclaration},
+    storage::{MetadataError, SessionStore, Title, TitleSource},
+};
 use regex::Regex;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
-use rutis_bridge::session::{Value as ServiceValue, arg, host_key, settle};
+use rutis_bridge::session::{HostDispatch, Value as ServiceValue, arg, host_key, settle};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -27,6 +26,11 @@ use std::{
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 const SOURCE: &str = "session-title";
+
+/// Installs SessionTitle in a host profile that provides Settings and SessionStore.
+pub fn install(builder: &mut AgentBuilder) {
+    builder.plugin(|names| Ok(Box::new(SessionTitlePlugin::new(names)?)));
+}
 pub const GENERATOR: &str = "sessionTitleGenerator";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -129,7 +133,7 @@ impl DynPlugin for SessionTitlePlugin {
 
 struct SessionTitle {
     settings: Key<SettingsService>,
-    sessions: Key<SessionsService>,
+    sessions: Key<dyn HostDispatch>,
     store: Key<SessionStore>,
     auxiliary: Key<AuxiliaryModelHost>,
     identity: Key<SessionIdentity>,
@@ -141,7 +145,7 @@ impl SessionTitle {
     fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
             settings: names.key()?,
-            sessions: names.key()?,
+            sessions: host_key("sessions"),
             store: names.key()?,
             auxiliary: names.key()?,
             identity: names.key()?,
@@ -264,7 +268,7 @@ struct Owner {
     ctx: Ctx,
     id: String,
     settings: Arc<SettingsService>,
-    sessions: Arc<SessionsService>,
+    sessions: Arc<dyn HostDispatch>,
     store: Arc<SessionStore>,
     auxiliary: Arc<AuxiliaryModelHost>,
     state: Mutex<State>,
@@ -298,12 +302,17 @@ impl Owner {
             let mut after = None;
             let mut through = None;
             loop {
-                let page = self.sessions.history(HistoryRequest {
-                    session_id: self.id.clone(), branch_id: "main".into(), after, through,
-                    at_least: through.is_none().then_some(sequence), limit: None,
-                }).await.map_err(|_| ())?;
-                through = Some(page.through);
-                for event in &page.events {
+                let call = self.sessions.invoke("history", json!([{
+                    "sessionId": self.id, "branchId":"main", "after":after, "through":through,
+                    "atLeast":through.is_none().then_some(sequence),
+                }]).into()).map_err(|_| ())?;
+                let mut page = settle(call).await.map_err(|_| ())?.json().map_err(|_| ())?;
+                if page["ok"] != true { return Err(()); }
+                let page = page.get_mut("value").ok_or(())?;
+                let head = page["through"].as_u64().ok_or(())?;
+                let events: Vec<AgentEvent> = serde_json::from_value(page["events"].take()).map_err(|_| ())?;
+                through = Some(head);
+                for event in &events {
                     match &event.kind {
                         EventKind::InputMessage(message) => {
                             if let Some(user) = &message.user {
@@ -319,9 +328,9 @@ impl Owner {
                         _ => {},
                     }
                 }
-                let Some(last) = page.events.last() else { break; };
+                let Some(last) = events.last() else { break; };
                 after = Some(last.sequence);
-                if last.sequence >= page.through { break; }
+                if last.sequence >= head { break; }
             }
             if !self.current(epoch) || !operator { return Ok("skipped"); }
             let Some(first) = first else { return Ok("skipped"); };

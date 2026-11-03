@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 
 type Request = (Value, oneshot::Sender<String>);
 type Generation = (
-    dim_app_server::session_title::GenerateTitleRequest,
+    dim_session_title::GenerateTitleRequest,
     oneshot::Sender<Value>,
 );
 
@@ -46,7 +46,7 @@ impl rutis::Plugin for GeneratorPlugin {
     }
     async fn apply(&self, ctx: &rutis::Ctx, (): ()) -> rutis::Result {
         ctx.provide_at(
-            rutis_bridge::session::host_key(dim_app_server::session_title::GENERATOR),
+            rutis_bridge::session::host_key(dim_session_title::GENERATOR),
             self.0.clone() as Arc<dyn rutis_bridge::session::HostDispatch>,
         )?;
         Ok(())
@@ -175,6 +175,7 @@ pub(super) async fn configure(client: &mut Client, document: Value) {
 
 fn title_builder(provider: &str) -> AgentBuilder {
     let mut builder = AgentBuilder::new(AgentConfig::default());
+    dim_session_title::install(&mut builder);
     defaults::install_with_prompt(
         &mut builder,
         Arc::new(dim_agent_capabilities::host::EmptyPromptHost),

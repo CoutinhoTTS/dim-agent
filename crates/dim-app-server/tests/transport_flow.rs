@@ -355,6 +355,9 @@ async fn launch_inner(
         uuid::Uuid::new_v4()
     )));
     let mut builder = AgentBuilder::new(AgentConfig::default());
+    if config.product_home.is_some() {
+        dim_session_title::install(&mut builder);
+    }
     builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
