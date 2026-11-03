@@ -673,6 +673,8 @@ impl AgentIndex {
         self.until_unloaded(async {
             let lease = self.acquire(&at.session_id).await?;
             let session = &lease.session;
+            #[cfg(feature = "testing")]
+            self.idle_admitted.notify_one();
             let idle = tokio::select! {
                 idle = session.idle(&at.branch_id) => idle,
                 _ = session.closed() => Err(AgentError::Closed(session.id().into())),
