@@ -64,6 +64,10 @@ pub enum McpServerError {
     /// A request refused before contacting the server during start backoff.
     #[error("MCP server failed to start; the next attempt is in {0} s")]
     StartCooldown(u64),
+    /// The server answered HTTP 404 to a request that carried a session id.
+    /// The request was not processed, so replaying it once is safe.
+    #[error("MCP session expired (HTTP 404)")]
+    SessionExpired,
     #[error("invalid MCP server response: {0}")]
     InvalidResponse(String),
     #[error("MCP cleanup failed")]
@@ -1035,6 +1039,22 @@ impl McpServer {
             .map_err(ViewFailure::error)
     }
 
+    /// Drop the connection a `404` used: its session is already gone, so
+    /// there is no graceful close to wait for. The generation check keeps a
+    /// caller that already reconnected from retiring the new session.
+    async fn expire(&self, generation: u64) {
+        let mut connection = self.connection.lock().await;
+        if self.generations.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        let Some(current) = connection.take() else {
+            return;
+        };
+        current.abandon().await;
+        self.set_failure(McpServerError::SessionExpired.to_string());
+        self.state.set(McpServerState::Disconnected);
+    }
+
     /// The request path every call shares, reporting whether the connection
     /// already held the request when it failed.
     async fn exchange(
@@ -1042,35 +1062,52 @@ impl McpServer {
         request: ClientRequest,
         cancel: &CancellationToken,
     ) -> std::result::Result<ServerResult, ViewFailure> {
-        let (peer, _generation) = self
-            .peer_with_generation(cancel)
-            .await
-            .map_err(ViewFailure::Refused)?;
-        if cancel.is_cancelled() {
-            return Err(ViewFailure::Refused(McpServerError::Cancelled));
-        }
-        let mut handle = peer
-            .send_cancellable_request(request, PeerRequestOptions::no_options())
-            .await
-            .map_err(|_| ViewFailure::Refused(McpServerError::RequestFailed))?;
-        let failure = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => McpServerError::Cancelled,
-            _ = tokio::time::sleep(Duration::from_secs(60)) => McpServerError::Timeout,
-            response = &mut handle.rx => {
-                return match response {
-                    Err(_) => Err(ViewFailure::Unanswered(McpServerError::RequestFailed)),
-                    Ok(response) => response
-                        .map_err(|error| ViewFailure::Unanswered(self.request_failure(&error))),
-                };
+        let mut retried = false;
+        loop {
+            let (peer, generation) = self
+                .peer_with_generation(cancel)
+                .await
+                .map_err(ViewFailure::Refused)?;
+            if cancel.is_cancelled() {
+                return Err(ViewFailure::Refused(McpServerError::Cancelled));
             }
-        };
-        let _ = tokio::time::timeout(
-            Duration::from_secs(5),
-            handle.cancel(Some("MCP operation cancelled".into())),
-        )
-        .await;
-        Err(ViewFailure::Unanswered(failure))
+            let mut handle = peer
+                .send_cancellable_request(request.clone(), PeerRequestOptions::no_options())
+                .await
+                .map_err(|_| ViewFailure::Refused(McpServerError::RequestFailed))?;
+            let failure = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => McpServerError::Cancelled,
+                _ = tokio::time::sleep(Duration::from_secs(60)) => McpServerError::Timeout,
+                response = &mut handle.rx => {
+                    match response {
+                        Err(_) => McpServerError::RequestFailed,
+                        Ok(Ok(response)) => return Ok(response),
+                        Ok(Err(error)) => {
+                            let failure = self.request_failure(&error);
+                            if matches!(failure, McpServerError::SessionExpired) {
+                                // The server did not process a request that
+                                // carried the expired session id, so one replay
+                                // on a fresh session is safe. A second 404 in a
+                                // row fails the call.
+                                self.expire(generation).await;
+                                if !retried {
+                                    retried = true;
+                                    continue;
+                                }
+                            }
+                            return Err(ViewFailure::Unanswered(failure));
+                        }
+                    }
+                }
+            };
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                handle.cancel(Some("MCP operation cancelled".into())),
+            )
+            .await;
+            return Err(ViewFailure::Unanswered(failure));
+        }
     }
 
     /// Authorization outcomes of a request, from the transport's own error.
@@ -1089,6 +1126,9 @@ impl McpServer {
                     error.required_scope.clone().unwrap_or_default(),
                 );
             }
+            Some(HttpError::SessionExpired) => {
+                return McpServerError::SessionExpired;
+            }
             _ => {}
         }
         match error.error.downcast_ref::<McpServerError>() {
@@ -1096,6 +1136,7 @@ impl McpServer {
             Some(McpServerError::InsufficientScope(scopes)) => {
                 McpServerError::InsufficientScope(scopes.clone())
             }
+            Some(McpServerError::SessionExpired) => McpServerError::SessionExpired,
             _ => McpServerError::RequestFailed,
         }
     }

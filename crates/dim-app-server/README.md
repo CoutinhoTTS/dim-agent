@@ -137,7 +137,9 @@ not the user source.
   HTTP status; it is status only and never enters a model request. A closed connection starts
   again on its next use. A failed start waits for a cooldown that doubles from 1 second to 5
   minutes and resets after a connection succeeds; `failed` is reported only while that cooldown
-  holds, and discovery starts a failed server again after each cooldown. These are existing
+  holds, and discovery starts a failed server again after each cooldown. A remote server that
+  answers HTTP 404 to a request carrying its session id starts a new session and the request is
+  replayed once; a second 404 in a row fails the call. These are existing
   connection generations, not a host-global connection state. Inspection does not connect or
   contact the server.
 - `mcp.test` probes one configuration without attaching a Session; the

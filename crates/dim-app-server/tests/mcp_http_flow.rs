@@ -155,6 +155,11 @@ struct Remote {
     release_delete: Notify,
     repeating: AtomicBool,
     nullable: AtomicBool,
+    session: AtomicUsize,
+    session_check: AtomicBool,
+    expire_once: AtomicBool,
+    expire_always: AtomicBool,
+    grown: AtomicBool,
     events: broadcast::Sender<String>,
 }
 impl Remote {
@@ -170,6 +175,11 @@ impl Remote {
             release_delete: Notify::new(),
             repeating: AtomicBool::new(false),
             nullable: AtomicBool::new(false),
+            session: AtomicUsize::new(0),
+            session_check: AtomicBool::new(false),
+            expire_once: AtomicBool::new(false),
+            expire_always: AtomicBool::new(false),
+            grown: AtomicBool::new(false),
             events: broadcast::channel(16).0,
         })
     }
@@ -182,9 +192,22 @@ async fn rpc(
     if headers.get("authorization").and_then(|h| h.to_str().ok()) != Some("Bearer fixture-only") {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let result = match message["method"].as_str().unwrap() {
+    let method = message["method"].as_str().unwrap();
+    let checked = remote.session_check.load(Ordering::SeqCst);
+    let current_session = format!("s{}", remote.session.load(Ordering::SeqCst));
+    if checked
+        && method != "initialize"
+        && method != "notifications/initialized"
+        && headers.get("mcp-session-id").and_then(|h| h.to_str().ok())
+            != Some(current_session.as_str())
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let mut response_session = current_session;
+    let result = match method {
         "initialize" => {
             remote.initializes.fetch_add(1, Ordering::SeqCst);
+            response_session = format!("s{}", remote.session.fetch_add(1, Ordering::SeqCst) + 1);
             json!({"protocolVersion":message["params"]["protocolVersion"],"capabilities":{"tools":{"listChanged":true}},"serverInfo":{"name":"local-mcp","version":"1"}})
         }
         "notifications/initialized" => return StatusCode::ACCEPTED.into_response(),
@@ -207,6 +230,16 @@ async fn rpc(
                 if remote.nullable.load(Ordering::SeqCst) {
                     tools.push(json!({"name":"spaces","inputSchema":{"type":"object","properties":{"space_id":{"type":["string","null"]}}}}));
                 }
+                if checked {
+                    tools.push(json!({"name":"expire-once","inputSchema":{"type":"object"}}));
+                    tools.push(json!({"name":"expire-always","inputSchema":{"type":"object"}}));
+                }
+                if checked
+                    && remote.grown.load(Ordering::SeqCst)
+                    && remote.initializes.load(Ordering::SeqCst) >= 2
+                {
+                    tools.push(json!({"name":"grown","inputSchema":{"type":"object"}}));
+                }
                 json!({"tools":tools,"nextCursor":"next"})
             }
         }
@@ -214,6 +247,20 @@ async fn rpc(
             remote.calls.fetch_add(1, Ordering::SeqCst);
             match message["params"]["name"].as_str().unwrap() {
                 "expire" => return StatusCode::NOT_FOUND.into_response(),
+                "expire-once" if remote.expire_once.swap(false, Ordering::SeqCst) => {
+                    remote.session.fetch_add(1, Ordering::SeqCst);
+                    return StatusCode::NOT_FOUND.into_response();
+                }
+                "expire-once" => {
+                    json!({"content":[{"type":"text","text":"expired-once"}]})
+                }
+                "expire-always" if remote.expire_always.load(Ordering::SeqCst) => {
+                    remote.session.fetch_add(1, Ordering::SeqCst);
+                    return StatusCode::NOT_FOUND.into_response();
+                }
+                "expire-always" => {
+                    json!({"content":[{"type":"text","text":"expired-always"}]})
+                }
                 "slow" => {
                     remote.slow.notify_one();
                     remote.release_call.notified().await;
@@ -235,7 +282,11 @@ async fn rpc(
         )
             .into_response()
     } else {
-        ([("mcp-session-id", "fixture-session")], Json(response)).into_response()
+        (
+            [("mcp-session-id", response_session.as_str())],
+            Json(response),
+        )
+            .into_response()
     }
 }
 async fn events(State(remote): State<Arc<Remote>>) -> impl IntoResponse {
@@ -486,19 +537,6 @@ async fn http_plugin_discovers_calls_cancels_and_drains_the_remote_session() {
         Err(McpServerError::Cancelled)
     ));
     assert_eq!(remote.cancelled.load(Ordering::SeqCst), 1);
-    let count = remote.calls.load(Ordering::SeqCst);
-    assert!(
-        connection
-            .call("expire".into(), Default::default(), &cancel)
-            .await
-            .is_err()
-    );
-    assert_eq!(remote.calls.load(Ordering::SeqCst), count + 1);
-    assert_eq!(
-        remote.initializes.load(Ordering::SeqCst),
-        1,
-        "404 must not replay initialization or the tool"
-    );
     let closing = {
         let mcp = fixture.mcp.clone();
         tokio::spawn(async move {
@@ -1152,6 +1190,105 @@ async fn a_failed_restart_replaces_the_reason_and_keeps_it_after_the_cooldown() 
     let failure = connection.failure().expect("the reason stays");
     assert!(failure.contains("restart-failure"), "{failure}");
     fixture.close().await;
+}
+
+#[tokio::test]
+async fn an_expired_http_session_reconnects_and_retries_once() {
+    let remote = Remote::new();
+    remote.session_check.store(true, Ordering::SeqCst);
+    remote.expire_once.store(true, Ordering::SeqCst);
+    remote.grown.store(true, Ordering::SeqCst);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let stop = CancellationToken::new();
+    let server = tokio::spawn(
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/mcp", post(rpc).get(events).delete(delete))
+                .with_state(remote.clone()),
+        )
+        .with_graceful_shutdown(stop.clone().cancelled_owned())
+        .into_future(),
+    );
+    let fixture = Fixture::new(&url, "fixture-only").await;
+    let cancel = CancellationToken::new();
+    let connection = fixture
+        .mcp
+        .server(None, "docs".into(), &cancel)
+        .await
+        .unwrap();
+    let before = connection.generation();
+    let result = connection
+        .call(
+            "expire-once".into(),
+            json!({}).as_object().unwrap().clone(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let ToolContent::Blocks(content) = result.content else {
+        panic!("expected blocks")
+    };
+    assert_eq!(
+        content,
+        vec![ContentBlock::Text {
+            text: "expired-once".into()
+        }]
+    );
+    assert_eq!(remote.initializes.load(Ordering::SeqCst), 2);
+    assert_eq!(remote.calls.load(Ordering::SeqCst), 2);
+    assert!(connection.generation() > before);
+    let tools = connection.tools(&cancel).await.unwrap();
+    assert!(tools.iter().any(|tool| tool.name == "grown"));
+    fixture.close().await;
+    stop.cancel();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn a_second_http_404_fails_without_a_third_attempt() {
+    let remote = Remote::new();
+    remote.session_check.store(true, Ordering::SeqCst);
+    remote.expire_always.store(true, Ordering::SeqCst);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let stop = CancellationToken::new();
+    let server = tokio::spawn(
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/mcp", post(rpc).get(events).delete(delete))
+                .with_state(remote.clone()),
+        )
+        .with_graceful_shutdown(stop.clone().cancelled_owned())
+        .into_future(),
+    );
+    let fixture = Fixture::new(&url, "fixture-only").await;
+    let cancel = CancellationToken::new();
+    let connection = fixture
+        .mcp
+        .server(None, "docs".into(), &cancel)
+        .await
+        .unwrap();
+    connection.tools(&cancel).await.unwrap();
+    let before = connection.generation();
+    assert!(matches!(
+        connection
+            .call(
+                "expire-always".into(),
+                json!({}).as_object().unwrap().clone(),
+                &cancel
+            )
+            .await,
+        Err(McpServerError::SessionExpired)
+    ));
+    assert_eq!(remote.initializes.load(Ordering::SeqCst), 2);
+    assert_eq!(remote.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(connection.generation(), before + 1);
+    fixture.close().await;
+    stop.cancel();
+    server.await.unwrap().unwrap();
 }
 
 #[tokio::test]

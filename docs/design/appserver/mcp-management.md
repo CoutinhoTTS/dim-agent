@@ -185,6 +185,10 @@ that failed.
   such a server as `disconnected`, with the reason as its `message`. A failed start is `failed`
   only while its cooldown holds; the cooldown moves it to `disconnected`, and discovery starts
   the server again after each cooldown. The reason stays until a connection succeeds.
+- A remote server that answers HTTP 404 to a request carrying its session id ended that session
+  without processing the request: the connection starts a new session and the request is
+  replayed once. A second 404 in a row fails the call. The replacement is a new connection
+  generation, so a Session republishes its tool list.
 - `mcp.test` is a one-shot diagnostic: it contacts the server for a saved entry or a draft and
   reports one terminal outcome. It attaches no Session, publishes no tool, registers no
   connection and writes no configuration, so it says nothing about what runs.

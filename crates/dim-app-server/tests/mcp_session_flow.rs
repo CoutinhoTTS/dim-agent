@@ -59,6 +59,14 @@ struct Remote {
     /// ends.
     app_hold: AtomicBool,
     app_called: Notify,
+    /// The session id the server currently accepts.
+    session: AtomicUsize,
+    /// Rejects a request that carries another session id with HTTP 404.
+    session_check: AtomicBool,
+    /// Expires the session once on `lookup/item`.
+    expire_once: AtomicBool,
+    /// Adds a tool when the client has connected a second time.
+    grown: AtomicBool,
 }
 impl Remote {
     fn new() -> Arc<Self> {
@@ -78,6 +86,10 @@ impl Remote {
             widgets: AtomicUsize::new(0),
             app_hold: AtomicBool::new(false),
             app_called: Notify::new(),
+            session: AtomicUsize::new(0),
+            session_check: AtomicBool::new(false),
+            expire_once: AtomicBool::new(false),
+            grown: AtomicBool::new(false),
         })
     }
 }
@@ -89,9 +101,21 @@ async fn rpc(
     let Some(id) = body.get("id") else {
         return StatusCode::ACCEPTED.into_response();
     };
-    let result = match body["method"].as_str().unwrap() {
+    let method = body["method"].as_str().unwrap();
+    let checked = remote.session_check.load(Ordering::SeqCst);
+    let current_session = format!("s{}", remote.session.load(Ordering::SeqCst));
+    if checked
+        && method != "initialize"
+        && headers.get("mcp-session-id").and_then(|h| h.to_str().ok())
+            != Some(current_session.as_str())
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let mut response_session = current_session;
+    let result = match method {
         "initialize" => {
             remote.initializes.fetch_add(1, Ordering::SeqCst);
+            response_session = format!("s{}", remote.session.fetch_add(1, Ordering::SeqCst) + 1);
             json!({"protocolVersion":"2025-03-26","capabilities":{"tools":{"listChanged":true}},"serverInfo":{"name":"session-test","version":"1"}})
         }
         "tools/list" => {
@@ -122,6 +146,12 @@ async fn rpc(
                 tools.push(json!({"name":"refresh","description":"Refresh the view","inputSchema":{"type":"object"},"_meta":{"ui":{"visibility":["app"]}}}));
                 tools.push(json!({"name":"summary","description":"Summarize","inputSchema":{"type":"object"},"_meta":{"ui":{"visibility":["model"]}}}));
             }
+            if checked
+                && remote.grown.load(Ordering::SeqCst)
+                && remote.initializes.load(Ordering::SeqCst) >= 2
+            {
+                tools.push(json!({"name":"grown","description":"Appeared after reconnect","inputSchema":{"type":"object"}}));
+            }
             json!({"tools":tools})
         }
         "resources/read" => {
@@ -145,6 +175,12 @@ async fn rpc(
                 .lock()
                 .unwrap()
                 .push(body["params"]["name"].as_str().unwrap().into());
+            if body["params"]["name"] == "lookup/item"
+                && remote.expire_once.swap(false, Ordering::SeqCst)
+            {
+                remote.session.fetch_add(1, Ordering::SeqCst);
+                return StatusCode::NOT_FOUND.into_response();
+            }
             if body["params"]["name"] == "chart" {
                 if remote.app_hold.load(Ordering::SeqCst) {
                     remote.app_called.notify_waiters();
@@ -174,7 +210,7 @@ async fn rpc(
     let mut response = Json(json!({"jsonrpc":"2.0","id":id,"result":result})).into_response();
     response
         .headers_mut()
-        .insert("mcp-session-id", "fixture".parse().unwrap());
+        .insert("mcp-session-id", response_session.parse().unwrap());
     response
 }
 async fn delete(State(remote): State<Arc<Remote>>) -> StatusCode {
@@ -2308,5 +2344,47 @@ async fn a_cooldown_error_reaches_the_tool_result_without_stderr() {
         !messages.contains("restart-failure"),
         "no stderr tail enters a model request"
     );
+    env.close().await;
+}
+
+#[tokio::test]
+async fn an_expired_session_is_a_new_generation_with_a_new_tool_list() {
+    let env = Env::new().await;
+    let session = env.session(true, PermissionPreset::FullAccess).await;
+    let before = ready(&session).await;
+    let mcp = session.session_service::<McpSession>().unwrap();
+    let mut changed = mcp.subscribe();
+    env.remote.session_check.store(true, Ordering::SeqCst);
+    env.remote.grown.store(true, Ordering::SeqCst);
+    env.remote.expire_once.store(true, Ordering::SeqCst);
+    env.turn(
+        &session,
+        Action::Call {
+            pause: false,
+            name: None,
+        },
+    )
+    .await;
+    assert!(results(&session).await.last().unwrap().contains("one:8"));
+    let after = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(McpSourceState::Ready { version }) =
+                changed.borrow_and_update().servers.get("docs")
+                && version != &before
+            {
+                return version.clone();
+            }
+            changed.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("a new connection republishes the tool list");
+    assert_ne!(before, after);
+    adopted(&session, Some(&after)).await;
+    env.turn(&session, Action::Text).await;
+    let request = env.model.requests.lock().unwrap().last().unwrap().clone();
+    let grown = declared(request.tools.as_deref().unwrap(), "grown");
+    assert!(grown.name.starts_with("mcp_docs_"));
+    assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 2);
     env.close().await;
 }
