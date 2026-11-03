@@ -8194,6 +8194,74 @@ async fn a_query_selects_kinds_flags_and_a_predicate_from_sqlite() {
     db.close().await.unwrap();
 }
 
+/// The start is a bound on every read, not only on the by-id one: both stores
+/// begin at it, so a page of the branch after a position is the same page.
+#[tokio::test]
+async fn a_query_begins_at_its_start_in_both_stores() {
+    use dim_agent_runtime::TimelineQueryScope::Branch;
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store: std::sync::Arc<dyn TimelineStore> = SqliteTimelineStore::new(db.clone());
+    let memory_store: std::sync::Arc<dyn TimelineStore> =
+        std::sync::Arc::new(dim_agent_runtime::MemoryTimelineStore::default());
+    for target in [store.clone(), memory_store.clone()] {
+        target
+            .create_session("query", &SessionConfig::default())
+            .await
+            .unwrap();
+        for sequence in 1..=4u64 {
+            publish_records(
+                &target,
+                key("query", "main"),
+                vec![query_record(
+                    sequence,
+                    sequence,
+                    &format!("fact-{sequence}"),
+                    delta(&format!("d{sequence}")),
+                )],
+            )
+            .await;
+        }
+    }
+    let sqlite = Timeline::restore(
+        rutis::Ctx::root().unwrap(),
+        key("query", "main"),
+        vec![],
+        store.clone(),
+    )
+    .await
+    .unwrap();
+    let memory = Timeline::restore(
+        rutis::Ctx::root().unwrap(),
+        key("query", "main"),
+        vec![],
+        memory_store,
+    )
+    .await
+    .unwrap();
+
+    let mut request = query(Branch, 8);
+    request.from_sequence = Some(3);
+    let from_sqlite = sqlite.query(request.clone()).await.unwrap();
+    let from_memory = memory.query(request).await.unwrap();
+    assert_eq!(query_ids(&from_sqlite), ["fact-3", "fact-4"], "sqlite");
+    assert_eq!(query_ids(&from_memory), ["fact-3", "fact-4"], "memory");
+
+    let mut skipped = query(Branch, 8);
+    skipped.from_sequence = Some(3);
+    skipped.offset = 1;
+    let from_sqlite = sqlite.query(skipped.clone()).await.unwrap();
+    let from_memory = memory.query(skipped).await.unwrap();
+    assert_eq!(
+        query_ids(&from_sqlite),
+        ["fact-4"],
+        "the skip counts from the start"
+    );
+    assert_eq!(query_ids(&from_memory), ["fact-4"]);
+    db.close().await.unwrap();
+}
+
 /// `1`, `1.0` and `true` are three values: a predicate that compares with one
 /// of them must not spend its page on the other two, or a page of one fact
 /// comes back empty and the caller reads that as the end of the selection.

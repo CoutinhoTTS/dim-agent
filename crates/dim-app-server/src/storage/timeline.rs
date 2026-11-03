@@ -3606,7 +3606,7 @@ impl TimelineStore for SqliteTimelineStore {
             let offset = usize::try_from(query.offset).unwrap_or(usize::MAX);
             let limit = usize::try_from(query.limit.get()).unwrap_or(usize::MAX);
             let rows = u64::try_from(offset.saturating_add(limit)).unwrap_or(u64::MAX);
-            let records = self.query_page(key, query, 1..=through, rows).await?;
+            let records = self.query_page(key, query, from..=through, rows).await?;
             let skipped = records.len().min(offset);
             let page: Vec<StoredEvent> = records.into_iter().skip(skipped).take(limit).collect();
             Ok(TimelineQueryPage {

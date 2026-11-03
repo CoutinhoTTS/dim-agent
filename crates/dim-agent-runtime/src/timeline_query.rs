@@ -186,6 +186,11 @@ impl TimelineQuery {
                 "a read begins at an event id or a sequence, not both".into(),
             ));
         }
+        if self.from_sequence.is_some() && self.scope == TimelineQueryScope::Chain {
+            return Err(AgentError::InvalidInput(
+                "a chain read begins at an event id, which names its segment".into(),
+            ));
+        }
         if self.from_sequence == Some(0) {
             return Err(AgentError::InvalidInput(
                 "timeline sequences start at 1".into(),
