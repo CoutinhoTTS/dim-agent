@@ -34,9 +34,22 @@ written to the terminal remains append-only; fullscreen redraws retained history
 
 ## Command menu
 
-In both scrollback and fullscreen TUI, group commands by category and sort
-categories and command names alphabetically by their canonical English identifiers.
-Search relevance takes priority; equally ranked matches use the same category/name order.
+In both scrollback and fullscreen TUI, list commands in a fixed task order:
+Session, model and permissions, extensions and automation, view, then app.
+Within each category use the following order, not alphabetical or recent-use order:
+
+| Category | Commands in order |
+| --- | --- |
+| `session` | `/new`, `/resume`, `/timeline`, `/goal`, `/tasks`, `/lines`, `/branch`, `/fork`, `/compact`, `/usage`, `/rename`, `/web` |
+| `model` | `/models`, `/agent`, `/effort`, `/fast`, `/permissions`, `/connect`, `/login` |
+| `extensions` | `/skills`, `/mcp`, `/plugins`, `/hooks`, `/scheduled`, `/workflow`, `/workflow:save`, `/reload-skills`, `/runtime` |
+| `view` | `/theme`, `/language`, `/tools`, `/tui` |
+| `app` | `/settings`, `/keys`, `/exit` |
+
+`/fast` is listed only when the model advertises service tiers.
+Search relevance takes priority; equally ranked matches keep this task order.
+The order is independent of the interface language. Opening `/` selects `/new`;
+`/exit` is last in the unfiltered command list.
 Exit requires its exact name or alias before dispatch: choosing an
 incomplete match fills the command name and keeps the composer open. Exact typed
 commands, including hidden commands, retain their own dispatch behavior.
@@ -47,7 +60,8 @@ picking an earlier message and scrolling to the top or bottom are also omitted;
 `Tab`, `Home` and `End` retain their bindings.
 
 The menu fits the available terminal columns and rows in both modes. Command
-names take priority over descriptions and shortcut labels; a shortcut that
+names take priority over category labels, descriptions and shortcut labels;
+category labels shorten when needed to preserve command names. A shortcut that
 would crowd out its command name is omitted from the row, without changing
 the binding. On short screens, fewer commands are shown and the window follows
 the selection. Scrollback keeps the command draft visible above the menu and
@@ -64,12 +78,15 @@ discarding text. Otherwise the usual history reservation is retained.
 
 ```text
 Commands
-  app     /exit        exit
-  app     /keys        show the key bindings
-  model   /permissions   file access, tool approval, process isolation and command rules
-  session /rename      rename this session
+  session /new         start a new session
+  session /resume      resume a previous session
+  session /timeline    jump to a message of the shown line
+  session /goal        follow or change the shown line's goal
+  session /tasks       view command output or interrupt a member
+  session /lines       follow, talk to and end this session's lines
 
-/ + Enter          -> /exit (completion only)
+/ + Enter          -> start a new session
+/ex + Enter        -> /exit (completion only)
 /exit + Enter      -> exit
 /permissions + Enter -> permission controls
 ```
@@ -78,10 +95,10 @@ Commands
 Fullscreen, 8 rows             Scrollback, 8 rows
 +- Command Palette -------+
 | >                       |   +- input -----------------+
-| app /exit               |   | > /                     |
+| session /new            |   | > /                     |
 +-------------------------+   +-------------------------+
                               +-------------------------+
-+- input -----------------+   | app /exit               |
++- input -----------------+   | session /new            |
 |                         |   +-------------------------+
 +-------------------------+   AGENT
 ```

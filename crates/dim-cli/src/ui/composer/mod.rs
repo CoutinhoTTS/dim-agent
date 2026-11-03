@@ -1947,11 +1947,10 @@ mod tests {
         let mut c = Composer::new(Vec::new());
         typed(&mut c, "/");
         assert!(c.palette_open());
-        typed(&mut c, "exit");
         assert_eq!(
             c.handle_key(key(KeyCode::Enter)),
             Outcome::Command {
-                name: "exit".into(),
+                name: "new".into(),
                 args: String::new()
             }
         );
@@ -1960,7 +1959,7 @@ mod tests {
 
     #[test]
     fn palette_requires_an_exact_exit_before_dispatch() {
-        for query in ["/", "/e", "/ex"] {
+        for query in ["/ex", "/qui"] {
             let mut c = Composer::new(Vec::new());
             typed(&mut c, query);
             assert_eq!(c.handle_key(key(KeyCode::Enter)), Outcome::Handled);
@@ -1969,10 +1968,13 @@ mod tests {
         for query in ["/exit", "/quit"] {
             let mut c = Composer::new(Vec::new());
             typed(&mut c, query);
-            assert!(matches!(
+            assert_eq!(
                 c.handle_key(key(KeyCode::Enter)),
-                Outcome::Command { .. }
-            ));
+                Outcome::Command {
+                    name: "exit".into(),
+                    args: String::new()
+                }
+            );
         }
     }
 
