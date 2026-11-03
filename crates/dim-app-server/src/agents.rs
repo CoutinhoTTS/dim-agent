@@ -8,7 +8,8 @@ use crate::{
 use dim_agent_capabilities::host::ModelSelectionHost;
 use dim_agent_runtime::{
     AGENT_GROUP, Agent, AgentBuilder, AgentError, CollaborationRole, InUse, Modules, Names,
-    NoConfig, Session, SessionConfig, TimelineKey,
+    NoConfig, Session, SessionConfig, TimelineKey, TimelineQuery, TimelineQueryDirection,
+    TimelineQueryOrderBy, TimelineQueryScope,
 };
 pub use dim_agent_types::AgentProfile;
 use dim_agent_types::{ContentBlock, EventKind};
@@ -22,6 +23,7 @@ use rutis_loader::edit::InstanceResult;
 use rutis_loader::resolve::Build;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    num::NonZeroU64,
     path::{Component, Path},
     sync::{
         Arc, Mutex, OnceLock,
@@ -355,7 +357,8 @@ impl AgentIndex {
             .then(|| self.ctx.get()?.get::<ModelSelectionHost>())
             .flatten()
     }
-    const SUMMARY_SCAN_LIMIT: usize = 256;
+    /// How many `input/message` facts a session summary's preview scan keeps.
+    const SUMMARY_SCAN_LIMIT: u64 = 256;
     const SUMMARY_PREVIEW_CHARS: usize = 120;
     /// Process Session defaults that Agent profiles apply on top of.
     pub fn session_defaults(&self) -> &SessionConfig {
@@ -1001,11 +1004,23 @@ impl AgentIndex {
         through: u64,
         created_at: u64,
     ) -> dim_agent_runtime::Result<(Option<String>, u64)> {
+        let inputs = TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            from_event: None,
+            from_sequence: None,
+            order_by: TimelineQueryOrderBy::Sequence,
+            direction: TimelineQueryDirection::Ascending,
+            kinds: vec!["input/message".into()],
+            flags: Vec::new(),
+            event_id: None,
+            predicate: None,
+            limit: NonZeroU64::new(Self::SUMMARY_SCAN_LIMIT)
+                .expect("a summary scan keeps at least one input"),
+            offset: 0,
+        };
         let loaded = match self.session(id) {
             Some((_, session)) => match async {
-                let events = session
-                    .local_page("main", 0, Self::SUMMARY_SCAN_LIMIT, through)
-                    .await?;
+                let events = session.query("main", inputs.clone()).await?.events;
                 let last = session.local("main", through..=through).await?.pop();
                 Ok::<_, AgentError>((events, last))
             }
@@ -1026,18 +1041,18 @@ impl AgentIndex {
                 .session_store
                 .as_ref()
                 .ok_or_else(|| AgentError::Closed(id.into()))?;
+            let key = TimelineKey {
+                session_id: id.into(),
+                branch_id: "main".into(),
+            };
             let events = store
-                .read_page_without_request_bodies(id, 0, Self::SUMMARY_SCAN_LIMIT, through)
-                .await?;
+                .timeline_store()
+                .query(&key, &inputs, 1, through)
+                .await?
+                .events;
             let last = store
                 .timeline_store()
-                .read(
-                    &TimelineKey {
-                        session_id: id.into(),
-                        branch_id: "main".into(),
-                    },
-                    through..=through,
-                )
+                .read(&key, through..=through)
                 .await?
                 .pop()
                 .map(|record| record.event);
