@@ -24,6 +24,7 @@ pub mod permission_rules;
 mod pipe_client;
 pub mod plugin_files;
 pub mod plugin_manager;
+pub mod prompt_suggestion_settings;
 pub mod protocol;
 pub mod provider;
 pub mod runtime_manager;
@@ -528,7 +529,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         let legacy = config.file_roots[index].join("host-isolation.json");
         if legacy.is_file() {
             eprintln!(
-                "Ignoring {}: command isolation is a user setting in /permissions > Process isolation; delete the file.",
+                "Ignoring {}: command isolation is a user setting in /settings > Process isolation; delete the file.",
                 legacy.display()
             );
         }
@@ -735,6 +736,14 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             Ok(Box::new(execution_settings::ExecutionSettingsPlugin::new(
                 names,
             )?))
+        })?);
+        dim_agent_runtime::names::register::<
+            dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettingsHost,
+        >(builder.catalog_mut(), None);
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            Ok(Box::new(
+                prompt_suggestion_settings::PromptSuggestionSettingsPlugin::new(names)?,
+            ))
         })?);
         rows.push(register_part(
             &mut builtins,
