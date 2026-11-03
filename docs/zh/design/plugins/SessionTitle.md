@@ -47,9 +47,11 @@ atLeast 与 through，直接使用原生 HistoryPage/AgentEvent。S2 稳定目�
 注册 Session 部分，每个 Session 挂载一份副本。该部分注入
 `sessionMethods`，并在 `apply` 中把 `session.rename` 注册到它；它不提供服务。
 插件仅依赖 Settings 与 SessionStore 的既有公开 Rust 绑定；历史回复在本插件的命名服务边界解析一次。插件行为与跨插件标题流程位于插件 crate 的 tests，使用公开客户端与宿主 API；App Server 测试不依赖该 crate，也不隐式安装标题插件。`apply` 读取 Session 标识和创建配置，
-登记观察/清理，不启动异步初始化任务；创建配置不可变。同一部分声明全部依赖：进程服务
+登记观察/清理，不启动异步初始化任务；创建配置不可变。同一部分注入必需依赖：进程服务
 `sessions`、`settings`、`sessionMetadata` 和 `auxiliaryModel`，以及 Session 服务 `sessionIdentity`、
-`sessionConfig`、`sessionLifecycle` 和 `sessionMethods`。产品装配独立于外语插件行安装原生插件。
+`sessionConfig`、`sessionLifecycle` 和 `sessionMethods`。可选的 `sessionTitleGenerator`
+遵循[必需/可选绑定契约](../rutis-usage.md#3-按名字的服务)，在使用时按名字读取，不注入，也不影响 Ready。
+产品装配独立于外语插件行安装原生插件。
 必需服务的提供者缺失时，依照既有依赖规则仅影响 SessionTitle 的可用性，不影响 Session 的执行能力。
 
 固定快照止于返回的 T，不承诺恰好止于 N。第一条被采用的操作者输入提供文本；model=null
@@ -254,7 +256,7 @@ revision 检查就是复检：手动标题总是胜出。
 | 原则 §4 第 9 条（只有后续决定要用的事实才进 Timeline） | 标题是 SessionStore 的进程级状态：不进 Timeline，通过 `setTitle` 修改，以 Session 广播通知送达 UI。 |
 | 原则 §1（Capability 与 App Server 边界） | SessionTitle 是 Session 部分，不注入 Dispatcher 或 Timeline，因此不属于 Capability；Rpc 只分派 `session.rename`，并从 SessionStore 读取标题字段。 |
 | ADR 002 D1（作用域跟随状态） | Session 作用域：标题属于 Session；存储的标题归 SessionStore。 |
-| ADR 002 D2（不设接线模块） | 没有接线模块；所有依赖都是声明的服务。 |
+| ADR 002 D2（不设接线模块） | 没有接线模块；必需服务注入，可选生成器依绑定契约在使用时读取。 |
 | ADR 002 D3（依赖跟随作用域） | 依赖位于 Session 或外层进程作用域；它们重载会取消生成，这是可接受的。 |
 | ADR 002 D4（结构配置与业务配置分离） | 包安装/启用属于结构配置；A.3 的用户级 `session-title` 来源拥有业务配置，使用时读取，不重载原行。 |
 | ADR 002 D5（合同语言中立） | 契约语言中立；Rust 形式见附录 G。 |

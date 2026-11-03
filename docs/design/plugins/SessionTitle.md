@@ -58,9 +58,12 @@ and registers the Session part; each Session mounts a copy. The part injects
 it does not start an asynchronous initialization job. Its creation configuration is immutable.
 The plugin depends on the existing public Rust Settings and SessionStore bindings; it does not expose or alter their implementations. Named history replies are decoded once at this plugin boundary. Plugin behavior and cross-plugin title flows live in this crate's tests and use the public client and host APIs. App Server tests have no dependency on this crate and install no title plugin implicitly.
 
-The part declares all its dependencies: the process services `sessions`,
+The part injects its required dependencies: the process services `sessions`,
 `settings`, `sessionMetadata` and `auxiliaryModel`, and the Session services `sessionIdentity`,
-`sessionConfig`, `sessionLifecycle` and `sessionMethods`. The product assembly installs the native
+`sessionConfig`, `sessionLifecycle` and `sessionMethods`. The optional `sessionTitleGenerator`
+is read by name when used, without injection or a readiness gate, under the
+[required/optional binding contract](../rutis-usage.md#3-services-by-name).
+The product assembly installs the native
 plugin independently of foreign plugin rows. Missing required service providers affect only SessionTitle's
 availability under the existing dependency rules, not the Session's execution capabilities.
 
@@ -282,7 +285,7 @@ The first input's text is sent only to the generation paths selected by §3.3: a
 | Principles §4 rule 9 (only facts later decisions use) | The title is process-level SessionStore state: it never enters the Timeline, changes through `setTitle` and reaches UIs as a Session broadcast notice. |
 | Principles §1 (Capability and App Server boundary) | SessionTitle is a Session part, not a Capability: it injects neither Dispatcher nor Timeline; Rpc only dispatches `session.rename` and reads title fields from SessionStore. |
 | ADR 002 D1 (scope follows state) | Session scope: the title belongs to the Session; the stored title is SessionStore's. |
-| ADR 002 D2 (no wiring modules) | No wiring module; all dependencies are declared services. |
+| ADR 002 D2 (no wiring modules) | No wiring module; required services are injected, and the optional generator is read at use under the binding contract. |
 | ADR 002 D3 (dependencies follow scope) | Dependencies are in the Session or enclosing process scope; their reload cancels a generation, which is accepted. |
 | ADR 002 D4 (structural vs business configuration) | Plugin enablement and source selection are structural; the user-only `session-title` source in A.3 owns business configuration, read at use without reloading the row. |
 | ADR 002 D5 (language-neutral contracts) | Contracts are neutral; the Rust form is Appendix G. |

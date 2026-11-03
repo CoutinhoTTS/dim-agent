@@ -174,7 +174,7 @@ rutis 的 Python 运行时是一个进程；行 `py:<模块>` 用 `importlib.imp
 ```text
 bin/dimcode[.exe]
 default-plugins.json        # PluginManager §2.3，含 `runtimes`（§2.2）
-plugins/<name>/             # goal、web、session-title、workflow、scheduler，带生产依赖的 node_modules；plugin-authoring
+plugins/<name>/             # goal、web、workflow、scheduler，带生产依赖的 node_modules；plugin-authoring
 LICENSE  NOTICE  release-manifest.json
 ```
 
