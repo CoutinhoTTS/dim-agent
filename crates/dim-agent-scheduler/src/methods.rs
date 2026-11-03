@@ -12,10 +12,10 @@ use dim_agent_capabilities::{
     methods::{Handler, Interruption, MethodDecl, RpcError, params},
     settings::SettingsScope,
 };
-use dim_agent_runtime::Names;
+use dim_agent_runtime::{Names, PartRegistry, PartScope};
 use dim_agent_types::{PermissionPolicy, PermissionPreset};
 use dim_app_server::{
-    SessionPermissions, SessionRef,
+    SessionPermissions, SessionRef, SessionsError,
     methods::ManagementMethods,
     plugin_files::PluginFileTransactions,
     settings::{SettingsError, SettingsService},
@@ -24,7 +24,7 @@ use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 const NAMESPACE: &str = "schedule";
@@ -37,15 +37,19 @@ pub struct SchedulerPlugin {
     files: Key<PluginFileTransactions>,
     methods: Key<ManagementMethods>,
     permissions: Key<SessionPermissions>,
+    parts: Key<PartRegistry>,
+    texts: Arc<crate::SchedulerTexts>,
 }
 
 impl SchedulerPlugin {
-    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+    pub fn new(names: &Names<'_>, texts: Arc<crate::SchedulerTexts>) -> rutis::Result<Self> {
         Ok(Self {
             settings: names.key()?,
             files: names.key()?,
             methods: names.key()?,
             permissions: names.key()?,
+            parts: names.key()?,
+            texts,
         })
     }
 }
@@ -60,6 +64,7 @@ impl DynPlugin for SchedulerPlugin {
             self.files.erase(),
             self.methods.erase(),
             self.permissions.erase(),
+            self.parts.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -75,8 +80,11 @@ impl DynPlugin for SchedulerPlugin {
                 files,
                 permissions,
                 pruning: tokio::sync::Mutex::new(()),
+                texts: self.texts.clone(),
                 stop: ctx.cancellation_token(),
                 tasks: TaskTracker::new(),
+                retention: Default::default(),
+                reporting: Default::default(),
             });
             let cleanup = shared.clone();
             ctx.effect(move || async move {
@@ -101,23 +109,41 @@ impl DynPlugin for SchedulerPlugin {
                 ],
                 handler(shared.clone()),
             )?;
-            match runs::read(&shared.files).await {
-                Ok(active) => crate::engine::recover(
-                    &shared,
-                    active
-                        .into_iter()
-                        .filter(|run| !run.state.is_terminal())
-                        .collect(),
-                ),
-                Err(error) => {
-                    tracing::warn!(%error, "scheduler run history is unreadable; recovery is skipped")
-                }
-            }
+            let active = runs::read(&shared.files).await.map_err(|error| {
+                rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
+                    format!("scheduler run history: {error}").into(),
+                ))
+            })?;
+            crate::engine::recover(
+                &shared,
+                active
+                    .into_iter()
+                    .filter(|run| !run.state.is_terminal())
+                    .collect(),
+            );
+            shared.spawn(crate::engine::prune(shared.clone()));
+            let texts = self.texts.clone();
+            ctx.require_at(&self.parts)?.register(
+                ctx,
+                PartScope::Session,
+                "SchedulerSession",
+                move |mount| {
+                    Ok(Some(Box::new(crate::SchedulerSession::new(
+                        mount.names,
+                        texts.description.clone(),
+                    )?)))
+                },
+            )?;
             let timer = shared.clone();
             shared.spawn(async move {
+                let mut ticks = 0u32;
                 while timer.pause(std::time::Duration::from_secs(1)).await {
                     if let Err(error) = crate::engine::tick(&timer).await {
                         tracing::warn!(%error, "scheduler tick failed");
+                    }
+                    ticks += 1;
+                    if ticks.is_multiple_of(60) && timer.retention_pending() {
+                        crate::engine::prune(timer.clone()).await;
                     }
                 }
             });
@@ -131,12 +157,19 @@ pub(crate) struct Shared {
     pub(crate) settings: Arc<SettingsService>,
     pub(crate) files: Arc<PluginFileTransactions>,
     pub(crate) permissions: Arc<SessionPermissions>,
+    pub(crate) texts: Arc<crate::SchedulerTexts>,
     /// Serializes retention passes, so a pass never deletes what another reads.
     pub(crate) pruning: tokio::sync::Mutex<()>,
     /// Cancelled when this generation starts to unload.
     pub(crate) stop: CancellationToken,
     /// The timer, run tasks and retention passes; cleanup waits for them.
     pub(crate) tasks: TaskTracker,
+    /// Whether the last retention pass left expired records or could not
+    /// read; the timer retries it once a minute (A.7).
+    pub(crate) retention: std::sync::atomic::AtomicBool,
+    /// Runs whose report call or diagnostic write is still in flight; their
+    /// records are not eligible for retention (A.7).
+    pub(crate) reporting: std::sync::Mutex<HashSet<String>>,
 }
 
 impl Shared {
@@ -145,6 +178,10 @@ impl Shared {
         if !self.stop.is_cancelled() {
             self.tasks.spawn(task);
         }
+    }
+
+    pub(crate) fn retention_pending(&self) -> bool {
+        self.retention.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Waits `delay`; `false` once the owner is unloading, when the caller
@@ -288,6 +325,11 @@ struct ManagementPatch {
     policy: Option<PermissionPreset>,
     #[serde(default)]
     max_run_minutes: Option<u32>,
+    #[serde(default)]
+    agent_id: Option<String>,
+    /// Binds or rebinds a `reuse` job to an existing Session.
+    #[serde(default)]
+    session_id: Option<String>,
 }
 
 /// The fields of a job a save writes. The server owns `created_by`,
@@ -300,6 +342,9 @@ struct JobInput {
     model: Option<ModelSelection>,
     agent_id: Option<String>,
     mode: Option<Mode>,
+    /// A management save's explicit binding; `None` keeps a `reuse` job's
+    /// binding while it stays `reuse`.
+    session_id: Option<String>,
     policy: Option<PermissionPreset>,
     max_run_minutes: Option<u32>,
     enabled: Option<bool>,
@@ -415,9 +460,11 @@ fn build_job(
         (true, Some(before)) if before.enabled => before.enabled_at.clone(),
         (true, _) => Some(stamp(now)),
     };
-    let session_id = previous
-        .filter(|before| before.mode == mode && mode == Mode::Reuse)
-        .and_then(|before| before.session_id.clone());
+    let session_id = input.session_id.or_else(|| {
+        previous
+            .filter(|before| before.mode == mode && mode == Mode::Reuse)
+            .and_then(|before| before.session_id.clone())
+    });
     let job = Job {
         id: previous
             .map(|before| before.id.clone())
@@ -497,6 +544,8 @@ async fn save(
     let host = host_bound(shared).await?;
     let id = input.job.id.clone();
     let enabled = input.job.enabled;
+    let agent_id = input.job.agent_id;
+    let session_id = input.job.session_id;
     let patch = JobPatch {
         name: input.job.name,
         schedule: input.job.schedule,
@@ -522,6 +571,10 @@ async fn save(
             if enabled.is_some() {
                 saved.enabled = enabled;
             }
+            if agent_id.is_some() {
+                saved.agent_id = agent_id;
+            }
+            saved.session_id = session_id;
             Ok(saved)
         },
     )
@@ -529,8 +582,11 @@ async fn save(
     Ok(json!({ "transition": transition(previous.as_ref(), &job), "job": job }))
 }
 
+/// Removes the job; its terminal history and owned Sessions are retired by
+/// the retention pass that follows (A.7), which deletes an owned Session
+/// before the last record naming it.
 async fn delete(
-    shared: &Shared,
+    shared: &Arc<Shared>,
     input: DeleteParams,
     cancel: &CancellationToken,
 ) -> Result<Value, SchedulerError> {
@@ -547,13 +603,7 @@ async fn delete(
         .update(SettingsScope::User, &snapshot.revision, document, cancel)
         .await
         .map_err(write_failure)?;
-    let job_id = input.job_id.clone();
-    runs::update(&shared.files, move |history| {
-        let before = history.len();
-        history.retain(|run| run.job_id != job_id || !run.state.is_terminal());
-        Ok((history.len() != before, ()))
-    })
-    .await?;
+    shared.spawn(crate::engine::prune(shared.clone()));
     Ok(json!({ "job_id": input.job_id }))
 }
 
@@ -706,7 +756,15 @@ pub(crate) async fn session_policy(
             branch_id: branch_id.to_owned(),
         })
         .await
-        .map_err(|error| SchedulerError::new("service_unavailable", error.to_string()))?;
+        .map_err(|error| match error {
+            SessionsError::SessionClosed { message } => {
+                SchedulerError::new("session_closed", message)
+            }
+            SessionsError::BranchMissing { message } => {
+                SchedulerError::new("branch_missing", message)
+            }
+            other => SchedulerError::new("service_unavailable", other.to_string()),
+        })?;
     Ok(state.policy)
 }
 
@@ -779,6 +837,7 @@ fn merge(
                 model: patch.model,
                 agent_id: None,
                 mode: patch.mode,
+                session_id: None,
                 policy: patch.policy,
                 max_run_minutes: patch.max_run_minutes,
                 enabled: Some(true),
@@ -792,6 +851,7 @@ fn merge(
             model: patch.model.or_else(|| before.model.clone()),
             agent_id: before.agent_id.clone(),
             mode: Some(patch.mode.unwrap_or_else(|| before.mode.clone())),
+            session_id: None,
             policy: patch.policy.or(before.policy),
             max_run_minutes: Some(patch.max_run_minutes.unwrap_or(before.max_run_minutes)),
             enabled: Some(before.enabled),
@@ -926,7 +986,7 @@ impl ScheduleJobs {
                 let job_id = request
                     .job_id
                     .ok_or_else(|| invalid("job_id is required"))?;
-                let value = delete(shared, DeleteParams { job_id }, &cancel).await?;
+                let value = delete(&self.shared, DeleteParams { job_id }, &cancel).await?;
                 Ok(JobReply {
                     content: value.to_string(),
                     records: value,

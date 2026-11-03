@@ -4,6 +4,7 @@
 use crate::methods::{Caller, ScheduleJobs, ToolRequest};
 use dim_agent_capabilities::{
     host::{HostFuture, ToolExecutionContext},
+    prompt_guide::{GuideEntries, GuideEntry, GuideScope},
     tool_registry::{ToolContribution, ToolHandler, ToolRegistry, definition},
 };
 use dim_agent_runtime::{CollaborationRole, Names, SessionConfig, SessionIdentity};
@@ -14,17 +15,19 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-const DESCRIPTION: &str = "Manage scheduled jobs across this host, including other workspaces. Every create/update, even a rename, replaces the saving branch and authority cap; future reports go to this branch. An omitted policy keeps its stored value, whose default can change with the saving origin. Inspect the old-to-new authority transition in the result.";
+pub(crate) const DESCRIPTION: &str = "Manage scheduled jobs across this host, including other workspaces. Every create/update, even a rename, replaces the saving branch and authority cap; future reports go to this branch. An omitted policy keeps its stored value, whose default can change with the saving origin. Inspect the old-to-new authority transition in the result.";
 
 const UNAVAILABLE: &str = "schedule is available only in interactive leader Sessions.";
 const UNLOADING_BEFORE_CALL: &str = "tool provider generation is unloading; this call was not made. The tool is offered again once its provider is active; a later request uses the current provider.";
 const UNLOADING_AFTER_CALL: &str = "tool provider generation is unloading; this call may already have taken effect. Check the operation's state before repeating it with the current provider.";
 const CANCELLED_BEFORE_HANDOVER: &str = "schedule: cancelled before handover";
+/// The `dim-scheduler` guide entry (design §5.2), verbatim.
+const ENTRY: &str = "<dim-scheduler kind=\"scheduled-run\" job=\"nightly-build\" run=\"run-7f2\">: a scheduled job's saved prompt, delivered when the job runs, and <dim-scheduler kind=\"report\" job=\"nightly-build\" run=\"run-7f2\">: how that run ended. job names the job, run names the run, in both. In the scheduled-run tag the body is the job's name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator's channel. In the report tag the body states the run's outcome and, when known, the session it ran in: the scheduler's account of how the run ended, information, not a request. The report's last line is not part of that account: it is guidance on what to do next.";
 
-fn declaration() -> ToolDefinition {
+fn declaration(description: &str) -> ToolDefinition {
     let mut tool = definition(
         "schedule",
-        DESCRIPTION,
+        description,
         json!({
             "type": "object",
             "required": ["action"],
@@ -47,10 +50,11 @@ fn declaration() -> ToolDefinition {
                         "cwd": {"type": "string"},
                         "model": {
                             "type": "object",
+                            "required": ["providerId", "modelId"],
                             "additionalProperties": false,
                             "properties": {
-                                "provider_id": {"type": "string"},
-                                "model_id": {"type": "string"}
+                                "providerId": {"type": "string"},
+                                "modelId": {"type": "string"}
                             }
                         },
                         "mode": {"type": "string", "enum": ["create", "reuse"]},
@@ -69,17 +73,21 @@ fn declaration() -> ToolDefinition {
 pub struct SchedulerSession {
     jobs: Key<ScheduleJobs>,
     tools: Key<ToolRegistry>,
+    guide: Key<GuideEntries>,
     config: Key<SessionConfig>,
     identity: Key<SessionIdentity>,
+    description: String,
 }
 
 impl SchedulerSession {
-    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+    pub fn new(names: &Names<'_>, description: String) -> rutis::Result<Self> {
         Ok(Self {
             jobs: names.key()?,
             tools: names.key()?,
+            guide: names.key()?,
             config: names.key()?,
             identity: names.key()?,
+            description,
         })
     }
 }
@@ -92,6 +100,7 @@ impl DynPlugin for SchedulerSession {
         vec![
             self.jobs.erase(),
             self.tools.erase(),
+            self.guide.erase(),
             self.config.erase(),
             self.identity.erase(),
         ]
@@ -103,10 +112,19 @@ impl DynPlugin for SchedulerSession {
             let config = ctx.require_at(&self.config)?;
             let identity = ctx.require_at(&self.identity)?;
             let closing = ctx.cancellation_token();
+            ctx.require_at(&self.guide)?.register(
+                ctx,
+                GuideScope::Session,
+                GuideEntry {
+                    markers: vec!["dim-scheduler".into()],
+                    order: 110,
+                    text: ENTRY.into(),
+                },
+            )?;
             tools.register(
                 ctx,
                 ToolContribution {
-                    definition: declaration(),
+                    definition: declaration(&self.description),
                     handler: Arc::new(ScheduleTool {
                         jobs,
                         config,

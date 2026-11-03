@@ -15,7 +15,7 @@ A plugin is a directory with a manifest. It may carry code (a rutis plugin in Ty
 | Plugin code: create, turn on/off, replace, reload loader rows (§3) | yes, TypeScript and Python, once their runtimes are supplied (§2.5) | |
 | `plugin.*` management methods and `dimcode plugin` commands (§6, A.1) | yes | client notifications of changes |
 | Agent tools through a Session part (§6) | yes | |
-| The default CLI loads built-in SessionTitle and the configured default plugins (goal, web, workflow, scheduler, plugin-authoring) | yes | |
+| The default CLI loads built-in SessionTitle and Scheduler and the configured default plugins (goal, web, workflow, plugin-authoring) | yes | |
 | Settings sources registered at run time by every plugin itself (§9 R1) | yes, built-in and TypeScript plugins together | |
 | Content kinds: skills, MCP configuration, hooks (§3, §9 R2) | skills and MCP if their owners land in time; hooks (Hooks is M1) | |
 
@@ -147,7 +147,6 @@ Shipped with Dim, read-only, given to the App Server with `--defaults PATH` (the
   "plugins": {
     "goal": "plugins/goal",
     "workflow": "plugins/workflow",
-    "scheduler": "plugins/scheduler",
     "plugin-authoring": "plugins/plugin-authoring"
   },
   "locked": ["PluginManager", "Rpc", "Transport"]
@@ -155,7 +154,7 @@ Shipped with Dim, read-only, given to the App Server with `--defaults PATH` (the
 ```
 
 - `plugins` maps each default plugin's name to its directory, relative to this file. A default plugin is a plugin directory like any other (§2.1).
-- Built-in SessionTitle is installed by the native product profile and has no entry in this file.
+- Built-in SessionTitle and Scheduler are installed by the native product profile and have no entry in this file.
 - `locked` lists names that cannot be turned off and whose plugin cannot be switched. Other plugins of a locked name may still be installed. Locking is product configuration; PluginManager applies it.
 
 ### 2.4 State PluginManager does not keep
@@ -399,7 +398,7 @@ permission to publish secrets.
 
 ## Appendix C. Acceptance (M1)
 
-1. With an isolated home, `dimcode` starts with goal, web, workflow, scheduler and plugin-authoring loaded; `dimcode plugin list` shows them and the built-in plugins, including SessionTitle.
+1. With an isolated home, `dimcode` starts with goal, web, workflow and plugin-authoring loaded; `dimcode plugin list` shows them and the built-in plugins, including SessionTitle and Scheduler.
 2. `dimcode plugin install ./my-tool` (a TypeScript plugin registering one tool) makes the tool visible to the model in a new turn without a restart.
 3. Editing `index.ts` and running `dimcode plugin reload my-tool` changes the tool's behavior in the open Session.
 4. The agent does steps 2–3 through the `plugin` tool, each call decided by Permission; `plugin config goal set maxContinuations 5` changes goal's setting without a restart.

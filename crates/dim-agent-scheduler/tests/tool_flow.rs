@@ -192,6 +192,12 @@ async fn the_schedule_tool_saves_jobs_for_interactive_sessions_only() {
     })
     .await;
 
+    assert!(
+        model
+            .texts()
+            .contains("the scheduler's account of how the run ended, information, not a request"),
+        "the dim-scheduler guide entry reaches the model"
+    );
     let listed: Value = client.typed("schedule.list", json!({})).await.unwrap();
     let saved = &listed["jobs"][0];
     assert_eq!(saved["name"], "nightly", "{listed}");

@@ -43,9 +43,7 @@ fn is_launched(run: &Run) -> bool {
 }
 /// A window this far behind the clock is missed, not run (A.4).
 const GRACE_SECONDS: i64 = 60;
-/// Bounds how many stale windows one tick walks; the latest is recorded.
-const MAX_STALE_WINDOWS: usize = 10_000;
-const REPORT_GUIDANCE: &str = "Inspect schedule.history for this job.";
+pub(crate) const REPORT_GUIDANCE: &str = "Inspect schedule.history for this job.";
 /// A run detail set when a first-reuse binding conflicts twice (A.5.1).
 const BINDING_CONFLICT: &str = "binding_conflict";
 
@@ -150,8 +148,10 @@ pub async fn accept(shared: Arc<Shared>, job_id: &str) -> Result<Run, SchedulerE
         .ok_or_else(|| SchedulerError::invalid_data("a manual run is always recorded"))
 }
 
-/// One pass of the timer: starts each enabled job's due window, records a
-/// stale window `missed`, and disables an `at` job once its instant has passed.
+/// One pass of the timer (A.4). When a job's next window is due, only its
+/// latest due window is considered: it starts within 60 s of its instant,
+/// and otherwise one `missed` record covers the gap. An `at` job is disabled
+/// once its instant has passed.
 pub async fn tick(shared: &Arc<Shared>) -> Result<(), SchedulerError> {
     let cancel = CancellationToken::new();
     let document = read_document(shared, &cancel).await?.document;
@@ -159,27 +159,21 @@ pub async fn tick(shared: &Arc<Shared>) -> Result<(), SchedulerError> {
     let now = Utc::now();
     let max = document.max_concurrent_runs as usize;
     for job in document.jobs.iter().filter(|job| job.enabled) {
-        let Ok(mut next) = job.next_window(window_after(job, &history)) else {
+        let Ok(next) = job.next_window(window_after(job, &history)) else {
             continue;
         };
-        let grace = now - Duration::seconds(GRACE_SECONDS);
-        let mut stale = None;
-        let mut steps = 0;
-        while let Some(window) = next
-            && window < grace
-            && steps < MAX_STALE_WINDOWS
+        if let Some(due) = next
+            && due <= now
         {
-            stale = Some(window);
-            next = job.next_window(window).ok().flatten();
-            steps += 1;
-        }
-        if let Some(window) = stale {
-            record(shared, job, stamp(window), true, max).await?;
-        }
-        if let Some(window) = next
-            && window <= now
-        {
-            record(shared, job, stamp(window), false, max).await?;
+            let latest = job
+                .latest_window(now)
+                .ok()
+                .flatten()
+                .unwrap_or(due)
+                .max(due);
+            let missed = now - latest >= Duration::seconds(GRACE_SECONDS);
+            record(shared, job, stamp(latest), missed, max).await?;
+            continue;
         }
         if matches!(job.schedule, Schedule::At(_))
             && next.is_none()
@@ -282,6 +276,8 @@ async fn finish(
     detail: String,
 ) -> Result<(), SchedulerError> {
     let run_id = run_id.to_owned();
+    shared.reporting.lock().unwrap().insert(run_id.clone());
+    let marked = run_id.clone();
     let settled = runs::update(&shared.files, move |history| {
         let run = history
             .iter_mut()
@@ -304,15 +300,22 @@ async fn finish(
         run.validate().map_err(SchedulerError::invalid_data)?;
         Ok((true, Some(run.clone())))
     })
-    .await?;
-    match settled {
-        Some(run) => {
-            let outcome = report(shared, run).await;
-            shared.spawn(prune(shared.clone()));
-            outcome
+    .await;
+    let settled = match settled {
+        Ok(settled) => settled,
+        Err(error) => {
+            shared.reporting.lock().unwrap().remove(&marked);
+            return Err(error);
         }
-        None => Ok(()),
-    }
+    };
+    let Some(run) = settled else {
+        shared.reporting.lock().unwrap().remove(&marked);
+        return Ok(());
+    };
+    let outcome = report(shared, run).await;
+    shared.reporting.lock().unwrap().remove(&marked);
+    shared.spawn(prune(shared.clone()));
+    outcome
 }
 
 /// Steers a tool-saved run's outcome into the branch that saved the job, once.
@@ -335,7 +338,7 @@ async fn report(shared: &Arc<Shared>, run: Run) -> Result<(), SchedulerError> {
     if let Some(session_id) = &run.session_id {
         body += &format!(" Session {session_id}.");
     }
-    body += &format!("\n{REPORT_GUIDANCE}");
+    body += &format!("\n{}", shared.texts.report_guidance);
     let text = format!(
         "<dim-scheduler kind=\"report\" job=\"{}\" run=\"{}\">{}</dim-scheduler>",
         escaped(&run.job_id),
@@ -368,18 +371,28 @@ async fn report(shared: &Arc<Shared>, run: Run) -> Result<(), SchedulerError> {
 /// stay when the delete fails, so the next pass retries.
 pub async fn prune(shared: Arc<Shared>) {
     let _pass = shared.pruning.lock().await;
-    if let Err(error) = prune_once(&shared).await {
-        tracing::warn!(%error, "scheduler retention failed");
-    }
+    let pending = match prune_once(&shared).await {
+        Ok(pending) => pending,
+        Err(error) => {
+            tracing::warn!(%error, "scheduler retention failed");
+            true
+        }
+    };
+    shared
+        .retention
+        .store(pending, std::sync::atomic::Ordering::Relaxed);
 }
 
-async fn prune_once(shared: &Arc<Shared>) -> Result<(), SchedulerError> {
+/// One retention pass (A.7). Returns whether expired records remain, so the
+/// timer retries.
+async fn prune_once(shared: &Arc<Shared>) -> Result<bool, SchedulerError> {
     let cancel = CancellationToken::new();
-    let document = read_document(shared, &cancel).await?.document;
     let runs = runs::read(&shared.files).await?;
+    let document = read_document(shared, &cancel).await?.document;
+    let reporting = shared.reporting.lock().unwrap().clone();
     let mut keep: HashSet<String> = runs
         .iter()
-        .filter(|run| !run.state.is_terminal())
+        .filter(|run| !run.state.is_terminal() || reporting.contains(&run.run_id))
         .map(|run| run.run_id.clone())
         .collect();
     for job in &document.jobs {
@@ -431,17 +444,22 @@ async fn prune_once(shared: &Arc<Shared>) -> Result<(), SchedulerError> {
         .filter_map(|run| run.session_id.clone())
         .filter(|session_id| !references.contains(session_id))
         .collect();
+    let mut pending = false;
     for session_id in deletions {
         match sessions(&shared.ctx, "delete", json!({"sessionId": session_id})).await {
             Ok(Ok(_)) => {}
-            _ => keep.extend(
-                expired
-                    .iter()
-                    .filter(|run| {
-                        is_launched(run) && run.session_id.as_deref() == Some(session_id.as_str())
-                    })
-                    .map(|run| run.run_id.clone()),
-            ),
+            _ => {
+                pending = true;
+                keep.extend(
+                    expired
+                        .iter()
+                        .filter(|run| {
+                            is_launched(run)
+                                && run.session_id.as_deref() == Some(session_id.as_str())
+                        })
+                        .map(|run| run.run_id.clone()),
+                );
+            }
         }
     }
     let remove: HashSet<String> = runs
@@ -449,15 +467,15 @@ async fn prune_once(shared: &Arc<Shared>) -> Result<(), SchedulerError> {
         .filter(|run| !keep.contains(&run.run_id))
         .map(|run| run.run_id.clone())
         .collect();
-    if remove.is_empty() {
-        return Ok(());
+    if !remove.is_empty() {
+        runs::update(&shared.files, move |history| {
+            let before = history.len();
+            history.retain(|run| !remove.contains(&run.run_id));
+            Ok((history.len() != before, ()))
+        })
+        .await?;
     }
-    runs::update(&shared.files, move |history| {
-        let before = history.len();
-        history.retain(|run| !remove.contains(&run.run_id));
-        Ok((history.len() != before, ()))
-    })
-    .await
+    Ok(pending)
 }
 
 /// Starts a tracker for each run that was active when the previous process
@@ -747,6 +765,10 @@ async fn reuse(
     };
     let actual = match session_policy(shared, bound, "main").await {
         Ok(actual) => actual,
+        Err(error) if matches!(error.code, "session_closed" | "branch_missing") => {
+            settle_checked(shared, job, run, RunState::Failed, error.code).await?;
+            return Ok(false);
+        }
         Err(_) => {
             settle_checked(shared, job, run, RunState::Skipped, "policy_read_failed").await?;
             return Ok(false);
@@ -920,12 +942,16 @@ async fn drive(shared: &Arc<Shared>, job: &Job, run: &Run) -> Result<(), Schedul
     .await
 }
 
-/// Follows the run's Session history, from the input's own sequence when it
-/// is known, until its first turn ends after the input is consumed; the run is
-/// `running` from that consumption. History is read page by page from the last
-/// returned event, so no event before the head is skipped. At the deadline an
-/// unconsumed input is withdrawn, and a consumed one is stopped; either
-/// settles `timed_out`.
+/// Follows the run's Session history (§3.2), from the input's own sequence
+/// when it is known. Each pass reads the whole published prefix through the
+/// first page's `through` before deciding. The run is `running` from its own
+/// consumption, and the first following `turn/end` supplies the outcome; its
+/// own `input/deleted` settles `cancelled: withdrawn`. At the deadline an
+/// input applied and interrupted before consumption settles `timed_out`
+/// without a stop; an unconsumed input is withdrawn (`deleted` settles
+/// `timed_out`, `notHeld` reads history again); consumed work is stopped and
+/// settles `timed_out` at its `turn/end`. A `withdraw` or `stop` that does not
+/// answer is retried on the next pass.
 async fn track(
     shared: &Arc<Shared>,
     run_id: &str,
@@ -936,67 +962,84 @@ async fn track(
 ) -> Result<(), SchedulerError> {
     let mut after = start.map(|sequence| sequence.saturating_sub(1));
     let mut consumed = false;
-    let mut timing_out = false;
+    let mut applied = false;
+    let mut interrupted = false;
+    let mut stopped = false;
     loop {
-        let mut args = json!({"sessionId": session_id, "branchId": "main"});
-        if let Some(after) = after {
-            args["after"] = json!(after);
-        }
-        let page = match sessions(&shared.ctx, "history", args).await {
-            Ok(Err(code)) if is_reloading(&code) => {
-                if !shared.pause(POLL).await {
-                    return Err(unloading());
-                }
-                continue;
+        let mut cutoff: Option<u64> = None;
+        loop {
+            let mut args = json!({"sessionId": session_id, "branchId": "main"});
+            if let Some(after) = after {
+                args["after"] = json!(after);
             }
-            Err(_) => {
-                if !shared.pause(POLL).await {
-                    return Err(unloading());
-                }
-                continue;
+            if let Some(through) = cutoff {
+                args["through"] = json!(through);
             }
-            Ok(Err(code)) => return finish(shared, run_id, RunState::Failed, code).await,
-            Ok(Ok(value)) => value,
-        };
-        let events: Vec<AgentEvent> = serde_json::from_value(page["events"].clone())
-            .map_err(|error| SchedulerError::invalid_data(error.to_string()))?;
-        let through = page["through"].as_u64();
-        if let Some(last) = events.last() {
-            after = Some(last.sequence);
-        }
-        for event in events {
-            match event.kind {
-                EventKind::InputConsumed(data) if data.input_id == input_id && !consumed => {
-                    consumed = true;
-                    update_run(shared, run_id, |run| {
-                        if run.state == RunState::Submitted {
-                            run.state = RunState::Running;
-                        }
-                    })
-                    .await?;
+            let page = match sessions(&shared.ctx, "history", args).await {
+                Ok(Ok(value)) => value,
+                Ok(Err(code)) if !is_reloading(&code) => {
+                    return finish(shared, run_id, RunState::Failed, code).await;
                 }
-                EventKind::TurnEnd(end) if consumed => {
-                    let (state, detail) = if timing_out {
-                        (RunState::TimedOut, "timed_out".to_owned())
-                    } else {
-                        match end.outcome {
-                            TurnOutcome::Completed { .. } => {
-                                (RunState::Completed, "completed".into())
+                Ok(Err(_)) | Err(_) => {
+                    if !shared.pause(POLL).await {
+                        return Err(unloading());
+                    }
+                    continue;
+                }
+            };
+            let events: Vec<AgentEvent> = serde_json::from_value(page["events"].clone())
+                .map_err(|error| SchedulerError::invalid_data(error.to_string()))?;
+            let through = page["through"].as_u64();
+            cutoff = cutoff.or(through);
+            if let Some(last) = events.last() {
+                after = Some(last.sequence);
+            }
+            for event in events {
+                match event.kind {
+                    EventKind::InputDeleted(data) if data.input_id == input_id && !consumed => {
+                        let (state, detail) = if stopped {
+                            (RunState::TimedOut, "withdrawn_at_deadline")
+                        } else {
+                            (RunState::Cancelled, "withdrawn")
+                        };
+                        return finish(shared, run_id, state, detail.into()).await;
+                    }
+                    EventKind::InputApplied(data) if data.input_id == input_id => applied = true,
+                    EventKind::StopInterrupt(_) if applied && !consumed => interrupted = true,
+                    EventKind::InputConsumed(data) if data.input_id == input_id && !consumed => {
+                        consumed = true;
+                        update_run(shared, run_id, |run| {
+                            if run.state == RunState::Submitted {
+                                run.state = RunState::Running;
                             }
-                            TurnOutcome::Failed { error } => (RunState::Failed, error),
-                            TurnOutcome::Cancelled { reason } => (RunState::Cancelled, reason),
-                        }
-                    };
-                    return finish(shared, run_id, state, detail).await;
+                        })
+                        .await?;
+                    }
+                    EventKind::TurnEnd(end) if consumed => {
+                        let (state, detail) = if stopped {
+                            (RunState::TimedOut, "timed_out".to_owned())
+                        } else {
+                            match end.outcome {
+                                TurnOutcome::Completed { .. } => {
+                                    (RunState::Completed, "completed".into())
+                                }
+                                TurnOutcome::Failed { error } => (RunState::Failed, error),
+                                TurnOutcome::Cancelled { reason } => (RunState::Cancelled, reason),
+                            }
+                        };
+                        return finish(shared, run_id, state, detail).await;
+                    }
+                    _ => {}
                 }
-                _ => {}
+            }
+            if !(through.is_some_and(|through| after.is_some_and(|after| after < through))) {
+                break;
             }
         }
-        if through.is_some_and(|through| after.is_some_and(|after| after < through)) {
-            continue;
-        }
-        if Utc::now() >= deadline && !timing_out {
-            timing_out = true;
+        if Utc::now() >= deadline && !stopped {
+            if !consumed && interrupted {
+                return finish(shared, run_id, RunState::TimedOut, "timed_out".into()).await;
+            }
             if !consumed {
                 let withdrawn = sessions(
                     &shared.ctx,
@@ -1005,7 +1048,7 @@ async fn track(
                         "reason": "scheduled run timed out"}),
                 )
                 .await;
-                if let Ok(Ok(value)) = withdrawn
+                if let Ok(Ok(value)) = &withdrawn
                     && value["status"] == json!("deleted")
                 {
                     return finish(
@@ -1016,13 +1059,16 @@ async fn track(
                     )
                     .await;
                 }
-            } else {
-                let _ = sessions(
+            } else if matches!(
+                sessions(
                     &shared.ctx,
                     "stop",
                     json!({"sessionId": session_id, "branchId": "main", "reason": "scheduled run timed out"}),
                 )
-                .await;
+                .await,
+                Ok(Ok(_))
+            ) {
+                stopped = true;
             }
         }
         if !shared.pause(POLL).await {

@@ -283,7 +283,7 @@ equal 比较预设，并把每个工具列表视为集合，忽略顺序和重�
 `within(x,savedEffective)` 与 `within(x,currentStarterOrHostBound)`。
 这是 S2 的保守 cap 稳定检查，不是逐工具权限等价判定。不得为通过检查而改写被复用 Session 的权限。
 
-Rust 实现（`crates/dim-agent-scheduler/src/policy.rs`）按共享[权限 cap 样例](../../../../tests/fixtures/permission-policy-cap.json)
+`PermissionPolicy::cap` 与 `within`（`crates/dim-agent-types/src/permission.rs`）按共享[权限 cap 样例](../../../../tests/fixtures/permission-policy-cap.json)
 实现该纯计算。样例分为 cap 向量和独立 reuse 向量，后者包含 x、savedEffective、
 liveBound、withinSaved、withinLive。标记 job-save-and-launch 的 cap 向量使用仅含
 预设的任务请求；launch-only 向量验证完整策略的 launch 输入，不扩大 Job.policy。
@@ -352,7 +352,7 @@ sequenceDiagram
 
 报告的正文保留其句子，并以 `escaped(...)` 作为一整段文本转义，与 Workflow 报告的做法相同，因此带有标记文字的任务 id 或结局细节无法开启或关闭该标记；属性同样转义。
 
-policy 文本是出厂配置成员：`code.config.description` 替换声明的 description，`code.config.report_guidance` 替换结果报告的指引行；产品不设置它们，因此内置文本生效。一个成员承载一段文本——整段 description，或一行指引——其中的 protocol 句子由流程测试钉住：候选若改动其中一句，就是改动 protocol，必须与行为和测试一起落地（[面向模型的提示词 §9.2](../model-prompts.md#92-每个写入面向模型文字的能力)）。`report_guidance` 必须是一行，且由配置强制：guide 条目（§5.2）告诉模型报告的最后一行是指引，不属于 scheduler 对这次运行结局的记述，因此含换行的值会在插件加载时被拒绝（`scheduler/index.ts`）。改动它的 profile 也保持它只有一行。
+policy 文本是出厂配置成员：`description` 替换声明的 description，`report_guidance` 替换结果报告的指引行（附录 G）；产品不设置它们，因此内置文本生效。一个成员承载一段文本——整段 description，或一行指引——其中的 protocol 句子由流程测试钉住：候选若改动其中一句，就是改动 protocol，必须与行为和测试一起落地（[面向模型的提示词 §9.2](../model-prompts.md#92-每个写入面向模型文字的能力)）。`report_guidance` 必须是一行，且由配置强制：guide 条目（§5.2）告诉模型报告的最后一行是指引，不属于 scheduler 对这次运行结局的记述，因此含换行的值会在安装插件时被拒绝。改动它的 profile 也保持它只有一行。
 
 两个 kind 都带有 guide 条目：Scheduler 的 Session 部件在 `apply` 中为 `dim-scheduler` 注册一个条目，按 session 范围生效，因此 scheduled-run 标记所开辟的运行 Session 中的请求、以及报告落到的保存方分支所在的 Session 中的请求，各自带上本 Session 部件的该条目（[Prompt §6.2](Prompt.md#62-写入者)）。
 
@@ -780,5 +780,8 @@ Scheduler 以原生 Rust 实现，没有 TypeScript 包、Node 进程或回退�
 | 权限 cap | `dim-agent-types` 中的 `PermissionPolicy::cap` 与 `within`，与 S2 launch 使用同一函数，并按共享样例测试 |
 | 进程存储 | App Server 的类型化 `PluginFileTransactions` 服务；宿主写 `{version: 1, text}` 信封，Scheduler 提供内部 v1 文本，字节与 TypeScript 版本相同 |
 | 定时器 / 跟踪 | 进程部分拥有：定时器、运行任务、恢复与保留在其任务跟踪器中运行，在方法与服务注册后启动。卸载时（`ctx.cancellation_token()`）停止新工作并结束等待，清理在存储 scope 关闭前等待跟踪器；已接纳的 `sessions` 调用先结算。仍活动的运行留在文件中，由下一代恢复。Session 工具返回 §1.3 的卸载结果及 `schedule: cancelled before handover` |
-| Cron 与时区 | `croner` 与 `chrono-tz`，由 `deny.toml` 检查 |
+| policy 文本 | `install_with(builder, SchedulerTexts {description, report_guidance})`；`install` 使用内置文本。含换行的 `report_guidance` 被拒绝 |
+| guide 条目 | Session 部分取得 `GuideEntries`，注册 §5.2 的条目，session 范围，order 110 |
+| 可选行 | `AgentBuilder::optional_plugin`：宿主不等待该行，依赖缺失或运行存储不可读只让 Scheduler 失败（附录 D 第 12 项） |
+| Cron 与时区 | `croner` 与 `chrono-tz`，由 `deny.toml` 检查。墙钟时间落在夏令时空档的触发被跳过，回拨时重复的时间只在较早的那一刻触发一次 |
 | 测试 | 经管理方法、`schedule` 工具与 CLI wire 测试的公开流程，脚本模型可挂起一个 turn；不添加私有辅助函数单元测试（AGENTS.md Testing） |

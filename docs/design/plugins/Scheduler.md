@@ -318,7 +318,7 @@ each tool list as a set (order and duplicates do not matter). Require
 input. This is S2 cap-stability, a conservative check rather than pointwise
 permission equivalence. Do not rewrite the reused Session's policy to pass it.
 
-The Rust implementation (`crates/dim-agent-scheduler/src/policy.rs`) implements this pure calculation against the shared
+`PermissionPolicy::cap` and `within` (`crates/dim-agent-types/src/permission.rs`) implement this pure calculation against the shared
 [policy-cap fixtures](../../../tests/fixtures/permission-policy-cap.json).
 The fixture has `cap` vectors and separate `reuse` vectors with `x`,
 `savedEffective`, `liveBound`, `withinSaved` and `withinLive`. Cap vectors marked
@@ -391,7 +391,7 @@ A text is protocol or policy as [model-facing prompts §4](../model-prompts.md#4
 
 The report's body keeps its sentences and is escaped as one text with `escaped(...)`, as the Workflow report's is, so a job id or an outcome detail that carries markup cannot open or close the tag; the attributes are escaped the same way.
 
-The policy text is a factory member: `code.config.description` replaces the declaration's description and `code.config.report_guidance` replaces the report's guidance line; the product sets neither, so the built-in texts are in force. A member holds one text — a whole description, or one line of guidance — and the flow tests pin any protocol sentence it contains: a candidate that changes one changes protocol, and lands with the behaviour and its test ([model-facing prompts §9.2](../model-prompts.md#92-every-capability-that-writes-model-facing-text)). `report_guidance` must be one line, and the configuration enforces it: the guide entry (§5.2) tells the model the report's last line is guidance and not part of the scheduler's account, so a value with a line break is refused when the plugin loads (`scheduler/index.ts`). A profile that changes it keeps it to one line.
+The policy text is a factory member: `description` replaces the declaration's description and `report_guidance` replaces the report's guidance line (Appendix G); the product sets neither, so the built-in texts are in force. A member holds one text — a whole description, or one line of guidance — and the flow tests pin any protocol sentence it contains: a candidate that changes one changes protocol, and lands with the behaviour and its test ([model-facing prompts §9.2](../model-prompts.md#92-every-capability-that-writes-model-facing-text)). `report_guidance` must be one line, and the configuration enforces it: the guide entry (§5.2) tells the model the report's last line is guidance and not part of the scheduler's account, so a value with a line break is refused when the plugin is installed. A profile that changes it keeps it to one line.
 
 Both kinds carry the guide entry: the Scheduler Session part registers one entry for `dim-scheduler` from `apply`, session-scoped, so a request in the run Session the scheduled-run marker opens, and a request in the saving branch the report lands on, each carry the entry from that Session's part ([Prompt §6.2](Prompt.md#62-the-writers)).
 
@@ -868,5 +868,8 @@ names that exist today: `Names::key`, `Key<T>`, `require_at`, `provide_as`,
 | Policy cap | `PermissionPolicy::cap` and `within` in `dim-agent-types`, the same functions the S2 launch uses, tested against the shared fixtures |
 | Process storage | The typed `PluginFileTransactions` service of App Server ([trusted plugin storage](../../../crates/dim-app-server/README.md#trusted-plugin-storage)). The host writes the `{version: 1, text}` envelope; Scheduler supplies the inner v1 text, the same bytes the TypeScript version wrote. |
 | Timer and trackers | Owned by the process part: the timer, run tasks, recovery and retention run in its task tracker and start after its methods and services are registered. On unload (`ctx.cancellation_token()`), new work stops, waits end, and cleanup joins the tracker before the storage scope closes; an admitted `sessions` call settles first. A run still active is left in the file for the next generation's recovery. The Session tool returns the unloading results of §1.3 and `schedule: cancelled before handover` |
-| Cron and time zones | `croner` and `chrono-tz`, checked by `deny.toml` |
+| Policy texts | `install_with(builder, SchedulerTexts {description, report_guidance})`; `install` uses the built-in texts. A `report_guidance` with a line break is refused |
+| Guide entry | The Session part keys `GuideEntries` and registers the §5.2 entry, session-scoped, order 110 |
+| Optional row | `AgentBuilder::optional_plugin`: the host does not wait for the row, so missing dependencies or an unreadable run store fail only Scheduler (Appendix D item 12) |
+| Cron and time zones | `croner` and `chrono-tz`, checked by `deny.toml`. Scheduler skips an occurrence whose wall time falls in a DST gap and fires a repeated fall-back time once, at its earlier instant |
 | Tests | Public flows through the management methods, the `schedule` tool and the CLI wire tests, with a scripted model that can hold a turn; private helper unit tests are not added (AGENTS.md Testing) |

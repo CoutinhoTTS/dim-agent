@@ -252,10 +252,17 @@ pub fn stored_runs(home: &Path) -> Vec<Value> {
     inner["runs"].as_array().unwrap().clone()
 }
 
+/// Rewrites the run store as a crash or another process would leave it; a
+/// missing store starts empty.
 pub fn edit_runs(home: &Path, change: impl FnOnce(&mut Vec<Value>)) {
     let path = home.join("scheduler/runs.json");
-    let envelope: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    let mut inner: Value = serde_json::from_str(envelope["text"].as_str().unwrap()).unwrap();
+    let mut inner: Value = match std::fs::read(&path) {
+        Ok(bytes) => {
+            let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+            serde_json::from_str(envelope["text"].as_str().unwrap()).unwrap()
+        }
+        Err(_) => json!({"version": 1, "runs": []}),
+    };
     change(inner["runs"].as_array_mut().unwrap());
     let text = serde_json::to_string(&inner).unwrap();
     std::fs::write(

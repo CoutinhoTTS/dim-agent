@@ -2,11 +2,9 @@
 //! jobs are stored in the settings document, and run history is read through
 //! the host file transactions.
 use dim_agent_capabilities::defaults;
-use dim_agent_runtime::{AgentBuilder, AgentConfig, Names};
-use dim_agent_scheduler::SchedulerPlugin;
+use dim_agent_runtime::{AgentBuilder, AgentConfig};
 use dim_app_server::{ServerConfig, serve};
 use dim_client::{Client, ConnectionConfig, Server};
-use rutis::host::DynPlugin;
 use serde_json::{Value, json};
 use std::{os::unix::fs::PermissionsExt, path::Path, time::Duration};
 
@@ -21,9 +19,7 @@ async fn start(home: &Path) -> (dim_app_server::RunningServer, Client) {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
     defaults::mock_hosts(&mut builder);
-    builder.plugin(|names: &Names<'_>| {
-        Ok(Box::new(SchedulerPlugin::new(names)?) as Box<dyn DynPlugin>)
-    });
+    dim_agent_scheduler::install(&mut builder);
     let server = serve(
         builder,
         ServerConfig {
@@ -196,7 +192,7 @@ async fn jobs_are_saved_with_revisions_toggled_and_deleted_through_the_namespace
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn invalid_run_history_is_refused_and_its_bytes_are_kept() {
+async fn invalid_run_history_fails_the_scheduler_and_keeps_its_bytes() {
     let home = home();
     let envelope = serde_json::to_vec(&json!({
         "version": 1,
@@ -212,7 +208,10 @@ async fn invalid_run_history_is_refused_and_its_bytes_are_kept() {
         .rpc("schedule.history", json!({"job_id": "any"}))
         .await
         .unwrap_err();
-    assert!(format!("{refused}").contains("invalid_data"), "{refused}");
+    assert!(
+        format!("{refused}").contains("service_unavailable"),
+        "{refused}"
+    );
     assert_eq!(std::fs::read(&runs).unwrap(), envelope);
 
     drop(client);

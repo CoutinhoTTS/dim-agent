@@ -1307,6 +1307,7 @@ dependencies = [
  "dim-app-server",
  "dim-client",
  "futures-util",
+ "rusqlite",
  "rutis",
  "rutis-bridge",
  "serde",

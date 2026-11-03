@@ -26,6 +26,7 @@ chrono-tz = "0.10"
 croner = "4"
 
 [dev-dependencies]
+rusqlite = "0.40.2"
 tempfile = "3"
 tokio.workspace = true
 serde_json.workspace = true
