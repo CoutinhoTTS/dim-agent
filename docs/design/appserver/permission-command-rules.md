@@ -376,9 +376,12 @@ same authority here keeps the rule source user-owned: the user's local configura
 rules, and the Session policy decides the preset. A project-scope deny rule would not widen
 authority, but it would add a second rule source with its own owner, read path, revision and failure
 behavior, and no requirement asks for one; rejecting the scope keeps one source and one write path.
-Per-workspace user rule sets would keep user authority, but they would add a second store key, read
-path and revision surface, while the one list already applies everywhere. The single list is the
-decision.
+Per-workspace user rule sets would keep user authority, so they are not an authority change; they
+are rejected on cost. They would add a second source with its own owner, read path, revision and
+failure behavior, and they would need a precedence rule between the two user lists when both match.
+The one list already applies everywhere. Reopening the split is a design change to this document
+(source keying, read path and the cross-scope precedence), with a new ADR only if that precedence
+changes an accepted decision.
 
 **Precedence and matching.** The order is §5.2: tool lists, a deny rule, the file gate, an
 allow-list, the preset, then an allow rule answering the remaining tool question. List order and
@@ -395,6 +398,13 @@ whose legacy specificity order does not also deny are reported `unsupported`; no
 written, and rules whose precedence depends on a rejected one are rejected too.
 `defaultAction` is reported unsupported and does not become a preset. The native `permission`
 source has no field for any of them.
+
+**Known losses and replacements.** None of the three rejections leaves the need without an
+alternative: one user list replaces per-workspace lists, `exact`/`prefix` replaces pattern
+shortcuts, and `toolApproval: "ask"` with allow rules for the commands that should run replaces a
+per-command `ask`. The remaining loss is convenience: a command family needs one rule per form
+rather than a pattern, and a per-command ask under a permissive preset needs an allow rule for every
+command that should run.
 
 **Typed owner and Web admission.** There is no new read or write. `permission.rules` and
 `permission.set_rules` remain the only rule surface, CAS on the Settings revision; a stale write is
