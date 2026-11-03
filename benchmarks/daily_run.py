@@ -1233,6 +1233,28 @@ def main() -> int:
     # made this obvious: ssh gave up on a run that is still going, and that was
     # the one where the artifact held an exit code and nothing else.
     fetch_error = fetch_results(args.host, remote_results, run_id, out)
+    # What the run was driven with, and then what it actually ran with. The job
+    # config harbor executed is fetched beside the results, and its params are
+    # the measured ones — including the model-config digest and the agent model
+    # name, which no CLI argument can supply — so on overlap the sidecar wins.
+    # A baseline frozen from this run is then self-describing without a hand
+    # backfill, and a measured param is provenance rather than an assertion.
+    params = {"timeout_multiplier": 1.0,
+              "agent_timeout_multiplier": 1.0,
+              "n_concurrent_trials": args.concurrency,
+              "harbor_version": harbor_version,
+              "verifier_proxy": verifier_proxy,
+              "verifier_no_proxy": verifier_no_proxy}
+    job_sidecar = out / f"{run_id}-job.json"
+    if job_sidecar.exists():
+        try:
+            from_config = baselines.params_from_config(
+                json.loads(job_sidecar.read_text()))
+        except (OSError, json.JSONDecodeError) as error:
+            print(f"[daily] WARNING: unreadable job config {job_sidecar.name}: "
+                  f"{error}")
+            from_config = {}
+        params.update({k: v for k, v in from_config.items() if v is not None})
     if l2_exit == 0:
         if fetch_error is not None:
             # Nothing to score and nothing to score it from. Recorded the same
@@ -1244,12 +1266,7 @@ def main() -> int:
             try:
                 l2_summary = settle(
                     out, run_id, run_type, k, pin, baseline, identity, runner_sha,
-                    params={"timeout_multiplier": 1.0,
-                            "agent_timeout_multiplier": 1.0,
-                            "n_concurrent_trials": args.concurrency,
-                            "harbor_version": harbor_version,
-                            "verifier_proxy": verifier_proxy,
-                            "verifier_no_proxy": verifier_no_proxy},
+                    params=params,
                     baselines_dir=args.baselines_dir,
                 )
             except Exception as error:  # noqa: BLE001 - see below
