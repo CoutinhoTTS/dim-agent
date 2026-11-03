@@ -401,17 +401,18 @@ impl CheckSubmission for SkillSubmitCheck {
     }
 }
 
-/// Whether a text block after the first was added by a submit check: a loaded
-/// Skill block, or a hook's `UserPromptSubmit` context. The first block is
-/// always the operator's own.
-fn submit_check_block(index: usize, block: &ContentBlock) -> bool {
+/// Whether a text block after the first is runtime content: the prompt guide
+/// says the operator's words carry no runtime tag, and every runtime block
+/// starts with `<dim-`, the same test `operator_input` uses in the Hooks
+/// runner. The first block is always the operator's own.
+fn runtime_block(index: usize, block: &ContentBlock) -> bool {
     if index == 0 {
         return false;
     }
     let ContentBlock::Text { text } = block else {
         return false;
     };
-    text.starts_with("<dim-skill name=\"") || text.starts_with("<dim-hooks kind=\"prompt-submit\">")
+    text.starts_with("<dim-")
 }
 
 /// The Skill name an existing block already loaded, as its attribute holds
@@ -428,13 +429,13 @@ fn existing_skill(index: usize, block: &ContentBlock) -> Option<String> {
     (!name.is_empty()).then(|| name.to_owned())
 }
 
-/// The Skill names the operator's own text references, in order. A block a
-/// submit check added is not operator text, so a steer follows no reference
-/// inside it.
+/// The Skill names the operator's own text references, in order. A runtime
+/// block is not the operator's text, so a steer follows no reference inside
+/// it.
 fn referenced(content: &[ContentBlock]) -> Vec<String> {
     let mut names = Vec::new();
     for (index, block) in content.iter().enumerate() {
-        if submit_check_block(index, block) {
+        if runtime_block(index, block) {
             continue;
         }
         let ContentBlock::Text { text } = block else {
