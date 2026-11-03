@@ -3054,3 +3054,74 @@ async fn gemini_signed_text_parts_keep_their_blocks() {
         "text must close before the function call: {trace:?}"
     );
 }
+
+/// Responses text blocks split by content part, and a function call keeps its
+/// item id (vendored patch for arcships/aimux#468).
+#[tokio::test]
+async fn responses_output_text_parts_and_function_call_ids_are_kept() {
+    use aimux_core::language_model::LanguageModel;
+    use aimux_core::language_model_message::convert_to_language_model_prompt;
+    use aimux_core::message::ModelMessage;
+    use aimux_core::options::CallOptions;
+    use aimux_core::stream_part::StreamPart;
+    use aimux_providers::openai::{OpenAIProviderSettings, create_openai};
+    use futures::StreamExt;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    let body = sse(vec![
+        json!({"type":"response.created","response":{"id":"resp-1","created_at":1,"model":"test-model"}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg-1","role":"assistant","phase":"commentary","content":[]}}),
+        json!({"type":"response.content_part.added","item_id":"msg-1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}),
+        json!({"type":"response.output_text.delta","item_id":"msg-1","output_index":0,"content_index":0,"delta":"before"}),
+        json!({"type":"response.content_part.added","item_id":"msg-1","output_index":0,"content_index":1,"part":{"type":"output_text","text":"","annotations":[]}}),
+        json!({"type":"response.output_text.delta","item_id":"msg-1","output_index":0,"content_index":1,"delta":"after"}),
+        json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg-1","role":"assistant","phase":"commentary","content":[]}}),
+        json!({"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc-1","call_id":"call-1","name":"echo","arguments":""}}),
+        json!({"type":"response.function_call_arguments.done","item_id":"fc-1","output_index":1,"arguments":"{\"text\":\"x\"}"}),
+        json!({"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","id":"fc-1","call_id":"call-1","name":"echo","arguments":"{\"text\":\"x\"}"}}),
+        json!({"type":"response.completed","response":{"id":"resp-1","created_at":1,"model":"test-model","usage":{"input_tokens":1,"output_tokens":1}}}),
+    ]);
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    let model = create_openai(OpenAIProviderSettings {
+        api_key: Some("test-key".into()),
+        base_url: Some(format!("{}/v1", server.uri())),
+        ..Default::default()
+    })
+    .unwrap()
+    .responses("test-model");
+    let options = CallOptions::new(
+        convert_to_language_model_prompt(&[ModelMessage::user("hi")], None, None).unwrap(),
+    );
+    let mut result = model.do_stream(&options).await.unwrap();
+    let mut text_starts = 0;
+    let mut tool_item_id = None;
+    while let Some(part) = result.stream.next().await {
+        match part.unwrap() {
+            StreamPart::TextStart { .. } => text_starts += 1,
+            StreamPart::ToolInputStart {
+                provider_metadata, ..
+            } => {
+                tool_item_id = provider_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("openai"))
+                    .and_then(|namespace| namespace.get("itemId"))
+                    .cloned();
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(text_starts, 2, "each output_text part keeps its own block");
+    assert_eq!(
+        tool_item_id,
+        Some(json!("fc-1")),
+        "the function call keeps its item id"
+    );
+}

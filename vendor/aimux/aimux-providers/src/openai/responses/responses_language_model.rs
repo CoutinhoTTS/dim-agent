@@ -1503,6 +1503,7 @@ const MODELED_CHUNK_TYPES: &[&str] = &[
     "response.code_interpreter_call_code.delta",
     "response.code_interpreter_call_code.done",
     "response.completed",
+    "response.content_part.added",
     "response.created",
     "response.custom_tool_call_input.delta",
     "response.failed",
@@ -1645,6 +1646,9 @@ fn chunk_schema_error(chunk: &Value) -> Option<String> {
             (&[], &["output_index"])
         }
         "response.output_text.delta" => (&["item_id", "delta"], &[]),
+        "response.content_part.added" => (&["item_id"], &["output_index", "content_index"]),
+        "response.refusal.delta" => (&["item_id", "delta"], &["output_index", "content_index"]),
+        "response.refusal.done" => (&["item_id", "refusal"], &["output_index", "content_index"]),
         "response.function_call_arguments.delta"
         | "response.custom_tool_call_input.delta"
         | "response.code_interpreter_call_code.delta"
@@ -2020,6 +2024,8 @@ struct OpenAIResponsesStream {
     text_states: HashMap<String, Value>,
     /// Refusal parts that already received a delta, keyed by item and part.
     refusal_deltas: HashSet<(String, u64)>,
+    /// Text block ids by item id and content index.
+    text_part_ids: HashMap<(String, u64), String>,
     output_ids: HashMap<usize, String>,
     text_annotations: HashMap<String, Vec<Value>>,
     logprobs: Vec<Value>,
@@ -2066,6 +2072,7 @@ impl Transformer for OpenAIResponsesStream {
             ref mut stream_errored,
             ref mut text_states,
             ref mut refusal_deltas,
+            ref mut text_part_ids,
             ref mut output_ids,
             ref mut text_annotations,
             ref mut logprobs,
@@ -2165,6 +2172,7 @@ impl Transformer for OpenAIResponsesStream {
                                         .to_string();
                                     output_ids.insert(output_index, id.clone());
                                     text_states.insert(id.clone(), item.clone());
+                                    text_part_ids.insert((id.clone(), 0), id.clone());
                                     controller.enqueue(StreamPart::TextStart {
                                         id,
                                         provider_metadata: Some(
@@ -2193,7 +2201,17 @@ impl Transformer for OpenAIResponsesStream {
                                             tool_call_id: call_id.clone(),
                                         },
                                     );
-                                    controller.tool_input_start(call_id, name);
+                                    controller.enqueue(StreamPart::ToolInputStart {
+                                        id: call_id,
+                                        tool_name: name,
+                                        provider_executed: None,
+                                        dynamic: None,
+                                        title: None,
+                                        provider_metadata: Some(
+                                            provider_namespace(provider_key, tool_metadata(item))
+                                                .expect("provider metadata must be an object"),
+                                        ),
+                                    });
                                 }
                                 "custom_tool_call" => {
                                     let call_id = item
@@ -2212,7 +2230,17 @@ impl Transformer for OpenAIResponsesStream {
                                             tool_call_id: call_id.clone(),
                                         },
                                     );
-                                    controller.tool_input_start(call_id, name);
+                                    controller.enqueue(StreamPart::ToolInputStart {
+                                        id: call_id,
+                                        tool_name: name,
+                                        provider_executed: None,
+                                        dynamic: None,
+                                        title: None,
+                                        provider_metadata: Some(
+                                            provider_namespace(provider_key, tool_metadata(item))
+                                                .expect("provider metadata must be an object"),
+                                        ),
+                                    });
                                 }
                                 "reasoning" => {
                                     let id = item
@@ -2338,6 +2366,56 @@ impl Transformer for OpenAIResponsesStream {
                         }
                     }
 
+                    // ── response.content_part.added → split text blocks ───────
+                    "response.content_part.added" => {
+                        if parsed
+                            .get("part")
+                            .and_then(|part| part.get("type"))
+                            .and_then(Value::as_str)
+                            == Some("output_text")
+                        {
+                            let mut item_id = parsed
+                                .get("item_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            if let Some(index) = parsed.get("output_index").and_then(Value::as_u64)
+                                && let Some(original_id) = output_ids.get(&(index as usize))
+                            {
+                                item_id = original_id.clone();
+                            }
+                            let content_index = parsed
+                                .get("content_index")
+                                .and_then(Value::as_u64)
+                                .unwrap_or(0);
+                            if content_index > 0
+                                && !text_part_ids.contains_key(&(item_id.clone(), content_index))
+                            {
+                                if let Some(previous_block) = text_part_ids
+                                    .get(&(item_id.clone(), content_index - 1))
+                                    .cloned()
+                                {
+                                    controller.text_end(previous_block);
+                                }
+                                let block_id = format!("{item_id}:{content_index}");
+                                text_part_ids
+                                    .insert((item_id.clone(), content_index), block_id.clone());
+                                let mut metadata = text_states
+                                    .get(&item_id)
+                                    .map(|item| text_metadata(item, None))
+                                    .unwrap_or_else(|| json!({ "itemId": item_id.clone() }));
+                                metadata["contentIndex"] = json!(content_index);
+                                controller.enqueue(StreamPart::TextStart {
+                                    id: block_id,
+                                    provider_metadata: Some(
+                                        provider_namespace(provider_key, metadata)
+                                            .expect("provider metadata must be an object"),
+                                    ),
+                                });
+                            }
+                        }
+                    }
+
                     // ── response.output_text.delta → TextDelta ────────────────
                     "response.output_text.delta" => {
                         if request_body
@@ -2348,7 +2426,7 @@ impl Transformer for OpenAIResponsesStream {
                         {
                             logprobs.push(logprobs_fields(value));
                         }
-                        let mut id = parsed
+                        let mut item_id = parsed
                             .get("item_id")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
@@ -2356,8 +2434,16 @@ impl Transformer for OpenAIResponsesStream {
                         if let Some(index) = parsed.get("output_index").and_then(Value::as_u64)
                             && let Some(original_id) = output_ids.get(&(index as usize))
                         {
-                            id = original_id.clone();
+                            item_id = original_id.clone();
                         }
+                        let content_index = parsed
+                            .get("content_index")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0);
+                        let id = text_part_ids
+                            .get(&(item_id.clone(), content_index))
+                            .cloned()
+                            .unwrap_or(item_id);
                         let delta = parsed
                             .get("delta")
                             .and_then(|v| v.as_str())
@@ -2385,6 +2471,10 @@ impl Transformer for OpenAIResponsesStream {
                         let delta = parsed.get("delta").and_then(|v| v.as_str()).unwrap_or("");
                         if !delta.is_empty() {
                             refusal_deltas.insert((id.clone(), content_index));
+                            let id = text_part_ids
+                                .get(&(id.clone(), content_index))
+                                .cloned()
+                                .unwrap_or(id);
                             controller.text_delta(id, delta.to_string());
                         }
                     }
@@ -2409,6 +2499,10 @@ impl Transformer for OpenAIResponsesStream {
                             let refusal =
                                 parsed.get("refusal").and_then(|v| v.as_str()).unwrap_or("");
                             if !refusal.is_empty() {
+                                let id = text_part_ids
+                                    .get(&(id.clone(), content_index))
+                                    .cloned()
+                                    .unwrap_or(id);
                                 controller.text_delta(id, refusal.to_string());
                             }
                         }
@@ -2550,8 +2644,14 @@ impl Transformer for OpenAIResponsesStream {
                                         metadata_item["phase"] = phase.clone();
                                     }
                                     let annotations = text_annotations.remove(&id);
+                                    let block_id = text_part_ids
+                                        .iter()
+                                        .filter(|((item_id, _), _)| item_id == &id)
+                                        .max_by_key(|((_, index), _)| *index)
+                                        .map(|(_, block)| block.clone())
+                                        .unwrap_or_else(|| id.clone());
                                     controller.enqueue(StreamPart::TextEnd {
-                                        id,
+                                        id: block_id,
                                         provider_metadata: Some(
                                             provider_namespace(
                                                 provider_key,
