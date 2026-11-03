@@ -6,7 +6,9 @@ use crate::{
 use dim_agent_runtime::{
     AgentError, Branch, BranchLifecycle, BranchOptions, Delivery, Dispatcher, Names, Result,
     SessionIdentity, StoredBranch, StoredEvent, Timeline, TimelineContext, TimelineFactory,
-    TimelineIdentity, TimelineInfo, TimelineKey, TimelineStore, TimelineTreeControl,
+    TimelineIdentity, TimelineInfo, TimelineKey, TimelineQuery, TimelineQueryDirection,
+    TimelineQueryOrderBy, TimelineQueryPredicate, TimelineQueryScope, TimelineStore,
+    TimelineTreeControl,
 };
 use dim_agent_types::*;
 use futures_util::{FutureExt, future::join_all};
@@ -14,8 +16,10 @@ use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::service;
 use rutis::{Ctx, Error};
 use serde::Deserialize;
+use serde_json::json;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    num::NonZeroU64,
     panic::AssertUnwindSafe,
     sync::{
         Arc, Mutex, Weak,
@@ -32,7 +36,8 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 /// created child wrote while it opened fit in one.
 const CREATION_PAGE: usize = 32;
 
-const TAIL_EVENTS: u64 = 32;
+/// Facts one page of a line read keeps.
+const LINE_PAGE: u64 = 32;
 
 /// How a loaded branch begins on its Timeline.
 enum Opening {
@@ -562,27 +567,52 @@ impl TimelineTree {
                 let (opening, first) = match opening {
                     Opening::Start { start, first } => (EventKind::BranchStart(start), first),
                     Opening::Resume { head, lines } => {
-                        let history = tokio::select! {
-                            result = tokio::time::timeout(owner.factory.startup_timeout(), context.timeline().local(..=head)) =>
-                                result.map_err(|_| AgentError::Build("branch opening timed out".into()))??,
-                            _ = owner.cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into())),
-                        };
                         let mut facts = LineFacts::default();
-                        for event in &history {
-                            match &event.kind {
-                                EventKind::BranchCreateFailed(
-                                    BranchCreateFailedData::Failed { create_event, .. }
-                                    | BranchCreateFailedData::Cancelled { create_event, .. },
-                                ) => {
-                                    facts.failed_creates.insert(*create_event);
+                        let mut from = 1;
+                        loop {
+                            let reply = tokio::select! {
+                                result = tokio::time::timeout(owner.factory.startup_timeout(), context.timeline().query(TimelineQuery {
+                                    scope: TimelineQueryScope::Branch,
+                                    from_event: None,
+                                    from_sequence: Some(from),
+                                    order_by: TimelineQueryOrderBy::Sequence,
+                                    direction: TimelineQueryDirection::Ascending,
+                                    kinds: vec![
+                                        "branch/create-failed".into(),
+                                        "branch/create".into(),
+                                        "branch/ended".into(),
+                                    ],
+                                    flags: Vec::new(),
+                                    event_id: None,
+                                    predicate: None,
+                                    limit: NonZeroU64::new(LINE_PAGE).expect("a page keeps at least one event"),
+                                    offset: 0,
+                                })) =>
+                                    result.map_err(|_| AgentError::Build("branch opening timed out".into()))??,
+                                _ = owner.cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into())),
+                            };
+                            let short = (reply.events.len() as u64) < LINE_PAGE;
+                            let last = reply.events.last().map(|event| event.sequence);
+                            for event in &reply.events {
+                                match &event.kind {
+                                    EventKind::BranchCreateFailed(
+                                        BranchCreateFailedData::Failed { create_event, .. }
+                                        | BranchCreateFailedData::Cancelled { create_event, .. },
+                                    ) => {
+                                        facts.failed_creates.insert(*create_event);
+                                    }
+                                    EventKind::BranchCreate(data) => {
+                                        facts.sources.insert(data.branch.clone(), data.source.clone());
+                                    }
+                                    EventKind::BranchEnded(data) => {
+                                        facts.ended.insert(data.branch.clone());
+                                    }
+                                    _ => unreachable!("the read selects the line facts"),
                                 }
-                                EventKind::BranchCreate(data) => {
-                                    facts.sources.insert(data.branch.clone(), data.source.clone());
-                                }
-                                EventKind::BranchEnded(data) => {
-                                    facts.ended.insert(data.branch.clone());
-                                }
-                                _ => {}
+                            }
+                            match last {
+                                Some(last) if !short && last < head => from = last + 1,
+                                _ => break,
                             }
                         }
                         let _ = lines.send(facts);
@@ -686,7 +716,7 @@ impl TimelineTree {
             session_id: self.session_id.clone(),
             branch_id: branch.into(),
         };
-        let mut window = TAIL_EVENTS;
+        let mut window = LINE_PAGE;
         loop {
             let from = head.saturating_sub(window.saturating_sub(1)).max(1);
             let records = self.store.read(&key, from..=head).await?;
@@ -2287,35 +2317,64 @@ impl BranchTool {
                     .tree
                     .get(&context.branch_id)
                     .map_err(|error| HostError::failed(error.to_string()))?;
-                let events = parent
-                    .local(..)
-                    .await
-                    .map_err(|error| HostError::failed(error.to_string()))?;
-                let first_use = events
-                    .iter()
-                    .position(|event| {
-                        matches!(&event.kind, EventKind::ToolUse(data)
-                            if data.turn_id == context.turn_id
-                                && data.request_id == context.request_id)
-                    })
-                    .ok_or_else(|| {
-                        HostError::failed("branch tool call is absent from its owning timeline")
-                    })?;
-                events[..first_use]
-                    .iter()
-                    .rev()
-                    .find_map(|event| match &event.kind {
-                        EventKind::ModelStart(data)
-                            if data.turn_id == context.turn_id
-                                && data.request_id == context.request_id =>
-                        {
-                            Some(event.sequence - 1)
+                // The dispatcher delivers only published facts, so the
+                // `step/tool-use` this call runs from and the `step/model-start`
+                // before it are published when the read runs.
+                let mut model_start = None;
+                let mut found = None;
+                let mut from = 1;
+                loop {
+                    let reply = parent
+                        .query(TimelineQuery {
+                            scope: TimelineQueryScope::Branch,
+                            from_event: None,
+                            from_sequence: Some(from),
+                            order_by: TimelineQueryOrderBy::Sequence,
+                            direction: TimelineQueryDirection::Ascending,
+                            kinds: vec!["step/model-start".into(), "step/tool-use".into()],
+                            flags: Vec::new(),
+                            event_id: None,
+                            predicate: Some(TimelineQueryPredicate {
+                                path: "request_id".into(),
+                                value: json!(context.request_id),
+                            }),
+                            limit: NonZeroU64::new(LINE_PAGE)
+                                .expect("a page keeps at least one event"),
+                            offset: 0,
+                        })
+                        .await
+                        .map_err(|error| HostError::failed(error.to_string()))?;
+                    let short = (reply.events.len() as u64) < LINE_PAGE;
+                    let last = reply.events.last().map(|event| event.sequence);
+                    for event in &reply.events {
+                        match &event.kind {
+                            EventKind::ModelStart(data) if data.turn_id == context.turn_id => {
+                                model_start = Some(event.sequence);
+                            }
+                            EventKind::ToolUse(data) if data.turn_id == context.turn_id => {
+                                found = Some(
+                                    model_start.ok_or_else(|| {
+                                        HostError::failed(
+                                            "branch tool batch has no owning model start",
+                                        )
+                                    })? - 1,
+                                );
+                                break;
+                            }
+                            _ => {}
                         }
-                        _ => None,
-                    })
-                    .ok_or_else(|| {
-                        HostError::failed("branch tool batch has no owning model start")
-                    })?
+                    }
+                    if found.is_some() {
+                        break;
+                    }
+                    match last {
+                        Some(last) if !short => from = last + 1,
+                        _ => break,
+                    }
+                }
+                found.ok_or_else(|| {
+                    HostError::failed("branch tool call is absent from its owning timeline")
+                })?
             }
         };
         let branch = self
