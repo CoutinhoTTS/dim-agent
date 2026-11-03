@@ -112,7 +112,7 @@ jobs:
       - name: Run compiled workspace tests
         if: needs.changes.outputs.rust == 'true'
         run: |
-          node scripts/run-rust-test.mjs target/test-artifacts.jsonl --workspace
+          node scripts/run-rust-test.mjs target/test-artifacts.jsonl --workspace --test-threads=4
           cargo test --workspace --doc --locked ${{ needs.changes.outputs.eval == 'true' && '--features xtask/eval-tests' || '' }}
       - name: Verify wall-clock background handoff
         if: needs.changes.outputs.execution == 'true'
