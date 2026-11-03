@@ -28,8 +28,9 @@ contract between stores, not an interface for a capability.
 The Timeline exposes one read for capabilities: the scope (this branch, or the branch chain —
 each ancestor up to its cut, root first, then this branch to its head), the accepted event kinds
 plus the envelope's two
-context flags, one event id, one equality predicate over a data field, the order, and the page:
-how many matching events it skips and how many it returns, the second nonzero by type. It returns
+context flags, one event id, one equality predicate over a data field, where the read begins
+(an event id or a sequence), the order and its direction, and the page: how many matching events
+it skips and how many it returns, the second nonzero by type. It returns
 decoded events, each with its chain position.
 
 A kind or field path the store does not know matches no rows; it is not an error. A capability

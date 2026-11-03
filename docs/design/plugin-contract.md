@@ -209,14 +209,15 @@ A part reads facts through its branch's `timeline` service with one bounded quer
 | Kinds and flags | The event kinds it accepts (`domain/name`), and the envelope's context flags (§5.1) it selects on |
 | Event id | An equality on the event id: one id selects that event, so a caller reads one event or looks up its position without paging |
 | Predicate | One equality against one JSON scalar. The path is a sequence of field names inside the event's data joined by dots, with no array indexing and no wildcards |
-| Order | Ascending (oldest first) or descending (newest first). A reply is ordered by chain position, then sequence, in the requested direction |
+| From | Where the read begins, named by an event id or by a sequence; the event it names is part of the read. A branch read takes it on that branch; a chain read begins in the segment it names and carries on, skipping the segments before it |
+| Order | The key the reply is ordered by — the sequence — and the direction: ascending (oldest first) or descending (newest first). A chain read orders by chain position first |
 | Page | How many matching events the read skips, and how many it returns; the second is nonzero by type, so no read is unbounded. Both count events, not storage rows |
 
 The elements combine: an event is selected when it satisfies all of them, and flags named together
 are alternatives, so an event is accepted when it carries at least one of them — the context read
 selects the rows that carry `context_render` or `context_state`. A selection that names no kind
-accepts every kind, one with no event id accepts every event, and a flag it does not name constrains
-nothing: no omission is an error.
+accepts every kind, one with no event id accepts every event, one that names no start begins at the
+first event of its scope, and a flag it does not name constrains nothing: no omission is an error.
 
 Paging is skipping: a caller repeats the query with a larger skip, and a page shorter than the
 count is what says the selection is exhausted. A page does not align with an atomic batch — it may
