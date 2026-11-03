@@ -509,9 +509,11 @@ A paging or projection read returns what an event says without rebuilding the re
 and `model/call`: the request in such a record keeps the empty message list and the absent `tools` and `system` that
 its row holds, and no content row it references is loaded, hashed or checked. These readers never look at those requests:
 history paging discards both kinds, `session.summaries` reads only input text and the last event's time, the context
-projection projects input and output facts, and collaboration reads tool calls, results and turn outcomes. They page
-through `TimelineStore::read_page_without_request_bodies`, whose default is `read_page`; a store may implement it
-with no request walk at all. Every read that uses a request (`local`, `history`, `context`, `trace`,
+projection projects input and output facts, and collaboration reads tool calls, results and turn outcomes. The readers that still page
+through `TimelineStore::read_page_without_request_bodies` are the collaboration read of a peer Session and the App
+Server's page read of a line this process does not hold or that has ended; its default is `read_page`, and a store
+may implement it with no request walk at all. A history page of a loaded line reads through the branch's query, which
+rebuilds the requests of the rows it returns ([ADR 020](../adr/020-timeline-read-convergence.md) D6). Every read that uses a request (`local`, `history`, `context`, `trace`,
 `validate_session`, export) still rebuilds and checks each one as §7.1–§8 state.
 
 - The read still checks that each record and each draft of its trace has the references its kind requires, and no
@@ -519,8 +521,8 @@ with no request walk at all. Every read that uses a request (`local`, `history`,
 - A damaged node therefore does not fail a paging read, because that read would not have loaded it. Restore and every
   read that uses requests still fail on it, and a Session with a damaged list is still refused at restore (§8).
 - The streamed projection (§10) reads its history through paging, so the events it projects carry no stored request.
-  The one request an estimate compares against comes from `policy_facts`, whose rows include the `model/call` of the
-  last `model/usage`, not from the projected events.
+  The one request an estimate compares against is the one the newest `model/usage` measured: it comes from the
+  `model/call` the query returns for that usage's `request_id`, not from the projected events.
 
 ## 8. Validation and damaged rows
 
@@ -584,7 +586,7 @@ between 30 and 42 were written before any snapshot chose it, and their lists rea
 
 A checkpoint read starts at 30 as today. Its first request row there is rebuilt by walking that row's own list: content
 rows only, in holds of at most 256 node loads. No row that ends before 30 is read, and no request row before 30, which
-is the `context_with_checkpoint` convention of
+is the checkpoint read's convention of
 [timeline-storage §4](../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描). The nodes it loads are the
 messages of the requests the read returns, which v16 loads through those rows' references. The rows after it, the new
 list at 43 included, continue from the kept request in order.

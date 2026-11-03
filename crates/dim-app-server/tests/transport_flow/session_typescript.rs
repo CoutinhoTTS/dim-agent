@@ -10,6 +10,7 @@ use dim_agent_capabilities::{
     tool_registry::definition,
 };
 use dim_agent_runtime::SESSION_GROUP;
+use dim_agent_runtime::testing::{branch_events, chain_events};
 use dim_agent_types::{MessageContent, MessagePart, ModelRequest, Role};
 use dim_app_server::session_typescript::SessionTypeScriptConfig;
 use rutis::host::{CtxHost, InstanceId};
@@ -101,7 +102,7 @@ async fn node_session_part_calls_provider_auxiliary_model_without_timeline_write
     assert_ok(&created);
     let sid = created["result"]["sessionId"].as_str().unwrap();
     let session = agent.get_session(sid).unwrap();
-    let before = session.history("main", None).await.unwrap();
+    let before = chain_events(&session, "main", ..).await.unwrap();
     let request = json!({"model":{"providerId":"018ec73f-0000-7000-8000-000000000009","modelId":"title"}, "request":{
         "system":"Write a title", "messages":[{"role":"user","content":"hello"}], "maxOutputTokens":32
     }});
@@ -159,7 +160,7 @@ async fn node_session_part_calls_provider_auxiliary_model_without_timeline_write
         requests.try_recv().is_err(),
         "invalid calls must not reach the model"
     );
-    let after = session.history("main", None).await.unwrap();
+    let after = chain_events(&session, "main", ..).await.unwrap();
     assert_eq!(
         before.iter().map(|event| &event.id).collect::<Vec<_>>(),
         after.iter().map(|event| &event.id).collect::<Vec<_>>()
@@ -415,8 +416,7 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
     )
     .await;
     assert_ok(&initial);
-    let loading: Vec<Value> = first_session
-        .local("main", ..=first_after)
+    let loading: Vec<Value> = branch_events(&first_session, "main", ..=first_after)
         .await
         .unwrap()
         .iter()
@@ -503,8 +503,7 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
             .await,
     );
     let through = first_session.sequence("main").unwrap();
-    let expected: Vec<Value> = first_session
-        .local("main", first_after + 1..)
+    let expected: Vec<Value> = branch_events(&first_session, "main", first_after + 1..)
         .await
         .unwrap()
         .iter()
@@ -534,7 +533,7 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
         .await
         .unwrap();
     first_session.idle(&child).await.unwrap();
-    let child_history = first_session.local(&child, ..).await.unwrap();
+    let child_history = branch_events(&first_session, &child, ..).await.unwrap();
     let child_records = client
         .rpc(
             "session.observer.through",
@@ -665,8 +664,7 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
         other["result"]["generation"]
     );
     let restored_session = server.agent().unwrap().get_session(&second).unwrap();
-    let restoring: Vec<Value> = restored_session
-        .local("main", ..)
+    let restoring: Vec<Value> = branch_events(&restored_session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -851,8 +849,7 @@ async fn node_session_typescript_observes_a_session_across_idle_unloads() {
         assert_ok(&status);
         submit(&mut client, &id, text).await;
         let through = session.sequence("main").unwrap();
-        let expected: Vec<Value> = session
-            .local("main", after + 1..)
+        let expected: Vec<Value> = branch_events(&session, "main", after + 1..)
             .await
             .unwrap()
             .iter()
@@ -1455,7 +1452,7 @@ async fn node_session_typescript_tools_methods_and_generation_lifetimes() {
             .await,
     );
     let session = server.agent().unwrap().get_session(&first).unwrap();
-    let history = session.history("main", None).await.unwrap();
+    let history = chain_events(&session, "main", ..).await.unwrap();
     let results: Vec<_> = history
         .iter()
         .filter_map(|event| match &event.kind {
@@ -1521,7 +1518,7 @@ async fn node_session_typescript_tools_methods_and_generation_lifetimes() {
     assert_eq!(progress["params"]["data"]["phase"], "started");
     assert_ok(&client.response(progress_call).await);
     submit(&mut client, &first, r#"tool:ts_echo {"text":"malformed"}"#).await;
-    assert!(session.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::ToolResult(batch) if batch.results.iter().any(|result| result.result.is_error == Some(true)))));
+    assert!(chain_events(&session, "main", ..).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::ToolResult(batch) if batch.results.iter().any(|result| result.result.is_error == Some(true)))));
 
     assert_ok(&client.rpc("session.submit", json!({"sessionId":first,"branchId":"main","text":r#"tool:ts_echo {"text":"cancel"}"#})).await);
     assert_ok(
@@ -1659,7 +1656,7 @@ async fn node_session_typescript_restore_fork_delete_and_disabled_parts() {
         1
     );
     let fork = server.agent().unwrap().get_session(fork_id).unwrap();
-    let history = fork.history("main", None).await.unwrap();
+    let history = chain_events(&fork, "main", ..).await.unwrap();
     let result = history
         .iter()
         .rev()
@@ -2195,7 +2192,7 @@ async fn node_session_typescript_tool_only_first_request_on_create_and_restore()
         .await;
         assert!(requests.recv().await.unwrap().contains(&"ts_echo".into()));
         let session = server.agent().unwrap().get_session(&session_id).unwrap();
-        let history = session.history("main", None).await.unwrap();
+        let history = chain_events(&session, "main", ..).await.unwrap();
         let result = history
             .iter()
             .rev()
@@ -2280,7 +2277,7 @@ async fn node_session_typescript_row_reload_settles_tools_and_rejects_retained_h
             .await,
     );
     let session = server.agent().unwrap().get_session(&session_id).unwrap();
-    assert!(session.history("main", None).await.unwrap().iter().any(|event| {
+    assert!(chain_events(&session, "main", ..).await.unwrap().iter().any(|event| {
         matches!(&event.kind, EventKind::ToolResult(batch) if batch.results.iter().any(|result| {
             result.result.is_error == Some(true)
                 && result.result.content == dim_agent_types::ToolContent::Text("tool provider generation is unloading; this call may already have taken effect. Check the operation's state before repeating it with the current provider.".into())
@@ -2427,7 +2424,7 @@ async fn node_session_typescript_tool_result_carries_declared_effects() {
     submit(&mut client, &id, r#"tool:ts_echo {"text":"declares"}"#).await;
     assert!(requests.recv().await.unwrap().contains(&"ts_echo".into()));
     let session = server.agent().unwrap().get_session(&id).unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let declared = events
         .iter()
         .find_map(|event| match &event.kind {

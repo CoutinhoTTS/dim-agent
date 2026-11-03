@@ -1,8 +1,10 @@
 use dim_agent_capabilities::file_storage::FileStoragePlugin;
-use dim_agent_capabilities::history::{HistoryRenderer, read_context};
+use dim_agent_capabilities::history::{HistoryRenderer, read_context, replay_context};
+use dim_agent_runtime::testing::{chain_events, timeline_events};
 use dim_agent_runtime::{
     AgentBuilder, AgentConfig, AgentError, MemoryTimelineStore, SessionConfig, StoredEvent,
-    Timeline, TimelineKey, TimelineStore, TimelineTrace, TraceStep, testing::MinimalHost,
+    Timeline, TimelineKey, TimelineQueryScope, TimelineStore, TimelineTrace, TraceStep,
+    testing::MinimalHost,
 };
 use dim_agent_types::{
     grant::{GrantKind, GrantMode, SessionGrant},
@@ -27,7 +29,7 @@ mod catalog;
 #[path = "storage_flow/worktrees.rs"]
 mod worktrees;
 
-const INTERPRETER: &str = "dim/context-projection/v3";
+const INTERPRETER: &str = "dim/context-projection/v4";
 fn snapshot(sequence: u64, checkpoint: &ProjectionCheckpoint) -> RecoverySnapshot {
     let mut snapshot = RecoverySnapshot {
         sequence,
@@ -287,6 +289,29 @@ fn insert_documented_records(connection: &Connection, tables: &[&str]) {
                 .unwrap();
         }
     }
+}
+
+/// The documented example predates the two context switches (v31): a store
+/// that holds it has them set from each row's kind, as the upgrade writes them.
+fn write_documented_context_switches(connection: &Connection) {
+    let keys = |list: &[&str]| {
+        list.iter()
+            .map(|key| format!("'{key}'"))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    connection
+        .execute_batch(&format!(
+            "UPDATE timeline_events SET context_render=1 WHERE kind IN ({});",
+            keys(dim_agent_types::CONTEXT_RENDER_KEYS)
+        ))
+        .unwrap();
+    connection
+        .execute_batch(&format!(
+            "UPDATE timeline_events SET context_state=1 WHERE kind IN ({});",
+            keys(dim_agent_types::CONTEXT_STATE_KEYS)
+        ))
+        .unwrap();
 }
 
 /// The v13 schema exactly as v13 daemons wrote it, frozen here so that tests
@@ -594,6 +619,7 @@ async fn documented_native_records_restore_with_legacy_snapshot_bypassed() {
         .execute("INSERT INTO agent_store_format VALUES (?1)", [STORE_FORMAT])
         .unwrap();
     insert_documented_records(&connection, BUSINESS_TABLES);
+    write_documented_context_switches(&connection);
     drop(connection);
 
     assert_eq!(store.branches("s1").await.unwrap().len(), 2);
@@ -605,7 +631,7 @@ async fn documented_native_records_restore_with_legacy_snapshot_bypassed() {
     )
     .await
     .unwrap();
-    let generated = projection_checkpoint(&main.context(2).await.unwrap(), "e2").unwrap();
+    let generated = projection_checkpoint(&replay_context(&main, 2).await.unwrap(), "e2").unwrap();
     let saved = store
         .latest_snapshot(&key("s1", "main"), 7, "dim/context-projection/v1")
         .await
@@ -613,7 +639,13 @@ async fn documented_native_records_restore_with_legacy_snapshot_bypassed() {
         .unwrap();
     let saved: ProjectionCheckpoint = serde_json::from_str(&saved.state).unwrap();
     assert_eq!(saved, generated);
-    let full = project_history(&main.history(Some(7)).await.unwrap(), "main").unwrap();
+    let full = project_history(
+        &timeline_events(&main, TimelineQueryScope::Chain, ..=7)
+            .await
+            .unwrap(),
+        "main",
+    )
+    .unwrap();
     let recovered = read_context(&main, 7).await.unwrap();
     assert!(recovered.checkpoint.is_none());
     let compacted = project_context_history(&recovered).unwrap();
@@ -905,7 +937,13 @@ async fn committed_history_round_trips_requests_outputs_traces_and_branch_direct
     .await
     .unwrap();
     assert_eq!(timeline.sequence(), 10);
-    assert_eq!(timeline.history(None).await.unwrap().len(), 10);
+    assert_eq!(
+        timeline_events(&timeline, TimelineQueryScope::Chain, ..)
+            .await
+            .unwrap()
+            .len(),
+        10
+    );
     timeline
         .append(EventDraft::new(EventKind::StopInterrupt(
             StopInterruptData {
@@ -1061,7 +1099,7 @@ async fn output_block_start_id_roundtrips_through_the_merged_row() {
     builder.timeline_store(store.clone());
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent.restore_session("session".into()).await.unwrap();
-    let restored = session.history("main", Some(2)).await.unwrap();
+    let restored = chain_events(&session, "main", ..=2).await.unwrap();
     let text: Vec<_> = restored
         .iter()
         .filter(|event| matches!(event.kind, EventKind::Text(_)))
@@ -1282,28 +1320,9 @@ async fn a_cut_check_starts_at_the_last_completed_compaction() {
     )
     .await
     .unwrap();
-    assert_eq!(
-        store
-            .last_compaction_cut(&key("session", "main"), 14)
-            .await
-            .unwrap(),
-        Some(dim_agent_runtime::CompactionCut {
-            retain_from: "event-8".into(),
-            sequence: 9,
-        }),
-        "a cancelled compaction after the completed one is not a cut"
-    );
-    assert_eq!(
-        store
-            .last_compaction_cut(&key("session", "main"), 8)
-            .await
-            .unwrap(),
-        None
-    );
-    assert_eq!(timeline.compaction_cut(14).await.unwrap(), Some(8));
     for at in [4, 8, 12, 14] {
         let expected = dim_agent_capabilities::history::validate_context_boundary(
-            &timeline.context(at).await.unwrap(),
+            &replay_context(&timeline, at).await.unwrap(),
         );
         assert_eq!(
             dim_agent_capabilities::history::validate_context_boundary_at(&timeline, at)
@@ -1394,10 +1413,9 @@ async fn a_cut_on_another_branch_replays_the_segment() {
     )
     .await
     .unwrap();
-    assert_eq!(timeline.compaction_cut(4).await.unwrap(), None);
     for at in [3, 4] {
         let expected = dim_agent_capabilities::history::validate_context_boundary(
-            &timeline.context(at).await.unwrap(),
+            &replay_context(&timeline, at).await.unwrap(),
         );
         assert!(expected.is_err(), "the output is open at {at}");
         assert_eq!(
@@ -1586,12 +1604,34 @@ async fn extension_events_store_the_switches_their_producer_sets() {
     .await
     .unwrap();
     let read = store
-        .read_context(&key("session", "main"), 1, 2)
+        .query(
+            &key("session", "main"),
+            &dim_agent_runtime::TimelineQuery {
+                scope: dim_agent_runtime::TimelineQueryScope::Branch,
+                include_publishing: false,
+                from_event: None,
+                from_sequence: None,
+                order_by: dim_agent_runtime::TimelineQueryOrderBy::Sequence,
+                direction: dim_agent_runtime::TimelineQueryDirection::Ascending,
+                kinds: Vec::new(),
+                flags: vec![
+                    dim_agent_runtime::TimelineQueryFlag::Render,
+                    dim_agent_runtime::TimelineQueryFlag::State,
+                ],
+                event_id: None,
+                predicate: None,
+                limit: std::num::NonZeroU64::MIN,
+                offset: 0,
+            },
+            1,
+            2,
+        )
         .await
         .unwrap();
     assert_eq!(
-        read.iter()
-            .map(|record| record.event.sequence)
+        read.events
+            .iter()
+            .map(|event| event.sequence)
             .collect::<Vec<_>>(),
         vec![1],
         "only the event the producer marked is read for the context"
@@ -1670,7 +1710,7 @@ async fn extension_events_keep_their_own_rows_and_restore_unchanged() {
     builder.timeline_store(store.clone());
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent.restore_session("session".into()).await.unwrap();
-    let restored = session.history("main", Some(3)).await.unwrap();
+    let restored = chain_events(&session, "main", ..=3).await.unwrap();
     let written: Vec<_> = written.iter().map(|entry| entry.event.clone()).collect();
     assert_eq!(
         serde_json::to_string(&restored).unwrap(),
@@ -1813,7 +1853,7 @@ async fn branch_end_events_restore_unchanged_and_the_line_stays_ended() {
     builder.timeline_store(store.clone());
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent.restore_session("session".into()).await.unwrap();
-    let restored = session.history("main", Some(5)).await.unwrap();
+    let restored = chain_events(&session, "main", ..=5).await.unwrap();
     assert!(
         restored
             .iter()
@@ -1821,7 +1861,13 @@ async fn branch_end_events_restore_unchanged_and_the_line_stays_ended() {
     );
     assert!(!session.branches().iter().any(|line| line.id == "child"));
     assert_eq!(session.sequence("child").unwrap(), 2);
-    let line = session.local_page("child", 0, 8, 2).await.unwrap();
+    let line = store
+        .read_page_without_request_bodies(&key("session", "child"), 0, 8, 2)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|record| record.event)
+        .collect::<Vec<_>>();
     assert_eq!(line.len(), 2);
     assert_eq!(line[1].kind, end);
     assert!(matches!(
@@ -2409,8 +2455,11 @@ async fn reads_rebuild_lists_from_where_they_start_in_bounded_holds() {
     .await
     .unwrap();
     let retain_from = format!("event-{}", 3 * (TURNS - 2) - 2);
-    let checkpoint =
-        projection_checkpoint(&timeline.context(through).await.unwrap(), &retain_from).unwrap();
+    let checkpoint = projection_checkpoint(
+        &replay_context(&timeline, through).await.unwrap(),
+        &retain_from,
+    )
+    .unwrap();
     dim_agent_runtime::core::close_timeline(&timeline)
         .await
         .unwrap();
@@ -2560,7 +2609,13 @@ async fn paging_reads_do_not_rebuild_request_bodies() {
     session.idle("main").await.unwrap();
     store.take_node_loads();
 
-    let page = session.local_page("main", 0, 8, 3).await.unwrap();
+    let page = store
+        .read_page_without_request_bodies(&main, 0, 8, 3)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|record| record.event)
+        .collect::<Vec<_>>();
     assert_eq!(page.len(), 3);
     assert_eq!(
         store.take_node_loads(),
@@ -2592,7 +2647,13 @@ async fn paging_reads_do_not_rebuild_request_bodies() {
         ),
         "a read that uses the requests checks their content"
     );
-    let page = session.local_page("main", 0, 8, 3).await.unwrap();
+    let page = store
+        .read_page_without_request_bodies(&main, 0, 8, 3)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|record| record.event)
+        .collect::<Vec<_>>();
     assert_eq!(
         page.iter().map(|event| event.sequence).collect::<Vec<_>>(),
         vec![1, 2, 3]
@@ -2832,7 +2893,7 @@ async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_o
         assert_eq!(store.writer_memo_requests(&bad_id), 0);
         assert!(agent.get_session(&bad_id).is_none());
         assert!(agent.get_session(good.id()).is_some());
-        let bad_history = bad.history("main", None).await.unwrap();
+        let bad_history = chain_events(&bad, "main", ..).await.unwrap();
         assert!(
             bad_history
                 .iter()
@@ -2849,7 +2910,7 @@ async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_o
                 .to_string()
                 .contains("injected output commit failure")
         );
-        assert!(good.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("healthy output"))));
+        assert!(chain_events(&good, "main", ..).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("healthy output"))));
         connection
             .execute_batch("DROP TRIGGER fail_output; DROP TABLE injected_session")
             .unwrap();
@@ -2905,14 +2966,14 @@ async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_o
         settled("the healthy branch idles after recovery", good.idle("main"))
             .await
             .unwrap();
-        assert!(good.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("still healthy"))));
+        assert!(chain_events(&good, "main", ..).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("still healthy"))));
         settled(
             "the restored branch settles the orphaned turn",
             session.idle("main"),
         )
         .await
         .unwrap();
-        let history = session.history("main", None).await.unwrap();
+        let history = chain_events(&session, "main", ..).await.unwrap();
         assert!(history.iter().any(|event| matches!(&event.kind, EventKind::ModelOutputEnd(data) if matches!(data.outcome, ModelOutputOutcome::Failed { .. }))));
         assert!(history.iter().any(|event| matches!(&event.kind, EventKind::TurnEnd(data) if matches!(data.outcome, TurnOutcome::Failed { .. }))));
         session
@@ -2922,7 +2983,7 @@ async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_o
         settled("the restored branch ends its turn", session.idle("main"))
             .await
             .unwrap();
-        assert!(session.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("after recovery"))));
+        assert!(chain_events(&session, "main", ..).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("after recovery"))));
         assert_eq!(store.writer_memo_requests(session.id()), 1);
         assert!(session.unload_if_idle().await.unwrap());
         settled("the unloaded Session closes", session.closed())
@@ -3918,24 +3979,7 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
         .collect();
     insert_documented_records(&connection, &kept);
     if from >= 31 {
-        let keys = |list: &[&str]| {
-            list.iter()
-                .map(|key| format!("'{key}'"))
-                .collect::<Vec<_>>()
-                .join(",")
-        };
-        connection
-            .execute_batch(&format!(
-                "UPDATE timeline_events SET context_render=1 WHERE kind IN ({});",
-                keys(dim_agent_types::CONTEXT_RENDER_KEYS)
-            ))
-            .unwrap();
-        connection
-            .execute_batch(&format!(
-                "UPDATE timeline_events SET context_state=1 WHERE kind IN ({});",
-                keys(dim_agent_types::CONTEXT_STATE_KEYS)
-            ))
-            .unwrap();
+        write_documented_context_switches(&connection);
     }
     if from >= 27 {
         connection
@@ -4227,7 +4271,7 @@ async fn a_v21_store_upgrades_in_place_once_and_restores_typeless_tool_schemas()
     builder.timeline_store(store.clone());
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent.restore_session("schema".into()).await.unwrap();
-    let restored = session.history("main", Some(2)).await.unwrap();
+    let restored = chain_events(&session, "main", ..=2).await.unwrap();
     assert_eq!(restored[0], configured.event);
     assert_eq!(restored[1], called.event);
     agent.close().await.unwrap();
@@ -4334,7 +4378,7 @@ async fn a_type_array_tool_schema_round_trips_on_the_current_store_without_an_up
     builder.timeline_store(store.clone());
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent.restore_session("schema".into()).await.unwrap();
-    let restored = session.history("main", Some(2)).await.unwrap();
+    let restored = chain_events(&session, "main", ..=2).await.unwrap();
     assert_eq!(restored[0], configured.event);
     assert_eq!(restored[1], called.event);
     agent.close().await.unwrap();
@@ -4760,6 +4804,221 @@ async fn concurrent_and_cancelled_close_waits_for_the_same_durable_round() {
     db.close().await.unwrap();
 }
 
+/// A v3 snapshot is not selected, converted or rewritten: its interpreter no
+/// longer matches, so the read replays the facts and the row stays as stored.
+#[tokio::test]
+async fn a_v3_snapshot_is_bypassed_and_left_as_stored() {
+    use dim_agent_capabilities::history::project_context_history;
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    append(
+        &store,
+        key("session", "main"),
+        vec![
+            record(
+                1,
+                EventKind::InputMessage(InputMessageData::text("history", None)),
+            ),
+            record(
+                2,
+                EventKind::InputConsumed(InputConsumedData {
+                    input_id: "event-1".into(),
+                }),
+            ),
+            record(
+                3,
+                EventKind::ContextCompaction(completed("event-2", "summary", 2)),
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+    let state = "{\"resume\":{\"branch_id\":\"main\",\"sequence\":2},\"state\":{\"retain_from\":\"event-2\"}}";
+    let connection = Connection::open(&database.0).unwrap();
+    connection
+        .execute(
+            "INSERT INTO timeline_snapshots VALUES ('session','main',3,?1,'event-3',?2)",
+            params!["dim/context-projection/v3", state],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(
+        store
+            .latest_snapshot(&key("session", "main"), 3, "dim/context-projection/v4")
+            .await
+            .unwrap()
+            .is_none(),
+        "the candidate read takes one interpreter"
+    );
+    let timeline = Timeline::restore(
+        rutis::Ctx::root().unwrap(),
+        key("session", "main"),
+        vec![],
+        store.clone(),
+    )
+    .await
+    .unwrap();
+    let full = replay_context(&timeline, 3).await.unwrap();
+    let recovered = read_context(&timeline, 3).await.unwrap();
+    assert!(recovered.checkpoint.is_none());
+    assert_eq!(
+        project_context_history(&recovered).unwrap(),
+        project_context_history(&full).unwrap()
+    );
+    dim_agent_runtime::core::close_timeline(&timeline)
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT interpreter, state FROM timeline_snapshots",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap(),
+        ("dim/context-projection/v3".into(), state.into()),
+        "a bypassed snapshot is not converted or backfilled"
+    );
+}
+
+/// When no history entry is kept, the checkpoint resumes at the context's last
+/// event, which can be inside a merged output row: that event's id is not in
+/// the identity index, so the read finds it through the page and begins there.
+/// The recovered context is the full replay's.
+#[tokio::test]
+async fn a_resume_inside_a_merged_output_row_restores_the_full_context() {
+    use dim_agent_capabilities::history::{project_context_history, projection_checkpoint};
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    append(
+        &store,
+        key("session", "main"),
+        vec![
+            record(
+                1,
+                EventKind::InputMessage(InputMessageData::text("question", None)),
+            ),
+            record(
+                2,
+                EventKind::InputConsumed(InputConsumedData {
+                    input_id: "event-1".into(),
+                }),
+            ),
+            record(
+                3,
+                EventKind::ModelStart(ModelStartData {
+                    turn_id: "turn".into(),
+                    request_id: "request".into(),
+                }),
+            ),
+            text(4, "RETAINED "),
+            text(5, "ANSWER"),
+        ],
+    )
+    .await
+    .unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT sequence, last_sequence, event_id FROM timeline_events \
+                 WHERE session_id='session' AND branch_id='main' AND sequence=4",
+                [],
+                |row| Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?
+                )),
+            )
+            .unwrap(),
+        (4, 5, None),
+        "the two deltas share one merged output row, which holds no id"
+    );
+    drop(connection);
+    let timeline = Timeline::restore(
+        rutis::Ctx::root().unwrap(),
+        key("session", "main"),
+        vec![],
+        store.clone(),
+    )
+    .await
+    .unwrap();
+    let checkpoint =
+        projection_checkpoint(&replay_context(&timeline, 5).await.unwrap(), "event-3").unwrap();
+    assert_eq!(
+        (
+            checkpoint.resume.sequence,
+            checkpoint.resume.event_id.as_str()
+        ),
+        (5, "event-5"),
+        "no entry is kept, so the resume falls back to the last event"
+    );
+    dim_agent_runtime::core::close_timeline(&timeline)
+        .await
+        .unwrap();
+    append(
+        &store,
+        key("session", "main"),
+        vec![record(
+            6,
+            EventKind::ContextCompaction(completed("event-3", "summary", 5)),
+        )],
+    )
+    .await
+    .unwrap();
+    let saved = snapshot(6, &checkpoint);
+    store
+        .save_snapshot(&key("session", "main"), saved)
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let timeline = Timeline::restore(
+        rutis::Ctx::root().unwrap(),
+        key("session", "main"),
+        vec![],
+        store.clone(),
+    )
+    .await
+    .unwrap();
+    let full = replay_context(&timeline, 6).await.unwrap();
+    let recovered = read_context(&timeline, 6).await.unwrap();
+    assert!(recovered.checkpoint.is_some());
+    assert_eq!(
+        recovered.events.first().map(|event| event.id.as_str()),
+        Some("event-5"),
+        "the read begins at the event the id names inside the merged row"
+    );
+    assert_eq!(
+        project_context_history(&recovered).unwrap(),
+        project_context_history(&full).unwrap(),
+        "the resumed context is the full replay"
+    );
+    dim_agent_runtime::core::close_timeline(&timeline)
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn damaged_snapshot_cannot_silently_remove_retained_output_after_restart() {
     use dim_agent_capabilities::history::{
@@ -4817,7 +5076,8 @@ async fn damaged_snapshot_cannot_silently_remove_retained_output_after_restart()
     )
     .await
     .unwrap();
-    let checkpoint = projection_checkpoint(&timeline.context(5).await.unwrap(), "event-3").unwrap();
+    let checkpoint =
+        projection_checkpoint(&replay_context(&timeline, 5).await.unwrap(), "event-3").unwrap();
     assert_eq!(checkpoint.resume.sequence, 5);
     assert!(!checkpoint.state.output.is_empty());
     let compaction = completed("event-3", "summary", 5);
@@ -4870,7 +5130,7 @@ async fn damaged_snapshot_cannot_silently_remove_retained_output_after_restart()
         )
         .await
         .unwrap();
-        let full = timeline.context(6).await.unwrap();
+        let full = replay_context(&timeline, 6).await.unwrap();
         let recovered = read_context(&timeline, 6).await.unwrap();
         let expected = vec![
             summary_message("summary"),
@@ -5036,9 +5296,10 @@ async fn recovery_ignores_disposable_snapshots_but_preserves_and_validates_facts
             snapshot(
                 3,
                 &ProjectionCheckpoint {
-                    resume: TimelinePosition {
+                    resume: ResumePoint {
                         branch_id: branch.into(),
                         sequence,
+                        event_id: "missing".into(),
                     },
                     state: ProjectionCheckpointState {
                         retain_from: "event-3".into(),
@@ -5072,7 +5333,7 @@ async fn recovery_ignores_disposable_snapshots_but_preserves_and_validates_facts
         )
         .await
         .unwrap();
-        let full = timeline.context(3).await.unwrap();
+        let full = replay_context(&timeline, 3).await.unwrap();
         assert!(full.checkpoint.is_none());
         let accelerated = read_context(&timeline, 3).await.unwrap();
         assert!(accelerated.checkpoint.is_none());
@@ -5263,7 +5524,8 @@ async fn nested_branches_read_fixed_ancestor_checkpoints_after_their_parents_clo
     )
     .await
     .unwrap();
-    let checkpoint = projection_checkpoint(&prefix.context(3).await.unwrap(), "event-3").unwrap();
+    let checkpoint =
+        projection_checkpoint(&replay_context(&prefix, 3).await.unwrap(), "event-3").unwrap();
     append(
         &store,
         key("nested", "main"),
@@ -5395,10 +5657,22 @@ async fn nested_branches_read_fixed_ancestor_checkpoints_after_their_parents_clo
             Message::text(Role::User, "queued across compaction")
         ]
     );
-    let history = grandchild.history(None).await.unwrap();
+    let history = timeline_events(&grandchild, TimelineQueryScope::Chain, ..)
+        .await
+        .unwrap();
     assert_eq!(history.len(), 6);
-    assert_eq!(history[..4], main.local(..=4).await.unwrap());
-    assert_eq!(history[4..], child.local(..=2).await.unwrap());
+    assert_eq!(
+        history[..4],
+        timeline_events(&main, TimelineQueryScope::Branch, ..=4)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        history[4..],
+        timeline_events(&child, TimelineQueryScope::Branch, ..=2)
+            .await
+            .unwrap()
+    );
     assert_eq!(store.branches("nested").await.unwrap().len(), 4);
     dim_agent_runtime::core::close_timeline(&early)
         .await
@@ -5531,11 +5805,11 @@ async fn a_cold_read_failure_preserves_the_record_and_other_session_progress() {
         bad.idle("main").await.unwrap();
         let connection = Connection::open(&database.0).unwrap();
         assert!(connection.execute("UPDATE timeline_content SET body = 'unreadable external bytes' WHERE session_id = ?1", [bad.id()]).unwrap() > 0);
-        assert!(matches!(bad.history("main", None).await, Err(AgentError::Storage(_))));
+        assert!(matches!(chain_events(&bad, "main", ..).await, Err(AgentError::Storage(_))));
         assert!(bad.failure().is_none(), "a read error belongs to its operation");
         good.submit("healthy progress".into(), InputMode::Queue, "main").await.unwrap();
         good.idle("main").await.unwrap();
-        assert!(good.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("healthy progress"))));
+        assert!(chain_events(&good, "main", ..).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("healthy progress"))));
         assert_eq!(connection.query_row("SELECT body FROM timeline_content WHERE session_id = ?1 LIMIT 1", [bad.id()], |row| row.get::<_, String>(0)).unwrap(), "unreadable external bytes");
         agent.close().await.unwrap();
         assert!(matches!(store.branches(bad.id()).await, Err(AgentError::Storage(_))));
@@ -5737,7 +6011,10 @@ async fn directory_history_pages_keep_a_fixed_head_and_resolve_prior_tool_calls(
         .unwrap();
     wait.await.unwrap().unwrap();
     let through = store.head(&key("paged", "main")).await.unwrap();
-    let first = sessions.read_page("paged", 0, 200, through).await.unwrap();
+    let first = sessions
+        .read_page("paged", "main", 0, 200, through)
+        .await
+        .unwrap();
     assert_eq!(first.len(), 200);
     let (done, wait) = tokio::sync::oneshot::channel();
     store
@@ -5751,11 +6028,11 @@ async fn directory_history_pages_keep_a_fixed_head_and_resolve_prior_tool_calls(
         .unwrap();
     wait.await.unwrap().unwrap();
     let second = sessions
-        .read_page("paged", 200, 200, through)
+        .read_page("paged", "main", 200, 200, through)
         .await
         .unwrap();
     let third = sessions
-        .read_page("paged", 400, 200, through)
+        .read_page("paged", "main", 400, 200, through)
         .await
         .unwrap();
     let sequences: Vec<_> = first
@@ -5780,7 +6057,7 @@ async fn directory_history_pages_keep_a_fixed_head_and_resolve_prior_tool_calls(
     }
     assert!(
         sessions
-            .read_page("paged", 600, 200, through)
+            .read_page("paged", "main", 600, 200, through)
             .await
             .unwrap()
             .is_empty()
@@ -6110,7 +6387,7 @@ async fn native_continuation_survives_sqlite_checkpoint_request_and_child_restor
         .await
         .unwrap();
         let checkpoint =
-            projection_checkpoint(&timeline.context(6).await.unwrap(), "event-3").unwrap();
+            projection_checkpoint(&replay_context(&timeline, 6).await.unwrap(), "event-3").unwrap();
         assert_eq!(checkpoint.state.output, content);
         let compaction = completed("event-3", "summary", 6);
         append(
@@ -6191,7 +6468,9 @@ async fn native_continuation_survives_sqlite_checkpoint_request_and_child_restor
                     .collect::<Vec<_>>(),
                 vec![&assistant]
             );
-            let events = timeline.history(None).await.unwrap();
+            let events = timeline_events(&timeline, TimelineQueryScope::Chain, ..)
+                .await
+                .unwrap();
             assert!(events.iter().any(|e|matches!(&e.kind,EventKind::ModelCall(call) if call.request.messages[0].as_ref()==&assistant)));
             dim_agent_runtime::core::close_timeline(&timeline)
                 .await
@@ -6210,12 +6489,15 @@ async fn native_continuation_survives_sqlite_checkpoint_request_and_child_restor
         )
         .await
         .unwrap();
-        let anchor = timeline
-            .local(saved.sequence..=saved.sequence)
-            .await
-            .unwrap()
-            .pop()
-            .unwrap();
+        let anchor = timeline_events(
+            &timeline,
+            TimelineQueryScope::Branch,
+            saved.sequence..=saved.sequence,
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
         dim_agent_runtime::core::close_timeline(&timeline)
             .await
             .unwrap();
@@ -6899,298 +7181,11 @@ async fn a_v25_provider_record_keeps_supplied_limits_and_drops_assumed_ones() {
     );
 }
 
+/// A streamed context folds pages of events, not atomic batches: the page that
+/// ends inside the batch at 255..=257 carries part of it, and the projection of
+/// the pages still equals the whole render.
 #[tokio::test]
-async fn policy_window_keeps_a_queued_input_consumed_after_turn_start() {
-    let database = Database::new();
-    let db = SqliteStorage::open(database.0.clone()).unwrap();
-    let store = SqliteTimelineStore::new(db.clone());
-    store
-        .create_session("session", &SessionConfig::default())
-        .await
-        .unwrap();
-    append(
-        &store,
-        key("session", "main"),
-        vec![
-            record(
-                1,
-                EventKind::InputMessage(InputMessageData::text("queued", Some(InputMode::Queue))),
-            ),
-            record(
-                2,
-                EventKind::TurnStart(TurnStartData {
-                    turn_id: "turn".into(),
-                }),
-            ),
-            record(
-                3,
-                EventKind::InputConsumed(InputConsumedData {
-                    input_id: "event-1".into(),
-                }),
-            ),
-            text(4, "anchor"),
-        ],
-    )
-    .await
-    .unwrap();
-    let window = store
-        .policy_window(&key("session", "main"), 4, "turn", "event-4")
-        .await
-        .unwrap();
-    let ids: Vec<_> = window
-        .events
-        .iter()
-        .map(|event| event.id.as_str())
-        .collect();
-    assert!(ids.contains(&"event-1"), "{ids:?}");
-    assert!(ids.contains(&"event-2"), "{ids:?}");
-    assert!(ids.contains(&"event-3"), "{ids:?}");
-    db.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn policy_facts_keeps_a_queued_input_consumed_after_turn_start() {
-    let database = Database::new();
-    let db = SqliteStorage::open(database.0.clone()).unwrap();
-    let store = SqliteTimelineStore::new(db.clone());
-    store
-        .create_session("session", &SessionConfig::default())
-        .await
-        .unwrap();
-    append(
-        &store,
-        key("session", "main"),
-        vec![
-            record(
-                1,
-                EventKind::InputMessage(InputMessageData::text("queued", Some(InputMode::Queue))),
-            ),
-            record(
-                2,
-                EventKind::TurnStart(TurnStartData {
-                    turn_id: "turn".into(),
-                }),
-            ),
-            record(
-                3,
-                EventKind::InputConsumed(InputConsumedData {
-                    input_id: "event-1".into(),
-                }),
-            ),
-            text(4, "after"),
-        ],
-    )
-    .await
-    .unwrap();
-    let facts = store
-        .policy_facts(&key("session", "main"), 4, "turn")
-        .await
-        .unwrap();
-    let ids: Vec<_> = facts
-        .events
-        .iter()
-        .map(|fact| fact.event.id.as_str())
-        .collect();
-    assert!(ids.contains(&"event-1"), "{ids:?}");
-    assert!(ids.contains(&"event-2"), "{ids:?}");
-    assert!(ids.contains(&"event-3"), "{ids:?}");
-    db.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn policy_facts_selects_latest_completed_compaction_in_both_stores() {
-    let database = Database::new();
-    let db = SqliteStorage::open(database.0.clone()).unwrap();
-    let sqlite = SqliteTimelineStore::new(db.clone());
-    let memory = MemoryTimelineStore::default();
-    sqlite
-        .create_session("session", &SessionConfig::default())
-        .await
-        .unwrap();
-    memory
-        .create_session("session", &SessionConfig::default())
-        .await
-        .unwrap();
-    let diagnostics: Box<CompactionDiagnosticsRecord> = serde_json::from_value(serde_json::json!({
-        "reason": "auto", "trigger": "threshold", "estimatedInputTokens": 1,
-        "entriesReplaced": 1, "modelCallCount": 1, "durationMs": 1,
-        "strategy": {"kind": "summary"}
-    }))
-    .unwrap();
-    let events = vec![
-        record(
-            1,
-            EventKind::ContextCompaction(completed("event-0", "summary", 1)),
-        ),
-        record(
-            2,
-            EventKind::ContextCompaction(ContextCompactionData {
-                turn_id: None,
-                request_id: None,
-                command: None,
-                start: None,
-                through: 1,
-                outcome: ContextCompactionResult::Failed {
-                    error: "failed".into(),
-                    diagnostics: None,
-                },
-            }),
-        ),
-        record(
-            3,
-            EventKind::ContextCompaction(ContextCompactionData {
-                turn_id: None,
-                request_id: None,
-                command: None,
-                start: None,
-                through: 1,
-                outcome: ContextCompactionResult::Skipped {
-                    reason: "skipped".into(),
-                    diagnostics,
-                },
-            }),
-        ),
-    ];
-    append(&sqlite, key("session", "main"), events.clone())
-        .await
-        .unwrap();
-    memory
-        .append(
-            key("session", "main"),
-            events,
-            Box::new(|result| assert!(result.is_ok())),
-        )
-        .unwrap();
-    let sqlite_facts = sqlite
-        .policy_facts(&key("session", "main"), 3, "")
-        .await
-        .unwrap();
-    let memory_facts = memory
-        .policy_facts(&key("session", "main"), 3, "")
-        .await
-        .unwrap();
-    let sqlite_ids: Vec<_> = sqlite_facts
-        .events
-        .iter()
-        .map(|fact| fact.event.id.as_str())
-        .collect();
-    let memory_ids: Vec<_> = memory_facts
-        .events
-        .iter()
-        .map(|fact| fact.event.id.as_str())
-        .collect();
-    assert_eq!(sqlite_ids, memory_ids);
-    assert_eq!(sqlite_ids, ["event-1"]);
-    db.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn policy_order_reads_the_last_anchors_and_the_turn_window_in_both_stores() {
-    let database = Database::new();
-    let db = SqliteStorage::open(database.0.clone()).unwrap();
-    let sqlite = SqliteTimelineStore::new(db.clone());
-    let memory = MemoryTimelineStore::default();
-    sqlite
-        .create_session("session", &SessionConfig::default())
-        .await
-        .unwrap();
-    memory
-        .create_session("session", &SessionConfig::default())
-        .await
-        .unwrap();
-    let turn = |sequence: u64, turn_id: &str, id: &str| {
-        let mut entry = record(
-            sequence,
-            EventKind::TurnStart(TurnStartData {
-                turn_id: turn_id.into(),
-            }),
-        );
-        Arc::make_mut(&mut entry.event).id = id.into();
-        entry
-    };
-    let start = |sequence: u64, through: u64| {
-        record(
-            sequence,
-            EventKind::ContextCompactionStart(ContextCompactionStartData {
-                turn_id: Some("one".into()),
-                request_id: None,
-                command: None,
-                through,
-                trigger: CompactionTrigger::Threshold,
-                strategy: "summary".into(),
-            }),
-        )
-    };
-    let events = vec![
-        turn(1, "one", "turn-one"),
-        text(2, "a"),
-        start(3, 1),
-        turn(4, "two", "turn-two"),
-        text(5, "b"),
-        turn(6, "three", "turn-three"),
-        text(7, "c"),
-        turn(8, "four", "turn-four"),
-        text(9, "d"),
-    ];
-    append(&sqlite, key("session", "main"), events.clone())
-        .await
-        .unwrap();
-    memory
-        .append(
-            key("session", "main"),
-            events,
-            Box::new(|result| assert!(result.is_ok())),
-        )
-        .unwrap();
-    let read = |order: &dim_agent_runtime::PolicyOrder| -> Vec<(String, bool, Option<u64>)> {
-        order
-            .events
-            .iter()
-            .map(|event| (event.id.clone(), event.turn_start, event.compaction_start))
-            .collect()
-    };
-    let windowed = sqlite
-        .policy_order(&key("session", "main"), 5..=9, 9)
-        .await
-        .unwrap();
-    let memory_windowed = memory
-        .policy_order(&key("session", "main"), 5..=9, 9)
-        .await
-        .unwrap();
-    assert_eq!(read(&windowed), read(&memory_windowed));
-    assert_eq!(
-        read(&windowed),
-        [
-            ("event-3".to_owned(), false, Some(1)),
-            ("turn-three".to_owned(), true, None),
-            ("turn-four".to_owned(), true, None),
-        ],
-        "the window, the last compaction start and its through"
-    );
-
-    // An empty window still reads the last turn start: the manual limit's
-    // candidate, and the position a cut id resolves through.
-    let empty = sqlite
-        .policy_order(&key("session", "main"), 9..=9, 9)
-        .await
-        .unwrap();
-    let memory_empty = memory
-        .policy_order(&key("session", "main"), 9..=9, 9)
-        .await
-        .unwrap();
-    assert_eq!(read(&empty), read(&memory_empty));
-    assert_eq!(
-        read(&empty),
-        [
-            ("event-3".to_owned(), false, Some(1)),
-            ("turn-four".to_owned(), true, None),
-        ]
-    );
-    db.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn streamed_context_reads_complete_batches_across_the_window() {
+async fn a_streamed_context_folds_a_page_that_ends_inside_an_atomic_batch() {
     let database = Database::new();
     let db = SqliteStorage::open(database.0.clone()).unwrap();
     let store = SqliteTimelineStore::new(db.clone());
@@ -7217,21 +7212,15 @@ async fn streamed_context_reads_complete_batches_across_the_window() {
     .unwrap();
     let renderer = HistoryRenderer::default();
     let streamed = renderer.rendered_stream(&timeline, 257, 256).await.unwrap();
-    for limit in 1..=3 {
-        let page = timeline.stored_page(254, limit, 257).await.unwrap();
-        assert_eq!(
-            page.iter().map(|event| event.sequence).collect::<Vec<_>>(),
-            vec![255, 256, 257],
-            "a page whose limit would end inside the atomic batch reads it whole: {limit}"
-        );
-    }
     let (_, full) = renderer.rendered_context(&timeline, 257).await.unwrap();
     assert_eq!(streamed.history, full);
     db.close().await.unwrap();
 }
 
+/// A history page's limit is a target, not an edge: a page that would end inside
+/// an atomic batch reads the batch whole.
 #[tokio::test]
-async fn policy_facts_ranges_end_at_the_atomic_batch() {
+async fn a_history_page_that_would_end_inside_a_batch_reads_it_whole() {
     let database = Database::new();
     let db = SqliteStorage::open(database.0.clone()).unwrap();
     let store = SqliteTimelineStore::new(db.clone());
@@ -7239,54 +7228,28 @@ async fn policy_facts_ranges_end_at_the_atomic_batch() {
         .create_session("session", &SessionConfig::default())
         .await
         .unwrap();
-    let mut batch = vec![
-        text(1, "prefix"),
-        text(2, "prefix"),
-        record(
-            3,
-            EventKind::InputMessage(InputMessageData::text("a", Some(InputMode::Queue))),
-        ),
-        record(
-            4,
-            EventKind::InputMessage(InputMessageData::text("b", Some(InputMode::Queue))),
-        ),
-        text(5, "anchor"),
-    ];
-    for record in &mut batch {
-        record.batch_end = 5;
-    }
-    append(&store, key("session", "main"), batch).await.unwrap();
-    append(
-        &store,
-        key("session", "main"),
-        vec![
-            record(
-                6,
-                EventKind::TurnStart(TurnStartData {
-                    turn_id: "turn".into(),
-                }),
-            ),
-            record(
-                7,
-                EventKind::InputConsumed(InputConsumedData {
-                    input_id: "event-3".into(),
-                }),
-            ),
-        ],
-    )
-    .await
-    .unwrap();
-    let facts = store
-        .policy_facts(&key("session", "main"), 7, "turn")
+    let singles: Vec<_> = (1..=254).map(|sequence| text(sequence, "line")).collect();
+    append(&store, key("session", "main"), singles)
         .await
         .unwrap();
-    let ids: Vec<_> = facts
-        .events
-        .iter()
-        .map(|fact| fact.event.id.as_str())
-        .collect();
-    assert!(ids.contains(&"event-3"), "{ids:?}");
-    assert!(ids.contains(&"event-4"), "{ids:?}");
+    let mut batch = vec![text(255, "a"), text(256, "b"), text(257, "c")];
+    for record in &mut batch {
+        record.batch_end = 257;
+    }
+    append(&store, key("session", "main"), batch).await.unwrap();
+    for limit in 1..=3 {
+        let page = store
+            .read_page_without_request_bodies(&key("session", "main"), 254, limit, 257)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.iter()
+                .map(|record| record.event.sequence)
+                .collect::<Vec<_>>(),
+            vec![255, 256, 257],
+            "a page whose limit would end inside the atomic batch reads it whole: {limit}"
+        );
+    }
     db.close().await.unwrap();
 }
 
@@ -7630,112 +7593,6 @@ async fn the_derived_indexes_are_created_at_open_without_a_format_step() {
 }
 
 #[tokio::test]
-async fn a_kind_page_walks_a_fixed_head_backwards_by_stored_row() {
-    let database = Database::new();
-    let db = SqliteStorage::open(database.0.clone()).unwrap();
-    let sessions =
-        dim_app_server::storage::SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
-    let store = sessions.timeline_store();
-    store
-        .create_session("session", &SessionConfig::default())
-        .await
-        .unwrap();
-    let mut records = vec![
-        record(
-            1,
-            EventKind::TurnStart(TurnStartData {
-                turn_id: "turn".into(),
-            }),
-        ),
-        record(
-            2,
-            EventKind::InputMessage(InputMessageData::text("go", Some(InputMode::Queue))),
-        ),
-    ];
-    records.extend((3..=6).map(|sequence| {
-        let mut event = text(sequence, "delta");
-        event.batch_end = 6;
-        event
-    }));
-    records.push(record(
-        7,
-        EventKind::Thinking(ThinkingData {
-            turn_id: "turn".into(),
-            request_id: "request".into(),
-            delta: "thinking".into(),
-        }),
-    ));
-    records.push(record(
-        8,
-        EventKind::TurnEnd(TurnEndData {
-            turn_id: "turn".into(),
-            outcome: TurnOutcome::Completed {
-                reason: "end_turn".into(),
-            },
-        }),
-    ));
-    let (published, receiver) = tokio::sync::oneshot::channel();
-    store
-        .append(
-            key("session", "main"),
-            records,
-            Box::new(move |result| {
-                let _ = published.send(result);
-            }),
-        )
-        .unwrap();
-    tokio::time::timeout(PUBLISHED, receiver)
-        .await
-        .expect("the writer did not publish the write")
-        .unwrap()
-        .unwrap();
-
-    let kinds = ["turn/start", "input/message", "step/text", "turn/end"];
-    let first = store
-        .read_kind_page(&key("session", "main"), &kinds, 8, 2)
-        .await
-        .unwrap();
-    assert_eq!(
-        first
-            .iter()
-            .map(|record| record.event.sequence)
-            .collect::<Vec<_>>(),
-        vec![3, 4, 5, 6, 8],
-        "the newest two matching rows, the streamed row whole, oldest first"
-    );
-    let next = store
-        .read_kind_page(&key("session", "main"), &kinds, 2, 2)
-        .await
-        .unwrap();
-    assert_eq!(
-        next.iter()
-            .map(|record| record.event.sequence)
-            .collect::<Vec<_>>(),
-        vec![1, 2]
-    );
-    assert!(
-        store
-            .read_kind_page(&key("session", "main"), &kinds, 0, 2)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        store
-            .read_kind_page(&key("session", "main"), &[], 8, 2)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-
-    drop(store);
-    drop(sessions);
-    db.close().await.unwrap();
-}
-
-/// A window's fixed watermark must end a batch: two events committed as one
-/// batch make `through` 1 a storage error, not an empty page.
-#[tokio::test]
 async fn a_history_window_read_rejects_a_through_inside_a_batch() {
     let database = Database::new();
     let db = SqliteStorage::open(database.0.clone()).unwrap();
@@ -7783,6 +7640,67 @@ async fn a_history_window_read_rejects_a_through_inside_a_batch() {
 
     drop(store);
     drop(sessions);
+    db.close().await.unwrap();
+}
+
+/// A batch's edge is answered from the row that covers the sequence: an
+/// interior sequence is refused and a batch's last sequence passes, also when
+/// one physical row holds the records of several batches.
+#[tokio::test]
+async fn a_batch_edge_check_reads_the_row_covering_the_sequence() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    append(&store, key("session", "main"), vec![text(1, "one")])
+        .await
+        .unwrap();
+    let mut two = text(2, "two");
+    two.batch_end = 3;
+    append(&store, key("session", "main"), vec![two, text(3, "three")])
+        .await
+        .unwrap();
+    let mut four = record(
+        4,
+        EventKind::InputMessage(InputMessageData::text("first", None)),
+    );
+    four.batch_end = 5;
+    append(
+        &store,
+        key("session", "main"),
+        vec![
+            four,
+            record(
+                5,
+                EventKind::InputMessage(InputMessageData::text("second", None)),
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+
+    for edge in [1, 3, 5] {
+        store
+            .batch_end(&key("session", "main"), edge)
+            .await
+            .unwrap_or_else(|error| panic!("sequence {edge} ends a batch: {error:?}"));
+    }
+    for inside in [2, 4] {
+        assert!(matches!(
+            store.batch_end(&key("session", "main"), inside).await,
+            Err(AgentError::InvalidInput(message))
+                if message == format!("sequence {inside} is inside an atomic batch")
+        ));
+    }
+    assert!(matches!(
+        store.batch_end(&key("session", "main"), 6).await,
+        Err(AgentError::Storage(_))
+    ));
+
+    store.close().await.unwrap();
     db.close().await.unwrap();
 }
 
@@ -7965,6 +7883,7 @@ fn query(
 ) -> dim_agent_runtime::TimelineQuery {
     dim_agent_runtime::TimelineQuery {
         scope,
+        include_publishing: false,
         from_event: None,
         from_sequence: None,
         order_by: Default::default(),
@@ -8205,6 +8124,29 @@ async fn a_query_selects_kinds_flags_and_a_predicate_from_sqlite() {
             "{path}: a path or value that matches no fact selects no rows"
         );
     }
+
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// A kind no event has is a selection that matches nothing: a misspelled kind
+/// answers an empty page rather than an error.
+#[tokio::test]
+async fn a_query_with_a_misspelled_kind_returns_an_empty_page() {
+    use dim_agent_runtime::TimelineQueryScope::Branch;
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let (main, _) = query_histories(store.clone()).await;
+
+    let mut misspelled = query(Branch, 16);
+    misspelled.kinds = vec!["step/tex".into()];
+    let reply = main.query(misspelled).await.unwrap();
+    assert!(
+        reply.events.is_empty() && reply.positions.is_empty(),
+        "a kind no event has selects no fact"
+    );
 
     store.close().await.unwrap();
     db.close().await.unwrap();

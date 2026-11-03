@@ -2,11 +2,13 @@ use dim_agent_capabilities::{
     adapters::{DefaultPrepareModelPlugin, EchoModel, MockTools},
     defaults,
     history::{
-        HistoryEntry, HistoryRenderer, project_context_history, project_history, summary_message,
+        HistoryEntry, HistoryRenderer, project_context_history, project_history, read_context_in,
+        replay_context, summary_message,
     },
     host::*,
 };
 use dim_agent_runtime::testing::MinimalHost;
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use futures_util::StreamExt;
@@ -382,7 +384,7 @@ async fn a_steer_before_any_model_output_ends_the_request_and_continues_the_turn
         assert_eq!(requests.len(), 2);
         assert!(!carries(&requests[0]));
         assert!(carries(&requests[1]));
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let position = |predicate: &dyn Fn(&EventKind) -> bool| {
             events
                 .iter()
@@ -462,7 +464,7 @@ async fn provider_budget_recovery_uses_one_fixed_source_and_retries_only_once() 
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let sources: Vec<_> = events
             .iter()
             .filter_map(|e| match &e.kind {
@@ -531,7 +533,7 @@ async fn foreign_compaction_cursor_fails_recovery_without_another_model_call() {
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let sources: Vec<_> = events
             .iter()
             .filter_map(|event| match &event.kind {
@@ -598,7 +600,7 @@ async fn compressor_cursor_cannot_split_an_assistant_tool_use_from_its_result() 
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(events.iter().any(|event| matches!(
             &event.kind,
             EventKind::ContextCompaction(ContextCompactionData {
@@ -701,7 +703,7 @@ async fn compaction_restores_counts_and_uses_the_committed_context_baseline() {
             .unwrap();
         session.idle("main").await.unwrap();
     }
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let baseline = events
         .iter()
         .find_map(|event| match &event.kind {
@@ -776,7 +778,7 @@ async fn compaction_restores_counts_and_uses_the_committed_context_baseline() {
             .unwrap();
         forged_session.idle("main").await.unwrap();
     }
-    let forged_events = forged_session.history("main", None).await.unwrap();
+    let forged_events = chain_events(&forged_session, "main", ..).await.unwrap();
     let rewritten_requests: Vec<_> = forged_events
         .iter()
         .filter_map(|event| match &event.kind {
@@ -909,8 +911,7 @@ async fn before_modified_request_is_budget_checked_before_native_model_invocatio
         session.idle("main").await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(
-            session
-                .history("main", None)
+            chain_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()
@@ -978,7 +979,7 @@ async fn provider_usage_baseline_counts_only_new_history_after_a_matching_reques
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let budgets: Vec<_> = events
             .iter()
             .filter_map(|e| match &e.kind {
@@ -1126,7 +1127,7 @@ async fn restoring_each_preparation_handoff_settles_without_replaying_work() {
             .await
             .unwrap_or_else(|_| panic!("recovery stuck at {boundary}"))
             .unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(events.iter().any(|event| matches!(&event.kind, EventKind::TurnEnd(data) if data.outcome == TurnOutcome::Failed { error: CAPABILITY_RELOADING.into() })));
         assert!(
             !events.iter().any(|event| event.sequence > persisted
@@ -1169,7 +1170,7 @@ async fn restoring_each_preparation_handoff_settles_without_replaying_work() {
             .await
             .unwrap()
             .unwrap();
-        assert!(session.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("next input"))));
+        assert!(chain_events(&session, "main", ..).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("next input"))));
         tokio::time::timeout(Duration::from_secs(3), agent.close())
             .await
             .unwrap()
@@ -1220,7 +1221,7 @@ async fn restoring_idle_unpaused_queue_input_applies_it_without_a_new_submission
         .await
         .unwrap()
         .unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert!(events.iter().any(|event| matches!(&event.kind,
         EventKind::InputApplied(data) if data.input_id == input.id)));
     assert!(events.iter().any(|event| matches!(&event.kind,
@@ -1284,7 +1285,7 @@ async fn restoring_pending_inputs_runs_each_queued_input_in_its_own_turn() {
         .await
         .unwrap()
         .unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let consumed = |id: &str| {
         events
             .iter()
@@ -1414,8 +1415,7 @@ async fn a_compaction_completed_after_a_stop_is_committed_not_discarded() {
     let mut dispatch = session.dispatch_watch("main").unwrap();
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            let interrupt = session
-                .history("main", None)
+            let interrupt = chain_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()
@@ -1439,7 +1439,7 @@ async fn a_compaction_completed_after_a_stop_is_committed_not_discarded() {
         .unwrap()
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let interrupt = events
         .iter()
         .position(|event| matches!(event.kind, EventKind::StopInterrupt(_)))
@@ -1491,7 +1491,7 @@ async fn a_single_long_turn_compacts_inside_itself_instead_of_skipping() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert_eq!(
         events
             .iter()
@@ -1543,7 +1543,7 @@ async fn a_changed_prefix_message_fails_the_preparation() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert!(
         !events
             .iter()
@@ -1585,7 +1585,7 @@ async fn a_short_request_fails_the_preparation() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert!(
         !events
             .iter()
@@ -1621,7 +1621,7 @@ async fn a_message_appended_after_the_prefix_reaches_the_model() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let sent = events
         .iter()
         .find_map(|event| match &event.kind {
@@ -1676,7 +1676,7 @@ async fn a_completed_compaction_keeps_its_replacement_in_the_prefix_check() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert!(
         events.iter().any(|event| matches!(
             &event.kind,
@@ -1731,7 +1731,7 @@ async fn a_completed_compaction_keeps_its_replacement_in_the_prefix_check() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert_eq!(
         events
             .iter()

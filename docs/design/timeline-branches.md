@@ -467,7 +467,7 @@ The panel is separate from the tasks panel, which lists background commands, mem
 | TimelineTree | The identity block in `first_input` for every source. `TreeCommands.end(id, source)` and `TreeCommands.page(id, after, limit)`. `TimelineInfo.source`, filled from the parent's `branch/create` (§5). The end flow, refusing input once a line is ending, `branch/ended`, the restore rule, and reads of ended lines | It owns the line lifecycle and the opening input |
 | TreeTimeline | Consumes `branch/end`, plus the line's next turn end for an end issued by a tool call, and routes them to TimelineTree | It routes `branch/create` the same way |
 | BranchTool | The action-based tool, plus the new BranchLine branch part | The tool's actions and one line's view of its lines |
-| Session facade | `Session::end_branch(id, source)`. History reads of an ended line (`local_page`, `sequence`) from the store, at its fixed head | §17 |
+| Session facade | `Session::end_branch(id, source)`. An ended line's head is `Session::sequence`; its history is read at that fixed head through `TreeCommands.page` | §17 |
 | App Server | `session.branch_end` (v3, a host source with a minted `operation_id`, listed in `hello.features` with the other Session methods when `session_execution` is on and the connection's entry is not bare or the daemon profile is not protected). `session.history` on an ended line returns immediately, at its stored head. `ProductEvent::new` carries the two kinds in v3 and leaves them out of v1 and v2 | An entry and a read, no business logic |
 | dim-agent-types | `branch/end` and `branch/ended` in `EventKind` and the v1 exclusion list, registered in the contract tests. The frozen fixtures are unchanged | Two core facts (§16) |
 | Goal (Pursuit amendment) | Recognizes its evaluator from the line's source and ends it ([Pursuit §13](plugins/Pursuit.md#13-ending-the-evaluator-with-427)) | Goal owns its evaluator's protocol |
@@ -517,7 +517,7 @@ The format decision for them is recorded in the storage contract: [#427 v20 deci
   - no new input once `branch/end` is committed;
   - descendants end first;
   - restore treats an ended line as inactive and completes a `branch/end` that has no `branch/ended`;
-  - an ended line's committed history stays readable at its fixed head, through `Session::local_page` and `TreeCommands.page`.
+  - an ended line's committed history stays readable at its fixed head, through `TreeCommands.page`.
 - **Effect on sequences, batches, interrupt and reload.**
   - Each event is its own batch: `branch/end` on the line, and `branch/ended` on the parent after the close.
   - An end with a `host` source, or because of an ancestor, interrupts the line through `Branch::close()`.

@@ -5,6 +5,7 @@ use dim_agent_capabilities::{
     tool_registry::definition,
 };
 use dim_agent_runtime::testing::MinimalHost;
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -115,7 +116,7 @@ async fn a_max_tokens_turn_keeps_the_session_usable_with_a_larger_output_limit()
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let history = session.history("main", None).await.unwrap();
+    let history = chain_events(&session, "main", ..).await.unwrap();
     assert!(history.iter().any(|event| matches!(&event.kind,
         EventKind::ModelOutputEnd(ModelOutputEndData { outcome: ModelOutputOutcome::Failed { error, budget: None, presentation: Some(presentation) }, .. })
         if error.contains(&model.provider_id) && error.contains(&model.model_id)
@@ -144,7 +145,7 @@ async fn a_max_tokens_turn_keeps_the_session_usable_with_a_larger_output_limit()
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let history = session.history("main", None).await.unwrap();
+    let history = chain_events(&session, "main", ..).await.unwrap();
     assert!(matches!(
         &history.last().unwrap().kind,
         EventKind::TurnEnd(TurnEndData {
@@ -216,7 +217,7 @@ async fn steer_and_append_enter_the_current_turn_at_tool_result_while_queue_wait
         let appended = session.submit("extra current context".into(), InputMode::Append, "main").await.unwrap();
         let mut dispatch = session.dispatch_watch("main").unwrap();
         loop {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             let applied = events.iter().filter(|event| matches!(&event.kind,
                 EventKind::InputApplied(data) if [&steered.id, &appended.id].contains(&&data.input_id))).count();
             if applied == 2 && dispatch.borrow().sequence >= events.last().unwrap().sequence {
@@ -224,9 +225,9 @@ async fn steer_and_append_enter_the_current_turn_at_tool_result_while_queue_wait
             }
             dispatch.changed().await.unwrap();
         }
-        assert!(!session.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind,
+        assert!(!chain_events(&session, "main", ..).await.unwrap().iter().any(|event| matches!(&event.kind,
             EventKind::InputApplied(data) if data.input_id == queued.id)));
-        assert!(!session.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind,
+        assert!(!chain_events(&session, "main", ..).await.unwrap().iter().any(|event| matches!(&event.kind,
             EventKind::InputConsumed(data) if [&queued.id, &steered.id, &appended.id].contains(&&data.input_id))));
         release.notify_one();
         session.idle("main").await.unwrap();
@@ -236,7 +237,7 @@ async fn steer_and_append_enter_the_current_turn_at_tool_result_while_queue_wait
         assert!(requests[1].messages.contains(&Arc::new(Message::text(Role::User, "extra current context"))));
         assert!(!requests[1].messages.contains(&Arc::new(Message::text(Role::User, "next turn"))));
         assert!(requests[2].messages.contains(&Arc::new(Message::text(Role::User, "next turn"))));
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let applied = |id: &str| events.iter().find(|event| matches!(&event.kind, EventKind::InputConsumed(data) if data.input_id == id)).unwrap().sequence;
         let tool_result = events.iter().find(|event| matches!(event.kind, EventKind::ToolResult(_))).unwrap().sequence;
         let turn_end = events.iter().find(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().sequence;
@@ -270,7 +271,7 @@ async fn model_receives_the_committed_before_result_and_fixed_history() {
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let frozen = session.history("main", None).await.unwrap();
+        let frozen = chain_events(&session, "main", ..).await.unwrap();
         session
             .submit("second".into(), InputMode::Queue, "main")
             .await
@@ -294,15 +295,8 @@ async fn model_receives_the_committed_before_result_and_fixed_history() {
             .iter()
             .find(|event| matches!(event.kind, EventKind::ModelCall(_)))
             .unwrap();
-        assert_eq!(
-            session
-                .trace("main", call.sequence)
-                .await
-                .unwrap()
-                .unwrap()
-                .steps
-                .len(),
-            1
+        assert!(
+            matches!(&call.kind, EventKind::ModelCall(data) if data.request.model_id == "final-model")
         );
         agent.close().await.unwrap();
     })
@@ -347,7 +341,7 @@ async fn stop_waits_for_native_cleanup_and_keeps_a_real_success() {
         started.notified().await;
         session.stop("main", "stop".into()).await.unwrap();
         assert!(cleaned.load(Ordering::SeqCst));
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(events.iter().any(|event| matches!(&event.kind, EventKind::ToolResult(data) if data.results[0].result.content == ToolContent::Text("native operation succeeded".into()) && data.results[0].result.is_error.is_none())));
         assert!(matches!(events.last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Cancelled { .. }, .. })));
         agent.close().await.unwrap();
@@ -412,8 +406,7 @@ async fn invalid_model_stream_is_cancelled_and_drained_before_settlement() {
         session.idle("main").await.unwrap();
         assert!(cleaned.load(Ordering::SeqCst));
         assert!(matches!(
-            session
-                .history("main", None)
+            chain_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .last()
@@ -774,7 +767,7 @@ async fn process_model_recovery_respects_output_cleanup_and_cancellation() {
                 .await
                 .unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             let ends: Vec<_> = events
                 .iter()
                 .filter_map(|event| match &event.kind {
@@ -890,7 +883,7 @@ async fn transient_retries_are_bounded_and_stop_after_irreversible_output() {
                 expected_rejected,
                 "mode {mode}"
             );
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             let ends: Vec<_> = events
                 .iter()
                 .filter_map(|event| match &event.kind {
@@ -985,7 +978,7 @@ async fn waiting_to_retry_obeys_stop_steer_and_provider_reload() {
             session.idle("main").await.unwrap();
             assert_eq!(probe.recovered.load(Ordering::SeqCst), 0);
             assert_eq!(probe.rejected.load(Ordering::SeqCst), 0);
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             match action {
                 "stop" => {
                     assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
@@ -1108,7 +1101,7 @@ async fn stop_during_native_drain_keeps_an_already_completed_model_result() {
             .stop("main", "stop during drain".into())
             .await
             .unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(events.iter().any(|event| matches!(
             &event.kind,
             EventKind::ModelOutputEnd(ModelOutputEndData {
@@ -1186,8 +1179,7 @@ async fn retry_after_uses_one_real_sixty_second_budget() {
             usize::from(mode != 12)
         );
         assert!(
-            session
-                .history("main", None)
+            chain_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()
@@ -1213,7 +1205,7 @@ async fn an_idle_append_starts_no_turn_and_joins_the_next_one() {
         let session = agent.create_session(SessionConfig::default()).await.unwrap();
         let appended = session.submit("idle context".into(), InputMode::Append, "main").await.unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(events.iter().any(|event| matches!(&event.kind,
             EventKind::InputApplied(data) if data.input_id == appended.id && data.mode == Some(InputMode::Append))));
         assert!(!events.iter().any(|event| matches!(event.kind, EventKind::TurnStart(_))));
@@ -1228,7 +1220,7 @@ async fn an_idle_append_starts_no_turn_and_joins_the_next_one() {
         assert_eq!(requests.len(), 1);
         assert!(requests[0].messages.contains(&Arc::new(Message::text(Role::User, "idle context"))));
         assert!(requests[0].messages.contains(&Arc::new(Message::text(Role::User, "go"))));
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         assert_eq!(events.iter().filter(|event| matches!(event.kind, EventKind::TurnStart(_))).count(), 1);
         agent.close().await.unwrap();
     }).await.unwrap();
@@ -1293,7 +1285,7 @@ async fn a_steer_during_output_continues_the_turn_instead_of_ending_it() {
         session.submit("first".into(), InputMode::Queue, "main").await.unwrap();
         let mut dispatch = session.dispatch_watch("main").unwrap();
         loop {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             if events.iter().any(|event| matches!(event.kind, EventKind::Text(_)))
                 && dispatch.borrow().sequence >= events.last().unwrap().sequence
             {
@@ -1303,7 +1295,7 @@ async fn a_steer_during_output_continues_the_turn_instead_of_ending_it() {
         }
         let steer = session.submit("STEER-MARKER".into(), InputMode::Steer, "main").await.unwrap();
         loop {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             if events.iter().any(|event| matches!(&event.kind, EventKind::InputApplied(data) if data.input_id == steer.id))
                 && dispatch.borrow().sequence >= events.last().unwrap().sequence
             {
@@ -1316,7 +1308,7 @@ async fn a_steer_during_output_continues_the_turn_instead_of_ending_it() {
         let requests = requests.lock().unwrap().clone();
         assert_eq!(requests.len(), 2);
         assert!(requests[1].messages.contains(&Arc::new(Message::text(Role::User, "STEER-MARKER"))));
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         assert_eq!(events.iter().filter(|event| matches!(event.kind, EventKind::TurnStart(_))).count(), 1);
         assert_eq!(events.iter().filter(|event| matches!(event.kind, EventKind::TurnEnd(_))).count(), 1);
         assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta == "partial answer")));
@@ -1402,7 +1394,7 @@ async fn model_output_is_committed_per_block_and_shown_as_progress_until_then() 
             .unwrap()
             .thinking_part_id
             .expect("open thinking part id");
-        assert!(outputs(&session.history("main", None).await.unwrap()).is_empty());
+        assert!(outputs(&chain_events(&session, "main", ..).await.unwrap()).is_empty());
         send(vec![
             ModelChunk::ThinkingEnd {
                 thinking: "deep thought".into(),
@@ -1419,7 +1411,7 @@ async fn model_output_is_committed_per_block_and_shown_as_progress_until_then() 
         let first_text_part = shown.text_part_id.clone().expect("first text part id");
         assert!(shown.thinking_part_id.is_none());
         assert_eq!(
-            outputs(&session.history("main", None).await.unwrap()),
+            outputs(&chain_events(&session, "main", ..).await.unwrap()),
             ["thinking:deep thought"]
         );
         let piece = "a".repeat(3000);
@@ -1452,7 +1444,7 @@ async fn model_output_is_committed_per_block_and_shown_as_progress_until_then() 
             .await
             .unwrap();
         assert_eq!(
-            outputs(&session.history("main", None).await.unwrap()),
+            outputs(&chain_events(&session, "main", ..).await.unwrap()),
             [
                 "thinking:deep thought",
                 "text:5",
@@ -1481,7 +1473,7 @@ async fn model_output_is_committed_per_block_and_shown_as_progress_until_then() 
         ]);
         drop(chunks);
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         assert_eq!(
             outputs(&events)[..6],
             [
@@ -1610,7 +1602,7 @@ async fn end_markers_do_not_split_adjacent_blocks() {
         ]);
         drop(chunks);
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let thinking: Vec<_> = events
             .iter()
             .filter_map(|event| match &event.kind {
@@ -1666,8 +1658,7 @@ async fn buffered_text_is_committed_once_a_second_old() {
             .unwrap();
         let mut progress = session.on::<ModelProgress>("main").unwrap().unwrap();
         let texts = async || -> Vec<String> {
-            session
-                .history("main", None)
+            chain_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()
@@ -1779,8 +1770,7 @@ async fn a_held_input_is_withdrawn_once_and_an_applied_one_is_not() {
             Withdrawal::NotHeld
         );
         let mut dispatch = session.dispatch_watch("main").unwrap();
-        while !session
-            .history("main", None)
+        while !chain_events(&session, "main", ..)
             .await
             .unwrap()
             .iter()
@@ -1825,7 +1815,7 @@ async fn a_held_input_is_withdrawn_once_and_an_applied_one_is_not() {
 
         release.notify_one();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let deleted: Vec<_> = events
             .iter()
             .filter_map(|event| match &event.kind {
@@ -1994,7 +1984,7 @@ async fn a_session_switched_to_a_text_only_model_sends_image_placeholders() {
         let parts = sent_parts(&request);
         assert_eq!(parts[..5], ["look", omitted, omitted, omitted, omitted]);
         assert!(parts.contains(&"next".to_string()));
-        let history = session.history("main", None).await.unwrap();
+        let history = chain_events(&session, "main", ..).await.unwrap();
         assert!(history.iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("next"))));
         assert!(history.iter().any(|event| matches!(&event.kind,
             EventKind::InputMessage(data) if data.user.as_ref().is_some_and(|user| user.content.iter().any(|block| matches!(block, ContentBlock::Image { .. }))))));
@@ -2125,7 +2115,7 @@ async fn tool_result_estimates(image: bool) -> Vec<f64> {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert!(
         matches!(
             events.last().unwrap().kind,

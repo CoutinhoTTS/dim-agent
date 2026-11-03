@@ -20,6 +20,7 @@ use dim_agent_capabilities::{
     workspace_tools::WorkspaceToolsConfig,
 };
 use dim_agent_runtime::testing::MinimalHost;
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use local_support::*;
@@ -118,8 +119,7 @@ async fn approval_request(session: &Session) -> ApprovalRequestData {
 }
 
 async fn tool_results(session: &Session) -> Vec<ToolResult> {
-    session
-        .history("main", None)
+    chain_events(session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -359,8 +359,7 @@ async fn unresolved_write_targets_fail_without_mutation() {
     }
     assert!(!dirs.root.join("missing").exists());
     assert!(
-        session
-            .history("main", None)
+        chain_events(&session, "main", ..)
             .await
             .unwrap()
             .iter()

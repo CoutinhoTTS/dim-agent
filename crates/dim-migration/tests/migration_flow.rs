@@ -1,5 +1,6 @@
 #![cfg(unix)]
 use dim_agent_capabilities::defaults;
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::{AgentBuilder, AgentConfig};
 use dim_agent_types::EventKind;
 use dim_app_server::{ServerConfig, serve, storage::SqliteStorage};
@@ -654,7 +655,7 @@ async fn migration_keeps_large_images_as_files_without_rejecting_session_history
         .await
         .unwrap();
         let session = server.agent().unwrap().restore_session(id).await.unwrap();
-        let history = session.history("main", None).await.unwrap();
+        let history = chain_events(&session, "main", ..).await.unwrap();
         let replacement = history
             .iter()
             .find_map(|event| match &event.kind {
@@ -861,7 +862,7 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
         .rpc("session.attach", json!({"sessionId":id}))
         .await
         .unwrap();
-    let history = session.history("main", None).await.unwrap();
+    let history = chain_events(&session, "main", ..).await.unwrap();
     assert!(
         history
             .iter()
@@ -885,7 +886,7 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
         .rpc("session.idle", json!({"sessionId":id,"branchId":"main"}))
         .await
         .unwrap();
-    let history = session.history("main", None).await.unwrap();
+    let history = chain_events(&session, "main", ..).await.unwrap();
     let request = history
         .iter()
         .find_map(|e| match &e.kind {
@@ -2096,7 +2097,7 @@ async fn migration_continuation_preserves_tool_pairs_revert_and_retry_boundaries
             .await
             .unwrap();
         let session = agent.get_session(&id).unwrap();
-        let history = session.history("main", None).await.unwrap();
+        let history = chain_events(&session, "main", ..).await.unwrap();
         assert!(history.iter().all(|event| !matches!(
             event.kind,
             EventKind::ModelCall(_)
@@ -2120,7 +2121,7 @@ async fn migration_continuation_preserves_tool_pairs_revert_and_retry_boundaries
             .rpc("session.idle", json!({"sessionId":id,"branchId":"main"}))
             .await
             .unwrap();
-        let history = session.history("main", None).await.unwrap();
+        let history = chain_events(&session, "main", ..).await.unwrap();
         let request = history
             .iter()
             .find_map(|event| match &event.kind {

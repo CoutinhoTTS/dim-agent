@@ -63,6 +63,7 @@ flowchart LR
     p36["Attachments"]
   end
   p58 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p78
+  p58 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p78
   p51 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p77
   p58 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p77
   p58 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p77
@@ -140,6 +141,7 @@ flowchart LR
   p58 -->|"dim_agent_runtime::config::BranchLifecycle@main"| p63
   p58 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p63
   p58 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p63
+  p58 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p63
   p41 -->|"dim_agent_capabilities::prompt_guide::GuideEntries@session"| p62
   p33 -->|"dim_agent_runtime::config::SessionLifecycle@session"| p62
   p58 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p62
