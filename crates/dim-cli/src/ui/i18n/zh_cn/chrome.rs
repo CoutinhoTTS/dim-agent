@@ -332,7 +332,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Could not save the theme: {error}" => "无法保存主题：{error}",
 
         "Sessions" => "会话",
-        "Enter open · Ctrl+R refresh · Esc close" => "Enter 打开 · Ctrl+R 刷新 · Esc 关闭",
+        "Sessions · This workspace" => "会话 · 当前工作区",
+        "Sessions · This repository" => "会话 · 当前仓库",
+        "Sessions · All workspaces" => "会话 · 所有工作区",
+        "No saved sessions in this workspace. Ctrl+S shows more." => {
+            "当前工作区没有已保存的会话。Ctrl+S 查看更多。"
+        }
+        "Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close" => {
+            "Enter 打开 · Ctrl+S 切换范围 · Ctrl+R 刷新 · Esc 关闭"
+        }
         "Loading sessions..." => "正在加载会话...",
         "No saved sessions yet." => "暂无已保存的会话。",
         "No matching sessions." => "无匹配的会话。",

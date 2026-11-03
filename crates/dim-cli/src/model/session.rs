@@ -91,6 +91,15 @@ impl SubmitMode {
     }
 }
 
+/// What `/resume` lists: the launch workspace, the same directory in its
+/// repository's worktrees, or every workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionsScope {
+    Workspace,
+    Repository(Vec<String>),
+    All,
+}
+
 pub enum Command {
     Submit(String, SubmitMode),
     /// A draft with pastes to store or content blocks to send.
@@ -194,13 +203,16 @@ pub enum Command {
     NewSession,
     /// Switch to a stored session.
     Resume(String),
-    /// List stored sessions (newest first).
+    /// Find the launch workspace's repository worktrees, once per picker open.
+    FindRepository,
+    /// List stored sessions (newest first), in `scope`.
     ListSessions {
         id: String,
         query: String,
         cursor: Option<String>,
         /// The "Show ACP sessions" preference the picker was opened with.
         show_acp: bool,
+        scope: SessionsScope,
     },
     CloseSessions,
     /// List the models that can be chosen.
@@ -1037,6 +1049,9 @@ pub enum Update {
         paged: bool,
         result: Result<(Vec<SessionItem>, Option<String>), String>,
     },
+    /// The workspaces the picker may offer as its repository scope: more than
+    /// one, found once per picker open.
+    RepositoryWorkspaces(Vec<String>),
     /// A command failed without ending the session.
     Notice(String),
     /// A newer version the user has not skipped, once per start.

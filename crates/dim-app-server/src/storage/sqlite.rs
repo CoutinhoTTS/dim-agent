@@ -15,7 +15,7 @@ use std::{
 };
 
 /// The native store format this daemon creates and opens.
-pub const FORMAT: u32 = 31;
+pub const FORMAT: u32 = 32;
 /// The oldest schema the startup transaction upgrades: the first step of
 /// `UPGRADES`, which is ordered oldest first.
 const MIN_FORMAT: u32 = UPGRADES[0].0;
@@ -29,14 +29,32 @@ const WAL_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
 /// store with 2,300 Sessions put their hot tail pages (about 20 MB) in cache
 /// from 32 MiB on; larger caches read no fewer bytes.
 const PAGE_CACHE_KIB: i64 = 32 * 1024;
-const LEGACY_BY_END: (&str, &str) = (
-    "timeline_events_by_end",
-    "CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence)",
-);
+/// Indexes a format range had and the current schema no longer creates, with
+/// the first and last format that had them.
+const LEGACY_INDEXES: &[(&str, &str, u32, u32)] = &[
+    (
+        "timeline_events_by_end",
+        "CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence)",
+        13,
+        24,
+    ),
+    (
+        "timeline_events_render",
+        "CREATE INDEX timeline_events_render ON timeline_events(session_id, branch_id, sequence) WHERE context_render = 1",
+        31,
+        31,
+    ),
+    (
+        "timeline_events_state",
+        "CREATE INDEX timeline_events_state ON timeline_events(session_id, branch_id, sequence) WHERE context_state = 1",
+        31,
+        31,
+    ),
+];
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 31))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 32))",
     ),
     (
         "settings_documents",
@@ -103,12 +121,8 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
         "CREATE INDEX timeline_events_by_id ON timeline_events(session_id, event_id) WHERE event_id IS NOT NULL",
     ),
     (
-        "timeline_events_render",
-        "CREATE INDEX timeline_events_render ON timeline_events(session_id, branch_id, sequence) WHERE context_render = 1",
-    ),
-    (
-        "timeline_events_state",
-        "CREATE INDEX timeline_events_state ON timeline_events(session_id, branch_id, sequence) WHERE context_state = 1",
+        "timeline_events_context",
+        "CREATE INDEX timeline_events_context ON timeline_events(session_id, branch_id, sequence) WHERE context_render = 1 OR context_state = 1",
     ),
     (
         "timeline_events_positions",
@@ -186,7 +200,7 @@ ALTER TABLE timeline_events ADD COLUMN context_state INTEGER NOT NULL DEFAULT 0;
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 17] = [
+const UPGRADES: [(u32, &[&str]); 18] = [
     (
         13,
         &[
@@ -239,15 +253,12 @@ const UPGRADES: [(u32, &[&str]); 17] = [
     // #557: a Session's creation origin; the column only, and the step fills
     // in the rows whose leader link already records one.
     (29, &[]),
-    // #708: the two reading switches on timeline events.
-    (
-        30,
-        &[
-            "timeline_events_render",
-            "timeline_events_state",
-            "timeline_events_positions",
-        ],
-    ),
+    // #708: the two reading switches on timeline events; v32 keeps the
+    // switch columns and the position index, and replaces the two
+    // reading-switch indexes with one.
+    (30, &["timeline_events_positions"]),
+    // #605: one partial index over both reading switches replaces the two.
+    (31, &["timeline_events_context"]),
 ];
 
 fn format_table(version: u32) -> String {
@@ -260,13 +271,19 @@ fn format_table(version: u32) -> String {
 fn schema_of(version: u32) -> Vec<(&'static str, String)> {
     SCHEMA
         .iter()
-        .chain((version <= 24).then_some(&LEGACY_BY_END))
+        .copied()
+        .chain(
+            LEGACY_INDEXES
+                .iter()
+                .filter(|(_, _, from, through)| *from <= version && version <= *through)
+                .map(|&(name, sql, _, _)| (name, sql)),
+        )
         .filter(|(name, _)| {
             !UPGRADES
                 .iter()
                 .any(|(from, added)| *from >= version && added.contains(name))
         })
-        .map(|&(name, sql)| {
+        .map(|(name, sql)| {
             let sql = match name {
                 "agent_store_format" => format_table(version),
                 "agent_sessions" if version < 27 => AGENT_SESSIONS_BEFORE_V27.to_owned(),
@@ -624,6 +641,12 @@ impl SqliteStorage {
                             "UPDATE timeline_events SET context_state=1 WHERE kind IN ({});",
                             keys(dim_agent_types::CONTEXT_STATE_KEYS)
                         ))
+                        .map_err(storage)?;
+                    }
+                    if *from == 31 && version == 31 {
+                        tx.execute_batch(
+                            "DROP INDEX timeline_events_render; DROP INDEX timeline_events_state",
+                        )
                         .map_err(storage)?;
                     }
                     for (_, sql) in SCHEMA.iter().filter(|(name, _)| added.contains(name)) {

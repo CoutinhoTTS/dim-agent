@@ -121,6 +121,27 @@ pub struct StoredEvent {
     pub batch_end: u64,
 }
 
+/// Where a backward, kind-filtered read of a branch chain continues: the
+/// pinned head, the segment of the chain (ancestors root first, then the
+/// branch itself) and the last sequence of that segment still to read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BranchCursor {
+    pub(crate) through: u64,
+    pub(crate) segment: Option<usize>,
+    pub(crate) before: u64,
+}
+
+/// One page of a branch chain read backwards: the matching events of one
+/// segment, oldest first.
+#[derive(Debug, Clone)]
+pub struct BranchPage {
+    pub events: Vec<Arc<AgentEvent>>,
+    /// The page after this one, older, or `None` at the start of the chain.
+    pub next: Option<BranchCursor>,
+    /// Whether these events are the branch's own, not an ancestor's.
+    pub own: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct StoredBranch {
     pub info: BranchRecord,
@@ -323,6 +344,41 @@ pub trait TimelineStore: Send + Sync + 'static {
             if let Some(record) = records.get(limit - 1) {
                 let end = record.batch_end;
                 records.retain(|record| record.event.sequence <= end);
+            }
+            Ok(records)
+        })
+    }
+    /// Reads one page of a branch walked backwards: the events whose kind is
+    /// in `kinds`, at or below `before`, taking at most `limit` stored rows
+    /// from the newest, returned oldest first. `before` is a published
+    /// sequence, so a caller pins one head and reads its pages from there; the
+    /// end of the page is the input of the next call. A stored row may hold
+    /// several events (streamed output deltas), so a page may return more
+    /// events than rows. Every other row is skipped before it is decoded.
+    /// The default reads the branch to its head and trims in memory.
+    fn read_kind_page<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        kinds: &'a [&'a str],
+        before: u64,
+        limit: usize,
+    ) -> BoxFuture<'a, Result<Vec<StoredEvent>>> {
+        Box::pin(async move {
+            let head = self.head(key).await?;
+            let before = before.min(head);
+            if before == 0 || limit == 0 {
+                return Ok(Vec::new());
+            }
+            let records = self.read(key, 1..=head).await?;
+            let mut records: Vec<_> = records
+                .into_iter()
+                .filter(|record| {
+                    record.event.sequence <= before
+                        && kinds.iter().any(|kind| record.event.kind.key() == *kind)
+                })
+                .collect();
+            if records.len() > limit {
+                records.drain(..records.len() - limit);
             }
             Ok(records)
         })
