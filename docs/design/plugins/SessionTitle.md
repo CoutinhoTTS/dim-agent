@@ -1,16 +1,21 @@
 # SessionTitle
 
-Status: Implemented as an optional TypeScript package. Overall design: [overview](../overview.md) (SessionTitle). Phase: P1. Language: TypeScript first. Scope: [ADR 002](../../adr/002-plugin-scope.md) (Session).
+Overall design: [overview](../overview.md) (SessionTitle). Scope: [ADR 002](../../adr/002-plugin-scope.md) (Session).
 
 SessionTitle is a Session plugin that gives an interactive leader Session a title stored through SessionStore metadata. It observes its own Session through the existing Session broadcast; when the first operator input on `main` is adopted (`input/applied`), it generates a title from that input's text alone through the Provider `AuxiliaryModel`, with the model from its own setting. The title is SessionStore state: SessionTitle writes it only through SessionStore's typed `setTitle` operation, and SessionStore announces each change with a Session broadcast notice that clients consume (the delivered C6 notice record is described in [§9](#9-requirements-raised-to-mechanism-owners); the SessionStore title metadata and the Rpc forwarding are supplements in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). It serves `session.rename` by registering the namespace `session.rename` with its Session's `sessionMethods` ([methods and tool contributions](../contracts/session-boundary.md)). It writes no Timeline event and has no model-visible effect. Contracts are given in neutral form ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust binding is in Appendix G.
 
 ## 0. Implementation boundary
 
-C1/C2, C4 tools/methods #150, S2 #98/#159, S4's Rust host #89,
-Settings #166/#175/#177, C6 notices #85, S5b title metadata #96 and the named S4 binding #225 are delivered.
-The optional [SessionTitle package](../../../runtime/plugins/session-title/README.md) implements
-the Session part and Appendix D behavior using these owners. The package is installed explicitly
-through `SessionTypeScriptConfig`; default CLI-profile installation is outside this contract.
+The base CLI provides `session-title` as a built-in Rust plugin. Its process row registers
+the Settings source and the Session part through the existing part registry; every Session
+mounts one copy. Availability does not depend on `--defaults`, a staged TypeScript package,
+Node/Python installation or language-runtime acquisition. Provider and storage remain the
+owners of auxiliary calls and title metadata.
+
+The shipped plugin retains the `session-title` identity, Settings document and metadata format.
+PluginManager's source selection owns the transition from the former default package to the
+built-in implementation, preserving explicit disablement and installed replacement selections.
+Only the selected implementation may register the Settings source or `session.rename`.
 
 Verification uses the actual plugin over its declared SDK ports and the real Node/App Server flow
 [`session_title.rs`](../../../crates/dim-app-server/tests/transport_flow/session_title.rs).
@@ -41,16 +46,16 @@ API. Retain T and page with through=T and after=the last returned sequence; neve
 through together. Use native HistoryPage/AgentEvent data. S2's stable directory reads the index per
 call, so index reload does not reload this consumer.
 
-Use the [C4 binding contract](../session-typescript.md): the package's one row injects `partRegistry`
-and registers the Session part as a Session definition; each Session mounts a copy. The part injects
+Use the [plugin binding contract](../rutis-usage.md): the plugin's one row injects `partRegistry`
+and registers the Session part; each Session mounts a copy. The part injects
 `sessionMethods` and registers `session.rename` with it from `apply`; its provides dictionary is empty.
 `apply` reads the Session identity and creation configuration and registers observation/cleanup;
 it does not start an asynchronous initialization job. Its creation configuration is immutable.
 The same part declares all its dependencies in `inject`: the process services `sessions`,
 `settings`, `sessionMetadata` and `auxiliaryModel`, and the Session services `sessionIdentity`,
-`sessionConfig`, `sessionLifecycle` and `sessionMethods`. The package is optional and is installed through the
-existing `ServerConfig.session_typescript.rows` input, as Web is; it adds no default-profile
-installation or plugin-specific App Server wiring.
+`sessionConfig`, `sessionLifecycle` and `sessionMethods`. The product assembly installs the native
+plugin independently of foreign plugin rows. Missing optional providers affect SessionTitle's
+availability under the existing dependency rules, not the Session's execution capabilities.
 
 The fixed snapshot ends at returned T, not necessarily at N. Its first adopted operator input
 supplies text. With model=null, the latest ContextConfiguredData.settings in that snapshot supplies
@@ -347,7 +352,8 @@ omits `maxOutputTokens`, using S4's existing model limit; the 30 s budget remain
 
 ## Appendix D. Acceptance
 
-Flow tests through configured optional C4 rows, `session.create`/`session.submit`, `session.rename`,
+Flow tests through the default native product assembly without language runtimes,
+`session.create`/`session.submit`, `session.rename`,
 `session.summaries`, `settings.read/update` and a fake auxiliary model:
 
 1. Hold the main turn open with the existing model fixture. The first `session.submit` on an interactive leader Session starts generation after adoption and produces an `auto` title while that controlled turn is still active; the request contains only the system text and that input's text, and one title notice reaches subscribed clients. Completion before turn end is not a production ordering guarantee.

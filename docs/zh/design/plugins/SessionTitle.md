@@ -1,15 +1,18 @@
 # SessionTitle
 
-状态：已实现为可选 TypeScript 包。总体设计：[overview](../overview.md)（SessionTitle）。阶段：P1。语言：TypeScript 优先。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。
+总体设计：[overview](../overview.md)（SessionTitle）。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。
 
 SessionTitle 是一个 Session 插件，为交互式 leader Session 提供经 SessionStore 元数据保存的标题。它通过既有的 Session 广播观察自己的 Session；当 `main` 上的第一条操作者输入被采用时（`input/applied`），它仅凭该输入的文本，经 Provider `AuxiliaryModel`、用它自己设置中的模型生成标题。标题是 SessionStore 的状态：SessionTitle 只通过 SessionStore 的类型化操作 `setTitle` 写入，SessionStore 在每次变更后发出一条 Session 广播通知，由客户端消费（已交付的 C6 通知记录见 [§9](#9-向机制所有者提出的需求)；SessionStore 标题元数据和 Rpc 转发是补充，见[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)）。它把命名空间 `session.rename` 注册到本 Session 的 `sessionMethods`，以此提供 `session.rename`（[方法与工具贡献](../contracts/session-boundary.md)）。它不写任何 Timeline 事件，也没有模型可见的效果。契约以语言中立形式给出（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 绑定见附录 G。
 
 ## 0. 实施边界
 
-C1/C2、C4 工具/方法 #150、S2 #98/#159、S4 Rust 宿主 #89、
-Settings #166/#175/#177、C6 通知 #85、S5b 标题元数据 #96 和 S4 具名绑定 #225 已交付。
-可选 [SessionTitle 包](../../../../runtime/plugins/session-title/README.md) 使用这些所有者实现 Session 部分
-和附录 D 行为。通过 SessionTypeScriptConfig 显式安装；默认 CLI profile 安装不属于本合同。
+基础 CLI 以 Rust 内置插件提供 `session-title`。进程行通过既有部件注册表注册 Settings 来源和
+Session 部分，每个 Session 挂载一份副本。其可用性不依赖 `--defaults`、打包的 TypeScript 包、
+Node/Python 安装或语言运行时获取。辅助调用和标题元数据仍分别归 Provider 与存储所有者管理。
+
+内置插件保留 `session-title` 标识、Settings 文档和元数据格式。由 PluginManager 的来源选择
+负责原默认包向内置实现的过渡，保留显式禁用和已安装替代实现的选择。
+只有选中的实现可以注册 Settings 来源与 `session.rename`。
 
 验证沿实际插件声明的 SDK 端口，以及真实 Node/App Server 的
 [session_title.rs](../../../../crates/dim-app-server/tests/transport_flow/session_title.rs) 流程进行。
@@ -37,13 +40,13 @@ Core API。保留 T，后续用 through=T 和上一页最后 sequence 作为 aft
 atLeast 与 through，直接使用原生 HistoryPage/AgentEvent。S2 稳定目录每次读取索引，
 索引重载不会重载消费方。
 
-沿用 [C4 绑定合同](../../../design/session-typescript.md)：包的唯一一行注入 `partRegistry`，
-把 Session 部分注册为 Session 定义，每个 Session 挂载一份副本。该部分注入
+沿用[插件绑定合同](../rutis-usage.md)：插件的唯一一行注入 `partRegistry`，
+注册 Session 部分，每个 Session 挂载一份副本。该部分注入
 `sessionMethods`，并在 `apply` 中把 `session.rename` 注册到它；它的 provides 为空。`apply` 读取 Session 标识和创建配置，
 登记观察/清理，不启动异步初始化任务；创建配置不可变。同一部分在 `inject` 声明全部依赖：进程服务
 `sessions`、`settings`、`sessionMetadata` 和 `auxiliaryModel`，以及 Session 服务 `sessionIdentity`、
-`sessionConfig`、`sessionLifecycle` 和 `sessionMethods`。包为可选安装，沿用 Web 的 `ServerConfig.session_typescript.rows` 入口；
-不加入默认产品配置，也不增加 SessionTitle 专用 App Server 接线。
+`sessionConfig`、`sessionLifecycle` 和 `sessionMethods`。产品装配独立于外语插件行安装原生插件。
+可选提供者缺失时，依照既有依赖规则仅影响 SessionTitle 的可用性，不影响 Session 的执行能力。
 
 固定快照止于返回的 T，不承诺恰好止于 N。第一条被采用的操作者输入提供文本；model=null
 时，从该快照最新 ContextConfiguredData.settings 读取 providerId/modelId。没有被采用的
