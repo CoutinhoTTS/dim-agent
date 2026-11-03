@@ -254,22 +254,6 @@ pub trait TimelineStore: Send + Sync + 'static {
             Ok(records)
         })
     }
-    /// The events of one kind up to `through`.
-    fn events_of_kind<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        kind: &'a str,
-        through: u64,
-    ) -> BoxFuture<'a, Result<Vec<Arc<AgentEvent>>>> {
-        Box::pin(async move {
-            let records = self.read(key, 1..=through).await?;
-            Ok(records
-                .into_iter()
-                .map(|record| record.event)
-                .filter(|event| event.kind.key() == kind)
-                .collect())
-        })
-    }
     /// The event at `sequence`, even when an atomic batch crosses it: the read
     /// runs to the branch head, which is a batch boundary, and picks the last
     /// event at or before the cut.
