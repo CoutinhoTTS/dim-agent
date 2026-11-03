@@ -99,15 +99,33 @@ impl TimelineStore for Reads {
 }
 
 /// Decodes a checkpoint whose resume is the sequence held in the snapshot
-/// state, on `main`.
+/// state, on `main`, with an event id the store does not hold: the read keeps
+/// the recorded position.
 fn checkpoint_resume(
     snapshot: &RecoverySnapshot,
     _anchor: &AgentEvent,
 ) -> Option<ProjectionCheckpoint> {
     Some(ProjectionCheckpoint {
-        resume: TimelinePosition {
+        resume: ResumePoint {
             branch_id: "main".into(),
             sequence: snapshot.state.parse().ok()?,
+            event_id: "missing".into(),
+        },
+        state: ProjectionCheckpointState::default(),
+    })
+}
+/// Decodes a checkpoint whose resume names the event id held in the snapshot
+/// state, before a colon, and a position that need not be that event's.
+fn checkpoint_resume_by_id(
+    snapshot: &RecoverySnapshot,
+    _anchor: &AgentEvent,
+) -> Option<ProjectionCheckpoint> {
+    let (event_id, sequence) = snapshot.state.split_once(':')?;
+    Some(ProjectionCheckpoint {
+        resume: ResumePoint {
+            branch_id: "main".into(),
+            sequence: sequence.parse().ok()?,
+            event_id: event_id.into(),
         },
         state: ProjectionCheckpointState::default(),
     })
@@ -729,6 +747,121 @@ async fn a_checkpoint_anchored_inside_an_atomic_batch_is_still_used() {
         "a mid-batch anchor still selects its checkpoint"
     );
     assert_eq!(context.events.len(), 13);
+}
+
+/// The resume event the checkpoint names by id is where the read begins; the
+/// position stored beside it is only used when the store holds no such id.
+#[tokio::test]
+async fn a_checkpoint_resumes_at_the_event_its_id_names() {
+    let store = Arc::new(Reads::default());
+    store
+        .memory
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let key = TimelineKey {
+        session_id: "session".into(),
+        branch_id: "main".into(),
+    };
+    let writer = Timeline::new(Ctx::root().unwrap(), key.clone(), vec![], store.clone());
+    let prefix = writer
+        .append_batch_registered(
+            (1..=50)
+                .map(|index| input(&format!("prefix {index}")))
+                .collect(),
+            |_| Ok(()),
+        )
+        .unwrap();
+    let resume = prefix[39].clone();
+    let anchor = writer.append(input("anchor")).unwrap();
+    writer
+        .save_snapshot(RecoverySnapshot {
+            sequence: anchor.sequence,
+            event_id: anchor.id.clone(),
+            interpreter: "test/anchor".into(),
+            state: format!("{}:1", resume.id),
+        })
+        .await
+        .unwrap();
+    writer
+        .append_batch_registered(
+            (1..=1000)
+                .map(|index| input(&format!("tail {index}")))
+                .collect(),
+            |_| Ok(()),
+        )
+        .unwrap();
+    let reader = Timeline::restore(Ctx::root().unwrap(), key, vec![], store.clone())
+        .await
+        .unwrap();
+    let through = reader.committed();
+    let context = reader
+        .context_with_checkpoint(through, "test/anchor", checkpoint_resume_by_id)
+        .await
+        .unwrap();
+    assert!(context.checkpoint.is_some());
+    assert_eq!(
+        context.events.first().map(|event| event.id.as_str()),
+        Some(resume.id.as_str()),
+        "the read begins at the event the id names, not at the stored position"
+    );
+    assert_eq!(
+        context.events.len(),
+        (through - resume.sequence + 1) as usize
+    );
+}
+
+/// A resume id no stored event carries leaves the recorded position in use.
+#[tokio::test]
+async fn a_resume_id_the_store_does_not_hold_keeps_the_recorded_position() {
+    let store = Arc::new(Reads::default());
+    store
+        .memory
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let key = TimelineKey {
+        session_id: "session".into(),
+        branch_id: "main".into(),
+    };
+    let writer = Timeline::new(Ctx::root().unwrap(), key.clone(), vec![], store.clone());
+    writer
+        .append_batch_registered(
+            (1..=50)
+                .map(|index| input(&format!("prefix {index}")))
+                .collect(),
+            |_| Ok(()),
+        )
+        .unwrap();
+    let anchor = writer.append(input("anchor")).unwrap();
+    writer
+        .save_snapshot(RecoverySnapshot {
+            sequence: anchor.sequence,
+            event_id: anchor.id.clone(),
+            interpreter: "test/anchor".into(),
+            state: "missing:40".into(),
+        })
+        .await
+        .unwrap();
+    writer
+        .append_batch_registered(
+            (1..=1000)
+                .map(|index| input(&format!("tail {index}")))
+                .collect(),
+            |_| Ok(()),
+        )
+        .unwrap();
+    let reader = Timeline::restore(Ctx::root().unwrap(), key, vec![], store.clone())
+        .await
+        .unwrap();
+    let through = reader.committed();
+    let context = reader
+        .context_with_checkpoint(through, "test/anchor", checkpoint_resume_by_id)
+        .await
+        .unwrap();
+    assert!(context.checkpoint.is_some());
+    assert_eq!(context.events.first().map(|event| event.sequence), Some(40));
+    assert_eq!(context.events.len(), (through - 39) as usize);
 }
 
 #[tokio::test]

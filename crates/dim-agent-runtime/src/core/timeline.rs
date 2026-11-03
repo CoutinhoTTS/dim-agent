@@ -2,11 +2,12 @@ use super::keys::KeyFilter;
 use crate::{
     AgentError, BoxFuture, BranchCursor, BranchLifecycle, BranchPage, FaultReporter, PolicyFacts,
     PolicyOrder, PolicyOrderEvent, PolicyWindow, Result, StoredEvent, TimelineKey, TimelineQuery,
-    TimelineQueryDirection, TimelineQueryReply, TimelineQueryScope, TimelineStore,
+    TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryReply, TimelineQueryScope,
+    TimelineStore,
 };
 use dim_agent_types::{
     AgentEvent, EventDraft, EventKind, InputMessageData, ProjectionCheckpoint, RecoverySnapshot,
-    TimelinePosition,
+    ResumePoint, TimelinePosition,
 };
 use rutis::events::SyncCall;
 #[allow(unused_imports)]
@@ -1256,7 +1257,9 @@ impl Timeline {
         Ok(window)
     }
     /// The latest interpreter-compatible checkpoint at `through`, if one is
-    /// valid for this branch and its fixed ancestor chain.
+    /// valid for this branch and its fixed ancestor chain. The resume it names
+    /// is read with `from_event` and returned at the position that event
+    /// occupies; the recorded position is used when no event carries the id.
     #[service(skip)]
     pub async fn checkpoint(
         &self,
@@ -1300,9 +1303,13 @@ impl Timeline {
             if anchor.id != snapshot.event_id || anchor.sequence != snapshot.sequence {
                 continue;
             }
-            let Some(checkpoint) = decode(&snapshot, &anchor) else {
+            let Some(mut checkpoint) = decode(&snapshot, &anchor) else {
                 continue;
             };
+            if let Some(position) = self.resume_position(&checkpoint.resume).await? {
+                checkpoint.resume.branch_id = position.branch_id;
+                checkpoint.resume.sequence = position.sequence;
+            }
             let Some(resume_index) = segments[..=index]
                 .iter()
                 .position(|(id, _)| *id == checkpoint.resume.branch_id)
@@ -1318,6 +1325,27 @@ impl Timeline {
             return Ok(Some(checkpoint));
         }
         Ok(None)
+    }
+    /// The position of the event a checkpoint resumes at, read with
+    /// `from_event`, which names the branch the event sits in. A resume event
+    /// the store holds no id for (an event inside a merged output row) keeps
+    /// the position the checkpoint recorded.
+    #[service(skip)]
+    async fn resume_position(&self, resume: &ResumePoint) -> Result<Option<TimelinePosition>> {
+        let query = TimelineQuery {
+            scope: TimelineQueryScope::Chain,
+            from_event: Some(resume.event_id.clone()),
+            from_sequence: None,
+            order_by: TimelineQueryOrderBy::Sequence,
+            direction: TimelineQueryDirection::Ascending,
+            kinds: Vec::new(),
+            flags: Vec::new(),
+            event_id: None,
+            predicate: None,
+            limit: std::num::NonZeroU64::new(1).expect("one is nonzero"),
+            offset: 0,
+        };
+        Ok(self.query(query).await?.positions.into_iter().next())
     }
     /// Select an interpreter-compatible cache before decoding or trimming facts.
     /// Invalid caches are disposable; failures reading required facts are not.
