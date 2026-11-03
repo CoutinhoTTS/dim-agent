@@ -52,7 +52,7 @@ The CLI owns terminal and command interactions; the App Server owns host configu
 - Multiline editing: use `Shift+Enter` or `Ctrl+J` for a newline; `Shift+Enter` requires terminal support.
 - Input history: use Up/Down to retrieve submitted prompts and `!` / `!!` command history, stored per working directory; availability depends on cursor position and draft state.
 - Command completion: use `/` to find commands and Skills; execute a selected command or complete it before entering arguments.
-- Skill references: choose a Skill through `$`, `/` or `@` suggestions and insert `$skill: <name>` for submission with the message. Inserting a reference does not send the message.
+- Skill references: choose a Skill through the `/` command palette, or type `$skill: <name>`; the reference loads that Skill with the message it is submitted with. Inserting a reference does not send the message. `/` is the only trigger, and `@` remains the file picker.
 - File references: use `@` to search project paths, browse directories and select files; ordinary files are passed as paths for the Agent to read as needed.
 - Pasted and dropped paths: recognize existing paths, including multiple paths, quoted paths and `file://` URLs. Ordinary files become path references; supported images become attachments. Drag-and-drop depends on the terminal passing paths.
 - Multiline paste: display long or multiline text as a compact block and restore the full text on submission.
@@ -73,7 +73,7 @@ The CLI owns terminal and command interactions; the App Server owns host configu
 - Clipboard compatibility: copy text through the system clipboard and OSC 52 for local and SSH use. Over SSH, terminals with the kitty clipboard protocol (OSC 5522, e.g. kitty, Ghostty 1.4+) also serve `Ctrl+V` image (PNG, JPEG, WebP, GIF) and text reads from the local clipboard; other terminals keep the native readers. Image/file reads and remote copying depend on platform components and terminal support.
 - History browsing and navigation: use `/timeline` to locate messages. Fullscreen TUI loads earlier records from a row at the top of the transcript; in scrollback a `/timeline` jump to an earlier message draws history from it, and the terminal's own scrollback does the rest.
 - Open links: click web and local-file links in fullscreen TUI output to open them with the system's default browser or application.
-- Tool groups: each group of tool calls is collapsed by default (`▸`); click its header in fullscreen TUI to expand or collapse that group. `/tools` expands or collapses every group.
+- Tool groups: each group of tool calls is collapsed by default (`▸`); click its header in fullscreen TUI to cycle that group through collapsed, one-row-per-call summary, and expanded forms. `/tools` cycles every group through the same forms; compaction bodies show only in expanded. See [transcript detail settings](design/cli-commands.md#transcript-detail-settings).
 
 ### Run feedback and confirmation
 
@@ -123,8 +123,7 @@ The CLI owns terminal and command interactions; the App Server owns host configu
 - `/agent`: switch Agent mode.
 - `/goal`: switch Goal mode; set, edit, pause, resume and clear a goal.
 - Goal continuation: continue toward an explicit goal and record completion or blockage.
-- `/approvals`: manage tool approvals and permission rules.
-- `/approval`: set the session's tool approval to ask or full access. Ask is workspace-write. The choice is remembered for new sessions.
+- `/permissions`: select the session's permission preset and manage command rules; `/approvals` and `/approval` are aliases. The preset is remembered for new sessions.
 - Permission policies: read-only, workspace-write and full access.
 - Sandbox: configure file, network and process access; availability depends on the platform and runtime environment.
 - Command rules: configure allowed commands and the execution Shell.

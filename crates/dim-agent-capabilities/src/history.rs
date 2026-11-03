@@ -1,5 +1,5 @@
 use crate::prompt_state::PromptSnapshot;
-use dim_agent_runtime::{AgentError, ContextHistory, Timeline};
+use dim_agent_runtime::{AgentError, ContextHistory, Session, Timeline};
 use dim_agent_types::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -285,7 +285,9 @@ impl HistoryRenderer {
                 "a stream needs a positive batch size".into(),
             ));
         }
-        let policy_order = timeline.policy_order(through).await?;
+        let policy_order = timeline
+            .policy_order(through, dim_agent_runtime::PolicyTurns::Anchors)
+            .await?;
         let checkpoint = timeline
             .checkpoint(through, self.checkpoint_interpreter, self.decode_checkpoint)
             .await?;
@@ -310,6 +312,7 @@ impl HistoryRenderer {
         let mut compaction = None;
         let mut cut_in_effect: Option<(Option<usize>, u64)> = None;
         let mut compaction_cut: Option<dim_agent_types::TimelinePosition> = None;
+        let mut cuts: Vec<(String, dim_agent_types::TimelinePosition)> = Vec::new();
         for (index, (branch, cut)) in segments.iter().enumerate().skip(first) {
             let mut cursor = if index == first { resume } else { 1 };
             while cursor <= *cut {
@@ -363,6 +366,9 @@ impl HistoryRenderer {
                     }
                     cut_in_effect = Some(at);
                     compaction_cut = Some(cut.clone());
+                    if !cuts.iter().any(|(id, _)| id == retain_from) {
+                        cuts.push((retain_from.clone(), cut.clone()));
+                    }
                     let kept = history
                         .iter()
                         .position(|entry| {
@@ -377,6 +383,21 @@ impl HistoryRenderer {
             }
         }
         let state = state.unwrap_or_default();
+        let mut order = policy_order.events;
+        let rank = |branch: &str| segments.iter().position(|(name, _)| name == branch);
+        for (id, position) in cuts {
+            if !order.iter().any(|event| event.id == id) {
+                order.push(dim_agent_runtime::PolicyOrderEvent {
+                    id,
+                    branch_id: position.branch_id,
+                    sequence: position.sequence,
+                    turn_start: false,
+                    compaction_start: None,
+                    boundary: false,
+                });
+            }
+        }
+        order.sort_by_key(|event| (rank(&event.branch_id), event.sequence));
         Ok(StreamedContext {
             history,
             configuration: state.configuration,
@@ -386,7 +407,7 @@ impl HistoryRenderer {
                 .into_iter()
                 .map(|(branch, _)| branch)
                 .collect(),
-            order: policy_order.events,
+            order,
             compaction,
             branches: segments.iter().map(|(branch, _)| branch.clone()).collect(),
             compaction_cut,
@@ -401,12 +422,13 @@ pub struct StreamedContext {
     pub configuration: Option<ContextConfiguredData>,
     pub prompt: Option<PromptReference>,
     pub ancestry: Vec<String>,
+    /// The policy order, extended with each completed compaction's cut so a
+    /// cut id resolves to its position.
     pub order: Vec<dim_agent_runtime::PolicyOrderEvent>,
     pub compaction: Option<Arc<AgentEvent>>,
     /// Root first, the segments the stream read.
     pub branches: Vec<String>,
-    /// The position of the cut in effect, which need not be an event the
-    /// policy order carries.
+    /// The position of the cut in effect.
     pub compaction_cut: Option<dim_agent_types::TimelinePosition>,
 }
 
@@ -635,47 +657,16 @@ fn replay(
                 }
                 output_open = true;
             }
-            EventKind::Thinking(data) => match output.last_mut() {
-                Some(MessagePart::Thinking { thinking, .. }) => thinking.push_str(&data.delta),
-                _ => output.push(MessagePart::Thinking {
-                    provider_metadata: None,
-                    thinking: data.delta.clone(),
-                    start_time: None,
-                    end_time: None,
-                }),
-            },
-            EventKind::Text(data) => match output.last_mut() {
-                Some(MessagePart::Text { text, .. }) => text.push_str(&data.delta),
-                _ => output.push(MessagePart::Text {
-                    provider_metadata: None,
-                    text: data.delta.clone(),
-                    start_time: None,
-                    end_time: None,
-                }),
-            },
+            EventKind::Thinking(_)
+            | EventKind::Text(_)
+            | EventKind::ToolUse(_)
+            | EventKind::ModelContent(_) => {
+                fold_output_parts(&mut output, &event.kind)?;
+            }
             EventKind::ToolUseStart(data) => {
                 open_tools.push(data.call_id.clone());
-                output.push(MessagePart::ToolUse {
-                    provider_metadata: None,
-                    id: data.call_id.clone(),
-                    name: data.name.clone(),
-                    input: JsonObject::new(),
-                    start_time: None,
-                });
+                fold_output_parts(&mut output, &event.kind)?;
             }
-            EventKind::ToolUse(data) => match output
-                .iter_mut()
-                .find(|part| matches!(part, MessagePart::ToolUse { id, .. } if *id == data.call.id))
-            {
-                Some(MessagePart::ToolUse { input, .. }) => input.clone_from(&data.call.input),
-                _ => {
-                    return Err(format!(
-                        "Tool call {} completes without step/tool-use-start",
-                        data.call.id
-                    ));
-                }
-            },
-            EventKind::ModelContent(data) => output = data.content.clone(),
             EventKind::ModelOutputEnd(data) => {
                 let output = std::mem::take(&mut output);
                 if matches!(data.outcome, ModelOutputOutcome::Completed { .. }) {
@@ -940,6 +931,184 @@ pub fn projection_checkpoint(
 
 pub fn validate_context_boundary(context: &ContextHistory) -> Result<(), String> {
     boundary(&replay(&context.events, initial_state(context), &context.positions)?.state)
+}
+
+/// Folds one streamed output event into the parts history builds for that
+/// output: a delta appends to a trailing part of its own kind, a tool call
+/// starts a `ToolUse` part, and `model/content` replaces them all. Other
+/// kinds leave the parts as they are.
+pub fn fold_output_parts(parts: &mut Vec<MessagePart>, kind: &EventKind) -> Result<(), String> {
+    match kind {
+        EventKind::Thinking(data) => match parts.last_mut() {
+            Some(MessagePart::Thinking { thinking, .. }) => thinking.push_str(&data.delta),
+            _ => parts.push(MessagePart::Thinking {
+                provider_metadata: None,
+                thinking: data.delta.clone(),
+                start_time: None,
+                end_time: None,
+            }),
+        },
+        EventKind::Text(data) => match parts.last_mut() {
+            Some(MessagePart::Text { text, .. }) => text.push_str(&data.delta),
+            _ => parts.push(MessagePart::Text {
+                provider_metadata: None,
+                text: data.delta.clone(),
+                start_time: None,
+                end_time: None,
+            }),
+        },
+        EventKind::ToolUseStart(data) => parts.push(MessagePart::ToolUse {
+            provider_metadata: None,
+            id: data.call_id.clone(),
+            name: data.name.clone(),
+            input: JsonObject::new(),
+            start_time: None,
+        }),
+        EventKind::ToolUse(data) => match parts
+            .iter_mut()
+            .find(|part| matches!(part, MessagePart::ToolUse { id, .. } if *id == data.call.id))
+        {
+            Some(MessagePart::ToolUse { input, .. }) => input.clone_from(&data.call.input),
+            _ => {
+                return Err(format!(
+                    "Tool call {} completes without step/tool-use-start",
+                    data.call.id
+                ));
+            }
+        },
+        EventKind::ModelContent(data) => parts.clone_from(&data.content),
+        _ => {}
+    }
+    Ok(())
+}
+
+/// The event limit one page of a cut check asks for.
+const BOUNDARY_PAGE: usize = 256;
+
+/// The paged read a cut check folds: one branch's Timeline, or that branch
+/// through the Session facade.
+enum CutReads<'a> {
+    Timeline(&'a Timeline),
+    Session(&'a Session, &'a str),
+}
+
+impl CutReads<'_> {
+    /// The cut ends an atomic batch, as it must for a branch prefix.
+    async fn batch_end(&self, through: u64) -> dim_agent_runtime::Result<()> {
+        match self {
+            Self::Timeline(timeline) => timeline.local(through..=through).await.map(|_| ()),
+            Self::Session(session, branch) => {
+                session.local(branch, through..=through).await.map(|_| ())
+            }
+        }
+    }
+    async fn cut(&self, through: u64) -> dim_agent_runtime::Result<Option<u64>> {
+        match self {
+            Self::Timeline(timeline) => timeline.compaction_cut(through).await,
+            Self::Session(session, branch) => session.compaction_cut(branch, through).await,
+        }
+    }
+    async fn page(
+        &self,
+        after: u64,
+        through: u64,
+    ) -> dim_agent_runtime::Result<Vec<Arc<AgentEvent>>> {
+        match self {
+            Self::Timeline(timeline) => {
+                timeline
+                    .stored_context_page(after, BOUNDARY_PAGE, through)
+                    .await
+            }
+            Self::Session(session, branch) => {
+                session
+                    .context_page(branch, after, BOUNDARY_PAGE, through)
+                    .await
+            }
+        }
+    }
+    fn branch(&self) -> String {
+        match self {
+            Self::Timeline(timeline) => timeline.branch_id(),
+            Self::Session(_, branch) => (*branch).to_owned(),
+        }
+    }
+}
+
+/// Folds one branch's context pages from `start` to `through`. The inner error
+/// is the projection's: the pages alone cannot be folded from that start.
+async fn folded(
+    reads: &CutReads<'_>,
+    branch: &str,
+    start: u64,
+    through: u64,
+) -> dim_agent_runtime::Result<Result<ProjectionCheckpointState, String>> {
+    let mut state = None;
+    let mut cursor = start.max(1);
+    while cursor <= through {
+        let events = reads.page(cursor - 1, through).await?;
+        if events.is_empty() {
+            break;
+        }
+        let end = events.last().map_or(cursor, |event| event.sequence);
+        match project_batch(&events, state.as_ref(), branch) {
+            Ok(projected) => state = Some(projected.state),
+            Err(error) => return Ok(Err(error)),
+        }
+        cursor = end + 1;
+    }
+    Ok(Ok(state.unwrap_or_default()))
+}
+
+async fn boundary_at(
+    reads: CutReads<'_>,
+    through: u64,
+) -> dim_agent_runtime::Result<Result<(), String>> {
+    reads.batch_end(through).await?;
+    let branch = reads.branch();
+    let projection = match reads.cut(through).await? {
+        Some(cut) => match folded(&reads, &branch, cut, through).await? {
+            Ok(state) => Ok(state),
+            Err(_) => folded(&reads, &branch, 1, through).await?,
+        },
+        None => folded(&reads, &branch, 1, through).await?,
+    };
+    Ok(projection.and_then(|state| boundary(&state)))
+}
+
+/// Verifies that the cut at `through` splits no tool call from its result and
+/// leaves no model output open, folding pages from the branch's last completed
+/// compaction instead of materializing the whole prefix. The outer error is the
+/// read's (an unknown branch, a cut past the head or inside an atomic batch);
+/// the inner one is the verdict [`validate_context_boundary`] returns.
+///
+/// A completed compaction replaces the entries before its `retain_from` from a
+/// validated boundary, so the projection's open calls and output are empty at
+/// that cut and the tail alone gives the state at `through`.
+///
+/// A cut outside this branch's own events (such as one on an ancestor), a cut
+/// at or after the compaction fact that names it, and a cut whose pages cannot
+/// fold on their own (it replaced the input a later `input/consumed` names) are
+/// not resume points here: the fold starts at the branch's segment start
+/// instead, which always replays because the branch's `branch/start` resets
+/// that state. A malformed reference therefore never leaves the tail unread, so
+/// the check cannot accept the empty state of an unfolded prefix. Read errors
+/// are returned as they are; the verdict is the one a replay of the whole prefix
+/// gives.
+pub async fn validate_context_boundary_at(
+    timeline: &Timeline,
+    through: u64,
+) -> dim_agent_runtime::Result<Result<(), String>> {
+    boundary_at(CutReads::Timeline(timeline), through).await
+}
+
+/// [`validate_context_boundary_at`] through the Session facade, for callers
+/// that do not hold the branch's Timeline.
+pub async fn validate_context_boundary_in(
+    session: &Session,
+    branch: &str,
+    through: u64,
+) -> dim_agent_runtime::Result<Result<(), String>> {
+    boundary_at(CutReads::Session(session, branch), through).await
 }
 
 fn assistant(

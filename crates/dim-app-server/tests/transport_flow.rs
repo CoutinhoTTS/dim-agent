@@ -56,6 +56,8 @@ mod collaboration;
 
 #[path = "transport_flow/catalog.rs"]
 mod catalog;
+#[path = "transport_flow/configured_auxiliary.rs"]
+mod configured_auxiliary;
 #[path = "transport_flow/native_storage.rs"]
 mod native_storage;
 
@@ -73,6 +75,9 @@ mod barrier;
 
 #[path = "transport_flow/product_protocol.rs"]
 mod product_protocol;
+
+#[path = "transport_flow/model_startup.rs"]
+mod model_startup;
 
 #[path = "transport_flow/summaries.rs"]
 mod summaries;
@@ -130,6 +135,9 @@ mod web;
 #[path = "transport_flow/skills.rs"]
 mod skills;
 
+#[path = "transport_flow/skill_references.rs"]
+mod skill_references;
+
 #[path = "transport_flow/sessions.rs"]
 mod sessions;
 
@@ -155,8 +163,8 @@ mod ui_host;
 #[path = "transport_flow/web_entry.rs"]
 mod web_entry;
 
-#[path = "transport_flow/session_title.rs"]
-mod session_title;
+#[path = "transport_flow/prompt_suggestion.rs"]
+mod prompt_suggestion;
 #[path = "transport_flow/workflow.rs"]
 mod workflow;
 
@@ -2421,3 +2429,6 @@ async fn unmounted_management_preserves_mock_sessions_and_wire_admission() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+#[path = "transport_flow/worktrees.rs"]
+mod worktrees;

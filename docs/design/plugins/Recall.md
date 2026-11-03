@@ -67,15 +67,36 @@ and it tells it in its own shape.
 
 ### 3.1 The pinned read
 
-At the start of each call the tool reads `head = branch.sequence()` (the published sequence) and
-`events = branch.history(Some(head))`: for a child branch, the parent's events up to the fork
-point (the inherited prefix) followed by its own; for a forked Session's `main`, the copied facts
-followed by its `session/forked` and its own events. Both are history from before the fork, and
-Recall reads them like any other.
-Everything else is computed from this one fixed list, so a call never mixes two heads. The pattern
+At the start of each call the tool pins `head = branch.sequence()` (the published
+sequence) and reads that pinned history backwards in pages: `branch.page_cursor()`
+and `branch.page(cursor, PAGE_ROWS, KINDS)` return the newest stored rows whose kind
+the projection folds (§3.2), at or below `head`, and the tool continues from the
+oldest sequence of each page until its answer is met (§5.3). For a child branch the
+pages run through the parent's events up to the fork point (the inherited prefix)
+and then its own; for a forked Session's `main` they run through the copied facts
+and then its `session/forked` and its own events. Both are history from before the
+fork, and Recall reads them like any other.
+Everything is computed from this one pinned head, so a call never mixes two heads. The pattern
 is the one `wait` already uses ([wait.rs](../../../crates/dim-agent-capabilities/src/wait.rs)): a
 Session tool that resolves the calling branch from `ToolExecutionContext.branch_id` through
-`TreeCommands`. Recall does not apply compaction: it walks the whole list.
+`TreeCommands`. Recall does not apply compaction: it walks the whole pinned history the pages
+reach.
+
+The read does not fold while it pages. It stops when the collected pages reach the turn or the
+count the answer needs: the turn of the id it opens, 21 entries for the index, 21 candidate things
+for a search, or the start of the chain. It then folds the collected pages once. A search whose
+fold finds fewer matches than a page finishes the read without folding and folds the whole chain
+once more, so a call folds at most twice however many pages it reads; a search with no match reads
+the chain and folds twice, not once per page.
+
+A page cuts the oldest turn it holds. Recall folds the collected events in order and tells
+nothing from before that turn's `turn/end`, so the turn a page cuts is not reported and every
+later event is folded exactly as folding the whole history folds it. The `input/message` of an
+input consumed after that point is part of the page even when the message itself is older,
+because the join and the keyed liveness rule need it; while it is missing, the read takes one
+more page. A page inside the branch itself is after its own `branch/start`, and a page of the
+inherited prefix is before it: the two lines of §3.6 that depend on the branch start read
+accordingly.
 
 On a line while it is ending, `branch/end` is not told and the `end` call is told like any other
 call.
@@ -356,6 +377,9 @@ format (§3.4), so a page of 20 entries stays under 13,000 characters. The turn 
 Characters are Unicode scalar values, so CJK text is never cut inside a character. A turn's lines
 only grow at its end, so an offset returned once keeps pointing at the same line.
 
+The read that feeds these pages takes `PAGE_ROWS` stored rows at a time (§3.1). That size is a
+constant of the tool as well; it never decides an answer, only how many pages the read takes.
+
 ### 5.4 Model-facing texts
 
 The `recall` declaration is protocol ([model-facing prompts §4](../model-prompts.md#4-protocol-and-policy)): its schema, and the description's sentences, which state what a page returns, the arguments that open or search, and the `[input <id>]` handle that opens a shortened input. The tool's results are protocol too:
@@ -506,10 +530,15 @@ type change.
 
 ## 12. Requirements raised to mechanism owners
 
-None. Considered and not needed:
+- **A paged, kind-filtered history read on the facade.** Recall reads its pages through
+  `Branch::page_cursor` and `Branch::page`: the runtime returns the newest stored rows of the
+  kinds Recall names, at or below the pinned head, as one contiguous suffix of the branch chain.
+  The facade gains no cache and no projection rule; the read is
+  [timeline storage §5](../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描)'s,
+  and `TimelineStore::read_kind_page` states its page and row bounds.
 
-- a paged or filtered history read on the facade: the selection, the liveness of keys and the
-  joins need the whole pinned prefix anyway, and `Branch::history(Some(head))` already returns it;
+Considered and not needed:
+
 - a per-branch tool declaration (§7);
 - a schema check of tool input in ToolExecutor: the handler checks its own arguments, as `wait`
   does (§5.2);
@@ -531,7 +560,7 @@ None. Considered and not needed:
 | Risk | `session` |
 | Assembly | Every real-model profile: installed in `defaults::install_local_execution` beside `wait`, which the product and `--models` profiles both use. Recall does not depend on compaction, so a `--models` branch without compaction still has it |
 | State, writes, type changes | None |
-| Cost | No cache: each call reads and walks the pinned history. A cache keyed by branch and head inside the tool is added only if a measurement shows the need; the facade does not change |
+| Cost | No cache: each call reads the pages its answer needs, newest first, and folds what it read once (twice when a search must finish the chain). An answer that needs the oldest history (an old turn or thing, an id that names no line, a search with few matches) reads to the start; the index, a search page and a thing near the head read only the newest pages. A cache keyed by branch and head inside the tool is added only if a measurement shows the need; the facade does not change |
 | Delivery | Milestone M2 (#129); implementation follows the M2 plan |
 
 ## 14. Acceptance (flow tests)
@@ -590,6 +619,13 @@ in `crates/dim-app-server/tests` that finds `recall` in the tool table of both t
 13. **Arguments.** Each row of the §6 error table returns its text as an error result, and a
     `before=` taken from an index line, a between-turns line and a search line each continues
     from that position.
+14. **A long history.** Over a branch of 120 turns, the turn index, its second page, a search and
+    one thing in the newest turn answer exactly as folding the whole pinned history does, and
+    their reads decode fewer events than that history holds. Opening the first turn and a search
+    that only the oldest pages match also answer exactly. A child branch with a 40-turn own
+    segment pages through its inherited prefix and opens an inherited id the same way. A search
+    with no match over 40 and 120 turns builds the same number of folds, at most two, so the fold
+    work does not grow with the pages read.
 
 ## 15. Ready
 

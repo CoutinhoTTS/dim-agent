@@ -72,6 +72,7 @@ pub enum Effect {
     None,
     /// The prompt wants to leave without answering anything.
     Close,
+    Fork,
     Exit,
     /// Leave and start the updated CLI on this session; `confirmed` once a
     /// busy session's confirmation said so.
@@ -142,7 +143,7 @@ pub enum Effect {
         projection_id: u64,
         run_id: String,
     },
-    SetPermission(crate::permission::Change),
+    SetPermission(dim_agent_types::PermissionPreset),
     /// Paint with this theme without saving it.
     ThemePreview(String),
     /// Keep this theme and save it.
@@ -214,6 +215,10 @@ pub enum Effect {
         model_id: String,
         /// Set when ←/→ cycled this model's reasoning effort.
         reasoning_effort: Option<String>,
+    },
+    SetEffort {
+        model: String,
+        value: String,
     },
     /// Reread the subagent model policy before another save.
     ReadModelPolicy,
@@ -682,6 +687,147 @@ impl PermissionPrompt {
             p,
         );
         bordered(&content, width, None, &p.border, Some(&title), Some(&hint))
+    }
+}
+
+pub struct EffortPrompt {
+    result: Option<Result<crate::configure::EffortChoices, String>>,
+    selected: usize,
+}
+
+impl EffortPrompt {
+    pub fn new() -> Self {
+        Self {
+            result: None,
+            selected: 0,
+        }
+    }
+
+    pub fn set_choices(&mut self, result: Result<crate::configure::EffortChoices, String>) {
+        self.selected = result
+            .as_ref()
+            .ok()
+            .and_then(|choices| {
+                choices
+                    .choices
+                    .iter()
+                    .position(|value| Some(value) == choices.current.as_ref())
+            })
+            .unwrap_or(0);
+        self.result = Some(result);
+    }
+
+    pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
+        if key.code == KeyCode::Esc {
+            return Effect::Close;
+        }
+        let Some(Ok(choices)) = &self.result else {
+            return Effect::None;
+        };
+        if !plain(key) || choices.choices.is_empty() {
+            return Effect::None;
+        }
+        match key.code {
+            KeyCode::Up => self.selected = self.selected.saturating_sub(1),
+            KeyCode::Down => {
+                self.selected = (self.selected + 1).min(choices.choices.len() - 1);
+            }
+            KeyCode::Char(digit @ '1'..='9') => {
+                let index = digit as usize - '1' as usize;
+                if index < choices.choices.len() {
+                    self.selected = index;
+                }
+            }
+            KeyCode::Enter => {
+                return Effect::SetEffort {
+                    model: choices.model.clone(),
+                    value: choices.choices[self.selected].clone(),
+                };
+            }
+            _ => {}
+        }
+        Effect::None
+    }
+
+    pub fn render(&self, width: usize, rows: usize, p: &Palette) -> Vec<String> {
+        let inner = width.saturating_sub(4).max(1);
+        let mut body = Body {
+            head: Vec::new(),
+            rows: Vec::new(),
+        };
+        let available = matches!(&self.result, Some(Ok(choices)) if !choices.choices.is_empty());
+        let hint = if available {
+            t("↑↓ move · 1-9 select · Enter apply · Esc cancel")
+        } else {
+            t("Esc cancel")
+        };
+        let mut hints: Vec<String> = Vec::new();
+        for part in hint.split(" · ") {
+            if let Some(line) = hints.last_mut()
+                && display_width(line) + 3 + display_width(part) <= inner
+            {
+                line.push_str(" · ");
+                line.push_str(part);
+            } else {
+                hints.push(truncate_cells(part, inner));
+            }
+        }
+        let body_rows = rows.saturating_sub(2 + hints.len()).max(1);
+        match &self.result {
+            None => body
+                .head
+                .push(Line::text(t("Loading reasoning efforts…").to_owned())),
+            Some(Err(error)) => {
+                body.head
+                    .extend(wrap_cells(error, inner).into_iter().map(Line::warn));
+            }
+            Some(Ok(choices)) => {
+                body.head.push(Line::text(choices.model.clone()));
+                body.head.push(Line::text(tf(
+                    "Current: {value}",
+                    &[(
+                        "value",
+                        choices.current.as_deref().unwrap_or(t("Model default")),
+                    )],
+                )));
+                if choices.choices.is_empty() {
+                    body.head.extend(
+                        wrap_cells(t("This model does not advertise reasoning efforts."), inner)
+                            .into_iter()
+                            .map(Line::text),
+                    );
+                } else {
+                    body.head.push(Line::text(String::new()));
+                    body.head.truncate(body_rows.saturating_sub(1));
+                    for (index, value) in choices.choices.iter().enumerate() {
+                        let focused = self.selected == index;
+                        let prefix = row_prefix(
+                            focused,
+                            index,
+                            choices.choices.len().to_string().len(),
+                            mark(false, choices.current.as_ref() == Some(value)),
+                        );
+                        body.rows.push(Row {
+                            lines: vec![Line::choice(format!("{prefix}{value}"), focused)],
+                            selected: focused,
+                        });
+                    }
+                }
+            }
+        }
+        let mut content: Vec<String> = fit_body(&body, body_rows)
+            .iter()
+            .map(|line| line_text(line, inner, p))
+            .collect();
+        content.extend(hints.iter().map(|line| key_hints(line, p)));
+        bordered(
+            &content,
+            width,
+            None,
+            &p.border,
+            Some(t("Reasoning effort")),
+            None,
+        )
     }
 }
 

@@ -25,7 +25,7 @@ use dim_agent_runtime::{
 use dim_agent_types::{
     AgentEvent, ApprovalCallData, BranchSource, COMMAND_SEPARATORS, CommandMatch, CommandRule,
     CommandRuleDecision, EventKind, FileAccess, PermissionChangedData, PermissionPolicy,
-    PermissionPreset, ToolApproval, grant::GrantMode,
+    PermissionPreset, grant::GrantMode,
 };
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::{Ctx, Error};
@@ -254,8 +254,9 @@ impl Permission {
             },
             None => None,
         };
-        let policy = self.state.get().policy;
-        let access = policy.file_access();
+        let dispatched = self.state.get();
+        let policy = dispatched.policy;
+        let access = policy.preset.file_access();
         let name = &call.name;
         if policy.disallowed_tools.contains(name) {
             return Ok(Decision::Deny {
@@ -265,20 +266,16 @@ impl Permission {
         if write && let decision @ Decision::Deny { .. } = decide(&policy, name, risk) {
             return Ok(decision);
         }
-        if write
-            && access == FileAccess::ReadOnly
-            && (policy.file_access.is_some()
-                || (policy.tool_approval.is_some() && !policy.allowed_tools.contains(name)))
-        {
+        if write && access == FileAccess::ReadOnly {
             return Ok(Decision::Deny {
-                reason: "File writes are not allowed by Read only file access".into(),
+                reason: "File writes are not allowed by the read-only preset".into(),
             });
         }
         if write && access != FileAccess::Unrestricted {
             let facts = self.ctx.get_at(&self.facts);
             if let (Some(Ok((_, target))), Some(facts)) = (&target, facts) {
                 let facts = tokio::select! {
-                    result = facts.0.facts(&self.session_id, access, target, GrantMode::Write) => result,
+                    result = facts.0.facts(&self.session_id, access, target, GrantMode::Write, cancel.clone()) => result,
                     _ = cancel.cancelled() => return Err(HostError::Cancelled(CANCELLED.into())),
                 };
                 let facts = match facts {
@@ -292,15 +289,13 @@ impl Permission {
                         });
                     }
                 };
-                let scope = match (
-                    access,
-                    policy.file_access.is_some() || policy.tool_approval.is_some(),
-                ) {
-                    (FileAccess::ReadOnly, true) => "Read only file access",
-                    (FileAccess::WorkspaceReadWrite, true) => "Workspace read/write file access",
-                    (FileAccess::ReadOnly, false) => "the read-only preset",
-                    (FileAccess::WorkspaceReadWrite, false) => "the workspace-write preset",
-                    (FileAccess::Unrestricted, _) => unreachable!("unrestricted skips the facts"),
+                if self.state.get().version != dispatched.version {
+                    return Box::pin(self.decide(call, risk, cancel)).await;
+                }
+                let scope = match access {
+                    FileAccess::ReadOnly => "the read-only preset",
+                    FileAccess::WorkspaceReadWrite => "the workspace-write preset",
+                    FileAccess::Unrestricted => unreachable!("unrestricted skips the facts"),
                 };
                 if facts.system {
                     return Ok(Decision::Deny {
@@ -320,8 +315,13 @@ impl Permission {
                     }
                     return Ok(Decision::Ask {
                         reason: format!(
-                            "Writing outside the session workspace requires approval: {}",
-                            target.display()
+                            "Writing outside the session workspace requires approval: {}{}",
+                            target.display(),
+                            facts
+                                .discovery_error
+                                .as_ref()
+                                .map(|error| format!(" (worktree discovery: {error})"))
+                                .unwrap_or_default()
                         ),
                     });
                 }
@@ -364,7 +364,7 @@ impl Permission {
                 }
             };
             let facts = tokio::select! {
-                result = facts.0.facts(&self.session_id, access, target, GrantMode::Read) => result,
+                result = facts.0.facts(&self.session_id, access, target, GrantMode::Read, cancel.clone()) => result,
                 _ = cancel.cancelled() => return Err(HostError::Cancelled(CANCELLED.into())),
             };
             let facts = match facts {
@@ -378,11 +378,19 @@ impl Permission {
                     });
                 }
             };
+            if self.state.get().version != dispatched.version {
+                return Box::pin(self.decide(call, risk, cancel)).await;
+            }
             if !(facts.workspace || facts.system || facts.owned || facts.grant) {
                 return Ok(Decision::Ask {
                     reason: format!(
-                        "Reading outside the session workspace requires approval: {}",
-                        target.display()
+                        "Reading outside the session workspace requires approval: {}{}",
+                        target.display(),
+                        facts
+                            .discovery_error
+                            .as_ref()
+                            .map(|error| format!(" (worktree discovery: {error})"))
+                            .unwrap_or_default()
                     ),
                 });
             }
@@ -453,7 +461,7 @@ impl Permission {
         let Some(path) = path.filter(|_| resolvable) else {
             return Ok(None);
         };
-        if self.state.get().policy.file_access() == FileAccess::Unrestricted {
+        if self.state.get().policy.preset.file_access() == FileAccess::Unrestricted {
             return Ok(None);
         }
         let (cwd, path) = (self.cwd.clone(), path.to_owned());
@@ -624,14 +632,6 @@ fn matches(rule: &CommandRule, command: &str) -> bool {
 fn decide(policy: &PermissionPolicy, name: &str, risk: Option<&str>) -> Decision {
     if policy.allowed_tools.iter().any(|item| item == name) {
         return Decision::Allow;
-    }
-    if let Some(approval) = policy.tool_approval {
-        return match approval {
-            ToolApproval::Bypass => Decision::Allow,
-            ToolApproval::Ask => Decision::Ask {
-                reason: format!("Tool `{name}` requires approval under Ask tool approval"),
-            },
-        };
     }
     let risk = Risk::of(risk);
     let (preset, verdict) = match policy.preset {

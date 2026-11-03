@@ -696,6 +696,7 @@ async fn run_connection(
                                             methods.push("session.catalog");
                                             methods.push("session.catalog.cancel");
                                             methods.push("session.catalog.origins");
+                                            methods.push("session.catalog.workspaces");
                                         }
                                         methods
                                     } else {
@@ -714,6 +715,9 @@ async fn run_connection(
                                             "session.branch_end",
                                             "session.create.origin",
                                         ]);
+                                        if local && hub.config().product_home.is_some() {
+                                            features.push("session.create.modelFromSession");
+                                        }
                                         if hub.config().database_path.is_some() {
                                             features.push("session.fork");
                                             features.push("session.history.latestTurn");

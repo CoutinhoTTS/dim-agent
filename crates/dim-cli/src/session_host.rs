@@ -25,8 +25,8 @@ use crate::model::session::{
     DIM_OAUTH_ID, DraftPart, EmptyProvider, EmptyReason, ExecutionSnapshot, ManagementReply,
     ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider, OauthEvent, OauthStart,
     PluginItem, PluginReply, ProviderAction, ProviderEntry, RuntimeAction, RuntimeItem,
-    RuntimesError, SandboxBackend, SessionItem, SessionPort, SubagentModelPolicy, SwitchKind,
-    Update, Usage, stored_title,
+    RuntimesError, SandboxBackend, SessionItem, SessionPort, SessionsScope, SubagentModelPolicy,
+    SuggestionSetting, SwitchKind, Update, Usage, stored_title,
 };
 use crate::model::view::{
     LineState, LineView, SideLine, TaskOutputState, TaskTarget, WorkflowInventory,
@@ -256,7 +256,7 @@ struct Worker {
     output: Option<OutputWatch>,
     /// The admitted read can outlive its detail; false discards that old reply.
     output_request: Option<(u64, bool)>,
-    catalog_request: Option<(u64, String, bool)>,
+    catalog_request: Option<(u64, String, bool, SessionsScope)>,
     /// When the next snapshot goes out; set by the first unpublished change.
     publish_at: Option<tokio::time::Instant>,
     /// The `shell.run` in flight: its request id and run id.
@@ -268,6 +268,7 @@ struct Worker {
     shell_stops: Vec<u64>,
     /// The model the session adopted, for the preference commands.
     model: Option<Configuration>,
+    model_session: Option<String>,
     /// The MCP sign-in waiting for its callback.
     mcp_attempt: Option<McpAttempt>,
     /// Callbacks the local listener captured.
@@ -295,6 +296,13 @@ struct Worker {
     /// The outstanding `provider.refresh` requests `models()` sent for those
     /// catalogs, with the provider each was sent for.
     refill_requests: Vec<(u64, String)>,
+    /// Whether this Session's method table lists `session.suggestion.request`:
+    /// `None` until the first completed turn reads it, and again after a
+    /// Session switch.
+    suggestion_methods: Option<bool>,
+    /// Whether this Session already said that the unused count paused its
+    /// suggestions, so later refusals stay quiet; a switch starts over.
+    suggestion_throttle_noted: bool,
 }
 
 struct MemberDetailRead {
@@ -368,6 +376,7 @@ async fn run(
         title_revision: 0,
         session_cwd: None,
         parked: String::new(),
+        model_session: None,
         projection: Projection::default(),
         question_responses: Vec::new(),
         approval_details: Default::default(),
@@ -400,18 +409,18 @@ async fn run(
         compact_requests: Vec::new(),
         refilled_catalogs: Default::default(),
         refill_requests: Vec::new(),
+        suggestion_methods: None,
+        suggestion_throttle_noted: false,
     };
     worker.send(Update::Permissions(Ok(dim_agent_types::PermissionPolicy {
         preset: worker
             .options
             .permission
             .unwrap_or(dim_agent_types::PermissionPreset::WorkspaceWrite),
-        file_access: worker.options.file_access,
-        tool_approval: worker.options.tool_approval,
         ..Default::default()
     })));
     if let Err(error) = worker.open().await {
-        if worker.options.resume.is_some() {
+        if worker.options.resume.is_some() || worker.options.startup.is_some() {
             let _ = updates.send(Update::Failed(error.to_string()));
             return;
         }
@@ -493,6 +502,8 @@ struct Created {
 struct Attached {
     #[serde(default)]
     model: Option<ModelId>,
+    #[serde(default)]
+    capability_snapshot: Option<Box<dim_agent_types::ModelCapabilitySnapshot>>,
     /// The adopted configuration's preferences; absent when it carries none.
     #[serde(default)]
     model_preferences: Option<dim_agent_types::ModelPreferences>,
@@ -674,9 +685,19 @@ struct CancelNotice {
     branch_id: String,
 }
 
+/// `session.create` parameters: the workspace and, when one is chosen, the
+/// permission preset, which the Session's branches and members inherit.
+fn creation_params(options: &Options) -> serde_json::Value {
+    let mut params = json!({"cwd": options.workspace().as_str()});
+    if let Some(policy) = permission::creation_policy(options) {
+        params["permissionPolicy"] = policy;
+    }
+    params
+}
+
 impl Worker {
     async fn cancel_catalog(&mut self) -> crate::Result<()> {
-        if let Some((request, _, _)) = self.catalog_request.take()
+        if let Some((request, _, _, _)) = self.catalog_request.take()
             && self.client.offers("session.catalog.cancel")
         {
             self.client
@@ -686,9 +707,22 @@ impl Worker {
         Ok(())
     }
 
+    /// The catalog `cwd` for `scope`: one workspace, the repository's set, or
+    /// none.
+    fn scope_cwd(&self, scope: &SessionsScope) -> Option<serde_json::Value> {
+        match scope {
+            SessionsScope::Workspace => Some(json!(self.options.workspace().as_str())),
+            SessionsScope::Repository(workspaces) => Some(json!(workspaces)),
+            SessionsScope::All => None,
+        }
+    }
+
     /// Creates or resumes the session the process was started for.
     async fn open(&mut self) -> crate::Result<()> {
         if let Some(id) = self.options.resume.clone() {
+            if self.options.ui_identity.is_none() {
+                adopt_startup(&mut self.client, &self.options, &id).await?;
+            }
             let kind = if self.options.created_session {
                 SwitchKind::New
             } else {
@@ -697,18 +731,20 @@ impl Worker {
             return self.attach(id, kind).await;
         }
         let attached_session = self.invalidate_projection();
-        let mut params = self.create_params();
-        let mut preferences = None;
+        let mut params = creation_params(&self.options);
+        self.options.creation_startup(&mut params);
+        let mut preferences = self.options.creation_preferences(None);
         let mut target = None;
         if let (Some(provider), Some(model)) =
             (self.options.provider.clone(), self.options.model.clone())
         {
-            params["model"] = json!({"provider": provider, "modelId": model});
-            preferences = saved_model_preferences(&mut self.client, &provider, &model).await?;
-            if let Some(preferences) = &preferences {
-                params["modelPreferences"] = preferences.clone();
-            }
+            preferences = self.options.creation_preferences(
+                saved_model_preferences(&mut self.client, &provider, &model).await?,
+            );
             target = Some((provider, model));
+        }
+        if let Some(preferences) = &preferences {
+            params["modelPreferences"] = preferences.clone();
         }
         let created: Created = match self.client.typed("session.create", params).await {
             Ok(created) => created,
@@ -717,7 +753,9 @@ impl Worker {
                     &mut self.client,
                     target.as_ref().map(|(p, m)| (p.as_str(), m.as_str())),
                     error,
-                    preferences.as_ref(),
+                    preferences
+                        .as_ref()
+                        .filter(|_| self.options.effort.is_none()),
                 )
                 .await);
             }
@@ -735,18 +773,39 @@ impl Worker {
     /// the status line shows.
     async fn start_session(&mut self) -> crate::Result<()> {
         let attached_session = self.invalidate_projection();
-        let mut params = self.create_params();
+        let mut params = creation_params(&self.options);
         let mut preferences = None;
         let mut target = None;
         let result = async {
-            if let Some(model) = &self.model {
-                params["model"] = json!({"provider": model.provider_id, "modelId": model.model_id});
+            if let Some(source) = &self.model_session
+                && self.client.offers("session.create.modelFromSession")
+            {
+                params["modelFromSession"] = json!(source);
+            } else if let Some(model) = &self.model {
                 let (provider, model) = (model.provider_id.clone(), model.model_id.clone());
-                preferences = saved_model_preferences(&mut self.client, &provider, &model).await?;
-                if let Some(preferences) = &preferences {
-                    params["modelPreferences"] = preferences.clone();
+                params["model"] = json!({"provider": provider, "modelId": model});
+                if self.model_session.is_some() && self.options.model_config.is_none() {
+                    let cannot_copy = "This daemon cannot copy the adopted Session model. Restart the daemon with a version supporting session.create.modelFromSession, then rebind the temporary connection with DIM_BASE_URL and DIM_API_FORMAT";
+                    if !self.client.offers("provider.management") {
+                        return Err(cannot_copy.into());
+                    }
+                    let snapshot: ProviderManagement = self
+                        .client
+                        .typed("provider.management", json!({}))
+                        .await?;
+                    let configured = snapshot
+                        .providers
+                        .into_iter()
+                        .find(|entry| entry.provider_id == provider)
+                        .ok_or_else(|| format!("{cannot_copy}, or select a configured Provider model before starting a new Session"))?;
+                    preferences = configured.preferences.get(&model).cloned();
+                } else {
+                    preferences = saved_model_preferences(&mut self.client, &provider, &model).await?;
                 }
                 target = Some((provider, model));
+            }
+            if let Some(preferences) = &preferences {
+                params["modelPreferences"] = preferences.clone();
             }
             match self.client.typed::<Created>("session.create", params).await {
                 Ok(created) => Ok(created),
@@ -775,16 +834,6 @@ impl Worker {
                 Err(error)
             }
         }
-    }
-
-    /// `session.create` parameters: the workspace and, when one is chosen,
-    /// the permission preset, which the Session's branches and members inherit.
-    fn create_params(&self) -> serde_json::Value {
-        let mut params = json!({"cwd": self.options.cwd});
-        if let Some(policy) = permission::creation_policy(&self.options) {
-            params["permissionPolicy"] = policy;
-        }
-        params
     }
 
     async fn enter(
@@ -822,11 +871,20 @@ impl Worker {
         let configuration = Configuration {
             provider_id: model.provider_id.clone(),
             model_id: model.model_id.clone(),
+            capability_snapshot: attached.capability_snapshot,
             model_preferences,
         };
         self.session_title = stored_title(attached.title.as_deref()).map(str::to_owned);
         self.title_revision = attached.title_revision;
         self.session_id = session_id.clone();
+        self.model_session = Some(session_id.clone());
+        // The method table is read once per Session, before anything can ask
+        // for an offer or probe the settings source: a Session that does not
+        // list the methods is never asked.
+        let offered = self.suggestion_offered().await;
+        self.suggestion_methods = Some(offered);
+        self.send(Update::SuggestionMethods(offered));
+        self.suggestion_throttle_noted = false;
         self.session_cwd = attached.cwd;
         self.register_ui().await;
         self.mcp_required.clear();
@@ -844,9 +902,29 @@ impl Worker {
             self.send(Update::Permissions(policy));
         }
         self.send(Update::Switched { session_id, kind });
+        self.refresh_skills().await;
         self.context_stale = true;
         self.publish();
         Ok(())
+    }
+
+    /// Reads the Session's Skills for the command palette. A daemon without
+    /// `skills.catalog`, or a failed read, leaves the palette with commands
+    /// only: no error, and the next event asks again.
+    async fn refresh_skills(&mut self) {
+        let Some(cwd) = self.session_cwd.clone() else {
+            self.send(Update::Skills(Vec::new()));
+            return;
+        };
+        if !self.client.supports(&["skills.catalog"]) {
+            self.send(Update::Skills(Vec::new()));
+            return;
+        }
+        let entries = crate::management::skills::catalog(&mut self.client, &cwd)
+            .await
+            .map(|catalog| catalog.entries)
+            .unwrap_or_default();
+        self.send(Update::Skills(entries));
     }
 
     /// Whether the model takes image input, from its catalog entry:
@@ -903,6 +981,31 @@ impl Worker {
     async fn attach(&mut self, session_id: String, kind: SwitchKind) -> crate::Result<()> {
         let attached_session = self.invalidate_projection();
         self.enter(session_id, None, kind, attached_session).await
+    }
+
+    async fn suggestion_offered(&mut self) -> bool {
+        #[derive(serde::Deserialize)]
+        struct Decl {
+            name: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct Table {
+            methods: Vec<Decl>,
+        }
+        if !self.client.offers("session.methods") {
+            return false;
+        }
+        match self
+            .client
+            .typed::<Table>("session.methods", json!({"sessionId": self.session_id}))
+            .await
+        {
+            Ok(table) => table
+                .methods
+                .iter()
+                .any(|decl| decl.name == "session.suggestion.request"),
+            Err(_) => false,
+        }
     }
 
     async fn list(&mut self) -> crate::Result<Vec<SessionSummary>> {
@@ -997,7 +1100,13 @@ impl Worker {
             && matches!(command, Command::Submit(..) | Command::SubmitDraft(..))
             && let Err(error) = self.start_session().await
         {
-            self.send(Update::Notice(no_session(&error)));
+            self.send(Update::Notice(
+                if self.options.startup.is_some() || self.model_session.is_some() {
+                    error.to_string()
+                } else {
+                    no_session(&error)
+                },
+            ));
             return Ok(());
         }
         match command {
@@ -1198,8 +1307,6 @@ impl Worker {
                             .options
                             .permission
                             .unwrap_or(dim_agent_types::PermissionPreset::WorkspaceWrite),
-                        file_access: self.options.file_access,
-                        tool_approval: self.options.tool_approval,
                         ..Default::default()
                     })));
                     self.send(Update::Context(None));
@@ -1207,6 +1314,7 @@ impl Worker {
                         session_id: String::new(),
                         kind: SwitchKind::New,
                     });
+                    self.send(Update::Skills(Vec::new()));
                 }
             }
             Command::Resume(session_id) => {
@@ -1217,6 +1325,7 @@ impl Worker {
                 query,
                 cursor,
                 show_acp,
+                scope,
             } => {
                 self.cancel_catalog().await?;
                 let paged = self.client.offers("session.catalog");
@@ -1224,6 +1333,9 @@ impl Worker {
                     let mut params = json!({"limit":50,"query":query,"withPreview":true});
                     if show_acp && self.client.offers("session.catalog.origins") {
                         params["withAcpSessions"] = json!(true);
+                    }
+                    if let Some(cwd) = self.scope_cwd(&scope) {
+                        params["cwd"] = cwd;
                     }
                     if let Some(cursor) = cursor {
                         params["cursor"] = cursor.into();
@@ -1233,12 +1345,26 @@ impl Worker {
                     ("session.summaries", json!({}))
                 };
                 match self.client.send(method, params).await {
-                    Ok(request) => self.catalog_request = Some((request, id, paged)),
+                    Ok(request) => self.catalog_request = Some((request, id, paged, scope)),
                     Err(error) => self.send(Update::Sessions {
                         id,
                         paged,
                         result: Err(error.to_string()),
                     }),
+                }
+            }
+            Command::FindRepository => {
+                let usable = self.client.offers("session.catalog.workspaces")
+                    || !self.client.offers("session.catalog");
+                if usable {
+                    let updates = self.updates.clone();
+                    let workspace = self.options.workspace().as_str().to_owned();
+                    tokio::spawn(async move {
+                        let workspaces = repository_workspaces(&workspace).await;
+                        if workspaces.len() > 1 {
+                            let _ = updates.send(Update::RepositoryWorkspaces(workspaces));
+                        }
+                    });
                 }
             }
             Command::CloseSessions => self.cancel_catalog().await?,
@@ -1376,6 +1502,90 @@ impl Worker {
                     .and_then(execution_snapshot);
                 self.send(Update::Isolation(result));
             }
+            Command::Suggest { turn_id } => {
+                let offered = match self.suggestion_methods {
+                    Some(offered) => offered,
+                    None => {
+                        let offered = self.suggestion_offered().await;
+                        self.suggestion_methods = Some(offered);
+                        offered
+                    }
+                };
+                if offered {
+                    #[derive(Deserialize)]
+                    struct Reply {
+                        #[serde(default)]
+                        reason: Option<String>,
+                    }
+                    let reply = self
+                        .client
+                        .typed::<Reply>(
+                            "session.suggestion.request",
+                            json!({"sessionId": self.session_id, "turnId": turn_id}),
+                        )
+                        .await;
+                    if let Ok(reply) = reply
+                        && reply.reason.as_deref() == Some("throttled")
+                        && !self.suggestion_throttle_noted
+                    {
+                        self.suggestion_throttle_noted = true;
+                        self.send(Update::SuggestionThrottled);
+                    }
+                }
+            }
+            Command::SuggestionRespond { turn_id, accept } => {
+                let action = if accept { "accept" } else { "dismiss" };
+                let _ = self
+                    .client
+                    .rpc(
+                        "session.suggestion.respond",
+                        json!({
+                            "sessionId": self.session_id,
+                            "turnId": turn_id,
+                            "action": action,
+                        }),
+                    )
+                    .await;
+            }
+            Command::ReadSuggestionSetting => {
+                if !self.client.supports(&["settings.read", "settings.update"]) {
+                    self.send(Update::SuggestionSetting(Err(
+                        "This daemon does not support prompt suggestions".into(),
+                    )));
+                } else {
+                    let result = self
+                        .client
+                        .typed(
+                            "settings.read",
+                            json!({"source": "prompt-suggestion", "scope": "user"}),
+                        )
+                        .await
+                        .map_err(|error| error.to_string())
+                        .and_then(suggestion_setting);
+                    self.send(Update::SuggestionSetting(result));
+                }
+            }
+            Command::SaveSuggestionSetting {
+                expected_revision,
+                enabled,
+                max_chars,
+            } => {
+                let result = self
+                    .client
+                    .typed(
+                        "settings.update",
+                        json!({
+                            "source": "prompt-suggestion",
+                            "scope": "user",
+                            "expectedRevision": expected_revision,
+                            "document": {"enabled": enabled, "maxChars": max_chars},
+                        }),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(suggestion_setting);
+                self.send(Update::SuggestionSetting(result));
+            }
             Command::ReadModelPolicy => self.read_model_policy(false).await,
             Command::SetModelPolicy {
                 expected_revision,
@@ -1428,32 +1638,18 @@ impl Worker {
             }
             Command::SetPermission(change) => {
                 let result = if self.session_id.is_empty() {
-                    let mut policy = dim_agent_types::PermissionPolicy {
-                        preset: self
-                            .options
-                            .permission
-                            .unwrap_or(dim_agent_types::PermissionPreset::WorkspaceWrite),
-                        file_access: self.options.file_access,
-                        tool_approval: self.options.tool_approval,
+                    Ok(dim_agent_types::PermissionPolicy {
+                        preset: change,
                         ..Default::default()
-                    };
-                    change.apply(&mut policy);
-                    Ok(policy)
+                    })
                 } else {
                     let session_id = self.session_id.clone();
-                    permission::select_control(&mut self.client, &session_id, change)
+                    permission::select_preset(&mut self.client, &session_id, change)
                         .await
                         .map_err(|error| error.to_string())
                 };
                 if result.is_ok() {
-                    match change {
-                        permission::Change::FileAccess(value) => {
-                            self.options.file_access = Some(value)
-                        }
-                        permission::Change::ToolApproval(value) => {
-                            self.options.tool_approval = Some(value)
-                        }
-                    }
+                    self.options.permission = Some(change);
                     self.send(Update::PermissionSelected(change));
                 }
                 self.send(Update::Permissions(result));
@@ -1608,8 +1804,7 @@ impl Worker {
                 let cwd = self
                     .session_cwd
                     .as_deref()
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_else(|| self.options.cwd.clone());
+                    .unwrap_or(self.options.workspace().as_str());
                 // A run a panel starts reports to the line the transcript
                 // shows, the line a submit goes to. Home has no Session yet,
                 // so it has no line to report to.
@@ -1617,9 +1812,18 @@ impl Worker {
                     session_id: self.session_id.clone(),
                     branch_id: self.focus.clone(),
                 });
-                let result =
-                    crate::management::apply(&mut self.client, &request, &cwd, line.as_ref()).await;
-                self.send(Update::Management(ManagementReply { request, result }));
+                let applied =
+                    crate::management::apply(&mut self.client, &request, Some(cwd), line.as_ref())
+                        .await;
+                self.send(Update::Management(ManagementReply {
+                    request,
+                    result: applied.result,
+                }));
+                // The palette lists the same entries the panel's view was
+                // built from.
+                if let Some(entries) = applied.skills {
+                    self.send(Update::Skills(entries));
+                }
             }
             Command::SetLocale(language) => crate::management::use_language(language),
             Command::Configure(text) => {
@@ -1628,11 +1832,19 @@ impl Worker {
                     return Ok(());
                 }
                 let model = self.model.clone();
-                match configure::run(&mut self.client, &self.session_id, model.as_ref(), &text)
-                    .await
-                {
-                    Ok(report) => self.report(report.lines.join("\n"), false),
-                    Err(error) => self.report(error.to_string(), true),
+                let result =
+                    configure::run(&mut self.client, &self.session_id, model.as_ref(), &text).await;
+                if matches!(text.as_str(), "/effort" | "/reasoning") {
+                    self.send(Update::EffortChoices(
+                        result
+                            .map(|report| report.effort.expect("bare effort query has choices"))
+                            .map_err(|error| error.to_string()),
+                    ));
+                } else {
+                    match result {
+                        Ok(report) => self.report(report.lines.join("\n"), false),
+                        Err(error) => self.report(error.to_string(), true),
+                    }
                 }
             }
             Command::SelectModel {
@@ -2024,7 +2236,23 @@ impl Worker {
                     {
                         self.context_stale = true;
                     }
+                    let completed = match &notice.event.content {
+                        EventContent::TurnEnd(data)
+                            if notice.branch_id == "main"
+                                && matches!(
+                                    data.outcome,
+                                    dim_agent_types::TurnOutcome::Completed { .. }
+                                ) =>
+                        {
+                            Some(data.turn_id.clone())
+                        }
+                        _ => None,
+                    };
                     self.task_event(&notice.branch_id, notice.event);
+                    if let Some(turn_id) = completed {
+                        self.publish();
+                        self.send(Update::TurnCompleted { turn_id });
+                    }
                 } else if notice.branch_id == "main" && self.observes_member(&notice.session_id) {
                     self.member_notice(&notice.session_id, member::Notice::Event(notice.event));
                 }
@@ -2108,6 +2336,31 @@ impl Worker {
                     && params["kind"] == "title" =>
             {
                 self.title_notice(&params["data"]);
+            }
+            "session.notice"
+                if params["sessionId"] == self.session_id
+                    && params["source"]
+                        == dim_agent_capabilities::prompt_suggestion::NOTICE_SOURCE =>
+            {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Suggestion {
+                    turn_id: String,
+                    #[serde(default)]
+                    text: Option<String>,
+                }
+                let notice: Suggestion = serde_json::from_value(params["data"].clone())?;
+                match notice.text {
+                    Some(text) if params["kind"] == "offer" => {
+                        self.send(Update::SuggestionOffer {
+                            turn_id: notice.turn_id,
+                            text,
+                        });
+                    }
+                    _ => self.send(Update::SuggestionCleared {
+                        turn_id: notice.turn_id,
+                    }),
+                }
             }
             "session.notice"
                 if params["sessionId"] == self.session_id
@@ -2360,7 +2613,7 @@ impl Worker {
                 }
                 let state = crate::management::mcp::set_enabled(
                     &mut self.client,
-                    &self.options.cwd,
+                    self.options.workspace().as_str(),
                     id,
                     command == "enable",
                 )
@@ -3110,6 +3363,7 @@ impl Worker {
             }
         }
         let model = if self.session_id.is_empty() {
+            self.model_session = None;
             let model = ModelId {
                 provider_id,
                 model_id,
@@ -3118,6 +3372,7 @@ impl Worker {
             let configuration = Configuration {
                 provider_id: model.provider_id.clone(),
                 model_id: model.model_id.clone(),
+                capability_snapshot: None,
                 model_preferences: None,
             };
             self.model = Some(configuration.clone());
@@ -3157,6 +3412,14 @@ impl Worker {
             let configuration = Configuration {
                 provider_id: updated.model.provider_id.clone(),
                 model_id: updated.model.model_id.clone(),
+                capability_snapshot: self
+                    .model
+                    .as_ref()
+                    .filter(|shown| {
+                        shown.provider_id == updated.model.provider_id
+                            && shown.model_id == updated.model.model_id
+                    })
+                    .and_then(|shown| shown.capability_snapshot.clone()),
                 model_preferences,
             };
             self.model = Some(configuration.clone());
@@ -3508,9 +3771,9 @@ impl Worker {
         if self
             .catalog_request
             .as_ref()
-            .is_some_and(|(request, _, _)| *request == id)
+            .is_some_and(|(request, ..)| *request == id)
         {
-            let (_, id, paged) = self
+            let (_, id, paged, scope) = self
                 .catalog_request
                 .take()
                 .expect("matched catalog request");
@@ -3532,6 +3795,12 @@ impl Worker {
                 };
                 if !paged {
                     sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+                    let workspace = self.options.workspace().as_str();
+                    sessions.retain(|session| match &scope {
+                        SessionsScope::Workspace => session.cwd == workspace,
+                        SessionsScope::Repository(workspaces) => workspaces.contains(&session.cwd),
+                        SessionsScope::All => true,
+                    });
                 }
                 Ok((
                     sessions
@@ -3961,6 +4230,38 @@ fn effort_choices(
     (efforts, default)
 }
 
+pub(crate) async fn adopt_startup(
+    client: &mut Client,
+    options: &Options,
+    session_id: &str,
+) -> crate::Result<()> {
+    if options.startup.is_none() && options.effort.is_none() && options.model.is_none() {
+        return Ok(());
+    }
+    let mut params = json!({"sessionId":session_id,"branchId":"main"});
+    if let Some(startup) = &options.startup {
+        params["startup"] = startup.clone();
+    }
+    if let Some(model) = &options.model {
+        params["modelId"] = json!(model);
+    }
+    let mut saved = None;
+    if let (Some(provider), Some(model)) = (&options.provider, &options.model) {
+        params["providerId"] = json!(provider);
+        saved = saved_model_preferences(client, provider, model).await?;
+    }
+    if let Some(preferences) = options.creation_preferences(saved) {
+        params["modelPreferences"] = preferences;
+    }
+    client
+        .rpc("session.model.update", params)
+        .await
+        .map_err(|error| {
+            format!("Cannot adopt startup configuration for resumed Session: {error}")
+        })?;
+    Ok(())
+}
+
 pub(crate) async fn saved_model_preferences(
     client: &mut Client,
     provider_id: &str,
@@ -4163,6 +4464,71 @@ fn compact_reply(result: Result<serde_json::Value, client::RpcError>) -> Option<
     }
 }
 
+/// The workspaces `/resume` offers as one repository: the launch workspace
+/// and the same relative directory in every worktree of its git repository.
+/// Both reads share one two-second bound; a git that fails or does not answer
+/// leaves the set empty, and the picker keeps its two other scopes.
+async fn repository_workspaces(workspace: &str) -> Vec<String> {
+    let read = async {
+        let path = std::path::Path::new(workspace);
+        let root = git_output(path, &["rev-parse", "--show-toplevel"]).await?;
+        let root = String::from_utf8(root).ok()?;
+        let root = std::path::PathBuf::from(root.trim());
+        let root = std::fs::canonicalize(&root).unwrap_or(root);
+        let relative = path.strip_prefix(&root).ok()?;
+        let list = git_output(path, &["worktree", "list", "--porcelain", "-z"]).await?;
+        Some(worktree_workspaces(&list, relative, workspace))
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), read)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+/// One git read from the workspace; a failed read is no answer.
+async fn git_output(workspace: &std::path::Path, args: &[&str]) -> Option<Vec<u8>> {
+    let output = tokio::process::Command::new("git")
+        .current_dir(workspace)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .ok()?;
+    output.status.success().then_some(output.stdout)
+}
+
+/// The listed worktrees, each joined with the workspace's relative directory.
+fn worktree_workspaces(list: &[u8], relative: &std::path::Path, workspace: &str) -> Vec<String> {
+    let mut workspaces = vec![workspace.to_owned()];
+    let mut entry: Option<&[u8]> = None;
+    let mut bare = false;
+    for field in list.split(|byte| *byte == 0) {
+        if field.is_empty() {
+            if let Some(path) = entry.take().and_then(|path| std::str::from_utf8(path).ok())
+                && !bare
+            {
+                let path = std::path::Path::new(path);
+                let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+                let joined = path.join(relative);
+                if let Some(joined) = joined.to_str()
+                    && !workspaces.iter().any(|workspace| workspace == joined)
+                {
+                    workspaces.push(joined.to_owned());
+                }
+            }
+            bare = false;
+        } else if let Some(path) = field.strip_prefix(b"worktree ") {
+            entry = Some(path);
+        } else if field == b"bare" {
+            bare = true;
+        }
+    }
+    workspaces
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionSummary {
@@ -4198,6 +4564,24 @@ fn execution_snapshot(value: serde_json::Value) -> Result<ExecutionSnapshot, Str
     })
 }
 
+/// The `prompt-suggestion` source as `settings.read` and `settings.update`
+/// answer it, in the capability's own document type: a missing or malformed
+/// document, or a missing member, is an error rather than an invented value.
+fn suggestion_setting(value: serde_json::Value) -> Result<SuggestionSetting, String> {
+    let revision = value
+        .get("revision")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "prompt suggestion settings response has no revision".to_string())?
+        .to_owned();
+    let document = value
+        .get("document")
+        .cloned()
+        .ok_or_else(|| "prompt suggestion settings response has no document".to_string())?;
+    let document = serde_json::from_value(document)
+        .map_err(|error| format!("prompt suggestion settings: {error}"))?;
+    Ok(SuggestionSetting { revision, document })
+}
+
 /// The `runtime.*` calls a change makes, in order: the configuration write
 /// first when it has one, then the apply (RuntimeManager §5).
 fn runtime_calls(action: &RuntimeAction) -> Vec<(&'static str, serde_json::Value)> {
@@ -4221,6 +4605,32 @@ fn runtime_calls(action: &RuntimeAction) -> Vec<(&'static str, serde_json::Value
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `prompt-suggestion` document is the capability's own type: a
+    /// missing or malformed document, or a missing member, is an error rather
+    /// than an invented value.
+    #[test]
+    fn a_malformed_suggestion_setting_is_an_error_not_a_default() {
+        for value in [
+            json!({"revision": "r1", "document": {"enabled": true}}),
+            json!({"revision": "r1", "document": {"maxChars": 80}}),
+            json!({"revision": "r1", "document": {"enabled": true, "maxChars": 80, "extra": 1}}),
+            json!({"revision": "r1", "document": "not an object"}),
+            json!({"revision": "r1"}),
+            json!({"document": {"enabled": true, "maxChars": 80}}),
+        ] {
+            assert!(
+                suggestion_setting(value.clone()).is_err(),
+                "{value} was accepted"
+            );
+        }
+        let setting =
+            suggestion_setting(json!({"revision":"r1","document":{"enabled":true,"maxChars":120}}))
+                .unwrap();
+        assert_eq!(setting.revision, "r1");
+        assert!(setting.document.enabled);
+        assert_eq!(setting.document.max_chars, 120);
+    }
 
     #[test]
     fn a_line_notice_reaches_its_own_transcript() {
@@ -4278,5 +4688,25 @@ mod tests {
         for (action, calls) in cases {
             assert_eq!(runtime_calls(&action), calls, "{action:?}");
         }
+    }
+
+    /// The TUI creates a Session in the resolved workspace: the request
+    /// carries exactly the directory the client resolved, never a rendering
+    /// of it whose invalid bytes another path replaced.
+    #[test]
+    fn a_session_is_created_in_the_resolved_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = std::fs::canonicalize(root.path()).unwrap();
+        let mut options = crate::args::Options::parse(
+            ["tui", "--cwd", directory.to_str().unwrap()]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .unwrap();
+        options.resolve_workspace().unwrap();
+        assert_eq!(
+            creation_params(&options)["cwd"],
+            directory.to_str().unwrap()
+        );
     }
 }

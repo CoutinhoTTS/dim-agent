@@ -220,25 +220,7 @@ pub enum ModelConnection {
     Http(HttpModelConnection),
     Bedrock(BedrockModelConnection),
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ModelProtocol {
-    #[serde(rename = "openai-chat")]
-    OpenaiChat,
-    #[serde(rename = "openai-compatible")]
-    OpenaiCompatible,
-    #[serde(rename = "openai-responses")]
-    OpenaiResponses,
-    #[serde(rename = "xai")]
-    Xai,
-    #[serde(rename = "xai-responses")]
-    XaiResponses,
-    #[serde(rename = "anthropic")]
-    Anthropic,
-    #[serde(rename = "gemini")]
-    Gemini,
-    #[serde(rename = "bedrock")]
-    Bedrock,
-}
+pub use dim_agent_types::ModelProtocol;
 /// The reasoning-effort mapping of the model catalog, applied to a copied
 /// configuration: the configuration's own reasoning fields are reset, then the
 /// model's declaration for this protocol is set (ContextCompaction §13.2).
@@ -608,6 +590,30 @@ pub enum AuxiliaryErrorCode {
 pub struct AuxiliaryError {
     pub code: AuxiliaryErrorCode,
     pub message: String,
+}
+impl From<HostError> for AuxiliaryError {
+    /// A closed owner or a cancelled call is `cancelled`; every other host
+    /// failure is `failed`. The caller's request errors keep their own code.
+    fn from(error: HostError) -> Self {
+        match error {
+            HostError::Cancelled(message) => Self {
+                code: AuxiliaryErrorCode::Cancelled,
+                message,
+            },
+            HostError::Failed {
+                kind: HostErrorKind::OwnerClosed,
+                message,
+                ..
+            } => Self {
+                code: AuxiliaryErrorCode::Cancelled,
+                message,
+            },
+            error => Self {
+                code: AuxiliaryErrorCode::Failed,
+                message: error.to_string(),
+            },
+        }
+    }
 }
 /// The caller chooses the model; the owner of credentials never falls back
 /// to another one and never returns the connection.

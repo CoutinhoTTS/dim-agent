@@ -5,6 +5,7 @@
 //! `dimcode` executable installs it through [`row`].
 mod http;
 mod models;
+mod session_title;
 mod store;
 mod usage;
 
@@ -1175,6 +1176,10 @@ impl DynPlugin for DimOAuthPlugin {
                 Ok(())
             })?;
             service.0.tasks.spawn(service.0.clone().keep_fresh());
+            ctx.provide_at(
+                rutis_bridge::session::host_key(dim_session_title::GENERATOR),
+                service.clone() as Arc<dyn rutis_bridge::session::HostDispatch>,
+            )?;
             ctx.provide_as::<dyn ManagedProvider>(service)?;
             Ok(Effect::Done)
         })

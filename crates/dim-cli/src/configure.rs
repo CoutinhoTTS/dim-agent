@@ -11,16 +11,26 @@ struct Configured {
     outcome: String,
 }
 
+/// The adopted model's advertised reasoning efforts and effective selection.
+#[derive(Debug, PartialEq)]
+pub struct EffortChoices {
+    pub model: String,
+    pub current: Option<String>,
+    pub choices: Vec<String>,
+}
+
 /// What a configuration command did.
 pub struct Report {
     pub lines: Vec<String>,
     /// The Session's configuration changed, so its history has new events.
     pub changed: bool,
+    /// Present for a bare reasoning-effort query.
+    pub effort: Option<EffortChoices>,
 }
 
 /// Whether `text` reaches for the Session: every configuration command
 /// given a value writes the shown Session (`/agent ID`, `/effort VALUE`,
-/// `/reasoning VALUE`, `/fast on|off`). Bare commands read a catalog and
+/// `/reasoning VALUE`, `/fast on|off`). Bare commands read advertised choices and
 /// answer on their own.
 pub fn needs_session(text: &str) -> bool {
     text.split_whitespace().nth(1).is_some()
@@ -35,6 +45,7 @@ pub async fn run(
     text: &str,
 ) -> Result<Report> {
     let mut lines = Vec::new();
+    let mut effort = None;
     let words: Vec<_> = text.split_whitespace().collect();
     let command = words[0];
     if words.len() > 2 {
@@ -72,47 +83,61 @@ pub async fn run(
             return Ok(Report {
                 lines,
                 changed: false,
+                effort,
             });
         }
     } else {
         let model = model.ok_or("The adopted model is unavailable")?;
-        #[derive(Deserialize)]
-        struct Snapshot {
-            catalog: Option<Catalog>,
-        }
-        #[derive(Deserialize)]
-        struct Catalog {
-            models: Vec<CatalogModel>,
-        }
-        #[derive(Deserialize)]
-        struct CatalogModel {
-            id: String,
-            capabilities: CatalogCapabilities,
-            metadata: Option<Preferences>,
-        }
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Preferences {
-            reasoning: Option<ModelReasoning>,
-            service_tier: Option<ModelServiceTier>,
-        }
-        let snapshot: Snapshot = client
-            .typed("provider.catalog", json!({"providerId":model.provider_id}))
-            .await?;
-        let catalog = snapshot
-            .catalog
-            .ok_or("Model preference catalog is unavailable")?;
-        let catalog_model = catalog
-            .models
-            .into_iter()
-            .find(|entry| entry.id == model.model_id)
-            .ok_or("The adopted model is absent from the catalog")?;
-        let metadata = catalog_model
-            .metadata
-            .ok_or("This model does not advertise preference choices")?;
+        let (reasoning, service_tier, supports_reasoning) =
+            if let Some(snapshot) = &model.capability_snapshot {
+                (
+                    snapshot.reasoning.clone(),
+                    snapshot.service_tier.clone(),
+                    snapshot.capabilities.reasoning,
+                )
+            } else {
+                #[derive(Deserialize)]
+                struct Snapshot {
+                    catalog: Option<Catalog>,
+                }
+                #[derive(Deserialize)]
+                struct Catalog {
+                    models: Vec<CatalogModel>,
+                }
+                #[derive(Deserialize)]
+                struct CatalogModel {
+                    id: String,
+                    capabilities: CatalogCapabilities,
+                    metadata: Option<Preferences>,
+                }
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Preferences {
+                    reasoning: Option<ModelReasoning>,
+                    service_tier: Option<ModelServiceTier>,
+                }
+                let snapshot: Snapshot = client
+                    .typed("provider.catalog", json!({"providerId":model.provider_id}))
+                    .await?;
+                let catalog = snapshot
+                    .catalog
+                    .ok_or("Model preference catalog is unavailable")?;
+                let catalog_model = catalog
+                    .models
+                    .into_iter()
+                    .find(|entry| entry.id == model.model_id)
+                    .ok_or("The adopted model is absent from the catalog")?;
+                let metadata = catalog_model
+                    .metadata
+                    .ok_or("This model does not advertise preference choices")?;
+                (
+                    metadata.reasoning,
+                    metadata.service_tier,
+                    catalog_model.capabilities.reasoning,
+                )
+            };
         let preference = if command == "/fast" {
-            metadata
-                .service_tier
+            service_tier
                 .as_ref()
                 .filter(|tier| {
                     tier.supported
@@ -131,10 +156,9 @@ pub async fn run(
                 }
             }
         } else {
-            let reasoning = metadata
-                .reasoning
+            let reasoning = reasoning
                 .as_ref()
-                .filter(|reasoning| reasoning.supported && catalog_model.capabilities.reasoning)
+                .filter(|reasoning| reasoning.supported && supports_reasoning)
                 .ok_or("This model does not advertise reasoning preferences")?;
             let mut choices = reasoning.effort_options.clone().unwrap_or_default();
             if reasoning.off.is_some() && !choices.iter().any(|choice| choice == "none") {
@@ -154,6 +178,14 @@ pub async fn run(
                         choices.join(", ")
                     }
                 ));
+                effort = Some(EffortChoices {
+                    model: format!("{} / {}", model.provider_id, model.model_id),
+                    current: model
+                        .model_preferences
+                        .as_ref()
+                        .and_then(|preferences| preferences.reasoning_effort.clone()),
+                    choices,
+                });
                 None
             }
         };
@@ -178,11 +210,13 @@ pub async fn run(
             return Ok(Report {
                 lines,
                 changed: false,
+                effort,
             });
         }
     }
     Ok(Report {
         lines,
         changed: true,
+        effort,
     })
 }

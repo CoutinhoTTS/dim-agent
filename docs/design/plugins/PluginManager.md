@@ -15,7 +15,7 @@ A plugin is a directory with a manifest. It may carry code (a rutis plugin in Ty
 | Plugin code: create, turn on/off, replace, reload loader rows (§3) | yes, TypeScript and Python, once their runtimes are supplied (§2.5) | |
 | `plugin.*` management methods and `dimcode plugin` commands (§6, A.1) | yes | client notifications of changes |
 | Agent tools through a Session part (§6) | yes | |
-| The default CLI loads the default plugins (goal, web, session-title, workflow, scheduler, plugin-authoring) | yes | |
+| The default CLI loads built-in SessionTitle and the configured default plugins (goal, web, workflow, scheduler, plugin-authoring) | yes | |
 | Settings sources registered at run time by every plugin itself (§9 R1) | yes, built-in and TypeScript plugins together | |
 | Content kinds: skills, MCP configuration, hooks (§3, §9 R2) | skills and MCP if their owners land in time; hooks (Hooks is M1) | |
 
@@ -84,11 +84,11 @@ Every path is relative, resolved inside the directory after following symbolic l
 
 **Row configuration.** A row's `config` is the manifest's `code.config` with the host's patch for that plugin name deep-merged over it: objects merge member by member, and any other value, arrays included, replaces the manifest's. A host sets a patch before startup; the product sets none, so a shipped plugin reads its manifest's value. A host that runs a candidate text puts the text at the member the plugin's author exposed, as the evaluation tooling does ([model-prompts §8.1](../model-prompts.md#81-the-rule)), so both arms run the same plugin code.
 
-**Data directory.** The plugin files root is the product home's; a host without a product home names it. When a plugin with code is turned on, PluginManager creates `<pluginFiles root>/<id>/` if it does not exist: `<id>` is the installed id, or a default plugin's name, both checked by the id rule (§7). It never deletes the directory, on turning off or on remove, as Settings documents stay in the home. An existing entry is used only if it is a directory, not a symbolic link, that resolves to itself inside the root; otherwise nothing is created and the plugin's file operations fail as they would without it. A plugin writes only under its own id directory through `pluginFiles` ([process TypeScript §5.2](../process-typescript.md#52-public-pluginfiles-binding)).
+**Data directory.** The plugin files root is the root an embedding host names, else the product home, else the execution home the host was started with (`--home`). A host started with only a database file has none of them, so it has no plugin files root and runs no PluginManager; the root is never the database's directory or the working directory. When a plugin with code is turned on, PluginManager creates `<pluginFiles root>/<id>/` if it does not exist: `<id>` is the installed id, or a default plugin's name, both checked by the id rule (§7). It never deletes the directory, on turning off or on remove, as Settings documents stay in the home. An existing entry is used only if it is a directory, not a symbolic link, that resolves to itself inside the root; otherwise nothing is created and the plugin's file operations fail as they would without it. A plugin writes only under its own id directory through `pluginFiles` ([process TypeScript §5.2](../process-typescript.md#52-public-pluginfiles-binding)).
 
 A plugin's business configuration (its Settings sources) is not in the manifest: the plugin's code registers its sources with Settings when it starts (§9 R1). The `settings` member of today's TypeScript rows goes away.
 
-The repository's own TypeScript plugins (`runtime/plugins/*`) get a `dim-plugin.json` in place of their row files (`web.json`, `process.json`, `settings.json`, `session-title.json`).
+The repository's own TypeScript plugins (`runtime/plugins/*`) get a `dim-plugin.json` in place of their row files (`web.json`, `process.json`, `settings.json`). SessionTitle is a built-in plugin, not a TypeScript package.
 
 ### 2.2 `plugins.json`
 
@@ -133,6 +133,11 @@ The repository's own TypeScript plugins (`runtime/plugins/*`) get a `dim-plugin.
 
 A name with no entry is in its shipped state: a built-in or default plugin on. Writing goes to a temporary file in the same directory, flushed on its own writable handle (`sync_all`, which also works on Windows), then renamed over `plugins.json`. A file that does not parse fails startup with its path; PluginManager never overwrites a file it could not read. The format is versioned; an unknown version fails startup.
 
+A persisted `use: "default"` selects the same-name built-in when the distribution no longer
+ships that default package. An existing default package remains the explicit selection while
+it is shipped. This source transition does not rewrite the record; `off` and installed source
+selections retain their meaning.
+
 ### 2.3 The default configuration file
 
 Shipped with Dim, read-only, given to the App Server with `--defaults PATH` (the default CLI passes the file in its release; `./dev` stages this file and the plugins it lists into the checkout's ignored `staging/dev-plugins` and passes that copy, so the plugins resolve the runtime's single copy of `@deepseek-ai/cordis`).
@@ -141,7 +146,6 @@ Shipped with Dim, read-only, given to the App Server with `--defaults PATH` (the
 {
   "plugins": {
     "goal": "plugins/goal",
-    "session-title": "plugins/session-title",
     "workflow": "plugins/workflow",
     "scheduler": "plugins/scheduler",
     "plugin-authoring": "plugins/plugin-authoring"
@@ -151,6 +155,7 @@ Shipped with Dim, read-only, given to the App Server with `--defaults PATH` (the
 ```
 
 - `plugins` maps each default plugin's name to its directory, relative to this file. A default plugin is a plugin directory like any other (§2.1).
+- Built-in SessionTitle is installed by the native product profile and has no entry in this file.
 - `locked` lists names that cannot be turned off and whose plugin cannot be switched. Other plugins of a locked name may still be installed. Locking is product configuration; PluginManager applies it.
 
 ### 2.4 State PluginManager does not keep
@@ -394,7 +399,7 @@ permission to publish secrets.
 
 ## Appendix C. Acceptance (M1)
 
-1. With an isolated home, `dimcode` starts with goal, web, session-title, workflow, scheduler and plugin-authoring loaded; `dimcode plugin list` shows them and the built-in plugins.
+1. With an isolated home, `dimcode` starts with goal, web, workflow, scheduler and plugin-authoring loaded; `dimcode plugin list` shows them and the built-in plugins, including SessionTitle.
 2. `dimcode plugin install ./my-tool` (a TypeScript plugin registering one tool) makes the tool visible to the model in a new turn without a restart.
 3. Editing `index.ts` and running `dimcode plugin reload my-tool` changes the tool's behavior in the open Session.
 4. The agent does steps 2–3 through the `plugin` tool, each call decided by Permission; `plugin config goal set maxContinuations 5` changes goal's setting without a restart.

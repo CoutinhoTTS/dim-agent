@@ -24,6 +24,10 @@ use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 async fn agent() -> MinimalHost {
+    agent_with(Arc::new(MemoryTimelineStore::default())).await
+}
+
+async fn agent_with(store: Arc<dyn TimelineStore>) -> MinimalHost {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_hosts_with_model(
         &mut builder,
@@ -32,6 +36,7 @@ async fn agent() -> MinimalHost {
     );
     defaults::install(&mut builder);
     recall::install(&mut builder);
+    builder.timeline_store(store);
     MinimalHost::start(&builder).await.unwrap()
 }
 
@@ -1450,14 +1455,6 @@ fn a_permission_change_and_an_interrupt_are_lines_of_their_own() {
     recorded.push(consumed(&input));
     recorded.at(4, 5);
     let changed = recorded.push(permission(PermissionPreset::FullAccess));
-    let separate = recorded.push(EventKind::PermissionChanged(PermissionChangedData {
-        policy: PermissionPolicy {
-            preset: PermissionPreset::FullAccess,
-            file_access: Some(FileAccess::WorkspaceReadWrite),
-            tool_approval: Some(ToolApproval::Ask),
-            ..Default::default()
-        },
-    }));
     recorded.at(4, 6);
     let stopped = recorded.push(interrupted());
     recorded.push(turn_ends(
@@ -1475,9 +1472,6 @@ fn a_permission_change_and_an_interrupt_are_lines_of_their_own() {
             "2026-10-17 (UTC)",
             &format!("04:00 {input} user: go"),
             &format!("04:05 {changed} permission mode changed to full-access"),
-            &format!(
-                "04:05 {separate} permission mode changed to files=workspace-read-write, tools=ask"
-            ),
             &format!("04:06 {stopped} the user interrupted the turn"),
             &format!("End of turn. Open one: open={input}."),
         ]
@@ -2922,4 +2916,314 @@ fn the_arguments_and_the_paginations_say_how_to_fix_the_call() {
     assert!(!error, "{page}");
     assert!(!page.contains("second need"), "{page}");
     assert_eq!(page.lines().last(), Some("No more."));
+}
+
+/// A memory store that counts the events a page read decodes.
+#[derive(Default)]
+struct PageReads {
+    memory: MemoryTimelineStore,
+    events: std::sync::atomic::AtomicUsize,
+    pages: std::sync::atomic::AtomicUsize,
+}
+
+impl TimelineStore for PageReads {
+    fn create_session<'a>(
+        &'a self,
+        session_id: &'a str,
+        config: &'a SessionConfig,
+    ) -> BoxFuture<'a, Result<()>> {
+        self.memory.create_session(session_id, config)
+    }
+    fn rollback_session<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<()>> {
+        self.memory.rollback_session(session_id)
+    }
+    fn release_session<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<()>> {
+        self.memory.release_session(session_id)
+    }
+    fn session_config<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<SessionConfig>>> {
+        self.memory.session_config(session_id)
+    }
+    fn branches<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<Vec<StoredBranch>>> {
+        self.memory.branches(session_id)
+    }
+    fn head<'a>(&'a self, key: &'a TimelineKey) -> BoxFuture<'a, Result<u64>> {
+        self.memory.head(key)
+    }
+    fn append(
+        &self,
+        key: TimelineKey,
+        events: Vec<StoredEvent>,
+        publish: PublishCallback,
+    ) -> Result<()> {
+        self.memory.append(key, events, publish)
+    }
+    fn read_segments<'a>(
+        &'a self,
+        session_id: &'a str,
+        segments: Vec<(String, std::ops::RangeInclusive<u64>)>,
+    ) -> BoxFuture<'a, Result<Vec<Vec<StoredEvent>>>> {
+        self.memory.read_segments(session_id, segments)
+    }
+    fn read_kind_page<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        kinds: &'a [&'a str],
+        before: u64,
+        limit: usize,
+    ) -> BoxFuture<'a, Result<Vec<StoredEvent>>> {
+        Box::pin(async move {
+            let page = self
+                .memory
+                .read_kind_page(key, kinds, before, limit)
+                .await?;
+            self.events
+                .fetch_add(page.len(), std::sync::atomic::Ordering::SeqCst);
+            self.pages.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(page)
+        })
+    }
+    fn trace<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> BoxFuture<'a, Result<Option<TimelineTrace>>> {
+        self.memory.trace(key, sequence)
+    }
+    fn query<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        query: &'a TimelineQuery,
+        from: u64,
+        through: u64,
+    ) -> BoxFuture<'a, Result<TimelineQueryPage>> {
+        self.memory.query(key, query, from, through)
+    }
+    fn save_snapshot<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        snapshot: RecoverySnapshot,
+    ) -> BoxFuture<'a, Result<()>> {
+        self.memory.save_snapshot(key, snapshot)
+    }
+    fn latest_snapshot<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        through: u64,
+        interpreter: &'a str,
+    ) -> BoxFuture<'a, Result<Option<RecoverySnapshot>>> {
+        self.memory.latest_snapshot(key, through, interpreter)
+    }
+}
+
+impl PageReads {
+    fn decoded(&self) -> usize {
+        self.events.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn pages(&self) -> usize {
+        self.pages.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Runs one `recall` call and checks that its answer is the answer folding
+/// the whole pinned history gives for the same arguments; returns the events
+/// its pages decoded.
+async fn recall_is_the_whole_fold(
+    session: &Session,
+    reads: &PageReads,
+    branch: &str,
+    arguments: Value,
+) -> (String, usize) {
+    let before = reads.decoded();
+    let (text, error) = recall(session, branch, arguments.clone()).await;
+    let read = reads.decoded() - before;
+    let history = session.history(branch, None).await.unwrap();
+    let pinned = &history[..history
+        .iter()
+        .rposition(|event| matches!(event.kind, EventKind::ToolResult(_)))
+        .expect("the recall call's result")];
+    let calling = pinned
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::TurnStart(data) => Some(data.turn_id.as_str()),
+            _ => None,
+        })
+        .expect("the calling turn");
+    let whole = Narrative::new(pinned).answer(calling, arguments.as_object().unwrap());
+    let whole_text = match &whole.content {
+        ToolContent::Text(text) => text.clone(),
+        other => panic!("expected text, got {other:?}"),
+    };
+    assert_eq!(
+        text, whole_text,
+        "the paged answer differs from folding the pinned history for {arguments}"
+    );
+    assert_eq!(error, whole.is_error.unwrap_or(false), "{arguments}");
+    (text, read)
+}
+
+/// The `before=` id a page ends with.
+fn before_of(page: &str) -> String {
+    let at = page.find("before=").expect("a page handle") + "before=".len();
+    page[at..]
+        .split(|c: char| !c.is_ascii_hexdigit() && c != '-')
+        .next()
+        .expect("an id")
+        .to_owned()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+// §5.3 pages and §3.1 the pinned read.
+async fn a_long_history_is_answered_from_bounded_pages_read_backwards() {
+    tokio::time::timeout(Duration::from_secs(180), async {
+        let reads = Arc::new(PageReads::default());
+        let agent = agent_with(reads.clone()).await;
+        let session = open(&agent).await;
+        for task in 0..120 {
+            session
+                .submit(format!("task {task}"), InputMode::Queue, "main")
+                .await
+                .unwrap();
+            session.idle("main").await.unwrap();
+        }
+        let history = session.history("main", None).await.unwrap();
+        assert!(
+            history.len() > 600,
+            "the history is long: {}",
+            history.len()
+        );
+
+        let (index, read) = recall_is_the_whole_fold(&session, &reads, "main", json!({})).await;
+        assert!(index.contains("Earlier: before="), "{index}");
+        assert!(
+            read < history.len() / 2,
+            "the index decoded {read} of {} events",
+            history.len()
+        );
+        let pages = reads.pages();
+        assert!(pages > 1, "the index read {pages} page(s)");
+        assert!(pages <= 3, "the index read {pages} pages");
+
+        let (second, read) = recall_is_the_whole_fold(
+            &session,
+            &reads,
+            "main",
+            json!({ "before": before_of(&index) }),
+        )
+        .await;
+        assert!(second.contains("Earlier: before="), "{second}");
+        assert!(
+            read < history.len() / 2,
+            "the second index page decoded {read} of {} events",
+            history.len()
+        );
+
+        let (search, read) =
+            recall_is_the_whole_fold(&session, &reads, "main", json!({ "about": "task" })).await;
+        assert!(search.contains("More: before="), "{search}");
+        assert!(
+            read < history.len() / 2,
+            "the search decoded {read} of {} events",
+            history.len()
+        );
+
+        // A search and a turn that only the oldest pages hold still answer
+        // exactly as folding the whole pinned history does.
+        let (deep, _) =
+            recall_is_the_whole_fold(&session, &reads, "main", json!({ "about": "task 0" })).await;
+        assert!(deep.contains("task 0"), "{deep}");
+        let first = history
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::TurnStart(_) => Some(event.id.clone()),
+                _ => None,
+            })
+            .expect("the first turn");
+        let (turn, _) =
+            recall_is_the_whole_fold(&session, &reads, "main", json!({ "open": first })).await;
+        assert!(turn.contains("task 0"), "{turn}");
+
+        let newest_input = history
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                EventKind::InputMessage(data) if data.user.is_some() => Some(event.id.clone()),
+                _ => None,
+            })
+            .expect("the newest user input");
+        let (_thing, read) =
+            recall_is_the_whole_fold(&session, &reads, "main", json!({ "open": newest_input }))
+                .await;
+        assert!(
+            read < history.len() / 2,
+            "opening the newest input decoded {read} of {} events",
+            history.len()
+        );
+
+        agent.close().await.unwrap();
+    })
+    .await
+    .expect("the long history flow");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+// §3.1 pages through the inherited prefix and §3.6 the cut parent turn.
+async fn a_child_branch_pages_through_its_inherited_prefix() {
+    tokio::time::timeout(Duration::from_secs(180), async {
+        let reads = Arc::new(PageReads::default());
+        let agent = agent_with(reads.clone()).await;
+        let session = open(&agent).await;
+        session
+            .submit("first parent task".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        session
+            .submit(
+                r#"tool:branch {"action":"create","prompt":"investigate the logs"}"#.into(),
+                InputMode::Queue,
+                "main",
+            )
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let child = session
+            .branches()
+            .into_iter()
+            .find(|info| info.parent.as_deref() == Some("main"))
+            .expect("the child branch")
+            .id;
+        session.idle(&child).await.unwrap();
+        for task in 0..40 {
+            session
+                .submit(format!("child task {task}"), InputMode::Queue, &child)
+                .await
+                .unwrap();
+            session.idle(&child).await.unwrap();
+        }
+        let history = session.history(&child, None).await.unwrap();
+
+        let (index, read) = recall_is_the_whole_fold(&session, &reads, &child, json!({})).await;
+        assert!(index.contains("Earlier: before="), "{index}");
+        assert!(
+            read < history.len(),
+            "the index decoded {read} of {} events",
+            history.len()
+        );
+
+        let inherited = {
+            let parent = session.history("main", None).await.unwrap();
+            id_of_input(&parent, "first parent task")
+        };
+        let (page, _) =
+            recall_is_the_whole_fold(&session, &reads, &child, json!({ "open": inherited })).await;
+        assert!(page.contains("first parent task"), "{page}");
+
+        agent.close().await.unwrap();
+    })
+    .await
+    .expect("the child branch pages flow");
 }

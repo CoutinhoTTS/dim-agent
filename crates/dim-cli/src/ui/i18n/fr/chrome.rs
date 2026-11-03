@@ -32,8 +32,21 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "line {id}" => "ligne {id}",
         "jump to a message of the shown line" => "aller à un message de la ligne affichée",
         "Timeline" => "Chronologie",
-        "Enter jump · e edit · q quote · b branch · f fork · Esc close" => {
-            "Enter aller · e modifier · q citer · b branche · f fork · Esc fermer"
+        "Enter actions · Esc close" => "Enter actions · Esc fermer",
+        "Timeline actions" => "Actions de chronologie",
+        "↑↓ select · Enter confirm · Esc cancel" => {
+            "↑↓ choisir · Enter confirmer · Esc annuler"
+        }
+        "Jump to message" => "Aller au message",
+        "Edit as a new draft" => "Modifier comme nouveau brouillon",
+        "Quote message" => "Citer le message",
+        "Create branch from here" => "Créer une branche ici",
+        "Before this message" => "Avant ce message",
+        "Fork session" => "Forker la session",
+        "1. Create fork" => "1. Créer le fork",
+        "2. Cancel" => "2. Annuler",
+        "Creates a new session; the current session stays unchanged." => {
+            "Crée une session ; la session actuelle reste inchangée."
         }
         "No messages yet." => "Aucun message pour l'instant.",
         "Already on screen above; /tui jumps to it" => "Déjà plus haut ; /tui y va directement",
@@ -43,8 +56,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "follow, talk to and end this session's lines" => {
             "suivre, dialoguer et terminer les lignes de cette session"
         }
-        "End line" => "Terminer la ligne",
-        "y/N" => "y/N",
+        "End line {id}?" => "Terminer la ligne {id} ?",
+        "y end it" => "y terminer",
+        "n cancel" => "n annuler",
         "main is the session itself; a line ends, main does not" => {
             "main est la session elle-même ; une ligne se termine, pas main"
         }
@@ -56,12 +70,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "e edit · b branch · f fork" => "e modifier · b branche · f fork",
         "e edit" => "e modifier",
-        "Fork the session before “{message}”? (y/N)" => {
-            "Forker la session avant « {message} » ? (y/N)"
-        }
-        "Fork the session after the last turn? (y/N)" => {
-            "Forker la session après le dernier tour ? (y/N)"
-        }
+        "Fork the session before “{message}”?" => "Forker la session avant « {message} » ?",
+        "Fork the session after the last turn?" => "Forker la session après le dernier tour ?",
         "⑂ new line from {id} · Esc cancel" => "⑂ nouvelle ligne depuis {id} · Échap annuler",
         "A fork copies main; b opens a line here" => "Un fork copie main ; b ouvre une ligne ici",
         "A line opens from text; images and files were not included" => {
@@ -302,6 +312,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "run" => "exécution",
         "view" => "affichage",
         "model" => "modèle",
+        "extensions" => "extensions",
         "app" => "app",
         "skill" => "skill",
         // composer/commands.rs: descriptions
@@ -322,8 +333,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "défiler en haut",
         "scroll to the bottom" => "défiler en bas",
         "pick an earlier message to edit or quote" => "choisir un message à modifier ou citer",
-        "collapse or expand tool details and compaction summaries" => {
-            "replier/déplier les détails des outils et les résumés de compression"
+        "cycle tool details and compaction summaries" => {
+            "alterner les détails des outils et les résumés de compactage"
         }
         "switch between fullscreen and scrollback" => "basculer plein écran / défilement",
         "switch theme" => "changer de thème",
@@ -345,6 +356,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "esc close" => "esc fermer",
         "Suggestions" => "Suggestions",
         "Skills" => "Skills",
+        "Skill loaded: {name}" => "Skill chargé: {name}",
         "Commands" => "Commandes",
         "Command Palette" => "Palette de commandes",
         "No matches" => "Aucun résultat",
@@ -395,8 +407,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
 
         // sessions_panel.rs
         "Sessions" => "Sessions",
-        "Enter open · Ctrl+R refresh · Esc close" => {
-            "Enter ouvrir · Ctrl+R actualiser · Esc fermer"
+        "Sessions · This workspace" => "Sessions · Cet espace de travail",
+        "Sessions · This repository" => "Sessions · Ce dépôt",
+        "Sessions · All workspaces" => "Sessions · Tous les espaces de travail",
+        "No saved sessions in this workspace. Ctrl+S shows more." => {
+            "Aucune session enregistrée dans cet espace de travail. Ctrl+S en affiche d'autres."
+        }
+        "Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close" => {
+            "Enter ouvrir · Ctrl+S portée · Ctrl+R actualiser · Esc fermer"
         }
         "Loading sessions..." => "Chargement…",
         "No saved sessions yet." => "Aucune session enregistrée.",
@@ -486,6 +504,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Question waiting for your answer" => "Question en attente de réponse",
         "Notify when agent needs you" => "Notifier si l'agent vous attend",
         "Show ACP sessions" => "Afficher les sessions ACP",
+        "Prompt suggestion" => "Suggestion de prompt",
+        "Prompt suggestion: {error}" => "Suggestion de prompt: {error}",
+        "Suggestions are paused in this session because offers went unused. Turn them off and on in /settings to resume." => {
+            "Les suggestions sont en pause dans cette session parce que des propositions sont restées inutilisées. Désactivez puis réactivez dans /settings pour reprendre."
+        }
         // keys.rs
         "show the key bindings" => "afficher les raccourcis",
         "Application keys" => "Raccourcis de l'app",

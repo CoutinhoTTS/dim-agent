@@ -16,11 +16,11 @@
 //! │   Mouse                  on                  │
 //! │   Notify when agent ...  on                  │
 //! │   Show ACP sessions      off                 │
+//! │   Prompt suggestion      off                 │
 //! │   Permissions                                │
-//! │   File access            Workspace read/write › │
-//! │   Tool approval          Ask ›               │
+//! │   Permission             Workspace write ›   │
 //! │   Process isolation      ›                   │
-//! │ 1 / 9 · ↑↓ move · enter select · ←→/space change · esc close │
+//! │ 1 / 10 · ↑↓ move · enter select · ←→/space change · esc close │
 //! ╰──────────────────────────────────────────────╯
 //! ```
 
@@ -29,19 +29,25 @@ use crate::ui::list_panel::{Event, Item, ListPanel};
 use crate::ui::prompts::Effect;
 use crate::ui::terminal::{KeyCode, KeyEvent};
 use crate::ui::theme::Palette;
+use crate::ui::transcript::tool_group::Detail;
 
 /// The values the rows show, read when the panel opens.
 pub struct Values {
     pub theme: String,
     pub language: String,
     pub fullscreen_default: bool,
-    pub tools_expanded: bool,
+    pub tool_detail: Detail,
     pub thinking_expanded: bool,
     pub mouse: bool,
     pub notify: bool,
     pub acp_sessions: bool,
-    pub file_access: String,
-    pub approvals: String,
+    /// Whether the daemon lists the suggestion methods: without them the row
+    /// is absent.
+    pub prompt_suggestion_supported: bool,
+    /// `Some` is the switch as the daemon reported it; `None` is a read that
+    /// has not happened or failed, which the row shows rather than a value.
+    pub prompt_suggestion: Option<bool>,
+    pub permission: String,
 }
 
 /// One row: a switch flips in place, a link opens its picker.
@@ -55,8 +61,8 @@ pub enum Setting {
     Mouse,
     Notify,
     AcpSessions,
-    FileAccess,
-    Approvals,
+    PromptSuggestion,
+    Permission,
     Isolation,
 }
 
@@ -69,8 +75,8 @@ const ROWS: [(Setting, &str); 11] = [
     (Setting::Mouse, "mouse"),
     (Setting::Notify, "notify"),
     (Setting::AcpSessions, "acp-sessions"),
-    (Setting::FileAccess, "file-access"),
-    (Setting::Approvals, "approvals"),
+    (Setting::PromptSuggestion, "prompt-suggestion"),
+    (Setting::Permission, "permission"),
     (Setting::Isolation, "isolation"),
 ];
 
@@ -95,6 +101,7 @@ impl Setting {
                 | Self::Mouse
                 | Self::Notify
                 | Self::AcpSessions
+                | Self::PromptSuggestion
         )
     }
 }
@@ -110,7 +117,7 @@ impl SettingsPanel {
         let row = |setting: Setting, label: &'static str, value: String| {
             Item::new(setting.id(), t(label), value)
         };
-        let items = vec![
+        let mut items = vec![
             Item::heading(t("Interface")),
             row(Setting::Theme, "Theme", link(&values.theme)),
             row(Setting::Language, "Language", link(&values.language)),
@@ -127,12 +134,7 @@ impl SettingsPanel {
             row(
                 Setting::ToolDetails,
                 "Tool details",
-                if values.tools_expanded {
-                    t("expanded")
-                } else {
-                    t("collapsed")
-                }
-                .to_owned(),
+                t(values.tool_detail.label()).to_owned(),
             ),
             row(
                 Setting::ThinkingDetails,
@@ -159,15 +161,22 @@ impl SettingsPanel {
                 "Show ACP sessions",
                 on_off(values.acp_sessions).to_owned(),
             ),
-            Item::heading(t("Permissions")),
-            row(
-                Setting::FileAccess,
-                "File access",
-                link(&values.file_access),
-            ),
-            row(Setting::Approvals, "Tool approval", link(&values.approvals)),
-            row(Setting::Isolation, "Process isolation", link("")),
         ];
+        if values.prompt_suggestion_supported {
+            items.push(row(
+                Setting::PromptSuggestion,
+                "Prompt suggestion",
+                match values.prompt_suggestion {
+                    Some(on) => on_off(on).to_owned(),
+                    None => t("Not available").to_owned(),
+                },
+            ));
+        }
+        items.extend([
+            Item::heading(t("Permissions")),
+            row(Setting::Permission, "Permission", link(&values.permission)),
+            row(Setting::Isolation, "Process isolation", link("")),
+        ]);
         let mut list = ListPanel::new(
             "Settings",
             "↑↓ move · Enter select · ←→/Space change · Esc close",
@@ -184,6 +193,18 @@ impl SettingsPanel {
     /// A paste goes into the filter.
     pub fn paste(&mut self, text: &str) {
         self.list.paste(text);
+    }
+
+    /// Shows a value that was read after the panel opened.
+    pub fn set_prompt_suggestion(&mut self, enabled: bool) {
+        let value = if enabled { t("on") } else { t("off") };
+        self.list.set_detail(Setting::PromptSuggestion.id(), value);
+    }
+
+    /// Shows that the source could not be read, rather than a value.
+    pub fn set_prompt_suggestion_unavailable(&mut self) {
+        self.list
+            .set_detail(Setting::PromptSuggestion.id(), t("Not available"));
     }
 
     pub fn selected(&self) -> Setting {

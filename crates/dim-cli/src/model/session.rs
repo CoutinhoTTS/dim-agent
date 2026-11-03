@@ -45,6 +45,15 @@ pub struct ExecutionSnapshot {
     pub network: bool,
 }
 
+/// The `prompt-suggestion` source as `settings.read` and `settings.update`
+/// answer it: the revision the next write expects, and the capability's own
+/// document, so the client keeps no second copy of the members.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SuggestionSetting {
+    pub revision: String,
+    pub document: dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettings,
+}
+
 /// The host's answer to `host.execution.backend`; the Execution panel shows
 /// the reason when the platform has no sandbox backend.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,6 +98,15 @@ impl SubmitMode {
             Self::Steer => "steer",
         }
     }
+}
+
+/// What `/resume` lists: the launch workspace, the same directory in its
+/// repository's worktrees, or every workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionsScope {
+    Workspace,
+    Repository(Vec<String>),
+    All,
 }
 
 pub enum Command {
@@ -194,13 +212,16 @@ pub enum Command {
     NewSession,
     /// Switch to a stored session.
     Resume(String),
-    /// List stored sessions (newest first).
+    /// Find the launch workspace's repository worktrees, once per picker open.
+    FindRepository,
+    /// List stored sessions (newest first), in `scope`.
     ListSessions {
         id: String,
         query: String,
         cursor: Option<String>,
         /// The "Show ACP sessions" preference the picker was opened with.
         show_acp: bool,
+        scope: SessionsScope,
     },
     CloseSessions,
     /// List the models that can be chosen.
@@ -212,6 +233,25 @@ pub enum Command {
         network: bool,
     },
     ResetIsolation(String),
+    /// Ask the Session for the message the user would send next, after the
+    /// turn completed in this interface.
+    Suggest {
+        turn_id: String,
+    },
+    /// Report what became of the offer for `turn_id`; accepting inserts the
+    /// text locally and sends nothing.
+    SuggestionRespond {
+        turn_id: String,
+        accept: bool,
+    },
+    /// Read the `prompt-suggestion` switch.
+    ReadSuggestionSetting,
+    /// Write the `prompt-suggestion` switch.
+    SaveSuggestionSetting {
+        expected_revision: String,
+        enabled: bool,
+        max_chars: u32,
+    },
     ClearModelPreferences {
         provider_id: String,
         model_id: String,
@@ -227,7 +267,7 @@ pub enum Command {
     Rename(Option<String>),
     /// `/goal`: show, set, edit, pause, resume or clear the shown line's goal.
     Goal(crate::goal::Request),
-    SetPermission(crate::permission::Change),
+    SetPermission(dim_agent_types::PermissionPreset),
     /// List the providers of the `/connect` panel.
     ListProviders,
     /// Change one provider.
@@ -332,6 +372,15 @@ impl Area {
         matches!(
             self,
             Self::Scheduled | Self::Mcp | Self::Models { .. } | Self::Workflow
+        )
+    }
+
+    /// Whether a request for this area names the workspace: the areas that
+    /// read or write this project's own files.
+    pub fn names_workspace(&self) -> bool {
+        matches!(
+            self,
+            Self::Skills | Self::Hooks | Self::Mcp | Self::Workflow
         )
     }
 }
@@ -1031,12 +1080,18 @@ pub enum Update {
         session_id: String,
         kind: SwitchKind,
     },
+    /// The Session's Skills as the palette lists them: enabled and not
+    /// shadowed. An empty list when the daemon has no catalog.
+    Skills(Vec<crate::management::skills::Entry>),
     /// The stored sessions, or why they could not be listed.
     Sessions {
         id: String,
         paged: bool,
         result: Result<(Vec<SessionItem>, Option<String>), String>,
     },
+    /// The workspaces the picker may offer as its repository scope: more than
+    /// one, found once per picker open.
+    RepositoryWorkspaces(Vec<String>),
     /// A command failed without ending the session.
     Notice(String),
     /// A newer version the user has not skipped, once per start.
@@ -1047,6 +1102,7 @@ pub enum Update {
         result: Result<(), String>,
     },
     Models(Result<ModelList, String>),
+    EffortChoices(Result<crate::configure::EffortChoices, String>),
     /// A catalog `models()` asked `provider.refresh` to fill holds models
     /// now: a picker that is still open reads the list again.
     ModelsRefilled,
@@ -1056,10 +1112,32 @@ pub enum Update {
     /// Read once with the switches; a failed read adds no line and leaves the
     /// switches usable.
     IsolationBackend(Result<SandboxBackend, String>),
+    /// Whether the Session's method table lists `session.suggestion.request`:
+    /// without it the interface neither asks for an offer nor shows the row.
+    SuggestionMethods(bool),
+    /// The `prompt-suggestion` switch, as last read or written.
+    SuggestionSetting(Result<SuggestionSetting, String>),
+    /// A turn completed on `main`: the interface may ask for the next
+    /// message when nothing else has its attention.
+    TurnCompleted {
+        turn_id: String,
+    },
+    /// The Session offered the message the user would send next.
+    SuggestionOffer {
+        turn_id: String,
+        text: String,
+    },
+    /// The offer for `turn_id` is withdrawn.
+    SuggestionCleared {
+        turn_id: String,
+    },
+    /// The Session paused suggestions for the rest of it after the unused
+    /// count reached its limit: said once per Session.
+    SuggestionThrottled,
     /// A transient status-line message.
     Toast(String),
     Permissions(Result<dim_agent_types::PermissionPolicy, String>),
-    PermissionSelected(crate::permission::Change),
+    PermissionSelected(dim_agent_types::PermissionPreset),
     Providers(Result<Vec<ProviderEntry>, String>),
     /// What a provider change came to.
     ProviderResult {

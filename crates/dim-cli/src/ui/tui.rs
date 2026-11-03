@@ -11,7 +11,7 @@ use crate::management::{self, editor};
 use crate::model::session::{
     Area, Command, CompactReply, ContextReading, DIM_OAUTH_ID, DraftPart, ManagementAction,
     ManagementRefusal, ManagementRequest, ManagementResult, RenameReply, SessionPort, SubmitMode,
-    SwitchKind, Update,
+    SuggestionSetting, SwitchKind, Update,
 };
 #[cfg(test)]
 use crate::model::shell::Outcome as ShellOutcome;
@@ -19,7 +19,6 @@ use crate::model::shell::ShellRun;
 use crate::model::view::{
     CompactionState, LineState, LineView, RowKind, SideLine, TaskTarget, ViewRow, ViewSnapshot,
 };
-use crate::permission::{file_label, tool_label, tool_policy_label};
 use crate::ui::Env;
 use crate::ui::approvals_panel::ApprovalsPanel;
 use crate::ui::commands::{COMMANDS, Context as CommandContext, Needs};
@@ -33,7 +32,7 @@ use crate::ui::oauth_view::OauthView;
 use crate::ui::plugins_panel::PluginsPanel;
 use crate::ui::progress::ProgressBar;
 use crate::ui::prompts::{
-    AskUserPrompt, Effect, ExitConfirm, ExitReason, PermissionPrompt, WriteTarget,
+    AskUserPrompt, Effect, EffortPrompt, ExitConfirm, ExitReason, PermissionPrompt, WriteTarget,
 };
 use crate::ui::providers_panel::ProvidersPanel;
 use crate::ui::render::fullscreen::Document;
@@ -74,8 +73,9 @@ use crate::wire::Configuration;
 
 const COMPOSER_PLACEHOLDER: &str = "Ask anything...";
 const SHELL_PLACEHOLDER: &str = "Run a shell command · Esc to exit";
-/// `config.json` key of the tool detail toggle, shared with the TS CLI.
-const TOOL_DETAILS_KEY: &str = "tuiToolDetailsExpanded";
+/// `config.json` key of the three tool display forms.
+const TOOL_DETAILS_KEY: &str = "tuiToolDetails";
+const LEGACY_TOOL_DETAILS_KEY: &str = "tuiToolDetailsExpanded";
 const THINKING_DETAILS_KEY: &str = "tuiThinkingDetailsExpanded";
 /// Share of the compaction threshold the context reading warns at. Set by
 /// the interface; the threshold itself is the one `session.context.usage`
@@ -128,6 +128,15 @@ enum Jump {
 
 /// The card id of fullscreen's load-more row: no line or delegation id.
 const LOAD_MORE: &str = "\u{1}load-more";
+
+/// The preset as the status line names it.
+fn permission_label(preset: dim_agent_types::PermissionPreset) -> &'static str {
+    match preset {
+        dim_agent_types::PermissionPreset::ReadOnly => "Read only",
+        dim_agent_types::PermissionPreset::WorkspaceWrite => "Workspace write",
+        dim_agent_types::PermissionPreset::FullAccess => "Full access",
+    }
+}
 
 fn apply_jump(full: &mut FullScreen, app: &App, jump: Jump) {
     match jump {
@@ -252,7 +261,7 @@ fn run_terminal(
         ),
         None => detected.clone(),
     };
-    let cwd_key = surroundings.workspace.to_string_lossy().into_owned();
+    let cwd_key = surroundings.workspace.clone();
     let mut app = App::new(
         host,
         MarkdownRenderer::new(&theme),
@@ -549,7 +558,7 @@ fn run_terminal(
                     }
                     KeyCode::Char('e') if key.mods.0 == 0 => {
                         if let Some(text) = full.focused_text(&app) {
-                            app.composer.set_draft(&text);
+                            app.set_draft(&text);
                         }
                         full.clear_focus();
                         full.follow();
@@ -977,8 +986,6 @@ struct App {
     /// A line about to open on the shown line: the next submit is its
     /// opening input (timeline UI §4.2).
     line_draft: Option<LineDraft>,
-    /// A fork the user asked for, until they answer (timeline UI §4.3).
-    fork_confirm: Option<ForkAsk>,
     /// The picked message, set in the fork's composer once it is attached.
     fork_draft: Option<String>,
     /// A management area's drafts while the editor runs and until their write
@@ -991,6 +998,23 @@ struct App {
     /// Queued messages withdrawn for the draft, by input id, until the host
     /// confirms each withdrawal; a confirmed one goes into the draft.
     recovering: Vec<(String, String)>,
+    /// The message the Session offered for the turn its composer belongs to.
+    suggestion: Option<Suggestion>,
+    /// The `prompt-suggestion` switch as last read or written; none until a
+    /// read answers.
+    suggestion_setting: Option<SuggestionSetting>,
+    /// Whether this Session's method table lists the suggestion methods:
+    /// without them, `/settings` neither probes the source nor shows the row.
+    suggestion_methods: bool,
+    /// A flip asked for before the switch was known: the read that answers
+    /// it sends the flip.
+    suggestion_flip: bool,
+}
+
+/// An offer the Session made for the message the user would send next.
+struct Suggestion {
+    turn_id: String,
+    text: String,
 }
 
 /// A management area's draft of one document: the text the editor was
@@ -1027,8 +1051,6 @@ fn management_notice(line: &str, read_error: Option<&str>) -> String {
     }
 }
 
-/// Where a line the user is drafting opens.
-/// A fork waiting for its `y`.
 struct ForkAsk {
     at: u64,
     /// What the fork's composer starts with.
@@ -1036,6 +1058,73 @@ struct ForkAsk {
     /// The picked message the fork cuts before; none for `/fork`, which
     /// cuts after the last turn.
     before: Option<String>,
+    create: bool,
+    timeline: Option<Box<TimelinePanel>>,
+}
+
+impl ForkAsk {
+    fn handle_key(&mut self, key: KeyEvent) -> Effect {
+        match key.code {
+            KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::BackTab => {
+                self.create = !self.create;
+                Effect::None
+            }
+            KeyCode::Enter if self.create => Effect::Fork,
+            KeyCode::Enter | KeyCode::Esc => Effect::Close,
+            KeyCode::Char('y' | 'Y' | '1') if key.mods == Modifiers::NONE => Effect::Fork,
+            KeyCode::Char('n' | 'N' | '2') if key.mods == Modifiers::NONE => Effect::Close,
+            _ => Effect::None,
+        }
+    }
+
+    fn render(&self, width: usize, rows: usize, p: &Palette) -> Vec<String> {
+        use crate::ui::render::panel::{bordered, choices};
+        let inner = width.saturating_sub(4).max(1);
+        let question = match &self.before {
+            Some(message) => tf(
+                "Fork the session before “{message}”?",
+                &[("message", &crate::sanitize::safe_line(message))],
+            ),
+            None => t("Fork the session after the last turn?").to_owned(),
+        };
+        let mut body = wrap_words(&question, inner);
+        let mut hints = wrap_words(t("↑↓ select · Enter confirm · Esc cancel"), inner);
+        if body.len() + 4 + hints.len() > rows {
+            hints.clear();
+        }
+        let body_rows = rows.saturating_sub(4 + hints.len());
+        if body.len() > body_rows {
+            body.truncate(body_rows);
+            if let Some(last) = body.last_mut() {
+                *last = truncate_cells(&format!("{last} …"), inner);
+            }
+        }
+        let explanation = wrap_words(
+            t("Creates a new session; the current session stays unchanged."),
+            inner,
+        );
+        if body.len() + 1 + explanation.len() <= body_rows {
+            body.push(String::new());
+            body.extend(explanation);
+        }
+        let mut content: Vec<String> = body.iter().map(|line| fg(line, &p.text)).collect();
+        for (index, label) in [t("1. Create fork"), t("2. Cancel")].iter().enumerate() {
+            content.push(choices(
+                &[truncate_cells(label, inner.saturating_sub(2))],
+                if self.create == (index == 0) { 0 } else { 1 },
+                p,
+            ));
+        }
+        content.extend(hints.into_iter().map(|line| fg(&line, &p.muted)));
+        bordered(
+            &content,
+            width,
+            None,
+            &p.border,
+            Some(t("Fork session")),
+            None,
+        )
+    }
 }
 
 struct LineDraft {
@@ -1053,6 +1142,25 @@ const OVERLAY_LIST_WIDTH: usize = 100;
 const OVERLAY_MAX_ROWS: usize = 30;
 /// Least rows inside the fullscreen composer box.
 const FULLSCREEN_COMPOSER_ROWS: usize = 3;
+
+/// The rows the live region leaves a scrollback panel: below the composer,
+/// the blank row above the panel and the status line, never more than 18.
+fn live_panel_rows(live_budget: usize, composer_rows: usize, status_rows: usize) -> usize {
+    live_budget
+        .saturating_sub(composer_rows + 1 + status_rows)
+        .min(18)
+}
+
+/// The rows a fullscreen overlay gives a panel: the terminal less the
+/// composer and two rows on either side, never under six unless the terminal
+/// cannot hold that.
+fn overlay_panel_rows(terminal_rows: usize, composer_rows: usize) -> usize {
+    terminal_rows
+        .saturating_sub(composer_rows + 2 + 2)
+        .max(6)
+        .min(terminal_rows.saturating_sub(composer_rows + 1))
+        .min(OVERLAY_MAX_ROWS)
+}
 
 /// Messages a resume shows at first, and per load-more page.
 const HISTORY_WINDOW: usize = 100;
@@ -1074,6 +1182,7 @@ enum Prompt {
     Tasks(TasksPanel),
     Lines(Box<LinesPanel>),
     Timeline(Box<TimelinePanel>),
+    Fork(ForkAsk),
     Models(ModelsPanel),
     Providers(Box<ProvidersPanel>),
     Plugins(PluginsPanel),
@@ -1089,6 +1198,7 @@ enum Prompt {
     Upgrade(UpgradeDialog),
     Permission(PermissionPrompt),
     Ask(AskUserPrompt),
+    Effort(EffortPrompt),
 }
 
 impl App {
@@ -1111,7 +1221,7 @@ impl App {
             host,
             composer,
             cwd_key,
-            tool_detail: saved_detail(&home, TOOL_DETAILS_KEY),
+            tool_detail: saved_tool_detail(&home),
             thinking_detail: saved_detail(&home, THINKING_DETAILS_KEY),
             group_details: HashMap::new(),
             tail_groups: Vec::new(),
@@ -1191,11 +1301,14 @@ impl App {
             member_target: None,
             upgrade: None,
             line_draft: None,
-            fork_confirm: None,
             fork_draft: None,
             management_edits: Vec::new(),
             management_named: None,
             recovering: Vec::new(),
+            suggestion: None,
+            suggestion_setting: None,
+            suggestion_methods: false,
+            suggestion_flip: false,
         }
     }
 
@@ -1274,7 +1387,7 @@ impl App {
         if !self.composer.is_empty() {
             self.palette_stash = Some(self.composer.text().to_owned());
         }
-        self.composer.set_draft("/");
+        self.set_draft("/");
     }
 
     /// Shows `prompt` in the prompt slot, keeping a pending question aside
@@ -1317,6 +1430,76 @@ impl App {
 
     fn running(&self) -> bool {
         self.failure.is_none() && self.snapshot.as_ref().is_some_and(|s| s.running)
+    }
+
+    /// Whether the user's attention is free for an offer: an empty composer,
+    /// no prompt or panel, no question or approval waiting and no goal
+    /// driving the Session.
+    fn suggestion_wanted(&self) -> bool {
+        self.failure.is_none()
+            && self.prompt.is_none()
+            && self.composer.is_empty()
+            && self.snapshot.as_ref().is_none_or(|snapshot| {
+                snapshot.questions.is_empty()
+                    && snapshot.approvals.is_empty()
+                    && snapshot
+                        .goal
+                        .as_ref()
+                        .is_none_or(|goal| goal.status != crate::goal::Status::Active)
+            })
+    }
+
+    /// A `turn/end` with `Completed` reached this interface: ask the Session
+    /// for the message the user would send next, when nothing else has the
+    /// user's attention.
+    fn turn_completed(&mut self, turn_id: &str) {
+        if self.suggestion_wanted() {
+            self.host.send(Command::Suggest {
+                turn_id: turn_id.to_owned(),
+            });
+        }
+    }
+
+    /// Takes the offer into the draft, unsent.
+    fn accept_suggestion(&mut self) {
+        let Some(suggestion) = self.suggestion.take() else {
+            return;
+        };
+        self.set_draft(&suggestion.text);
+        self.host.send(Command::SuggestionRespond {
+            turn_id: suggestion.turn_id,
+            accept: true,
+        });
+    }
+
+    /// Hides the offer and reports that it was not taken.
+    fn dismiss_suggestion(&mut self) {
+        let Some(suggestion) = self.suggestion.take() else {
+            return;
+        };
+        self.host.send(Command::SuggestionRespond {
+            turn_id: suggestion.turn_id,
+            accept: false,
+        });
+    }
+
+    /// Puts `text` in the composer as an edit, which dismisses an offer.
+    fn set_draft(&mut self, text: &str) {
+        self.dismiss_suggestion();
+        self.composer.set_draft(text);
+    }
+
+    /// Writes the `prompt-suggestion` switch the panel flipped, keeping the
+    /// length limit the last read reported.
+    fn save_suggestion_flip(&mut self) {
+        let Some(setting) = self.suggestion_setting.clone() else {
+            return;
+        };
+        self.host.send(Command::SaveSuggestionSetting {
+            expected_revision: setting.revision,
+            enabled: !setting.document.enabled,
+            max_chars: setting.document.max_chars,
+        });
     }
 
     /// What the command palette weighs availability against.
@@ -1390,9 +1573,9 @@ impl App {
         let (_, text) = self.recovering.remove(at);
         let draft = self.composer.text();
         if draft.trim().is_empty() {
-            self.composer.set_draft(&text);
+            self.set_draft(&text);
         } else {
-            self.composer.set_draft(&format!("{draft}\n{text}"));
+            self.set_draft(&format!("{draft}\n{text}"));
         }
     }
 
@@ -1449,7 +1632,8 @@ impl App {
             | Some(Prompt::Settings(_))
             | Some(Prompt::Isolation(_))
             | Some(Prompt::Lines(_))
-            | Some(Prompt::Timeline(_)) => {}
+            | Some(Prompt::Timeline(_))
+            | Some(Prompt::Fork(_)) => {}
             Some(Prompt::Tasks(_)) if approval.is_none() && question.is_none() => {}
             Some(Prompt::Upgrade(_)) if approval.is_none() && question.is_none() => {}
             Some(Prompt::Permission(p))
@@ -1726,9 +1910,34 @@ impl App {
                 ));
             }
             Update::Switched { session_id, kind } => self.switch_session(session_id, kind),
+            Update::Skills(entries) => {
+                self.composer.set_skills(
+                    entries
+                        .into_iter()
+                        .filter(|entry| {
+                            // A name with whitespace cannot be referenced
+                            // (Skills §9), so it is not offered.
+                            entry.enabled
+                                && entry.shadowed_by.is_none()
+                                && !entry.name.chars().any(char::is_whitespace)
+                        })
+                        .map(|entry| crate::ui::composer::palette::Skill {
+                            name: entry.name,
+                            description: entry.description,
+                            display_name: None,
+                            display_description: None,
+                        })
+                        .collect(),
+                );
+            }
             Update::Sessions { id, paged, result } => {
                 if let Some(Prompt::Sessions(panel)) = &mut self.prompt {
                     panel.page(&id, paged, result);
+                }
+            }
+            Update::RepositoryWorkspaces(workspaces) => {
+                if let Some(Prompt::Sessions(panel)) = &mut self.prompt {
+                    panel.repository(workspaces);
                 }
             }
             Update::Toast(text) => self.set_notice(text),
@@ -1765,17 +1974,14 @@ impl App {
                 }
                 Err(error) => self.notices.push(error),
             },
-            Update::PermissionSelected(change) => {
-                let (key, value) = change.config();
-                let label = match change {
-                    crate::permission::Change::FileAccess(value) => {
-                        format!("File access: {}", file_label(value))
-                    }
-                    crate::permission::Change::ToolApproval(value) => {
-                        format!("Tool approval: {}", tool_label(value))
-                    }
-                };
-                let message = crate::ui::config::write(&self.home, key, value).map_or_else(
+            Update::PermissionSelected(preset) => {
+                let label = format!("Permission: {}", crate::permission::name(preset));
+                let message = crate::ui::config::write(
+                    &self.home,
+                    "permission",
+                    serde_json::json!(crate::permission::name(preset)),
+                )
+                .map_or_else(
                     || format!("{label} (also for new sessions)"),
                     |error| format!("{label} applied, but default could not be saved: {error}"),
                 );
@@ -2068,6 +2274,11 @@ impl App {
                     panel.set_models(models);
                 }
             }
+            Update::EffortChoices(result) => {
+                if let Some(Prompt::Effort(prompt)) = &mut self.prompt {
+                    prompt.set_choices(result);
+                }
+            }
             Update::ModelsRefilled => {
                 if matches!(self.prompt, Some(Prompt::Models(_))) {
                     self.host.send(Command::ListModels);
@@ -2082,6 +2293,53 @@ impl App {
                 if let Some(Prompt::Isolation(panel)) = &mut self.prompt {
                     panel.set_backend(result);
                 }
+            }
+            Update::SuggestionMethods(offered) => {
+                self.suggestion_methods = offered;
+                if let Some(Prompt::Settings(panel)) = &self.prompt {
+                    self.open_settings(panel.selected());
+                }
+            }
+            Update::SuggestionSetting(result) => match result {
+                Ok(setting) => {
+                    self.suggestion_setting = Some(setting.clone());
+                    if let Some(Prompt::Settings(panel)) = &mut self.prompt {
+                        panel.set_prompt_suggestion(setting.document.enabled);
+                    }
+                    if std::mem::take(&mut self.suggestion_flip) {
+                        self.save_suggestion_flip();
+                    }
+                }
+                Err(error) => {
+                    self.suggestion_flip = false;
+                    self.suggestion_setting = None;
+                    if let Some(Prompt::Settings(panel)) = &mut self.prompt {
+                        panel.set_prompt_suggestion_unavailable();
+                    }
+                    self.set_notice(tf("Prompt suggestion: {error}", &[("error", &error)]));
+                }
+            },
+            Update::TurnCompleted { turn_id } => self.turn_completed(&turn_id),
+            Update::SuggestionOffer { turn_id, text } => {
+                self.suggestion = Some(Suggestion { turn_id, text });
+            }
+            Update::SuggestionCleared { turn_id } => {
+                if self
+                    .suggestion
+                    .as_ref()
+                    .is_some_and(|suggestion| suggestion.turn_id == turn_id)
+                {
+                    self.suggestion = None;
+                }
+            }
+            Update::SuggestionThrottled => {
+                self.notices.push(
+                    t(
+                        "Suggestions are paused in this session because offers went unused. \
+                       Turn them off and on in /settings to resume.",
+                    )
+                    .to_owned(),
+                );
             }
             Update::ModelPolicy(update) => {
                 if let Some(Prompt::Models(panel)) = &mut self.prompt
@@ -2149,7 +2407,7 @@ impl App {
             && self.composer.is_empty()
             && let Some(draft) = self.palette_stash.take()
         {
-            self.composer.set_draft(&draft);
+            self.set_draft(&draft);
         }
         outcome
     }
@@ -2216,12 +2474,6 @@ impl App {
         if ctrl && key.code == KeyCode::Char('c') {
             return self.ctrl_c();
         }
-        if let Some(ask) = self.fork_confirm.take() {
-            if matches!(key.code, KeyCode::Char('y' | 'Y')) && key.mods == Modifiers::NONE {
-                self.fork(ask.at, ask.text);
-            }
-            return Outcome::Continue;
-        }
         // A question keeps the keys, but a command entered over it keeps
         // them from `/`, Ctrl+O or Ctrl+P through its argument: only Enter,
         // Esc or a draft that stops being a command gives them back.
@@ -2251,6 +2503,7 @@ impl App {
                 Prompt::Tasks(p) => p.handle_key(key),
                 Prompt::Lines(p) => p.handle_key(key),
                 Prompt::Timeline(p) => p.handle_key(key),
+                Prompt::Fork(p) => p.handle_key(key),
                 Prompt::Models(p) => p.handle_key(key),
                 Prompt::Providers(p) => p.handle_key(key),
                 Prompt::Plugins(p) => p.handle_key(key),
@@ -2273,6 +2526,7 @@ impl App {
                 Prompt::Upgrade(p) => p.handle_key(key),
                 Prompt::Permission(p) => p.handle_key(key),
                 Prompt::Ask(p) => p.handle_key(key),
+                Prompt::Effort(p) => p.handle_key(key),
             };
             let outcome = self.apply_effect(effect);
             self.sync_task_details();
@@ -2293,6 +2547,25 @@ impl App {
             (key, SubmitMode::Queue)
         };
         let ctrl = key.mods.contains(Modifiers::CTRL);
+        if self.suggestion.is_some()
+            && self.composer.is_empty()
+            && self.prompt.is_none()
+            && key.mods.0 == 0
+        {
+            let accept = match key.code {
+                KeyCode::Right => true,
+                KeyCode::Tab => {
+                    !self.fullscreen
+                        && !self.composer.palette_open()
+                        && !self.composer.mention_open()
+                }
+                _ => false,
+            };
+            if accept {
+                self.accept_suggestion();
+                return Outcome::Continue;
+            }
+        }
         match key.code {
             KeyCode::Char('o' | 'p') if ctrl && !self.composer.palette_open() => {
                 self.open_palette();
@@ -2334,6 +2607,8 @@ impl App {
                     self.interrupt();
                 } else if self.composer.shell().is_some() {
                     self.composer.clear();
+                } else if self.suggestion.is_some() {
+                    self.dismiss_suggestion();
                 }
                 return Outcome::Continue;
             }
@@ -2411,6 +2686,9 @@ impl App {
             ComposerOutcome::Rejected(reason) => self.set_notice(reason),
             ComposerOutcome::Handled | ComposerOutcome::Pass => {}
         }
+        if self.suggestion.is_some() && !self.composer.is_empty() {
+            self.dismiss_suggestion();
+        }
         Outcome::Continue
     }
 
@@ -2418,6 +2696,7 @@ impl App {
     /// dragged onto it: local files and directories it names are inserted
     /// as `[name]` tokens, except into a shell command.
     fn paste(&mut self, text: String) {
+        self.dismiss_suggestion();
         let base = std::path::Path::new(&self.cwd_key);
         let paths = match self.composer.shell() {
             Some(_) => None,
@@ -2638,21 +2917,6 @@ impl App {
     }
 
     fn place_label(&self) -> String {
-        if let Some(ask) = &self.fork_confirm {
-            return match &ask.before {
-                Some(message) => tf(
-                    "Fork the session before “{message}”? (y/N)",
-                    &[(
-                        "message",
-                        &truncate_cells(
-                            &crate::sanitize::safe(message.lines().next().unwrap_or_default()),
-                            32,
-                        ),
-                    )],
-                ),
-                None => t("Fork the session after the last turn? (y/N)").to_owned(),
-            };
-        }
         if let Some(draft) = &self.line_draft {
             let lines = self.snapshot.as_ref().map_or(&[][..], |s| &s.lines[..]);
             return tf(
@@ -2694,7 +2958,7 @@ impl App {
     fn draft_line(&mut self, at: u64, text: &str) {
         if let Some(draft) = self.line_at(at) {
             self.line_draft = Some(draft);
-            self.composer.set_draft(text);
+            self.set_draft(text);
         }
     }
 
@@ -2729,7 +2993,22 @@ impl App {
             Some(snapshot) if snapshot.focus != "main" => {
                 self.set_notice(t("A fork copies main; b opens a line here"));
             }
-            Some(_) => self.fork_confirm = Some(ForkAsk { at, text, before }),
+            Some(_) => {
+                let timeline = match self.prompt.take() {
+                    Some(Prompt::Timeline(panel)) => Some(panel),
+                    prompt => {
+                        self.prompt = prompt;
+                        None
+                    }
+                };
+                self.open_prompt(Prompt::Fork(ForkAsk {
+                    at,
+                    text,
+                    before,
+                    create: false,
+                    timeline,
+                }));
+            }
         }
     }
 
@@ -2761,7 +3040,15 @@ impl App {
                 if matches!(self.prompt, Some(Prompt::Sessions(_))) {
                     self.host.send(Command::CloseSessions);
                 }
-                self.prompt = None;
+                self.prompt = match self.prompt.take() {
+                    Some(Prompt::Fork(ask)) => ask.timeline.map(Prompt::Timeline),
+                    _ => None,
+                };
+            }
+            Effect::Fork => {
+                if let Some(Prompt::Fork(ask)) = self.prompt.take() {
+                    self.fork(ask.at, ask.text);
+                }
             }
             Effect::Exit => return Outcome::Exit(130),
             Effect::Restart { confirmed } => {
@@ -2841,7 +3128,9 @@ impl App {
                 self.host.send(Command::FocusLine(line));
             }
             Effect::Timeline { row_id, action } => {
-                self.prompt = None;
+                if action != TimelineAction::Fork {
+                    self.prompt = None;
+                }
                 self.timeline(&row_id, action);
             }
             Effect::EndLine {
@@ -2945,11 +3234,11 @@ impl App {
             }
             Effect::Setting(setting) => {
                 let from_permissions = setting == Setting::Isolation
-                    && self.settings_return.is_none()
                     && matches!(self.prompt, Some(Prompt::Approvals(_)));
+                let settings_return = self.settings_return;
                 self.setting(setting);
                 if from_permissions {
-                    self.settings_return = None;
+                    self.settings_return = settings_return;
                     self.permissions_return = true;
                 }
             }
@@ -2965,9 +3254,9 @@ impl App {
                     self.set_notice(error);
                 }
             }
-            Effect::SetPermission(change) => {
+            Effect::SetPermission(preset) => {
                 self.prompt = None;
-                self.host.send(Command::SetPermission(change));
+                self.host.send(Command::SetPermission(preset));
             }
             Effect::Provider(action) => self.host.send(Command::Provider(action)),
             Effect::Plugin(action) => self.host.send(Command::Plugin(action)),
@@ -3042,6 +3331,21 @@ impl App {
                     model_id,
                     reasoning_effort,
                 });
+            }
+            Effect::SetEffort { model, value } => {
+                self.prompt = None;
+                if self
+                    .label
+                    .as_ref()
+                    .is_some_and(|label| label.model == model)
+                {
+                    self.host
+                        .send(Command::Configure(format!("/effort {value}")));
+                } else {
+                    self.set_notice(t(
+                        "Model changed; reopen /effort to choose its reasoning effort.",
+                    ));
+                }
             }
             Effect::ReadIsolation => self.host.send(Command::ReadIsolation),
             Effect::SaveIsolation {
@@ -3181,7 +3485,12 @@ impl App {
     fn settings(&mut self, args: &str) {
         let mut words = args.split_whitespace();
         match (words.next(), words.next(), words.next()) {
-            (None, _, _) => self.open_settings(Setting::Theme),
+            (None, _, _) => {
+                if self.suggestion_methods {
+                    self.host.send(Command::ReadSuggestionSetting);
+                }
+                self.open_settings(Setting::Theme);
+            }
             (Some("recording"), None, None) => {
                 self.host.send(Command::Recording(String::new()));
             }
@@ -3210,13 +3519,17 @@ impl App {
             theme: theme.to_owned(),
             language,
             fullscreen_default: crate::ui::config::saved_fullscreen(&self.home),
-            tools_expanded: self.tool_detail == Detail::Expanded,
+            tool_detail: self.tool_detail,
             thinking_expanded: self.thinking_detail == Detail::Expanded,
             mouse: self.mouse,
             notify: self.notify,
             acp_sessions: crate::ui::config::saved_show_acp(&self.home),
-            file_access: file_label(self.permission_policy.file_access()).to_owned(),
-            approvals: tool_policy_label(&self.permission_policy).to_owned(),
+            prompt_suggestion_supported: self.suggestion_methods,
+            prompt_suggestion: self
+                .suggestion_setting
+                .as_ref()
+                .map(|setting| setting.document.enabled),
+            permission: crate::permission::name(self.permission_policy.preset).to_owned(),
         };
         self.open_prompt(Prompt::Settings(SettingsPanel::new(&values, select)));
     }
@@ -3235,12 +3548,8 @@ impl App {
                     &self.home,
                 ))));
             }
-            Setting::FileAccess => {
-                let panel = ApprovalsPanel::file(&self.permission_policy);
-                self.open_prompt(Prompt::Approvals(panel));
-            }
-            Setting::Approvals => {
-                let panel = ApprovalsPanel::tool(&self.permission_policy);
+            Setting::Permission => {
+                let panel = ApprovalsPanel::new(&self.permission_policy);
                 self.open_prompt(Prompt::Approvals(panel));
             }
             Setting::Isolation => {
@@ -3310,11 +3619,21 @@ impl App {
                 self.settings_return = None;
                 self.open_settings(setting);
             }
+            Setting::PromptSuggestion => {
+                self.settings_return = None;
+                if self.suggestion_setting.is_some() {
+                    self.save_suggestion_flip();
+                } else {
+                    self.suggestion_flip = true;
+                    self.host.send(Command::ReadSuggestionSetting);
+                }
+                self.open_settings(setting);
+            }
         }
     }
 
     fn toggle_tool_details(&mut self) {
-        let detail = self.tool_detail.flipped();
+        let detail = self.tool_detail.next();
         self.tool_detail = detail;
         self.group_details.clear();
         for block in &mut self.history {
@@ -3325,11 +3644,9 @@ impl App {
             }
         }
         self.request_reflow();
-        if let Some(error) = crate::ui::config::write(
-            &self.home,
-            TOOL_DETAILS_KEY,
-            (detail == Detail::Expanded).into(),
-        ) {
+        if let Some(error) =
+            crate::ui::config::write(&self.home, TOOL_DETAILS_KEY, detail.label().into())
+        {
             self.set_notice(tf("Tool details not saved: {error}", &[("error", &error)]));
         }
     }
@@ -3736,6 +4053,9 @@ impl App {
                 Outcome::Continue
             }
             "effort" | "fast" | "agent" => {
+                if name == "effort" && args.trim().is_empty() {
+                    self.open_prompt(Prompt::Effort(EffortPrompt::new()));
+                }
                 let text = format!("/{name} {args}");
                 self.host
                     .send(Command::Configure(text.trim_end().to_owned()));
@@ -3752,6 +4072,7 @@ impl App {
                 self.open_prompt(Prompt::Sessions(SessionsPanel::new(
                     crate::ui::config::saved_show_acp(&self.home),
                 )));
+                self.host.send(Command::FindRepository);
                 self.sync_sessions();
                 Outcome::Continue
             }
@@ -3770,7 +4091,7 @@ impl App {
                 Outcome::Continue
             }
             "branch" if args.is_empty() => {
-                self.composer.set_draft("/branch ");
+                self.set_draft("/branch ");
                 Outcome::Continue
             }
             "branch" => {
@@ -4250,15 +4571,23 @@ impl App {
             && self.composer.palette_open()
             && (self.prompt.is_none() || command_entry);
         let (cursor_row, cursor_col) = if self.composer.is_empty() || palette_overlay {
-            let placeholder = match shell {
-                Some(_) => t(SHELL_PLACEHOLDER),
-                None if self.fullscreen => "",
-                None => t(COMPOSER_PLACEHOLDER),
+            let offer = self
+                .suggestion
+                .as_ref()
+                .filter(|_| shell.is_none() && self.prompt.is_none() && !palette_overlay)
+                .filter(|_| cols >= 20)
+                .map(|suggestion| truncate_cells(&suggestion.text, text_width))
+                .filter(|text| !text.is_empty());
+            let placeholder = match offer {
+                Some(text) => text,
+                None if shell.is_some() => t(SHELL_PLACEHOLDER).to_owned(),
+                None if self.fullscreen => String::new(),
+                None => t(COMPOSER_PLACEHOLDER).to_owned(),
             };
             rows.push(format!(
                 "{}{}",
                 fg(prompt, prompt_color),
-                fg(placeholder, &p.muted)
+                fg(&placeholder, &p.muted)
             ));
             (0, prompt_width)
         } else {
@@ -4339,7 +4668,15 @@ impl App {
         let replaced = !command_entry
             && matches!(
                 self.prompt,
-                Some(Prompt::Permission(_) | Prompt::Ask(_) | Prompt::Exit(_) | Prompt::Upgrade(_))
+                Some(
+                    Prompt::Permission(_)
+                        | Prompt::Ask(_)
+                        | Prompt::Effort(_)
+                        | Prompt::Exit(_)
+                        | Prompt::Upgrade(_)
+                        | Prompt::Fork(_)
+                        | Prompt::Timeline(_)
+                )
             );
         if !replaced {
             live.extend(composer_box);
@@ -4356,9 +4693,7 @@ impl App {
         let panel_rows = if native_selection {
             size.1 as usize
         } else {
-            live_budget
-                .saturating_sub(composer_rows + 1 + status_rows)
-                .min(18)
+            live_panel_rows(live_budget, composer_rows, status_rows)
         };
         let panel_cursor = |width: usize, height: usize| match &self.prompt {
             Some(Prompt::Sessions(prompt)) => Some(prompt.cursor(width)),
@@ -4377,51 +4712,65 @@ impl App {
             let budget = if native_selection {
                 size.1 as usize
             } else {
-                (size.1 as usize)
-                    .saturating_sub(composer_rows + 2 + 2)
-                    .max(6)
-                    .min((size.1 as usize).saturating_sub(composer_rows + 1))
-                    .min(OVERLAY_MAX_ROWS)
+                overlay_panel_rows(size.1 as usize, composer_rows)
             };
             let list_width = if native_selection {
                 cols
             } else {
                 cols.saturating_sub(4).min(OVERLAY_LIST_WIDTH)
             };
-            let caret = panel_cursor(list_width, budget)
-                .flatten()
-                .map(|(row, column)| (row as u16, column as u16));
-            let list = |rows: Vec<String>| {
-                Some(Overlay {
-                    rows,
-                    cursor: caret,
-                })
-            };
             frame.overlay = match &self.prompt {
                 _ if palette_overlay => {
                     let width = cols.saturating_sub(4).min(OVERLAY_PALETTE_WIDTH);
                     self.composer.palette_overlay(width, budget, p)
                 }
-                Some(Prompt::Sessions(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Tasks(prompt)) => {
-                    list(prompt.render(list_width, budget, p, &self.markdown))
+                prompt => {
+                    let rows = match prompt {
+                        Some(Prompt::Sessions(prompt)) => {
+                            Some(prompt.render(list_width, budget, p))
+                        }
+                        Some(Prompt::Tasks(prompt)) => {
+                            Some(prompt.render(list_width, budget, p, &self.markdown))
+                        }
+                        Some(Prompt::Lines(prompt)) => {
+                            Some(prompt.render(list_width, budget, p, &self.markdown))
+                        }
+                        Some(Prompt::Timeline(prompt)) => {
+                            Some(prompt.render(list_width, budget, p))
+                        }
+                        Some(Prompt::Fork(prompt)) => Some(prompt.render(list_width, budget, p)),
+                        Some(Prompt::Models(prompt)) => Some(prompt.render(list_width, budget, p)),
+                        Some(Prompt::Providers(prompt)) => {
+                            Some(prompt.render(list_width, budget, p))
+                        }
+                        Some(Prompt::Plugins(prompt)) => Some(prompt.render(list_width, budget, p)),
+                        Some(Prompt::Runtime(prompt)) => Some(prompt.render(list_width, budget, p)),
+                        Some(Prompt::Management(prompt)) => {
+                            Some(prompt.render(list_width, budget, p))
+                        }
+                        Some(Prompt::Login(prompt)) => Some(prompt.render(list_width, budget, p)),
+                        Some(Prompt::Approvals(prompt)) => {
+                            Some(prompt.render(list_width, budget, p))
+                        }
+                        Some(Prompt::Theme(prompt)) => Some(prompt.render(list_width, budget, p)),
+                        Some(Prompt::Language(prompt)) => {
+                            Some(prompt.render(list_width, budget, p))
+                        }
+                        Some(Prompt::Settings(prompt)) => {
+                            Some(prompt.render(list_width, budget, p))
+                        }
+                        Some(Prompt::Isolation(prompt)) => {
+                            Some(prompt.render(list_width, budget, p))
+                        }
+                        _ => None,
+                    };
+                    // A panel's cursor follows the rows it just drew, so it
+                    // is read after the render.
+                    let cursor = panel_cursor(list_width, budget)
+                        .flatten()
+                        .map(|(row, column)| (row as u16, column as u16));
+                    rows.map(|rows| Overlay { rows, cursor })
                 }
-                Some(Prompt::Lines(prompt)) => {
-                    list(prompt.render(list_width, budget, p, &self.markdown))
-                }
-                Some(Prompt::Timeline(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Models(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Providers(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Plugins(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Runtime(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Management(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Login(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Approvals(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Theme(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Language(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Settings(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Isolation(prompt)) => list(prompt.render(list_width, budget, p)),
-                _ => None,
             };
         }
         let panel = match &self.prompt {
@@ -4437,6 +4786,7 @@ impl App {
                 Some(prompt.render(outer, panel_rows, p, &self.markdown))
             }
             Some(Prompt::Timeline(prompt)) => Some(prompt.render(outer, panel_rows, p)),
+            Some(Prompt::Fork(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Models(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Providers(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Plugins(prompt)) => Some(prompt.render(outer, panel_rows, p)),
@@ -4452,6 +4802,7 @@ impl App {
             Some(Prompt::Upgrade(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Permission(prompt)) => Some(prompt.render_sized(outer, panel_rows, p)),
             Some(Prompt::Ask(prompt)) => Some(prompt.render(outer, panel_rows, p)),
+            Some(Prompt::Effort(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             None => self
                 .composer
                 .palette_panel(outer, panel_rows, p)
@@ -4797,7 +5148,9 @@ impl App {
         self.awaiting_window = true;
         self.pending_line = Some(line);
         self.line_draft = None;
-        self.fork_confirm = None;
+        if matches!(self.prompt, Some(Prompt::Fork(_))) {
+            self.prompt = None;
+        }
         self.card_blocks.clear();
         self.message_blocks.clear();
         if self.fullscreen {
@@ -4851,7 +5204,7 @@ impl App {
         };
         self.composer.clear();
         self.line_draft = None;
-        self.fork_confirm = None;
+        self.suggestion = None;
         if let Some(text) = self.fork_draft.take()
             && kind == SwitchKind::Forked
         {
@@ -4881,7 +5234,7 @@ impl App {
         let (text, cut) = (snapshot.rows[index].text.clone(), snapshot.rows[index].cut);
         match action {
             TimelineAction::Jump => self.jump_to(index),
-            TimelineAction::Edit => self.composer.set_draft(&text),
+            TimelineAction::Edit => self.set_draft(&text),
             TimelineAction::Quote => {
                 if !self.composer.quote(&text) && self.composer.shell().is_some() {
                     self.set_notice(t("Leave shell mode to quote a message"));
@@ -5003,7 +5356,7 @@ impl App {
                     .get(first)
                     .copied()
                     .unwrap_or(self.tool_detail);
-                self.group_details.insert(first.clone(), current.flipped());
+                self.group_details.insert(first.clone(), current.next());
                 return true;
             }
             return false;
@@ -5013,7 +5366,7 @@ impl App {
         }
         let index = id.checked_sub(self.dropped);
         match index.and_then(|index| self.history.get_mut(index)) {
-            Some(Block::ToolGroup(group)) => group.detail = group.detail.flipped(),
+            Some(Block::ToolGroup(group)) => group.detail = group.detail.next(),
             Some(Block::Thinking { expanded, .. } | Block::Compaction { expanded, .. }) => {
                 *expanded = !*expanded
             }
@@ -5329,9 +5682,8 @@ impl App {
         if let Some(goal) = self.goal_label() {
             parts.push(fg(goal, &p.muted));
         }
-        if self.permission_policy.tool_approval() == dim_agent_types::ToolApproval::Bypass {
-            let mode = tool_policy_label(&self.permission_policy);
-            parts.push(fg(&format!("\u{23f5}\u{23f5} {mode}"), &p.muted));
+        if self.permission_policy.preset == dim_agent_types::PermissionPreset::FullAccess {
+            parts.push(fg("\u{23f5}\u{23f5} Full access", &p.muted));
         }
         if let Some(context) = self.context_label() {
             let color = if self.context_near() {
@@ -5346,13 +5698,7 @@ impl App {
 
     fn status_line(&self, cols: usize) -> String {
         let slot = self.slot();
-        let approval = if self.permission_policy.tool_approval.is_none()
-            && self.permission_policy.tool_approval() == dim_agent_types::ToolApproval::Ask
-        {
-            "Ask (legacy)"
-        } else {
-            tool_policy_label(&self.permission_policy)
-        };
+        let approval = permission_label(self.permission_policy.preset);
         let mut left = format!("{}AGENT  \u{23f5}\u{23f5} {}", " ".repeat(MARGIN), approval);
         if let Some(goal) = self.goal_label() {
             left.push_str("  ");
@@ -5834,14 +6180,7 @@ fn workspace_label(branch: &str) -> String {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
-    let home = std::env::var("HOME").unwrap_or_default();
-    let cwd = match cwd.strip_prefix(&home) {
-        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => {
-            format!("~{rest}")
-        }
-        _ => cwd,
-    };
-    format!("{cwd} ({branch})")
+    format!("{} ({branch})", crate::ui::tilde(&cwd))
 }
 
 fn git_head(cwd: &str) -> Option<PathBuf> {
@@ -6045,6 +6384,18 @@ fn saved_detail(home: &std::path::Path, key: &str) -> Detail {
     }
 }
 
+fn saved_tool_detail(home: &std::path::Path) -> Detail {
+    match crate::ui::config::read(home, TOOL_DETAILS_KEY)
+        .as_ref()
+        .and_then(|v| v.as_str())
+    {
+        Some("collapsed") => Detail::Collapsed,
+        Some("summary") => Detail::Summary,
+        Some("expanded") => Detail::Expanded,
+        _ => saved_detail(home, LEGACY_TOOL_DETAILS_KEY),
+    }
+}
+
 /// A Termux resize that changes only the height comes from the on-screen
 /// keyboard; it uses the ordinary frame path instead of rewriting scrollback.
 fn termux_height_only(previous_columns: u16, size: (u16, u16), termux: bool) -> bool {
@@ -6102,7 +6453,10 @@ mod tests {
                     let mut drawn = Drawn::new(size, None, true);
                     drawn.app.fullscreen = fullscreen;
                     drawn.key(KeyCode::Char('/'));
-                    for command in ["/exit", "/keys", "/runtime", "/settings"] {
+                    let commands =
+                        crate::ui::composer::palette::filter_commands("/", drawn.app.context());
+                    for command in commands {
+                        let command = format!("/{}", command.name);
                         let frame = drawn.app.frame(size);
                         let rows = frame.overlay.as_ref().map_or(&frame.live, |o| &o.rows);
                         let width = frame
@@ -6128,7 +6482,7 @@ mod tests {
                         emu.feed(&bytes);
                         let text = emu.rows_text().join("\n");
                         assert!(
-                            text.contains(command),
+                            text.contains(&command),
                             "{size:?} fullscreen={fullscreen}: {text}"
                         );
                         let query = if fullscreen { "> " } else { "› /" };
@@ -6147,6 +6501,414 @@ mod tests {
             }
         }
         i18n::set(i18n::Locale::En);
+    }
+
+    /// From the smallest size the App gives a panel to the panel's own full
+    /// height, in both layouts: the composer's rows stay on the screen, the
+    /// panel never draws more rows than its budget and draws nothing under
+    /// two rows, and it ends above the composer. A drawn panel keeps the
+    /// hint's closing key and, whenever it has a list row, the selected
+    /// entry. The panel with notes keeps its first three list rows while it
+    /// can still show a note.
+    #[test]
+    fn list_panels_keep_their_row_budget_on_short_screens() {
+        use crate::model::session::{
+            ActionKind, Area, ExecutionSnapshot, ManagementAction, ManagementEntry,
+            ManagementGroup, ManagementReply, ManagementRequest, ManagementResult, ManagementView,
+            SessionItem,
+        };
+        use crate::model::view::{LineState, LineView, ViewSnapshot};
+        use crate::ui::render::panel::{strip_escapes, visible_width};
+
+        let sessions = || {
+            let mut panel = SessionsPanel::new(false);
+            panel.set_items(Ok((0..11)
+                .map(|i| SessionItem {
+                    id: format!("s{i}"),
+                    title: Some(format!("item{i}")),
+                    preview: None,
+                    cwd: "/work".into(),
+                    updated_at: u64::MAX,
+                    model: "p/m".into(),
+                    origin: None,
+                })
+                .collect()));
+            Prompt::Sessions(panel)
+        };
+        let workflow = || {
+            let mut panel = ManagementPanel::new(Area::Workflow, None);
+            panel.set_result(&ManagementReply {
+                request: ManagementRequest {
+                    area: Area::Workflow,
+                    action: ManagementAction::List,
+                },
+                result: ManagementResult::View {
+                    view: Box::new(ManagementView {
+                        actions: vec![ActionKind::Reload],
+                        groups: vec![ManagementGroup {
+                            heading: "user".into(),
+                            entries: vec![ManagementEntry {
+                                id: "cleanup".into(),
+                                label: "cleanup".into(),
+                                detail: vec!["Runs first.".into()],
+                                enabled: Some(true),
+                                states: Vec::new(),
+                                actions: vec![ActionKind::Toggle],
+                                remove_verb: Default::default(),
+                                document: None,
+                                run: None,
+                            }],
+                        }],
+                        ..ManagementView::default()
+                    }),
+                    note: None,
+                },
+            });
+            Prompt::Management(Box::new(panel))
+        };
+        let lines = || {
+            let snapshot = ViewSnapshot {
+                session_id: "s1".into(),
+                projection_id: 3,
+                focus: "b-7c".into(),
+                lines: vec![
+                    LineView {
+                        id: "main".into(),
+                        parent: None,
+                        purpose: String::new(),
+                        state: LineState::Main,
+                        cut: None,
+                    },
+                    LineView {
+                        id: "b-7c".into(),
+                        parent: Some("main".into()),
+                        purpose: "parser race".into(),
+                        state: LineState::Working,
+                        cut: None,
+                    },
+                ],
+                ..ViewSnapshot::default()
+            };
+            let mut panel = LinesPanel::new(&snapshot);
+            let key = |code| {
+                crate::ui::terminal::KeyEvent::new(code, crate::ui::terminal::Modifiers::NONE)
+            };
+            panel.handle_key(key(KeyCode::Char('x')));
+            Prompt::Lines(Box::new(panel))
+        };
+        let isolation = || {
+            let mut panel = crate::ui::isolation_panel::IsolationPanel::new();
+            panel.set_snapshot(Ok(ExecutionSnapshot {
+                revision: "r1".into(),
+                sandbox: false,
+                network: false,
+            }));
+            Prompt::Isolation(Box::new(panel))
+        };
+        let render = |prompt: &Prompt, app: &App, width: usize, rows: usize| match prompt {
+            Prompt::Sessions(panel) => panel.render(width, rows, &app.palette),
+            Prompt::Management(panel) => panel.render(width, rows, &app.palette),
+            Prompt::Lines(panel) => panel.render(width, rows, &app.palette, &app.markdown),
+            Prompt::Isolation(panel) => panel.render(width, rows, &app.palette),
+            _ => unreachable!(),
+        };
+
+        // The composer's rows, from the first row after the dock's blank
+        // line to its bottom border.
+        let composer_rows = |frame: &crate::ui::render::screen::Frame| {
+            let live: Vec<String> = frame.live.iter().map(|row| strip_escapes(row)).collect();
+            let start = frame.dock + 1;
+            let end = (start..live.len())
+                .find(|&row| live[row].trim_start().starts_with('╰'))
+                .unwrap_or(live.len() - 1);
+            end + 1 - start
+        };
+
+        let sweep = |fullscreen: bool,
+                     open: &dyn Fn() -> Prompt,
+                     title: &str,
+                     selected: &str,
+                     keys: &str,
+                     notes: bool| {
+            let mut drawn = Drawn::new((40, 8), None, true);
+            drawn.app.fullscreen = fullscreen;
+            let mut natural = None;
+            let mut reached = false;
+            let mut budgets = Vec::new();
+            for height in 8..=40u16 {
+                let size = (40, height);
+                // The composer's longest draft: the shortest terminals leave
+                // the panel no rows at all.
+                drawn.app.composer.set_draft("l1\nl2\nl3\nl4\nl5\nl6\nl7");
+                drawn.app.prompt = Some(open());
+                let frame = drawn.app.frame(size);
+                let budget = if fullscreen {
+                    overlay_panel_rows(size.1 as usize, composer_rows(&frame))
+                } else {
+                    live_panel_rows(
+                        crate::ui::render::live_row_budget(
+                            size.1 as usize,
+                            crate::ui::render::screen::MIN_HISTORY_ROWS as usize,
+                        ),
+                        composer_rows(&frame),
+                        1,
+                    )
+                };
+                budgets.push(budget);
+                let live: Vec<String> = frame.live.iter().map(|row| strip_escapes(row)).collect();
+                let mut top = 0;
+                let panel: Vec<String> = if fullscreen {
+                    let overlay = frame
+                        .overlay
+                        .as_ref()
+                        .unwrap_or_else(|| panic!("no overlay for {title}"));
+                    overlay.rows.iter().map(|row| strip_escapes(row)).collect()
+                } else {
+                    match live
+                        .iter()
+                        .rposition(|row| row.contains(&format!("╭─ {title}")))
+                    {
+                        Some(panel_top) => {
+                            top = panel_top;
+                            live[top..live.len() - 1].to_vec()
+                        }
+                        None => Vec::new(),
+                    }
+                };
+                assert!(
+                    panel.len() <= budget,
+                    "{title} {size:?} fullscreen={fullscreen}: {} rows drawn of {budget}: {panel:#?}",
+                    panel.len()
+                );
+                assert_eq!(
+                    panel.is_empty(),
+                    budget < 2,
+                    "{title} {size:?} fullscreen={fullscreen}: a {budget}-row budget drew {} rows: {live:#?}",
+                    panel.len()
+                );
+                if natural.is_none() && !panel.is_empty() {
+                    natural =
+                        Some(render(&open(), &drawn.app, visible_width(&panel[0]), 100).len());
+                }
+                let text = panel.join("\n");
+                if !panel.is_empty() {
+                    assert!(
+                        text.contains(keys),
+                        "{title} {size:?} fullscreen={fullscreen}: the closing key: {text}"
+                    );
+                }
+                if fullscreen {
+                    let dock = frame.live.len() - frame.dock;
+                    let overlay = frame.overlay.as_ref().unwrap().rows.len();
+                    assert!(
+                        overlay + dock <= size.1 as usize,
+                        "{title} {size:?} fullscreen: {overlay} rows and a {dock}-row dock: {text}"
+                    );
+                } else {
+                    assert!(
+                        frame.live.len() <= size.1 as usize,
+                        "{title} {size:?}: {} live rows: {text}",
+                        frame.live.len()
+                    );
+                }
+                if panel.len() >= 3 {
+                    assert!(
+                        panel.iter().any(|row| row.contains(selected)
+                            && !row.contains("End line")
+                            && !row.contains("y end it")),
+                        "{title} {size:?} fullscreen={fullscreen}: the selection: {text}"
+                    );
+                }
+                if notes {
+                    // The first three list rows stay while the notes still
+                    // show a line; the notes give up lines before they do.
+                    let entries = [
+                        "No network",
+                        "Network allowed",
+                        "Save",
+                        "Reset to defaults",
+                        "Reload",
+                    ];
+                    let rows = panel
+                        .iter()
+                        .filter(|row| {
+                            (row.contains("Off") && row.contains("selected"))
+                                || entries.iter().any(|entry| row.contains(entry))
+                        })
+                        .count();
+                    let note = panel.iter().any(|row| row.contains("Applies to"));
+                    assert!(
+                        !note || rows >= 3,
+                        "{title} {size:?} fullscreen={fullscreen}: {rows} list rows beside a note: {text}"
+                    );
+                }
+                if matches!(
+                    drawn.app.prompt,
+                    Some(Prompt::Sessions(_) | Prompt::Lines(_))
+                ) {
+                    // The cursor sits on the `> query` row, or nowhere once
+                    // the panel gave the row up.
+                    let query = panel
+                        .iter()
+                        .position(|row| row.trim_start().starts_with("│ > "));
+                    let caret = if fullscreen {
+                        frame.overlay.as_ref().unwrap().cursor
+                    } else {
+                        frame.cursor
+                    };
+                    assert_eq!(
+                        caret.map(|(row, _)| row as usize),
+                        query.map(|row| row + top),
+                        "{title} {size:?} fullscreen={fullscreen}: the query cursor: {text}"
+                    );
+                }
+                let bytes = if fullscreen {
+                    FullScreen::new(size, true).render(&frame, size, &drawn.app.palette, &drawn.app)
+                } else {
+                    Screen::new(size, true).render(&frame, size)
+                };
+                let mut emu =
+                    crate::ui::render::testterm::Emu::new(size.0 as usize, size.1 as usize);
+                emu.feed(&bytes);
+                let screen = emu.rows_text().join("\n").replace('\0', "");
+                let screen_rows: Vec<&str> = screen.lines().collect();
+                for row in live.iter().skip(frame.dock + 1).take(composer_rows(&frame)) {
+                    let row = row.trim_end();
+                    assert!(
+                        screen_rows.iter().any(|line| line.trim_end() == row),
+                        "{title} {size:?} fullscreen={fullscreen}: the composer row {row:?} is cut: {screen}"
+                    );
+                }
+                if !panel.is_empty() {
+                    assert!(
+                        screen.contains(keys),
+                        "{title} {size:?} fullscreen={fullscreen}: the keys: {screen}"
+                    );
+                }
+                if natural.is_some_and(|natural| panel.len() >= natural) {
+                    reached = true;
+                    break;
+                }
+            }
+            for budget in [0, 1, 2] {
+                assert!(
+                    budgets.contains(&budget),
+                    "{title} fullscreen={fullscreen}: never gave the panel {budget} rows: {budgets:?}"
+                );
+            }
+            assert!(
+                reached,
+                "{title} fullscreen={fullscreen}: never reached {natural:?}"
+            );
+        };
+
+        for fullscreen in [false, true] {
+            sweep(
+                fullscreen,
+                &sessions,
+                "Sessions",
+                "item0",
+                "Esc close",
+                false,
+            );
+            sweep(
+                fullscreen,
+                &workflow,
+                "Workflow",
+                "cleanup",
+                "Esc close",
+                false,
+            );
+            sweep(fullscreen, &lines, "Lines", "b-7c", "y end it", false);
+            sweep(
+                fullscreen,
+                &isolation,
+                "Process isolation",
+                "Off",
+                "Esc close",
+                true,
+            );
+        }
+    }
+
+    /// At the sizes a short screen leaves it, the management panel keeps the
+    /// composer, the selected entry and the key hint, in both layouts.
+    #[test]
+    fn short_management_panels_keep_the_composer_and_key_hint() {
+        use crate::model::session::{
+            ActionKind, Area, ManagementAction, ManagementEntry, ManagementGroup, ManagementReply,
+            ManagementRequest, ManagementResult, ManagementView,
+        };
+        let view = || ManagementView {
+            actions: vec![ActionKind::Reload, ActionKind::Add],
+            groups: vec![ManagementGroup {
+                heading: "user".into(),
+                entries: vec![ManagementEntry {
+                    id: "review-and-fix".into(),
+                    label: "review-and-fix".into(),
+                    detail: vec!["Runs the review first.".into()],
+                    enabled: Some(true),
+                    states: Vec::new(),
+                    actions: vec![
+                        ActionKind::Toggle,
+                        ActionKind::Edit,
+                        ActionKind::Run,
+                        ActionKind::Inspect,
+                    ],
+                    remove_verb: Default::default(),
+                    document: None,
+                    run: None,
+                }],
+            }],
+            ..ManagementView::default()
+        };
+        for fullscreen in [false, true] {
+            for size in [(32, 8), (40, 10), (32, 12)] {
+                let mut drawn = Drawn::new(size, None, true);
+                drawn.app.fullscreen = fullscreen;
+                drawn.app.composer.set_draft("draft");
+                let mut panel = ManagementPanel::new(Area::Workflow, None);
+                panel.set_result(&ManagementReply {
+                    request: ManagementRequest {
+                        area: Area::Workflow,
+                        action: ManagementAction::List,
+                    },
+                    result: ManagementResult::View {
+                        view: Box::new(view()),
+                        note: None,
+                    },
+                });
+                drawn.app.prompt = Some(Prompt::Management(Box::new(panel)));
+                let frame = drawn.app.frame(size);
+                let bytes = if fullscreen {
+                    FullScreen::new(size, true).render(&frame, size, &drawn.app.palette, &drawn.app)
+                } else {
+                    Screen::new(size, true).render(&frame, size)
+                };
+                let mut emu =
+                    crate::ui::render::testterm::Emu::new(size.0 as usize, size.1 as usize);
+                emu.feed(&bytes);
+                let text = emu.rows_text().join("\n").replace('\0', "");
+                assert!(
+                    text.contains("draft"),
+                    "{size:?} fullscreen={fullscreen}: the composer: {text}"
+                );
+                assert!(
+                    text.contains("review"),
+                    "{size:?} fullscreen={fullscreen}: the selected entry: {text}"
+                );
+                assert!(
+                    text.contains("Esc close"),
+                    "{size:?} fullscreen={fullscreen}: the keys: {text}"
+                );
+                if size.0 >= 40 {
+                    assert!(
+                        text.contains("Enter toggle"),
+                        "{size:?} fullscreen={fullscreen}: the action keys: {text}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -6579,115 +7341,52 @@ mod tests {
     }
 
     #[test]
-    fn tool_details_start_collapsed_until_expanded_is_saved() {
-        let home = tempfile::tempdir().unwrap();
-        assert_eq!(
-            saved_detail(home.path(), TOOL_DETAILS_KEY),
-            Detail::Collapsed
-        );
-        assert_eq!(
-            crate::ui::config::write(home.path(), TOOL_DETAILS_KEY, false.into()),
-            None
-        );
-        assert_eq!(
-            saved_detail(home.path(), TOOL_DETAILS_KEY),
-            Detail::Collapsed
-        );
-        assert_eq!(
-            crate::ui::config::write(home.path(), TOOL_DETAILS_KEY, true.into()),
-            None
-        );
-        assert_eq!(
-            saved_detail(home.path(), TOOL_DETAILS_KEY),
-            Detail::Expanded
-        );
+    fn legacy_tool_preferences_survive_until_the_three_state_setting_is_saved() {
+        for (legacy, initial, changed) in [
+            (false, "collapsed", "summary"),
+            (true, "expanded", "collapsed"),
+        ] {
+            let mut drawn = Drawn::new((100, 40), None, true);
+            assert_eq!(
+                crate::ui::config::write(
+                    drawn._home.path(),
+                    LEGACY_TOOL_DETAILS_KEY,
+                    legacy.into()
+                ),
+                None
+            );
+            for expected in [initial, changed] {
+                let theme = test_theme();
+                drawn.app = App::new(
+                    Box::new(Idle),
+                    MarkdownRenderer::new(&theme),
+                    theme.palette,
+                    drawn._home.path().to_path_buf(),
+                    "/work".into(),
+                );
+                drawn.app.open_settings(Setting::ToolDetails);
+                let frame = drawn.app.frame(drawn.size);
+                let settings = crate::ui::render::panel::strip_escapes(&frame.live.join("\n"));
+                assert!(
+                    settings
+                        .lines()
+                        .any(|line| line.contains("Tool details") && line.contains(expected)),
+                    "{settings}"
+                );
+                if expected == initial {
+                    press(&mut drawn.app, KeyCode::Right);
+                    assert_eq!(
+                        crate::ui::config::read(drawn._home.path(), TOOL_DETAILS_KEY),
+                        Some(changed.into())
+                    );
+                }
+            }
+        }
     }
 
     fn test_theme() -> Theme {
         use crate::ui::theme::{Appearance, ColorMode};
         Theme::system(ColorMode::TrueColor, Appearance::Dark, None)
-    }
-
-    #[test]
-    fn model_activity_stays_blue_across_themes_and_terminal_modes() {
-        use crate::ui::theme::{Appearance, ColorMode};
-
-        for (mode, appearance, sgr) in [
-            (
-                ColorMode::TrueColor,
-                Appearance::Dark,
-                "\x1b[38;2;56;189;248m",
-            ),
-            (ColorMode::Ansi256, Appearance::Dark, "\x1b[38;5;75m"),
-            (ColorMode::Ansi16, Appearance::Dark, "\x1b[94m"),
-            (
-                ColorMode::TrueColor,
-                Appearance::Light,
-                "\x1b[38;2;3;105;161m",
-            ),
-            (
-                ColorMode::Ansi256,
-                Appearance::Light,
-                "\x1b[38;2;3;105;161m",
-            ),
-            (ColorMode::Ansi16, Appearance::Light, "\x1b[94m"),
-        ] {
-            let mut drawn = Drawn::new((80, 24), None, true);
-            drawn.app.theme_context = Some(ThemeContext {
-                mode,
-                appearance,
-                background: None,
-                active: "system".into(),
-            });
-            let named = match appearance {
-                Appearance::Dark => "monokai-dark",
-                Appearance::Light => "monokai-light",
-            };
-            for id in ["system", named] {
-                drawn.app.paint_theme(id);
-                for initialized in [true, false] {
-                    let context = (!initialized).then(|| drawn.app.theme_context.take());
-                    for fullscreen in [false, true] {
-                        drawn.app.fullscreen = fullscreen;
-                        for name in ["text", "thinking"] {
-                            let mut projection = crate::projection::Projection::default();
-                            let event = serde_json::from_value(serde_json::json!({
-                                "sequence": 1, "create_at": 1, "type": "step", "name": name,
-                                "data": {"turn_id": "t1", "request_id": "r1", "delta": "Checking the parser."}
-                            }))
-                            .unwrap();
-                            projection.apply("main", &event);
-                            projection.set_running(true);
-                            drawn
-                                .app
-                                .apply(Update::Snapshot(Box::new(projection.snapshot())));
-                            drawn.app.run_started = Some(Instant::now() - Duration::from_secs(42));
-                            let frame = drawn.app.frame((80, 24));
-                            let label = if name == "thinking" {
-                                "thinking…"
-                            } else {
-                                "working…"
-                            };
-                            let row = frame.live.iter().find(|row| row.contains(label)).unwrap();
-                            let start = row
-                                .find(sgr)
-                                .expect("the activity uses the terminal's blue");
-                            let colored = row[start + sgr.len()..].split("\x1b[0m").next().unwrap();
-                            let (pulse, status) = colored.split_once(' ').unwrap();
-                            assert!(["·", "•", "●"].contains(&pulse));
-                            assert_eq!(
-                                status,
-                                format!("{label}  42s"),
-                                "{mode:?}, {appearance:?}, {id}, fullscreen={fullscreen}, initialized={initialized}: {row:?}"
-                            );
-                        }
-                    }
-                    if let Some(context) = context {
-                        drawn.app.theme_context = context;
-                    }
-                }
-            }
-        }
     }
 
     /// A thought only grows while it runs and never shrinks when it
@@ -6774,8 +7473,9 @@ mod tests {
             let settings = screen(&mut drawn);
             assert!(settings.contains("Settings"), "{settings}");
             assert!(settings.contains("Process isolation"), "{settings}");
-            assert!(settings.contains("File access"), "{settings}");
-            assert!(settings.contains("Tool approval"), "{settings}");
+            assert!(settings.contains("Permission"), "{settings}");
+            assert!(!settings.contains("File access"), "{settings}");
+            assert!(!settings.contains("Tool approval"), "{settings}");
             assert!(!settings.contains("Execution"), "{settings}");
             assert!(!settings.contains("Model"), "{settings}");
             drawn.key(KeyCode::Esc);
@@ -6867,8 +7567,33 @@ mod tests {
     }
 
     #[test]
-    fn process_isolation_select_and_save() {
-        use crate::model::session::ExecutionSnapshot;
+    fn the_offer_truncates_to_the_composer_and_hides_below_twenty_columns() {
+        let home = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent)),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        app.apply(Update::SuggestionOffer {
+            turn_id: "turn".into(),
+            text: "run the tests and commit the change".into(),
+        });
+        let live = |app: &mut App, cols: u16, rows: u16| {
+            crate::ui::render::panel::strip_escapes(&app.frame((cols, rows)).live.join("\n"))
+        };
+        assert!(live(&mut app, 80, 24).contains("run the tests and commit the change"));
+        assert!(live(&mut app, 30, 24).contains("run the tests and co…"));
+        let narrow = live(&mut app, 19, 24);
+        assert!(!narrow.contains("run the tests"), "{narrow}");
+        assert!(narrow.contains("Ask anythi"), "{narrow}");
+    }
+
+    #[test]
+    fn the_prompt_suggestion_row_shows_the_daemons_value_and_writes_the_flip() {
         let home = tempfile::tempdir().unwrap();
         let theme = test_theme();
         let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -6880,37 +7605,94 @@ mod tests {
             "/work".into(),
         );
         let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
+        app.apply(Update::SuggestionMethods(true));
         app.run_command("settings", "");
-        for _ in 0..10 {
+        assert!(matches!(
+            sent.borrow().first(),
+            Some(Command::ReadSuggestionSetting)
+        ));
+        app.apply(Update::SuggestionSetting(Ok(SuggestionSetting {
+            revision: "r1".into(),
+            document: dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettings {
+                enabled: false,
+                max_chars: 80,
+            },
+        })));
+        let row = |app: &mut App| {
+            let live =
+                crate::ui::render::panel::strip_escapes(&app.frame((100, 40)).live.join("\n"));
+            let line = live
+                .lines()
+                .find(|line| line.contains("Prompt suggestion"))
+                .expect("the switch's row")
+                .to_owned();
+            line.split("Prompt suggestion")
+                .nth(1)
+                .expect("the row's value")
+                .trim_start()
+                .to_owned()
+        };
+        assert!(row(&mut app).starts_with("off"));
+        for _ in 0..8 {
             app.handle_input(key(KeyCode::Down));
         }
         app.handle_input(key(KeyCode::Enter));
-        assert!(matches!(sent.borrow().last(), Some(Command::ReadIsolation)));
-        app.apply(Update::Isolation(Ok(ExecutionSnapshot {
-            revision: "r1".into(),
-            sandbox: false,
-            network: false,
-        })));
-        app.handle_input(key(KeyCode::Down));
-        app.handle_input(key(KeyCode::Enter));
-        app.handle_input(key(KeyCode::Down));
-        app.handle_input(key(KeyCode::Down));
-        app.handle_input(key(KeyCode::Enter));
         assert!(matches!(
             sent.borrow().last(),
-            Some(Command::SaveIsolation {
+            Some(Command::SaveSuggestionSetting {
                 expected_revision,
-                sandbox: true,
-                network: false,
+                enabled: true,
+                max_chars: 80,
             }) if expected_revision == "r1"
         ));
+        app.apply(Update::SuggestionSetting(Ok(SuggestionSetting {
+            revision: "r2".into(),
+            document: dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettings {
+                enabled: true,
+                max_chars: 80,
+            },
+        })));
+        assert!(row(&mut app).starts_with("on"));
+    }
+
+    /// A read that fails shows that the source is unavailable rather than a
+    /// value the client invented.
+    #[test]
+    fn a_failed_suggestion_read_shows_no_value() {
+        let home = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent)),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        app.apply(Update::SuggestionMethods(true));
+        app.run_command("settings", "");
+        app.apply(Update::SuggestionSetting(Err(
+            "prompt suggestion settings: missing field `maxChars`".into(),
+        )));
+        let live = crate::ui::render::panel::strip_escapes(&app.frame((100, 40)).live.join("\n"));
+        let row = live
+            .lines()
+            .find(|line| line.contains("Prompt suggestion"))
+            .expect("the switch's row");
+        assert!(
+            row.contains(t("Not available")),
+            "the row shows a value: {row}"
+        );
     }
 
     #[test]
-    fn permission_controls_refresh_the_full_policy_and_keep_their_own_fields() {
-        use crate::permission::Change;
-        use dim_agent_types::{FileAccess, PermissionPolicy, PermissionPreset, ToolApproval};
-        for fullscreen in [false, true] {
+    fn process_isolation_select_and_save() {
+        use crate::model::session::ExecutionSnapshot;
+        for (command, steps, via_permissions) in [
+            ("settings", 10, false),
+            ("permissions", 4, false),
+            ("settings", 8, true),
+        ] {
             let home = tempfile::tempdir().unwrap();
             let theme = test_theme();
             let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -6921,174 +7703,43 @@ mod tests {
                 home.path().to_path_buf(),
                 "/work".into(),
             );
-            app.fullscreen = fullscreen;
             let key =
                 |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
-            for alias in ["permissions", "approvals", "approval"] {
-                app.run_command(alias, "");
-                app.handle_input(key(KeyCode::Tab));
-                app.handle_input(key(KeyCode::BackTab));
-                app.handle_input(key(KeyCode::Tab));
-                app.handle_input(key(KeyCode::Enter));
-                let rendered = app.frame((64, 40));
-                let frame = rendered
-                    .overlay
-                    .as_ref()
-                    .map_or(&rendered.live, |overlay| &overlay.rows)
-                    .join("\n");
-                assert!(frame.find("Bypass").unwrap() < frame.find("Hint:").unwrap());
-                assert_eq!(frame.matches("Hint:").count(), 1);
-                app.handle_input(key(KeyCode::Enter));
-                assert!(matches!(
-                    sent.borrow().last(),
-                    Some(Command::SetPermission(Change::ToolApproval(
-                        ToolApproval::Ask
-                    )))
-                ));
+            app.run_command(command, "");
+            for _ in 0..steps {
+                app.handle_input(key(KeyCode::Down));
             }
-            app.run_command("permissions", "");
-            app.apply(Update::Permissions(Ok(PermissionPolicy {
-                preset: PermissionPreset::ReadOnly,
-                file_access: Some(FileAccess::Unrestricted),
-                tool_approval: Some(ToolApproval::Bypass),
-                allowed_tools: vec!["read".into()],
-                disallowed_tools: vec!["blocked".into()],
-            })));
             app.handle_input(key(KeyCode::Enter));
-            for width in [40, 64, 112] {
-                let rendered = app.frame((width, 40));
-                let lines: Vec<_> = rendered
-                    .overlay
-                    .as_ref()
-                    .map_or(&rendered.live, |overlay| &overlay.rows)
-                    .iter()
-                    .map(|line| crate::ui::render::panel::strip_escapes(line))
-                    .collect();
-                let hint = lines
-                    .iter()
-                    .position(|line| line.contains("Hint:"))
-                    .unwrap();
-                assert!(
-                    lines[..hint]
-                        .iter()
-                        .any(|line| line.contains("Unrestricted"))
-                );
-                assert!(lines[hint - 1].trim().trim_matches('│').trim().is_empty());
-                let text = lines
-                    .iter()
-                    .map(|line| line.trim().trim_matches('│').trim())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                assert!(text.contains("Read only: no writes."));
-                assert!(text.contains("writes inside; asks outside."));
-                assert!(text.contains("System and session files stay protected."));
-                assert!(text.contains("Tool approval still applies."));
+            if via_permissions {
+                for _ in 0..4 {
+                    app.handle_input(key(KeyCode::Down));
+                }
+                app.handle_input(key(KeyCode::Enter));
             }
-            app.handle_input(key(KeyCode::Up));
+            assert!(matches!(sent.borrow().last(), Some(Command::ReadIsolation)));
+            app.apply(Update::Isolation(Ok(ExecutionSnapshot {
+                revision: "r1".into(),
+                sandbox: false,
+                network: false,
+            })));
+            app.handle_input(key(KeyCode::Down));
+            app.handle_input(key(KeyCode::Enter));
+            app.handle_input(key(KeyCode::Down));
+            app.handle_input(key(KeyCode::Down));
             app.handle_input(key(KeyCode::Enter));
             assert!(matches!(
                 sent.borrow().last(),
-                Some(Command::SetPermission(Change::FileAccess(
-                    FileAccess::WorkspaceReadWrite
-                )))
-            ));
-            assert_eq!(app.permission_policy.preset, PermissionPreset::ReadOnly);
-            assert_eq!(
-                app.permission_policy.tool_approval,
-                Some(ToolApproval::Bypass)
-            );
-            assert_eq!(app.permission_policy.disallowed_tools, ["blocked"]);
-            std::fs::write(
-                home.path().join("config.json"),
-                r#"{"permissionPreset":"read-only","toolApproval":"bypass","kept":true}"#,
-            )
-            .unwrap();
-            app.apply(Update::PermissionSelected(Change::FileAccess(
-                FileAccess::WorkspaceReadWrite,
-            )));
-            let saved: serde_json::Value = serde_json::from_str(
-                &std::fs::read_to_string(home.path().join("config.json")).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(
-                saved,
-                serde_json::json!({"permissionPreset":"read-only","toolApproval":"bypass","fileAccess":"workspace-read-write","kept":true})
-            );
-            app.apply(Update::PermissionSelected(Change::ToolApproval(
-                ToolApproval::Ask,
-            )));
-            let saved: serde_json::Value = serde_json::from_str(
-                &std::fs::read_to_string(home.path().join("config.json")).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(
-                saved,
-                serde_json::json!({"permissionPreset":"read-only","toolApproval":"ask","fileAccess":"workspace-read-write","kept":true})
-            );
-            app.open_settings(Setting::Approvals);
-            app.apply(Update::Permissions(Ok(PermissionPolicy {
-                preset: PermissionPreset::ReadOnly,
-                file_access: Some(FileAccess::ReadOnly),
-                tool_approval: Some(ToolApproval::Ask),
-                ..Default::default()
-            })));
-            let rendered = app.frame((112, 40));
-            let frame = rendered
-                .overlay
-                .as_ref()
-                .map_or(&rendered.live, |overlay| &overlay.rows)
-                .join("\n");
-            assert!(frame.contains("Read only") && !frame.contains("Unrestricted"));
-            assert!(frame.contains("Ask") && !frame.contains("Bypass"));
-            app.handle_input(key(KeyCode::Enter));
-            let rendered = app.frame((112, 40));
-            let frame = rendered
-                .overlay
-                .as_ref()
-                .map_or(&rendered.live, |overlay| &overlay.rows)
-                .join("\n");
-            assert!(
-                frame.contains("Bypass"),
-                "Settings retains the Tool approval selection"
-            );
-            app.handle_input(key(KeyCode::Esc));
-            app.handle_input(key(KeyCode::Esc));
-            app.apply(Update::Snapshot(Box::new(ViewSnapshot {
-                session_id: "s1".into(),
-                approvals: vec![crate::model::view::ApprovalView {
-                    member: None,
-                    request_id: "pending-exec".into(),
-                    branch_id: "main".into(),
-                    reason: "shell command".into(),
-                    tool_name: "exec".into(),
-                    tool_input: serde_json::json!({"command":"npm test"}),
-                    always: None,
-                }],
-                ..Default::default()
-            })));
-            app.handle_input(key(KeyCode::BackTab));
-            app.handle_input(key(KeyCode::Enter));
-            assert!(matches!(app.prompt, Some(Prompt::Approvals(_))));
-            app.handle_input(key(KeyCode::Down));
-            app.handle_input(key(KeyCode::Down));
-            app.handle_input(key(KeyCode::Enter));
-            app.apply(Update::Isolation(Ok(
-                crate::model::session::ExecutionSnapshot {
-                    revision: "r1".into(),
-                    sandbox: false,
+                Some(Command::SaveIsolation {
+                    expected_revision,
+                    sandbox: true,
                     network: false,
-                },
-            )));
-            let rendered = app.frame((112, 34));
-            let frame = rendered
-                .overlay
-                .as_ref()
-                .map_or(&rendered.live, |overlay| &overlay.rows)
-                .join("\n");
-            assert!(frame.contains("commands use your OS permissions, not file-tool limits."));
-            assert!(frame.find("Reload").unwrap() < frame.find("Hint:").unwrap());
-            app.handle_input(key(KeyCode::Esc));
-            assert!(matches!(app.prompt, Some(Prompt::Approvals(_))));
+                }) if expected_revision == "r1"
+            ));
+            app.apply(Update::Isolation(Ok(ExecutionSnapshot {
+                revision: "r2".into(),
+                sandbox: true,
+                network: false,
+            })));
             app.handle_input(key(KeyCode::Esc));
             let rendered = app.frame((112, 40));
             let frame = rendered
@@ -7096,21 +7747,69 @@ mod tests {
                 .as_ref()
                 .map_or(&rendered.live, |overlay| &overlay.rows)
                 .join("\n");
-            assert!(
-                frame.contains("npm test"),
-                "The pending approval returns without another snapshot"
-            );
-            app.handle_input(key(KeyCode::Enter));
-            assert!(matches!(
-                sent.borrow().last(),
-                Some(Command::Approval { request_id, .. }) if request_id == "pending-exec"
-            ));
+            let parent = if command == "permissions" || via_permissions {
+                "Command rules"
+            } else {
+                "Settings"
+            };
+            assert!(frame.contains(parent), "{frame}");
+            if via_permissions {
+                app.handle_input(key(KeyCode::Esc));
+                assert!(matches!(app.prompt, Some(Prompt::Settings(_))));
+            }
         }
     }
 
-    /// A picked message opens a line of the shown line with the submitted
-    /// text, and forks only `main`, after a confirmation, carrying the text
-    /// into the fork (timeline UI §4.2, §4.3).
+    #[test]
+    fn a_permission_choice_applies_the_preset_and_keeps_it_for_new_sessions() {
+        use dim_agent_types::{PermissionPolicy, PermissionPreset};
+        let home = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent.clone())),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
+        app.apply(Update::Permissions(Ok(PermissionPolicy {
+            preset: PermissionPreset::ReadOnly,
+            allowed_tools: vec!["read".into()],
+            disallowed_tools: vec!["blocked".into()],
+        })));
+        app.run_command("permissions", "");
+        let rendered = app.frame((112, 40));
+        let frame = rendered
+            .overlay
+            .as_ref()
+            .map_or(&rendered.live, |overlay| &overlay.rows)
+            .join("\n");
+        for line in [
+            "Read only",
+            "Workspace write",
+            "Full access",
+            "The preset fixes the path boundary",
+        ] {
+            assert!(frame.contains(line), "{line} is missing: {frame}");
+        }
+        assert!(!frame.contains("File access"), "{frame}");
+        app.handle_input(key(KeyCode::Down));
+        app.handle_input(key(KeyCode::Enter));
+        assert!(matches!(
+            sent.borrow().last(),
+            Some(Command::SetPermission(PermissionPreset::WorkspaceWrite))
+        ));
+        app.apply(Update::PermissionSelected(PermissionPreset::WorkspaceWrite));
+        let saved: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(home.path().join("config.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved, serde_json::json!({"permission":"workspace-write"}));
+        assert_eq!(app.permission_policy.disallowed_tools, ["blocked"]);
+    }
+
     #[test]
     fn a_picked_message_opens_a_line_or_forks_main() {
         let home = tempfile::tempdir().unwrap();
@@ -7163,18 +7862,29 @@ mod tests {
 
         app.apply(snapshot("b-7c"));
         app.ask_fork(4, "from a line".into(), Some("try RwLock".into()));
-        assert!(app.fork_confirm.is_none(), "a fork copies main only");
+        assert!(
+            !matches!(app.prompt, Some(Prompt::Fork(_))),
+            "a fork copies main only"
+        );
         app.apply(snapshot("main"));
         app.ask_fork(4, String::new(), None);
-        assert!(app.place_label().contains("after the last turn"));
+        assert!(
+            app.frame((80, 30))
+                .live
+                .join("\n")
+                .contains("after the last turn")
+        );
         app.handle_input(key(KeyCode::Char('n')));
         app.ask_fork(4, "try RwLock".into(), Some("try RwLock".into()));
         assert!(
-            app.place_label().contains("before “try RwLock”"),
+            app.frame((80, 30))
+                .live
+                .join("\n")
+                .contains("before “try RwLock”"),
             "the question names the message"
         );
         app.handle_input(key(KeyCode::Char('n')));
-        assert!(app.fork_confirm.is_none());
+        assert!(app.prompt.is_none());
         let count = sent.borrow().len();
         app.ask_fork(4, "try RwLock".into(), Some("try RwLock".into()));
         app.handle_input(key(KeyCode::Char('y')));
@@ -8090,6 +8800,61 @@ mod tests {
         }
     }
 
+    /// The palette lists the Session's enabled, unshadowed Skills, and a row
+    /// completes its marker without sending.
+    #[test]
+    fn the_palette_lists_enabled_unshadowed_skills() {
+        use crate::management::skills::Entry;
+        let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
+        let (mut app, sent, _home) = session_with_queue(false, &[]);
+        let entry = |name: &str, enabled: bool, shadowed_by: Option<&str>| Entry {
+            id: format!("user:{name}"),
+            source: Some("user".into()),
+            name: name.into(),
+            description: format!("About {name}"),
+            file_path: format!("/home/.agents/skills/{name}/SKILL.md"),
+            enabled,
+            shadowed_by: shadowed_by.map(str::to_owned),
+        };
+        app.apply(Update::Skills(vec![
+            entry("commit", true, None),
+            entry("deploy", false, None),
+            entry("shadowed", true, Some("user:shadowed")),
+            entry("two words", true, None),
+        ]));
+        typed(&mut app, "/comm");
+        assert!(matches!(app.handle(key(KeyCode::Enter)), Outcome::Continue));
+        assert_eq!(app.composer.text(), "$skill: commit ");
+        assert!(
+            sent.borrow().is_empty(),
+            "the marker is a draft, not a message"
+        );
+        app.composer.clear();
+        typed(&mut app, "/dep");
+        app.handle(key(KeyCode::Tab));
+        assert_eq!(
+            app.composer.text(),
+            "/dep",
+            "a disabled Skill is not offered"
+        );
+        app.composer.clear();
+        typed(&mut app, "/sha");
+        app.handle(key(KeyCode::Tab));
+        assert_eq!(
+            app.composer.text(),
+            "/sha",
+            "a shadowed Skill is not offered"
+        );
+        app.composer.clear();
+        typed(&mut app, "/two");
+        app.handle(key(KeyCode::Tab));
+        assert_eq!(
+            app.composer.text(),
+            "/two",
+            "a name with whitespace cannot be referenced and is not offered"
+        );
+    }
+
     /// A resumed session of `count` user messages `ask N`, each cut at `N`.
     fn resume_asks(drawn: &mut Drawn, count: usize) {
         drawn
@@ -8317,10 +9082,20 @@ mod tests {
                 assert!(
                     settings
                         .lines()
-                        .any(|line| line.contains("Tool details") && line.contains("expanded")),
+                        .any(|line| line.contains("Tool details") && line.contains("summary")),
                     "{settings}"
                 );
                 assert!(settings.lines().any(|line| line.contains("Thinking details") && line.contains("collapsed")), "{settings}");
+                press(&mut reopened, KeyCode::Enter);
+                press(&mut reopened, KeyCode::Esc);
+                let full = strip_escapes(&reopened.reflow_history(100).join("\n"))
+                    + &strip_escapes(&reopened.frame(drawn.size).live.join("\n"));
+                assert_eq!(full.contains("Build succeeded"), !streaming, "{full}");
+                reopened.run_command("tools", "");
+                let folded = strip_escapes(&reopened.reflow_history(100).join("\n"))
+                    + &strip_escapes(&reopened.frame(drawn.size).live.join("\n"));
+                assert!(!folded.contains("cargo check"), "{folded}");
+                assert!(!folded.contains("Inspect the lock lifetime."), "{folded}");
             }
         }
     }
@@ -8474,6 +9249,135 @@ mod tests {
     }
 
     #[test]
+    fn timeline_dialogs_keep_actions_drafts_and_history_in_both_modes() {
+        use crate::ui::render::panel::visible_width;
+
+        for locale in [i18n::Locale::En, i18n::Locale::ZhCn] {
+            i18n::set(locale);
+            for fullscreen in [false, true] {
+                for size in [(32, 12), (48, 24), (80, 24), (120, 40)] {
+                    let mut drawn = Drawn::new(size, None, true);
+                    drawn.app.fullscreen = fullscreen;
+                    resume_asks(&mut drawn, 12);
+                    drawn.app.snapshot.as_mut().unwrap().ended =
+                        Some((45, crate::model::view::TurnEnd::Completed));
+                    let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+                    drawn.app.host = Box::new(Recorder(sent.clone()));
+                    drawn.app.composer.set_draft("unfinished draft");
+                    let mut full = FullScreen::new(size, true);
+                    let mut screen = Screen::new(size, true);
+                    let mut emu =
+                        crate::ui::render::testterm::Emu::new(size.0 as usize, size.1 as usize);
+                    if fullscreen {
+                        let frame = drawn.app.frame(size);
+                        let bytes = full.render(&frame, size, &drawn.app.palette, &drawn.app);
+                        emu.feed(&bytes);
+                        full.scroll_to_top();
+                    }
+                    let mut shown = |app: &mut App| {
+                        let frame = app.frame(size);
+                        let rows = frame.overlay.as_ref().map_or(&frame.live, |o| &o.rows);
+                        assert!(rows.iter().all(|row| visible_width(row) <= size.0 as usize));
+                        if size.0 == 32 && matches!(app.prompt, Some(Prompt::Fork(_))) {
+                            let lines: Vec<_> = rows
+                                .iter()
+                                .map(|row| crate::ui::render::panel::strip_escapes(row))
+                                .collect();
+                            for line in lines
+                                .iter()
+                                .skip_while(|line| !line.trim().starts_with('╭'))
+                                .skip(1)
+                                .take_while(|line| !line.trim().starts_with('╰'))
+                            {
+                                let text = line.trim().trim_matches('│').trim();
+                                assert!(
+                                    !text.is_empty() && text != "…",
+                                    "compact fork dialog has no empty or ellipsis-only rows: {lines:?}"
+                                );
+                            }
+                        }
+                        let bytes = if fullscreen {
+                            full.render(&frame, size, &app.palette, app)
+                        } else {
+                            screen.render(&frame, size)
+                        };
+                        emu.feed(&bytes);
+                        emu.rows_text()
+                            .join("\n")
+                            .replace(['\0', '│'], "")
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    };
+                    let before = shown(&mut drawn.app);
+                    drawn.app.run_command("fork", "");
+                    let text = shown(&mut drawn.app);
+                    for label in [t("Fork session"), t("1. Create fork"), t("2. Cancel")] {
+                        assert!(
+                            text.contains(label),
+                            "{size:?} fullscreen={fullscreen}: {text}"
+                        );
+                    }
+                    drawn.key(KeyCode::Char('x'));
+                    assert!(shown(&mut drawn.app).contains(t("2. Cancel")));
+                    drawn.key(KeyCode::Enter);
+                    assert!(sent.borrow().is_empty(), "Enter defaults to cancel");
+                    let after = shown(&mut drawn.app);
+                    assert!(after.contains("unfinished draft"));
+                    if fullscreen {
+                        assert_eq!(after, before, "cancelling restores the scrolled transcript");
+                    }
+                    drawn.app.run_command("timeline", "");
+                    drawn.key(KeyCode::Home);
+                    drawn.key(KeyCode::Down);
+                    drawn.key(KeyCode::Enter);
+                    let text = shown(&mut drawn.app);
+                    assert!(text.contains(t("Timeline actions")), "{text}");
+                    assert!(text.contains(t("Jump to message")), "{text}");
+                    drawn.key(KeyCode::End);
+                    let text = shown(&mut drawn.app);
+                    assert!(text.contains(t("Fork session")), "{text}");
+                    assert!(text.contains(t("Before this message")), "{text}");
+                    assert!(text.contains("#2"), "the selected message is named: {text}");
+                    drawn.key(KeyCode::Enter);
+                    assert!(shown(&mut drawn.app).contains("ask 1"));
+                    drawn.key(KeyCode::Esc);
+                    let text = shown(&mut drawn.app);
+                    assert!(text.contains(t("Timeline actions")), "{text}");
+                    assert!(text.contains(t("Fork session")), "{text}");
+                    drawn.key(KeyCode::Esc);
+                    drawn.key(KeyCode::Enter);
+                    drawn.key(KeyCode::Char('2'));
+                    assert_eq!(drawn.app.composer.text(), "ask 1");
+                    let text = shown(&mut drawn.app);
+                    assert!(!text.contains(t("Timeline actions")), "{text}");
+                    drawn.app.run_command("timeline", "");
+                    drawn.key(KeyCode::Home);
+                    drawn.key(KeyCode::Down);
+                    drawn.key(KeyCode::Enter);
+                    drawn.key(KeyCode::Char('5'));
+                    shown(&mut drawn.app);
+                    drawn.key(KeyCode::Up);
+                    drawn.key(KeyCode::Enter);
+                    shown(&mut drawn.app);
+                    assert!(matches!(
+                        sent.borrow().as_slice(),
+                        [Command::Fork { at: 1, .. }]
+                    ));
+                    assert!(
+                        emu.scrollback
+                            .iter()
+                            .all(|row| !row.contains(t("1. Create fork"))
+                                && !row.contains(t("Timeline actions"))),
+                        "dialogs must not become terminal history"
+                    );
+                }
+            }
+        }
+        i18n::set(i18n::Locale::En);
+    }
+
+    #[test]
     fn a_timeline_jump_in_scrollback_draws_earlier_history_from_the_message() {
         let mut drawn = Drawn::new((80, 40), None, true);
         resume_asks(&mut drawn, 120);
@@ -8489,12 +9393,14 @@ mod tests {
         drawn.key(KeyCode::Down);
         drawn.key(KeyCode::Down);
         drawn.key(KeyCode::Enter);
+        drawn.key(KeyCode::Enter);
         assert!(drawn.app.prompt.is_none(), "a jump closes the panel");
         let text = drawn.transcript();
         let page = text.find("Earlier history").expect("the page is drawn");
         assert!(text[page..].contains("ask 2"), "{text}");
         assert!(!text[page..].contains("ask 1\n"), "{text}");
         drawn.app.run_command("timeline", "");
+        drawn.key(KeyCode::Enter);
         drawn.key(KeyCode::Enter);
         assert_eq!(
             drawn.app.notice.as_ref().map(|(text, _)| text.as_str()),
@@ -8550,6 +9456,7 @@ mod tests {
         drawn.app.run_command("timeline", "");
         drawn.key(KeyCode::Home);
         drawn.key(KeyCode::Down);
+        drawn.key(KeyCode::Enter);
         drawn.key(KeyCode::Enter);
         let picked = drawn
             .app
@@ -8673,6 +9580,40 @@ mod tests {
         let draft = drawn.app.line_draft.as_ref().expect("a line draft");
         assert_eq!((draft.parent.as_str(), draft.at), ("main", 2));
         assert_eq!(drawn.app.composer.text(), "ask 2");
+    }
+
+    /// Editing a message that loaded a Skill prefills the operator's own text,
+    /// so resending does not carry the block and load the Skill twice.
+    #[test]
+    fn editing_a_message_that_loaded_a_skill_prefills_the_operators_text_only() {
+        let mut drawn = Drawn::new((80, 40), None, true);
+        let mut projection = crate::projection::Projection::default();
+        let event: crate::wire::Event = serde_json::from_value(serde_json::json!({
+            "id": "input-1", "sequence": 1, "create_at": 1,
+            "type": "input", "name": "message",
+            "data": {"user": {"content": [
+                {"type": "text", "text": "check the build"},
+                {"type": "text", "text": "<dim-skill name=\"checkin\">\nSkill: checkin\nDescription: D\nFile: /x/SKILL.md\n\nInstructions:\nBODY\n</dim-skill>"},
+            ]}, "mode": "queue"},
+        }))
+        .unwrap();
+        projection.apply("main", &event);
+        let applied: crate::wire::Event = serde_json::from_value(serde_json::json!({
+            "id": "applied-1", "sequence": 2, "create_at": 2,
+            "type": "input", "name": "applied", "data": {"input_id": "input-1"},
+        }))
+        .unwrap();
+        projection.apply("main", &applied);
+        let mut snapshot = projection.snapshot();
+        snapshot.session_id = "s1".into();
+        snapshot.focus = "main".into();
+        snapshot.history_complete = true;
+        drawn.app.apply(Update::Snapshot(Box::new(snapshot)));
+        drawn.draw();
+        drawn.app.run_command("timeline", "");
+        drawn.key(KeyCode::Up);
+        drawn.key(KeyCode::Char('e'));
+        assert_eq!(drawn.app.composer.text(), "check the build");
     }
 
     /// Entering fullscreen lays out only the shown Session's transcript,
@@ -8892,28 +9833,6 @@ mod tests {
     }
 
     #[test]
-    fn the_goodbye_box_lines_up_with_the_welcome_box() {
-        let welcome = boxed(
-            &["Welcome".to_owned()],
-            40,
-            &|e| e.to_owned(),
-            &|_, b| b.to_owned(),
-            None,
-        );
-        let edge = |row: &str| row.find(|c: char| c != ' ');
-        for row in goodbye_panel(Some("session")) {
-            assert_eq!(edge(&row), edge(&welcome[0]), "{row:?}");
-        }
-        let text = |row: &str| row.find(|c: char| c.is_alphanumeric());
-        assert_eq!(
-            text(&goodbye_panel(None)[1]),
-            text(&welcome[1]),
-            "{:?}",
-            goodbye_panel(None)
-        );
-    }
-
-    #[test]
     fn startup_panels_keep_their_greeting_and_width_in_narrow_terminals() {
         let theme = test_theme();
         let opened = WebOpened {
@@ -8934,50 +9853,6 @@ mod tests {
                 assert!(web.contains(t("DIM Web is ready")), "{web}");
             }
         }
-    }
-
-    #[test]
-    fn boxed_rows_have_equal_display_width() {
-        let rows = vec![
-            "plain".to_owned(),
-            "中文 mixed".to_owned(),
-            "\x1b[2mdim\x1b[22m".to_owned(),
-        ];
-        let out = boxed(&rows, 40, &|e| e.to_owned(), &|_, b| b.to_owned(), None);
-        for line in &out {
-            assert_eq!(width_of(line), 38, "{line:?}");
-        }
-        let out = boxed(
-            &rows,
-            40,
-            &|e| e.to_owned(),
-            &|_, b| b.to_owned(),
-            Some(("● working…  3s", &|s| s.to_owned())),
-        );
-        assert!(
-            out[0].starts_with(&format!("{}╭─ ● working…  3s ─", " ".repeat(MARGIN))),
-            "{:?}",
-            out[0]
-        );
-        for line in &out {
-            assert_eq!(width_of(line), 38, "{line:?}");
-        }
-    }
-
-    #[test]
-    fn emoji_sequences_count_as_one_wide_cluster() {
-        assert_eq!(width_of("👨‍👩‍👧"), 2);
-        assert_eq!(width_of("❤️"), 2);
-        assert_eq!(width_of("🇨🇳"), 2);
-        let (cut, used) = clip("ab👨‍👩‍👧cd", 3);
-        assert_eq!((cut.as_str(), used), ("ab", 2), "a cluster is never split");
-        assert_eq!(wrap("a👨‍👩‍👧b", 2), vec!["a", "👨‍👩‍👧", "b"]);
-    }
-
-    #[test]
-    fn wrap_respects_wide_characters() {
-        assert_eq!(wrap("中中中", 4), vec!["中中", "中"]);
-        assert_eq!(wrap("abcd", 2), vec!["ab", "cd"]);
     }
 
     #[test]
@@ -9044,6 +9919,95 @@ mod tests {
         }
     }
 
+    #[test]
+    fn effort_picker_preserves_pending_questions_and_rejects_stale_model_choices() {
+        for fullscreen in [false, true] {
+            let (mut app, sent, _home) = asked();
+            app.fullscreen = fullscreen;
+            app.apply(Update::Ready(Configuration {
+                provider_id: "relay".into(),
+                model_id: "reasoner".into(),
+                model_preferences: None,
+                capability_snapshot: None,
+            }));
+            press(&mut app, KeyCode::Char(' '));
+            let answer = selection(&app);
+            for (result, message) in [
+                (
+                    Err("Reasoning not supported".into()),
+                    "Reasoning not supported",
+                ),
+                (
+                    Ok(crate::configure::EffortChoices {
+                        model: "relay / reasoner".into(),
+                        current: None,
+                        choices: Vec::new(),
+                    }),
+                    "does not advertise",
+                ),
+            ] {
+                let before = sent.borrow().len();
+                typed(&mut app, "/effort");
+                press(&mut app, KeyCode::Enter);
+                assert!(
+                    app.frame((36, 16))
+                        .live
+                        .join("\n")
+                        .contains(t("Loading reasoning efforts…"))
+                );
+                app.apply(Update::EffortChoices(result));
+                press(&mut app, KeyCode::Enter);
+                assert!(app.frame((36, 16)).live.join("\n").contains(message));
+                assert_eq!(sent.borrow().len(), before + 1);
+                press(&mut app, KeyCode::Esc);
+                assert_eq!(selection(&app), answer);
+            }
+
+            for stale in [false, true] {
+                typed(&mut app, "/effort");
+                press(&mut app, KeyCode::Enter);
+                app.apply(Update::EffortChoices(Ok(crate::configure::EffortChoices {
+                    model: "relay / reasoner".into(),
+                    current: Some("high".into()),
+                    choices: vec!["low".into(), "high".into(), "none".into()],
+                })));
+                let frame = app.frame((36, 16));
+                assert!(
+                    frame.overlay.is_none(),
+                    "effort uses the inline AskUser location"
+                );
+                assert!(frame.live.join("\n").contains("› 2 (•) high"));
+                assert!(frame.live.iter().all(|row| width_of(row) <= 36));
+                if stale {
+                    app.apply(Update::Ready(Configuration {
+                        provider_id: "relay".into(),
+                        model_id: "other".into(),
+                        model_preferences: None,
+                        capability_snapshot: None,
+                    }));
+                }
+                let before = sent.borrow().len();
+                press(&mut app, KeyCode::Down);
+                press(&mut app, KeyCode::Enter);
+                assert_eq!(selection(&app), answer);
+                if stale {
+                    assert_eq!(sent.borrow().len(), before);
+                    assert!(app.notice.as_ref().unwrap().0.contains("/effort"));
+                } else {
+                    assert!(
+                        matches!(sent.borrow().last(), Some(Command::Configure(text)) if text == "/effort none")
+                    );
+                }
+            }
+            assert!(!sent.borrow().iter().any(|command| matches!(
+                command,
+                Command::AskAnswers { .. }
+                    | Command::AskCancel { .. }
+                    | Command::SelectModel { .. }
+            )));
+        }
+    }
+
     /// A session with `queued` messages waiting, while a run is in progress
     /// when `running` is set.
     fn session_with_queue(
@@ -9083,6 +10047,38 @@ mod tests {
         (app, sent, home)
     }
 
+    #[test]
+    fn choosing_goal_completes_before_dispatch_in_both_modes() {
+        for fullscreen in [false, true] {
+            for query in ["/go", "/goal"] {
+                for selection in [KeyCode::Enter, KeyCode::Tab] {
+                    for (objective, expected) in [
+                        ("", crate::goal::Request::Show),
+                        (
+                            "fix the failing build",
+                            crate::goal::Request::Objective("fix the failing build".into()),
+                        ),
+                    ] {
+                        let (mut app, sent, _home) = session_with_queue(false, &[]);
+                        app.fullscreen = fullscreen;
+                        typed(&mut app, query);
+                        press(&mut app, selection);
+                        assert!(sent.borrow().is_empty(), "selection must not dispatch");
+                        assert_eq!(app.composer.text(), "/goal ");
+                        assert!(!app.composer.palette_open());
+                        typed(&mut app, objective);
+                        press(&mut app, KeyCode::Enter);
+                        assert!(matches!(
+                            sent.borrow().as_slice(),
+                            [Command::Goal(request)] if *request == expected
+                        ));
+                        assert!(app.composer.is_empty());
+                    }
+                }
+            }
+        }
+    }
+
     fn describe(commands: &[Command]) -> Vec<String> {
         commands
             .iter()
@@ -9093,6 +10089,33 @@ mod tests {
                 _ => "other".into(),
             })
             .collect()
+    }
+
+    /// Tab in the palette only completes, so repeating it never runs a
+    /// command and never exits, in either layout.
+    #[test]
+    fn repeated_tab_in_the_palette_only_completes() {
+        let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
+        for fullscreen in [false, true] {
+            let (mut app, sent, _home) = session_with_queue(false, &[]);
+            app.fullscreen = fullscreen;
+            assert!(matches!(
+                app.handle(key(KeyCode::Char('/'))),
+                Outcome::Continue
+            ));
+            for _ in 0..3 {
+                assert!(matches!(app.handle(key(KeyCode::Tab)), Outcome::Continue));
+                assert_eq!(app.composer.text(), "/new");
+            }
+            assert!(sent.borrow().is_empty(), "Tab ran nothing");
+
+            let (mut app, sent, _home) = session_with_queue(false, &[]);
+            app.fullscreen = fullscreen;
+            typed(&mut app, "/ke");
+            assert!(matches!(app.handle(key(KeyCode::Tab)), Outcome::Continue));
+            assert_eq!(app.composer.text(), "/keys");
+            assert!(sent.borrow().is_empty(), "the key bindings did not open");
+        }
     }
 
     /// During a run Enter queues the draft, and Ctrl+S steers a draft that is

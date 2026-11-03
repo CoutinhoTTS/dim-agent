@@ -14,6 +14,11 @@ dim-app-server process tree (account build `dimcode`, product home set)
         ├── account.* RPC (management)
         ├── Provider service: catalog cache, model credentials
         └── webSearch (rutis service for Web plugin)
+
+DimOAuth independently provides `sessionTitleGenerator` for SessionTitle. That optional named
+service and its cancellation protocol are defined by [SessionTitle](../../../docs/design/plugins/SessionTitle.md#33-generation-routing-and-optional-service).
+Its account request implementation is described in the [runtime contract](runtime-contract.md#session-title-generation).
+It neither extends `ManagedProvider` nor introduces routing in Provider or AuxiliaryModel.
 ```
 
 | Part | Owns |
@@ -41,7 +46,7 @@ dim-app-server process tree (account build `dimcode`, product home set)
 | Principles §1 | A process plugin of the App Server; RPC methods only dispatch to `ManagedProviders`. |
 | ADR 002 D1–D3 | Process scope; its only dependency, FileStorage, is a declared process service. |
 | ADR 002 D4 | Registration is structural (build inputs and product home); there are no business settings. |
-| ADR 002 D5 | Deviation, accepted in review: `ManagedProvider` is a Rust trait, so a non-Rust provider cannot implement it. If one is needed, export the service with `#[rutis::service]` after moving to rutis 0.15. |
+| ADR 002 D5 | `ManagedProvider` retains its accepted Rust-only deviation. The independent `sessionTitleGenerator` service uses a language-neutral request/reply contract and the existing HostDispatch binding. |
 
 ## 4. Requirements raised to mechanism owners
 
@@ -49,4 +54,4 @@ None.
 
 ## Appendix D. Acceptance
 
-`dim_oauth_flow` (device and browser login, identity, catalog projection, leases, usage, logout and revocation, recovery and compare-and-delete, rotation across two processes, TypeScript record compatibility, reset backup and unknown schema), `managed_provider_flow` (host binding and lease release) and `transport_flow::managed_provider` (RPC login and a model request recovered after a 401) run against a local account service, without Node.
+`dim_oauth_flow` (device and browser login, identity, catalog projection, leases, usage, logout and revocation, recovery and compare-and-delete, a fresh grant read without the account lease, rotation across two processes, TypeScript record compatibility, reset backup and unknown schema), `managed_provider_flow` (host binding and lease release) and `transport_flow::managed_provider` (RPC login and a model request recovered after a 401) run against a local account service, without Node.

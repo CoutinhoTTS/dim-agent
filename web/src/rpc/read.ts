@@ -200,18 +200,12 @@ function readPreset(value: unknown, at: string): PermissionPreset {
 
 function readPermissionPolicy(value: unknown, at: string): PermissionPolicy {
   const policy = obj(value, at)
-  const fileAccess = optStr(policy, "fileAccess", at)
-  const toolApproval = optStr(policy, "toolApproval", at)
-  if (fileAccess !== undefined && fileAccess !== "read-only" && fileAccess !== "workspace-read-write" && fileAccess !== "unrestricted") fail(`${at}.fileAccess`, "a file access policy")
-  if (toolApproval !== undefined && toolApproval !== "ask" && toolApproval !== "bypass") fail(`${at}.toolApproval`, "a tool approval policy")
   const list = (key: string) => arr(policy[key], `${at}.${key}`).map((item, index) => {
     if (typeof item !== "string") fail(`${at}.${key}[${index}]`, "a string")
     return item
   })
   return {
     preset: readPreset(policy.preset, `${at}.preset`),
-    ...(fileAccess === undefined ? {} : { fileAccess }),
-    ...(toolApproval === undefined ? {} : { toolApproval }),
     allowedTools: list("allowedTools"),
     disallowedTools: list("disallowedTools"),
   }
@@ -341,6 +335,38 @@ export function readWithdrawResult(value: unknown): WithdrawResult {
   fail(`${at}.status`, "deleted or notHeld")
 }
 
+const SKILL_BLOCK = '<dim-skill name="'
+
+/** A loaded Skill's block names it after the marker (Skills §9). */
+function loadedSkill(text: string): string | undefined {
+  if (!text.startsWith(SKILL_BLOCK)) return undefined
+  const end = text.indexOf('"', SKILL_BLOCK.length)
+  if (end < 0) return undefined
+  return text.slice(SKILL_BLOCK.length, end)
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&amp;", "&")
+}
+
+/**
+ * The operator's own text of a message and the Skills its blocks loaded: a
+ * text block after the first that starts with the marker is a loaded Skill,
+ * shown as one line and never as its instructions.
+ */
+function userText(blocks: unknown, at: string): { text: string; skills: string[] } {
+  const text: string[] = []
+  const skills: string[] = []
+  arr(blocks, at).forEach((item, index) => {
+    const block = obj(item, `${at}[${index}]`)
+    if (block.type !== "text" || typeof block.text !== "string") return
+    const skill = index === 0 ? undefined : loadedSkill(block.text)
+    if (skill === undefined) text.push(block.text)
+    else skills.push(skill)
+  })
+  return { text: text.join("\n"), skills }
+}
+
 function textOf(blocks: unknown, at: string): string {
   return arr(blocks, at).flatMap((item, index) => {
     const block = obj(item, `${at}[${index}]`)
@@ -401,7 +427,8 @@ function content(type: string, name: string, data: Json, at: string): EventConte
         return { kind: "source-input", text, blocks, ...(mode === undefined ? {} : { mode }) }
       }
       const user = obj(data.user, `${at}.user`)
-      return { kind: "input", text: textOf(user.content, `${at}.user.content`), user: readUserInput(user, `${at}.user`), blocks }
+      const { text, skills } = userText(user.content, `${at}.user.content`)
+      return { kind: "input", text, user: readUserInput(user, `${at}.user`), skills: skills.length === 0 ? undefined : skills, blocks }
     }
     case "input/applied":
       return { kind: "input-applied", inputId: str(data, "input_id", at) }

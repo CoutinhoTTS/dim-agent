@@ -8,7 +8,7 @@
 //! │ › node      download  auto on   24.21.0   ready   │
 //! │   python    system    auto on   3.12.15   off     │
 //! │                                                   │
-//! │   4 plugins wait for node: goal, session-title, … │
+//! │   3 plugins wait for node: goal, workflow, … │
 //! ╰─ Enter install or apply · s source · a auto ──────╯
 //! ```
 
@@ -35,31 +35,6 @@ const POLL: Duration = Duration::from_secs(1);
 /// The row names PluginManager's rows wait for, as `plugin.list` reports
 /// them (RuntimeManager §5).
 const RUNTIME_ROWS: [(&str, &str); 2] = [("session-node", "node"), ("py", "python")];
-
-/// Every English key this panel draws through [`t`]; each locale translates
-/// them all.
-#[cfg(test)]
-pub const STRINGS: &[&str] = &[
-    "Plugin runtimes",
-    HINT,
-    HINT_NO_AUTO,
-    ACQUIRING_HINT,
-    FAILED_HINT,
-    "Loading plugin runtimes...",
-    "acquiring",
-    "starting",
-    "down",
-    "failed",
-    "ready",
-    "off",
-    "auto on",
-    "auto off",
-    "1 plugin waits for {runtime}: {names}",
-    "{count} plugins wait for {runtime}: {names}",
-    "show, install or configure the plugin runtimes",
-    "This daemon does not serve plugin runtimes ({version})",
-    "Usage: /runtime [install NAME | source NAME download|system | auto NAME on|off]",
-];
 
 /// The runtime the plugin row waits for, from the rows `plugin.list` names.
 pub fn waited_runtime(item: &PluginItem) -> Option<&'static str> {

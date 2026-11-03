@@ -24,9 +24,10 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 /// program name. This keeps the descriptors the process inherited; a process
 /// `main` enters through [`process_entry`].
 pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::error::Error>> {
-    run_with(args, None)
+    run_with(args, None, |_| {})
 }
 
+/// Installs the host profile with `install` before assembly.
 /// Runs a process that serves the App Server: closes every descriptor above
 /// standard error that the process inherited, then runs [`run_with`].
 ///
@@ -37,10 +38,11 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
 pub fn process_entry(
     args: impl IntoIterator<Item = String>,
     managed_provider: Option<crate::managed_provider::ManagedProviderRow>,
+    install: fn(&mut AgentBuilder),
 ) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(unix)]
     close_inherited_descriptors();
-    run_with(args, managed_provider)
+    run_with(args, managed_provider, install)
 }
 
 /// Closes every descriptor above standard error that this process inherited.
@@ -195,12 +197,14 @@ pub fn product_session_defaults(defaults: &mut dim_agent_runtime::SessionConfig)
 
 /// [`run`] with a managed provider plugin, which an account build's own
 /// executable supplies; it is installed when the server has a product home.
+/// `install` contributes the host's native plugins to the builder before assembly.
 ///
 /// This is an in-process entry that keeps the descriptors the process has
 /// open; a process `main` calls [`process_entry`] instead.
 pub fn run_with(
     args: impl IntoIterator<Item = String>,
     managed_provider: Option<crate::managed_provider::ManagedProviderRow>,
+    install: fn(&mut AgentBuilder),
 ) -> Result<(), Box<dyn std::error::Error>> {
     let argv: Vec<String> = args.into_iter().collect();
     if argv.first().map(String::as_str) == Some("--connect-pipe") {
@@ -503,8 +507,10 @@ pub fn run_with(
                         }),
                 );
             }
+            dim_agent_capabilities::prompt_suggestion::install(&mut builder);
             collaboration::install(&mut builder);
             dim_agent_questions::install(&mut builder);
+            install(&mut builder);
         } else if mock_model {
             defaults::install(&mut builder);
             defaults::mock_model_hosts(&mut builder);

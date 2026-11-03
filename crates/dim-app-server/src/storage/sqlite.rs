@@ -15,7 +15,7 @@ use std::{
 };
 
 /// The native store format this daemon creates and opens.
-pub const FORMAT: u32 = 31;
+pub const FORMAT: u32 = 33;
 /// The oldest schema the startup transaction upgrades: the first step of
 /// `UPGRADES`, which is ordered oldest first.
 const MIN_FORMAT: u32 = UPGRADES[0].0;
@@ -29,14 +29,32 @@ const WAL_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
 /// store with 2,300 Sessions put their hot tail pages (about 20 MB) in cache
 /// from 32 MiB on; larger caches read no fewer bytes.
 const PAGE_CACHE_KIB: i64 = 32 * 1024;
-const LEGACY_BY_END: (&str, &str) = (
-    "timeline_events_by_end",
-    "CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence)",
-);
+/// Indexes a format range had and the current schema no longer creates, with
+/// the first and last format that had them.
+const LEGACY_INDEXES: &[(&str, &str, u32, u32)] = &[
+    (
+        "timeline_events_by_end",
+        "CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence)",
+        13,
+        24,
+    ),
+    (
+        "timeline_events_render",
+        "CREATE INDEX timeline_events_render ON timeline_events(session_id, branch_id, sequence) WHERE context_render = 1",
+        31,
+        31,
+    ),
+    (
+        "timeline_events_state",
+        "CREATE INDEX timeline_events_state ON timeline_events(session_id, branch_id, sequence) WHERE context_state = 1",
+        31,
+        31,
+    ),
+];
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 31))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 33))",
     ),
     (
         "settings_documents",
@@ -103,12 +121,8 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
         "CREATE INDEX timeline_events_by_id ON timeline_events(session_id, event_id) WHERE event_id IS NOT NULL",
     ),
     (
-        "timeline_events_render",
-        "CREATE INDEX timeline_events_render ON timeline_events(session_id, branch_id, sequence) WHERE context_render = 1",
-    ),
-    (
-        "timeline_events_state",
-        "CREATE INDEX timeline_events_state ON timeline_events(session_id, branch_id, sequence) WHERE context_state = 1",
+        "timeline_events_context",
+        "CREATE INDEX timeline_events_context ON timeline_events(session_id, branch_id, sequence) WHERE context_render = 1 OR context_state = 1",
     ),
     (
         "timeline_events_positions",
@@ -141,6 +155,18 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "session_output_owners_by_path",
         "CREATE INDEX session_output_owners_by_path ON session_output_owners(path)",
+    ),
+    (
+        "worktree_directories",
+        "CREATE TABLE worktree_directories (repository TEXT NOT NULL, root TEXT NOT NULL, PRIMARY KEY (repository, root))",
+    ),
+    (
+        "session_worktrees",
+        "CREATE TABLE session_worktrees (session_id TEXT NOT NULL REFERENCES agent_sessions(session_id), repository TEXT NOT NULL, root TEXT NOT NULL, subtree TEXT NOT NULL, PRIMARY KEY (session_id, repository, root), FOREIGN KEY (repository, root) REFERENCES worktree_directories(repository, root))",
+    ),
+    (
+        "session_worktrees_by_directory",
+        "CREATE INDEX session_worktrees_by_directory ON session_worktrees(repository, root, session_id)",
     ),
     (
         "session_metadata",
@@ -186,7 +212,7 @@ ALTER TABLE timeline_events ADD COLUMN context_state INTEGER NOT NULL DEFAULT 0;
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 17] = [
+const UPGRADES: [(u32, &[&str]); 19] = [
     (
         13,
         &[
@@ -239,13 +265,18 @@ const UPGRADES: [(u32, &[&str]); 17] = [
     // #557: a Session's creation origin; the column only, and the step fills
     // in the rows whose leader link already records one.
     (29, &[]),
-    // #708: the two reading switches on timeline events.
+    // #708: the two reading switches on timeline events; v32 keeps the
+    // switch columns and the position index, and replaces the two
+    // reading-switch indexes with one.
+    (30, &["timeline_events_positions"]),
+    // #605: one partial index over both reading switches replaces the two.
+    (31, &["timeline_events_context"]),
     (
-        30,
+        32,
         &[
-            "timeline_events_render",
-            "timeline_events_state",
-            "timeline_events_positions",
+            "worktree_directories",
+            "session_worktrees",
+            "session_worktrees_by_directory",
         ],
     ),
 ];
@@ -260,13 +291,19 @@ fn format_table(version: u32) -> String {
 fn schema_of(version: u32) -> Vec<(&'static str, String)> {
     SCHEMA
         .iter()
-        .chain((version <= 24).then_some(&LEGACY_BY_END))
+        .copied()
+        .chain(
+            LEGACY_INDEXES
+                .iter()
+                .filter(|(_, _, from, through)| *from <= version && version <= *through)
+                .map(|&(name, sql, _, _)| (name, sql)),
+        )
         .filter(|(name, _)| {
             !UPGRADES
                 .iter()
                 .any(|(from, added)| *from >= version && added.contains(name))
         })
-        .map(|&(name, sql)| {
+        .map(|(name, sql)| {
             let sql = match name {
                 "agent_store_format" => format_table(version),
                 "agent_sessions" if version < 27 => AGENT_SESSIONS_BEFORE_V27.to_owned(),
@@ -291,29 +328,53 @@ fn same_schema(actual: &[(String, String)], mut expected: Vec<(&str, String)>) -
                 name == expected_name && *sql == expected_sql
             })
 }
-/// The read index the daemon creates at open (session-history-window §5.1).
-/// It carries no data and no decode rule, so it is not part of the format:
-/// `schema` and the format gate ignore it, and every open recreates it.
-const DERIVED_INDEX: (&str, &str) = (
-    "timeline_history_anchors",
-    "CREATE INDEX IF NOT EXISTS timeline_history_anchors ON timeline_events(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'input/message')",
-);
+/// The read indexes the daemon creates at open: the latest-turn window's
+/// ([session-history-window §5.1](../../../../docs/design/appserver/session-history-window.md#51-the-derived-index)),
+/// the policy window's turn starts, and the event query's by kind, which carries
+/// the event id so a kind read needs no table body for it (ADR 019 D4). They
+/// carry no data and no decode rule, so they are not part of the format: `schema`
+/// and the format gate ignore them, and every open recreates them.
+const DERIVED_INDEXES: &[(&str, &str)] = &[
+    (
+        "timeline_history_anchors",
+        "CREATE INDEX IF NOT EXISTS timeline_history_anchors ON timeline_events(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'input/message')",
+    ),
+    (
+        "timeline_events_by_kind",
+        "CREATE INDEX IF NOT EXISTS timeline_events_by_kind ON timeline_events(session_id, branch_id, kind, sequence, event_id)",
+    ),
+    (
+        "timeline_policy_turns",
+        "CREATE INDEX IF NOT EXISTS timeline_policy_turns ON timeline_events(session_id, branch_id, kind, sequence, event_id) WHERE kind = 'turn/start'",
+    ),
+];
 /// The schema objects of `connection`'s database that belong to the format,
 /// sorted by name.
 fn schema(connection: &Connection) -> Result<Vec<(String, String)>> {
+    let derived = DERIVED_INDEXES
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>();
+    let placeholders = vec!["?"; derived.len()].join(",");
     let mut query = connection
-        .prepare(
+        .prepare(&format!(
             "SELECT name, sql FROM sqlite_master \
-             WHERE name NOT LIKE 'sqlite_%' AND name != ?1 ORDER BY name",
-        )
+             WHERE name NOT LIKE 'sqlite_%' AND name NOT IN ({placeholders}) ORDER BY name"
+        ))
         .map_err(storage)?;
-    query
-        .query_map(rusqlite::params![DERIVED_INDEX.0], |row| {
+    let objects = query
+        .query_map(rusqlite::params_from_iter(derived), |row| {
             Ok((row.get(0)?, row.get(1)?))
         })
         .map_err(storage)?
-        .collect::<rusqlite::Result<_>>()
-        .map_err(storage)
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(storage)?;
+    Ok(objects
+        .into_iter()
+        .filter(|(name, _): &(String, String)| {
+            !DERIVED_INDEXES.iter().any(|(derived, _)| derived == name)
+        })
+        .collect())
 }
 /// The format whose exact schema `actual` is: the current format, or one an
 /// upgrade step starts from.
@@ -612,6 +673,12 @@ impl SqliteStorage {
                         ))
                         .map_err(storage)?;
                     }
+                    if *from == 31 && version == 31 {
+                        tx.execute_batch(
+                            "DROP INDEX timeline_events_render; DROP INDEX timeline_events_state",
+                        )
+                        .map_err(storage)?;
+                    }
                     for (_, sql) in SCHEMA.iter().filter(|(name, _)| added.contains(name)) {
                         tx.execute_batch(sql).map_err(storage)?;
                     }
@@ -650,7 +717,9 @@ impl SqliteStorage {
                 path.display()
             )));
         }
-        tx.execute_batch(DERIVED_INDEX.1).map_err(storage)?;
+        for (_, sql) in DERIVED_INDEXES {
+            tx.execute_batch(sql).map_err(storage)?;
+        }
         tx.commit().map_err(storage)?;
         connection
             .pragma_update(None, "journal_mode", "WAL")

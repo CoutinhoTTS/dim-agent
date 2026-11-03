@@ -1,6 +1,7 @@
 pub mod adapters;
 pub mod agent_loop;
 pub mod approval;
+pub mod auxiliary_model;
 pub(crate) mod branch_input;
 pub mod context_block;
 pub mod context_methods;
@@ -27,6 +28,7 @@ pub mod prompt_guide;
 pub mod prompt_registry;
 pub mod prompt_sources;
 pub mod prompt_state;
+pub mod prompt_suggestion;
 pub mod recall;
 pub mod session_broadcast;
 pub mod session_grants;
@@ -85,6 +87,7 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<input_queue::SubmitChecks>(catalog, session);
     register::<session_grants::SessionGrantsHost>(catalog, session);
     register::<file_access::FileAccessFacts>(catalog, session);
+    register::<file_access::WorktreeAssociations>(catalog, None);
     register::<methods::SessionMethods>(catalog, session);
     let branch = Some(BRANCH_GROUP);
     register::<input_queue::InputQueue>(catalog, branch);

@@ -36,6 +36,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `partRegistry` | process | PartRegistry | yes | `registerDefinition` async |
 | `pluginFiles` | process | PluginFiles | yes | `open` async |
 | `pluginMounter` | process | rutis-loader | yes | — |
+| `promptSuggestionSettingsHost` | process | PromptSuggestionSettings | Rust-only | — |
 | `providerConnectionResolver` | process | Provider | Rust-only | — |
 | `providerService` | process | Provider | Rust-only | — |
 | `publication` | process | McpPublication | Rust-only | — |
@@ -54,6 +55,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `sqliteStorage` | process | SqliteStorage | Rust-only | — |
 | `uiHost` | process | UiHost | Rust-only | — |
 | `workflowFiles` | process | Settings | yes | `createDirectory` async, `list` async, `read` async, `replace` async |
+| `worktreeAssociations` | process | SessionStore | Rust-only | — |
 | `agentConfig` | session | SessionScope | Rust-only | — |
 | `collaborationConfig` | session | SessionScope | Rust-only | — |
 | `collaborationSession` | session | CollaborationSession | Rust-only | — |
@@ -102,7 +104,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `permission` | branch | Permission | Rust-only | — |
 | `prompt` | branch | Prompt | Rust-only | — |
 | `skillsBranch` | branch | SkillsBranch | Rust-only | — |
-| `timeline` | branch | BranchScope | yes | `ancestors` async, `append` async, `branchId` async, `committed` async, `hasPending` async, `history` async, `sequence` async, `storedContextPage` async, `trace` async |
+| `timeline` | branch | BranchScope | yes | `ancestors` async, `append` async, `branchId` async, `committed` async, `hasPending` async, `history` async, `query` async, `sequence` async, `storedContextPage` async, `trace` async |
 | `timelineIdentity` | branch | BranchScope | yes | `get` async |
 | `toolBinding` | branch | ToolBinding | Rust-only | — |
 | `toolExecutor` | branch | ToolExecutor | Rust-only | — |

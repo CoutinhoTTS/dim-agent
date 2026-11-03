@@ -15,6 +15,7 @@ extracted here rather than reconstructed later from trajectories.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import sys
 import tomllib
@@ -40,6 +41,35 @@ from harbor.models.agent.context import AgentContext
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import dim_events  # noqa: E402  (sibling module, stdlib-only)
+
+#: What a usable key-variable name looks like. Valid names only — a redacted
+#: "DEEP****KEY", a "${VAR}" template, or an empty value all fail this, and all
+#: three have been produced by harbor's sensitive-value handling.
+_KEY_VAR_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+#: Echoed in errors, so bounded: by contract the value is a name, not the key
+#: itself, but the refusal should not publish a mis-set value in full either.
+_KEY_VAR_ECHO_LIMIT = 40
+
+
+def _resolve_key_var(env: dict) -> str:
+    """The environment variable that names the provider key.
+
+    Prefers the carrier harbor cannot redact; keeps the legacy one working for
+    jobs queued before the rename; refuses everything else with the cause.
+    """
+    key_var = (env.get("DIM_EVAL_API_VAR")
+               or env.get("DIM_EVAL_API_KEY_ENV")
+               or "")
+    if not _KEY_VAR_NAME.fullmatch(key_var):
+        shown = key_var if len(key_var) <= _KEY_VAR_ECHO_LIMIT \
+            else key_var[:_KEY_VAR_ECHO_LIMIT] + "…"
+        raise RuntimeError(
+            f"no usable key-variable name {shown!r}: DIM_EVAL_API_VAR "
+            "must carry the provider key variable's name (the legacy "
+            "DIM_EVAL_API_KEY_ENV carrier is redacted by harbor)"
+        )
+    return key_var
 
 #: Read-only mount point of the build under test, laid out like a release
 #: payload: dimcode finds its default plugins one level above ``bin/``.
@@ -137,7 +167,7 @@ class DimAgent(BaseInstalledAgent):
             "SSL_CERT_FILE": CA_BUNDLE,
             **self.extra_env,
         }
-        key_var = env["DIM_EVAL_API_KEY_ENV"]
+        key_var = _resolve_key_var(env)
 
         # The model config travels as an env value and is written by the shell,
         # so no quoting of its JSON is needed. Missing credentials otherwise

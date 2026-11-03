@@ -4,7 +4,7 @@ use std::path::Path;
 use std::{ffi::OsString, path::PathBuf};
 
 #[cfg(not(target_os = "macos"))]
-pub(super) const BWRAP_UNAVAILABLE: &str = "bubblewrap (bwrap) is not installed on the captured host PATH. Install bubblewrap, or select Off in /permissions > Process isolation";
+pub(super) const BWRAP_UNAVAILABLE: &str = "bubblewrap (bwrap) is not installed on the captured host PATH. Install bubblewrap, or select Off in /settings > Process isolation";
 
 /// The bubblewrap executable preparation would run, from the captured host
 /// `PATH`. The availability report and preparation share this resolution.
@@ -86,7 +86,7 @@ impl HostPlatform {
     pub(crate) async fn prepare_isolated_process(
         &self,
         mut spec: ProcessSpec,
-        workspace: &Path,
+        workspaces: &[PathBuf],
         output_dir: Option<&Path>,
     ) -> Result<(ProcessSpec, Option<TemporaryDirectory>, Option<Isolation>), ProcessSpecError>
     {
@@ -151,7 +151,9 @@ impl HostPlatform {
         };
         let (read_only, mut read_only_files) =
             roots(read_only_paths, true).await.map_err(invalid)?;
-        let writable_paths: Vec<PathBuf> = std::iter::once(workspace)
+        let writable_paths: Vec<PathBuf> = workspaces
+            .iter()
+            .map(PathBuf::as_path)
             .chain(output_dir)
             .map(Path::to_path_buf)
             .collect();
@@ -166,7 +168,7 @@ impl HostPlatform {
                 .map_err(|error| ProcessSpecError {
                     code: "isolation_unavailable",
                     reason: format!(
-                        "Isolated temporary directory: {error}; select Off in /permissions > Process isolation"
+                        "Isolated temporary directory: {error}; select Off in /settings > Process isolation"
                     ),
                 })?;
             writable.push((temporary.0.clone(), temporary.0.clone()));

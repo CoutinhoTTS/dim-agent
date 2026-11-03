@@ -70,7 +70,21 @@ fullscreen 的 Tab 选取本来就停在用户消息上。被选消息的点是�
 
 ### 4.3 `f`：从这里 fork
 
-仅 `main`，从 Tab 选取或 `/timeline`（§4.6）发起；scrollback 就是用 `/timeline` 选消息。composer 底边写明派生的位置：选中消息时问 `在“把 cache 的锁换成 RwLock 试试”之前派生会话？(y/N)`，`/fork` 问 `在最近一个回合之后派生会话？(y/N)`。`y` 发送 `session.fork {sessionId, at}`，在 `已派生 ID · N 条消息` 边界下 attach 到 fork，并把被选消息放进它的 composer。fork 在用户提交之前不开始任何工作（fork 设计 §6.5）。
+仅 `main`，从 Tab 选取或 `/timeline`（§4.6）发起；scrollback 就是用 `/timeline` 选消息。独立的有边框确认框写明切点，并说明当前会话保持不变；问题和选项在框内，不再放在 composer 底边。选中消息时问 `在“把 cache 的锁换成 RwLock 试试”之前派生会话？`，`/fork` 问 `在最近一个回合之后派生会话？`。
+
+```text
+╭─ 派生会话 ─────────────────────────────────────────────╮
+│ 在最近一个回合之后派生会话？                           │
+│ 创建新会话，当前会话保持不变。                         │
+│   1. 创建派生会话                                      │
+│ › 2. 取消                                              │
+│ ↑↓ 选择 · Enter 确认 · Esc 取消                         │
+╰────────────────────────────────────────────────────────╯
+```
+
+默认选中取消；↑↓ 或 Tab 切换，Enter 确认，`1`/`y` 派生，`2`/`n`/Esc 取消，其余按键不关闭对话框。确认后发送 `session.fork {sessionId, at}`，在 `已派生 ID · N 条消息` 边界下 attach 到 fork，并把被选消息放进它的 composer。fork 在用户提交之前不开始任何工作（fork 设计 §6.5）。从 Timeline 发起时，取消返回原操作列表；否则恢复输入区，保留草稿和 transcript 位置。
+
+scrollback 在 live 交互区以确认框替换输入框，不提交到历史；fullscreen 显示为 overlay。两种模式的选项、按键一致，窄窗口折行显示问题并保留可选操作。
 
 ### 4.4 标记
 
@@ -105,11 +119,12 @@ Timeline 的点就是它的用户消息。Tab 从最新一条起逐条走；`/ti
 │   #1  weather in Shanghai      Cloudy, 20°C, light wind …        │
 │   #2  try RwLock for the cache The lock moves into …             │
 │ › #3  adsa                                                       │
-└──── Enter jump · e edit · q quote · b branch · f fork · Esc close ┘
+└────────────────────────────────── Enter actions · Esc close ┘
 ```
 
 - 默认选中最新一条。输入不做过滤：字母键作用于选中的消息，与选取上的按键相同（§4.1–4.3）。
-- `Enter` 跳转。全屏选中这条消息，与 Tab 选中一样，之后可用选取的按键。scrollback 不能往上走：还没画出的消息从它开始作为一页更早历史画出；已经画出的给出提示，`/tui` 可直接跳到它。
+- `Enter` 打开操作列表，写明所选消息，列出跳转、编辑为新草稿、引用、创建分支、派生会话；派生选项说明切点在该消息之前。↑↓ 和 Enter 选择，数字 1–5 直接执行；原有 `e`、`q`、`b`、`f` 在两个列表都可用。Esc 返回消息列表，保留所选消息和列表位置，再按 Esc 关闭。scrollback 在 live 交互区显示，fullscreen 显示为 overlay，均不提交到历史。
+- 跳转会关闭面板。全屏选中这条消息，与 Tab 选中一样，之后可用选取的按键。scrollback 不能往上走：还没画出的消息从它开始作为一页更早历史画出；已经画出的给出提示，`/tui` 可直接跳到它。
 
 恢复会话时只画最新 100 条。全屏在 transcript 顶部放一行加载按钮（`↑ 130 earlier messages · Enter or click to load`）：点击，或用 Tab 走到它再按 `Enter`，就在上方画出前 100 条，并让原来最早的那条消息留在视图顶部。scrollback 没有这一行，更早的历史由 `/timeline` 跳转画出。它取代了 `/history`：后者把更早的消息接在最新消息之后翻页画出。
 
@@ -216,7 +231,7 @@ fork 是别的 Session，归 `/resume`。按键保持 #427 §14 的定义。
 ## 9. 消融检查
 
 - 没有新模式：点沿用 Tab 选取，线标记和加载按钮沿用卡片选取，切线沿用 #427，fork 后的 attach 沿用 `/resume`。唯一的新面板 `/timeline` 列出选取所走的点，按键与选取相同。
-- 新增的交互：选取上的 `b`/`f`、composer 的分支草稿与 fork 询问、路径式底边、`/branch` 与 `/fork`，各自对应 §2 的一条规则。
+- 新增的交互：选取上的 `b`/`f`、composer 的分支草稿、fork 确认框、Timeline 操作列表、路径式底边、`/branch` 与 `/fork`。确认框让切点和影响可见，操作列表使动作不再依赖底部快捷键提示；两者复用已有 prompt 渲染，不写持久历史。
 - 侧面板（§4.7）是唯一新增的界面：不离开父线就跟随一条线，需要一个父线 Timeline 装不下的视图。它不折叠新数据，CLI 本来就为每条打开的线保留 transcript。它收起后的形态就是已有的 `⑂` 标记，所以关闭时不写任何东西。
 - 考虑过但去掉的：lines 面板里的 `b`（需要每条线的末尾；当前线上的 `/branch` 已覆盖）、按点置灰的提示（按键时的 notice 说的是同一件事，状态更少）、结束标记（§4.4）、继承前缀的一行摘要与 `Esc Esc` 回父线（§5 和标记已经通向那里）。
 - 待消费消息（§4.8）不新增一份列表：还是同一行，按 input id 关联，队列条就是这一行的前一态。scrollback 的 live tail 与 fullscreen 的原地重画，就是流式回答、运行中工具组和委派卡片已有的规则，三个状态都来自客户端已收到的事件——没有计时器、没有新事件、没有第二份 transcript。

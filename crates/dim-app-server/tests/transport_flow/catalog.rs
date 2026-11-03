@@ -527,3 +527,192 @@ async fn catalog_filters_creation_origin_before_the_page_boundary() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+/// #920: `cwd` accepts a set of workspaces, and one page lists all of them in
+/// activity order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catalog_lists_and_pages_a_set_of_workspaces() {
+    let store = seeded_workspace_store(&[("/workspace/a", 1000), ("/workspace/b", 2000)]).await;
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert!(
+        client
+            .features
+            .as_array()
+            .unwrap()
+            .contains(&json!("session.catalog.workspaces")),
+        "a store-backed daemon advertises the set"
+    );
+    let listed = |value: &Value| -> Vec<String> {
+        value["result"]["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["sessionId"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let first = client
+        .rpc(
+            "session.catalog",
+            json!({"cwd":["/workspace/a","/workspace/b"],"limit":4}),
+        )
+        .await;
+    assert_ok(&first);
+    assert_eq!(
+        listed(&first),
+        ["b-2", "b-1", "b-0", "a-2"],
+        "the set lists both workspaces in activity order"
+    );
+    let cursor = first["result"]["nextCursor"].as_str().unwrap().to_owned();
+    let second = client
+        .rpc(
+            "session.catalog",
+            json!({"cwd":["/workspace/a","/workspace/b"],"limit":4,"cursor":cursor}),
+        )
+        .await;
+    assert_ok(&second);
+    assert_eq!(listed(&second), ["a-1", "a-0"]);
+    assert!(second["result"].get("nextCursor").is_none());
+    let one = client
+        .rpc("session.catalog", json!({"cwd":"/workspace/a"}))
+        .await;
+    assert_ok(&one);
+    assert_eq!(listed(&one), ["a-2", "a-1", "a-0"]);
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A cursor continues under the set it was taken under and no other: the set
+/// compares in canonical order, so a reordered set and a one-element list are
+/// the same filter.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catalog_cursor_belongs_to_one_set_of_workspaces() {
+    let store = seeded_workspace_store(&[("/workspace/a", 1000), ("/workspace/b", 2000)]).await;
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let first = client
+        .rpc(
+            "session.catalog",
+            json!({"cwd":["/workspace/a","/workspace/b"],"limit":2}),
+        )
+        .await;
+    assert_ok(&first);
+    let cursor = first["result"]["nextCursor"].as_str().unwrap().to_owned();
+    for params in [
+        json!({"cwd":["/workspace/a","/workspace/c"],"limit":2,"cursor":cursor}),
+        json!({"cwd":"/workspace/a","limit":2,"cursor":cursor}),
+    ] {
+        let reply = client.rpc("session.catalog", params).await;
+        assert_eq!(reply["error"]["code"], -32602, "{reply}");
+    }
+    let reordered = client
+        .rpc(
+            "session.catalog",
+            json!({"cwd":["/workspace/b","/workspace/a"],"limit":2,"cursor":cursor}),
+        )
+        .await;
+    assert_ok(&reordered);
+    let single = client
+        .rpc("session.catalog", json!({"cwd":"/workspace/a","limit":1}))
+        .await;
+    assert_ok(&single);
+    let cursor = single["result"]["nextCursor"].as_str().unwrap().to_owned();
+    let listed = client
+        .rpc(
+            "session.catalog",
+            json!({"cwd":["/workspace/a"],"limit":1,"cursor":cursor}),
+        )
+        .await;
+    assert_ok(&listed);
+    assert_eq!(listed["result"]["sessions"][0]["sessionId"], "a-1");
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A `cwd` the catalog cannot read as a set is refused as invalid parameters.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catalog_refuses_a_cwd_that_is_not_a_set_of_workspaces() {
+    let store = seeded_workspace_store(&[("/workspace/a", 1000)]).await;
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    for cwd in [json!([]), json!(["/workspace/a", 7])] {
+        let reply = client.rpc("session.catalog", json!({"cwd":cwd})).await;
+        assert_eq!(reply["error"]["code"], -32602, "{reply}");
+        assert_eq!(reply["error"]["data"]["appError"], "invalid_params");
+    }
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A daemon without a native store has no catalog, so it lists no set of
+/// workspaces either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catalog_workspaces_is_not_advertised_without_native_storage() {
+    let server = launch(Arc::new(MockTools), ServerConfig::default()).await;
+    let client = Client::new_version(&server, false, 3).await;
+    assert!(
+        !client
+            .features
+            .as_array()
+            .unwrap()
+            .contains(&json!("session.catalog.workspaces"))
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A store holding three Sessions in each of `workspaces`, in the activity
+/// order `workspaces` gives: the later workspace's Sessions come first.
+async fn seeded_workspace_store(workspaces: &[(&str, i64)]) -> Store {
+    let store = Store::new();
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let seed = client.rpc("session.create", create(json!([]))).await;
+    assert_ok(&seed);
+    let seed = seed["result"]["sessionId"].as_str().unwrap().to_owned();
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+    let mut connection = store.connection();
+    let tx = connection.transaction().unwrap();
+    for (workspace, created) in workspaces {
+        for index in 0..3 {
+            let id = format!(
+                "{}-{index}",
+                workspace.rsplit('/').next().unwrap_or_default()
+            );
+            let created = created + i64::from(index);
+            tx.execute(
+                "INSERT INTO agent_sessions (session_id, config, created_at_ms) SELECT ?1, config, ?3 FROM agent_sessions WHERE session_id=?2",
+                params![id, seed, created],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO session_owners SELECT ?1, agent_id, protocol_version FROM session_owners WHERE session_id=?2",
+                params![id, seed],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO timeline_branches VALUES (?1,'main','{\"id\":\"main\"}',0)",
+                [&id],
+            )
+            .unwrap();
+            initialize_session_catalog(&tx, &id).unwrap();
+            tx.execute(
+                "UPDATE session_catalog SET cwd=?2 WHERE session_id=?1",
+                params![id, workspace],
+            )
+            .unwrap();
+        }
+    }
+    tx.commit().unwrap();
+    store
+}

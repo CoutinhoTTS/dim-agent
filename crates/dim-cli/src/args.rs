@@ -1,6 +1,6 @@
 use crate::{Result, export::Format, permission};
 use dim_agent_types::PermissionPreset;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// What `--server` must name, shared by every error about the value it
 /// supplies.
@@ -132,20 +132,69 @@ Options:\n\
                                    the default runs this executable's\n\
                                    app-server subcommand\n\
   --model-config PATH              Explicit API-key model configuration\n\
-  --provider ID --model ID         Model selection for a new session\n\
+  --model ID [--provider ID]        Temporary model selection (also on resume)\n\
+  --effort LEVEL                   Temporary reasoning effort (also on resume)\n\
+  --autocompact auto|TOKENS         Temporary compaction window (k/m suffixes)\n\
   --permission PRESET              read-only, workspace-write or full-access for a\n\
                                    new session, or for the resumed main branch\n\
   -h, --help                       Show this help without starting a daemon\n\
   -V, --version                    Show version without starting a daemon\n\n\
+Model startup:\n\
+  --model ID overrides DIM_MODEL; --provider optionally names a configured\n\
+    Provider. A bare ID uses the effective Provider or an unambiguous match.\n\
+  --effort LEVEL overrides DIM_EFFORT_LEVEL, then the model's saved effort.\n\
+    LEVEL must be supported by the selected Provider model; service tier is\n\
+    preserved and the override is not saved as a model preference.\n\
+  DIM_BASE_URL + DIM_API_FORMAT select a Session-local direct connection.\n\
+    Both are required; they conflict with --provider and --model-config.\n\
+    A new Session also requires --model or DIM_MODEL; resume can retain its ID.\n\
+    DIM_API_FORMAT: anthropic, openai-chat, openai-responses, openai-compatible,\n\
+      gemini, xai or xai-responses. DIM_BASE_URL may include a gateway prefix.\n\
+  DIM_API_KEY uses x-api-key (anthropic), x-goog-api-key (gemini), or Bearer\n\
+    (other formats). DIM_AUTH_TOKEN uses Bearer for any format. Set at most one.\n\
+  DIM_CUSTOM_HEADERS is newline-separated Name: Value, split at the first colon.\n\
+    Names are case-insensitive; duplicates and generated auth conflicts fail.\n\
+    Credentials and headers require direct mode; anonymous gateways are allowed.\n\
+  DIM_MAX_CONTEXT_TOKENS and DIM_MAX_OUTPUT_TOKENS declare positive capacities\n\
+    up to 9007199254740991; output cannot exceed context.\n\
+  --autocompact overrides DIM_AUTO_COMPACT_WINDOW: auto or a positive count,\n\
+    optionally suffixed k/m (1000/1000000). This is not the model capacity.\n\
+  Effort, autocompact and capacity startup controls require the product Provider\n\
+    and cannot be used with --model-config; set API-key generation settings\n\
+    in that configuration file instead.\n\
+  Model overrides with --model-config require --provider, including on resume.\n\
+  Startup overrides apply before the first input, including on resume, without\n\
+    changing saved Providers, preferences, defaults or the daemon environment.\n\
+    Explicit overrides force complete configuration inheritance for new work.\n\
+    DIM_* startup inputs are ignored by help, version and management commands.\n\
+  Examples (keep secrets in the environment, not command arguments):\n\
+    dimcode exec --model model-id --effort high --autocompact 128k -p 'Hello'\n\
+    DIM_BASE_URL=https://gateway.example/prefix DIM_API_FORMAT=openai-chat \\\n\
+      DIM_MODEL=model-id dimcode exec -p 'Hello'\n\
+    dimcode exec resume SESSION_ID --effort low --autocompact auto -p 'Continue'\n\
+  To supply an API connection, use --model-config PATH with a JSON file:\n\
+    defaultModel: {providerId, modelId}; providers: [{id, kind, baseUrl,\n\
+      apiKeyEnv, headers, models: [{id, contextWindow, maxOutputTokens, config}]}].\n\
+  kind selects the API format, not the model name: anthropic, openai-responses,\n\
+    openai-chat, openai-compatible, gemini, xai or xai-responses.\n\
+  baseUrl is the API base URL; the selected format supplies the request path.\n\
+  apiKeyEnv names an environment variable, not the key itself. Keys use\n\
+    x-api-key for anthropic, x-goog-api-key for gemini, or Bearer otherwise.\n\
+  headers is a JSON object for additional request headers, including gateway\n\
+    authentication when needed. Keep credentials out of command arguments.\n\
+  Each model requires contextWindow, maxOutputTokens and config.maxTokens:\n\
+    the total context capacity, output capacity and request output budget.\n\
+  The daemon inherits its launch environment; a later client's environment\n\
+    does not update it. Use a separate --home for a different model config.\n\
+  Example: dimcode --home /path/to/isolated-home --model-config model.json\n\n\
 Ctrl+C stops a running turn and waits for settlement; idle Ctrl+C or EOF exits.\n\
 Without -p, exec reads redirected stdin through EOF, including with --image.\n\
 Idle commands: /export <markdown|json> PATH, /rename TITLE|--clear, /exit.\n\
 PATH is relative to the CLI current directory; ~ is literal.\n\
-/permissions (aliases /approvals, /approval) opens separate File access, Tool\n\
-  approval (Ask/Bypass) and Process isolation controls in the terminal UI, and\n\
-  a Command rules row that lists, adds and removes the user's command rules.\n\
-The line prompt accepts file-access read-only|workspace-read-write|unrestricted,\n\
-  tool-approval ask|bypass, PRESET, allow|deny exact|prefix COMMAND, or remove N.\n\
+/permissions (aliases /approvals, /approval) selects a permission preset in the terminal UI, with\n\
+  Read only, Workspace write and Full access choices, and\n\
+  a Command rules row. Process isolation is in Settings.\n\
+The line prompt accepts PRESET, allow|deny exact|prefix COMMAND, or remove N.\n\
 Approval accepts only y/yes; empty input denies. For a simple exec command, a/always\n\
   also saves a command rule. Noninteractive approval exits 3.\n\
 The terminal UI offers a newer version on its npm channel (alpha, beta or latest),\n\
@@ -299,6 +348,35 @@ pub struct UiIdentity {
     pub token: String,
 }
 
+/// The workspace every request names: the launch directory, resolved once as
+/// a UTF-8 string. A `Path` cannot stand in for it, so no request can carry a
+/// path serde refuses or one a lossy conversion would alter; the client's own
+/// file system work asks for [`Workspace::path`] instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Workspace(String);
+
+impl Workspace {
+    /// The workspace `path` names. A path that is not valid UTF-8 names none:
+    /// the refusal shows it with the invalid bytes replaced.
+    fn resolve(path: &Path) -> Result<Self> {
+        match path.to_str() {
+            Some(text) => Ok(Self(text.to_owned())),
+            None => {
+                Err(format!("The workspace path {} must be valid UTF-8", path.display()).into())
+            }
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The same workspace, for the client's own file system work.
+    pub fn path(&self) -> &Path {
+        Path::new(&self.0)
+    }
+}
+
 #[derive(Clone)]
 pub struct Options {
     pub action: Action,
@@ -308,14 +386,20 @@ pub struct Options {
     pub resume: Option<String>,
     pub home: PathBuf,
     pub home_explicit: bool,
-    pub cwd: PathBuf,
+    /// The launch directory: where the daemon starts and what the client's
+    /// own file system work resolves against. Requests carry [`Self::workspace`]
+    /// instead.
+    cwd: PathBuf,
+    /// The workspace the command names in its requests, resolved once the
+    /// options are complete; `None` for a command that names none.
+    workspace: Option<Workspace>,
     pub server: Option<PathBuf>,
     pub model_config: Option<PathBuf>,
     pub provider: Option<String>,
     pub model: Option<String>,
+    pub effort: Option<String>,
+    pub startup: Option<serde_json::Value>,
     pub permission: Option<PermissionPreset>,
-    pub file_access: Option<dim_agent_types::FileAccess>,
-    pub tool_approval: Option<dim_agent_types::ToolApproval>,
     pub directory: Option<String>,
     pub device: bool,
     /// Set only for a hosted leaf `Tui`.
@@ -351,13 +435,14 @@ impl Options {
             home: default_home(),
             home_explicit: false,
             cwd: std::env::current_dir()?,
+            workspace: None,
             server: None,
             model_config: None,
             provider: None,
             model: None,
+            effort: None,
+            startup: None,
             permission: None,
-            file_access: None,
-            tool_approval: None,
             directory: None,
             device: false,
             ui_identity: None,
@@ -376,6 +461,7 @@ impl Options {
         };
         let mut args = args.peekable();
         let mut export_format = false;
+        let mut autocompact = None;
         while let Some(arg) = args.next() {
             let value = |args: &mut dyn Iterator<Item = String>| -> Result<String> {
                 args.next()
@@ -489,6 +575,16 @@ impl Options {
                 "--model-config" => options.model_config = Some(PathBuf::from(value(&mut args)?)),
                 "--provider" => options.provider = Some(value(&mut args)?),
                 "--model" => options.model = Some(value(&mut args)?),
+                "--effort" => {
+                    if options.effort.replace(value(&mut args)?).is_some() {
+                        return Err("Supply --effort only once".into());
+                    }
+                }
+                "--autocompact" => {
+                    if autocompact.replace(value(&mut args)?).is_some() {
+                        return Err("Supply --autocompact only once".into());
+                    }
+                }
                 "--permission" => {
                     let preset = permission::parse_preset(&value(&mut args)?)?;
                     if options.permission.replace(preset).is_some() {
@@ -1085,16 +1181,25 @@ impl Options {
         if options.home.as_os_str().is_empty() {
             return Err("Set --home PATH when the user home environment variable is absent".into());
         }
-        if options.provider.is_some() != options.model.is_some() {
-            return Err("Use --provider and --model together".into());
+        if matches!(options.action, Action::Chat | Action::Tui | Action::Exec) {
+            options.read_startup(autocompact.take())?;
         }
-        if options.resume.is_some() && options.model.is_some() {
-            return Err("A resumed session retains its model; omit --provider and --model".into());
+        if options
+            .effort
+            .as_ref()
+            .is_some_and(|effort| effort.is_empty() || effort.trim() != effort)
+        {
+            return Err("--effort / DIM_EFFORT_LEVEL must be a nonempty effort name without surrounding whitespace".into());
+        }
+        if options.provider.is_some() && options.model.is_none() {
+            return Err("--provider requires --model or DIM_MODEL".into());
         }
         if !matches!(options.action, Action::Chat | Action::Tui | Action::Exec)
             && (options.prompt.is_some()
                 || options.resume.is_some()
                 || options.model.is_some()
+                || options.effort.is_some()
+                || autocompact.is_some()
                 || options.permission.is_some())
         {
             return Err("Commands cannot be combined with chat options".into());
@@ -1203,6 +1308,292 @@ impl Options {
         }
         Ok(options)
     }
+
+    fn read_startup(&mut self, mut autocompact: Option<String>) -> Result<()> {
+        if self.model.is_none() {
+            self.model = startup_env("DIM_MODEL")?;
+        }
+        if self.effort.is_none() {
+            self.effort = startup_env("DIM_EFFORT_LEVEL")?;
+        }
+        if autocompact.is_none() {
+            autocompact = startup_env("DIM_AUTO_COMPACT_WINDOW")?;
+        }
+        if self
+            .model
+            .as_ref()
+            .is_some_and(|model| model.is_empty() || model.trim() != model)
+        {
+            return Err(
+                "--model / DIM_MODEL must be a nonempty model ID without surrounding whitespace"
+                    .into(),
+            );
+        }
+        let base_url = startup_env("DIM_BASE_URL")?;
+        let api_format = startup_env("DIM_API_FORMAT")?;
+        let api_key = startup_env("DIM_API_KEY")?;
+        let auth_token = startup_env("DIM_AUTH_TOKEN")?;
+        let headers = startup_env("DIM_CUSTOM_HEADERS")?;
+        let mut startup = serde_json::json!({});
+        match (base_url, api_format) {
+            (Some(base_url), Some(api_format)) => {
+                if self.provider.is_some() || self.model_config.is_some() {
+                    return Err(
+                        "Direct startup conflicts with --provider and --model-config".into(),
+                    );
+                }
+                if self.model.is_none() && self.resume.is_none() {
+                    return Err(
+                        "Direct startup requires --model or DIM_MODEL for a new Session".into(),
+                    );
+                }
+                let url = url::Url::parse(&base_url)
+                    .map_err(|_| "DIM_BASE_URL must be an HTTP(S) base URL")?;
+                if !matches!(url.scheme(), "http" | "https")
+                    || url.host_str().is_none()
+                    || base_url.trim() != base_url
+                    || base_url.bytes().any(|byte| byte.is_ascii_control())
+                    || !url.username().is_empty()
+                    || url.password().is_some()
+                    || url.query().is_some()
+                    || url.fragment().is_some()
+                {
+                    return Err("DIM_BASE_URL must be an HTTP(S) base URL without credentials, query or fragment".into());
+                }
+                if !matches!(
+                    api_format.as_str(),
+                    "anthropic"
+                        | "openai-chat"
+                        | "openai-responses"
+                        | "openai-compatible"
+                        | "gemini"
+                        | "xai"
+                        | "xai-responses"
+                ) {
+                    return Err("DIM_API_FORMAT must be anthropic, openai-chat, openai-responses, openai-compatible, gemini, xai or xai-responses".into());
+                }
+                if api_key.is_some() && auth_token.is_some() {
+                    return Err("DIM_API_KEY and DIM_AUTH_TOKEN are mutually exclusive".into());
+                }
+                let generated_auth = if auth_token.is_some() {
+                    Some("authorization")
+                } else if api_key.is_some() {
+                    Some(match api_format.as_str() {
+                        "anthropic" => "x-api-key",
+                        "gemini" => "x-goog-api-key",
+                        _ => "authorization",
+                    })
+                } else {
+                    None
+                };
+                let mut connection = serde_json::json!({"baseUrl":base_url,"apiFormat":api_format});
+                for (name, value) in [("apiKey", api_key), ("authToken", auth_token)] {
+                    if let Some(value) = value {
+                        reqwest::header::HeaderValue::from_str(&value)
+                            .map_err(|_| "Invalid startup credential header value")?;
+                        connection[name] = serde_json::json!(value);
+                    }
+                }
+                if let Some(headers) = headers {
+                    let mut parsed = serde_json::Map::new();
+                    for line in headers.lines() {
+                        let (name, value) = line
+                            .split_once(':')
+                            .ok_or("DIM_CUSTOM_HEADERS requires one Name: Value per line")?;
+                        let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                            .map_err(|_| "Invalid DIM_CUSTOM_HEADERS name")?;
+                        let value = value.trim_matches([' ', '\t']);
+                        reqwest::header::HeaderValue::from_str(value)
+                            .map_err(|_| "Invalid DIM_CUSTOM_HEADERS value")?;
+                        if generated_auth == Some(name.as_str()) {
+                            return Err(
+                                "DIM_CUSTOM_HEADERS conflicts with generated authentication".into(),
+                            );
+                        }
+                        if parsed
+                            .insert(name.to_string(), serde_json::json!(value))
+                            .is_some()
+                        {
+                            return Err("DIM_CUSTOM_HEADERS contains a repeated header name".into());
+                        }
+                    }
+                    connection["headers"] = serde_json::Value::Object(parsed);
+                }
+                startup["connection"] = connection;
+            }
+            (None, None) => {
+                if api_key.is_some() || auth_token.is_some() || headers.is_some() {
+                    return Err("DIM_API_KEY, DIM_AUTH_TOKEN and DIM_CUSTOM_HEADERS require DIM_BASE_URL and DIM_API_FORMAT".into());
+                }
+            }
+            _ => return Err("Direct startup requires both DIM_BASE_URL and DIM_API_FORMAT".into()),
+        }
+        for (env, field) in [
+            ("DIM_MAX_CONTEXT_TOKENS", "contextWindow"),
+            ("DIM_MAX_OUTPUT_TOKENS", "maxOutputTokens"),
+        ] {
+            if let Some(value) = startup_env(env)? {
+                startup[field] = serde_json::json!(parse_limit(env, &value)?);
+            }
+        }
+        if let (Some(context), Some(output)) = (
+            startup["contextWindow"].as_u64(),
+            startup["maxOutputTokens"].as_u64(),
+        ) && output > context
+        {
+            return Err("DIM_MAX_OUTPUT_TOKENS cannot exceed DIM_MAX_CONTEXT_TOKENS".into());
+        }
+        if let Some(value) = &autocompact {
+            startup["autoCompactWindow"] = if value == "auto" {
+                serde_json::json!("auto")
+            } else {
+                let (digits, multiplier) = match value.as_bytes().last() {
+                    Some(b'k' | b'K') => (&value[..value.len() - 1], 1_000),
+                    Some(b'm' | b'M') => (&value[..value.len() - 1], 1_000_000),
+                    _ => (value.as_str(), 1),
+                };
+                let tokens = parse_limit("--autocompact / DIM_AUTO_COMPACT_WINDOW", digits)?
+                    .checked_mul(multiplier)
+                    .filter(|n| *n <= dim_agent_types::JS_MAX_SAFE_INTEGER)
+                    .ok_or("--autocompact / DIM_AUTO_COMPACT_WINDOW is too large")?;
+                serde_json::json!(tokens)
+            };
+        }
+        if self.model_config.is_some() {
+            if self.model.is_some() && self.provider.is_none() {
+                return Err("--model / DIM_MODEL requires --provider when used with --model-config; select the configured Provider explicitly or omit the model override".into());
+            }
+            if self.effort.is_some() {
+                return Err("--effort / DIM_EFFORT_LEVEL require a product Provider catalog with capability declarations and cannot be used with --model-config; configure the API-key model's generation settings in --model-config instead".into());
+            }
+            if startup.as_object().is_some_and(|o| !o.is_empty()) {
+                return Err("--autocompact / DIM_AUTO_COMPACT_WINDOW, DIM_MAX_CONTEXT_TOKENS and DIM_MAX_OUTPUT_TOKENS require the product Provider and cannot be used with --model-config; omit these startup controls or use a product Provider".into());
+            }
+        } else if self.model.is_some()
+            || self.effort.is_some()
+            || startup.as_object().is_some_and(|o| !o.is_empty())
+        {
+            self.startup = Some(startup);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn creation_startup(&self, params: &mut serde_json::Value) {
+        if let Some(model) = &self.model {
+            params["model"] = serde_json::json!({"modelId":model});
+            if let Some(provider) = &self.provider {
+                params["model"]["provider"] = serde_json::json!(provider);
+            }
+        }
+        if let Some(startup) = &self.startup {
+            params["startup"] = startup.clone();
+        }
+    }
+
+    pub(crate) fn creation_preferences(
+        &self,
+        mut saved: Option<serde_json::Value>,
+    ) -> Option<serde_json::Value> {
+        if let Some(effort) = &self.effort {
+            saved.get_or_insert_with(|| serde_json::json!({}))["reasoningEffort"] =
+                serde_json::json!(effort);
+        }
+        saved
+    }
+}
+
+fn startup_env(name: &str) -> Result<Option<String>> {
+    match std::env::var(name) {
+        Ok(value) if value.is_empty() => Err(format!("{name} must not be empty").into()),
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(format!("{name} must be valid Unicode").into())
+        }
+    }
+}
+
+impl Options {
+    /// The launch directory, for the client's own file system work.
+    pub fn launch_dir(&self) -> &Path {
+        &self.cwd
+    }
+
+    /// Resolves the workspace every request this command sends names, once
+    /// the options are complete. A prompt from `-p` is here at parse; one
+    /// read from stdin arrives before this step, so a Chat that resumes a
+    /// Session and runs headless is still known to name none. A command that
+    /// names one is refused here, before the daemon is contacted, when the
+    /// path is not valid UTF-8.
+    pub fn resolve_workspace(&mut self) -> Result<()> {
+        self.workspace = self
+            .names_workspace()
+            .then(|| Workspace::resolve(&self.cwd))
+            .transpose()?;
+        Ok(())
+    }
+
+    /// The workspace every request this command sends names, resolved once
+    /// the options were complete. Only a command that names one reaches a
+    /// request.
+    pub fn workspace(&self) -> &Workspace {
+        self.workspace
+            .as_ref()
+            .expect("a command that names the workspace resolved it")
+    }
+
+    /// The workspace a request names, for a command that names one.
+    pub fn named_workspace(&self) -> Option<&str> {
+        self.workspace.as_ref().map(Workspace::as_str)
+    }
+
+    /// Whether this command names the workspace in a request it sends. Such a
+    /// command resolves it once its options are complete, so a path that is
+    /// not valid UTF-8 is refused before the daemon is contacted.
+    fn names_workspace(&self) -> bool {
+        match &self.action {
+            // A Chat that resumes a Session and runs headless names none: it
+            // attaches, reads history and submits, and the composer never
+            // runs. A new Chat or Session still does, and so does an
+            // interactive one.
+            Action::Chat => self.resume.is_none() || self.prompt.is_none(),
+            Action::Tui => true,
+            Action::Exec => self.resume.is_none(),
+            Action::McpList
+            | Action::McpLogin(_)
+            | Action::McpLogout(_)
+            | Action::McpEnable { .. }
+            | Action::McpDisconnect(_) => true,
+            Action::Management(request) => request.area.names_workspace(),
+            Action::ManagementEdit { area, .. }
+            | Action::ManagementSet { area, .. }
+            | Action::ManagementAdd { area, .. }
+            | Action::ManagementStart { area, .. } => area.names_workspace(),
+            Action::Migration(_)
+            | Action::Acp { .. }
+            | Action::Export { .. }
+            | Action::SessionRename { .. }
+            | Action::SessionDelete { .. }
+            | Action::SessionCleanup { .. }
+            | Action::Timeline { .. }
+            | Action::DaemonVacuum { .. }
+            | Action::Login(_)
+            | Action::Account(_)
+            | Action::Logout(_)
+            | Action::Models(_)
+            | Action::Recording { .. }
+            | Action::Plugin { .. }
+            | Action::RuntimeList
+            | Action::RuntimeInstall(_)
+            | Action::RuntimeConfig { .. }
+            | Action::DaemonStop
+            | Action::Web { .. }
+            | Action::WebInstall
+            | Action::DefaultTerminalMode { .. }
+            | Action::Help
+            | Action::Version => false,
+        }
+    }
 }
 
 /// A model limit as `--set-limits` and `--set-missing-limits` take it: a
@@ -1259,4 +1650,105 @@ pub fn default_home() -> PathBuf {
                 .map(|home| PathBuf::from(home).join(directory))
                 .unwrap_or_default()
         })
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::*;
+
+    /// Every parse that reaches a request takes the same step the CLI takes:
+    /// a piped prompt, when the row has one, then `resolve_workspace`.
+    #[test]
+    fn parsed_commands_resolve_only_workspaces_their_requests_name() {
+        let home = tempfile::tempdir().unwrap();
+        let directory = home.path().canonicalize().unwrap();
+        let directory = directory.to_str().unwrap();
+        let document = home.path().join("job.json");
+        std::fs::write(&document, "{}").unwrap();
+        let document = document.to_str().unwrap();
+        // Each row is its arguments, the prompt a pipe would carry, and
+        // whether its requests name the workspace.
+        let cases = [
+            (vec!["scheduled", "list"], None, false),
+            (vec!["scheduled", "enable", "job-1"], None, false),
+            (vec!["scheduled", "disable", "job-1"], None, false),
+            (vec!["scheduled", "edit", "job-1"], None, false),
+            (vec!["scheduled", "set", "job-1", document], None, false),
+            (vec!["scheduled", "add", document], None, false),
+            (vec!["scheduled", "remove", "job-1"], None, false),
+            (vec!["scheduled", "run", "job-1"], None, false),
+            (vec!["scheduled", "history", "job-1"], None, false),
+            (
+                vec!["exec", "resume", "session", "-p", "continue"],
+                None,
+                false,
+            ),
+            (
+                vec!["exec", "--resume", "session", "-p", "continue"],
+                None,
+                false,
+            ),
+            (vec!["--resume", "session", "-p", "continue"], None, false),
+            (vec!["--resume", "session"], Some("continue"), false),
+            (vec!["--version"], None, false),
+            (vec!["--resume", "session"], None, true),
+            (vec!["-p", "start"], None, true),
+            (vec!["exec", "-p", "start"], None, true),
+            (vec!["tui"], None, true),
+            (vec!["mcp", "list"], None, true),
+            (vec!["mcp", "login", "docs"], None, true),
+            (vec!["mcp", "logout", "docs"], None, true),
+            (vec!["mcp", "enable", "docs"], None, true),
+            (vec!["mcp", "disconnect", "docs"], None, true),
+            (vec!["mcp", "edit", "docs"], None, true),
+            (vec!["skills", "list"], None, true),
+            (vec!["hooks", "list"], None, true),
+            (vec!["hooks", "set", document], None, true),
+            (vec!["workflow", "list"], None, true),
+            (vec!["workflow", "start", "job"], None, true),
+        ];
+        for (arguments, piped, names_workspace) in cases {
+            let args = ["--home", directory, "--cwd", directory]
+                .into_iter()
+                .chain(arguments.iter().copied())
+                .map(str::to_owned);
+            let mut options =
+                Options::parse(args).unwrap_or_else(|error| panic!("{arguments:?}: {error}"));
+            // What `prepare` does with a prompt on stdin before it resolves
+            // the workspace.
+            if let Some(prompt) = piped {
+                assert!(options.prompt.is_none(), "{arguments:?}");
+                options.prompt = Some(prompt.to_owned());
+            }
+            options
+                .resolve_workspace()
+                .unwrap_or_else(|error| panic!("{arguments:?}: {error}"));
+            assert_eq!(
+                options.named_workspace(),
+                names_workspace.then_some(directory),
+                "{arguments:?}"
+            );
+            assert_eq!(options.launch_dir(), Path::new(directory));
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn a_workspace_that_is_not_utf8_is_refused() {
+        #[cfg(unix)]
+        let path = {
+            use std::os::unix::ffi::OsStrExt;
+            PathBuf::from(std::ffi::OsStr::from_bytes(b"/tmp/dim-\xff-work"))
+        };
+        #[cfg(windows)]
+        let path = {
+            use std::os::windows::ffi::OsStringExt;
+            PathBuf::from(std::ffi::OsString::from_wide(&[0xd800]))
+        };
+        let error = Workspace::resolve(&path).unwrap_err();
+        assert!(
+            error.to_string().ends_with("must be valid UTF-8"),
+            "{error}"
+        );
+    }
 }
