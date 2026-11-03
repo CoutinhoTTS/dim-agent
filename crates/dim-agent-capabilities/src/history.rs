@@ -1210,13 +1210,12 @@ enum CutReads<'a> {
 }
 
 impl CutReads<'_> {
-    /// The cut ends an atomic batch, as it must for a branch prefix.
+    /// The cut ends an atomic batch, as it must for a branch prefix: batch
+    /// structure is the store's check, not a query (ADR 020 D4).
     async fn batch_end(&self, through: u64) -> dim_agent_runtime::Result<()> {
         match self {
-            Self::Timeline(timeline) => timeline.local(through..=through).await.map(|_| ()),
-            Self::Session(session, branch) => {
-                session.local(branch, through..=through).await.map(|_| ())
-            }
+            Self::Timeline(timeline) => timeline.batch_end(through).await,
+            Self::Session(session, branch) => session.batch_end(branch, through).await,
         }
     }
     /// One bounded read of the branch's facts.

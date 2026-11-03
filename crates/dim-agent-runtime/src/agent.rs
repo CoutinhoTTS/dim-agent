@@ -542,6 +542,10 @@ impl Session {
     ) -> Result<Vec<Arc<AgentEvent>>> {
         self.published(branch)?.local(range).await
     }
+    /// See [`Branch::batch_end`].
+    pub async fn batch_end(&self, branch: &str, sequence: u64) -> Result<()> {
+        self.published(branch)?.batch_end(sequence).await
+    }
     /// Reads a local page of complete batches without exceeding the line's
     /// head: its published head while it is open, its fixed head once it ended.
     /// A paging read does not rebuild stored requests: `context/prepare` and

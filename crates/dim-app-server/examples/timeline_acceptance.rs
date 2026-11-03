@@ -878,6 +878,9 @@ impl TimelineStore for BarrierStore {
     fn head<'a>(&'a self, k: &'a TimelineKey) -> BoxFuture<'a, Result<u64>> {
         self.inner.head(k)
     }
+    fn batch_end<'a>(&'a self, k: &'a TimelineKey, sequence: u64) -> BoxFuture<'a, Result<()>> {
+        self.inner.batch_end(k, sequence)
+    }
     fn read_segments<'a>(
         &'a self,
         id: &'a str,

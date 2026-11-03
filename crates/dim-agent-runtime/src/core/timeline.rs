@@ -1092,6 +1092,14 @@ impl Timeline {
         let end = self.through(Some(end))?;
         self.records(&self.0.key.branch_id, start, end).await
     }
+    /// Checks that `sequence` ends an atomic batch: a stored row's structure,
+    /// not event content, so the store answers it and it is not a query
+    /// (ADR 020 D4). The check stays out of the service surface because no
+    /// other language reads batch structure.
+    #[service(skip)]
+    pub async fn batch_end(&self, sequence: u64) -> Result<()> {
+        self.0.store.batch_end(&self.0.key, sequence).await
+    }
     /// The branch chain the context covers, root first: each ancestor to its
     /// fixed cut and the local branch to `through`.
     #[service(skip)]

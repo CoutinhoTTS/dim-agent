@@ -145,6 +145,11 @@ impl Branch {
         let end = self.published(end)?;
         self.0.timeline().local(start..=end).await
     }
+    /// Checks that `sequence` ends an atomic batch, so a cut there can start a
+    /// read (ADR 020 D4). See [`Timeline::batch_end`].
+    pub async fn batch_end(&self, sequence: u64) -> Result<()> {
+        self.0.timeline().batch_end(sequence).await
+    }
     pub async fn context(&self, through: u64) -> Result<ContextHistory> {
         let through = self.published(Some(through))?;
         self.0.timeline().context(through).await

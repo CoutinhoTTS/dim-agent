@@ -100,6 +100,13 @@ impl dim_agent_runtime::TimelineStore for CountingTimelineStore {
     ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<u64>> {
         self.memory.head(key)
     }
+    fn batch_end<'a>(
+        &'a self,
+        key: &'a dim_agent_runtime::TimelineKey,
+        sequence: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.batch_end(key, sequence)
+    }
     fn append(
         &self,
         key: dim_agent_runtime::TimelineKey,

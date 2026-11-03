@@ -232,6 +232,13 @@ impl TimelineStore for CountContextReads {
     fn head<'a>(&'a self, key: &'a TimelineKey) -> dim_agent_runtime::BoxFuture<'a, Result<u64>> {
         self.memory.head(key)
     }
+    fn batch_end<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<()>> {
+        self.memory.batch_end(key, sequence)
+    }
     fn append(
         &self,
         key: TimelineKey,
@@ -1927,11 +1934,23 @@ async fn a_cut_after_a_compaction_reads_only_its_tail_and_keeps_the_verdict() {
             |_| Ok(()),
         )
         .unwrap();
+    store.ranges.lock().unwrap().clear();
     assert!(matches!(
         dim_agent_capabilities::history::validate_context_boundary_at(&timeline, batch[0].sequence)
             .await,
         Err(AgentError::InvalidInput(message)) if message.contains("inside an atomic batch")
     ));
+    assert!(
+        store.ranges.lock().unwrap().is_empty(),
+        "the batch-edge check reads the stored row, not the event"
+    );
+    assert_eq!(
+        dim_agent_capabilities::history::validate_context_boundary_at(&timeline, batch[1].sequence)
+            .await
+            .unwrap(),
+        Ok(()),
+        "the batch's last sequence ends it and may be a cut"
+    );
 }
 
 /// A stored cut that names a later event, or lies beyond `through`, is ignored:

@@ -7927,6 +7927,67 @@ async fn a_history_window_read_rejects_a_through_inside_a_batch() {
     db.close().await.unwrap();
 }
 
+/// A batch's edge is answered from the row that covers the sequence: an
+/// interior sequence is refused and a batch's last sequence passes, also when
+/// one physical row holds the records of several batches.
+#[tokio::test]
+async fn a_batch_edge_check_reads_the_row_covering_the_sequence() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    append(&store, key("session", "main"), vec![text(1, "one")])
+        .await
+        .unwrap();
+    let mut two = text(2, "two");
+    two.batch_end = 3;
+    append(&store, key("session", "main"), vec![two, text(3, "three")])
+        .await
+        .unwrap();
+    let mut four = record(
+        4,
+        EventKind::InputMessage(InputMessageData::text("first", None)),
+    );
+    four.batch_end = 5;
+    append(
+        &store,
+        key("session", "main"),
+        vec![
+            four,
+            record(
+                5,
+                EventKind::InputMessage(InputMessageData::text("second", None)),
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+
+    for edge in [1, 3, 5] {
+        store
+            .batch_end(&key("session", "main"), edge)
+            .await
+            .unwrap_or_else(|error| panic!("sequence {edge} ends a batch: {error:?}"));
+    }
+    for inside in [2, 4] {
+        assert!(matches!(
+            store.batch_end(&key("session", "main"), inside).await,
+            Err(AgentError::InvalidInput(message))
+                if message == format!("sequence {inside} is inside an atomic batch")
+        ));
+    }
+    assert!(matches!(
+        store.batch_end(&key("session", "main"), 6).await,
+        Err(AgentError::Storage(_))
+    ));
+
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
 /// One stored fact for the query flows, with its atomic batch's last
 /// sequence.
 fn query_record(sequence: u64, batch_end: u64, id: &str, kind: EventKind) -> StoredEvent {
