@@ -8826,6 +8826,7 @@
         "path ProjectionCheckpoint",
         "path ProjectionCheckpointState",
         "path RecoverySnapshot",
+        "path ResumePoint",
         "path TimelinePosition",
         "path checkpoint",
         "path dim_agent_types::ProjectionCheckpoint",
@@ -14792,11 +14793,13 @@
         "path TimelineQuery",
         "path TimelineQueryDirection::Ascending",
         "path TimelineQueryDirection::Descending",
+        "path TimelineQueryOrderBy::Sequence",
         "path TimelineQueryReply",
         "path TimelineQueryScope::Branch",
         "path TimelineQueryScope::Chain",
         "use crate::TimelineQuery",
         "use crate::TimelineQueryDirection",
+        "use crate::TimelineQueryOrderBy",
         "use crate::TimelineQueryReply",
         "use crate::TimelineQueryScope"
       ]
@@ -14831,9 +14834,11 @@
       "references": [
         "path ProjectionCheckpoint",
         "path RecoverySnapshot",
+        "path ResumePoint",
         "path TimelinePosition",
         "use dim_agent_types::ProjectionCheckpoint",
         "use dim_agent_types::RecoverySnapshot",
+        "use dim_agent_types::ResumePoint",
         "use dim_agent_types::TimelinePosition"
       ]
     },

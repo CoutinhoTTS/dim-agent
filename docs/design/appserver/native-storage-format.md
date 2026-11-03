@@ -347,21 +347,21 @@ Completed compaction facts contain source through, `retain_from` (the Timeline
 event id of the first event kept verbatim), `replacement`, `strategy`, baseline
 and diagnostics, not snapshots. Disposable snapshots commit separately without
 affecting fact durability. `RecoverySnapshot={sequence,event_id,interpreter,state}`;
-the default `dim/context-projection/v3` interpreter encodes `{payload,sha256}`,
+the default `dim/context-projection/v4` interpreter encodes `{payload,sha256}`,
 with the complete ProjectionCheckpoint JSON string below as payload. SQLite
 continues to treat state as opaque TEXT; the snapshot change needed no new database format.
 
-摘要算法为 SHA-256：先写入 UTF-8 `dim/recovery-snapshot/v1` 和一个 NUL，再写入 sequence 的 8 字节大端编码，随后依次写入 event_id、interpreter、payload；每个字符串先写入 UTF-8 字节长度的 8 字节大端编码，再写入原始字节。sha256 保存小写十六进制。解释器在解码 payload 前校验摘要，覆盖 resume、全部状态及锚点身份。旧 v1 无校验快照及按条目 ID 记录切点的 v2 快照直接绕过，不通过补算摘要升级；v3 不接受裸检查点或缺失摘要。历史事实及摘要文本不受影响。
+摘要算法为 SHA-256：先写入 UTF-8 `dim/recovery-snapshot/v1` 和一个 NUL，再写入 sequence 的 8 字节大端编码，随后依次写入 event_id、interpreter、payload；每个字符串先写入 UTF-8 字节长度的 8 字节大端编码，再写入原始字节。sha256 保存小写十六进制。解释器在解码 payload 前校验摘要，覆盖 resume、全部状态及锚点身份。旧 v1 无校验快照、按条目 ID 记录切点的 v2 快照，以及 resume 不带事件 ID 的 v3 快照直接绕过，不通过补算摘要升级；v4 不接受裸检查点或缺失摘要。历史事实及摘要文本不受影响。
 
 `HistoryRenderer` 同时拥有 `encode_checkpoint` 和 `decode_checkpoint`，自定义格式必须成对提供并管理自己的 interpreter 标识。完整性校验检测编码后发生的损坏，不是认证或生产者语义证明：可信 builder 必须生成与完整事实重放等价的状态，并通过差分测试验证。已知 builder 语义缺陷需要修复并更换解释器版本，不能给错误状态重算摘要。有效快照仍只读取恢复位置以后的事实，不在每次读取时重复完整重放。
 
-候选查询只选择相同 interpreter 且 sequence 不大于固定 through 的最新快照，并连接事件锚点验证 ID 与序号，不读取事件种类或内容；孤立或元数据不匹配的快照被忽略。锚点能否承载状态由快照所有者的解码回调判断：默认解释器只接受自己完成的 compaction 事实，且其 `retain_from` 与状态一致、through 早于锚点（#130）。Session 恢复不校验可选 state；缺失、不兼容、损坏、越界或锚点不符的快照回退事实重放，replacement 仍保留。运行时在裁剪前校验解码后的 resume 属于固定祖先链和 source through。`Timeline.context` 默认完整重放；加速显式调用 `context_with_checkpoint`，默认能力使用 `history::read_context`。事实或必需引用损坏仍失败并保留原字节。回滚先删除 snapshots 再删除 events。
+候选查询只选择相同 interpreter 且 sequence 不大于固定 through 的最新快照，并连接事件锚点验证 ID 与序号，不读取事件种类或内容；孤立或元数据不匹配的快照被忽略。锚点能否承载状态由快照所有者的解码回调判断：默认解释器只接受自己完成的 compaction 事实，且其 `retain_from` 与状态一致、through 早于锚点（#130）。Session 恢复不校验可选 state；缺失、不兼容、损坏、越界或锚点不符的快照回退事实重放，replacement 仍保留。运行时在裁剪前按 `resume.event_id` 定位该事件并校验 resume 属于固定祖先链和 source through；按 ID 查不到时使用记录的位置。`Timeline.context` 默认完整重放；加速显式调用 `context_with_checkpoint`，默认能力使用 `history::read_context`。事实或必需引用损坏仍失败并保留原字节。回滚先删除 snapshots 再删除 events。
 
 ```text
 ProjectionCheckpoint = {
-  resume: { branch_id: string, sequence: integer },
+  resume: { branch_id: string, sequence: integer, event_id: string },
   state: {
-    compacted_through: string,
+    retain_from: string,
     prompts: { entries: PromptEntry[], revision: PromptReference | null,
       system_revision: PromptReference | null, system: string,
       turns: string[], tasks: PromptScope[] },
@@ -388,6 +388,17 @@ ProjectionCheckpoint = {
 `agent_store_format.version` 同时标识 SQL 结构、持久化 JSON 和内容寻址规则。已发布格式发生不兼容变化时，必须定义新版本及读取或转换路径。保持版本的条件是旧读取器能正确解释新值、旧写入器不会重写丢失新值，且存储不变量不变。纯运行时重构不改变格式版本。
 
 首版定稿前的开发库兼容范围由上层持久化设计明确，不预设下一版本或迁移字段；S5a 的 Session 文件、S5b 的标题元数据、#193 的请求列表、#2 的扩展事件、#364 的挂载列表、#427 的分支结束事件、#527 的工具效果和清单条目、#580 的工具 schema、#556 的目录投影、#555 的 System 来源与 #596 的冗余索引移除各自的格式决定见下文。
+
+### #1002 格式决定
+
+[#1002](https://github.com/arcships/dim/issues/1002)（[ADR 020](../adr/020-timeline-read-convergence.md) D5）的格式决定：**不改格式**，v33 不变，不迁移；只升检查点解释器，并改 `ProjectionCheckpoint.resume` 的形状。
+
+- **只改可丢弃快照的 payload**：`resume` 从 `{branch_id, sequence}` 变为 `{branch_id, sequence, event_id}`，`event_id` 是该 resume 点的 Timeline 事件 ID。读取按 `event_id`（`from_event`）定位该事件并从此处续读祖先链，记录的位置只在按 ID 查不到该事件时使用。SQL 结构、`timeline_snapshots` 的列、其余持久化 JSON、内容寻址与事实字节都不变。
+- **不改版本**：`timeline_snapshots.state` 对 SQLite 是不透明 `TEXT`，快照是可丢弃的派生缓存，标识它编码的是 `interpreter` 而不是存储版本。旧读取器不解析 `state`，旧写入器不重写已有快照行，存储不变量不变，因此保持版本的条件都成立。
+- **解释器升版**：默认解释器从 `dim/context-projection/v3` 升到 `dim/context-projection/v4`。v3 的 payload 没有 `event_id`，且摘要覆盖 payload，不能给旧行重算摘要。
+- **旧快照**：v3 及更早的快照不被选中（候选查询按 `interpreter` 过滤）、不转换、不回填，随 Session 删除或回滚消失；读取回退完整事实重放，completed 事实与 replacement 不受影响。
+- **resume 落在合并输出行**：没有保留条目时 `projection_checkpoint` 回退到上下文的最后一个事件，其种类不受限，可能是位于合并 `output` 行内的 `step/text` 或 `step/thinking`，这些行的 `timeline_events.event_id` 为 NULL。读取按 ID 经查询查找该事件（ID 选择会检查合并行内的记录），查不到时用记录的位置；两条路径都从同一事件开始重放，结果与完整重放一致。
+- **验证**：`storage_flow.rs` 的 `a_resume_inside_a_merged_output_row_restores_the_full_context` 在一次性库中让两个增量合并成一行，核对 resume 落在该行的第二个事件上、恢复的上下文等于完整重放；`a_v3_snapshot_is_bypassed_and_left_as_stored` 核对 v3 快照不被选中且行字节不变；`timeline_flow.rs` 的 `a_checkpoint_resumes_at_the_event_its_id_names` 与 `a_resume_id_the_store_does_not_hold_keeps_the_recorded_position` 核对按 ID 续读与按位置兜底。既有快照命中、缺失、损坏、摘要不符、越界回退事实重放的流程测试不变并通过。
 
 ### S5a v15 格式决定
 
@@ -808,7 +819,7 @@ ProjectionCheckpoint = {
 
 下例是一条 Session `s1`、主分支 `main` 和子分支 `child` 的全部原生表记录，用于核对存储关系，不代表完整的对话执行序列。为便于阅读，`profile`、`config`、`info` 和事件 `body` 这几个实际为 `TEXT` 的列在展示时解析为 JSON；写入时各自是完整 JSON 字符串，类型规定省略的可选字段照常省略。ID/时间是示例值。`timeline_content.body` 保留实际写入的字符串形式，因此下面各 hash 可以按上文算法复核。`main` 第 4 条 `model/call` 是升级前 v16 写入的行，`child` 第 3 条是升级后 v17 写入的行，示例同时展示两种行混存。
 
-The example retains an old `dim/context-projection/v1` snapshot: the default v3
+The example retains an old `dim/context-projection/v1` snapshot: the default v4
 interpreter bypasses that unchecked cache and restores from facts. Existing v13
 databases needed no migration for this snapshot interpreter change. `s1` owns
 one Session file, stored at `<db>.session-files/<file_id>/<name>`; its name and
@@ -958,7 +969,7 @@ current manual title.
   ],
   "timeline_snapshots": [{"session_id": "s1", "branch_id": "main", "sequence": 3,
     "interpreter": "dim/context-projection/v1", "event_id": "e3",
-    "state": "{\"resume\":{\"branch_id\":\"main\",\"sequence\":2},\"state\":{\"retain_from\":\"e2\",\"prompts\":{\"entries\":[],\"revision\":null,\"system_revision\":null,\"system\":\"\",\"turns\":[],\"tasks\":[]},\"delivered\":[],\"inputs\":[[\"e1\",{\"user\":{\"content\":[{\"type\":\"text\",\"text\":\"Hi\"}]}}]],\"configuration\":null,\"output\":[],\"open_tools\":[],\"output_open\":false}}"
+    "state": "{\"resume\":{\"branch_id\":\"main\",\"sequence\":2,\"event_id\":\"e2\"},\"state\":{\"retain_from\":\"e2\",\"prompts\":{\"entries\":[],\"revision\":null,\"system_revision\":null,\"system\":\"\",\"turns\":[],\"tasks\":[]},\"delivered\":[],\"inputs\":[[\"e1\",{\"user\":{\"content\":[{\"type\":\"text\",\"text\":\"Hi\"}]}}]],\"configuration\":null,\"output\":[],\"open_tools\":[],\"output_open\":false}}"
   }],
   "session_files": [{"file_id": "0b4e7d2c-5a1f-4c3e-9f6a-2d8b1e7c4a90", "node": null, "writer": null}],
   "session_file_owners": [{"session_id": "s1", "file_id": "0b4e7d2c-5a1f-4c3e-9f6a-2d8b1e7c4a90"}],

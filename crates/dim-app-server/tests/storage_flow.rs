@@ -27,7 +27,7 @@ mod catalog;
 #[path = "storage_flow/worktrees.rs"]
 mod worktrees;
 
-const INTERPRETER: &str = "dim/context-projection/v3";
+const INTERPRETER: &str = "dim/context-projection/v4";
 fn snapshot(sequence: u64, checkpoint: &ProjectionCheckpoint) -> RecoverySnapshot {
     let mut snapshot = RecoverySnapshot {
         sequence,
@@ -4740,6 +4740,220 @@ async fn concurrent_and_cancelled_close_waits_for_the_same_durable_round() {
     db.close().await.unwrap();
 }
 
+/// A v3 snapshot is not selected, converted or rewritten: its interpreter no
+/// longer matches, so the read replays the facts and the row stays as stored.
+#[tokio::test]
+async fn a_v3_snapshot_is_bypassed_and_left_as_stored() {
+    use dim_agent_capabilities::history::project_context_history;
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    append(
+        &store,
+        key("session", "main"),
+        vec![
+            record(
+                1,
+                EventKind::InputMessage(InputMessageData::text("history", None)),
+            ),
+            record(
+                2,
+                EventKind::InputConsumed(InputConsumedData {
+                    input_id: "event-1".into(),
+                }),
+            ),
+            record(
+                3,
+                EventKind::ContextCompaction(completed("event-2", "summary", 2)),
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+    let state = "{\"resume\":{\"branch_id\":\"main\",\"sequence\":2},\"state\":{\"retain_from\":\"event-2\"}}";
+    let connection = Connection::open(&database.0).unwrap();
+    connection
+        .execute(
+            "INSERT INTO timeline_snapshots VALUES ('session','main',3,?1,'event-3',?2)",
+            params!["dim/context-projection/v3", state],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(
+        store
+            .latest_snapshot(&key("session", "main"), 3, "dim/context-projection/v4")
+            .await
+            .unwrap()
+            .is_none(),
+        "the candidate read takes one interpreter"
+    );
+    let timeline = Timeline::restore(
+        rutis::Ctx::root().unwrap(),
+        key("session", "main"),
+        vec![],
+        store.clone(),
+    )
+    .await
+    .unwrap();
+    let full = timeline.context(3).await.unwrap();
+    let recovered = read_context(&timeline, 3).await.unwrap();
+    assert!(recovered.checkpoint.is_none());
+    assert_eq!(
+        project_context_history(&recovered).unwrap(),
+        project_context_history(&full).unwrap()
+    );
+    dim_agent_runtime::core::close_timeline(&timeline)
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT interpreter, state FROM timeline_snapshots",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap(),
+        ("dim/context-projection/v3".into(), state.into()),
+        "a bypassed snapshot is not converted or backfilled"
+    );
+}
+
+/// When no history entry is kept, the checkpoint resumes at the context's last
+/// event, which can be inside a merged output row: that event's id is not in
+/// the identity index, so the read finds it through the page and begins there.
+/// The recovered context is the full replay's.
+#[tokio::test]
+async fn a_resume_inside_a_merged_output_row_restores_the_full_context() {
+    use dim_agent_capabilities::history::{project_context_history, projection_checkpoint};
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    append(
+        &store,
+        key("session", "main"),
+        vec![
+            record(
+                1,
+                EventKind::InputMessage(InputMessageData::text("question", None)),
+            ),
+            record(
+                2,
+                EventKind::InputConsumed(InputConsumedData {
+                    input_id: "event-1".into(),
+                }),
+            ),
+            record(
+                3,
+                EventKind::ModelStart(ModelStartData {
+                    turn_id: "turn".into(),
+                    request_id: "request".into(),
+                }),
+            ),
+            text(4, "RETAINED "),
+            text(5, "ANSWER"),
+        ],
+    )
+    .await
+    .unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT sequence, last_sequence, event_id FROM timeline_events \
+                 WHERE session_id='session' AND branch_id='main' AND sequence=4",
+                [],
+                |row| Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?
+                )),
+            )
+            .unwrap(),
+        (4, 5, None),
+        "the two deltas share one merged output row, which holds no id"
+    );
+    drop(connection);
+    let timeline = Timeline::restore(
+        rutis::Ctx::root().unwrap(),
+        key("session", "main"),
+        vec![],
+        store.clone(),
+    )
+    .await
+    .unwrap();
+    let checkpoint = projection_checkpoint(&timeline.context(5).await.unwrap(), "event-3").unwrap();
+    assert_eq!(
+        (
+            checkpoint.resume.sequence,
+            checkpoint.resume.event_id.as_str()
+        ),
+        (5, "event-5"),
+        "no entry is kept, so the resume falls back to the last event"
+    );
+    dim_agent_runtime::core::close_timeline(&timeline)
+        .await
+        .unwrap();
+    append(
+        &store,
+        key("session", "main"),
+        vec![record(
+            6,
+            EventKind::ContextCompaction(completed("event-3", "summary", 5)),
+        )],
+    )
+    .await
+    .unwrap();
+    let saved = snapshot(6, &checkpoint);
+    store
+        .save_snapshot(&key("session", "main"), saved)
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let timeline = Timeline::restore(
+        rutis::Ctx::root().unwrap(),
+        key("session", "main"),
+        vec![],
+        store.clone(),
+    )
+    .await
+    .unwrap();
+    let full = timeline.context(6).await.unwrap();
+    let recovered = read_context(&timeline, 6).await.unwrap();
+    assert!(recovered.checkpoint.is_some());
+    assert_eq!(
+        recovered.events.first().map(|event| event.id.as_str()),
+        Some("event-5"),
+        "the read begins at the event the id names inside the merged row"
+    );
+    assert_eq!(
+        project_context_history(&recovered).unwrap(),
+        project_context_history(&full).unwrap(),
+        "the resumed context is the full replay"
+    );
+    dim_agent_runtime::core::close_timeline(&timeline)
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn damaged_snapshot_cannot_silently_remove_retained_output_after_restart() {
     use dim_agent_capabilities::history::{
@@ -5016,9 +5230,10 @@ async fn recovery_ignores_disposable_snapshots_but_preserves_and_validates_facts
             snapshot(
                 3,
                 &ProjectionCheckpoint {
-                    resume: TimelinePosition {
+                    resume: ResumePoint {
                         branch_id: branch.into(),
                         sequence,
+                        event_id: "missing".into(),
                     },
                     state: ProjectionCheckpointState {
                         retain_from: "event-3".into(),

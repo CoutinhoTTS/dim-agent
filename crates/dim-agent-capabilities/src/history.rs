@@ -124,7 +124,7 @@ impl Default for HistoryRenderer {
         Self {
             render: project_context_history,
             checkpoint: projection_checkpoint,
-            checkpoint_interpreter: "dim/context-projection/v3",
+            checkpoint_interpreter: "dim/context-projection/v4",
             encode_checkpoint,
             decode_checkpoint,
         }
@@ -245,7 +245,14 @@ impl HistoryRenderer {
                 if fold < events.len() {
                     let mut state = state.unwrap_or_default();
                     state.retain_from = retain_from.to_owned();
-                    return Ok(ProjectionCheckpoint { resume: cut, state });
+                    return Ok(ProjectionCheckpoint {
+                        resume: ResumePoint {
+                            branch_id: cut.branch_id,
+                            sequence: cut.sequence,
+                            event_id: retain_from.to_owned(),
+                        },
+                        state,
+                    });
                 }
                 let last = events.last().map_or(cursor, |event| event.sequence);
                 cursor = last + 1;
@@ -979,6 +986,11 @@ pub fn projection_checkpoint(
         .get(resume)
         .cloned()
         .ok_or_else(|| "Compaction checkpoint has no resume event.".to_owned())?;
+    let event_id = context
+        .events
+        .get(resume)
+        .map(|event| event.id.clone())
+        .ok_or_else(|| "Compaction checkpoint has no resume event.".to_owned())?;
     let mut state = replay(
         &context.events[..resume],
         initial_state(context),
@@ -987,7 +999,11 @@ pub fn projection_checkpoint(
     .state;
     state.retain_from = retain_from.to_owned();
     Ok(ProjectionCheckpoint {
-        resume: position,
+        resume: ResumePoint {
+            branch_id: position.branch_id,
+            sequence: position.sequence,
+            event_id,
+        },
         state,
     })
 }

@@ -617,7 +617,10 @@ fn resume(context: &ContextHistory, cut: &str) -> ContextHistory {
     let index = context
         .positions
         .iter()
-        .position(|position| position == &checkpoint.resume)
+        .position(|position| {
+            position.branch_id == checkpoint.resume.branch_id
+                && position.sequence == checkpoint.resume.sequence
+        })
         .unwrap();
     let mut resumed = ContextHistory {
         events: context.events[index..].to_vec(),
