@@ -17,10 +17,9 @@ fn event(sequence: u64, id: &str, kind: &str, name: &str, data: Value) -> Value 
 
 fn detached_eof(wire: &mut Wire) {
     loop {
-        let mut line = String::new();
-        if wire.0.read_line(&mut line).unwrap() == 0 {
+        let Some(line) = wire.trailing_request() else {
             return;
-        }
+        };
         let request: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(
             request["method"], "session.detach",

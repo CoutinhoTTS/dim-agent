@@ -103,7 +103,12 @@ impl Home {
             stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
             let mut wire = Wire(BufReader::new(stream));
-            flow(&mut wire);
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| flow(&mut wire)))
+                && !payload.is::<PeerGone>()
+            {
+                std::panic::resume_unwind(payload);
+            }
         })
     }
     fn command(&self) -> Command {
@@ -129,9 +134,16 @@ const PATIENCE: Duration = Duration::from_secs(30);
 /// hanging; it is not a step's budget. A frame is due when the CLI and the
 /// fixture's daemon reach it, and a debug CLI starting on a loaded machine can
 /// take tens of seconds, so ten times the 30 s step budget keeps machine load
-/// out of the result: the scripted daemon's socket reads and the deadline
-/// `Wire::frame` retries within (#807).
+/// out of the result: the scripted daemon's socket reads, the deadline
+/// `Wire::frame` retries within, and the terminal waits for what the CLI draws
+/// or accepts (#807).
 const HANG_GUARD: Duration = Duration::from_secs(300);
+
+/// The CLI is gone. A flow that writes to it, or waits for a frame it will
+/// never send, ends there: the test ended the CLI deliberately, so the rest of
+/// what the flow would answer cannot be observed. A CLI that stays connected
+/// and silent is not gone; that still fails at `HANG_GUARD`.
+struct PeerGone;
 
 struct Wire(BufReader<UnixStream>);
 impl Wire {
@@ -150,7 +162,7 @@ impl Wire {
         let mut line = String::new();
         loop {
             match self.0.read_line(&mut line) {
-                Ok(0) => panic!("the CLI closed before a frame: {line:?}"),
+                Ok(0) => std::panic::panic_any(PeerGone),
                 Ok(_) => break,
                 Err(error)
                     if matches!(
@@ -163,14 +175,54 @@ impl Wire {
                         "no frame within {HANG_GUARD:?}: {line:?}"
                     );
                 }
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {
+                    std::panic::panic_any(PeerGone);
+                }
                 Err(error) => panic!("{error}"),
             }
         }
         serde_json::from_str(&line).unwrap()
     }
+    /// The request that arrives after the flow settled, or `None` when the CLI
+    /// closed first. A client killed with a reply still unread resets the
+    /// connection instead of ending it; both mean no request arrived.
+    fn trailing_request(&mut self) -> Option<String> {
+        let deadline = Instant::now() + HANG_GUARD;
+        let mut line = String::new();
+        loop {
+            match self.0.read_line(&mut line) {
+                Ok(0) => return None,
+                Ok(_) => return Some(line),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the CLI neither closed nor sent a request: {line:?}"
+                    );
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => return None,
+                Err(error) => panic!("{error}"),
+            }
+        }
+    }
     fn send(&mut self, value: Value) {
-        writeln!(self.0.get_mut(), "{value}").unwrap();
-        self.0.get_mut().flush().unwrap();
+        let written = writeln!(self.0.get_mut(), "{value}").and_then(|()| self.0.get_mut().flush());
+        match written {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                ) =>
+            {
+                std::panic::panic_any(PeerGone);
+            }
+            Err(error) => panic!("{error}"),
+        }
     }
     fn reply(&mut self, request: &Value, result: Value) {
         self.send(json!({"jsonrpc":"2.0","id":request["id"],"result":result}));
@@ -184,10 +236,18 @@ impl Wire {
         let mut line = String::new();
         let result = self.0.read_line(&mut line);
         self.0.get_ref().set_read_timeout(previous).unwrap();
-        assert!(
-            matches!(result, Err(ref error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)),
-            "Unexpected request or closure: {line:?}, {result:?}"
-        );
+        match result {
+            Err(ref error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Ok(0) => std::panic::panic_any(PeerGone),
+            Err(ref error) if error.kind() == std::io::ErrorKind::ConnectionReset => {
+                std::panic::panic_any(PeerGone);
+            }
+            _ => panic!("Unexpected request or closure: {line:?}, {result:?}"),
+        }
     }
     fn start(&mut self, resume: bool) {
         self.hello(&[]);
@@ -292,7 +352,7 @@ fn configured_event(sequence: u64, model_id: &str, preferences: Value) -> Value 
 }
 
 fn wait(mut child: Child) -> Output {
-    let deadline = Instant::now() + PATIENCE;
+    let deadline = Instant::now() + HANG_GUARD;
     while child.try_wait().unwrap().is_none() {
         if Instant::now() >= deadline {
             child.kill().unwrap();
@@ -887,10 +947,9 @@ fn a_daemon_of_another_version_is_stopped_and_replaced() {
             stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
             let mut wire = Wire(BufReader::new(stream));
-            let mut line = String::new();
-            if wire.0.read_line(&mut line).unwrap() == 0 {
+            let Some(line) = wire.trailing_request() else {
                 continue;
-            }
+            };
             let hello: Value = serde_json::from_str(&line).unwrap();
             assert_eq!(hello["method"], "hello");
             wire.reply(&hello,json!({"instanceId":"new","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
@@ -1070,8 +1129,7 @@ fn daemon_stop_never_treats_old_protocol_eof_or_cleanup_failure_as_completion() 
             if case != "old" { features.push("daemon.shutdown.completed"); }
             wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":features}));
             if case == "old" {
-                let mut line = String::new();
-                assert_eq!(wire.0.read_line(&mut line).unwrap(), 0, "must not stop an incompatible daemon");
+                assert_eq!(wire.trailing_request(), None, "must not stop an incompatible daemon");
             } else {
                 let request = wire.read("daemon.shutdown");
                 if case == "failed" { wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32000,"message":"Daemon cleanup failed"}})); }
@@ -2562,7 +2620,7 @@ impl Terminal {
         mode.c_lflag
     }
     fn wait(&mut self) -> ExitStatus {
-        let deadline = Instant::now() + PATIENCE;
+        let deadline = Instant::now() + HANG_GUARD;
         loop {
             assert!(Instant::now() < deadline, "CLI did not settle");
             let mut bytes = [0u8; 4096];
@@ -2588,7 +2646,7 @@ impl Terminal {
     /// consuming it, as a suspended application's or a stalled remote
     /// session's terminal does, and stays that way until the child is gone.
     fn wait_without_reading(&mut self) -> ExitStatus {
-        let deadline = Instant::now() + PATIENCE;
+        let deadline = Instant::now() + HANG_GUARD;
         loop {
             if let Some(status) = self.child.try_wait().unwrap() {
                 return status;
@@ -2633,7 +2691,7 @@ impl Terminal {
     /// Reads until `found` names how far into the unconsumed transcript the
     /// wait is satisfied.
     fn wait_for(&mut self, expected: &str, found: impl Fn(&str) -> Option<usize>) {
-        let deadline = Instant::now() + PATIENCE;
+        let deadline = Instant::now() + HANG_GUARD;
         loop {
             if let Some(end) = found(&self.transcript[self.consumed..]) {
                 self.consumed += end;
@@ -2675,7 +2733,7 @@ impl Terminal {
         );
     }
     fn raw(&mut self, mut bytes: &[u8]) {
-        let deadline = Instant::now() + PATIENCE;
+        let deadline = Instant::now() + HANG_GUARD;
         while !bytes.is_empty() {
             assert!(Instant::now() < deadline, "Terminal did not accept input");
             match self.master.as_mut().unwrap().write(bytes) {
@@ -6563,8 +6621,11 @@ fn mcp_loopback_capture_supports_both_families_and_busy_ports_fall_back_to_hidde
             wire.reply(&catalog, mcp_catalog("docs"));
             mcp_started(wire, &redirect, mode == "expiry");
             if matches!(mode, "cancel" | "expiry") {
-                let mut line = String::new();
-                assert_eq!(wire.0.read_line(&mut line).unwrap(), 0);
+                assert_eq!(
+                    wire.trailing_request(),
+                    None,
+                    "nothing follows the cancelled sign-in"
+                );
                 return;
             }
             let callback = wire.read("mcp.auth.complete");

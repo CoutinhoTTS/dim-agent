@@ -641,8 +641,7 @@ fn tui_questions_keep_structured_answers_and_the_leader_draft() {
             assert_eq!(submit["params"]["text"], "kept leader draft and continue");
             wire.reply(&submit, json!({"event":{}}));
             step(wire, "main", 11, "text", json!({"turn_id":"turn","request_id":"followup","delta":"continued after question"}));
-            let mut line = String::new();
-            assert_eq!(wire.0.read_line(&mut line).unwrap(), 0, "unexpected action: {line}");
+            assert_eq!(wire.trailing_request(), None, "unexpected action");
         });
         let mut command = home.command();
         if fullscreen {
@@ -708,8 +707,7 @@ fn tui_questions_retry_and_keep_call_identity_across_late_replies() {
             {"call_id":"c1","result":{"content":"declined"}}, {"call_id":"c2","result":{"content":"answered"}},
         ]}));
         step(wire,"main",13,"text",json!({"turn_id":"turn","request_id":"after","delta":"all three calls settled"}));
-        let mut line = String::new();
-        assert_eq!(wire.0.read_line(&mut line).unwrap(),0,"unexpected retry: {line}");
+        assert_eq!(wire.trailing_request(), None, "unexpected retry");
     });
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("Where to deploy?");
@@ -860,8 +858,7 @@ fn tui_member_questions_stay_read_only_and_a_leader_question_takes_the_prompt() 
         }
         step(wire,"main",5,"tool-result",answered("main-4","leader-request","c1",false));
         step(wire,"main",6,"text",json!({"turn_id":"leader-turn","request_id":"after","delta":"leader answer preserved readonly boundary"}));
-        let mut line=String::new();
-        assert_eq!(wire.0.read_line(&mut line).unwrap(),0,"unexpected peer action: {line}");
+        assert_eq!(wire.trailing_request(), None, "unexpected peer action");
     });
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
