@@ -624,7 +624,9 @@ class BaselineFlowTest(unittest.TestCase):
                 self.assertNotIn("UV_PYTHON_INSTALL_DIR", env)
                 self.assertNotIn("CURL_HOME", env)
 
-            (cache / "python" / "cpython-3.13.9-linux-x86_64-gnu").mkdir(parents=True)
+            python_bin = cache / "python" / "cpython-3.13.9-linux-x86_64-gnu" / "bin"
+            python_bin.mkdir(parents=True)
+            (python_bin / "python3.13").write_text("")
             (cache / "curl-home").mkdir()
             (cache / "curl-home" / ".curlrc").write_text("http1.1\n")
             with mock.patch.object(run_l2, "EVAL_CACHE", cache):

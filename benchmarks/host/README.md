@@ -118,7 +118,9 @@ HTTP/1.1，避开代理的 HTTP/2 问题。uv 安装本身仍从 astral.sh 下�
 安装器），`UV_INSTALLER_GITHUB_BASE_URL` 不设置，所以缓存缺失时安装器会走网络而不是失败。
 `UV_CACHE_DIR` 放在容器的 `/tmp`，每个 trial 独立。`run_l2.py` 只在 `python/` 下找到
 `cpython-3.13.*` 时才导出 `UV_PYTHON_INSTALL_DIR`；缺失时打印 warning，让 verifier 回退到
-网络下载。prep 必须在能访问 GitHub（或能用代理访问）的机器上执行，否则目录会留空。
+网络下载。prep 必须在能访问 GitHub（或能用代理访问）的机器上执行，否则目录会留空。缓存里的
+CPython 版本是固定的 harness 条件；升级 `cpython-3.13.*` 需要按新的 baseline 重采，不能把
+旧 baseline 和新缓存混在一起比较。
 
 ## 试运行
 

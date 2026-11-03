@@ -205,9 +205,9 @@ def verifier_proxy_enabled() -> bool:
 
 
 def _cached_python(cache: Path) -> Path | None:
-    """The cached CPython directory, or None when the cache is unprepared."""
+    """The cached CPython directory, or None when the interpreter is missing."""
     python = cache / "python"
-    return python if any(python.glob("cpython-3.13.*")) else None
+    return python if any(python.glob("cpython-3.13.*/bin/python3.13")) else None
 
 
 def verifier_env() -> dict[str, str]:
