@@ -164,7 +164,31 @@ pub fn tf(english: &'static str, args: &[(&str, &str)]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::Locale;
+    use super::*;
+
+    #[test]
+    fn every_locale_translates_the_prompt_suggestion_strings() {
+        let previous = active();
+        for (locale, code, _) in LOCALES {
+            if locale == Locale::En {
+                continue;
+            }
+            set(locale);
+            for key in [
+                "Prompt suggestion",
+                "Prompt suggestion: {error}",
+                "Suggestions are paused in this session because offers went unused. Turn them off and on in /settings to resume.",
+            ] {
+                assert_ne!(t(key), key, "{code} lacks {key:?}");
+            }
+            assert!(
+                tf("Prompt suggestion: {error}", &[("error", "fixture-error")])
+                    .contains("fixture-error"),
+                "{code} drops the error"
+            );
+        }
+        set(previous);
+    }
 
     #[test]
     fn environment_values_map_as_the_ts_build_does() {
