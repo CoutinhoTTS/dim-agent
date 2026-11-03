@@ -4861,6 +4861,7 @@ fn tui_at_mentions_pick_files_from_the_working_directory() {
         resolved.join("notes.txt").display(),
         resolved.join("src/main.rs").display()
     );
+    let (submitted, received) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         let hello = wire.read("hello");
         wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
@@ -4876,6 +4877,7 @@ fn tui_at_mentions_pick_files_from_the_working_directory() {
         let submit = wire.read("session.submit");
         assert_eq!(submit["params"]["text"], expected);
         wire.reply(&submit, json!({"event":{}}));
+        submitted.send(()).unwrap();
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             line.clear();
@@ -4895,10 +4897,10 @@ fn tui_at_mentions_pick_files_from_the_working_directory() {
     terminal.until("@src/main.rs");
     terminal.write(b"\t");
     terminal.write(b"\r");
-    let joined = daemon.join();
+    received.recv_timeout(PATIENCE).unwrap();
     terminal.signal(libc::SIGKILL);
     terminal.wait();
-    joined.unwrap();
+    daemon.join().unwrap();
 }
 
 #[test]
@@ -4913,6 +4915,7 @@ fn tui_sends_dropped_files_as_links_and_images_by_model_capability() {
         image.display(),
         notes.display()
     );
+    let (submitted, received) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         let hello = wire.read("hello");
         wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list","provider.catalog"]}));
@@ -4933,6 +4936,7 @@ fn tui_sends_dropped_files_as_links_and_images_by_model_capability() {
         assert_eq!(submit["params"]["text"], expected);
         assert!(submit["params"].get("user").is_none());
         wire.reply(&submit, json!({"event":{}}));
+        submitted.send(()).unwrap();
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             line.clear();
@@ -4949,10 +4953,10 @@ fn tui_sends_dropped_files_as_links_and_images_by_model_capability() {
     terminal.paste(&dragged);
     terminal.until("[my notes.txt]");
     terminal.write(b"\r");
-    let joined = daemon.join();
+    received.recv_timeout(PATIENCE).unwrap();
     terminal.signal(libc::SIGKILL);
     terminal.wait();
-    joined.unwrap();
+    daemon.join().unwrap();
 }
 
 #[test]

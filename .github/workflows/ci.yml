@@ -97,7 +97,7 @@ jobs:
         with:
           node-version-file: .node-version
           package-manager-cache: false
-      - name: Verify the Rust workspace
+      - name: Build and lint the Rust workspace
         if: needs.changes.outputs.rust == 'true'
         shell: bash
         run: |
@@ -109,7 +109,11 @@ jobs:
           fi
           cargo clippy --workspace --all-targets --locked ${features[@]+"${features[@]}"} -- -D warnings
           cargo build --workspace --all-targets --locked ${features[@]+"${features[@]}"} --message-format=json > target/test-artifacts.jsonl
-          cargo test --workspace --locked ${features[@]+"${features[@]}"}
+      - name: Run compiled workspace tests
+        if: needs.changes.outputs.rust == 'true'
+        run: |
+          node scripts/run-rust-test.mjs target/test-artifacts.jsonl --workspace --test-threads=4
+          cargo test --workspace --doc --locked ${{ needs.changes.outputs.eval == 'true' && '--features xtask/eval-tests' || '' }}
       - name: Verify wall-clock background handoff
         if: needs.changes.outputs.execution == 'true'
         run: node scripts/run-rust-test.mjs target/test-artifacts.jsonl local_execution a_long_foreground_command_moves_to_the_background_after_30_seconds --ignored --exact

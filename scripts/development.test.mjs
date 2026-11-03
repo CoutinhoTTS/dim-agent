@@ -24,6 +24,53 @@ test('compiled Rust targets forward arguments, failures and reject missing or am
   }
 });
 
+test('compiled workspace targets overlap in pairs and finish the queue after a failure', (t) => {
+  const temporary = mkdtempSync(path.join(os.tmpdir(), 'dim parallel artifacts '));
+  t.after(() => rmSync(temporary, { recursive: true, force: true }));
+  const artifacts = path.join(temporary, 'artifacts.jsonl');
+  const records = ['first', 'second', 'third'].map(name => {
+    const directory = path.join(temporary, name);
+    mkdirSync(directory);
+    return { reason: 'compiler-artifact', profile: { test: true }, target: { name }, manifest_path: path.join(directory, 'Cargo.toml'), executable: process.execPath };
+  });
+  writeFileSync(artifacts, records.map(record => JSON.stringify(record)).join('\n'));
+  const fixture = `
+    const assert = require('node:assert/strict');
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const name = path.basename(process.cwd());
+    const root = path.dirname(process.cwd());
+    fs.writeFileSync('started', '');
+    if (name === 'third') {
+      assert(fs.existsSync(path.join(root, 'first/done')) || fs.existsSync(path.join(root, 'second/done')));
+      fs.writeFileSync('done', '');
+    } else {
+      const other = name === 'first' ? 'second' : 'first';
+      const until = Date.now() + 5000;
+      const timer = setInterval(() => {
+        if (fs.existsSync(path.join(root, other, 'started'))) {
+          clearInterval(timer);
+          fs.writeFileSync('done', '');
+          process.exitCode = name === 'first' ? 7 : 0;
+        } else if (Date.now() > until) {
+          clearInterval(timer);
+          process.exitCode = 9;
+        }
+      }, 10);
+    }
+  `;
+  const result = spawnSync(process.execPath, [path.join(import.meta.dirname, 'run-rust-test.mjs'), artifacts, '--workspace', '--eval', fixture], { encoding: 'utf8', timeout: 10_000 });
+  assert.equal(result.status, 7, result.stderr);
+  for (const record of records) {
+    assert(existsSync(path.join(path.dirname(record.manifest_path), 'done')), result.stdout);
+    assert.match(result.stdout, new RegExp(`::group::${record.target.name}`));
+  }
+  writeFileSync(artifacts, '');
+  const empty = spawnSync(process.execPath, [path.join(import.meta.dirname, 'run-rust-test.mjs'), artifacts, '--workspace'], { encoding: 'utf8' });
+  assert.notEqual(empty.status, 0);
+  assert.match(empty.stderr, /Expected compiled workspace test targets/);
+});
+
 test('developer entry runs without Node or plugin packages and preserves terminal invocation', { skip: process.platform === 'win32' }, (t) => {
   const temporary = mkdtempSync(path.join(os.tmpdir(), 'dim dev flow '));
   t.after(() => rmSync(temporary, { recursive: true, force: true }));
