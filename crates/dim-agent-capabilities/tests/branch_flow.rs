@@ -4727,7 +4727,7 @@ async fn the_parent_block_replays_after_a_compaction() {
         soon(session.idle(&child)).await.unwrap();
     }
     let message = baseline_message(&local_events(&session, &child).await, "branch:parent")
-    .expect("the line compacted and its parent block replayed");
+        .expect("the line compacted and its parent block replayed");
     let MessageContent::Text(text) = &message.content else {
         panic!("the parent block is text: {message:?}");
     };

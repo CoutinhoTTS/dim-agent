@@ -635,13 +635,6 @@ async fn prepared_model_call_keeps_its_configuration_while_later_turn_uses_refre
         session.idle("main").await.unwrap();
 
         let child_events = chain_events(&session, &child, ..).await.unwrap();
-        let child_configured = child_events
-            .iter()
-            .find_map(|event| match &event.kind {
-                EventKind::ContextConfigured(data) => Some(data),
-                _ => None,
-            })
-            .unwrap();
         let first_call = child_events
             .iter()
             .find_map(|event| match &event.kind {
@@ -649,6 +642,19 @@ async fn prepared_model_call_keeps_its_configuration_while_later_turn_uses_refre
                 _ => None,
             })
             .unwrap();
+        let child_configured = child_events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ContextConfigured(data)
+                    if first_call.configuration.as_ref().is_some_and(|reference| {
+                        reference.timeline == data.timeline && reference.revision == data.revision
+                    }) =>
+                {
+                    Some(data)
+                }
+                _ => None,
+            })
+            .expect("the first call references a recorded configuration");
         assert_eq!(first_call.request.model_id, "one");
         assert_eq!(
             first_call
@@ -667,8 +673,8 @@ async fn prepared_model_call_keeps_its_configuration_while_later_turn_uses_refre
         assert_eq!(
             first_call.configuration,
             Some(PromptReference {
-                timeline: "main".into(),
-                revision: version_one.revision.clone(),
+                timeline: child.clone(),
+                revision: child_configured.revision.clone(),
             })
         );
         assert_eq!(first_call.prompt, version_one.prompt);
@@ -715,6 +721,138 @@ async fn prepared_model_call_keeps_its_configuration_while_later_turn_uses_refre
         assert_eq!(second_call.prompt, latest_configured.prompt);
         agent.close().await.unwrap();
     }
+}
+
+/// A line records the System it sends as its own configuration. The parent
+/// block reaches the line between two of its turns; each request sends the
+/// System its `configuration` reference holds, and each reference is on the
+/// line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_line_records_the_system_it_sends_across_a_parent_block() {
+    let host = Arc::new(Prompts(Mutex::new(BTreeMap::new())));
+    let agent = MinimalHost::start(&builder(host)).await.unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    session
+        .configure(
+            ConfigureUpdate {
+                sources: vec![],
+                model: Some(configuration("one")),
+            },
+            "main",
+        )
+        .await
+        .unwrap();
+    session
+        .submit("on main".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let child = session
+        .branch(
+            "main".into(),
+            session.sequence("main").unwrap(),
+            BranchOptions {
+                prompt: "on the line".into(),
+                source: BranchSource::Host {
+                    operation_id: "child".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    session.idle(&child).await.unwrap();
+
+    session
+        .submit("move main".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let mut events = branch_events(&session, &child, ..).await.unwrap();
+    for _ in 0..600 {
+        if parent_block(&events).is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        events = branch_events(&session, &child, ..).await.unwrap();
+    }
+    session
+        .submit("again".into(), InputMode::Queue, &child)
+        .await
+        .unwrap();
+    session.idle(&child).await.unwrap();
+
+    let events = branch_events(&session, &child, ..).await.unwrap();
+    let calls: Vec<(u64, &ModelCallData)> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => Some((event.sequence, data)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls.len(), 2, "one request per turn on the line");
+    let (block, text) =
+        parent_block(&events[..]).expect("main moved after the first turn, so the line was told");
+    assert!(
+        text.contains(r#"branch="main""#),
+        "the block names the line it was cut from: {text}"
+    );
+    assert!(
+        calls[0].0 < block && block < calls[1].0,
+        "the block reached the line between its two requests: {calls:?} {block}"
+    );
+    let Some(SystemPrompt::Text(first_system)) = calls[0].1.request.system.as_deref() else {
+        panic!("the first request carries a composed system");
+    };
+    assert!(
+        first_system.contains("<dim-branch-parent"),
+        "the line composes the parent entry into its System: {first_system}"
+    );
+    for (sequence, call) in &calls {
+        let reference = call
+            .configuration
+            .as_ref()
+            .unwrap_or_else(|| panic!("the request at {sequence} references a configuration"));
+        assert_eq!(
+            reference.timeline, child,
+            "the request at {sequence} references a configuration on the line"
+        );
+        let configured = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ContextConfigured(data)
+                    if data.revision == reference.revision
+                        && data.timeline == reference.timeline =>
+                {
+                    Some(data)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!("the request at {sequence} references a missing configuration")
+            });
+        assert_eq!(
+            call.request.system.as_deref(),
+            configured.system.as_ref(),
+            "the request at {sequence} sends the System its configuration holds"
+        );
+    }
+    agent.close().await.unwrap();
+}
+
+/// The `<dim-branch-parent>` block on the line: its sequence and text.
+fn parent_block(events: &[Arc<AgentEvent>]) -> Option<(u64, String)> {
+    events.iter().find_map(|event| match &event.kind {
+        EventKind::InputMessage(data) => data.blocks.iter().find_map(|block| match block {
+            InputBlock::Raw { text, .. } if text.starts_with("<dim-branch-parent") => {
+                Some((event.sequence, text.clone()))
+            }
+            _ => None,
+        }),
+        _ => None,
+    })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
