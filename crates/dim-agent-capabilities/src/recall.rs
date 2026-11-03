@@ -17,7 +17,8 @@ use crate::{
 };
 use chrono::{DateTime, TimeZone, Utc};
 use dim_agent_runtime::{
-    AgentBuilder, AgentError, BranchPage, CAPABILITY_RELOADING, Feature, Names,
+    AgentBuilder, AgentError, CAPABILITY_RELOADING, Feature, Names, TimelineQuery,
+    TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryReply, TimelineQueryScope,
 };
 use dim_agent_types::*;
 use rutis::Ctx;
@@ -38,8 +39,8 @@ const PAGE_CHARACTERS: usize = 8_000;
 const PART: usize = 120;
 /// Longest `about` the tool accepts (§5.2).
 const ABOUT: usize = 200;
-/// Stored rows one read asks for. The answer, not this page, ends the read.
-const PAGE_ROWS: usize = 128;
+/// Events one read asks for. The answer, not this page, ends the read.
+const PAGE_EVENTS: usize = 128;
 /// The kinds the narrative folds (§3.2, §3.7). The read skips every other
 /// row before decoding it.
 const KINDS: &[&str] = &[
@@ -180,15 +181,30 @@ impl RecallTool {
             Ok(arguments) => arguments,
             Err(message) => return Ok(ToolResult::error(message)),
         };
-        let mut read = Read::new(&arguments);
-        let mut next = Some(branch.page_cursor().map_err(Self::facade_error)?);
-        while let Some(cursor) = next {
+        let mut read = Read::new(&arguments, &context.branch_id);
+        // Newest first and bounded at the head of each page: the kinds the
+        // narrative folds, over the whole chain.
+        let mut query = TimelineQuery {
+            scope: TimelineQueryScope::Chain,
+            from_event: None,
+            from_sequence: None,
+            order_by: TimelineQueryOrderBy::Sequence,
+            direction: TimelineQueryDirection::Descending,
+            kinds: KINDS.iter().map(|kind| (*kind).to_owned()).collect(),
+            flags: Vec::new(),
+            event_id: None,
+            predicate: None,
+            limit: std::num::NonZeroU64::new(PAGE_EVENTS as u64).expect("a page holds an event"),
+            offset: 0,
+        };
+        let mut exhausted = false;
+        while !exhausted {
             let page = branch
-                .page(cursor, PAGE_ROWS, KINDS)
+                .query(query.clone())
                 .await
                 .map_err(Self::facade_error)?;
-            next = page.next;
-            read.push(page);
+            query.offset += page.events.len() as u64;
+            exhausted = read.push(page);
             check_cancel(&cancel)?;
             if !read.reached(&arguments) {
                 continue;
@@ -203,13 +219,13 @@ impl RecallTool {
         // collected chain once. Every answer comes from the whole chain or
         // from a fold the answer already reached, and a call folds at most
         // twice however many pages it reads.
-        while let Some(cursor) = next {
+        while !exhausted {
             let page = branch
-                .page(cursor, PAGE_ROWS, KINDS)
+                .query(query.clone())
                 .await
                 .map_err(Self::facade_error)?;
-            next = page.next;
-            read.push(page);
+            query.offset += page.events.len() as u64;
+            exhausted = read.push(page);
             check_cancel(&cancel)?;
         }
         let narrative = read.fold();
@@ -228,17 +244,23 @@ impl ToolHandler for RecallTool {
     }
 }
 
-/// The pages read backwards from the pinned head, and the positions that say
-/// when one fold can answer (§3.1, §5.3). A page never moves an older
-/// event's distance, so the read adds a page without re-folding the pages it
-/// already holds.
+/// The pages read backwards from the head, and the positions that say when one
+/// fold can answer (§3.1, §5.3). A page never moves an older event's distance,
+/// so the read adds a page without re-folding the pages it already holds.
 struct Read<'a> {
+    /// The branch the read is taken on; a fact of another branch is inherited.
+    branch: &'a str,
     /// The collected events, oldest first.
     events: Vec<Arc<AgentEvent>>,
     /// Distance of the next event read, counted from the newest end.
     distance: usize,
     own_oldest: bool,
     complete: bool,
+    /// The oldest sequence folded of each branch read. Each page is bounded at
+    /// the head when it runs, so a page taken after a write repeats facts and
+    /// holds ones published above the first page; a fact at or above the
+    /// oldest sequence of its branch is one of those and is dropped.
+    folded: HashMap<String, u64>,
     /// Distance of the oldest `turn/end` read: the fold tells nothing before
     /// it.
     turn_end: Option<usize>,
@@ -309,7 +331,7 @@ impl Target<'_> {
 }
 
 impl<'a> Read<'a> {
-    fn new(arguments: &'a Arguments) -> Self {
+    fn new(arguments: &'a Arguments, branch: &'a str) -> Self {
         let target = arguments
             .open
             .as_deref()
@@ -320,10 +342,12 @@ impl<'a> Read<'a> {
                 consumed: None,
             });
         Self {
+            branch,
             events: Vec::new(),
             distance: 0,
             own_oldest: false,
             complete: false,
+            folded: HashMap::new(),
             turn_end: None,
             turn_starts: Vec::new(),
             candidates: Vec::new(),
@@ -333,16 +357,41 @@ impl<'a> Read<'a> {
         }
     }
 
-    fn push(&mut self, page: BranchPage) {
-        self.complete = page.next.is_none();
-        self.own_oldest = page.own;
-        for event in page.events.iter().rev() {
+    /// Folds one descending page and says whether the selection is exhausted:
+    /// a page shorter than the read asked for ends it.
+    fn push(&mut self, page: TimelineQueryReply) -> bool {
+        self.complete = page.events.len() < PAGE_EVENTS;
+        let folded = &self.folded;
+        let mut events = Vec::new();
+        let mut positions = Vec::new();
+        for (event, position) in page.events.into_iter().zip(page.positions) {
+            if folded
+                .get(&position.branch_id)
+                .is_some_and(|oldest| position.sequence >= *oldest)
+            {
+                continue;
+            }
+            events.push(event);
+            positions.push(position);
+        }
+        for position in &positions {
+            self.folded
+                .entry(position.branch_id.clone())
+                .and_modify(|oldest| *oldest = (*oldest).min(position.sequence))
+                .or_insert(position.sequence);
+        }
+        if let Some(oldest) = positions.last() {
+            self.own_oldest = oldest.branch_id == self.branch;
+        }
+        for event in &events {
             self.visit(event);
             self.distance += 1;
         }
-        let mut older = page.events;
+        let mut older = events;
+        older.reverse();
         older.append(&mut self.events);
         self.events = older;
+        self.complete
     }
 
     fn visit(&mut self, event: &Arc<AgentEvent>) {

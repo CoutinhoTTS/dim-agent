@@ -2918,7 +2918,7 @@ fn the_arguments_and_the_paginations_say_how_to_fix_the_call() {
     assert_eq!(page.lines().last(), Some("No more."));
 }
 
-/// A memory store that counts the events a page read decodes.
+/// A memory store that counts the events a query page returns.
 #[derive(Default)]
 struct PageReads {
     memory: MemoryTimelineStore,
@@ -2967,24 +2967,6 @@ impl TimelineStore for PageReads {
     ) -> BoxFuture<'a, Result<Vec<Vec<StoredEvent>>>> {
         self.memory.read_segments(session_id, segments)
     }
-    fn read_kind_page<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        kinds: &'a [&'a str],
-        before: u64,
-        limit: usize,
-    ) -> BoxFuture<'a, Result<Vec<StoredEvent>>> {
-        Box::pin(async move {
-            let page = self
-                .memory
-                .read_kind_page(key, kinds, before, limit)
-                .await?;
-            self.events
-                .fetch_add(page.len(), std::sync::atomic::Ordering::SeqCst);
-            self.pages.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(page)
-        })
-    }
     fn trace<'a>(
         &'a self,
         key: &'a TimelineKey,
@@ -2999,7 +2981,13 @@ impl TimelineStore for PageReads {
         from: u64,
         through: u64,
     ) -> BoxFuture<'a, Result<TimelineQueryPage>> {
-        self.memory.query(key, query, from, through)
+        Box::pin(async move {
+            let page = self.memory.query(key, query, from, through).await?;
+            self.events
+                .fetch_add(page.events.len(), std::sync::atomic::Ordering::SeqCst);
+            self.pages.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(page)
+        })
     }
     fn save_snapshot<'a>(
         &'a self,

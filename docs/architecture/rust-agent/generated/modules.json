@@ -11249,10 +11249,18 @@
     },
     {
       "from": "dim_agent_capabilities::recall",
-      "to": "dim_agent_runtime::timeline_store",
+      "to": "dim_agent_runtime::timeline_query",
       "references": [
-        "path BranchPage",
-        "use dim_agent_runtime::BranchPage"
+        "path TimelineQuery",
+        "path TimelineQueryDirection::Descending",
+        "path TimelineQueryOrderBy::Sequence",
+        "path TimelineQueryReply",
+        "path TimelineQueryScope::Chain",
+        "use dim_agent_runtime::TimelineQuery",
+        "use dim_agent_runtime::TimelineQueryDirection",
+        "use dim_agent_runtime::TimelineQueryOrderBy",
+        "use dim_agent_runtime::TimelineQueryReply",
+        "use dim_agent_runtime::TimelineQueryScope"
       ]
     },
     {
