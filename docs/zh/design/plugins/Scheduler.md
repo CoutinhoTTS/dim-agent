@@ -1,6 +1,6 @@
 # Scheduler
 
-状态：设计已批准，可选包实现见 [#317](https://github.com/arcships/dim/pull/317)。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
+状态：设计已批准，可选包实现见 [#317](https://github.com/arcships/dim/pull/317)。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：Rust，原生，无 Node 依赖（[overview 附录 C](../overview.md#附录-c-实现语言)）。TypeScript 包已随迁移移除。
 
 **交付边界。** 包及其公开流程验证由 [#317](https://github.com/arcships/dim/pull/317) 提供，按 §1.3 显式安装。C4 工具 #150、Settings 来源声明/读写 #175、事件 #177、S2 sessions、实时权限读取 #259、原生输入所有权 #267 与 S10 的[公开装配](../../../design/process-typescript.md#52-public-pluginfiles-binding)已提供公开依赖。Agents 空闲卸载 #126/#331 与首次 reuse 合同 #339 已合入。包使用统一升级的 rutis 0.16.0，并保留 §1.3 与附录 D 的失败报告检查；不扩充 core 或 rutis。
 
@@ -76,9 +76,7 @@ flowchart LR
 
 ### 1.3 具体包行
 
-可选包位于 `runtime/plugins/scheduler`，包名 `@dimcode/scheduler`；根模块为进程插件，
-并在 apply 中经 `partRegistry` 把 `session.ts` 注册为 Session 定义 `SchedulerSession`，即 Session 工具。
-插件目录带有 `dim-plugin.json`，是 `runtime/default-plugins.json` 列出的默认插件，由 PluginManager 加载（`--defaults`）。
+原生实现位于 `crates/dim-agent-scheduler`。`install` 注册进程插件 `Scheduler` 与 Session 功能 `SchedulerTool`（Session 定义 `SchedulerSession`，即 Session 工具）。`dimcode` 通过 `dim_app_server::cli` 的 `ProductInstall` 安装它，它不在默认插件清单中。
 嵌入宿主仍可从清单的 `code` 字段构造下面这一行。
 
 | row 字段 | 进程行 |
@@ -293,7 +291,7 @@ equal 比较预设及两个有效独立维度，并把每个工具列表视为�
 这是 S2 的保守 cap 稳定检查，不是逐工具权限等价判定；显式授权元数据不同的等价策略
 也可能被拒绝。不得为通过检查而改写被复用 Session 的权限。
 
-TypeScript 包按共享[权限 cap 样例](../../../../tests/fixtures/permission-policy-cap.json)
+Rust 实现（`crates/dim-agent-scheduler/src/policy.rs`）实现该纯计算；Rust 测试尚未读取共享的 [权限 cap 样例](../../../../tests/fixtures/permission-policy-cap.json)
 实现该纯计算。样例分为 cap 向量、覆盖两个参数顺序的不可表示交集 reject 向量，
 以及独立 reuse 向量，后者包含 x、savedEffective、
 liveBound、withinSaved、withinLive。标记 job-save-and-launch 的 cap 向量使用仅含

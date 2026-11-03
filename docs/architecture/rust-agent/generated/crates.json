@@ -84,6 +84,30 @@
     "to": "dim-agent-runtime"
   },
   {
+    "from": "dim-agent-scheduler",
+    "to": "dim-agent-capabilities"
+  },
+  {
+    "from": "dim-agent-scheduler",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "dim-agent-scheduler",
+    "to": "dim-agent-types"
+  },
+  {
+    "from": "dim-agent-scheduler",
+    "to": "dim-app-server"
+  },
+  {
+    "from": "dim-agent-scheduler",
+    "to": "rutis"
+  },
+  {
+    "from": "dim-agent-scheduler",
+    "to": "dim-client"
+  },
+  {
     "from": "dim-app-server",
     "to": "dim-agent-aimux"
   },
@@ -185,6 +209,10 @@
   },
   {
     "from": "dim-migration",
+    "to": "dim-agent-scheduler"
+  },
+  {
+    "from": "dim-migration",
     "to": "dim-app-server"
   },
   {
@@ -210,6 +238,10 @@
   {
     "from": "dim-oauth",
     "to": "rutis"
+  },
+  {
+    "from": "dimcode",
+    "to": "dim-agent-scheduler"
   },
   {
     "from": "dimcode",

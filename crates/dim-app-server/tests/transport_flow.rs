@@ -157,9 +157,6 @@ mod session_title;
 #[path = "transport_flow/workflow.rs"]
 mod workflow;
 
-#[path = "transport_flow/scheduler.rs"]
-mod scheduler;
-
 #[path = "transport_flow/questions.rs"]
 mod questions;
 

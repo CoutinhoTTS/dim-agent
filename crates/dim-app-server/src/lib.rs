@@ -1162,6 +1162,7 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<rutis_loader::Loader>(catalog, None);
     register::<collaboration::CollaborationDirectory>(catalog, None);
     register::<collaboration::Collaboration>(catalog, None);
+    register::<plugin_files::PluginFileTransactions>(catalog, None);
     register::<ConnectionHub>(catalog, None);
     register::<ListenAddresses>(catalog, None);
     register::<ui_host::UiHost>(catalog, None);

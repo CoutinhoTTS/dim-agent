@@ -3,7 +3,6 @@
     "goal": "plugins/goal",
     "session-title": "plugins/session-title",
     "workflow": "plugins/workflow",
-    "scheduler": "plugins/scheduler",
     "plugin-authoring": "plugins/plugin-authoring"
   },
   "locked": ["PluginManager", "Rpc", "Transport"],

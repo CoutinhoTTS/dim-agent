@@ -1,6 +1,6 @@
 # Scheduler
 
-Status: Design approved; optional package implemented in [#317](https://github.com/arcships/dim/pull/317). Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
+Status: Design approved; optional package implemented in [#317](https://github.com/arcships/dim/pull/317). Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: Rust, native, with no Node dependency ([overview Appendix C](../overview.md#appendix-c-implementation-language)). The TypeScript package it replaces is removed with the migration; [Appendix G](#appendix-g-rust-binding) is the proposed binding and is pending maintainer confirmation.
 
 **Delivery boundary.** The package and its public-flow verification are supplied by #317; installation remains explicit under §1.3. C4 tools (#150), Settings source declarations/read-write (#175), Settings events (#177), `sessions` (S2), live permission reads (#259), native input ownership (#267) and S10's [public composition](../process-typescript.md#52-public-pluginfiles-binding) supply its public dependencies. Agents idle unloading (#126/#331) and the first-reuse contract (#339) are merged. The package uses the coordinated rutis 0.16.0 upgrade and the unchanged Appendix D failure-reporting checks in §1.3; no core or rutis expansion is requested.
 
@@ -83,13 +83,7 @@ No runtime, facade, loader, event format or rutis change is proposed. All new bu
 
 ### 1.3 Concrete package row
 
-The optional package lives at `runtime/plugins/scheduler`, with package name
-`@dimcode/scheduler`. Its root module is the process plugin; from its apply it
-registers `session.ts` with `partRegistry` as the Session definition
-`SchedulerSession`, the Session tool. The plugin directory carries `dim-plugin.json`
-and is a default plugin listed in `runtime/default-plugins.json`, which PluginManager
-loads (`--defaults`). An embedding host may still build the row below from the
-manifest's `code` fields.
+The row fields below are the dependency, method-kind and Settings contract that the native binding keeps. Their TypeScript spelling (manifest `code` fields, `definePlugin`, `ctx.use`) is replaced by [Appendix G](#appendix-g-rust-binding). The process part is a row registered by the product entry point, and the Session part is a Feature installed in the profile.
 
 | Row field | Process row |
 | --- | --- |
@@ -335,7 +329,7 @@ input. This is S2 cap-stability, a conservative check rather than pointwise
 permission equivalence; it may reject equivalent policies with different
 explicit grant metadata. Do not rewrite the reused Session's policy to pass it.
 
-The TypeScript package implements this pure calculation against the shared
+The Rust implementation (`crates/dim-agent-scheduler/src/policy.rs`) implements this pure calculation. Its tests do not yet read the shared
 [policy-cap fixtures](../../../tests/fixtures/permission-policy-cap.json).
 The fixture has `cap` vectors, `reject` vectors for unrepresentable intersections
 in both argument orders, and separate `reuse` vectors with `x`,
@@ -863,15 +857,29 @@ Known recovery limit: `launch` can finish after a caller disappears, before its 
 
 ## Appendix G. Rust binding
 
-The public bindings below are available. Scheduler owns the feature-specific
-services and tasks through the package in #317; delivery still requires the
-failure-reporting checks above.
+The binding is implemented: Scheduler is native Rust with no TypeScript package,
+Node process or fallback. Maintainer confirmation of the binding is still pending. The contract above
+is unchanged; only its binding moves.
 
-| Neutral | Rust |
+Proposed placement: a dedicated business crate, `crates/dim-agent-scheduler`,
+not App Server code (principles §1). Its process part is a row supplied through the
+product entry point as `dim-oauth` supplies its row, so the App Server crate does not
+depend on it. Its Session part is a Feature installed in the profile, as
+`dim-agent-questions` is. Both parts use the Rust names that exist today:
+`Names::key`, `Key<T>`, `require_at`, `provide_as`, `Feature::session`, `register_part`
+and `AgentBuilder::require_feature`. The Rust binding does not use `Keyed<T>`,
+`KeyedGate`, `Deps` or `names.part(...)`; AGENTS.md describes those names, which are
+not in the code.
+
+| Neutral | Rust (proposed) |
 | --- | --- |
-| Tool `schedule` registered with `toolRegistry` | `SchedulerSession` calls `tools.register(ctx, ToolContribution {definition, handler})` through `Keyed<ToolRegistry>` in its `apply`; `execute(ToolCall, cancel)` |
-| Namespace `schedule` registered with `managementMethods` | Looked up by Rpc per call, not a dependency of Rpc ([methods Appendix F](../contracts/session-boundary.md#appendix-f-rust-binding)) |
-| `sessions` | Public named service through `host_key("sessions")`; native request types and `AgentIndex::acquire` are private implementation details, not an external crate API |
-| `scheduleJobs` | Scheduler's implemented process service; declared dependency binding in §1.1 |
-| Process storage | Existing `pluginFiles.open` scope, with immediate effect cleanup; use A.7's agreed inner v1 format |
-| Timer / trackers | Owned by the process plugin; register cleanup immediately and start business work after apply; stop new work and settle before unloading |
+| Tool `schedule` registered with `toolRegistry` | Session part keys `ToolRegistry` from `names.key()` and calls `tools.register(ctx, ToolContribution {definition, handler})` in `apply`, as `dim-agent-questions` does |
+| Namespace `schedule` registered with `managementMethods` | Process part keys `ManagementMethods` and calls `methods.register(ctx, "schedule", declarations, handler)`; Rpc looks it up per call and holds no dependency on Scheduler |
+| `scheduleJobs` | Process-group name registered with `names::register::<ScheduleJobs>(catalog, None)`; the Session part reads it with `names.key()`, so no wiring part or forwarding plugin exists |
+| `sessions`, `sessionPermissions`, `settings`, `pluginFiles` | Existing services provided by App Server. Reaching them is an open decision: typed keys require a dependency on `dim-app-server`, and shared host-dispatch names avoid it with JSON calls. `xtask check` decides whether the chosen dependency is allowed |
+| Process storage | The typed `PluginFileTransactions` service of App Server ([trusted plugin storage](../../../crates/dim-app-server/README.md#trusted-plugin-storage)). The host writes the `{version: 1, text}` envelope; Scheduler supplies the inner v1 text, the same bytes the TypeScript version wrote. |
+| Timer and trackers | Owned by the process part; tasks start after the owner is published and stop on `closing()`, settling admitted S2 calls before their scope closes |
+| Cron and time zones | No cron parser or IANA time-zone database is in `Cargo.lock` today (only `chrono`). Choosing and vetting those crates is an open decision, checked by `deny.toml` |
+| Tests | Public flows through the management methods, the `schedule` tool and the CLI wire tests. Deterministic time and gate points need a test seam, an open decision; private helper unit tests are not added (AGENTS.md Testing) |
+
+Open decisions for confirmation: crate name and placement; how typed services are reached; the cron and time-zone dependencies; and the test seam for clock and pause points.

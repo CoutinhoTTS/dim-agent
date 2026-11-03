@@ -20,11 +20,19 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::{AgentBuilder, AgentConfig};
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
+/// Adds a product's process plugins to the builder before the server starts.
+/// The App Server does not depend on them: a product executable passes its own
+/// installer (for example `dim_agent_scheduler::install`), and the plain
+/// `dim-app-server` binary passes none.
+pub type ProductInstall = fn(&mut AgentBuilder);
+
+fn no_product_plugins(_: &mut AgentBuilder) {}
+
 /// Runs the App Server command line: `args` are the arguments after the
 /// program name. This keeps the descriptors the process inherited; a process
 /// `main` enters through [`process_entry`].
 pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::error::Error>> {
-    run_with(args, None)
+    run_with(args, None, no_product_plugins)
 }
 
 /// Runs a process that serves the App Server: closes every descriptor above
@@ -37,10 +45,11 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
 pub fn process_entry(
     args: impl IntoIterator<Item = String>,
     managed_provider: Option<crate::managed_provider::ManagedProviderRow>,
+    install: ProductInstall,
 ) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(unix)]
     close_inherited_descriptors();
-    run_with(args, managed_provider)
+    run_with(args, managed_provider, install)
 }
 
 /// Closes every descriptor above standard error that this process inherited.
@@ -201,6 +210,7 @@ pub fn product_session_defaults(defaults: &mut dim_agent_runtime::SessionConfig)
 pub fn run_with(
     args: impl IntoIterator<Item = String>,
     managed_provider: Option<crate::managed_provider::ManagedProviderRow>,
+    install: ProductInstall,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let argv: Vec<String> = args.into_iter().collect();
     if argv.first().map(String::as_str) == Some("--connect-pipe") {
@@ -413,6 +423,9 @@ pub fn run_with(
     if !mock_model && model_config.is_none() && config.product_home.is_none() {
         return Err("Product home is required; use --product-home PATH, --model-config PATH or --mock-model".into());
     }
+    if config.product_home.is_none() && config.plugin_files.is_none() {
+        config.plugin_files = config.target_home.clone();
+    }
     if config.product_home.is_some() || model_config.is_some() {
         product_session_defaults(&mut config.session_defaults);
     } else {
@@ -505,6 +518,14 @@ pub fn run_with(
             }
             collaboration::install(&mut builder);
             dim_agent_questions::install(&mut builder);
+            if let Some(root) = config
+                .product_home
+                .as_ref()
+                .or(config.plugin_files.as_ref())
+            {
+                super::create_private_directory(&root.join("scheduler"))?;
+                install(&mut builder);
+            }
         } else if mock_model {
             defaults::install(&mut builder);
             defaults::mock_model_hosts(&mut builder);
