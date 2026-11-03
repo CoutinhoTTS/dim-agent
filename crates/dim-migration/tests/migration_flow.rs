@@ -1450,6 +1450,70 @@ async fn migration_imports_a_fully_valid_mcp_file_as_before() {
     let stored: Value = serde_json::from_str(&stored).unwrap();
     assert_eq!(stored["mcpServers"], servers);
 }
+/// #952: a variable reference imports exactly as written; the migrated entry
+/// is user text and expands only when it connects.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migration_imports_an_entry_with_a_variable_reference_as_written() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    let _db = fixture(&source);
+    let servers = json!({
+        "docs": {
+            "type": "http",
+            "url": "https://${MCP_HOST}/mcp",
+            "headers": {"Authorization": "Bearer ${MCP_TOKEN}"}
+        }
+    });
+    std::fs::write(
+        source.join("mcp.json"),
+        json!({"mcpServers": servers.clone()}).to_string(),
+    )
+    .unwrap();
+    let before = snapshot(&source);
+    let target = directory.path().join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    let root = rutis::Ctx::root().unwrap();
+    let plugin = root.plugin(MigrationPlugin::new(
+        target.clone(),
+        "rust".into(),
+        vec!["system".into()],
+    ));
+    (&plugin).await.unwrap();
+    let report = root
+        .get::<Migration>()
+        .unwrap()
+        .run(source.clone(), true, None)
+        .await
+        .unwrap();
+    assert!(
+        report
+            .objects
+            .iter()
+            .any(|item| item.id == "mcp.mcpServers" && item.outcome == Outcome::Imported),
+        "{report:?}"
+    );
+    assert!(
+        !report
+            .objects
+            .iter()
+            .any(|item| item.id.starts_with("mcpServers.") && item.outcome == Outcome::Unsupported),
+        "{report:?}"
+    );
+    assert_eq!(snapshot(&source), before);
+    plugin.dispose().await.unwrap();
+    root.shutdown().await.unwrap();
+    let native = Connection::open(target.join("rust/dimcode.sqlite")).unwrap();
+    let stored: String = native
+        .query_row(
+            "SELECT document FROM settings_documents WHERE source='user/mcp'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stored: Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(stored["mcpServers"], servers);
+}
+
 /// #522: a legacy limit equal to the assumed pair imports as undeclared,
 /// while a typed or `metadata.raw`-declared value imports as a declaration;
 /// the `models` of a `bundled` or `remote` row are listing output, so an
