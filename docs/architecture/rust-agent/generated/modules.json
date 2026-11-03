@@ -4251,7 +4251,7 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
-        "panic"
+        "assert_ne"
       ]
     },
     {
@@ -15629,14 +15629,6 @@
     },
     {
       "from": "dim_agent_scheduler",
-      "to": "dim_agent_runtime::parts",
-      "references": [
-        "path Feature::new",
-        "use dim_agent_runtime::Feature"
-      ]
-    },
-    {
-      "from": "dim_agent_scheduler",
       "to": "dim_agent_scheduler::document",
       "references": [
         "mod document",
@@ -15647,7 +15639,8 @@
       "from": "dim_agent_scheduler",
       "to": "dim_agent_scheduler::engine",
       "references": [
-        "mod engine"
+        "mod engine",
+        "path engine::REPORT_GUIDANCE"
       ]
     },
     {
@@ -15675,7 +15668,7 @@
       "to": "dim_agent_scheduler::session",
       "references": [
         "mod session",
-        "path SchedulerSession::new",
+        "path session::DESCRIPTION",
         "use session::SchedulerSession"
       ]
     },
@@ -15786,7 +15779,10 @@
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
+        "path EventKind::InputApplied",
         "path EventKind::InputConsumed",
+        "path EventKind::InputDeleted",
+        "path EventKind::StopInterrupt",
         "path EventKind::TurnEnd",
         "path TurnOutcome::Cancelled",
         "path TurnOutcome::Completed",
@@ -15849,6 +15845,23 @@
     },
     {
       "from": "dim_agent_scheduler::methods",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path PartRegistry",
+        "path PartScope::Session",
+        "use dim_agent_runtime::PartRegistry",
+        "use dim_agent_runtime::PartScope"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::methods",
+      "to": "dim_agent_scheduler",
+      "references": [
+        "path crate::SchedulerTexts"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::methods",
       "to": "dim_agent_scheduler::document",
       "references": [
         "path DEFAULT_MAX_RUN_MINUTES",
@@ -15878,6 +15891,7 @@
       "to": "dim_agent_scheduler::engine",
       "references": [
         "path crate::engine::accept",
+        "path crate::engine::prune",
         "path crate::engine::recover",
         "path crate::engine::tick"
       ]
@@ -15892,12 +15906,18 @@
         "path SchedulerError::new",
         "path runs",
         "path runs::read",
-        "path runs::update",
         "path stamp",
         "use crate::runs",
         "use crate::runs::Run",
         "use crate::runs::SchedulerError",
         "use crate::runs::stamp"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::methods",
+      "to": "dim_agent_scheduler::session",
+      "references": [
+        "path crate::SchedulerSession::new"
       ]
     },
     {
@@ -15916,8 +15936,11 @@
       "references": [
         "path SessionPermissions",
         "path SessionRef",
+        "path SessionsError::BranchMissing",
+        "path SessionsError::SessionClosed",
         "use dim_app_server::SessionPermissions",
-        "use dim_app_server::SessionRef"
+        "use dim_app_server::SessionRef",
+        "use dim_app_server::SessionsError"
       ]
     },
     {
@@ -15990,6 +16013,18 @@
         "path ToolExecutionContext",
         "use dim_agent_capabilities::host::HostFuture",
         "use dim_agent_capabilities::host::ToolExecutionContext"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::session",
+      "to": "dim_agent_capabilities::prompt_guide",
+      "references": [
+        "path GuideEntries",
+        "path GuideEntry",
+        "path GuideScope::Session",
+        "use dim_agent_capabilities::prompt_guide::GuideEntries",
+        "use dim_agent_capabilities::prompt_guide::GuideEntry",
+        "use dim_agent_capabilities::prompt_guide::GuideScope"
       ]
     },
     {
@@ -31503,168 +31538,11 @@
       "from": "dim_cli::ui::i18n::tests",
       "to": "dim_cli::ui::i18n",
       "references": [
-        "path Locale::from_env_value"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::i18n::tests",
-      "to": "dim_cli::ui::i18n::de",
-      "references": [
-        "path de::lookup"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::i18n::tests",
-      "to": "dim_cli::ui::i18n::de::management",
-      "references": [
-        "path de::management::lookup"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::i18n::tests",
-      "to": "dim_cli::ui::i18n::es",
-      "references": [
-        "path es::lookup"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::i18n::tests",
-      "to": "dim_cli::ui::i18n::es::management",
-      "references": [
-        "path es::management::lookup"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::i18n::tests",
-      "to": "dim_cli::ui::i18n::fr",
-      "references": [
-        "path fr::lookup"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::i18n::tests",
-      "to": "dim_cli::ui::i18n::fr::management",
-      "references": [
-        "path fr::management::lookup"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::i18n::tests",
-      "to": "dim_cli::ui::i18n::id",
-      "references": [
-        "path id::lookup"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::i18n::tests",
-      "to": "dim_cli::ui::i18n::id::management",
-      "references": [
-        "path id::management::lookup"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::i18n::tests",
-      "to": "dim_cli::ui::i18n::ja",
-      "references": [
-        "path ja::lookup"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::i18n::tests",
-      "to": "dim_cli::ui::i18n::ja::management",
-      "references": [
-        "path ja::management::lookup"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::i18n::tests",
-      "to": "dim_cli::ui::i18n::ko",
-      "references": [
-        "path ko::lookup"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::i18n::tests",
-      "to": "dim_cli::ui::i18n::ko::management",
-      "references": [
-        "path ko::management::lookup"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::i18n::tests",
-      "to": "dim_cli::ui::i18n::pt_br",
-      "references": [
-        "path pt_br::lookup"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::i18n::tests",
-      "to": "dim_cli::ui::i18n::pt_br::management",
-      "references": [
-        "path pt_br::management::lookup"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::i18n::tests",
-      "to": "dim_cli::ui::i18n::pt_pt",
-      "references": [
-        "path pt_pt::lookup"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::i18n::tests",
-      "to": "dim_cli::ui::i18n::pt_pt::management",
-      "references": [
-        "path pt_pt::management::lookup"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::i18n::tests",
-      "to": "dim_cli::ui::i18n::zh_cn",
-      "references": [
-        "path zh_cn::lookup"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::i18n::tests",
-      "to": "dim_cli::ui::i18n::zh_cn::management",
-      "references": [
-        "path zh_cn::management::lookup"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::i18n::tests",
-      "to": "dim_cli::ui::i18n::zh_hant",
-      "references": [
-        "path zh_hant::lookup"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::i18n::tests",
-      "to": "dim_cli::ui::i18n::zh_hant::management",
-      "references": [
-        "path zh_hant::management::lookup"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::i18n::tests",
-      "to": "dim_cli::ui::management_panel",
-      "references": [
-        "path crate::ui::management_panel::STRINGS"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::i18n::tests",
-      "to": "dim_cli::ui::plugins_panel",
-      "references": [
-        "path crate::ui::plugins_panel::STRINGS"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::i18n::tests",
-      "to": "dim_cli::ui::runtime_panel",
-      "references": [
-        "path crate::ui::runtime_panel::STRINGS"
+        "path LOCALES",
+        "path Locale::En",
+        "path Locale::from_env_value",
+        "path active",
+        "path set"
       ]
     },
     {
@@ -37392,7 +37270,6 @@
       "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::render::panel",
       "references": [
-        "path clip",
         "path crate::ui::render::panel::strip_escapes"
       ]
     },
@@ -37521,12 +37398,9 @@
         "path Prompt::Sessions",
         "path QUEUE_HINT",
         "path QUEUE_HINT_MORE",
-        "path ThemeContext",
         "path WebOpened",
         "path banner",
-        "path boxed",
         "path chunk",
-        "path goodbye_panel",
         "path live_panel_rows",
         "path overlay_panel_rows",
         "path queue_strip",
@@ -40215,14 +40089,6 @@
     {
       "module": "dim_cli::ui::tui::tests",
       "path": "Appearance::Light"
-    },
-    {
-      "module": "dim_cli::ui::tui::tests",
-      "path": "ColorMode::Ansi16"
-    },
-    {
-      "module": "dim_cli::ui::tui::tests",
-      "path": "ColorMode::Ansi256"
     },
     {
       "module": "dim_cli::ui::tui::tests",
