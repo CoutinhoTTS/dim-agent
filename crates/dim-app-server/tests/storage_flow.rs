@@ -7725,6 +7725,50 @@ fn position_pairs(reply: &dim_agent_runtime::TimelineQueryReply) -> Vec<(String,
         .collect()
 }
 
+/// `main` with `turn/start` and `step/model-start` facts interleaved, each in
+/// its own atomic batch, so an unordered row fetch cannot pass for a
+/// sequence-ordered read.
+async fn interleaved_histories(store: Arc<dyn TimelineStore>) -> Timeline {
+    store
+        .create_session("mixed", &SessionConfig::default())
+        .await
+        .unwrap();
+    let main = key("mixed", "main");
+    let kinds = [
+        EventKind::TurnStart(TurnStartData {
+            turn_id: "turn".into(),
+        }),
+        EventKind::ModelStart(StepData {
+            turn_id: "turn".into(),
+            request_id: "request".into(),
+        }),
+        EventKind::TurnStart(TurnStartData {
+            turn_id: "turn".into(),
+        }),
+        EventKind::ModelStart(StepData {
+            turn_id: "turn".into(),
+            request_id: "request".into(),
+        }),
+    ];
+    for (index, kind) in kinds.into_iter().enumerate() {
+        let sequence = index as u64 + 1;
+        publish_records(
+            &store,
+            main.clone(),
+            vec![query_record(
+                sequence,
+                sequence,
+                &format!("mixed-{sequence}"),
+                kind,
+            )],
+        )
+        .await;
+    }
+    Timeline::restore(rutis::Ctx::root().unwrap(), main, vec![], store)
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn a_query_selects_and_pages_facts_from_sqlite() {
     use dim_agent_runtime::TimelineQueryPosition::{Cursor, Range};
@@ -8822,6 +8866,61 @@ async fn a_kind_filtered_query_plan_uses_the_kind_index() {
             .any(|detail| detail.contains("timeline_events_by_kind")),
         "the kind-filtered query plan uses the derived index: {plan:?}"
     );
+}
+
+#[tokio::test]
+async fn a_query_reads_interleaved_kinds_in_sequence_order() {
+    use dim_agent_runtime::TimelineCursor;
+    use dim_agent_runtime::TimelineQueryDirection::{Ascending, Descending};
+    use dim_agent_runtime::TimelineQueryPosition::Range;
+    use dim_agent_runtime::TimelineQueryScope::Branch;
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let sqlite = interleaved_histories(store.clone()).await;
+    let memory = interleaved_histories(Arc::new(MemoryTimelineStore::default())).await;
+
+    let mixed = |direction| dim_agent_runtime::TimelineQuery {
+        direction,
+        kinds: vec!["turn/start".into(), "step/model-start".into()],
+        ..query(
+            Branch,
+            Range {
+                start: 1,
+                end: None,
+            },
+            1,
+        )
+    };
+    let expected = [("mixed-1", 1, Ascending), ("mixed-4", 4, Descending)];
+    for (id, sequence, direction) in expected {
+        let sqlite_reply = sqlite.query(mixed(direction)).await.unwrap();
+        let memory_reply = memory.query(mixed(direction)).await.unwrap();
+        assert_eq!(
+            query_ids(&sqlite_reply),
+            [id],
+            "{direction:?}: the first chronological batch in the asked direction"
+        );
+        assert_eq!(query_ids(&memory_reply), query_ids(&sqlite_reply));
+        assert_eq!(
+            sqlite_reply.next,
+            Some(TimelineCursor {
+                branch_id: "main".into(),
+                sequence
+            }),
+            "{direction:?}"
+        );
+        assert_eq!(sqlite_reply.next, memory_reply.next);
+        assert_eq!(
+            position_pairs(&sqlite_reply),
+            position_pairs(&memory_reply),
+            "{direction:?}"
+        );
+    }
+
+    store.close().await.unwrap();
+    db.close().await.unwrap();
 }
 
 /// What a query returned or how it failed, as text two stores can compare.

@@ -15,8 +15,8 @@ use dim_agent_runtime::{
     AgentError, BoxFuture, BranchRecord, CompactionCut, PolicyEvent, PolicyFacts, PolicyOrder,
     PolicyOrderEvent, PolicyWindow, PublishCallback, Result, SessionConfig, StoredBranch,
     StoredEvent, TimelineCursor, TimelineKey, TimelineQuery, TimelineQueryDirection,
-    TimelineQueryFlag, TimelineQueryPosition, TimelineQueryReply, TimelineQueryScope, TimelineStore,
-    TimelineTrace, panic_message,
+    TimelineQueryFlag, TimelineQueryPosition, TimelineQueryReply, TimelineQueryScope,
+    TimelineStore, TimelineTrace, panic_message,
 };
 use dim_agent_types::{
     AgentEvent, BranchCreateAt, ContextCompactionResult, EventKind, ModelRequest, RecoverySnapshot,
