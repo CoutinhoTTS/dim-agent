@@ -24,6 +24,9 @@ use std::{
 #[path = "storage_flow/catalog.rs"]
 mod catalog;
 
+#[path = "storage_flow/worktrees.rs"]
+mod worktrees;
+
 const INTERPRETER: &str = "dim/context-projection/v3";
 fn snapshot(sequence: u64, checkpoint: &ProjectionCheckpoint) -> RecoverySnapshot {
     let mut snapshot = RecoverySnapshot {
@@ -213,6 +216,8 @@ const BUSINESS_TABLES: &[&str] = &[
     "session_file_owners",
     "session_grants",
     "session_output_owners",
+    "worktree_directories",
+    "session_worktrees",
     "session_metadata",
     "session_catalog",
 ];
@@ -222,6 +227,7 @@ const V15_TABLES: [&str; 2] = ["session_files", "session_file_owners"];
 const V16_TABLES: [&str; 1] = ["session_metadata"];
 const V28_TABLES: [&str; 1] = ["session_grants"];
 const V29_TABLES: [&str; 1] = ["session_output_owners"];
+const V33_TABLES: [&str; 2] = ["worktree_directories", "session_worktrees"];
 /// The columns `table` has, so a record example written for a later format
 /// contributes only the cells an older table can hold.
 fn table_columns(connection: &Connection, table: &str) -> Vec<String> {
@@ -345,6 +351,11 @@ const V31_REPLACED: &[&str] = &[
 const V32_ADDITIONS: &[&str] = &[
     "CREATE INDEX timeline_events_context ON timeline_events(session_id, branch_id, sequence) WHERE context_render = 1 OR context_state = 1",
 ];
+const V33_ADDITIONS: &[&str] = &[
+    "CREATE TABLE worktree_directories (repository TEXT NOT NULL, root TEXT NOT NULL, PRIMARY KEY (repository, root))",
+    "CREATE TABLE session_worktrees (session_id TEXT NOT NULL REFERENCES agent_sessions(session_id), repository TEXT NOT NULL, root TEXT NOT NULL, subtree TEXT NOT NULL, PRIMARY KEY (session_id, repository, root), FOREIGN KEY (repository, root) REFERENCES worktree_directories(repository, root))",
+    "CREATE INDEX session_worktrees_by_directory ON session_worktrees(repository, root, session_id)",
+];
 const V23_ADDITIONS: &[&str] = &[
     "CREATE TABLE session_catalog (session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0), preview TEXT, cwd TEXT NOT NULL)",
     "CREATE INDEX session_catalog_by_activity ON session_catalog(updated_at_ms DESC, session_id)",
@@ -362,6 +373,7 @@ fn schema_of(version: u32) -> Vec<String> {
         .chain(V31_REPLACED.iter().filter(|_| version == 31))
         .chain(V31_ADDITIONS.iter().filter(|_| version >= 31))
         .chain(V32_ADDITIONS.iter().filter(|_| version >= 32))
+        .chain(V33_ADDITIONS.iter().filter(|_| version >= 33))
         .filter(|sql| version <= 24 || !sql.starts_with("CREATE INDEX timeline_events_by_end "))
         .map(|sql| sql.replace("(version = 13)", &format!("(version = {version})")))
         .map(|sql| {
@@ -579,7 +591,7 @@ async fn documented_native_records_restore_with_legacy_snapshot_bypassed() {
         .execute("DELETE FROM agent_store_format", [])
         .unwrap();
     connection
-        .execute("INSERT INTO agent_store_format VALUES (32)", [])
+        .execute("INSERT INTO agent_store_format VALUES (?1)", [STORE_FORMAT])
         .unwrap();
     insert_documented_records(&connection, BUSINESS_TABLES);
     drop(connection);
@@ -3668,8 +3680,8 @@ fn a_newer_store_leaves_an_actionable_startup_note() {
     Connection::open(&database.0)
         .unwrap()
         .execute_batch(
-            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 33));
-             INSERT INTO agent_store_format VALUES (33);",
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 34));
+             INSERT INTO agent_store_format VALUES (34);",
         )
         .unwrap();
     let original = std::fs::read(&database.0).unwrap();
@@ -3679,10 +3691,10 @@ fn a_newer_store_leaves_an_actionable_startup_note() {
     assert!(message.contains("unsupported SQLite schema"), "{message}");
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
-    assert!(note.contains("Store format: v33"), "{note}");
-    assert!(note.contains("Daemon format: v32"), "{note}");
+    assert!(note.contains("Store format: v34"), "{note}");
+    assert!(note.contains("Daemon format: v33"), "{note}");
     assert!(note.contains("Existing data was preserved"), "{note}");
-    assert!(note.contains("Run a build supporting v33"), "{note}");
+    assert!(note.contains("Run a build supporting v34"), "{note}");
     assert!(note.contains("--home PATH"), "{note}");
 }
 
@@ -3700,7 +3712,7 @@ fn a_mismatched_store_note_does_not_claim_a_downgrade() {
     assert!(SqliteStorage::open(database.0.clone()).is_err());
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
-    assert!(note.contains("Store format: v29 (schema is v32)"), "{note}");
+    assert!(note.contains("Store format: v29 (schema is v33)"), "{note}");
     assert!(note.contains("marker and schema disagree"), "{note}");
     assert!(
         note.contains("Use the build that wrote this store"),
@@ -3744,7 +3756,7 @@ fn an_empty_marker_table_is_reported_as_missing_or_ambiguous() {
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
     assert!(
-        note.contains("Store format: v32 (format marker is missing or ambiguous)"),
+        note.contains("Store format: v33 (format marker is missing or ambiguous)"),
         "{note}"
     );
     assert!(!note.contains("Run a build supporting"), "{note}");
@@ -3837,20 +3849,20 @@ fn a_failed_open_replaces_the_previous_startup_note() {
     Connection::open(&database.0)
         .unwrap()
         .execute_batch(
-            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 33));
-             INSERT INTO agent_store_format VALUES (33);",
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 34));
+             INSERT INTO agent_store_format VALUES (34);",
         )
         .unwrap();
     std::fs::write(
         startup_note(&database.0),
-        "dimcode-startup-failure v1 pid=1\nCannot open native store /previous.\n  Store format: v34\n",
+        "dimcode-startup-failure v1 pid=1\nCannot open native store /previous.\n  Store format: v35\n",
     )
     .unwrap();
     assert!(SqliteStorage::open(database.0.clone()).is_err());
     let note = read_startup_note(&database.0);
-    assert!(note.contains("Store format: v33"), "{note}");
+    assert!(note.contains("Store format: v34"), "{note}");
     assert!(!note.contains("/previous"), "{note}");
-    assert!(!note.contains("v34"), "{note}");
+    assert!(!note.contains("v35"), "{note}");
 }
 
 #[test]
@@ -3869,7 +3881,10 @@ fn a_successful_upgrade_removes_a_stale_startup_note() {
     std::fs::write(startup_note(&database.0), "stale").unwrap();
     drop(SqliteStorage::open(database.0.clone()).unwrap());
     assert!(!startup_note(&database.0).exists());
-    assert_eq!(marker(&Connection::open(&database.0).unwrap()), vec![32]);
+    assert_eq!(
+        marker(&Connection::open(&database.0).unwrap()),
+        vec![i64::from(STORE_FORMAT)]
+    );
 }
 
 fn marker(connection: &Connection) -> Vec<i64> {
@@ -3893,6 +3908,7 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
         .chain(["session_catalog"].iter().filter(|_| from < 23))
         .chain(V28_TABLES.iter().filter(|_| from < 28))
         .chain(V29_TABLES.iter().filter(|_| from < 29))
+        .chain(V33_TABLES.iter().filter(|_| from < 33))
         .copied()
         .collect();
     let kept: Vec<&str> = BUSINESS_TABLES
@@ -3949,8 +3965,8 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
     store.close().await.unwrap();
     db.close().await.unwrap();
     let connection = Connection::open(&database.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(32));
-    assert_eq!(marker(&connection), [32]);
+    assert_eq!(schema(&connection), schema_of(STORE_FORMAT));
+    assert_eq!(marker(&connection), [i64::from(STORE_FORMAT)]);
     let text: (i64, i64) = connection
         .query_row(
             "SELECT context_render, context_state FROM timeline_events WHERE kind = 'step/text' LIMIT 1",
@@ -4067,8 +4083,8 @@ async fn a_v13_store_upgrades_in_place_once() {
     assert_eq!(db.upgraded_from(), None);
     db.close().await.unwrap();
     let connection = Connection::open(&fresh.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(32));
-    assert_eq!(marker(&connection), [32]);
+    assert_eq!(schema(&connection), schema_of(STORE_FORMAT));
+    assert_eq!(marker(&connection), [i64::from(STORE_FORMAT)]);
     drop(connection);
 
     let database = Database::new();
@@ -4188,7 +4204,7 @@ async fn a_v21_store_upgrades_in_place_once_and_restores_typeless_tool_schemas()
 
     let connection = Connection::open(&database.0).unwrap();
     assert_ne!(schema(&connection), schema_of(21));
-    assert_eq!(marker(&connection), [32]);
+    assert_eq!(marker(&connection), [i64::from(STORE_FORMAT)]);
     let body: String = connection
         .query_row(
             "SELECT body FROM timeline_content WHERE session_id = 'schema' AND kind = 'tools'",
@@ -4434,7 +4450,7 @@ async fn the_daemon_reports_a_v13_upgrade_on_stderr_once() {
         reports.push(stderr);
     }
     let line = format!(
-        "Upgraded native store {} from format v13 to v32; earlier dimcode versions cannot open it.",
+        "Upgraded native store {} from format v13 to v{STORE_FORMAT}; earlier dimcode versions cannot open it.",
         path.display()
     );
     assert!(
@@ -6707,8 +6723,8 @@ async fn a_v25_provider_record_keeps_supplied_limits_and_drops_assumed_ones() {
             .unwrap()
     };
     let connection = Connection::open(&database.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(32));
-    assert_eq!(marker(&connection), [32]);
+    assert_eq!(schema(&connection), schema_of(STORE_FORMAT));
+    assert_eq!(marker(&connection), [i64::from(STORE_FORMAT)]);
     drop(connection);
 
     let listed_expected = json!({

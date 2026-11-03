@@ -1,5 +1,5 @@
 use super::{
-    SqliteStorage,
+    SqliteStorage, WorktreeDirectory,
     codec::{
         self, CONTENT_BUDGET, ContentRow, ListReferences, Previous, Reader, RequestBodies, Values,
         WireEvent,
@@ -9,7 +9,10 @@ use super::{
     sqlite::error,
 };
 use crate::protocol::SessionOrigin;
-use dim_agent_capabilities::host::SessionFilesHost;
+use dim_agent_capabilities::{
+    file_access::{AssociateWorktree, WorktreeAssociations},
+    host::{HostError, HostFuture, SessionFilesHost},
+};
 use dim_agent_runtime::Names;
 use dim_agent_runtime::{
     AgentError, BoxFuture, BranchRecord, CompactionCut, PolicyEvent, PolicyFacts, PolicyOrder,
@@ -31,7 +34,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     ops::RangeInclusive,
     panic::{AssertUnwindSafe, catch_unwind},
-    path::PathBuf,
+    path::{Component, Path, PathBuf},
     sync::{Arc, Mutex, Weak, mpsc},
     thread,
     time::{Duration, Instant},
@@ -1011,6 +1014,7 @@ impl SqliteTimelineStore {
             "timeline_content",
             "session_grants",
             "session_output_owners",
+            "session_worktrees",
             "session_metadata",
             "session_catalog",
             "session_owners",
@@ -1106,6 +1110,15 @@ pub struct SessionStore {
     /// so a fork either copies before the removal or sees no rows (ADR 013 D4).
     ownership: Arc<tokio::sync::Mutex<()>>,
 }
+
+/// A Session's verified subtree in one recorded worktree. The association
+/// survives close, is removed by deletion, and is not copied by a fork.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeUsage {
+    pub session_id: String,
+    pub subtree: PathBuf,
+}
+
 impl SessionStore {
     /// `ctx` is SessionStore's own context, from which each file step reads
     /// the node's FileStorage; `files_root` is the FileStorage root of the
@@ -1731,6 +1744,140 @@ impl SessionStore {
             })
             .await
     }
+    /// Atomically records a Git-verified directory and its Session association.
+    /// Paths must be canonical absolute UTF-8 paths and `subtree` must be inside
+    /// the root. Repeated calls replace this Session's subtree. A missing or
+    /// deleted Session fails as Closed; failure changes neither record.
+    pub async fn associate_worktree(
+        &self,
+        session_id: &str,
+        directory: WorktreeDirectory,
+        subtree: PathBuf,
+    ) -> Result<()> {
+        let repository = stored_worktree_path(&directory.repository)?.to_owned();
+        let root = stored_worktree_path(&directory.root)?.to_owned();
+        let subtree_text = stored_worktree_path(&subtree)?.to_owned();
+        if !subtree.starts_with(&directory.root) {
+            return Err(error(
+                "the inherited subtree must be inside the worktree root",
+            ));
+        }
+        let _ownership = self.ownership.lock().await;
+        let session = session_id.to_owned();
+        self.timeline
+            .db
+            .run(move |connection| {
+                let tx = connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(error)?;
+                let exists: bool = tx
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM agent_sessions WHERE session_id=?1)",
+                        [&session],
+                        |row| row.get(0),
+                    )
+                    .map_err(error)?;
+                if !exists {
+                    return Err(AgentError::Closed(session));
+                }
+                tx.execute(
+                    "INSERT INTO worktree_directories (repository, root) VALUES (?1, ?2) \
+                     ON CONFLICT (repository, root) DO NOTHING",
+                    params![repository, root],
+                )
+                .map_err(error)?;
+                tx.execute(
+                    "INSERT INTO session_worktrees (session_id, repository, root, subtree) \
+                     VALUES (?1, ?2, ?3, ?4) ON CONFLICT (session_id, repository, root) \
+                     DO UPDATE SET subtree=excluded.subtree",
+                    params![session, repository, root, subtree_text],
+                )
+                .map_err(error)?;
+                tx.commit().map_err(error)
+            })
+            .await
+    }
+
+    /// Lists recorded directories, including those with no Session association.
+    /// The result is not a Git inventory or authority to delete any directory.
+    pub async fn worktree_directories(&self) -> Result<Vec<WorktreeDirectory>> {
+        self.timeline
+            .db
+            .run_read(|connection| {
+                connection
+                    .prepare("SELECT repository, root FROM worktree_directories ORDER BY repository, root")
+                    .map_err(error)?
+                    .query_map([], |row| {
+                        Ok(WorktreeDirectory {
+                            repository: PathBuf::from(row.get::<_, String>(0)?),
+                            root: PathBuf::from(row.get::<_, String>(1)?),
+                        })
+                    })
+                    .map_err(error)?
+                    .collect::<rusqlite::Result<_>>()
+                    .map_err(error)
+            })
+            .await
+    }
+
+    /// Lists the Session associations of a recorded directory. An unknown
+    /// directory or a candidate without remaining associations has no usages.
+    pub async fn worktree_usages(
+        &self,
+        directory: WorktreeDirectory,
+    ) -> Result<Vec<WorktreeUsage>> {
+        let repository = stored_worktree_path(&directory.repository)?.to_owned();
+        let root = stored_worktree_path(&directory.root)?.to_owned();
+        self.timeline
+            .db
+            .run_read(move |connection| {
+                connection
+                    .prepare(
+                        "SELECT session_id, subtree FROM session_worktrees \
+                         WHERE repository=?1 AND root=?2 ORDER BY session_id",
+                    )
+                    .map_err(error)?
+                    .query_map(params![repository, root], |row| {
+                        Ok(WorktreeUsage {
+                            session_id: row.get(0)?,
+                            subtree: PathBuf::from(row.get::<_, String>(1)?),
+                        })
+                    })
+                    .map_err(error)?
+                    .collect::<rusqlite::Result<_>>()
+                    .map_err(error)
+            })
+            .await
+    }
+}
+
+impl AssociateWorktree for SessionStore {
+    fn associate(
+        &self,
+        session: String,
+        directory: WorktreeDirectory,
+        subtree: PathBuf,
+    ) -> HostFuture<'_, ()> {
+        Box::pin(async move {
+            self.associate_worktree(&session, directory, subtree)
+                .await
+                .map_err(|error| HostError::failed(error.to_string()))
+        })
+    }
+}
+
+fn stored_worktree_path(path: &Path) -> Result<&str> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, Component::CurDir | Component::ParentDir))
+    {
+        return Err(error(
+            "a worktree path must be absolute without relative components",
+        ));
+    }
+    path.to_str()
+        .ok_or_else(|| error("a worktree path must be UTF-8"))
 }
 
 /// The Session directory, the `sessionFiles` service and the
@@ -1769,6 +1916,7 @@ impl DynPlugin for SessionStorePlugin {
             })?;
             files.start();
             ctx.provide_as::<SessionStore>(store.clone())?;
+            ctx.provide_as::<WorktreeAssociations>(Arc::new(WorktreeAssociations(store.clone())))?;
             ctx.provide_as::<SessionFilesHost>(Arc::new(SessionFilesHost(Arc::new(files))))?;
             ctx.provide_at(
                 host_key("sessionMetadata"),
@@ -3267,6 +3415,7 @@ fn drop_session(connection: &mut Connection, session: &str) -> Result<usize> {
         for table in [
             "session_output_owners",
             "session_grants",
+            "session_worktrees",
             "session_metadata",
             "session_catalog",
             "session_owners",

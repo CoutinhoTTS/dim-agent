@@ -152,6 +152,7 @@ struct Settlement {
 
 /// The persistent shell of one branch.
 pub struct ShellSession {
+    facts: Option<(Ctx, Key<crate::file_access::FileAccessFacts>)>,
     inner: tokio::sync::Mutex<Inner>,
     config: ShellSessionConfig,
     lifecycle: CancellationToken,
@@ -176,6 +177,7 @@ impl ShellSession {
         session_id: String,
     ) -> Self {
         Self {
+            facts: None,
             inner: tokio::sync::Mutex::new(Inner {
                 pty: None,
                 generation: 0,
@@ -400,9 +402,18 @@ impl ShellSession {
             env,
         };
         // The persistent shell adds no failure note (host-platform-isolation.md#visibility).
+        let roots = match self.facts.as_ref().and_then(|(ctx, key)| ctx.get_at(key)) {
+            Some(facts) => {
+                facts
+                    .0
+                    .workspace_roots(&self.config.cwd, self.lifecycle.clone())
+                    .await?
+            }
+            None => vec![self.config.cwd.clone()],
+        };
         let (spec, temporary, _) = self
             .host
-            .prepare_isolated_process(spec, &self.config.cwd, Some(&self.config.output_dir))
+            .prepare_isolated_process(spec, &roots, Some(&self.config.output_dir))
             .await
             .map_err(|error| HostError::failed(format!("{}: {}", error.code, error.reason)))?;
         let mut pty = self
@@ -1307,6 +1318,7 @@ fn advance_occupying(inner: &mut Inner) -> Option<Settlement> {
 
 /// The plugin.
 pub struct ShellSessionPlugin {
+    facts: Key<crate::file_access::FileAccessFacts>,
     session: Key<ShellSession>,
     stop: Key<dyn ExecStop>,
     timeline: Key<Timeline>,
@@ -1329,6 +1341,7 @@ impl ShellSessionPlugin {
     /// Derive execution settings from the owning Session.
     pub fn session(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
+            facts: names.key()?,
             session: names.key()?,
             stop: names.key()?,
             timeline: names.key()?,
@@ -1364,7 +1377,7 @@ impl DynPlugin for ShellSessionPlugin {
             let config = ctx.require_at(&self.session_config)?;
             let identity = ctx.require_at(&self.identity)?;
             let owner = ctx.get::<SessionFilesHost>();
-            let session = Arc::new(ShellSession::new(
+            let mut session = ShellSession::new(
                 self.config.clone().unwrap_or_else(|| ShellSessionConfig {
                     cwd: PathBuf::from(&config.cwd),
                     member: config.collaboration_role
@@ -1380,7 +1393,9 @@ impl DynPlugin for ShellSessionPlugin {
                 dispatcher,
                 owner,
                 identity.session_id.clone(),
-            ));
+            );
+            session.facts = Some((ctx.clone(), self.facts.clone()));
+            let session = Arc::new(session);
             let service = session.clone();
             ctx.effect(move || async move {
                 service.lifecycle.cancel();
