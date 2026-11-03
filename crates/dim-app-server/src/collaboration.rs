@@ -2425,8 +2425,7 @@ const LEADER_DESCRIPTION: &str = "Work with other agents as a team you lead.
   receiver must change course now.
 - read: view a team member's recent activity. list: show your team and the agents you
   can use. inspect: show one agent's full profile (instructions, tools, model).
-- models: query the models this Session can start an agent with, with their provider
-  IDs. Use it when you need model information to start an agent, such as the model a
+- models: query the models this Session can start an agent with, such as the model a
   profile asks for.
 - result: read a complete result by resultId from a report, even after closing the member.
 Address members with agentId + sessionId from earlier results.";
