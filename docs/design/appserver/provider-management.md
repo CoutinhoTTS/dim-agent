@@ -45,7 +45,7 @@ with its existing owner; management never writes another owner's state.
 | --- | --- |
 | `managementMethods`, process, namespace `provider` | Local v3 Desktop/CLI and trusted process callers; §3 extends this existing namespace |
 | Provider module boundary `stored_selection` (Rust) | Native data-boundary consumers such as Migration; §3.7 adds one pure function over an admitted record, not an RPC, host port or management method |
-| Provider host port `SelectableModelsHost` (core `dim-agent-capabilities`), provided by Provider | In-process owners that route by model capability (Modality); §3.6 adds one read, not a management method or RPC method |
+| Provider host port `SelectableModelsHost` (core `dim-agent-capabilities`), provided by Provider | In-process owners that route by model capability (Modality) and the `models` tool; §3.6 adds one read, not a management method or RPC method |
 | Existing `account`, `account.codex`, `account.grok` namespaces | Existing account operations; no new account method, event or managed host capability |
 | `ProviderConnectionResolver`, `ModelSelectionHost` | Provider implements catalog/route decisions through existing types; no new core port |
 | `auxiliaryModel.complete` | Existing caller-selected S4 contract, unchanged |
@@ -513,7 +513,9 @@ availability predicate of its own. The reply carries IDs and capabilities only,
 not a display name: a client that renders an option joins the ID with the model
 list of `provider.catalog` or `provider.management`, and Modality copies no name.
 Provider gains no per-consumer key, setting or filter: the read has no input, so a
-caller that wants one provider filters the reply.
+caller that wants one provider filters the reply. The `models` tool in the App
+Server reads the same reply, prints the IDs it carries to the model as a tool
+result, and keeps no rule of its own either ([Models](../plugins/Models.md)).
 
 **What does not change.** `provider.catalog`, `provider.management`,
 `provider.select`, model selection, adoption, preferences and their errors; the

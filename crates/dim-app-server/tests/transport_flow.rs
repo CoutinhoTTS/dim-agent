@@ -114,6 +114,8 @@ mod goal;
 mod guide_entries;
 #[path = "transport_flow/modality.rs"]
 mod modality;
+#[path = "transport_flow/models.rs"]
+mod models;
 #[path = "transport_flow/plugin_manager.rs"]
 mod plugin_manager;
 #[path = "transport_flow/process_typescript.rs"]
