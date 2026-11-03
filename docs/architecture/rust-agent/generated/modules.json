@@ -374,7 +374,6 @@
       "file": "crates/dim-agent-capabilities/src/context_methods.rs",
       "unexpandedMacros": [
         "json",
-        "matches",
         "tokio::select",
         "unreachable",
         "vec"
@@ -7750,6 +7749,22 @@
     },
     {
       "from": "dim_agent_capabilities::context_methods",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQuery",
+        "path TimelineQueryDirection::Ascending",
+        "path TimelineQueryOrderBy::Sequence",
+        "path TimelineQueryPredicate",
+        "path TimelineQueryScope::Branch",
+        "use dim_agent_runtime::TimelineQuery",
+        "use dim_agent_runtime::TimelineQueryDirection",
+        "use dim_agent_runtime::TimelineQueryOrderBy",
+        "use dim_agent_runtime::TimelineQueryPredicate",
+        "use dim_agent_runtime::TimelineQueryScope"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_methods",
       "to": "dim_agent_types::events",
       "references": [
         "path ContextCompactionResult::Cancelled",
@@ -10338,6 +10353,20 @@
         "path StateCell",
         "path StateCell::new",
         "use dim_agent_runtime::StateCell"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::permission",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQuery",
+        "path TimelineQueryDirection::Descending",
+        "path TimelineQueryOrderBy::Sequence",
+        "path TimelineQueryScope::Chain",
+        "use dim_agent_runtime::TimelineQuery",
+        "use dim_agent_runtime::TimelineQueryDirection",
+        "use dim_agent_runtime::TimelineQueryOrderBy",
+        "use dim_agent_runtime::TimelineQueryScope"
       ]
     },
     {
@@ -16435,6 +16464,20 @@
     },
     {
       "from": "dim_app_server::agents",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQuery",
+        "path TimelineQueryDirection::Ascending",
+        "path TimelineQueryOrderBy::Sequence",
+        "path TimelineQueryScope::Branch",
+        "use dim_agent_runtime::TimelineQuery",
+        "use dim_agent_runtime::TimelineQueryDirection",
+        "use dim_agent_runtime::TimelineQueryOrderBy",
+        "use dim_agent_runtime::TimelineQueryScope"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
         "path TimelineKey",
@@ -17734,6 +17777,20 @@
       "to": "dim_agent_runtime::parts",
       "references": [
         "path dim_agent_runtime::PartRegistry"
+      ]
+    },
+    {
+      "from": "dim_app_server::collaboration",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQuery",
+        "path TimelineQueryDirection::Ascending",
+        "path TimelineQueryOrderBy::Sequence",
+        "path TimelineQueryScope::Branch",
+        "use dim_agent_runtime::TimelineQuery",
+        "use dim_agent_runtime::TimelineQueryDirection",
+        "use dim_agent_runtime::TimelineQueryOrderBy",
+        "use dim_agent_runtime::TimelineQueryScope"
       ]
     },
     {

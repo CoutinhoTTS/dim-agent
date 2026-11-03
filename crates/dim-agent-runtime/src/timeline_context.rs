@@ -427,6 +427,10 @@ impl TimelineContext {
             })
             .map(Some)
     }
+    /// The input at `sequence`, a submission this branch already holds. The
+    /// duplicate may arrive while its first write is still in flight, so the
+    /// read takes the hot window and not the published head the query bounds
+    /// ([ADR 020 D3](../../../docs/adr/020-timeline-read-convergence.md#d3-replay-is-removed)).
     async fn committed_input(&self, sequence: u64) -> Result<Arc<AgentEvent>> {
         self.timeline
             .local(sequence..=sequence)
