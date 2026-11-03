@@ -15,8 +15,6 @@ type Dispatcher = {
     rebuild: () => number | bigint | Promise<number | bigint>,
     handler: (event: AgentEvent) => void | Promise<void>,
   ): Promise<void>
-  local(start: number | bigint, through: number | bigint): Promise<AgentEvent[]>
-  committed(): Promise<number | bigint>
 }
 type TimelineQuery = {
   scope: 'branch' | 'chain'
@@ -59,6 +57,9 @@ const INHERITED_PAGE = 64n
 
 /** Facts one page of the rebuild reads. */
 const REBUILD_PAGE = 256n
+
+/** Facts one page of the reply read keeps. */
+const REPLY_PAGE = 256n
 
 const codeOf = (error: unknown): string =>
   typeof error === 'object' && error !== null && 'code' in error
@@ -129,11 +130,20 @@ export default definePlugin({
     // the caller waiting (Pursuit §4.1).
     const created = async (after: bigint) => {
       const operation = evaluationOperation(String(after))
-      const through = await dispatcher.committed()
-      return (await dispatcher.local(after, through)).some(event => event.type === 'branch'
-        && event.name === 'create'
-        && event.data.source?.kind === 'host'
-        && event.data.source.operation_id === operation)
+      // The creation may still be in flight when its wait was abandoned, so the
+      // read adds the facts written and not yet published.
+      const page = await timeline.query({
+        scope: 'branch',
+        bound: 'committed',
+        from_sequence: after,
+        order_by: 'sequence',
+        direction: 'ascending',
+        kinds: ['branch/create'],
+        predicate: { path: 'source.operation_id', value: operation },
+        limit: 1n,
+        offset: 0n,
+      })
+      return page.events.length > 0
     }
     const doTurnEnd = async (after: bigint) => {
       if (fold.turnEnd?.sequence !== after) return
@@ -199,9 +209,28 @@ export default definePlugin({
         : writes.pause(branchId, decision.reason, evaluation))
     })
     // The reply is the turn's final model request: the text deltas of the
-    // request its last `step/model-start` names (Pursuit §4.2).
+    // request its last `step/model-start` names (Pursuit §4.2). The turn id is
+    // one equality, so the store selects the turn's facts, and the turn's end
+    // is where the read stops.
     const reply = async (turnStart: bigint, through: bigint, turnId: string) => {
-      const events = await dispatcher.local(turnStart, through)
+      const events: AgentEvent[] = []
+      let from = turnStart
+      for (;;) {
+        const page = await timeline.query({
+          scope: 'branch',
+          from_sequence: from,
+          order_by: 'sequence',
+          direction: 'ascending',
+          kinds: ['step/model-start', 'step/text'],
+          predicate: { path: 'turn_id', value: turnId },
+          limit: REPLY_PAGE,
+          offset: 0n,
+        })
+        events.push(...page.events.filter(event => BigInt(event.sequence) <= through))
+        const last = page.events.at(-1)
+        if (last === undefined || BigInt(page.events.length) < REPLY_PAGE || BigInt(last.sequence) >= through) break
+        from = BigInt(last.sequence) + 1n
+      }
       const starts = events.filter(event => event.type === 'step' && event.name === 'model-start' && event.data.turn_id === turnId)
       const request = starts.at(-1)?.data.request_id
       if (request === undefined) return ''
