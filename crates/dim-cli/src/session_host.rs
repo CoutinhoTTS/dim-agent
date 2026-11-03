@@ -4394,12 +4394,13 @@ mod tests {
     fn a_session_is_created_in_the_resolved_workspace() {
         let root = tempfile::tempdir().unwrap();
         let directory = std::fs::canonicalize(root.path()).unwrap();
-        let options = crate::args::Options::parse(
+        let mut options = crate::args::Options::parse(
             ["tui", "--cwd", directory.to_str().unwrap()]
                 .into_iter()
                 .map(str::to_owned),
         )
         .unwrap();
+        options.resolve_workspace().unwrap();
         assert_eq!(
             creation_params(&options)["cwd"],
             directory.to_str().unwrap()

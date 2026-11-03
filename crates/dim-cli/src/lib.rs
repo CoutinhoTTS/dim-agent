@@ -505,6 +505,10 @@ fn prepare() -> Result<Option<Options>> {
             options.prompt = Some(prompt);
         }
     }
+    // The last step before the daemon is contacted: with a prompt from stdin
+    // taken, a Chat that resumes a Session headlessly is known to name no
+    // workspace.
+    options.resolve_workspace()?;
     Ok(Some(options))
 }
 

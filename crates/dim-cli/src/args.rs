@@ -341,8 +341,8 @@ pub struct Options {
     /// own file system work resolves against. Requests carry [`Self::workspace`]
     /// instead.
     cwd: PathBuf,
-    /// The workspace the command names in its requests, resolved while the
-    /// options are parsed; `None` for a command that names none.
+    /// The workspace the command names in its requests, resolved once the
+    /// options are complete; `None` for a command that names none.
     workspace: Option<Workspace>,
     pub server: Option<PathBuf>,
     pub model_config: Option<PathBuf>,
@@ -1212,10 +1212,6 @@ impl Options {
         if !options.cwd.is_dir() {
             return Err("--cwd must name a directory".into());
         }
-        options.workspace = options
-            .names_workspace()
-            .then(|| Workspace::resolve(&options.cwd))
-            .transpose()?;
         if matches!(options.action, Action::DaemonStop) {
             return Ok(options);
         }
@@ -1249,8 +1245,22 @@ impl Options {
         &self.cwd
     }
 
-    /// The workspace every request this command sends names, resolved while
-    /// the options were parsed. Only a command that names one reaches a
+    /// Resolves the workspace every request this command sends names, once
+    /// the options are complete. A prompt from `-p` is here at parse; one
+    /// read from stdin arrives before this step, so a Chat that resumes a
+    /// Session and runs headless is still known to name none. A command that
+    /// names one is refused here, before the daemon is contacted, when the
+    /// path is not valid UTF-8.
+    pub fn resolve_workspace(&mut self) -> Result<()> {
+        self.workspace = self
+            .names_workspace()
+            .then(|| Workspace::resolve(&self.cwd))
+            .transpose()?;
+        Ok(())
+    }
+
+    /// The workspace every request this command sends names, resolved once
+    /// the options were complete. Only a command that names one reaches a
     /// request.
     pub fn workspace(&self) -> &Workspace {
         self.workspace
@@ -1264,11 +1274,16 @@ impl Options {
     }
 
     /// Whether this command names the workspace in a request it sends. Such a
-    /// command resolves it while its options are parsed, so a path that is
+    /// command resolves it once its options are complete, so a path that is
     /// not valid UTF-8 is refused before the daemon is contacted.
     fn names_workspace(&self) -> bool {
         match &self.action {
-            Action::Chat | Action::Tui => true,
+            // A Chat that resumes a Session and runs headless names none: it
+            // attaches, reads history and submits, and the composer never
+            // runs. A new Chat or Session still does, and so does an
+            // interactive one.
+            Action::Chat => self.resume.is_none() || self.prompt.is_none(),
+            Action::Tui => true,
             Action::Exec => self.resume.is_none(),
             Action::McpList
             | Action::McpLogin(_)
@@ -1367,6 +1382,8 @@ pub fn default_home() -> PathBuf {
 mod workspace_tests {
     use super::*;
 
+    /// Every parse that reaches a request takes the same step the CLI takes:
+    /// a piped prompt, when the row has one, then `resolve_workspace`.
     #[test]
     fn parsed_commands_resolve_only_workspaces_their_requests_name() {
         let home = tempfile::tempdir().unwrap();
@@ -1375,40 +1392,63 @@ mod workspace_tests {
         let document = home.path().join("job.json");
         std::fs::write(&document, "{}").unwrap();
         let document = document.to_str().unwrap();
+        // Each row is its arguments, the prompt a pipe would carry, and
+        // whether its requests name the workspace.
         let cases = [
-            (vec!["scheduled", "list"], false),
-            (vec!["scheduled", "enable", "job-1"], false),
-            (vec!["scheduled", "disable", "job-1"], false),
-            (vec!["scheduled", "edit", "job-1"], false),
-            (vec!["scheduled", "set", "job-1", document], false),
-            (vec!["scheduled", "add", document], false),
-            (vec!["scheduled", "remove", "job-1"], false),
-            (vec!["scheduled", "run", "job-1"], false),
-            (vec!["scheduled", "history", "job-1"], false),
-            (vec!["exec", "resume", "session", "-p", "continue"], false),
-            (vec!["exec", "--resume", "session", "-p", "continue"], false),
-            (vec!["--version"], false),
-            (vec!["exec", "-p", "start"], true),
-            (vec!["tui"], true),
-            (vec!["mcp", "list"], true),
-            (vec!["mcp", "login", "docs"], true),
-            (vec!["mcp", "logout", "docs"], true),
-            (vec!["mcp", "enable", "docs"], true),
-            (vec!["mcp", "disconnect", "docs"], true),
-            (vec!["mcp", "edit", "docs"], true),
-            (vec!["skills", "list"], true),
-            (vec!["hooks", "list"], true),
-            (vec!["hooks", "set", document], true),
-            (vec!["workflow", "list"], true),
-            (vec!["workflow", "start", "job"], true),
+            (vec!["scheduled", "list"], None, false),
+            (vec!["scheduled", "enable", "job-1"], None, false),
+            (vec!["scheduled", "disable", "job-1"], None, false),
+            (vec!["scheduled", "edit", "job-1"], None, false),
+            (vec!["scheduled", "set", "job-1", document], None, false),
+            (vec!["scheduled", "add", document], None, false),
+            (vec!["scheduled", "remove", "job-1"], None, false),
+            (vec!["scheduled", "run", "job-1"], None, false),
+            (vec!["scheduled", "history", "job-1"], None, false),
+            (
+                vec!["exec", "resume", "session", "-p", "continue"],
+                None,
+                false,
+            ),
+            (
+                vec!["exec", "--resume", "session", "-p", "continue"],
+                None,
+                false,
+            ),
+            (vec!["--resume", "session", "-p", "continue"], None, false),
+            (vec!["--resume", "session"], Some("continue"), false),
+            (vec!["--version"], None, false),
+            (vec!["--resume", "session"], None, true),
+            (vec!["-p", "start"], None, true),
+            (vec!["exec", "-p", "start"], None, true),
+            (vec!["tui"], None, true),
+            (vec!["mcp", "list"], None, true),
+            (vec!["mcp", "login", "docs"], None, true),
+            (vec!["mcp", "logout", "docs"], None, true),
+            (vec!["mcp", "enable", "docs"], None, true),
+            (vec!["mcp", "disconnect", "docs"], None, true),
+            (vec!["mcp", "edit", "docs"], None, true),
+            (vec!["skills", "list"], None, true),
+            (vec!["hooks", "list"], None, true),
+            (vec!["hooks", "set", document], None, true),
+            (vec!["workflow", "list"], None, true),
+            (vec!["workflow", "start", "job"], None, true),
         ];
-        for (arguments, names_workspace) in cases {
+        for (arguments, piped, names_workspace) in cases {
             let args = ["--home", directory, "--cwd", directory]
                 .into_iter()
                 .chain(arguments.iter().copied())
                 .map(str::to_owned);
-            let options =
+            let mut options =
                 Options::parse(args).unwrap_or_else(|error| panic!("{arguments:?}: {error}"));
+            // What `prepare` does with a prompt on stdin before it resolves
+            // the workspace.
+            if let Some(prompt) = piped {
+                assert!(options.prompt.is_none(), "{arguments:?}");
+                options.prompt = Some(prompt.to_owned());
+            }
+            options
+                .resolve_workspace()
+                .unwrap_or_else(|error| panic!("{arguments:?}: {error}"));
             assert_eq!(
                 options.named_workspace(),
                 names_workspace.then_some(directory),
