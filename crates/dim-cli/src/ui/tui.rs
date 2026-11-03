@@ -9083,6 +9083,38 @@ mod tests {
         (app, sent, home)
     }
 
+    #[test]
+    fn choosing_goal_completes_before_dispatch_in_both_modes() {
+        for fullscreen in [false, true] {
+            for query in ["/go", "/goal"] {
+                for selection in [KeyCode::Enter, KeyCode::Tab] {
+                    for (objective, expected) in [
+                        ("", crate::goal::Request::Show),
+                        (
+                            "fix the failing build",
+                            crate::goal::Request::Objective("fix the failing build".into()),
+                        ),
+                    ] {
+                        let (mut app, sent, _home) = session_with_queue(false, &[]);
+                        app.fullscreen = fullscreen;
+                        typed(&mut app, query);
+                        press(&mut app, selection);
+                        assert!(sent.borrow().is_empty(), "selection must not dispatch");
+                        assert_eq!(app.composer.text(), "/goal ");
+                        assert!(!app.composer.palette_open());
+                        typed(&mut app, objective);
+                        press(&mut app, KeyCode::Enter);
+                        assert!(matches!(
+                            sent.borrow().as_slice(),
+                            [Command::Goal(request)] if *request == expected
+                        ));
+                        assert!(app.composer.is_empty());
+                    }
+                }
+            }
+        }
+    }
+
     fn describe(commands: &[Command]) -> Vec<String> {
         commands
             .iter()

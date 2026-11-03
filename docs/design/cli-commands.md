@@ -171,9 +171,24 @@ registers. The methods, the marker blocks and the rule that reads the goal belon
 this section owns what the native clients do with them. The command is listed in the palette as a
 `session` command, like `/compact`.
 
+In both TUI modes, selecting `/goal` with Enter or Tab only fills `/goal ` in the
+composer and closes the palette. It does not dispatch until the user submits the
+draft. Submitting without arguments prints usage for Dim's supported forms,
+followed by the current goal and status, or that the shown line has no goal.
+The line-mode prompt prints the same help and state for bare `/goal`.
+
+```text
+palette: goal + Enter -> /goal |          (completion only)
+/goal fix build + Enter -> set/edit goal
+/goal + Space + Enter   -> usage + current goal
+
+Usage: /goal [OBJECTIVE | set OBJECTIVE | edit OBJECTIVE | pause | resume | clear]
+No goal on main.
+```
+
 | Form | Call |
 | --- | --- |
-| `/goal` | none: the goal in force on the shown line, or that it has none |
+| `/goal` | none: usage, then the goal in force on the shown line, or that it has none |
 | `/goal OBJECTIVE` | `session.goal.edit` while the goal is active or paused, `session.goal.set` otherwise |
 | `/goal set OBJECTIVE` | `session.goal.set` |
 | `/goal edit OBJECTIVE` | `session.goal.edit` |
