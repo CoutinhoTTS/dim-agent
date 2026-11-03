@@ -3051,11 +3051,11 @@ impl App {
             }
             Effect::Setting(setting) => {
                 let from_permissions = setting == Setting::Isolation
-                    && self.settings_return.is_none()
                     && matches!(self.prompt, Some(Prompt::Approvals(_)));
+                let settings_return = self.settings_return;
                 self.setting(setting);
                 if from_permissions {
-                    self.settings_return = None;
+                    self.settings_return = settings_return;
                     self.permissions_return = true;
                 }
             }
@@ -5470,7 +5470,7 @@ impl App {
         if let Some(goal) = self.goal_label() {
             parts.push(fg(goal, &p.muted));
         }
-        if self.permission_policy.preset.tool_approval() == dim_agent_types::ToolApproval::Bypass {
+        if self.permission_policy.preset == dim_agent_types::PermissionPreset::FullAccess {
             parts.push(fg("\u{23f5}\u{23f5} Full access", &p.muted));
         }
         if let Some(context) = self.context_label() {
@@ -7439,41 +7439,76 @@ mod tests {
     #[test]
     fn process_isolation_select_and_save() {
         use crate::model::session::ExecutionSnapshot;
-        let home = tempfile::tempdir().unwrap();
-        let theme = test_theme();
-        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let mut app = App::new(
-            Box::new(Recorder(sent.clone())),
-            MarkdownRenderer::new(&theme),
-            theme.palette.clone(),
-            home.path().to_path_buf(),
-            "/work".into(),
-        );
-        let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
-        app.run_command("settings", "");
-        for _ in 0..10 {
+        for (command, steps, via_permissions) in [
+            ("settings", 10, false),
+            ("permissions", 4, false),
+            ("settings", 8, true),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let theme = test_theme();
+            let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let mut app = App::new(
+                Box::new(Recorder(sent.clone())),
+                MarkdownRenderer::new(&theme),
+                theme.palette.clone(),
+                home.path().to_path_buf(),
+                "/work".into(),
+            );
+            let key =
+                |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
+            app.run_command(command, "");
+            for _ in 0..steps {
+                app.handle_input(key(KeyCode::Down));
+            }
+            app.handle_input(key(KeyCode::Enter));
+            if via_permissions {
+                for _ in 0..4 {
+                    app.handle_input(key(KeyCode::Down));
+                }
+                app.handle_input(key(KeyCode::Enter));
+            }
+            assert!(matches!(sent.borrow().last(), Some(Command::ReadIsolation)));
+            app.apply(Update::Isolation(Ok(ExecutionSnapshot {
+                revision: "r1".into(),
+                sandbox: false,
+                network: false,
+            })));
             app.handle_input(key(KeyCode::Down));
-        }
-        app.handle_input(key(KeyCode::Enter));
-        assert!(matches!(sent.borrow().last(), Some(Command::ReadIsolation)));
-        app.apply(Update::Isolation(Ok(ExecutionSnapshot {
-            revision: "r1".into(),
-            sandbox: false,
-            network: false,
-        })));
-        app.handle_input(key(KeyCode::Down));
-        app.handle_input(key(KeyCode::Enter));
-        app.handle_input(key(KeyCode::Down));
-        app.handle_input(key(KeyCode::Down));
-        app.handle_input(key(KeyCode::Enter));
-        assert!(matches!(
-            sent.borrow().last(),
-            Some(Command::SaveIsolation {
-                expected_revision,
+            app.handle_input(key(KeyCode::Enter));
+            app.handle_input(key(KeyCode::Down));
+            app.handle_input(key(KeyCode::Down));
+            app.handle_input(key(KeyCode::Enter));
+            assert!(matches!(
+                sent.borrow().last(),
+                Some(Command::SaveIsolation {
+                    expected_revision,
+                    sandbox: true,
+                    network: false,
+                }) if expected_revision == "r1"
+            ));
+            app.apply(Update::Isolation(Ok(ExecutionSnapshot {
+                revision: "r2".into(),
                 sandbox: true,
                 network: false,
-            }) if expected_revision == "r1"
-        ));
+            })));
+            app.handle_input(key(KeyCode::Esc));
+            let rendered = app.frame((112, 40));
+            let frame = rendered
+                .overlay
+                .as_ref()
+                .map_or(&rendered.live, |overlay| &overlay.rows)
+                .join("\n");
+            let parent = if command == "permissions" || via_permissions {
+                "Command rules"
+            } else {
+                "Settings"
+            };
+            assert!(frame.contains(parent), "{frame}");
+            if via_permissions {
+                app.handle_input(key(KeyCode::Esc));
+                assert!(matches!(app.prompt, Some(Prompt::Settings(_))));
+            }
+        }
     }
 
     #[test]

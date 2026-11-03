@@ -6,7 +6,7 @@
 //!   Workspace write  writes inside the workspace; asks outside it
 //!   Full access      no path limits; tools run without asking
 //!   Command rules    ›
-//!   Process isolation: Settings
+//!   Process isolation  Settings ›
 //! ```
 //!
 //! Permission is the preset (ADR 018). Process isolation stays in Settings.
@@ -53,13 +53,16 @@ impl ApprovalsPanel {
                     if preset == current { "current" } else { "" },
                 )
             })
-            .chain(std::iter::once(Item::new("rules", "Command rules", "›")))
+            .chain([
+                Item::new("rules", "Command rules", "›"),
+                Item::new("isolation", "Process isolation", "Settings ›"),
+            ])
             .collect::<Vec<_>>();
         let notes = PRESETS
             .into_iter()
             .map(|preset| format!("{}: {}", preset_label(preset), consequence(preset)))
             .chain(std::iter::once(
-                "The preset fixes the path boundary. Process isolation: Settings".to_owned(),
+                "The preset fixes the path boundary.".to_owned(),
             ))
             .collect();
         self.list = ListPanel::new("Permissions", HINT, "", "", "", false)
@@ -76,6 +79,7 @@ impl ApprovalsPanel {
                     area: Area::Permissions,
                     note: None,
                 },
+                "isolation" => Effect::Setting(crate::ui::settings_panel::Setting::Isolation),
                 name => match PRESETS
                     .into_iter()
                     .find(|preset| preset_name(*preset) == name)

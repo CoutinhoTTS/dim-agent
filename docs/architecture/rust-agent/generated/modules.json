@@ -29521,7 +29521,15 @@
         "path Effect::None",
         "path Effect::OpenArea",
         "path Effect::SetPermission",
+        "path Effect::Setting",
         "use crate::ui::prompts::Effect"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::approvals_panel",
+      "to": "dim_cli::ui::settings_panel",
+      "references": [
+        "path crate::ui::settings_panel::Setting::Isolation"
       ]
     },
     {
@@ -35231,8 +35239,7 @@
         "path dim_agent_types::PermissionPreset",
         "path dim_agent_types::PermissionPreset::FullAccess",
         "path dim_agent_types::PermissionPreset::ReadOnly",
-        "path dim_agent_types::PermissionPreset::WorkspaceWrite",
-        "path dim_agent_types::ToolApproval::Bypass"
+        "path dim_agent_types::PermissionPreset::WorkspaceWrite"
       ]
     },
     {

@@ -770,9 +770,9 @@ run 就是 `mcp.test`：它执行或联系已存条目一次，不写入领域�
 │   Full access          no path limits; tools run without      │
 │                        asking                                 │
 │   Command rules                                             › │
+│   Process isolation                                Settings › │
 │                                                               │
 │   The preset fixes the path boundary.                         │
-│   Process isolation: Settings                                 │
 ╰──── ↑↓/Tab move · Enter apply · Esc close ────────────────────╯
 
 ╭─ Command rules ───────────────────────────────────────────────╮
@@ -871,7 +871,7 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 | `!command` / `!!command` | 以 record/private 模式调用 Session 现有的 `shell.run`，模型回合进行中也可用。 |
 | `--permission read-only\|workspace-write\|full-access` | 为 `dimcode`、`tui`、`exec` 和 `exec resume` 选择新建或恢复的 Session 的预设（[权限控制](#权限控制)）。 |
 | `/goal [OBJECTIVE \| set OBJECTIVE \| edit OBJECTIVE \| pause \| resume \| clear]` | 在行客户端和两种终端 UI 模式下读取并写入当前显示线的目标（[目标](#目标)）。 |
-| `/permissions` | 打开 Permissions 面板：三个预设以及各自允许什么、一行指向 Settings 的进程隔离设置，以及列出、添加、删除用户命令规则的 Command rules 行（[权限控制](#权限控制)）。 |
+| `/permissions` | 打开 Permissions 面板：三个预设以及各自允许什么、链接到 Settings 进程隔离控件的行，以及列出、添加、删除用户命令规则的 Command rules 行（[权限控制](#权限控制)）。 |
 | `/approvals`、`/approval` | `/permissions` 的兼容别名，支持相同的预设参数。 |
 
 `dimcode hooks` 只写用户的 Hook 文档，而且只经 edit 这一种类：`dimcode hooks edit`、
@@ -1245,7 +1245,8 @@ Permission 拥有由 `session.create {permissionPolicy}` 初始化、经带版�
     Workspace write  writes inside the workspace; asks outside it
     Full access      no path limits; tools run without asking
     Command rules    >
-  The preset fixes the path boundary. Process isolation: Settings
+    Process isolation  Settings >
+  The preset fixes the path boundary.
 ```
 
 `↑↓` 移动，`Enter` 应用高亮的那一档，`Esc` 关闭。没有第二个策略控件：预设同时回答"什么能运行"和
@@ -1367,6 +1368,7 @@ Session 创建配置 --> main 当前策略 --分支点--> 子分支策略
 预设选择器。选择作用于 `main`，每次更新使用当前完整策略与版本，保留工具列表。
 保存失败既不改变记住的选择，也不回退到其他预设。
 
+Process isolation 行链接到 Settings 的进程隔离控件；Esc 返回本面板。
 Command rules 行打开[命令规则领域](#命令规则领域)的管理面板，在那里列出、添加和删除规则；Esc 返回本面板。终端 UI 中 `/permissions` 后面的参数改为打开该面板，而不是被忽略；面板打开时就带着一行说明参数在哪里生效——行内提示符与 `dimcode permissions`——这行一直显示在面板的答复之上，直到用户在这里按下第一个键，无论首次读取要多久；紧凑语法属于行内提示符。
 
 ```text
@@ -1375,8 +1377,9 @@ Permissions (main branch)
   Workspace write  writes inside the workspace; asks outside it
   Full access      no path limits; tools run without asking
   Command rules                             >
+  Process isolation                 Settings >
 
-The preset fixes the path boundary. Process isolation: Settings
+The preset fixes the path boundary.
 
 ↑↓/Tab move · Enter apply · Esc close
 ```

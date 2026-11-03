@@ -52,7 +52,7 @@ a member or confer authority on another Session.
 
 Consequences visible to users:
 
-- Changing the leader's File access or Tool approval affects members created by later requests,
+- Changing the leader's permission preset or tool lists affects members created by later requests,
   without changing process isolation.
 - Existing members retain their policy. Reusing a member does not refresh it; create a new member
   to obtain the current leader policy. Permission-switch confirmation states this explicitly.

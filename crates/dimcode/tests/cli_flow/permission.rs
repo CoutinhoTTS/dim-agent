@@ -1636,7 +1636,7 @@ fn open_command_rules(terminal: &mut Terminal) {
     terminal.write(b"/permissions\r");
     terminal.until("Workspace write");
     terminal.until("Command rules");
-    for _ in 0..3 {
+    for _ in 0..2 {
         terminal.raw(b"\x1b[B");
     }
     terminal.raw(b"\r");

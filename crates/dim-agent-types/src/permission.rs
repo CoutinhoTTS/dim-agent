@@ -17,13 +17,6 @@ pub enum FileAccess {
     Unrestricted,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ToolApproval {
-    Ask,
-    Bypass,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionPolicy {
@@ -41,13 +34,6 @@ impl PermissionPreset {
             PermissionPreset::ReadOnly => FileAccess::ReadOnly,
             PermissionPreset::WorkspaceWrite => FileAccess::WorkspaceReadWrite,
             PermissionPreset::FullAccess => FileAccess::Unrestricted,
-        }
-    }
-
-    pub fn tool_approval(self) -> ToolApproval {
-        match self {
-            PermissionPreset::FullAccess => ToolApproval::Bypass,
-            _ => ToolApproval::Ask,
         }
     }
 }

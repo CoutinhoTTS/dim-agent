@@ -1148,9 +1148,9 @@ this area's panel, and Esc there returns to the Permissions panel.
 │   Full access          no path limits; tools run without      │
 │                        asking                                 │
 │   Command rules                                             › │
+│   Process isolation                                Settings › │
 │                                                               │
 │   The preset fixes the path boundary.                         │
-│   Process isolation: Settings                                 │
 ╰──── ↑↓/Tab move · Enter apply · Esc close ────────────────────╯
 
 ╭─ Command rules ───────────────────────────────────────────────╮
@@ -1861,7 +1861,8 @@ remain `session.grants.add/remove` ([ADR 012](../adr/012-session-grants.md)).
     Workspace write  writes inside the workspace; asks outside it
     Full access      no path limits; tools run without asking
     Command rules    >
-  The preset fixes the path boundary. Process isolation: Settings
+    Process isolation  Settings >
+  The preset fixes the path boundary.
 ```
 
 `↑↓` moves, `Enter` applies the highlighted preset, `Esc` closes. There is no second policy
@@ -2061,7 +2062,8 @@ approves nor cancels work by that fact alone.
 same preset picker as compatibility aliases. The control applies to `main`; selecting a preset
 uses the current policy and version, preserving the tool lists. A failed save neither changes remembered choices nor falls back to another preset.
 
-Process isolation stays in Settings. The Command rules row opens the management panel
+The Process isolation row links to the Settings control; Esc returns to this panel.
+The Command rules row opens the management panel
 of [The command rules area](#the-command-rules-area), where the rules are listed, added and
 removed; Esc there returns to this panel.
 
@@ -2076,8 +2078,9 @@ Permissions (main branch)
   Workspace write  writes inside the workspace; asks outside it
   Full access      no path limits; tools run without asking
   Command rules                             >
+  Process isolation                 Settings >
 
-The preset fixes the path boundary. Process isolation: Settings
+The preset fixes the path boundary.
 
 ↑↓/Tab move · Enter apply · Esc close
 ```

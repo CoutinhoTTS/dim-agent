@@ -86,8 +86,6 @@ export interface AuxiliaryModel {
   complete(call: { model: ModelId; request: AuxiliaryRequest }, cancelled?: () => Promise<void>): Promise<AuxiliaryReply>;
 }
 export type PermissionPreset = 'read-only' | 'workspace-write' | 'full-access';
-export type FileAccess = 'read-only' | 'workspace-read-write' | 'unrestricted';
-export type ToolApproval = 'ask' | 'bypass';
 export interface PermissionPolicy {
   preset: PermissionPreset;
   allowedTools: string[];
