@@ -10,8 +10,7 @@ use crate::{
 };
 use dim_agent_runtime::{
     AgentError, BranchLifecycle, BranchPhase, CAPABILITY_RELOADING, Dispatcher, Names, Timeline,
-    TimelineIdentity, TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
-    TimelineQueryScope, rebuild_facts,
+    TimelineIdentity, rebuild_facts,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
