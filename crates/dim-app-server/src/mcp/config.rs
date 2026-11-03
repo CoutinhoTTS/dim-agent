@@ -65,8 +65,8 @@ impl fmt::Display for McpEntryError {
 }
 impl std::error::Error for McpEntryError {}
 
-/// One entry that did not decode, kept exactly as the document wrote it so a
-/// later write puts it back unchanged.
+/// One entry that did not decode, kept with its members and values so a
+/// later write puts it back unchanged (ids and member order are normalized).
 #[derive(Clone, Debug, PartialEq)]
 pub struct InvalidMcpServer {
     pub value: Value,
@@ -75,7 +75,8 @@ pub struct InvalidMcpServer {
 
 /// Every entry under `mcpServers`. An entry that does not decode is kept out
 /// of `mcp_servers` and listed in `invalid`; `raw` holds each entry's value as
-/// read so a write can put every untouched entry back as the file wrote it.
+/// read so a write can put every untouched entry back with its members and
+/// values (ids and member order are normalized).
 #[derive(Clone, Default, PartialEq)]
 pub struct McpSettings {
     mcp_servers: BTreeMap<String, McpServerSettings>,
@@ -331,22 +332,22 @@ pub fn decode_entry(
             }
             _ => return Err(entry_error(id, Some("type"), "stdio, http or sse")),
         },
-        Some(_) => return Err(entry_error(id, Some("type"), "a string")),
-        None if entry.contains_key("command") => Transport::Stdio,
-        None if entry.contains_key("url") => {
+        Some(Value::Null) | None if entry.contains_key("command") => Transport::Stdio,
+        Some(Value::Null) | None if entry.contains_key("url") => {
             return Err(entry_error(
                 id,
                 Some("type"),
                 "http or sse; an entry with a url must name its type",
             ));
         }
-        None => {
+        Some(Value::Null) | None => {
             return Err(entry_error(
                 id,
                 Some("type"),
                 "stdio, http or sse, or a command for stdio",
             ));
         }
+        Some(_) => return Err(entry_error(id, Some("type"), "a string")),
     };
     for key in entry.keys() {
         if key == "$generation" {
@@ -406,7 +407,7 @@ fn field_enabled(
     id: &str,
 ) -> std::result::Result<Option<bool>, McpEntryError> {
     match entry.get("enabled") {
-        None => Ok(None),
+        None | Some(Value::Null) => Ok(None),
         Some(Value::Bool(value)) => Ok(Some(*value)),
         Some(_) => Err(entry_error(id, Some("enabled"), "a boolean")),
     }
@@ -459,7 +460,10 @@ fn decode_stdio(
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
     Ok(McpServerSettings::Stdio {
-        kind: entry.contains_key("type").then_some(Stdio::Stdio),
+        kind: entry
+            .get("type")
+            .is_some_and(|value| !value.is_null())
+            .then_some(Stdio::Stdio),
         command,
         args,
         env,
@@ -531,7 +535,7 @@ fn decode_auth(
     id: &str,
     entry: &Map<String, Value>,
 ) -> std::result::Result<Option<BearerAuth>, McpEntryError> {
-    let Some(value) = entry.get("auth") else {
+    let Some(value) = entry.get("auth").filter(|value| !value.is_null()) else {
         return Ok(None);
     };
     let auth = value
@@ -557,7 +561,7 @@ fn decode_oauth(
     id: &str,
     entry: &Map<String, Value>,
 ) -> std::result::Result<Option<Box<McpOAuthSettings>>, McpEntryError> {
-    let Some(value) = entry.get("oauth") else {
+    let Some(value) = entry.get("oauth").filter(|value| !value.is_null()) else {
         return Ok(None);
     };
     let oauth = value
@@ -1459,6 +1463,42 @@ mod tests {
         let written = serde_json::to_value(&document).unwrap();
         assert_eq!(written["mcpServers"]["stream"]["type"], "http");
         assert_eq!(written["mcpServers"]["stream"]["future"], 1);
+    }
+
+    #[test]
+    fn null_optional_members_decode_as_absent() {
+        // A null `type` is absent: a stdio entry keeps no `type` marker.
+        let stdio = decode_entry("stdio", &json!({"type": null, "command": "server"})).unwrap();
+        assert!(matches!(stdio, McpServerSettings::Stdio { kind: None, .. }));
+
+        // A null `enabled` is absent.
+        let stdio = decode_entry("stdio", &json!({"command": "server", "enabled": null})).unwrap();
+        assert!(matches!(
+            stdio,
+            McpServerSettings::Stdio { enabled: None, .. }
+        ));
+
+        // Null `auth` and `oauth` are absent on a remote entry.
+        let remote = decode_entry(
+            "remote",
+            &json!({"type": "http", "url": "https://example.test/mcp", "auth": null, "oauth": null}),
+        )
+        .unwrap();
+        assert!(matches!(
+            remote,
+            McpServerSettings::Remote {
+                auth: None,
+                oauth: None,
+                ..
+            }
+        ));
+
+        // A null `type` with no command or url is still an entry error, matching
+        // the derived model's refusal.
+        let error = decode_entry("missing", &json!({"type": null}))
+            .err()
+            .unwrap();
+        assert_eq!(error.field.as_deref(), Some("type"));
     }
 
     #[test]

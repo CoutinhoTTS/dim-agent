@@ -1961,3 +1961,75 @@ async fn entries_decode_one_by_one_and_writes_keep_every_other_entry_as_written(
 
     fixture.close().await;
 }
+
+/// A broken project entry with the same id as a valid user entry must not hide
+/// the user server: the catalog reports the valid row under `servers` and the
+/// broken row under `invalid`, and runtime selection reaches the user entry.
+#[tokio::test]
+async fn a_broken_project_entry_does_not_hide_the_user_entry_with_the_same_id() {
+    let fixture = Fixture::new().await;
+    let cancel = CancellationToken::new();
+    // The default fixture gives `shared` a valid user entry; make the project
+    // `shared` entry broken.
+    let project_file = fixture.home.join("project/.mcp.json");
+    fs::write(
+        &project_file,
+        json!({"mcpServers": {"shared": {"command": ""}}}).to_string(),
+    )
+    .unwrap();
+
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    let shared = catalog.servers.get("shared").unwrap();
+    assert_eq!(shared.source, McpSource::User);
+    assert!(matches!(
+        shared.configuration,
+        McpServerSettings::Stdio { ref command, .. } if command == "user-server"
+    ));
+    let broken = catalog
+        .invalid
+        .iter()
+        .find(|entry| entry.id == "shared")
+        .unwrap();
+    assert_eq!(broken.source, McpSource::Project(1));
+    assert_eq!(broken.error.field.as_deref(), Some("command"));
+
+    // Runtime selection reaches the user entry, not the broken project row.
+    let connection = fixture
+        .mcp
+        .server(Some(1), "shared".into(), &cancel)
+        .await
+        .unwrap();
+    drop(connection);
+
+    fixture.close().await;
+}
+
+/// `null` in the optional members `type`, `enabled`, `auth` and `oauth` is the
+/// same as their absence: the entry loads instead of being reported invalid.
+#[tokio::test]
+async fn null_optional_members_load_instead_of_failing_the_entry() {
+    let fixture = Fixture::new().await;
+    let cancel = CancellationToken::new();
+    let user_file = fixture.home.join("mcp.json");
+    fs::write(
+        &user_file,
+        json!({
+            "mcpServers": {
+                "untyped": {"type": null, "command": "untyped-server"},
+                "enabled-null": {"command": "enabled-server", "enabled": null},
+                "auth-null": {"type": "http", "url": "https://example.test/mcp", "auth": null},
+                "oauth-null": {"type": "sse", "url": "https://example.test/sse", "oauth": null}
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let catalog = fixture.mcp.catalog(None, &cancel).await.unwrap();
+    for id in ["untyped", "enabled-null", "auth-null", "oauth-null"] {
+        assert!(catalog.servers.contains_key(id), "{id} did not load");
+    }
+    assert!(catalog.invalid.is_empty());
+
+    fixture.close().await;
+}

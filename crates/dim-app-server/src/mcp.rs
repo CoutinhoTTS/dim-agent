@@ -591,7 +591,6 @@ impl McpService {
                     );
                 }
                 for (id, entry) in invalid_entries {
-                    catalog.servers.remove(&id);
                     invalid.insert(
                         id.clone(),
                         McpInvalidEntry {
