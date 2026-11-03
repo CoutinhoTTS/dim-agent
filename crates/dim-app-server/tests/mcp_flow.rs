@@ -2187,3 +2187,139 @@ async fn a_moved_entry_keeps_a_reference_name_in_the_project_file() {
 
     fixture.close().await;
 }
+
+/// #952: a stored reference survives reads, an enablement write and a move in
+/// each direction.
+#[tokio::test]
+async fn a_stored_reference_survives_reads_writes_and_moves() {
+    let fixture = Fixture::new().await;
+    let cancel = CancellationToken::new();
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    fixture
+        .mcp
+        .update(
+            SettingsScope::User,
+            catalog.user_revision,
+            "kept".into(),
+            McpChange::Put(
+                serde_json::from_value(json!({
+                    "type": "http",
+                    "url": "https://${MCP_HOST}/mcp",
+                    "headers": {"Authorization": "Bearer ${MCP_TOKEN}"}
+                }))
+                .unwrap(),
+            ),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let user = |fixture: &Fixture| -> Value {
+        serde_json::from_slice(&fs::read(fixture.home.join("mcp.json")).unwrap()).unwrap()
+    };
+    assert_eq!(
+        user(&fixture)["mcpServers"]["kept"]["url"],
+        "https://${MCP_HOST}/mcp"
+    );
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    fixture
+        .mcp
+        .update(
+            SettingsScope::User,
+            catalog.user_revision,
+            "kept".into(),
+            McpChange::SetEnabled(true),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        user(&fixture)["mcpServers"]["kept"]["url"],
+        "https://${MCP_HOST}/mcp",
+        "an enablement write keeps the text"
+    );
+    assert_eq!(
+        user(&fixture)["mcpServers"]["kept"]["headers"]["Authorization"],
+        "Bearer ${MCP_TOKEN}"
+    );
+
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    fixture
+        .mcp
+        .move_entry(
+            McpSource::User,
+            McpSource::Project(1),
+            "kept".into(),
+            catalog.user_revision,
+            catalog.project_revision.unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let project: Value =
+        serde_json::from_slice(&fs::read(fixture.home.join("project/.mcp.json")).unwrap()).unwrap();
+    assert_eq!(project["mcpServers"]["kept"]["url"], "https://${MCP_HOST}");
+
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    fixture
+        .mcp
+        .move_entry(
+            McpSource::Project(1),
+            McpSource::User,
+            "kept".into(),
+            catalog.project_revision.unwrap(),
+            catalog.user_revision,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        user(&fixture)["mcpServers"]["kept"]["url"],
+        "https://${MCP_HOST}/mcp",
+        "the move back restores the withheld text"
+    );
+
+    fixture.close().await;
+}
+
+/// #952: a write stores the reference, never an expanded value, even when the
+/// daemon's environment has the name set.
+#[tokio::test]
+async fn a_write_never_stores_an_expanded_value() {
+    unsafe {
+        std::env::set_var("MCP_TEST_952_WRITE_URL", "https://expanded.test/mcp");
+    }
+    let fixture = Fixture::new().await;
+    let cancel = CancellationToken::new();
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    fixture
+        .mcp
+        .update(
+            SettingsScope::User,
+            catalog.user_revision,
+            "kept".into(),
+            McpChange::Put(
+                serde_json::from_value(json!({
+                    "type": "http",
+                    "url": "${MCP_TEST_952_WRITE_URL}"
+                }))
+                .unwrap(),
+            ),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let stored: Value =
+        serde_json::from_slice(&fs::read(fixture.home.join("mcp.json")).unwrap()).unwrap();
+    assert_eq!(
+        stored["mcpServers"]["kept"]["url"],
+        "${MCP_TEST_952_WRITE_URL}"
+    );
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    let kept = catalog.servers.get("kept").unwrap();
+    assert_eq!(
+        kept.referenced_variables,
+        std::collections::BTreeSet::from(["MCP_TEST_952_WRITE_URL".to_owned()])
+    );
+    assert!(kept.unset_variables.is_empty());
+    fixture.close().await;
+}

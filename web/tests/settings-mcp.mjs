@@ -16,7 +16,7 @@ registerHooks({
   },
 })
 
-const { readMcp } = await import("../src/rpc/general-settings.ts")
+const { readMcp, readMcpConfiguration } = await import("../src/rpc/general-settings.ts")
 
 function catalog(invalid) {
   return {
@@ -38,4 +38,30 @@ test("a reply without the invalid list still reads its servers", () => {
   const view = readMcp(catalog(undefined))
   assert.deepEqual(view.servers.map((server) => server.id), ["docs"])
   assert.deepEqual(view.invalid, [])
+})
+
+test("settings show referenced and unset variable names", () => {
+  const view = readMcp({
+    ...catalog(undefined),
+    servers: [{ id: "docs", source: "user", enabled: true, transport: "http",
+      referencedVariables: ["MCP_HOST", "MCP_TOKEN"], unsetVariables: ["MCP_TOKEN"] }],
+  })
+  assert.deepEqual(view.servers[0].referencedVariables, ["MCP_HOST", "MCP_TOKEN"])
+  assert.deepEqual(view.servers[0].unsetVariables, ["MCP_TOKEN"])
+  const legacy = readMcp(catalog(undefined))
+  assert.deepEqual(legacy.servers[0].referencedVariables, [])
+  assert.deepEqual(legacy.servers[0].unsetVariables, [])
+})
+
+test("a configuration view names variables without values", () => {
+  const configuration = readMcpConfiguration({
+    type: "http", endpoint: "https://${MCP_HOST}", headerNames: ["Authorization"],
+    authConfigured: true, oauthConfigured: false, oauth: null,
+    referencedVariables: ["MCP_HOST", "MCP_TOKEN"], unsetVariables: ["MCP_TOKEN"],
+  })
+  assert.deepEqual(configuration.referencedVariables, ["MCP_HOST", "MCP_TOKEN"])
+  assert.deepEqual(configuration.unsetVariables, ["MCP_TOKEN"])
+  const legacy = readMcpConfiguration({ type: "stdio", command: "server", argsCount: 0, cwd: null, envNames: [] })
+  assert.deepEqual(legacy.referencedVariables, [])
+  assert.deepEqual(legacy.unsetVariables, [])
 })

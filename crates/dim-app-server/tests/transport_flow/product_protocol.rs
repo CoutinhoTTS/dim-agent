@@ -1494,7 +1494,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     assert_ok(&catalog);
     assert_eq!(
         catalog["result"]["servers"],
-        json!([{"id":"docs","source":"project","enabled":false,"transport":"stdio"}])
+        json!([{"id":"docs","source":"project","enabled":false,"transport":"stdio","referencedVariables":[],"unsetVariables":[]}])
     );
     assert!(!catalog.to_string().contains("private-secret"));
     let revision = catalog["result"]["projectRevision"].clone();
@@ -3598,6 +3598,151 @@ async fn mcp_broken_entries_are_reported_and_managed_entry_by_entry() {
     assert_eq!(
         persisted["mcpServers"]["project-keep"],
         project_file["mcpServers"]["project-keep"]
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// #952: management reads name the variables an entry references, and the
+/// names that are unset, without returning an expanded value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_catalog_names_referenced_and_unset_variables_without_expanding_them() {
+    let home = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("dm-expansion-{}", uuid::Uuid::new_v4()));
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project = std::fs::canonicalize(&project).unwrap();
+    let user_file = json!({"mcpServers": {
+        "docs": {"type": "http", "url": "https://${MCP_952_HOST}/mcp",
+                 "headers": {"Authorization": "Bearer ${MCP_952_TOKEN}"}},
+        "local": {"command": "node", "args": ["--flag=${MCP_952_FLAG}"],
+                  "env": {"VALUE": "${MCP_952_VALUE:-fallback}"}}
+    }});
+    std::fs::write(home.join("mcp.json"), user_file.to_string()).unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let catalog = client.rpc("mcp.catalog", json!({"cwd": project})).await;
+    assert_ok(&catalog);
+    let servers = catalog["result"]["servers"].as_array().unwrap();
+    let docs = servers
+        .iter()
+        .find(|server| server["id"] == "docs")
+        .unwrap();
+    assert_eq!(
+        docs["referencedVariables"],
+        json!(["MCP_952_HOST", "MCP_952_TOKEN"])
+    );
+    assert_eq!(
+        docs["unsetVariables"],
+        json!(["MCP_952_HOST", "MCP_952_TOKEN"])
+    );
+    let local = servers
+        .iter()
+        .find(|server| server["id"] == "local")
+        .unwrap();
+    assert_eq!(
+        local["referencedVariables"],
+        json!(["MCP_952_FLAG", "MCP_952_VALUE"])
+    );
+    assert_eq!(local["unsetVariables"], json!(["MCP_952_FLAG"]));
+    let configuration = client
+        .rpc(
+            "mcp.configuration",
+            json!({"source": "user", "id": "docs", "cwd": project}),
+        )
+        .await;
+    assert_ok(&configuration);
+    assert_eq!(
+        configuration["result"]["configuration"]["referencedVariables"],
+        json!(["MCP_952_HOST", "MCP_952_TOKEN"])
+    );
+    assert_eq!(
+        configuration["result"]["configuration"]["unsetVariables"],
+        json!(["MCP_952_HOST", "MCP_952_TOKEN"])
+    );
+    assert!(
+        configuration["result"]["configuration"]["endpoint"]
+            .as_str()
+            .unwrap()
+            .contains("${MCP_952_HOST}"),
+        "the configuration view did not keep the reference as written"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// #952: one entry's configuration view keeps a reference as written instead
+/// of rejecting the entry because its URL is not yet a URL.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_configuration_keeps_a_variable_reference_as_written() {
+    let home = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("dm-expansion-view-{}", uuid::Uuid::new_v4()));
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project = std::fs::canonicalize(&project).unwrap();
+    let user_file = json!({"mcpServers": {
+        "docs": {"type": "http", "url": "https://${MCP_952_HOST}/mcp",
+                 "headers": {"Authorization": "Bearer ${MCP_952_TOKEN}"}},
+        "template": {"type": "http", "url": "${MCP_952_URL}/mcp"}
+    }});
+    std::fs::write(home.join("mcp.json"), user_file.to_string()).unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let configuration = client
+        .rpc(
+            "mcp.configuration",
+            json!({"source": "user", "id": "docs", "cwd": project}),
+        )
+        .await;
+    assert_ok(&configuration);
+    assert_eq!(
+        configuration["result"]["configuration"]["endpoint"],
+        "https://${MCP_952_HOST}"
+    );
+    assert_eq!(
+        configuration["result"]["configuration"]["referencedVariables"],
+        json!(["MCP_952_HOST", "MCP_952_TOKEN"])
+    );
+    assert_eq!(
+        configuration["result"]["configuration"]["unsetVariables"],
+        json!(["MCP_952_HOST", "MCP_952_TOKEN"])
+    );
+    let template = client
+        .rpc(
+            "mcp.configuration",
+            json!({"source": "user", "id": "template", "cwd": project}),
+        )
+        .await;
+    assert_ok(&template);
+    assert_eq!(
+        template["result"]["configuration"]["endpoint"],
+        "${MCP_952_URL}/mcp"
+    );
+    assert_eq!(
+        template["result"]["configuration"]["referencedVariables"],
+        json!(["MCP_952_URL"])
+    );
+    assert_eq!(
+        template["result"]["configuration"]["unsetVariables"],
+        json!(["MCP_952_URL"])
     );
     server.shutdown();
     server.join().await.unwrap();

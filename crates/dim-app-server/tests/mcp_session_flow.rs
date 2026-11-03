@@ -2936,6 +2936,165 @@ async fn a_probe_expands_references_with_the_entry_origin() {
     env.close().await;
 }
 
+/// #952: names from a workspace file and from the user overlay are both
+/// reported, while a connection guards the file text and expands the overlay.
+#[tokio::test]
+async fn mcp_configuration_names_references_from_the_overlay_but_keeps_file_guards() {
+    unsafe {
+        std::env::set_var("DIMCODE_TEST_952_FILE", "made-up-file-value");
+        std::env::set_var("DIMCODE_TEST_952_OVERLAY", "made-up-overlay-value");
+    }
+    let env = Env::new().await;
+    env.update(
+        SettingsScope::User,
+        "mixed",
+        McpChange::Put(
+            serde_json::from_value(json!({
+                "type": "http",
+                "url": env.url,
+                "headers": {"Authorization": "Bearer ${DIMCODE_TEST_952_OVERLAY}"}
+            }))
+            .unwrap(),
+        ),
+    )
+    .await;
+    let cancel = CancellationToken::new();
+    let catalog = env.directory.catalog(Some(1), &cancel).await.unwrap();
+    env.directory
+        .move_entry(
+            McpSource::User,
+            McpSource::Project(1),
+            "mixed".into(),
+            catalog.user_revision,
+            catalog.project_revision.unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    env.update(
+        SettingsScope::Project(1),
+        "mixed",
+        McpChange::Put(
+            serde_json::from_value(json!({
+                "type": "http",
+                "url": env.url,
+                "headers": {"X-Generation": "${DIMCODE_TEST_952_FILE}"}
+            }))
+            .unwrap(),
+        ),
+    )
+    .await;
+    env.update(
+        SettingsScope::Project(1),
+        "mixed",
+        McpChange::SetEnabled(true),
+    )
+    .await;
+
+    let catalog = env.directory.catalog(Some(1), &cancel).await.unwrap();
+    let mixed = catalog.servers.get("mixed").unwrap();
+    assert_eq!(
+        mixed.referenced_variables,
+        BTreeSet::from([
+            "DIMCODE_TEST_952_FILE".to_owned(),
+            "DIMCODE_TEST_952_OVERLAY".to_owned(),
+        ])
+    );
+    assert!(mixed.unset_variables.is_empty());
+    let configuration = management(
+        &env.agent,
+        "mcp.configuration",
+        json!({"source": "project", "id": "mixed", "cwd": env.home.join("project")}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        configuration["configuration"]["referencedVariables"],
+        json!(["DIMCODE_TEST_952_FILE", "DIMCODE_TEST_952_OVERLAY"])
+    );
+    assert_eq!(configuration["configuration"]["unsetVariables"], json!([]));
+
+    let session = env.session(true, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let seen = env.remote.seen();
+            let overlay = seen
+                .iter()
+                .any(|(_, authorization)| authorization == "Bearer made-up-overlay-value");
+            let file = seen.iter().any(|(generation, _)| generation.is_empty());
+            if overlay && file {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the mixed entry connects");
+    env.close().await;
+}
+
+/// #952: an unset reference keeps its text; the catalog names it and the
+/// entry still loads.
+#[tokio::test]
+async fn an_unset_reference_keeps_its_text_and_the_catalog_names_it() {
+    let env = Env::new().await;
+    env.update(
+        SettingsScope::User,
+        "unset",
+        McpChange::Put(
+            serde_json::from_value(json!({
+                "type": "http",
+                "url": "${MCP_TEST_952_UNSET_URL}/mcp"
+            }))
+            .unwrap(),
+        ),
+    )
+    .await;
+    let cancel = CancellationToken::new();
+    let catalog = env.directory.catalog(Some(1), &cancel).await.unwrap();
+    let unset = catalog.servers.get("unset").unwrap();
+    assert_eq!(
+        unset.referenced_variables,
+        BTreeSet::from(["MCP_TEST_952_UNSET_URL".to_owned()])
+    );
+    assert_eq!(
+        unset.unset_variables,
+        BTreeSet::from(["MCP_TEST_952_UNSET_URL".to_owned()])
+    );
+    let stored: Value =
+        serde_json::from_slice(&std::fs::read(env.home.join("mcp.json")).unwrap()).unwrap();
+    assert_eq!(
+        stored["mcpServers"]["unset"]["url"],
+        "${MCP_TEST_952_UNSET_URL}/mcp"
+    );
+    assert!(
+        env.directory
+            .catalog(Some(1), &cancel)
+            .await
+            .unwrap()
+            .servers
+            .contains_key("unset")
+    );
+
+    let session = env.session(false, PermissionPreset::FullAccess).await;
+    let mcp = session.session_service::<McpSession>().unwrap();
+    let mut changed = mcp.subscribe();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(McpSourceState::Failed { .. }) =
+                changed.borrow_and_update().servers.get("unset")
+            {
+                return;
+            }
+            changed.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("the unset reference fails its connection");
+    env.close().await;
+}
+
 /// #952: a project entry's `cwd` is expanded before it is joined to the
 /// workspace, so the probe runs in the directory the published connection
 /// uses instead of a literal directory below the workspace.

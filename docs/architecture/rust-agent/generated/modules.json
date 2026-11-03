@@ -3319,6 +3319,16 @@
       ]
     },
     {
+      "id": "dim_cli::management::mcp::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::management::mcp",
+      "file": "crates/dim-cli/src/management/mcp.rs",
+      "unexpandedMacros": [
+        "assert",
+        "json"
+      ]
+    },
+    {
       "id": "dim_cli::management::models",
       "crate": "dim_cli",
       "parent": "dim_cli::management",
@@ -20558,7 +20568,6 @@
         "path McpSource::Plugins",
         "path McpSource::Project",
         "path McpSource::User",
-        "path super::McpServerEntry",
         "use super::McpChange",
         "use super::McpError",
         "use super::McpService",
@@ -27336,6 +27345,13 @@
     },
     {
       "from": "dim_cli::management::mcp",
+      "to": "dim_cli::management::mcp::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::management::mcp",
       "to": "dim_cli::mcp",
       "references": [
         "path Auth",
@@ -27414,6 +27430,14 @@
         "path crate::client::RpcError",
         "path crate::client::app_error",
         "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::management::mcp::tests",
+      "to": "dim_cli::management::mcp",
+      "references": [
+        "path Configuration::decode",
+        "path test"
       ]
     },
     {

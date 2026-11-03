@@ -116,6 +116,10 @@ pub(crate) fn sources_in_precedence(project: Option<usize>) -> impl Iterator<Ite
 pub struct McpServerEntry {
     pub source: McpSource,
     pub configuration: McpServerSettings,
+    /// Names the effective configuration references, as written.
+    pub referenced_variables: BTreeSet<String>,
+    /// Referenced names that are unset and have no default.
+    pub unset_variables: BTreeSet<String>,
 }
 impl McpServerEntry {
     pub fn enabled(&self) -> bool {
@@ -142,6 +146,10 @@ pub(crate) fn daemon_environment(name: &str) -> Option<String> {
 /// entry) and the enablement the entry runs with.
 pub struct McpEditableEntry {
     pub configuration: McpServerSettings,
+    /// Names the declared configuration references, as written.
+    pub referenced_variables: BTreeSet<String>,
+    /// Referenced names that are unset and have no default.
+    pub unset_variables: BTreeSet<String>,
     pub revision: Option<String>,
     pub enabled: bool,
     /// The entry has a user-scope secret overlay; the withheld members are
@@ -593,14 +601,19 @@ impl McpService {
                                 protected: &protected,
                             },
                         )?;
-                        if let Some((key, _)) = auth::credential_key(&id, &expansion.configuration) {
+                        if let Some((key, _)) = auth::credential_key(&id, &expansion.configuration)
+                        {
                             catalog.credentials.insert(id.clone(), key);
                         }
+                        let (referenced_variables, unset_variables) =
+                            (expansion.referenced, expansion.unset);
                         catalog.servers.insert(
                             id,
                             McpServerEntry {
                                 source,
                                 configuration,
+                                referenced_variables,
+                                unset_variables,
                             },
                         );
                     }
@@ -651,11 +664,15 @@ impl McpService {
                     if let Some((key, _)) = auth::credential_key(&id, &expansion.configuration) {
                         catalog.credentials.insert(id.clone(), key);
                     }
+                    let (referenced_variables, unset_variables) =
+                        (expansion.referenced, expansion.unset);
                     catalog.servers.insert(
                         id,
                         McpServerEntry {
                             source,
                             configuration,
+                            referenced_variables,
+                            unset_variables,
                         },
                     );
                 }
@@ -721,6 +738,8 @@ impl McpService {
                     entry: McpServerEntry {
                         source,
                         configuration,
+                        referenced_variables: expansion.referenced,
+                        unset_variables: expansion.unset,
                     },
                     secret: None,
                     expanded: expansion.configuration,
@@ -768,6 +787,8 @@ impl McpService {
                 entry: McpServerEntry {
                     source: source.into(),
                     configuration,
+                    referenced_variables: expansion.referenced,
+                    unset_variables: expansion.unset,
                 },
                 secret,
                 expanded: expansion.configuration,
@@ -786,6 +807,7 @@ impl McpService {
         if id.trim().is_empty() {
             return Err(McpError::InvalidId);
         }
+        let protected = self.protected();
         self.run(cancel, move |settings, cancel| async move {
             let Some(scope) = source.scope() else {
                 let configuration = settings
@@ -794,9 +816,24 @@ impl McpService {
                     .document
                     .declared(&id)
                     .ok_or(McpError::UnknownServer)?;
+                let expansion = config::connected(
+                    &settings,
+                    configuration.clone(),
+                    config::Connection {
+                        scope: None,
+                        id: &id,
+                        secret: None,
+                        origin: config::Origin::Plugin,
+                        enablement: &McpProjectEnablement::default(),
+                        environment: &daemon_environment,
+                        protected: &protected,
+                    },
+                )?;
                 return Ok(McpEditableEntry {
                     enabled: configuration.enabled(),
                     configuration,
+                    referenced_variables: expansion.referenced,
+                    unset_variables: expansion.unset,
                     revision: None,
                     secrets_in_user_scope: false,
                     secret: None,
@@ -813,6 +850,25 @@ impl McpService {
             if let Some(secret) = &secret {
                 config::merge_secret(&mut configuration, secret)?;
             }
+            let origin = match scope {
+                SettingsScope::User => config::Origin::User,
+                SettingsScope::Project(_) => config::Origin::Workspace {
+                    overlay: secret.as_ref(),
+                },
+            };
+            let expansion = config::connected(
+                &settings,
+                configuration.clone(),
+                config::Connection {
+                    scope: None,
+                    id: &id,
+                    secret: None,
+                    origin,
+                    enablement: &McpProjectEnablement::default(),
+                    environment: &daemon_environment,
+                    protected: &protected,
+                },
+            )?;
             let enabled = match scope {
                 SettingsScope::User => configuration.enabled(),
                 SettingsScope::Project(_) => {
@@ -823,6 +879,8 @@ impl McpService {
             };
             Ok(McpEditableEntry {
                 configuration,
+                referenced_variables: expansion.referenced,
+                unset_variables: expansion.unset,
                 revision: Some(snapshot.revision),
                 enabled,
                 secrets_in_user_scope: secret.is_some(),

@@ -12,7 +12,7 @@ use crate::{
 use dim_agent_capabilities::methods::{Interruption, MethodDecl, RpcError, params, reply};
 use rutis::{Ctx, Error};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -183,7 +183,11 @@ fn patch_sets_secret(patch: &ConfigurationPatch, secret: &McpSecretEntry) -> boo
         )
 }
 
-fn configuration_view(configuration: McpServerSettings) -> Result<serde_json::Value, RpcError> {
+fn configuration_view(
+    configuration: McpServerSettings,
+    referenced: &BTreeSet<String>,
+    unset: &BTreeSet<String>,
+) -> Result<serde_json::Value, RpcError> {
     Ok(match configuration {
         McpServerSettings::Stdio {
             command,
@@ -193,7 +197,8 @@ fn configuration_view(configuration: McpServerSettings) -> Result<serde_json::Va
             ..
         } => serde_json::json!({
             "type": "stdio", "command": command, "argsCount": args.len(), "cwd": cwd,
-            "envNames": env.keys().collect::<Vec<_>>()
+            "envNames": env.keys().collect::<Vec<_>>(),
+            "referencedVariables": referenced, "unsetVariables": unset
         }),
         McpServerSettings::Remote {
             kind,
@@ -209,6 +214,7 @@ fn configuration_view(configuration: McpServerSettings) -> Result<serde_json::Va
                 "type": kind, "endpoint": endpoint,
                 "headerNames": headers.keys().collect::<Vec<_>>(),
                 "authConfigured": auth.is_some(), "oauthConfigured": oauth.is_some(),
+                "referencedVariables": referenced, "unsetVariables": unset,
                 "oauth": oauth.map(|oauth| serde_json::json!({
                     "clientId": oauth.client_id, "callbackPort": oauth.callback_port,
                     "scopes": oauth.scopes,
@@ -417,6 +423,10 @@ pub struct McpCatalogEntry {
     /// neither a credential nor a challenge for the server.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth: Option<McpAuthStatus>,
+    /// Names only, sorted and deduplicated.
+    pub referenced_variables: BTreeSet<String>,
+    /// Names only, sorted and deduplicated.
+    pub unset_variables: BTreeSet<String>,
 }
 
 pub(crate) fn error(error: McpError) -> RpcError {
@@ -502,19 +512,6 @@ fn writable(source: McpSource) -> Result<SettingsScope, RpcError> {
         .ok_or_else(|| RpcError::invalid("plugin MCP entries change through their plugin"))
 }
 
-/// One source's entry, for the `mcp.auth.*` targets.
-async fn target(
-    directory: &Arc<McpService>,
-    source: McpSource,
-    id: String,
-    cancel: &CancellationToken,
-) -> Result<super::McpServerEntry, RpcError> {
-    if id.trim().is_empty() {
-        return Err(RpcError::invalid("id must not be empty"));
-    }
-    directory.entry(source, id, cancel).await.map_err(error)
-}
-
 pub(super) fn provide(
     ctx: &Ctx,
     methods: &ManagementMethods,
@@ -556,11 +553,16 @@ pub(super) fn provide(
                     "mcp.inspect" => {
                         let p: McpTarget = params(value)?;
                         let source = source(p.source, project(&settings, p.cwd, &stopping).await?)?;
-                        let entry = target(&directory, source, p.id.clone(), &stopping).await?;
+                        let resolved = directory.resolved(source, p.id.clone(), &stopping).await.map_err(error)?;
+                        let entry = resolved.entry;
                         let connections = directory.publication.inspect(source, p.id, &stopping).await.map_err(error)?;
                         return Ok(serde_json::json!({
                             "enabled": entry.enabled(),
-                            "configuration": configuration_view(entry.configuration)?,
+                            "configuration": configuration_view(
+                                entry.configuration,
+                                &entry.referenced_variables,
+                                &entry.unset_variables,
+                            )?,
                             "connections": connections
                         }));
                     }
@@ -653,7 +655,11 @@ pub(super) fn provide(
                             revision: entry.revision,
                             enabled: entry.enabled,
                             secrets_in_user_scope: entry.secrets_in_user_scope,
-                            configuration: configuration_view(entry.configuration)?,
+                            configuration: configuration_view(
+                                entry.configuration,
+                                &entry.referenced_variables,
+                                &entry.unset_variables,
+                            )?,
                         });
                     }
                     "mcp.update" => {
@@ -724,6 +730,8 @@ pub(super) fn provide(
                                             ..
                                         } => "sse",
                                     },
+                                    referenced_variables: entry.referenced_variables,
+                                    unset_variables: entry.unset_variables,
                                 })
                                 .collect(),
                             invalid: catalog
@@ -907,6 +915,9 @@ pub(super) fn provide(
                     }
                     "mcp.auth.start" => {
                         let p: StartMcpAuth = params(value)?;
+                        if p.id.trim().is_empty() {
+                            return Err(RpcError::invalid("id must not be empty"));
+                        }
                         let source = source(p.source, project(&settings, p.cwd, &stopping).await?)?;
                         let resolved = directory
                             .resolved(source, p.id.clone(), &stopping)
@@ -954,6 +965,9 @@ pub(super) fn provide(
                     }
                     "mcp.auth.logout" => {
                         let p: McpTarget = params(value)?;
+                        if p.id.trim().is_empty() {
+                            return Err(RpcError::invalid("id must not be empty"));
+                        }
                         let source = source(p.source, project(&settings, p.cwd, &stopping).await?)?;
                         let resolved = directory
                             .resolved(source, p.id.clone(), &stopping)
@@ -997,13 +1011,22 @@ mod tests {
     /// parseable URL is reduced to its origin.
     #[test]
     fn a_configuration_view_errs_on_a_malformed_endpoint() {
-        let error = configuration_view(remote("host/mcp?token=made-up-secret")).unwrap_err();
+        let (referenced, unset) = (BTreeSet::new(), BTreeSet::new());
+        let error =
+            configuration_view(remote("host/mcp?token=made-up-secret"), &referenced, &unset)
+                .unwrap_err();
         assert_eq!(error.message, "Invalid MCP endpoint");
 
-        let view = configuration_view(remote("https://user:made-up-credential@host/mcp")).unwrap();
+        let view = configuration_view(
+            remote("https://user:made-up-credential@host/mcp"),
+            &referenced,
+            &unset,
+        )
+        .unwrap();
         assert_eq!(view["endpoint"], "https://host");
 
-        let view = configuration_view(remote("https://${MCP_HOST}/mcp")).unwrap();
+        let view =
+            configuration_view(remote("https://${MCP_HOST}/mcp"), &referenced, &unset).unwrap();
         assert_eq!(view["endpoint"], "https://${MCP_HOST}");
     }
 }
