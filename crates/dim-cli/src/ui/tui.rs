@@ -6210,7 +6210,10 @@ mod tests {
                     let mut drawn = Drawn::new(size, None, true);
                     drawn.app.fullscreen = fullscreen;
                     drawn.key(KeyCode::Char('/'));
-                    for command in ["/exit", "/keys", "/runtime", "/settings"] {
+                    let commands =
+                        crate::ui::composer::palette::filter_commands("/", drawn.app.context());
+                    for command in commands {
+                        let command = format!("/{}", command.name);
                         let frame = drawn.app.frame(size);
                         let rows = frame.overlay.as_ref().map_or(&frame.live, |o| &o.rows);
                         let width = frame
@@ -6236,7 +6239,7 @@ mod tests {
                         emu.feed(&bytes);
                         let text = emu.rows_text().join("\n");
                         assert!(
-                            text.contains(command),
+                            text.contains(&command),
                             "{size:?} fullscreen={fullscreen}: {text}"
                         );
                         let query = if fullscreen { "> " } else { "› /" };

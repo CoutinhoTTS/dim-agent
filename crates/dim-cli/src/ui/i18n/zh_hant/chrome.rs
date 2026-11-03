@@ -268,6 +268,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "run" => "執行",
         "view" => "檢視",
         "model" => "模型",
+        "extensions" => "擴充",
         "app" => "應用程式",
         "skill" => "技能",
         // composer/commands.rs: descriptions

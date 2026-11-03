@@ -658,6 +658,7 @@ fn tui_task_inventory_discards_old_pages_and_queued_retries_after_resuming_the_s
     terminal.write(b"/tasks\r");
     terminal.until("Loading branch history");
     terminal.write(b"\x1b[27u/new\r");
+    terminal.until("─ new session ─");
     readiness.recv_timeout(Duration::from_secs(10)).unwrap();
     terminal.write(b"/resume\r");
     terminal.until("Back to original");
@@ -930,7 +931,7 @@ fn tui_task_stop_all_keeps_admitted_targets_after_a_session_switch() {
     terminal.write(b"\x18");
     readiness.recv_timeout(Duration::from_secs(10)).unwrap();
     terminal.write(b"\x1b[27u/new\r");
-    terminal.until("new session");
+    terminal.until("─ new session ─");
     proceed.send(()).unwrap();
     terminal.until("attempted 2, errors 0, unavailable 0");
     terminal.signal(libc::SIGKILL);
@@ -2210,7 +2211,7 @@ fn tui_new_creates_the_session_on_the_first_message() {
     terminal.until("test / model");
     readiness.recv_timeout(PATIENCE).unwrap();
     terminal.write(b"/new\r");
-    terminal.until("new session");
+    terminal.until("─ new session ─");
     readiness.recv_timeout(PATIENCE).unwrap();
     terminal.write(b"first words\r");
     daemon.join().unwrap();
