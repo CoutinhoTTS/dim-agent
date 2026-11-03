@@ -13,7 +13,8 @@ use thiserror::Error;
 /// A numeric `retry-after-ms` takes precedence, even when negative or out of
 /// range. An absent or malformed millisecond value falls back to
 /// `retry-after` seconds, then an HTTP date. Only finite, non-negative delays
-/// fitting in `u64` are returned; fractional milliseconds are truncated.
+/// fitting in `u64` are returned; fractional milliseconds are rounded up, so a
+/// retry never starts before the instant the server named.
 #[must_use]
 pub fn retry_after_ms_from_headers(
     headers: &HashMap<String, String>,
@@ -33,8 +34,10 @@ pub fn retry_after_ms_from_headers(
 
     fn milliseconds(value: f64) -> Option<u64> {
         // u64::MAX rounds up to 2^64 as f64, so the upper bound is exclusive.
+        // `ceil` may leave a value below 2^64 that still rounds up to it; the
+        // saturating cast then clamps to `u64::MAX`, past any usable delay.
         if value.is_finite() && (0.0..u64::MAX as f64).contains(&value) {
-            Some(value.trunc() as u64)
+            Some(value.ceil() as u64)
         } else {
             None
         }

@@ -6,6 +6,7 @@ One patch remains from the earlier integration, the smallest change that keeps a
 | File | Change | Why it survives | Pinning test |
 | --- | --- | --- | --- |
 | aimux-core/src/parse_tool_call.rs | Export `parse_json_input`. | `arcships/aimux#463`: the Agent drives the stream and executes tool calls itself, so it parses raw tool input through this function. | `dim-agent-aimux/src/stream.rs` calls it, so the crate does not compile without the export; `src/stream/tests.rs`: `errors_release_transport_and_do_not_expose_request_or_tool_input` pins its `InvalidToolInput` contract. |
+| aimux-core/src/error.rs | Round a fractional `retry-after-ms` hint up to the next millisecond instead of truncating it. | `arcships/aimux#458`: a truncated hint starts a retry before the instant the server named. | `dim-agent-aimux/tests/model_flow/native.rs`: `native_failures_expose_only_normalized_model_facts` answers with `retry-after-ms: 25.1` and expects 26 ms. |
 
 The workspace member list is reduced to the four crates the Agent uses; production source is retained verbatim except for the change above.
 
