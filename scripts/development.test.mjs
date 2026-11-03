@@ -5,6 +5,25 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 
+test('compiled Rust targets forward arguments, failures and reject missing or ambiguous artifacts', (t) => {
+  const temporary = mkdtempSync(path.join(os.tmpdir(), 'dim test artifacts '));
+  t.after(() => rmSync(temporary, { recursive: true, force: true }));
+  const artifacts = path.join(temporary, 'artifacts.jsonl');
+  const record = { reason: 'compiler-artifact', profile: { test: true }, target: { name: 'flow' }, manifest_path: path.join(temporary, 'Cargo.toml'), executable: process.execPath };
+  const run = (...args) => spawnSync(process.execPath, [path.join(import.meta.dirname, 'run-rust-test.mjs'), artifacts, 'flow', ...args], { encoding: 'utf8' });
+  writeFileSync(artifacts, [JSON.stringify({ reason: 'build-finished', success: true }), JSON.stringify(record)].join('\n')+'\n');
+  const result = run('--eval', 'console.log(JSON.stringify({args:process.argv.slice(1),cwd:process.cwd()}))', '--', 'node_', '--ignored');
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {args:['node_', '--ignored'],cwd:realpathSync(temporary)});
+  assert.equal(run('--eval', 'process.exit(7)').status, 7);
+  for (const records of [[], [{ ...record, profile: { test: false } }], [record, record]]) {
+    writeFileSync(artifacts, records.map(value => JSON.stringify(value)).join('\n'));
+    const rejected = run();
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, /Expected one compiled test target named flow/);
+  }
+});
+
 test('developer entry runs without Node or plugin packages and preserves terminal invocation', { skip: process.platform === 'win32' }, (t) => {
   const temporary = mkdtempSync(path.join(os.tmpdir(), 'dim dev flow '));
   t.after(() => rmSync(temporary, { recursive: true, force: true }));
