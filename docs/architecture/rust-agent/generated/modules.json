@@ -1336,6 +1336,7 @@
         "format",
         "matches",
         "thread_local",
+        "unreachable",
         "vec"
       ]
     },
@@ -14728,6 +14729,7 @@
       "references": [
         "path TimelineQuery",
         "path TimelineQueryDirection::Ascending",
+        "path TimelineQueryDirection::Descending",
         "path TimelineQueryReply",
         "path TimelineQueryScope::Branch",
         "path TimelineQueryScope::Chain",
