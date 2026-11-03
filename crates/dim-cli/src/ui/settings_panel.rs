@@ -30,13 +30,14 @@ use crate::ui::list_panel::{Event, Item, ListPanel};
 use crate::ui::prompts::Effect;
 use crate::ui::terminal::{KeyCode, KeyEvent};
 use crate::ui::theme::Palette;
+use crate::ui::transcript::tool_group::Detail;
 
 /// The values the rows show, read when the panel opens.
 pub struct Values {
     pub theme: String,
     pub language: String,
     pub fullscreen_default: bool,
-    pub tools_expanded: bool,
+    pub tool_detail: Detail,
     pub thinking_expanded: bool,
     pub mouse: bool,
     pub notify: bool,
@@ -132,12 +133,7 @@ impl SettingsPanel {
             row(
                 Setting::ToolDetails,
                 "Tool details",
-                if values.tools_expanded {
-                    t("expanded")
-                } else {
-                    t("collapsed")
-                }
-                .to_owned(),
+                t(values.tool_detail.label()).to_owned(),
             ),
             row(
                 Setting::ThinkingDetails,

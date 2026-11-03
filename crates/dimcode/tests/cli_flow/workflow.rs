@@ -1076,6 +1076,50 @@ fn tui_workflow_panel_lists_definitions() {
     }
 }
 
+/// A short terminal keeps the composer, the selected entry and the key hint
+/// visible with `/workflow` open, in both layouts.
+#[test]
+fn tui_workflow_short_screen_keeps_the_composer_and_hints() {
+    for fullscreen in [false, true] {
+        for (cols, rows) in [(32, 8), (40, 10)] {
+            let home = Home::new();
+            let (shown, wait_shown) = mpsc::channel();
+            let daemon = home.daemon(move |wire| {
+                opened(wire);
+                wait_shown.recv_timeout(PATIENCE).unwrap();
+                let request = wire.read("workflow.list");
+                wire.reply(&request, listing(false));
+                let request = wire.read("settings.read");
+                wire.reply(&request, settings());
+                drains(wire);
+            });
+            let mut command = home.command();
+            sized(&mut command, cols, rows);
+            if fullscreen {
+                command.arg("--fullscreen");
+            }
+            let mut terminal = Terminal::launch_tui(command);
+            terminal.until("Git branch");
+            // A draft proves the composer is on the short screen; Ctrl+C
+            // clears it before the command.
+            terminal.write(b"xyzzy");
+            terminal.until("xyzzy");
+            terminal.raw(b"\x03");
+            shown.send(()).unwrap();
+            terminal.write(b"/workflow\r");
+            terminal.until("review");
+            // The bottom border's closing key, painted after the list.
+            terminal.until("Esc");
+            terminal.raw(b"\x1b");
+            thread::sleep(Duration::from_millis(200));
+            terminal.write(b"/exit\r");
+            terminal.until("Bye!");
+            assert!(terminal.wait().success());
+            daemon.join().unwrap();
+        }
+    }
+}
+
 /// `/workflow:save` opens the create editor; the project document it writes
 /// carries the workspace and no revision, and the note says it stays
 /// disabled.
@@ -1589,7 +1633,7 @@ fn tui_workflow_starts_without_a_session_and_reports_nowhere() {
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/new\r");
-    terminal.until("new session");
+    terminal.until("─ new session ─");
     terminal.write(b"/workflow\r");
     terminal.until("review-and-fix");
     terminal.raw(b"\x1b[B");

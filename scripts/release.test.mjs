@@ -101,14 +101,14 @@ test('staging the default plugins update is incremental and never leaves a half 
   const update=()=>run('stage-plugins.mjs',[output,'--update'],env);
   const first=update();
   assert.equal(first.status,0,first.stderr);
-  assert.match(first.stdout,/npm ci: goal, session-title, workflow, scheduler/);
-  assert.deepEqual(installs().map(installName).sort(),['goal','scheduler','session-title','workflow']);
+  assert.match(first.stdout,/npm ci: goal, workflow, scheduler/);
+  assert.deepEqual(installs().map(installName).sort(),['goal','scheduler','workflow']);
   assert.equal(readRecord().schemaVersion,1);
-  assert.deepEqual(Object.keys(readRecord().plugins).sort(),['goal','plugin-authoring','scheduler','session-title','workflow']);
+  assert.deepEqual(Object.keys(readRecord().plugins).sort(),['goal','plugin-authoring','scheduler','workflow']);
   const second=update();
   assert.equal(second.status,0,second.stderr);
   assert.match(second.stdout,/npm ci: none/);
-  assert.equal(installs().length,4);
+  assert.equal(installs().length,3);
   const sourceFile=path.join(output,'plugins/goal/index.ts');
   const original=readFileSync(sourceFile,'utf8');
   rmSync(sourceFile);
@@ -119,7 +119,7 @@ test('staging the default plugins update is incremental and never leaves a half 
   writeFileSync(record,`${JSON.stringify(changed)}\n`);
   const reinstalled=update();
   assert.equal(reinstalled.status,0,reinstalled.stderr);
-  assert.equal(installs().length,5);
+  assert.equal(installs().length,4);
   assert.equal(installName(installs().at(-1)),'goal');
   const removed=readRecord();
   removed.plugins.retired={hash:null,dir:'plugins/retired'};
@@ -147,8 +147,8 @@ test('the record follows the disk when an update fails part-way', {skip:process.
   const bin=path.join(temporary,'bin');
   mkdirSync(bin);
   const log=path.join(temporary,'npm.log');
-  const fail=path.join(temporary,'fail-session-title');
-  writeFileSync(path.join(bin,'npm'),`#!/bin/bash\nprintf '%s\\n' "$PWD" >> "${log}"\nmkdir -p "$PWD/node_modules"\ncase "$PWD" in *session-title*) [ -e "${fail}" ] && exit 1 ;; esac\nexit 0\n`,{mode:0o755});
+  const fail=path.join(temporary,'fail-workflow');
+  writeFileSync(path.join(bin,'npm'),`#!/bin/bash\nprintf '%s\\n' "$PWD" >> "${log}"\nmkdir -p "$PWD/node_modules"\ncase "$PWD" in *workflow*) [ -e "${fail}" ] && exit 1 ;; esac\nexit 0\n`,{mode:0o755});
   const env={PATH:`${bin}:${process.env.PATH}`};
   const output=path.join(temporary,'staged');
   const record=path.join(output,'.stage-plugins.json');
@@ -158,25 +158,25 @@ test('the record follows the disk when an update fails part-way', {skip:process.
   assert.equal(update().status,0);
   const changed=readRecord();
   changed.plugins.goal.hash='stale goal';
-  changed.plugins['session-title'].hash='stale session-title';
+  changed.plugins['workflow'].hash='stale workflow';
   writeFileSync(record,`${JSON.stringify(changed)}\n`);
   writeFileSync(fail,'');
   const failed=update();
   assert.notEqual(failed.status,0);
-  assert.match(failed.stderr,/Cannot stage session-title/);
+  assert.match(failed.stderr,/Cannot stage workflow/);
   const afterFailure=readRecord();
   assert.match(afterFailure.plugins.goal.hash,/^[0-9a-f]{64}$/);
-  assert.equal(afterFailure.plugins['session-title'].hash,'stale session-title');
-  assert.deepEqual(installs().slice(-2).map(installName),['goal','session-title']);
+  assert.equal(afterFailure.plugins['workflow'].hash,'stale workflow');
+  assert.deepEqual(installs().slice(-2).map(installName),['goal','workflow']);
   rmSync(fail);
   const count=installs().length;
   const fixed=update();
   assert.equal(fixed.status,0,fixed.stderr);
   assert.equal(installs().length,count+1);
-  assert.equal(installName(installs().at(-1)),'session-title');
+  assert.equal(installName(installs().at(-1)),'workflow');
   const afterFix=readRecord();
   assert.equal(afterFix.plugins.goal.hash,afterFailure.plugins.goal.hash);
-  assert.match(afterFix.plugins['session-title'].hash,/^[0-9a-f]{64}$/);
+  assert.match(afterFix.plugins['workflow'].hash,/^[0-9a-f]{64}$/);
 });
 
 test('a failed swap leaves the live plugin whole until its replacement lands', {skip:process.platform==='win32'}, async (t)=>{
@@ -269,13 +269,13 @@ test('two concurrent updates serialize on the stage lock', {skip:process.platfor
   const [firstRun,secondRun]=await Promise.all([first.done,second.done]);
   assert.equal(firstRun.status,0,firstRun.err);
   assert.equal(secondRun.status,0,secondRun.err);
-  assert.equal(readFileSync(log,'utf8').trim().split('\n').filter(Boolean).length,4);
+  assert.equal(readFileSync(log,'utf8').trim().split('\n').filter(Boolean).length,3);
   assert.match(secondRun.err,/Waiting for another staging run/);
   assert.match(secondRun.out,/npm ci: none/);
   const record=JSON.parse(readFileSync(path.join(output,'.stage-plugins.json')));
   assert.equal(record.schemaVersion,1);
-  assert.deepEqual(Object.keys(record.plugins).sort(),['goal','plugin-authoring','scheduler','session-title','workflow']);
-  for (const name of ['goal','session-title','workflow','scheduler']) {
+  assert.deepEqual(Object.keys(record.plugins).sort(),['goal','plugin-authoring','scheduler','workflow']);
+  for (const name of ['goal','workflow','scheduler']) {
     assert(existsSync(path.join(output,'plugins',name,'node_modules')),name);
     assert.match(record.plugins[name].hash,/^[0-9a-f]{64}$/);
   }
@@ -474,7 +474,7 @@ test('a recorded parent directory does not remove the plugins inside it', {skip:
   writeFileSync(record,`${JSON.stringify(data)}\n`);
   const updated=run('stage-plugins.mjs',[output,'--update'],env);
   assert.equal(updated.status,0,updated.stderr);
-  for (const name of ['goal','session-title','workflow','scheduler']) {
+  for (const name of ['goal','workflow','scheduler']) {
     assert(existsSync(path.join(output,'plugins',name,'index.ts')),name);
   }
   const after=JSON.parse(readFileSync(record));

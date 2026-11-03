@@ -40,7 +40,11 @@ fn main() {
                 global: global.into(),
             })
         });
-        if let Err(error) = dim_app_server::cli::process_entry(std::env::args().skip(2), provider) {
+        if let Err(error) = dim_app_server::cli::process_entry(
+            std::env::args().skip(2),
+            provider,
+            dim_session_title::install,
+        ) {
             eprintln!("Error: {error}");
             std::process::exit(1);
         }

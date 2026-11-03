@@ -71,6 +71,9 @@ pub struct ListPanel {
     /// shows at once; a set title is drawn as it was given.
     title: Title,
     hint: String,
+    /// A question with the key that answers it and the key that cancels it,
+    /// drawn in the hint's place until the next [`ListPanel::set_hint`].
+    confirmation: Option<(String, String, String)>,
     loading_text: &'static str,
     empty_text: &'static str,
     no_match_text: &'static str,
@@ -91,6 +94,9 @@ pub struct ListPanel {
     page: Cell<usize>,
     /// First row of the visible window, kept between frames.
     window: Cell<usize>,
+    /// The row the last render drew the `> query` line on, `None` when it
+    /// gave the line up.
+    query_row: Cell<Option<usize>>,
     refreshable: bool,
     notes: Vec<String>,
 }
@@ -107,6 +113,7 @@ impl ListPanel {
         Self {
             title: Title::Fixed(title),
             hint: hint.into(),
+            confirmation: None,
             loading_text,
             empty_text,
             no_match_text,
@@ -121,6 +128,7 @@ impl ListPanel {
             error: None,
             page: Cell::new(6),
             window: Cell::new(0),
+            query_row: Cell::new(Some(2)),
             refreshable,
             notes: Vec::new(),
         }
@@ -141,14 +149,31 @@ impl ListPanel {
     }
 
     /// The hint names the keys the selection offers; a panel that redraws it
-    /// when the selection moves sets it here.
+    /// when the selection moves sets it here. It replaces a confirmation.
     pub fn set_hint(&mut self, hint: String) {
         self.hint = hint;
+        self.confirmation = None;
+    }
+
+    /// A question with the key that answers it and the key that cancels it,
+    /// drawn in the hint's place until the next [`ListPanel::set_hint`].
+    pub fn set_confirmation(
+        &mut self,
+        question: impl Into<String>,
+        confirm: impl Into<String>,
+        cancel: impl Into<String>,
+    ) {
+        self.confirmation = Some((question.into(), confirm.into(), cancel.into()));
     }
 
     /// The title a caller draws in place of the panel's own.
     pub fn set_title(&mut self, title: impl Into<String>) {
         self.title = Title::Set(title.into());
+    }
+
+    /// A list whose empty text follows the view it shows replaces it here.
+    pub fn set_empty_text(&mut self, empty_text: &'static str) {
+        self.empty_text = empty_text;
     }
 
     /// Explanatory paragraphs below the choices, separate from keyboard hints.
@@ -196,11 +221,14 @@ impl ListPanel {
 
     /// The id of the selected row.
     pub fn selected_id(&self) -> Option<String> {
+        self.selected_item().map(|item| item.id.clone())
+    }
+
+    pub fn selected_item(&self) -> Option<&Item> {
         self.shown()
             .into_iter()
             .filter(|i| !i.heading)
             .nth(self.selected)
-            .map(|i| i.id.clone())
     }
 
     pub fn set_items(&mut self, items: Result<Vec<Item>, String>, preselect: Option<&str>) {
@@ -312,12 +340,13 @@ impl ListPanel {
     }
 
     /// Where the terminal cursor goes in the rendered rows of `width`
-    /// columns: after the filter text of the `> query` row, under the top
-    /// border and a blank row. A list without a filter has none.
+    /// columns: after the filter text of the `> query` row, on the row the
+    /// last render drew it on. A list without a filter has none.
     pub fn cursor(&self, width: usize) -> Option<(usize, usize)> {
         let inner = width.saturating_sub(4).max(1);
+        let row = self.query_row.get()?;
         self.filterable
-            .then(|| (2, 4 + self.filter.view(inner.saturating_sub(2)).1))
+            .then(|| (row, 4 + self.filter.view(inner.saturating_sub(2)).1))
     }
 
     /// `width` columns including borders; `rows` is the panel's row budget.
@@ -326,8 +355,18 @@ impl ListPanel {
     }
 
     /// As [`ListPanel::render`], with `footer` lines above the bottom border:
-    /// the caller fits and colours them, and they take their rows from the
-    /// list.
+    /// the caller colours them, and they take their rows from the list.
+    ///
+    /// The panel never draws more than `rows` rows, and under two rows it
+    /// draws nothing: the two borders alone would take the budget. While the
+    /// list cannot draw its first three entries, the notes give up lines
+    /// from the end, the blank row going with the last line. When not even
+    /// one list row fits beside the other parts, it gives them up in this
+    /// order: the rest of the notes, the filter's padding (the row below the
+    /// query first), the footer's first line first, the hint's rows above
+    /// the border, the query row, and the list's last row. The selected
+    /// entry and the hint's closing key stay the longest; a confirmation
+    /// keeps its confirm key the longest instead.
     pub fn render_with_footer(
         &self,
         width: usize,
@@ -335,20 +374,15 @@ impl ListPanel {
         p: &Palette,
         footer: &[String],
     ) -> Vec<String> {
+        if rows < 2 {
+            self.query_row.set(None);
+            self.page.set(0);
+            return Vec::new();
+        }
         let inner = width.saturating_sub(4).max(1);
         let shown = self.shown();
-        let query_rows = if self.filterable { 3 } else { 0 };
-        // A hint the bottom border cannot hold is drawn as rows above a plain
-        // bottom border, so no key is ever lost to the width. The rows take
-        // the list's space like the footer's, but the list keeps one row of
-        // its own: a panel too short for both shows no hint rather than no
-        // list.
-        let hint = hint_rows(&self.hint, width)
-            .filter(|hint| hint.len() <= rows.saturating_sub(2 + query_rows + footer.len() + 1));
-        let (bottom_hint, hint_rows): (Option<String>, Vec<String>) = match &hint {
-            Some(hint) => (None, hint.iter().map(|row| key_hints(row, p)).collect()),
-            None => (Some(key_hints(&self.hint, p)), Vec::new()),
-        };
+        let hint = self.hint_text();
+        let hint_above = hint_rows(&hint, width);
         let mut notes = Vec::new();
         for note in &self.notes {
             for line in wrap_words(note, inner.saturating_sub(6).max(1)) {
@@ -359,12 +393,6 @@ impl ListPanel {
                 ));
             }
         }
-        notes.truncate(rows.saturating_sub(3 + query_rows + shown.len().min(3) + hint_rows.len()));
-        let note_rows = notes.len() + usize::from(!notes.is_empty());
-        let page = rows
-            .saturating_sub(2 + query_rows + note_rows + footer.len() + hint_rows.len())
-            .max(1);
-        self.page.set(page);
         let list: Vec<Row> = shown
             .iter()
             .map(|item| Row {
@@ -389,38 +417,68 @@ impl ListPanel {
             })
             .collect();
         let columns = Columns::of(&list, inner);
-        let mut content = Vec::new();
-        if self.filterable {
-            content.push(String::new());
-            content.push(format!("> {}", self.filter.view(inner.saturating_sub(2)).0));
-            content.push(String::new());
-        }
         let selectable: Vec<usize> = list
             .iter()
             .enumerate()
             .filter(|(_, r)| r.selectable())
             .map(|(i, _)| i)
             .collect();
-        if selectable.is_empty() && shown.iter().any(|item| item.sticky) {
-            for item in shown.iter().filter(|item| item.sticky).take(page) {
-                content.push(fg(&truncate_cells(&item.label, inner), &p.muted));
-            }
-        } else if selectable.is_empty() {
-            let text = if self.loading {
-                t(self.loading_text)
-            } else if let Some(error) = &self.error {
-                error.as_str()
-            } else if self.filter.is_empty() {
-                t(self.empty_text)
-            } else {
-                t(self.no_match_text)
-            };
-            content.push(fg(&truncate_cells(text, inner), &p.muted));
+        let list_total = if selectable.is_empty() {
+            shown.iter().filter(|item| item.sticky).count().max(1)
         } else {
+            list.len()
+        };
+        let fitted = self.fit(
+            rows,
+            list_total,
+            notes.len(),
+            footer.len(),
+            hint_above.as_ref().map_or(0, Vec::len),
+        );
+        self.query_row
+            .set(match (self.filterable, fitted.query, fitted.above) {
+                (true, true, true) => Some(2),
+                (true, true, false) => Some(1),
+                _ => None,
+            });
+        self.page.set(fitted.list);
+        let mut content = Vec::new();
+        if self.filterable {
+            if fitted.above {
+                content.push(String::new());
+            }
+            if fitted.query {
+                content.push(format!("> {}", self.filter.view(inner.saturating_sub(2)).0));
+            }
+            if fitted.below {
+                content.push(String::new());
+            }
+        }
+        if selectable.is_empty() {
+            if fitted.list > 0 {
+                let sticky: Vec<&Item> = shown.iter().filter(|item| item.sticky).copied().collect();
+                if sticky.is_empty() {
+                    let text = if self.loading {
+                        t(self.loading_text)
+                    } else if let Some(error) = &self.error {
+                        error.as_str()
+                    } else if self.filter.is_empty() {
+                        t(self.empty_text)
+                    } else {
+                        t(self.no_match_text)
+                    };
+                    content.push(fg(&truncate_cells(text, inner), &p.muted));
+                } else {
+                    for item in sticky.into_iter().take(fitted.list) {
+                        content.push(fg(&truncate_cells(&item.label, inner), &p.muted));
+                    }
+                }
+            }
+        } else if fitted.list > 0 {
             let current_at = selectable[self.selected.min(selectable.len() - 1)];
-            let start = follow_window(self.window.get(), current_at, page, list.len());
+            let start = follow_window(self.window.get(), current_at, fitted.list, list.len());
             self.window.set(start);
-            for (offset, row) in list.iter().skip(start).take(page).enumerate() {
+            for (offset, row) in list.iter().skip(start).take(fitted.list).enumerate() {
                 if matches!(row.kind, Kind::Heading) {
                     content.push(fg(
                         &truncate_cells(&format!("  {}", row.label), inner),
@@ -437,16 +495,25 @@ impl ListPanel {
                 }
             }
         }
-        if !notes.is_empty() {
+        if fitted.notes > 0 {
             content.push(String::new());
-            content.extend(notes);
+            content.extend(notes.into_iter().take(fitted.notes));
         }
-        content.extend_from_slice(footer);
+        content.extend_from_slice(&footer[footer.len() - fitted.footer..]);
+        if fitted.hint_above
+            && let Some(hint) = &hint_above
+        {
+            content.extend(hint.iter().map(|row| key_hints(row, p)));
+        }
+        let bottom_hint = if fitted.hint_above {
+            None
+        } else {
+            Some(key_hints(&self.short_hint(&hint, width), p))
+        };
         let title = match &self.title {
             Title::Fixed(text) => t(text),
             Title::Set(text) => text.as_str(),
         };
-        content.extend(hint_rows);
         bordered(
             &content,
             width,
@@ -456,6 +523,121 @@ impl ListPanel {
             bottom_hint.as_deref(),
         )
     }
+
+    /// The text the hint draws: a confirmation reads as its question, its
+    /// confirm key and its cancel key.
+    fn hint_text(&self) -> String {
+        match &self.confirmation {
+            Some((question, confirm, cancel)) => format!("{question} {confirm} · {cancel}"),
+            None => self.hint.clone(),
+        }
+    }
+
+    /// The hint shortened to the bottom border: a key hint keeps its closing
+    /// key, a confirmation its confirm key.
+    fn short_hint(&self, hint: &str, width: usize) -> String {
+        match &self.confirmation {
+            Some((question, confirm, cancel)) => {
+                shorten_confirmation(question, confirm, cancel, width)
+            }
+            None => shorten_hint(hint, width),
+        }
+    }
+
+    /// The parts that fit `rows`. The list takes the space the other parts
+    /// leave; while it cannot draw its first three entries, the notes give up
+    /// lines from the end, the blank row going with the last line. When not
+    /// even one list row fits, the panel gives the rest up in order: the rest
+    /// of the notes, the filter's padding (the row below the query first),
+    /// the footer's first line first, the hint's rows above the border, the
+    /// query row, and the list's last row.
+    fn fit(
+        &self,
+        rows: usize,
+        list_total: usize,
+        notes: usize,
+        footer: usize,
+        hint_above: usize,
+    ) -> Fitted {
+        let filterable = self.filterable;
+        let page = |parts: &Fitted| {
+            let fixed = 2
+                + usize::from(parts.above)
+                + usize::from(parts.below)
+                + usize::from(parts.query)
+                + if parts.notes > 0 { parts.notes + 1 } else { 0 }
+                + parts.footer
+                + if parts.hint_above { hint_above } else { 0 };
+            rows.checked_sub(fixed)
+                .map(|left| left.min(list_total))
+                .unwrap_or(0)
+        };
+        let mut parts = Fitted {
+            above: filterable,
+            below: filterable,
+            query: filterable,
+            notes,
+            footer,
+            hint_above: hint_above > 0,
+            list: 0,
+        };
+        while parts.notes > 0 && page(&parts) < list_total.min(3) {
+            parts.notes -= 1;
+        }
+        parts.list = page(&parts);
+        if parts.list > 0 {
+            return parts;
+        }
+        parts.notes = 0;
+        parts.list = page(&parts);
+        if parts.list > 0 {
+            return parts;
+        }
+        parts.below = false;
+        parts.list = page(&parts);
+        if parts.list > 0 {
+            return parts;
+        }
+        parts.above = false;
+        parts.list = page(&parts);
+        if parts.list > 0 {
+            return parts;
+        }
+        while parts.footer > 0 {
+            parts.footer -= 1;
+            parts.list = page(&parts);
+            if parts.list > 0 {
+                return parts;
+            }
+        }
+        parts.hint_above = false;
+        parts.list = page(&parts);
+        if parts.list > 0 {
+            return parts;
+        }
+        parts.query = false;
+        parts.list = page(&parts);
+        parts
+    }
+}
+
+/// The parts of a panel's layout that survived the row budget.
+struct Fitted {
+    /// The blank row above the `> query` line.
+    above: bool,
+    /// The blank row below the `> query` line.
+    below: bool,
+    query: bool,
+    /// Note lines kept from the start; the blank row before them comes with
+    /// the first line.
+    notes: usize,
+    /// Footer lines kept, taken from the end: the line nearest the hint
+    /// stays the longest.
+    footer: usize,
+    /// The hint is drawn as rows above the bottom border.
+    hint_above: bool,
+    /// List rows to draw.
+    list: usize,
 }
 
 /// The hint as rows above the bottom border, when the border cannot hold it:
@@ -505,6 +687,60 @@ fn wrapped_part(part: &str, room: usize) -> Vec<String> {
     rows
 }
 
+/// `hint` shortened to fit the bottom border, keeping its closing key last:
+/// whole parts go from the one before the closing key leftwards until the
+/// rest fits, the first part and the closing key stay while they fit
+/// together, and a closing key too wide on its own is truncated with `…`.
+fn shorten_hint(hint: &str, width: usize) -> String {
+    // `bordered` puts a hint on the bottom border only while a dash still
+    // fits on either side of it.
+    let room = width.saturating_sub(6).max(1);
+    if visible_width(hint) <= room {
+        return hint.to_owned();
+    }
+    let parts: Vec<&str> = hint.split(" · ").collect();
+    let closing = parts[parts.len() - 1];
+    for kept in (0..parts.len() - 1).rev() {
+        let text = parts[..kept]
+            .iter()
+            .copied()
+            .chain(std::iter::once(closing))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        if visible_width(&text) <= room {
+            return text;
+        }
+    }
+    truncate_cells(closing, room)
+}
+
+/// A confirmation shortened to fit the bottom border, keeping its confirm
+/// key the longest: the full text, then the question cut with `…` before the
+/// two keys, then the two keys, then the confirm key alone, and a confirm key
+/// too wide on its own truncated with `…`.
+fn shorten_confirmation(question: &str, confirm: &str, cancel: &str, width: usize) -> String {
+    // `bordered` puts a hint on the bottom border only while a dash still
+    // fits on either side of it.
+    let room = width.saturating_sub(6).max(1);
+    let keys = format!("{confirm} · {cancel}");
+    let full = format!("{question} {keys}");
+    if visible_width(&full) <= room {
+        return full;
+    }
+    let keyed = visible_width(&keys) + 1;
+    if room > keyed {
+        let question = truncate_cells(question, room - keyed);
+        return format!("{question} {keys}");
+    }
+    if visible_width(&keys) <= room {
+        return keys;
+    }
+    if visible_width(confirm) <= room {
+        return confirm.to_owned();
+    }
+    truncate_cells(confirm, room)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,6 +756,85 @@ mod tests {
             None,
         );
         panel
+    }
+
+    fn palette() -> Palette {
+        use crate::ui::theme::{Appearance, ColorMode, Theme};
+        Theme::system(ColorMode::TrueColor, Appearance::Dark, None).palette
+    }
+
+    /// A panel draws no more rows than it is given, and nothing under two
+    /// rows: the two borders alone would take that budget. A confirmation
+    /// keeps its confirm key at every budget that draws, and its question
+    /// whole while the full text fits.
+    #[test]
+    fn a_list_panel_draws_within_its_row_budget() {
+        let question = "Remove a job whose name is a long one?";
+        let confirm = "Enter confirm";
+        let cancel = "Esc cancel";
+        let confirming = || {
+            let mut panel = three_rows();
+            panel.set_confirmation(question, confirm, cancel);
+            panel
+        };
+        let mut hinted = three_rows();
+        hinted.set_hint("Enter open · Ctrl+R refresh · Ctrl+F filter · Esc close".to_owned());
+        let configurations = [
+            ("plain", three_rows().without_filter(), Vec::new()),
+            ("filterable", three_rows(), Vec::new()),
+            (
+                "notes",
+                three_rows().with_notes(vec![
+                    "A note that takes its lines from the list beside it.".to_owned(),
+                ]),
+                Vec::new(),
+            ),
+            ("hint above the border", hinted, Vec::new()),
+            (
+                "footer",
+                three_rows(),
+                vec![
+                    "first footer line".to_owned(),
+                    "second footer line".to_owned(),
+                ],
+            ),
+            ("confirmation", confirming(), Vec::new()),
+        ];
+        for (name, panel, footer) in configurations {
+            for width in [20, 40, 80] {
+                for budget in 0..=8 {
+                    let rows = panel.render_with_footer(width, budget, &palette(), &footer);
+                    assert!(
+                        rows.len() <= budget,
+                        "{name} at {width}x{budget}: {} rows drawn: {rows:#?}",
+                        rows.len()
+                    );
+                    assert_eq!(
+                        rows.is_empty(),
+                        budget < 2,
+                        "{name} at {width}x{budget}: {rows:#?}"
+                    );
+                }
+            }
+        }
+        let full = format!("{question} {confirm} · {cancel}");
+        let panel = confirming();
+        for width in 20..=80 {
+            for budget in 2..=30 {
+                let rows = panel.render(width, budget, &palette());
+                let text = crate::ui::render::panel::strip_escapes(&rows.join("\n"));
+                assert!(
+                    text.contains(confirm),
+                    "confirmation at {width}x{budget}: the confirm key: {text}"
+                );
+                if visible_width(&full) + 6 <= width {
+                    assert!(
+                        text.contains(question),
+                        "confirmation at {width}x{budget}: the whole question: {text}"
+                    );
+                }
+            }
+        }
     }
 
     /// A part wider than a row wraps instead of being cut: the remove

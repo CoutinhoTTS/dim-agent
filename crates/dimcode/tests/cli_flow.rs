@@ -4006,6 +4006,193 @@ fn a_new_session_shows_the_effort_its_creation_adopted() {
     }
 }
 
+/// A model-config profile records the protocol its selection adopts, so the
+/// configured effort reaches the status line; a profile with no effort shows
+/// no suffix.
+#[test]
+#[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
+fn the_model_label_shows_a_configured_profile_effort() {
+    let binary = std::env::var("DIM_TEST_APP_SERVER")
+        .expect("Set DIM_TEST_APP_SERVER to the dim-app-server binary");
+    for (suffix, label) in [
+        ("effortful", "fixture / fixture-model · low"),
+        ("plain", "fixture / fixture-model"),
+    ] {
+        let home = Home::new();
+        let config = home.0.join("model.json");
+        let mut model = json!({"id":"fixture-model","contextWindow":32_000,
+            "maxOutputTokens":4_096,"config":{"maxTokens":4096}});
+        if suffix == "effortful" {
+            model["config"]["reasoning"] = json!({"effort":"low"});
+        }
+        fs::write(
+            &config,
+            serde_json::to_vec(&json!({
+                "defaultModel":{"providerId":"fixture","modelId":"fixture-model"},
+                "providers":[{"id":"fixture","kind":"anthropic",
+                    "baseUrl":"http://127.0.0.1:9","models":[model]}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut command = home.command();
+        command.args([
+            "--server",
+            &binary,
+            "--model-config",
+            config.to_str().unwrap(),
+            "--cwd",
+            home.0.to_str().unwrap(),
+        ]);
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until(label);
+        if suffix == "plain" {
+            assert!(
+                !terminal.transcript.contains("· low"),
+                "a profile without an effort drew a suffix: {}",
+                terminal.transcript
+            );
+        }
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
+    }
+}
+
+/// `/new` returns home: the status line keeps the provider and model it
+/// showed and drops the effort, because nothing has been adopted there yet.
+#[test]
+fn home_after_new_drops_the_previous_sessions_effort() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[
+            "ui.open",
+            "ui.close",
+            "ui.attach",
+            "ui.status",
+            "ui.shutdown",
+            "ui.replace",
+        ]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let register = wire.read("ui.attach");
+        wire.reply(&register, json!({"uiId":"ui-1"}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[configured_event(4, "model", json!({"reasoningEffort":"high"}))],
+                "through":8,"nextAfter":8,"done":true}),
+        );
+        wire.no_context();
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+
+        // `/effort high` adopts the value on the first Session.
+        let catalog = wire.read("provider.catalog");
+        assert_eq!(catalog["params"], json!({"providerId":"test"}));
+        let mut capabilities = serde_json::to_value(
+            dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384),
+        )
+        .unwrap();
+        capabilities["reasoning"] = json!(true);
+        wire.reply(
+            &catalog,
+            json!({"catalog":{"models":[{"id":"model","capabilities":capabilities,
+                "metadata":{"reasoning":{"supported":true,"effortOptions":["high","low"]}}}]}}),
+        );
+        let effort = wire.read("session.model.update");
+        assert_eq!(
+            effort["params"],
+            json!({"sessionId":"session","branchId":"main",
+                "modelPreferences":{"reasoningEffort":"high"}})
+        );
+        wire.reply(&effort, json!({"outcome":"adopted"}));
+
+        // `/new` and its first message create the next Session, which has
+        // adopted no preference yet.
+        let create = wire.read("session.create");
+        assert!(
+            create["params"].get("modelPreferences").is_none(),
+            "{create}"
+        );
+        wire.reply(
+            &create,
+            json!({"sessionId":"next","sequence":8,"model":{"providerId":"test","modelId":"model"}}),
+        );
+        let detach = wire.read("session.detach");
+        assert_eq!(detach["params"], json!({"sessionId":"session"}));
+        wire.reply(&detach, json!({}));
+        let attach = wire.read("session.attach");
+        assert_eq!(attach["params"], json!({"sessionId":"next"}));
+        wire.reply(&attach, attach_record(&attach));
+        let register = wire.read("ui.attach");
+        assert_eq!(register["params"], json!({"sessionId":"next","kind":"tui"}));
+        wire.reply(&register, json!({"uiId":"ui-2"}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["sessionId"], "next");
+        wire.reply(&submit, json!({"event":{}}));
+        wire.no_context();
+        wire.notice("session.event", json!({"sessionId":"next","branchId":"main",
+            "event":{"id":"next-text","sequence":9,"create_at":1,"type":"step","name":"text",
+                "data":{"turn_id":"next-turn","request_id":"next-request","delta":"next reply"}}}));
+        wire.hold();
+    });
+    let mut command = home.command();
+    // The waits below close on the end of a synchronized update, which frames
+    // every repaint; tmux would turn that framing off for the child.
+    command.env_remove("TMUX");
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / model · high");
+    terminal.write(b"/effort high\r");
+    terminal.until("Reasoning effort configuration adopted: high");
+    terminal.write(b"/new\r");
+    // The palette lists `/new` with its description while it is typed, so
+    // wait for the rule the boundary commits once the command has run.
+    terminal.until("─ new session ─");
+    // Widen the terminal so the whole label fits and every row is repainted:
+    // the status line at home must carry the model alone.
+    let size = libc::winsize {
+        ws_row: 24,
+        ws_col: 200,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    assert_eq!(
+        unsafe {
+            libc::ioctl(
+                terminal.master.as_ref().unwrap().as_raw_fd(),
+                libc::TIOCSWINSZ,
+                &size,
+            )
+        },
+        0
+    );
+    let resized_at = terminal.transcript.len();
+    terminal.signal(libc::SIGWINCH);
+    // The repaint of a resize clears the screen first; its status line is
+    // the last row of the frame, so wait for the label on that row and for
+    // the frame to close behind it before reading either.
+    terminal.until("\u{1b}[2J\u{1b}[H\u{1b}[3J");
+    terminal.until("test / model");
+    terminal.until("\u{1b}[?2026l");
+    let home = &terminal.transcript[resized_at..];
+    assert!(home.contains("test / model"), "home drew no label: {home}");
+    assert!(
+        !home.contains("· high"),
+        "home kept the previous Session's effort: {home}"
+    );
+    terminal.write(b"hello\r");
+    terminal.until("next reply");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
 /// Re-picking the model the label already shows keeps its effort: an
 /// `unchanged` adoption publishes no `context/configured` fact to redraw it.
 #[test]
@@ -4351,6 +4538,95 @@ fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
         "{}",
         terminal.transcript
     );
+}
+
+#[test]
+fn tui_effort_dialog_selects_the_current_models_effort_and_cancels_without_writing() {
+    fn catalog(wire: &mut Wire) {
+        let request = wire.read("provider.catalog");
+        assert_eq!(request["params"], json!({"providerId":"test"}));
+        let mut capabilities = serde_json::to_value(
+            dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384),
+        )
+        .unwrap();
+        capabilities["reasoning"] = json!(true);
+        wire.reply(
+            &request,
+            json!({"catalog":{"models":[
+                {"id":"other","capabilities":capabilities,"metadata":{"reasoning":{
+                    "supported":true,"effortOptions":["invalid-neighbor"]}}},
+                {"id":"model","capabilities":capabilities,"metadata":{"reasoning":{
+                    "supported":true,"effortOptions":["low","high"],
+                    "off":{"kind":"enable_thinking","value":false}}}}
+            ]}}),
+        );
+    }
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let daemon = home.daemon(|wire| {
+            wire.hello(&[]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history");
+            wire.reply(
+                &history,
+                json!({"events":[configured_event(4, "model", json!({"reasoningEffort":"high"}))],
+                "through":8,"nextAfter":8,"done":true}),
+            );
+            wire.no_context();
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            catalog(wire);
+            catalog(wire);
+            let selected = wire.read("session.model.update");
+            assert_eq!(
+                selected["params"],
+                json!({"sessionId":"session","branchId":"main",
+                "modelPreferences":{"reasoningEffort":"high"}})
+            );
+            wire.reply(&selected, json!({"outcome":"unchanged"}));
+            catalog(wire);
+            catalog(wire);
+            catalog(wire);
+            let selected = wire.read("session.model.update");
+            assert_eq!(
+                selected["params"],
+                json!({"sessionId":"session","branchId":"main",
+                "modelPreferences":{"reasoningEffort":"none"}})
+            );
+            wire.reply(&selected, json!({"outcome":"adopted"}));
+            wire.hold();
+        });
+        let mut command = home.command();
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("test / model · high");
+        terminal.write(b"/effort\r");
+        terminal.until("Current: high");
+        terminal.until("2 (•) high");
+        terminal.write(b"\r");
+        terminal.until("Reasoning effort configuration unchanged: high");
+        terminal.write(b"/effort\r");
+        terminal.until("Current: high");
+        terminal.write(b"\x1b");
+        terminal.until(if fullscreen {
+            "test / model · high"
+        } else {
+            "Ask anything..."
+        });
+        terminal.write(b"/reasoning\r");
+        terminal.until("Current: high");
+        terminal.until("3 ( ) none");
+        assert!(!terminal.transcript.contains("invalid-neighbor"));
+        terminal.write(b"3\r");
+        terminal.until("Reasoning effort configuration adopted: none");
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
 }
 
 #[test]
@@ -7270,7 +7546,7 @@ fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
     terminal.until("test / model");
     // `/new` goes home; the message starts the Session the UI moves to.
     terminal.write(b"/new\r");
-    terminal.until("new session");
+    terminal.until("─ new session ─");
     terminal.write(b"hello\r");
     terminal.until("The App Server closed this interface: another terminal took over");
     terminal.until("Bye!");
@@ -8287,7 +8563,16 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
     started.send(()).unwrap();
     terminal.until("Context compacted ▸");
     terminal.write(b"/tools\r");
+    terminal.until("Context compacted ▸");
+    terminal.until("test / model");
+    assert!(
+        !terminal.transcript.contains("The parser is half done."),
+        "summary tool form keeps the compaction body closed"
+    );
+    terminal.write(b"/tools\r");
     terminal.until("The parser is half done.");
+    terminal.write(b"/tools\r");
+    terminal.until("Context compacted ▸");
     terminal.write(b"/tools\r");
     terminal.until("Context compacted ▸");
     terminal.write(b"/tools\r");
@@ -8612,6 +8897,14 @@ fn tui_rebuilds_compaction_rows_from_history_on_resume() {
     command.args(["--resume", "session"]);
     let mut terminal = Terminal::launch_tui(command);
     terminal.until("Context compacted ▸");
+    terminal.until("test / model");
+    terminal.write(b"/tools\r");
+    terminal.until("Context compacted ▸");
+    terminal.until("test / model");
+    assert!(
+        !terminal.transcript.contains("Restored summary text."),
+        "summary tool form keeps the restored compaction body closed"
+    );
     terminal.write(b"/tools\r");
     terminal.until("Restored summary text.");
     terminal.write(b"/exit\r");

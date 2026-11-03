@@ -54,6 +54,11 @@ pub enum McpSourceState {
     Failed {
         message: String,
     },
+    /// The transport is gone but the last tools stay published and callable.
+    /// The reason is kept until a connection succeeds.
+    Disconnected {
+        message: String,
+    },
     /// The server needs the user to sign in; clears by itself once the
     /// server's credential changes.
     AuthRequired {
@@ -69,6 +74,7 @@ impl McpSourceState {
             Self::Connecting => ("connecting", None, None),
             Self::Ready { version } => ("ready", Some(version), None),
             Self::Failed { message } => ("failed", None, Some(message)),
+            Self::Disconnected { message } => ("disconnected", None, Some(message)),
             Self::AuthRequired { expired } => (
                 "auth_required",
                 None,
@@ -607,18 +613,78 @@ async fn discover(
         let mut state = connection.subscribe();
         let mut credential = connection.credential_changes();
         let mut previous: Option<Vec<McpTool>> = None;
+        let mut published: Option<Arc<ToolSourceSet>> = None;
         let mut generation = connection.generation();
         'discover: loop {
+            if cancel.is_cancelled() {
+                return Ok(());
+            }
             if let Some(credential) = credential.as_mut() {
                 credential.borrow_and_update();
             }
+            // Mark the current state seen: a wake below then means something
+            // changed while the attempt ran or after it.
+            let _ = state.borrow_and_update();
             let refused = match connection.tools(&cancel).await {
                 Err(McpServerError::AuthRequired { expired }) => Some(expired),
                 // Refused for scope while discovering: sign in again (§5.7).
                 Err(McpServerError::InsufficientScope(_)) => Some(false),
                 result => {
-                    let tools = result?;
-                    if matches!(connection.state(), McpServerState::Failed | McpServerState::Closed) {
+                    let tools = match result {
+                        Ok(tools) => tools,
+                        Err(error) => {
+                            if matches!(error, McpServerError::Closed) {
+                                return Err(McpError::Unavailable);
+                            }
+                            if matches!(error, McpServerError::Cancelled) {
+                                return Ok(());
+                            }
+                            let message = connection.failure().unwrap_or_else(|| error.to_string());
+                            let set = published.clone().map(|set| (set, connection.clone()));
+                            match connection.state() {
+                                McpServerState::Failed => {
+                                    // A start failure: keep the last tools,
+                                    // and try again when the cooldown ends.
+                                    owner.publish(
+                                        &id,
+                                        set,
+                                        McpSourceState::Failed { message },
+                                        &cancel,
+                                    );
+                                    wait_for_attempt(
+                                        &cancel,
+                                        &mut state,
+                                        &mut changed,
+                                        &mut credential,
+                                        true,
+                                    )
+                                    .await?;
+                                    continue 'discover;
+                                }
+                                McpServerState::Disconnected => {
+                                    // The transport is gone. The last tools
+                                    // stay callable; the next use reconnects.
+                                    owner.publish(
+                                        &id,
+                                        set,
+                                        McpSourceState::Disconnected { message },
+                                        &cancel,
+                                    );
+                                    wait_for_attempt(
+                                        &cancel,
+                                        &mut state,
+                                        &mut changed,
+                                        &mut credential,
+                                        false,
+                                    )
+                                    .await?;
+                                    continue 'discover;
+                                }
+                                _ => return Err(error.into()),
+                            }
+                        }
+                    };
+                    if matches!(connection.state(), McpServerState::Closed) {
                         return Err(McpError::Unavailable);
                     }
                     // A new connection is a new discovery even when it declares
@@ -631,15 +697,52 @@ async fn discover(
                             key: format!("mcp:{id}"), version: version.clone(),
                             tools: tools.iter().filter(|tool| model_visible(tool)).map(|tool| contribution(&id, tool, connection.clone(), owner.stopped.clone())).collect(),
                         });
-                        owner.publish(&id, Some((set, connection.clone())), McpSourceState::Ready { version }, &cancel);
+                        owner.publish(&id, Some((set.clone(), connection.clone())), McpSourceState::Ready { version }, &cancel);
+                        published = Some(set);
                         previous = Some(tools);
                         generation = current;
                     }
                     loop {
                         let current = *state.borrow_and_update();
                         match current {
-                            McpServerState::Failed | McpServerState::Closed => return Err(McpError::Unavailable),
+                            McpServerState::Closed => return Err(McpError::Unavailable),
                             McpServerState::AuthRequired { expired } => break Some(expired),
+                            McpServerState::Failed => {
+                                let message = connection.failure().unwrap_or_else(|| "MCP connection failed".into());
+                                owner.publish(
+                                    &id,
+                                    published.clone().map(|set| (set, connection.clone())),
+                                    McpSourceState::Failed { message },
+                                    &cancel,
+                                );
+                                wait_for_attempt(
+                                    &cancel,
+                                    &mut state,
+                                    &mut changed,
+                                    &mut credential,
+                                    true,
+                                )
+                                .await?;
+                                continue 'discover;
+                            }
+                            McpServerState::Disconnected => {
+                                let message = connection.failure().unwrap_or_else(|| "MCP connection closed".into());
+                                owner.publish(
+                                    &id,
+                                    published.clone().map(|set| (set, connection.clone())),
+                                    McpSourceState::Disconnected { message },
+                                    &cancel,
+                                );
+                                wait_for_attempt(
+                                    &cancel,
+                                    &mut state,
+                                    &mut changed,
+                                    &mut credential,
+                                    false,
+                                )
+                                .await?;
+                                continue 'discover;
+                            }
                             _ => {}
                         }
                         tokio::select! {
@@ -655,6 +758,7 @@ async fn discover(
             if let Some(expired) = refused {
                 owner.publish(&id, None, McpSourceState::AuthRequired { expired }, &cancel);
                 previous = None;
+                published = None;
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => return Ok(()),
@@ -678,6 +782,45 @@ async fn discover(
             },
             &cancel,
         ),
+    }
+}
+
+/// Wait until another attempt can succeed: a start-failure cooldown ends, a
+/// caller reconnects the server, or the credential changes. With
+/// `after_cooldown`, only a state that is still a cooling failure waits; a
+/// state that already left it retries at once.
+async fn wait_for_attempt(
+    cancel: &CancellationToken,
+    state: &mut watch::Receiver<McpServerState>,
+    changed: &mut watch::Receiver<u64>,
+    credential: &mut Option<watch::Receiver<bool>>,
+    after_cooldown: bool,
+) -> std::result::Result<(), McpError> {
+    if after_cooldown && !matches!(*state.borrow_and_update(), McpServerState::Failed) {
+        return Ok(());
+    }
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(()),
+            result = state.changed() => {
+                if result.is_err() {
+                    return Err(McpError::Unavailable);
+                }
+                return Ok(());
+            }
+            result = changed.changed() => {
+                if result.is_err() {
+                    return Err(McpError::Unavailable);
+                }
+                return Ok(());
+            }
+            usable = credential_change(credential.as_mut()) => {
+                if usable? {
+                    return Ok(());
+                }
+            }
+        }
     }
 }
 

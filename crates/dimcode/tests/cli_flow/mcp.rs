@@ -1256,7 +1256,8 @@ fn mcp_inspect_prints_the_effective_entry_and_connections() {
                 "connections": [{"state": {"status": "connected"}, "tools": [
                     {"name": "search", "description": "Search docs",
                      "inputSchema": {"type": "object"}},
-                ]}],
+                ]}, {"state": {"status": "disconnected"}, "tools": null,
+                    "failure": "MCP server exited (exit status: 7): fixture diagnostic"}],
             }),
         );
         let mut line = String::new();
@@ -1285,6 +1286,11 @@ fn mcp_inspect_prints_the_effective_entry_and_connections() {
     assert!(stdout.contains("Environment names: DOCS_TOKEN"), "{stdout}");
     assert!(stdout.contains("Connection 1 · connected"), "{stdout}");
     assert!(stdout.contains("  search — Search docs"), "{stdout}");
+    assert!(stdout.contains("Connection 2 · disconnected"), "{stdout}");
+    assert!(
+        stdout.contains("exit status: 7): fixture diagnostic"),
+        "{stdout}"
+    );
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
         "Inspection does not connect or contact the server.\n"

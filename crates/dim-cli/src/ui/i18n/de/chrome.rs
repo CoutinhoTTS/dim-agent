@@ -32,8 +32,21 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "line {id}" => "Zweig {id}",
         "jump to a message of the shown line" => "zu einer Nachricht des gezeigten Zweigs springen",
         "Timeline" => "Zeitleiste",
-        "Enter jump · e edit · q quote · b branch · f fork · Esc close" => {
-            "Enter springen · e bearbeiten · q zitieren · b Zweig · f Fork · Esc schließen"
+        "Enter actions · Esc close" => "Enter Aktionen · Esc schließen",
+        "Timeline actions" => "Zeitleistenaktionen",
+        "↑↓ select · Enter confirm · Esc cancel" => {
+            "↑↓ wählen · Enter bestätigen · Esc abbrechen"
+        }
+        "Jump to message" => "Zur Nachricht springen",
+        "Edit as a new draft" => "Als neuen Entwurf bearbeiten",
+        "Quote message" => "Nachricht zitieren",
+        "Create branch from here" => "Zweig ab hier erstellen",
+        "Before this message" => "Vor dieser Nachricht",
+        "Fork session" => "Sitzung forken",
+        "1. Create fork" => "1. Fork erstellen",
+        "2. Cancel" => "2. Abbrechen",
+        "Creates a new session; the current session stays unchanged." => {
+            "Erstellt eine neue Sitzung; die aktuelle bleibt unverändert."
         }
         "No messages yet." => "Noch keine Nachrichten.",
         "Already on screen above; /tui jumps to it" => "Steht schon weiter oben; /tui springt hin",
@@ -43,8 +56,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "follow, talk to and end this session's lines" => {
             "Zweige dieser Sitzung verfolgen, ansprechen und beenden"
         }
-        "End line" => "Zweig beenden",
-        "y/N" => "y/N",
+        "End line {id}?" => "Zweig {id} beenden?",
+        "y end it" => "y beenden",
+        "n cancel" => "n abbrechen",
         "main is the session itself; a line ends, main does not" => {
             "main ist die Sitzung selbst; ein Zweig endet, main nicht"
         }
@@ -56,10 +70,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "e edit · b branch · f fork" => "e bearbeiten · b Zweig · f Fork",
         "e edit" => "e bearbeiten",
-        "Fork the session before “{message}”? (y/N)" => "Sitzung vor „{message}“ forken? (y/N)",
-        "Fork the session after the last turn? (y/N)" => {
-            "Sitzung nach dem letzten Zug forken? (y/N)"
-        }
+        "Fork the session before “{message}”?" => "Sitzung vor „{message}“ forken?",
+        "Fork the session after the last turn?" => "Sitzung nach dem letzten Zug forken?",
         "⑂ new line from {id} · Esc cancel" => "⑂ neuer Zweig von {id} · Esc abbrechen",
         "A fork copies main; b opens a line here" => {
             "Ein Fork kopiert main; b öffnet hier einen Zweig"
@@ -304,6 +316,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "run" => "Lauf",
         "view" => "Ansicht",
         "model" => "Modell",
+        "extensions" => "Erweiterungen",
         "app" => "App",
         "skill" => "Skill",
         // composer/commands.rs: descriptions
@@ -326,8 +339,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "nach oben scrollen",
         "scroll to the bottom" => "nach unten scrollen",
         "pick an earlier message to edit or quote" => "frühere Nachricht bearbeiten oder zitieren",
-        "collapse or expand tool details and compaction summaries" => {
-            "Werkzeugdetails und Komprimierungszusammenfassungen ein-/ausklappen"
+        "cycle tool details and compaction summaries" => {
+            "Werkzeugdetails und Kompaktierungszusammenfassungen durchschalten"
         }
         "switch between fullscreen and scrollback" => "Vollbild/Scrollback wechseln",
         "switch theme" => "Theme wechseln",
@@ -399,8 +412,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
 
         // sessions_panel.rs
         "Sessions" => "Sessions",
-        "Enter open · Ctrl+R refresh · Esc close" => {
-            "Enter öffnen · Ctrl+R aktualisieren · Esc schließen"
+        "Sessions · This workspace" => "Sessions · Dieser Arbeitsbereich",
+        "Sessions · This repository" => "Sessions · Dieses Repository",
+        "Sessions · All workspaces" => "Sessions · Alle Arbeitsbereiche",
+        "No saved sessions in this workspace. Ctrl+S shows more." => {
+            "Noch keine gespeicherten Sessions in diesem Arbeitsbereich. Ctrl+S zeigt mehr."
+        }
+        "Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close" => {
+            "Enter öffnen · Ctrl+S Bereich · Ctrl+R aktualisieren · Esc schließen"
         }
         "Loading sessions..." => "Lade Sessions…",
         "No saved sessions yet." => "Noch keine gespeicherten Sessions.",

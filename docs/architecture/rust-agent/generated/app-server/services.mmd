@@ -3,29 +3,30 @@ flowchart LR
   subgraph process["process"]
     p1["root"]
     p2["rutis-loader"]
-    p63["Attachments"]
-    p62["Questions"]
-    p61["PromptSuggestion"]
-    p60["PrepareModelHost"]
-    p59["ContextCompaction"]
-    p58["CommandRules"]
-    p57["PromptSources"]
-    p56["ShellInput"]
-    p55["Recall"]
-    p54["Wait"]
-    p53["WorkspaceTools"]
-    p52["BranchTool"]
-    p51["ToolExecution"]
-    p50["Permission"]
-    p49["ModelProvider"]
-    p48["Loop"]
-    p47["Prompt"]
-    p46["ContextPreparation"]
-    p45["ToolRegistry"]
-    p44["InputQueue"]
-    p43["SessionMethods"]
-    p42["TimelineTree"]
-    p41["SessionBroadcast"]
+    p64["Attachments"]
+    p63["Questions"]
+    p62["PromptSuggestion"]
+    p61["PrepareModelHost"]
+    p60["ContextCompaction"]
+    p59["CommandRules"]
+    p58["PromptSources"]
+    p57["ShellInput"]
+    p56["Recall"]
+    p55["Wait"]
+    p54["WorkspaceTools"]
+    p53["BranchTool"]
+    p52["ToolExecution"]
+    p51["Permission"]
+    p50["ModelProvider"]
+    p49["Loop"]
+    p48["Prompt"]
+    p47["ContextPreparation"]
+    p46["ToolRegistry"]
+    p45["InputQueue"]
+    p44["SessionMethods"]
+    p43["TimelineTree"]
+    p42["SessionBroadcast"]
+    p41["session-title"]
     p40["PartRegistry"]
     p39["Transport"]
     p38["Rpc"]
@@ -65,6 +66,7 @@ flowchart LR
     p4["FileStorage"]
     p3["ServerControl"]
   end
+  p40 -->|"dim_agent_runtime::parts::PartRegistry"| p64
   p40 -->|"dim_agent_runtime::parts::PartRegistry"| p63
   p40 -->|"dim_agent_runtime::parts::PartRegistry"| p62
   p40 -->|"dim_agent_runtime::parts::PartRegistry"| p61
@@ -88,6 +90,7 @@ flowchart LR
   p40 -->|"dim_agent_runtime::parts::PartRegistry"| p43
   p40 -->|"dim_agent_runtime::parts::PartRegistry"| p42
   p40 -->|"dim_agent_runtime::parts::PartRegistry"| p41
+  p16 -->|"dim_app_server::settings::SettingsService"| p41
   p37 -->|"dim_app_server::connection::ConnectionHub"| p39
   p3 -->|"dim_app_server::control::ServerControl"| p39
   p6 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p39

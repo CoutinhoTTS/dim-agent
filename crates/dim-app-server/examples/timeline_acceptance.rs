@@ -364,12 +364,22 @@ fn timed(
     )?;
     Ok(receiver)
 }
-/// `rounds [BRANCHES [PER_SECOND [CHAINS]]]`: for five seconds each of
+#[derive(Clone, Copy)]
+enum ChainKind {
+    Turn,
+    Consumed,
+}
+/// `rounds [BRANCHES [PER_SECOND [CHAINS [EVENT]]]]`: for five seconds each of
 /// BRANCHES Sessions appends a 128-byte `step/text` delta PER_SECOND times a
 /// second, the branches spread over the period, while each of CHAINS more
-/// Sessions runs chains of ten `turn/start` writes, each appended once the
-/// previous one is published, 20 to 80 ms apart.
-async fn rounds(branches: usize, per_second: f64, chains: usize) -> std::result::Result<(), Error> {
+/// Sessions runs chains of ten EVENT writes, each appended once the previous
+/// one is published, 20 to 80 ms apart.
+async fn rounds(
+    branches: usize,
+    per_second: f64,
+    chains: usize,
+    chain_kind: ChainKind,
+) -> std::result::Result<(), Error> {
     durable_vfs::install_tracking();
     let directory = directory("rounds");
     let db = SqliteStorage::open(directory.join("dimcode.sqlite"))?;
@@ -434,9 +444,14 @@ async fn rounds(branches: usize, per_second: f64, chains: usize) -> std::result:
                     let began = Instant::now();
                     for _ in 0..10 {
                         sequence += 1;
-                        let kind = EventKind::TurnStart(TurnStartData {
-                            turn_id: format!("turn-{sequence}"),
-                        });
+                        let kind = match chain_kind {
+                            ChainKind::Turn => EventKind::TurnStart(TurnStartData {
+                                turn_id: format!("turn-{sequence}"),
+                            }),
+                            ChainKind::Consumed => EventKind::InputConsumed(InputConsumedData {
+                                input_id: format!("input-{sequence}"),
+                            }),
+                        };
                         let (result, delay, round) =
                             timed(&store, &session, sequence, kind)?.await?;
                         result?;
@@ -892,6 +907,14 @@ impl TimelineStore for BarrierStore {
     ) -> BoxFuture<'a, Result<Option<RecoverySnapshot>>> {
         self.inner.latest_snapshot(k, s, interpreter)
     }
+    fn query<'a>(
+        &'a self,
+        k: &'a TimelineKey,
+        query: &'a dim_agent_runtime::TimelineQuery,
+        through: u64,
+    ) -> BoxFuture<'a, Result<dim_agent_runtime::TimelineQueryPage>> {
+        self.inner.query(k, query, through)
+    }
     fn append(&self, k: TimelineKey, e: Vec<StoredEvent>, publish: PublishCallback) -> Result<()> {
         let mode = self.mode.clone();
         self.inner.append(
@@ -1119,7 +1142,7 @@ async fn main() -> std::result::Result<(), Error> {
     match args.next().as_deref() {
         Some("memory") => memory(args.next().map(|n| n.parse()).transpose()?.unwrap_or(2000)).await,
         Some("rounds") => {
-            let usage = "usage: rounds [BRANCHES [PER_SECOND [CHAINS]]], BRANCHES and CHAINS counts (default 64 and 0, not both 0), PER_SECOND a positive rate (default 200)";
+            let usage = "usage: rounds [BRANCHES [PER_SECOND [CHAINS [EVENT]]]], BRANCHES and CHAINS counts (default 64 and 0, not both 0), PER_SECOND a positive rate (default 200), EVENT turn or consumed (default turn)";
             let count = |arg: Option<String>, default| {
                 arg.map_or(Some(default), |count| count.parse::<usize>().ok())
                     .ok_or(usage)
@@ -1133,10 +1156,15 @@ async fn main() -> std::result::Result<(), Error> {
                 })
                 .ok_or(usage)?;
             let chains = count(args.next(), 0)?;
+            let chain_kind = match args.next().as_deref() {
+                None | Some("turn") => ChainKind::Turn,
+                Some("consumed") => ChainKind::Consumed,
+                Some(_) => return Err(usage.into()),
+            };
             if branches == 0 && chains == 0 || args.next().is_some() {
                 return Err(usage.into());
             }
-            rounds(branches, per_second, chains).await
+            rounds(branches, per_second, chains, chain_kind).await
         }
         Some("read-load") => {
             let usage = "usage: read-load [STREAMS [PER_SECOND [EVENTS]]], STREAMS a positive count (default 8), PER_SECOND a positive rate (default 100), EVENTS a positive count (default 12000)";
@@ -1179,6 +1207,6 @@ async fn main() -> std::result::Result<(), Error> {
             .await
         }
         Some("powerloss") => power_parent().await,
-        _ => Err("expected memory [steps], rounds [branches [per-second [chains]]], read-load [streams [per-second [events]]], reads, paged-reads, crashes, or powerloss".into()),
+        _ => Err("expected memory [steps], rounds [branches [per-second [chains [event]]]], read-load [streams [per-second [events]]], reads, paged-reads, crashes, or powerloss".into()),
     }
 }

@@ -9,9 +9,11 @@ description = "The Dim account provider (dimcode-api-oauth) as a managed provide
 
 [dependencies]
 dim-app-server.workspace = true
+dim-session-title.workspace = true
 dim-agent-capabilities.workspace = true
 dim-agent-runtime.workspace = true
 rutis.workspace = true
+rutis-bridge.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 serde_json.workspace = true

@@ -156,6 +156,7 @@ pub async fn serve_home(
         ..Default::default()
     };
     let mut builder = AgentBuilder::new(AgentConfig::default());
+    dim_session_title::install(&mut builder);
     defaults::install_local_execution(
         &mut builder,
         ModelProviderPlugin::process,

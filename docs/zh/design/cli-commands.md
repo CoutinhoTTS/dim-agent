@@ -10,16 +10,29 @@ CLI 接口；当前可执行文件由[原生 CLI 合同](../../../crates/dim-cli
 
 ## 命令菜单
 
-scrollback 与 fullscreen TUI 都按分类分组，分类及分类内的命令名按其英文标识的字母顺序排列。
-搜索时匹配程度优先，同等匹配按分类和命令名排序。
-退出和挂起必须完整匹配命令名或别名才执行：选择不完整匹配时只补全命令名并保留输入框。
+scrollback 与 fullscreen TUI 都按固定的任务顺序分组：会话、模型与权限、扩展与自动化、界面、应用。
+分类内也使用以下固定顺序，不按字母或最近使用顺序排列：
+
+| 分类 | 命令顺序 |
+| --- | --- |
+| `session` | `/new`、`/resume`、`/timeline`、`/goal`、`/tasks`、`/lines`、`/branch`、`/fork`、`/compact`、`/usage`、`/rename`、`/web` |
+| `model` | `/models`、`/agent`、`/effort`、`/fast`、`/permissions`、`/connect`、`/login` |
+| `extensions` | `/skills`、`/mcp`、`/plugins`、`/hooks`、`/scheduled`、`/workflow`、`/workflow:save`、`/reload-skills`、`/runtime` |
+| `view` | `/theme`、`/language`、`/tools`、`/tui` |
+| `app` | `/settings`、`/keys`、`/exit` |
+
+`/fast` 仅在模型声明支持服务层级时列出。搜索时匹配程度优先，同等匹配保持上述任务顺序。
+排序不受界面语言影响；打开 `/` 默认选中 `/new`，Enter 会新建会话。未筛选列表中的 `/exit` 始终在最后。
+退出必须完整匹配命令名或别名才执行：选择不完整匹配时只补全命令名并保留输入框。
 完整输入的命令（包括隐藏命令）仍走各自的处理流程。
+菜单选择即使完整匹配命令名，也可能只补全：带行内参数的命令和 `/goal` 会填入输入框，等待另一次提交。
 菜单中的权限入口为 `/permissions`；`/approvals` 和 `/approval` 是完整输入时仍可使用的兼容别名。
 菜单不列出运行、排队和 steer 的按键，它们只由按键触发。菜单只列出斜杠命令：选择较早消息、滚动到顶部或底部等视图操作也不列出；
 `Tab`、`Home`、`End` 保留各自的绑定。
 
-两种模式下，菜单都适应终端可用的列数和行数。命令名优先于描述和快捷键标签；快捷键标签会挤占
-命令名时省略标签，但不改变按键绑定。短屏幕少显示一些命令，可见窗口跟随选择。
+两种模式下，菜单都适应终端可用的列数和行数。命令名优先于分类标签、描述和快捷键标签；必要时缩短
+分类标签以保留完整命令名。快捷键标签会挤占命令名时省略标签，但不改变按键绑定。
+短屏幕少显示一些命令，可见窗口跟随选择。
 Scrollback 保留菜单上方的命令草稿，必要时省略菜单标题和页脚；fullscreen 保留输入框上方的
 命令面板查询行和选中项。分类分组和排序不随终端尺寸变化。
 
@@ -27,14 +40,38 @@ Scrollback 保留菜单上方的命令草稿，必要时省略菜单标题和页
 但不超过终端高度。Fullscreen 先减少输入框的空白内边距和命令面板查询行的留白，避免两个输入区域
 重叠。草稿编辑器在剩余行数内滚动，保持光标可见且不丢弃文字。其他情况下保留通常的历史空间。
 
+列表面板同样遵守行数预算：绘制的行数不超过分给它的行数；分到不足两行时什么都不画，因为仅两条
+边框就要占满预算。列表占用其余部分留下的行。
+当列表画不出前三条时，提示说明从末尾逐行让出，其前的空行随最后一行一起让出。当连一行列表
+都放不下时，面板按此顺序放弃：剩余的提示说明、筛选区的留白（先放弃查询行下方的那一行）、
+页脚行（先放弃第一行）、边框上方的多行按键提示、查询行，最后是列表的最后一行。选中项和
+关闭键保留最久。底部边框放不下的按键提示整段丢弃，保留首段和关闭键。确认不按按键提示的规则缩短：
+先画完整的提问和两个按键，再画出用 `…` 截断的提问加两个按键，然后只画两个按键，再只画确认键，
+最后画用 `…` 截断的确认键；确认键保留最久。
+
+```text
+自然高度                                            短预算，5 行
+╭─ Sessions ─────────────────────────────────────╮  ╭─ Sessions ─────────────────────────────────────╮
+│                                                │  │                                                │
+│ >                                              │  │ >                                              │
+│                                                │  │ › [Chat] review the parser                     │
+│   [Chat] review the parser                     │  ╰────── Enter open · Ctrl+R refresh · Esc close ─╯
+│   [Chat] fix the flaky test                    │
+│   [Chat] release notes                         │
+╰────── Enter open · Ctrl+R refresh · Esc close ─╯
+```
+
 ```text
 Commands
-  app     /exit        exit
-  app     /keys        show the key bindings
-  model   /permissions   file access, tool approval, process isolation and command rules
-  session /rename      rename this session
+  session /new         start a new session
+  session /resume      resume a previous session
+  session /timeline    jump to a message of the shown line
+  session /goal        follow or change the shown line's goal
+  session /tasks       view command output or interrupt a member
+  session /lines       follow, talk to and end this session's lines
 
-/ + Enter          -> /exit (completion only)
+/ + Enter          -> start a new session
+/ex + Enter        -> /exit (completion only)
 /exit + Enter      -> exit
 /permissions + Enter -> permission controls
 ```
@@ -43,10 +80,10 @@ Commands
 Fullscreen, 8 rows             Scrollback, 8 rows
 +- Command Palette -------+
 | >                       |   +- input -----------------+
-| app /exit               |   | > /                     |
+| session /new            |   | > /                     |
 +-------------------------+   +-------------------------+
                               +-------------------------+
-+- input -----------------+   | app /exit               |
++- input -----------------+   | session /new            |
 |                         |   +-------------------------+
 +-------------------------+   AGENT
 ```
@@ -120,9 +157,22 @@ Home / End          滚动（fullscreen，草稿为空） 滚动（fullscreen，
 [Goal](plugins/Goal.md#a2-session-方法)（A.2、A.3）和 [Pursuit](plugins/Pursuit.md#3-对-goal-的修改)；
 本节规定原生客户端用它们做什么。该命令作为 `session` 分类列在命令菜单里，与 `/compact` 相同。
 
+两种 TUI 模式中，用 Enter 或 Tab 选择 `/goal` 只会把 `/goal ` 填入输入框并关闭命令面板，
+不会执行。用户再次提交空参数草稿时，先打印 Dim 支持的用法，再显示当前目标及状态，或该线没有目标的提示。
+行模式下直接提交 `/goal` 也显示相同的帮助和状态。
+
+```text
+palette: goal + Enter -> /goal |          (completion only)
+/goal fix build + Enter -> set/edit goal
+/goal + Space + Enter   -> usage + current goal
+
+Usage: /goal [OBJECTIVE | set OBJECTIVE | edit OBJECTIVE | pause | resume | clear]
+No goal on main.
+```
+
 | 形式 | 调用 |
 | --- | --- |
-| `/goal` | 无调用：当前显示线上的目标，或它没有目标 |
+| `/goal` | 无调用：先显示用法，再显示当前线上的目标，或它没有目标 |
 | `/goal OBJECTIVE` | 目标处于进行中或暂停时 `session.goal.edit`，否则 `session.goal.set` |
 | `/goal set OBJECTIVE` | `session.goal.set` |
 | `/goal edit OBJECTIVE` | `session.goal.edit` |
@@ -146,7 +196,7 @@ Home / End          滚动（fullscreen，草稿为空） 滚动（fullscreen，
 **读取目标。** 客户端按 Goal A.3 的规则，从它本来就在读的分支事件中折叠目标：最新存活的
 `goal:objective` 块是目标文本，最新存活的 `goal:status` 块是状态，`clear` 退役两者，`edit` 保留裁判，
 被 InputQueue 删除的输入会使折叠跳过它的块。它不新增查询方法，也不向 Goal 询问任何东西。不带参数的 `/goal`
-打印这个折叠结果。在 `set` 与 `edit` 之间选择之前，客户端先把该线读到已发布的头部，写入之后再读一次才打印：
+先打印用法，再打印这个折叠结果。在 `set` 与 `edit` 之间选择之前，客户端先把该线读到已发布的头部，写入之后再读一次才打印：
 显示的状态与选择的方法都来自事件，而不是从回复猜出来的状态。折叠在该线自己的开场事件处重新开始——它的 `branch/start`，
 或分叉在复制完事实之后写入的 `session/forked`——所以新开的线没有目标，分叉 Session 的 `main` 也从不显示
 复制来的目标（Goal §2、A11）。v3 客户端会收到这个开场事件，因此分叉在客户端与 Goal 里的读法一致。
@@ -160,6 +210,7 @@ Home / End          滚动（fullscreen，草稿为空） 滚动（fullscreen，
 
 ```text
 > /goal
+Usage: /goal [OBJECTIVE | set OBJECTIVE | edit OBJECTIVE | pause | resume | clear]
 No goal on main.
 
 > /goal Make the CLI tests pass
@@ -175,6 +226,7 @@ Goal paused on main · paused (user)
   Keep the CLI tests green
 
 > /goal
+Usage: /goal [OBJECTIVE | set OBJECTIVE | edit OBJECTIVE | pause | resume | clear]
 Goal on main · paused (user)
   Keep the CLI tests green
 
@@ -186,9 +238,11 @@ Goal resumed on main · active
 Goal cleared on main.
 ```
 
-第一行给出实际调用的方法、目标所属的线和当前状态；`edited` 表示找到已有目标、只改了目标文本的那种形式。
+不带参数的 `/goal` 先打印用法，随后显示状态报告。写入形式直接显示状态报告，给出实际调用的方法、
+目标所属的线和当前状态；`edited` 表示找到已有目标、只改了目标文本的那种形式。
 目标由 Pursuit 的裁判判定时，状态后跟 `evaluator judge`。暂停状态给出原因：`user`、`interrupted`、
-`limit`、`turn failed` 或 `evaluation failed`。目标文本另起一行，按它自身的换行输出。目标已清除或该线没有目标时只打印一行。
+`limit`、`turn failed` 或 `evaluation failed`。目标文本另起一行，按它自身的换行输出。
+清除目标时只打印一行确认；在没有目标的线上提交空参数 `/goal` 则打印两行：用法和没有目标的提示。
 
 行客户端和两种终端 UI 模式都打印这些行；在终端 UI 里它们是一段报告，因此更早的报告仍能在上方读到。
 当前显示线跟随目标（进行中或暂停）时，状态区带一个短元素，完成、受阻或已清除的目标没有：
@@ -280,7 +334,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 │ › node      download  24.21.0    ready                                    │
 │   python    system    3.12.15    off      未安装                          │
 │                                                                           │
-│   4 个插件在等 node：goal、session-title、scheduler、workflow             │
+│   3 个插件在等 node：goal、scheduler、workflow                            │
 ╰─ Enter 安装或应用 · s 来源 · a 自动 · r 重试 · Esc 关闭 ──────────────────╯
 ```
 
@@ -298,7 +352,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 │               https://npmmirror.com/mirrors/node/v24.21.0/…：404          │
 │   python    system    3.12.15    off      未安装                          │
 │                                                                           │
-│   4 个插件在等 node：goal、session-title、scheduler、workflow             │
+│   3 个插件在等 node：goal、scheduler、workflow                            │
 ╰─ Enter 重试 · s 把 node 换成 system · Esc 关闭 ───────────────────────────╯
 ```
 
@@ -307,7 +361,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 
 ### 菜单项
 
-`/runtime` 是 `app` 类的 slash 命令，因此菜单把它列在 `/keys` 与 `/settings` 之间；它不需要 Session
+`/runtime` 是 `extensions` 类的 slash 命令，位置遵循[命令菜单顺序](#命令菜单)；它不需要 Session
 （`Needs::Nothing`），也不接受内联参数，因为动作都在面板里。下面打字的子形态只在输入时接受，不作为
 菜单补全列出。
 
@@ -346,7 +400,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 /plugins
 ╭─ 插件 ────────────────────────────────────────────────────────────────────╮
 │ › goal           on     pending · 等待 node 运行时                        │
-│   session-title  on     pending · 等待 node 运行时                        │
+│   session-title  on     ready · 内置                                     │
 │   scheduler      on     pending · 等待 node 运行时                        │
 │   workflow       on     pending · 等待 node 运行时                        │
 ╰─ Enter 打开 /runtime · o 开/关 · r 重载 · Esc 关闭 ───────────────────────╯
@@ -757,6 +811,7 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 | `dimcode session delete SESSION` | 永久删除该 Session 及存储为它保留的一切；不弹出确认。 |
 | `dimcode session cleanup (--older-than DURATION\|--keep N) [--yes]` | 列出某个选择器命中的 Session，确认后删除。 |
 | `/rename TITLE` 或 `/rename --clear` | 设置或清除所显示 Session 的手动标题；该文本是命令，永不成为模型输入。 |
+| `/resume` | 在当前工作区上打开 Session 选择面板（[`/resume` 选择面板](#resume-选择面板)）；`Ctrl+S` 依次循环当前工作区、提供时的当前仓库与所有工作区。 |
 | `/export markdown PATH` 或 `/export json PATH` | 交互客户端空闲时把当前主分支导出到文件。 |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | 不经守护进程，把 Session 的完整 Timeline 写成带版本的 JSONL（[Timeline 导出](appserver/timeline-export.md)）；未给输出路径时写到 stdout。 |
 | `dimcode daemon vacuum [--database PATH]` | 用 SQLite `VACUUM` 重写离线原生库，回收已删除 Session 留下的页，并打印操作前后的大小（[存储格式](appserver/native-storage-format.md#sqlite-运行参数与空间回收)）；守护进程持库时失败，也不创建或升级库。 |
@@ -869,6 +924,55 @@ Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
 缺少路径或格式不支持时打印用法并回到提示符，不提交输入。`/exit` 不带参数。只拦截这些确切的命令名；
 其他文本走普通输入路径。子命令不建立插件命令注册表。
 
+### `/resume` 选择面板
+
+`/resume` 打开在 `dimcode` 启动时的工作区上：`--cwd` 指定的目录，经过规范化，也就是
+`session.create` 为在那里创建的 Session 记录的工作区。列表只含恰好属于该工作区的已存 Session，
+最新在前，每次打开都从这里开始。`Ctrl+S` 依次循环当前工作区、当前仓库与所有工作区，标题写明
+当前范围。过滤框保留输入框的 `Ctrl+A` 与 `Ctrl+W`，`Tab` 向下移动选择。
+
+```text
+╭─ Sessions · This workspace ──────────────────────────────────────────────────╮
+│                                                                              │
+│ >                                                                            │
+│                                                                              │
+│   Fix the failing test       3h ago                                          │
+│   Update the catalog design  1d ago                                          │
+╰───────────────────── Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close ─╯
+```
+
+```text
+╭─ Sessions · This repository ─────────────────────────────────────────────────╮
+│                                                                              │
+│ >                                                                            │
+│                                                                              │
+│   Fix the failing test       3h ago · ~/src/app/web                          │
+│   Update the catalog design  1d ago · ~/src/app-fix/web                      │
+╰───────────────────── Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close ─╯
+```
+
+```text
+╭─ Sessions · All workspaces ──────────────────────────────────────────────────╮
+│                                                                              │
+│ >                                                                            │
+│                                                                              │
+│   Fix the failing test       3h ago · ~/src/app/web                          │
+│   Update the catalog design  1d ago · ~/src/other                            │
+╰───────────────────── Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close ─╯
+```
+
+- 切换范围像一次新的查询：取消尚未完成的读取、丢掉游标、重新读第一页；查询保留，并在新范围内生效。
+- 当前仓库包含启动工作区，以及它所在 git 仓库每个 worktree 中同一个相对目录；选择面板打开时在后台用
+  `git rev-parse` 与 `git worktree list --porcelain` 读取。第一页不等 git，两次读取共用一个两秒的时限；
+  git 失败或不回答时该范围不出现，也不提示。只有当集合多于一个条目，并且守护进程读取一组工作区
+  （`session.catalog.workspaces`）或经 `session.summaries` 列目录时，才提供这个范围。bare worktree 不加入。
+- 在当前工作区范围之外，每行先写更新于多久之前，再写它所属的工作区，主目录写作 `~`。标签最多占一半
+  宽度，时间在最前，因此被截断的是长路径。
+- 当前工作区范围、没有 Session 且没有查询时，列表显示 `No saved sessions in this workspace. Ctrl+S shows more.`；
+  其余空列表与无匹配文案不变。
+- 没有 `session.catalog` 的守护进程经 `session.summaries` 列目录，客户端用同样的精确匹配把范围应用到收到的行上。
+- `dimcode --resume ID` 仍可恢复任何工作区的 Session，清理也在所有工作区范围内选择。
+
 ### 会话标题
 
 手动标题是 Session 自己的状态：`session.summaries` 以 `manual` 来源报告它，
@@ -922,7 +1026,8 @@ TITLE 视为缺失，也按同样方式拒绝。
 | `--older-than DURATION` | `updatedAt` 距今至少 `DURATION` 的每个 Session。`DURATION` 是数字加单位 `d`、`h` 或 `m`，例如 `30d`。 |
 | `--keep N` | 保留最近活跃的 N 个 Session；其余全部选中。 |
 
-清理只选 `/resume` 默认列出的 Session
+清理在所有工作区范围内选择，而不只是 `/resume` 打开时所在的那一个：它选的类别就是 `/resume`
+默认列出的那些
 （[分类](../../design/appserver/session-classification.md#35-catalog-visibility)）：来源为 `client` 或 `unknown`。
 `internal` 的 Session
 永远不会被选中：成员随其 leader 的删除一起消失，启动的 Session 属于它的插件。`acp` 的 Session

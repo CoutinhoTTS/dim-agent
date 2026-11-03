@@ -99,6 +99,11 @@ impl Columns {
             Kind::Command(command) => Some(display_width(command.name) + 1 + DETAIL_GAP),
             _ => None,
         });
+        let category = if command == 0 {
+            category
+        } else {
+            category.min(inner.saturating_sub(ROW_INDENT + DETAIL_GAP + command))
+        };
         let room = inner.saturating_sub(ROW_INDENT + category + DETAIL_GAP);
         Self {
             category,

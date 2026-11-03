@@ -24,9 +24,10 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 /// program name. This keeps the descriptors the process inherited; a process
 /// `main` enters through [`process_entry`].
 pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::error::Error>> {
-    run_with(args, None)
+    run_with(args, None, |_| {})
 }
 
+/// Installs the host profile with `install` before assembly.
 /// Runs a process that serves the App Server: closes every descriptor above
 /// standard error that the process inherited, then runs [`run_with`].
 ///
@@ -37,10 +38,11 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
 pub fn process_entry(
     args: impl IntoIterator<Item = String>,
     managed_provider: Option<crate::managed_provider::ManagedProviderRow>,
+    install: fn(&mut AgentBuilder),
 ) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(unix)]
     close_inherited_descriptors();
-    run_with(args, managed_provider)
+    run_with(args, managed_provider, install)
 }
 
 /// Closes every descriptor above standard error that this process inherited.
@@ -66,24 +68,18 @@ fn close_inherited_descriptors() {
     close_bounded_descriptors();
 }
 
-/// `close_range(3, ~0U, 0)`, false when the kernel or libc does not have it.
+/// `close_range(3, ~0U, 0)`, false when the kernel does not have it.
 #[cfg(target_os = "linux")]
 fn close_range_above_standard_error() -> bool {
-    // `libc` declares the function for GNU targets only, so the other Linux
-    // environments call the kernel's own entry point for it.
-    #[cfg(target_env = "gnu")]
     // SAFETY: the range covers descriptors this process owns and closing
     // them is what the call does.
-    let closed = unsafe { libc::close_range(3, libc::c_uint::MAX, 0) };
-    #[cfg(not(target_env = "gnu"))]
-    // SAFETY: as above; the arguments are the function's unsigned int range.
     let closed = unsafe {
         libc::syscall(
             libc::SYS_close_range,
             3 as libc::c_long,
             libc::c_uint::MAX as libc::c_long,
             0 as libc::c_long,
-        ) as libc::c_int
+        )
     };
     closed == 0
 }
@@ -201,12 +197,14 @@ pub fn product_session_defaults(defaults: &mut dim_agent_runtime::SessionConfig)
 
 /// [`run`] with a managed provider plugin, which an account build's own
 /// executable supplies; it is installed when the server has a product home.
+/// `install` contributes the host's native plugins to the builder before assembly.
 ///
 /// This is an in-process entry that keeps the descriptors the process has
 /// open; a process `main` calls [`process_entry`] instead.
 pub fn run_with(
     args: impl IntoIterator<Item = String>,
     managed_provider: Option<crate::managed_provider::ManagedProviderRow>,
+    install: fn(&mut AgentBuilder),
 ) -> Result<(), Box<dyn std::error::Error>> {
     let argv: Vec<String> = args.into_iter().collect();
     if argv.first().map(String::as_str) == Some("--connect-pipe") {
@@ -512,6 +510,7 @@ pub fn run_with(
             dim_agent_capabilities::prompt_suggestion::install(&mut builder);
             collaboration::install(&mut builder);
             dim_agent_questions::install(&mut builder);
+            install(&mut builder);
         } else if mock_model {
             defaults::install(&mut builder);
             defaults::mock_model_hosts(&mut builder);

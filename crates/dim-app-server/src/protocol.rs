@@ -566,7 +566,7 @@ pub struct Catalog {
     #[serde(default, deserialize_with = "optional_non_null")]
     pub query: Option<String>,
     #[serde(default, deserialize_with = "optional_non_null")]
-    pub cwd: Option<String>,
+    pub cwd: Option<Workspaces>,
     #[serde(default)]
     pub with_preview: bool,
     /// Whether Sessions whose origin is `internal` are listed (#557).
@@ -575,6 +575,45 @@ pub struct Catalog {
     /// Whether Sessions whose origin is `acp` are listed (#557).
     #[serde(default)]
     pub with_acp_sessions: bool,
+}
+
+/// The workspaces a catalog read selects: one workspace, or any of a set.
+/// Its serialized form is the deduplicated set in path order, so a single
+/// workspace, a one-element list and a reordered list are one filter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Workspaces(std::collections::BTreeSet<String>);
+
+impl<'de> Deserialize<'de> for Workspaces {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match Value::deserialize(deserializer)? {
+            Value::String(workspace) => Ok(Self([workspace].into())),
+            Value::Array(items) => {
+                let mut workspaces = std::collections::BTreeSet::new();
+                for item in items {
+                    match item {
+                        Value::String(workspace) => {
+                            workspaces.insert(workspace);
+                        }
+                        _ => {
+                            return Err(serde::de::Error::custom("cwd must hold workspace paths"));
+                        }
+                    }
+                }
+                if workspaces.is_empty() {
+                    return Err(serde::de::Error::custom(
+                        "cwd must name at least one workspace",
+                    ));
+                }
+                Ok(Self(workspaces))
+            }
+            _ => Err(serde::de::Error::custom(
+                "cwd must be a workspace or a list of workspaces",
+            )),
+        }
+    }
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -1,6 +1,6 @@
 # SessionStore 标题元数据
 
-状态：已在路线图 S5b 实现（[#60](https://github.com/arcships/dim/issues/60)，[#96](https://github.com/arcships/dim/pull/96)），在 C6（[#49](https://github.com/arcships/dim/issues/49)，[#85](https://github.com/arcships/dim/pull/85)）之后；实现与本设计一致。评审细化了写入何时被接纳、卸载如何了结它（§6、D14）。需求：[SessionTitle](../plugins/SessionTitle.md) §2、§4 与 [A.2](../plugins/SessionTitle.md#a2-依赖的形状由所有者定义)。总览：[附录 B.2](../overview.md#b2-app-server-进程插件) 的 SessionStore 与 Rpc 行。范围：[ADR 002](../../adr/002-plugin-scope.md) 进程作用域，在既有 SessionStore 插件内，外加三个 Rpc 列表字段。使用方：SessionTitle（P4，TypeScript 优先）。
+状态：已在路线图 S5b 实现（[#60](https://github.com/arcships/dim/issues/60)，[#96](https://github.com/arcships/dim/pull/96)），在 C6（[#49](https://github.com/arcships/dim/issues/49)，[#85](https://github.com/arcships/dim/pull/85)）之后；实现与本设计一致。评审细化了写入何时被接纳、卸载如何了结它（§6、D14）。需求：[SessionTitle](../plugins/SessionTitle.md) §2、§4 与 [A.2](../plugins/SessionTitle.md#a2-依赖的形状由所有者定义)。总览：[附录 B.2](../overview.md#b2-app-server-进程插件) 的 SessionStore 与 Rpc 行。范围：[ADR 002](../../adr/002-plugin-scope.md) 进程作用域，在既有 SessionStore 插件内，外加三个 Rpc 列表字段。使用方：SessionTitle。
 
 ## 1. 概要
 
@@ -21,7 +21,7 @@ SessionStore 为每个 Session 保存一个标题和一个按 Session 计数的�
 ```text
  Session 作用域                          进程作用域（控制节点）
  ----------------------------           --------------------------------------------------------------
- SessionTitle（TypeScript 行）           SessionStore（既有插件）
+ SessionTitle（Session 部分）           SessionStore（既有插件）
    inject 'sessionMetadata'               sessionMetadata（HostDispatch）
      read -------------------------->       read     -> metadata()   ------------------+
      setTitle ---------------------->       setTitle -> set_title()                    |
