@@ -142,7 +142,9 @@ impl Config {
         if let Some(cwd) = &self.cwd {
             command.current_dir(cwd);
         }
-        let mut child = command.spawn().map_err(|_| McpServerError::RequestFailed)?;
+        let mut child = command
+            .spawn()
+            .map_err(|error| McpServerError::StartFailed(error.to_string()))?;
         let read = FramedRead::new(
             child.stdout.take().expect("piped stdout"),
             JsonRpcMessageCodec::new_with_max_length(4 * 1024 * 1024),

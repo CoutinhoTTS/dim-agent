@@ -5,6 +5,7 @@ const readline = require('node:readline');
 const mode = process.argv[2] || 'normal';
 const stateFile = process.env.MCP_STATE_FILE || '';
 if (stateFile) fs.appendFileSync(stateFile, 'start\n');
+if (process.env.MCP_PID_FILE) fs.appendFileSync(process.env.MCP_PID_FILE, process.pid + '\n');
 
 function send(message) {
   process.stdout.write(JSON.stringify(message) + '\n');
@@ -44,8 +45,14 @@ const starts = stateFile
   ? fs.readFileSync(stateFile, 'utf8').split('\n').filter(Boolean).length
   : 1;
 
+if (mode === 'fail-restart' && starts >= 2) {
+  stderr('restart-failure');
+  process.exit(9);
+}
+
 const tools = [
   { name: 'echo', description: 'Echo', inputSchema: { type: 'object', properties: {} } },
+  { name: 'lookup/item', description: 'Lookup', inputSchema: { type: 'object', properties: {} } },
 ];
 if (mode === 'slow-exit') {
   tools.push({ name: 'slow', description: 'Slow', inputSchema: { type: 'object', properties: {} } });
@@ -110,11 +117,18 @@ rl.on('line', (line) => {
     if (mode === 'slow-restart') {
       setTimeout(() => process.exit(0), 20);
     }
+    if (mode === 'fail-restart' && starts === 1) {
+      stderr('first-exit');
+      setTimeout(() => process.exit(7), 20);
+    }
+    if (mode === 'close-stdout') {
+      setTimeout(() => fs.closeSync(1), 20);
+    }
     return;
   }
   if (message.id !== undefined) {
     fail(message.id);
   }
 });
-process.stdin.on('end', () => process.exit(0));
+if (mode !== 'close-stdout') process.stdin.on('end', () => process.exit(0));
 setInterval(() => {}, 1000);

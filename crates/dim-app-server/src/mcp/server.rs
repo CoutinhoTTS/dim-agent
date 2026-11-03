@@ -39,11 +39,12 @@ use std::{
     collections::{BTreeSet, HashMap},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
+use tokio::time::Instant;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 #[derive(Debug, thiserror::Error)]
@@ -58,6 +59,11 @@ pub enum McpServerError {
     Configuration(&'static str),
     #[error("MCP connection or request failed; the operation was not replayed")]
     RequestFailed,
+    #[error("MCP server failed to start: {0}")]
+    StartFailed(String),
+    /// A request refused before contacting the server during start backoff.
+    #[error("MCP server failed to start; the next attempt is in {0} s")]
+    StartCooldown(u64),
     #[error("invalid MCP server response: {0}")]
     InvalidResponse(String),
     #[error("MCP cleanup failed")]
@@ -165,6 +171,20 @@ pub(super) struct McpRuntime {
     /// request ever carries it (it can quote a server's stderr).
     failure: Option<String>,
     tools: Option<Vec<McpTool>>,
+}
+
+/// Start-failure backoff. The first retry waits one second; each later one
+/// doubles, capped at five minutes. A successful connection clears it.
+#[derive(Default)]
+struct Retry {
+    failures: u32,
+    next: Option<Instant>,
+    attempt: u64,
+}
+
+fn retry_delay(failures: u32) -> Duration {
+    let exponent = failures.saturating_sub(1).min(63);
+    Duration::from_secs((1u64 << exponent).min(300))
 }
 
 /// A server registers widget tools only for a client that declares the
@@ -398,6 +418,7 @@ struct OwnedTransport<T: Transport<RoleClient> + 'static> {
     closed: Option<oneshot::Sender<Result<()>>>,
     state: StateCell<McpServerState>,
     failure: Arc<Mutex<Option<String>>>,
+    abandoned: Arc<AtomicBool>,
 }
 impl<T: Transport<RoleClient> + 'static> Transport<RoleClient> for OwnedTransport<T> {
     type Error = T::Error;
@@ -417,14 +438,19 @@ impl<T: Transport<RoleClient> + 'static> Transport<RoleClient> for OwnedTranspor
             drop(failure);
             self.state.update(|state| {
                 if !matches!(state, McpServerState::AuthRequired { .. }) {
-                    *state = McpServerState::Failed;
+                    *state = McpServerState::Disconnected;
                 }
             });
         }
         message
     }
     async fn close(&mut self) -> std::result::Result<(), T::Error> {
-        let result = if let Some(inner) = self.inner.as_mut() {
+        let result = if self.abandoned.load(Ordering::SeqCst) {
+            // The session is gone: drop the transport without a graceful
+            // close, which also kills a stdio child that is still running.
+            self.inner.take();
+            Ok(())
+        } else if let Some(inner) = self.inner.as_mut() {
             inner.close().await
         } else {
             Ok(())
@@ -443,6 +469,11 @@ impl<T: Transport<RoleClient> + 'static> Transport<RoleClient> for OwnedTranspor
 }
 impl<T: Transport<RoleClient> + 'static> Drop for OwnedTransport<T> {
     fn drop(&mut self) {
+        if self.abandoned.load(Ordering::SeqCst) {
+            self.inner.take();
+            let _ = self.closed.take();
+            return;
+        }
         if let Some(mut inner) = self.inner.take() {
             let closed = self.closed.take();
             tokio::spawn(async move {
@@ -458,6 +489,7 @@ impl<T: Transport<RoleClient> + 'static> Drop for OwnedTransport<T> {
 struct Connection {
     running: RunningService<RoleClient, Notifications>,
     closed: oneshot::Receiver<Result<()>>,
+    abandoned: Arc<AtomicBool>,
 }
 impl Connection {
     async fn close(mut self) -> Result<()> {
@@ -465,6 +497,13 @@ impl Connection {
         self.closed.await.map_err(|_| McpServerError::Cleanup)??;
         result.map_err(|_| McpServerError::Cleanup)?;
         Ok(())
+    }
+
+    /// Drop a connection whose transport is already gone. There is no
+    /// graceful close to wait for, and the child must not outlive it.
+    async fn abandon(self) {
+        self.abandoned.store(true, Ordering::SeqCst);
+        let _ = self.running.cancel().await;
     }
 }
 
@@ -484,6 +523,7 @@ pub struct McpServer {
     connection: AsyncMutex<Option<Connection>>,
     generations: AtomicU64,
     failure: Arc<Mutex<Option<String>>>,
+    retry: Arc<Mutex<Retry>>,
     stopping: CancellationToken,
     gate: Mutex<()>,
     tasks: TaskTracker,
@@ -512,8 +552,70 @@ impl McpServer {
         *self.failure.lock().unwrap() = Some(message.into());
     }
 
+    /// A fallback reason for one event: a more specific message set by the
+    /// transport keeps priority.
+    fn set_failure_if_empty(&self, message: impl Into<String>) {
+        let mut failure = self.failure.lock().unwrap();
+        if failure.is_none() {
+            *failure = Some(message.into());
+        }
+    }
+
     fn clear_failure(&self) {
         *self.failure.lock().unwrap() = None;
+    }
+
+    fn cooldown_remaining(&self) -> Option<Duration> {
+        self.retry
+            .lock()
+            .unwrap()
+            .next
+            .map(|next| next.saturating_duration_since(Instant::now()))
+            .filter(|remaining| !remaining.is_zero())
+    }
+
+    fn cooldown_seconds(&self) -> u64 {
+        let remaining = self.cooldown_remaining().unwrap_or_default();
+        remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0)
+    }
+
+    fn record_failure(&self) -> (Duration, u64) {
+        let mut retry = self.retry.lock().unwrap();
+        retry.failures = retry.failures.saturating_add(1);
+        retry.attempt = retry.attempt.wrapping_add(1);
+        let delay = retry_delay(retry.failures);
+        retry.next = Some(Instant::now() + delay);
+        (delay, retry.attempt)
+    }
+
+    fn reset_retry(&self) {
+        let mut retry = self.retry.lock().unwrap();
+        retry.failures = 0;
+        retry.next = None;
+        retry.attempt = retry.attempt.wrapping_add(1);
+    }
+
+    /// Move a cooling failure to `Disconnected` when its delay ends. The
+    /// failure reason stays until a connection succeeds.
+    fn schedule_state_reset(&self, delay: Duration, attempt: u64) {
+        let state = self.state.clone();
+        let retry = self.retry.clone();
+        let stopping = self.stopping.clone();
+        self.tasks.spawn(async move {
+            tokio::select! {
+                _ = stopping.cancelled() => {}
+                _ = tokio::time::sleep(delay) => {
+                    let mut retry = retry.lock().unwrap();
+                    if retry.attempt != attempt {
+                        return;
+                    }
+                    retry.next = None;
+                    if matches!(state.get(), McpServerState::Failed) {
+                        state.set(McpServerState::Disconnected);
+                    }
+                }
+            }
+        });
     }
     /// The generation of the connection this server holds: a new one starts
     /// whenever a connection is established, and the Session's entry version
@@ -750,7 +852,10 @@ impl McpServer {
         .await
     }
 
-    async fn peer(&self, cancel: &CancellationToken) -> Result<Peer<RoleClient>> {
+    async fn peer_with_generation(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Result<(Peer<RoleClient>, u64)> {
         let mut connection = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(McpServerError::Cancelled),
@@ -761,35 +866,60 @@ impl McpServer {
         {
             let _ = refused.close().await;
         }
-        if let Some(connection) = connection.as_ref() {
-            if connection.running.is_closed() {
-                self.state.set(McpServerState::Failed);
-                return Err(McpServerError::RequestFailed);
+        if let Some(current) = connection.as_ref() {
+            if !current.running.is_closed() && matches!(self.state.get(), McpServerState::Connected)
+            {
+                return Ok((current.running.peer().clone(), self.generation()));
             }
-            return Ok(connection.running.peer().clone());
+            // The transport is gone even when its task has not marked the
+            // cell yet. Its child must not outlive the connection.
+            let closed = connection.take().expect("checked connection");
+            closed.abandon().await;
+            self.set_failure_if_empty("MCP transport closed");
+            self.state.set(McpServerState::Disconnected);
         }
         if self.state.get() == McpServerState::Failed {
-            return Err(McpServerError::RequestFailed);
+            if self.cooldown_remaining().is_some() {
+                return Err(McpServerError::StartCooldown(self.cooldown_seconds()));
+            }
+            self.state.set(McpServerState::Disconnected);
         }
+        let previous = self.failure();
         self.state.set(McpServerState::Connecting);
-        let result = self.connect(cancel).await;
-        match result {
+        match self.connect(cancel).await {
             Ok(connected) => {
                 let peer = connected.running.peer().clone();
                 *connection = Some(connected);
+                let restarted = self.generations.load(Ordering::SeqCst) > 0;
                 self.generations.fetch_add(1, Ordering::SeqCst);
+                let generation = self.generations.load(Ordering::SeqCst);
+                self.reset_retry();
+                self.clear_failure();
                 self.state.update(|state| {
                     if *state == McpServerState::Connecting {
                         *state = McpServerState::Connected;
                     }
                 });
-                Ok(peer)
+                if restarted {
+                    // A Session re-reads the tool list for this generation.
+                    self.tool_changes.update(|revision| *revision += 1);
+                }
+                Ok((peer, generation))
             }
             Err(error) => {
                 if let McpServerState::AuthRequired { expired } = self.state.get() {
                     return Err(McpServerError::AuthRequired { expired });
                 }
+                if matches!(error, McpServerError::Cancelled | McpServerError::Closed) {
+                    self.state.set(McpServerState::Disconnected);
+                    return Err(error);
+                }
+                if self.failure() == previous {
+                    self.set_failure(error.to_string());
+                }
+                let (delay, attempt) = self.record_failure();
                 self.state.set(McpServerState::Failed);
+                self.schedule_state_reset(delay, attempt);
                 Err(error)
             }
         }
@@ -842,11 +972,13 @@ impl McpServer {
     ) -> Result<Connection> {
         let previous = self.failure();
         let (tx, closed) = oneshot::channel();
+        let abandoned = Arc::new(AtomicBool::new(false));
         let transport = OwnedTransport {
             inner: Some(transport),
             closed: Some(tx),
             state: self.state.clone(),
             failure: self.failure.clone(),
+            abandoned: abandoned.clone(),
         };
         let lifetime = CancellationToken::new();
         let initialize =
@@ -858,7 +990,11 @@ impl McpServer {
                 match result {
                     Ok(running) => {
                         self.clear_failure();
-                        return Ok(Connection { running, closed });
+                        return Ok(Connection {
+                            running,
+                            closed,
+                            abandoned,
+                        });
                     },
                     Err(error) => {
                         handshake_cancel.cancel();
@@ -876,7 +1012,13 @@ impl McpServer {
         handshake_cancel.cancel();
         lifetime.cancel();
         if let Ok(running) = initialize.await {
-            Connection { running, closed }.close().await?;
+            Connection {
+                running,
+                closed,
+                abandoned,
+            }
+            .close()
+            .await?;
         } else {
             closed.await.map_err(|_| McpServerError::Cleanup)??;
         }
@@ -900,7 +1042,10 @@ impl McpServer {
         request: ClientRequest,
         cancel: &CancellationToken,
     ) -> std::result::Result<ServerResult, ViewFailure> {
-        let peer = self.peer(cancel).await.map_err(ViewFailure::Refused)?;
+        let (peer, _generation) = self
+            .peer_with_generation(cancel)
+            .await
+            .map_err(ViewFailure::Refused)?;
         if cancel.is_cancelled() {
             return Err(ViewFailure::Refused(McpServerError::Cancelled));
         }
@@ -1135,6 +1280,7 @@ impl Plugin for McpServerPlugin {
             connection: AsyncMutex::new(None),
             generations: AtomicU64::new(0),
             failure: Arc::new(Mutex::new(None)),
+            retry: Arc::new(Mutex::new(Retry::default())),
             stopping: ctx.cancellation_token(),
             gate: Mutex::new(()),
             tasks: TaskTracker::new(),
@@ -1160,5 +1306,21 @@ impl Plugin for McpServerPlugin {
         })?;
         ctx.provide_at(self.key.clone(), service)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retry_delay;
+
+    #[test]
+    fn the_start_backoff_doubles_to_five_minutes() {
+        let delays: Vec<u64> = (1..=12)
+            .map(|failures| retry_delay(failures).as_secs())
+            .collect();
+        assert_eq!(
+            delays,
+            vec![1, 2, 4, 8, 16, 32, 64, 128, 256, 300, 300, 300]
+        );
     }
 }

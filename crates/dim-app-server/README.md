@@ -134,7 +134,10 @@ not the user source.
   or null before discovery. Status is `disconnected`, `connecting`, `connected`, `failed`,
   `closed` or `auth_required` (with `expired`). `failure` is the last start or transport
   failure, such as a stdio server's exit status and bounded stderr tail or a remote server's
-  HTTP status; it is status only and never enters a model request. These are existing
+  HTTP status; it is status only and never enters a model request. A closed connection starts
+  again on its next use. A failed start waits for a cooldown that doubles from 1 second to 5
+  minutes and resets after a connection succeeds; `failed` is reported only while that cooldown
+  holds, and discovery starts a failed server again after each cooldown. These are existing
   connection generations, not a host-global connection state. Inspection does not connect or
   contact the server.
 - `mcp.test` probes one configuration without attaching a Session; the

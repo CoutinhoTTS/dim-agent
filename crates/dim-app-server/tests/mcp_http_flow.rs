@@ -794,7 +794,7 @@ async fn cancelling_a_stalled_handshake_drains_the_plugin() {
             .unwrap(),
         Err(McpServerError::Cancelled)
     ));
-    assert_eq!(connection.state(), McpServerState::Failed);
+    assert_eq!(connection.state(), McpServerState::Disconnected);
     tokio::time::timeout(Duration::from_secs(5), fixture.close())
         .await
         .unwrap();
@@ -871,12 +871,21 @@ async fn reconnect_fixture(mode: &str) -> Fixture {
         fixture.home.join("mcp.json"),
         serde_json::to_vec(&json!({"mcpServers":{"docs":{
             "command":"node", "args":[reconnect_script(), mode],
-            "cwd":fixture.home, "env":{"MCP_STATE_FILE":fixture.home.join("starts")}
+            "cwd":fixture.home, "env":{
+                "MCP_STATE_FILE":fixture.home.join("starts"),
+                "MCP_PID_FILE":fixture.home.join("pids")
+            }
         }}}))
         .unwrap(),
     )
     .unwrap();
     fixture
+}
+
+fn starts(fixture: &Fixture) -> usize {
+    fs::read_to_string(fixture.home.join("starts"))
+        .map(|text| text.lines().count())
+        .unwrap_or(0)
 }
 
 async fn wait_not_connected(connection: &dim_app_server::mcp::McpConnection) {
@@ -977,6 +986,241 @@ async fn a_chatty_stderr_is_drained_while_the_server_works() {
     assert!(failure.contains("exit status: 8"), "{failure}");
     assert!(failure.contains("chatty-final"), "{failure}");
     fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_closed_stdio_connection_reconnects_on_its_next_call() {
+    let fixture = reconnect_fixture("exit-after-call").await;
+    let cancel = CancellationToken::new();
+    let connection = fixture
+        .mcp
+        .server(None, "docs".into(), &cancel)
+        .await
+        .unwrap();
+    assert!(call_echo(&connection, &cancel).await.is_ok());
+    wait_not_connected(&connection).await;
+    assert_ne!(connection.state(), McpServerState::Connected);
+    assert!(call_echo(&connection, &cancel).await.is_ok());
+    assert!(call_echo(&connection, &cancel).await.is_ok());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn an_in_flight_call_fails_when_the_stdio_process_exits() {
+    let fixture = reconnect_fixture("slow-exit").await;
+    let cancel = CancellationToken::new();
+    let connection = fixture
+        .mcp
+        .server(None, "docs".into(), &cancel)
+        .await
+        .unwrap();
+    let in_flight = tokio::time::timeout(
+        Duration::from_secs(5),
+        connection.call(
+            "slow".into(),
+            json!({}).as_object().unwrap().clone(),
+            &cancel,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(in_flight.is_err());
+    assert!(call_echo(&connection, &cancel).await.is_ok());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn two_callers_after_an_exit_share_one_restart() {
+    let fixture = reconnect_fixture("exit-after-call").await;
+    let cancel = CancellationToken::new();
+    let connection = fixture
+        .mcp
+        .server(None, "docs".into(), &cancel)
+        .await
+        .unwrap();
+    assert!(call_echo(&connection, &cancel).await.is_ok());
+    wait_not_connected(&connection).await;
+    let (first, second) = tokio::join!(
+        call_echo(&connection, &cancel),
+        call_echo(&connection, &cancel)
+    );
+    assert!(first.is_ok());
+    assert!(second.is_ok());
+    assert_eq!(starts(&fixture), 2, "one restart serves both callers");
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn cancelling_a_restart_leaves_the_connection_able_to_start_again() {
+    let fixture = reconnect_fixture("slow-restart").await;
+    let cancel = CancellationToken::new();
+    let connection = fixture
+        .mcp
+        .server(None, "docs".into(), &cancel)
+        .await
+        .unwrap();
+    assert!(call_echo(&connection, &cancel).await.is_ok());
+    wait_not_connected(&connection).await;
+    let restart = cancel.child_token();
+    let attempt = tokio::spawn({
+        let connection = connection.clone();
+        let restart = restart.clone();
+        async move { call_echo(&connection, &restart).await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    restart.cancel();
+    let cancelled = tokio::time::timeout(Duration::from_secs(8), attempt)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(cancelled, Err(McpServerError::Cancelled)));
+    assert_eq!(connection.state(), McpServerState::Disconnected);
+    assert!(call_echo(&connection, &cancel).await.is_ok());
+    assert_eq!(starts(&fixture), 3);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_failed_start_waits_for_its_cooldown() {
+    let fixture = reconnect_fixture("always-exit").await;
+    let cancel = CancellationToken::new();
+    let connection = fixture
+        .mcp
+        .server(None, "docs".into(), &cancel)
+        .await
+        .unwrap();
+    assert!(connection.tools(&cancel).await.is_err());
+    assert_eq!(starts(&fixture), 1);
+    assert_eq!(connection.state(), McpServerState::Failed);
+    let retry = connection.tools(&cancel).await.unwrap_err();
+    assert_eq!(
+        retry.to_string(),
+        "MCP server failed to start; the next attempt is in 1 s"
+    );
+    assert!(
+        !retry.to_string().contains("startup-failure"),
+        "the cooldown error carries no stderr"
+    );
+    assert_eq!(
+        starts(&fixture),
+        1,
+        "a request inside the cooldown starts nothing"
+    );
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert_ne!(
+        connection.state(),
+        McpServerState::Failed,
+        "failed lasts only while the cooldown holds"
+    );
+    let failure = connection.failure().expect("the reason stays");
+    assert!(failure.contains("startup-failure"), "{failure}");
+    assert!(connection.tools(&cancel).await.is_err());
+    assert_eq!(
+        starts(&fixture),
+        2,
+        "the next attempt starts after the cooldown"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_failed_restart_replaces_the_reason_and_keeps_it_after_the_cooldown() {
+    let fixture = reconnect_fixture("fail-restart").await;
+    let cancel = CancellationToken::new();
+    let connection = fixture
+        .mcp
+        .server(None, "docs".into(), &cancel)
+        .await
+        .unwrap();
+    assert!(call_echo(&connection, &cancel).await.is_ok());
+    wait_not_connected(&connection).await;
+    let failure = connection.failure().expect("the exit is reported");
+    assert!(failure.contains("first-exit"), "{failure}");
+    assert!(failure.contains("exit status: 7"), "{failure}");
+    assert!(connection.tools(&cancel).await.is_err());
+    let failure = connection
+        .failure()
+        .expect("the restart failure is reported");
+    assert!(failure.contains("restart-failure"), "{failure}");
+    assert!(failure.contains("exit status: 9"), "{failure}");
+    assert!(
+        !failure.contains("first-exit"),
+        "a new failure replaces the old reason: {failure}"
+    );
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert_ne!(connection.state(), McpServerState::Failed);
+    let failure = connection.failure().expect("the reason stays");
+    assert!(failure.contains("restart-failure"), "{failure}");
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_reconnect_reaps_the_previous_stdio_process() {
+    let fixture = reconnect_fixture("close-stdout").await;
+    let cancel = CancellationToken::new();
+    let connection = fixture
+        .mcp
+        .server(None, "docs".into(), &cancel)
+        .await
+        .unwrap();
+    assert!(call_echo(&connection, &cancel).await.is_ok());
+    wait_not_connected(&connection).await;
+    let pids = read_pids(&fixture);
+    let old = pids
+        .last()
+        .expect("the first process wrote its pid")
+        .clone();
+    assert!(call_echo(&connection, &cancel).await.is_ok());
+    let pids = read_pids(&fixture);
+    let new = pids
+        .last()
+        .expect("the second process wrote its pid")
+        .clone();
+    assert_ne!(old, new);
+    wait_pid_gone(&old).await;
+    assert!(pid_alive(&new));
+    fixture.close().await;
+}
+
+async fn call_echo(
+    connection: &dim_app_server::mcp::McpConnection,
+    cancel: &CancellationToken,
+) -> dim_app_server::mcp::server::Result<dim_agent_types::ToolResult> {
+    connection
+        .call(
+            "echo".into(),
+            json!({}).as_object().unwrap().clone(),
+            cancel,
+        )
+        .await
+}
+
+fn read_pids(fixture: &Fixture) -> Vec<String> {
+    fs::read_to_string(fixture.home.join("pids"))
+        .map(|text| text.lines().map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+fn pid_alive(pid: &str) -> bool {
+    std::process::Command::new("node")
+        .args([
+            "-e",
+            "try { process.kill(Number(process.argv[1]), 0); process.exit(0); } catch(e) { process.exit(e.code === 'ESRCH' ? 1 : 2); }",
+            pid,
+        ])
+        .status()
+        .unwrap()
+        .success()
+}
+
+async fn wait_pid_gone(pid: &str) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while pid_alive(pid) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the previous child is gone");
 }
 
 async fn wait_file(path: &std::path::Path) {
