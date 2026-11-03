@@ -771,7 +771,13 @@ impl Timeline {
         };
         let anchor = match (&query.from_event, query.from_sequence) {
             (None, None) => None,
-            (None, Some(sequence)) => None.or(Some((None, sequence))),
+            (None, Some(sequence)) => Some((
+                match query.scope {
+                    TimelineQueryScope::Branch => None,
+                    TimelineQueryScope::Chain => Some(self.0.key.branch_id.clone()),
+                },
+                sequence,
+            )),
             (Some(event_id), None) => {
                 let mut found = None;
                 for (branch, _) in &clips {
