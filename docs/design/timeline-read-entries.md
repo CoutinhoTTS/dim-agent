@@ -169,6 +169,34 @@ Each row was read from the consumer's source: what it takes from the Timeline, h
 - Reading up to the committed position: replay, collaboration rebuild, file reads. Each reads facts it wrote itself.
 - Batch structure: cut validation.
 
+### 2.3 What the eleven rebuilds fold
+
+Read from each part rebuild. The follow key list is what a part subscribes to; the fold is what its rebuild consumes. They differ.
+
+| Part | Folds | State is |
+| --- | --- | --- |
+| Permission | permission/changed, ancestors and own, each overwrites the last | the last event |
+| Wait | turn/start, turn/end | the last event |
+| Approval | approval/request, approval/respond, approval/cancelled | unclosed pairs |
+| ToolExecutor | step/tool-call, step/tool-result, stop/interrupt, turn/start, turn/end | unclosed pairs |
+| ModelProvider | model/call, step/tool-use-start, step/tool-use, step/model-output-end, stop/interrupt, turn/start, turn/end; also steer.apply, whose kinds were not read | unclosed pairs |
+| ContextPreparation | context/prepare, model/call, step/model-output-end, context/compaction-start, context/compaction, stop/interrupt, turn/start, turn/end; also steer.apply | unclosed pairs |
+| BackgroundExec | exec/started, exec/ended, stop/interrupt, tagged input/message | unclosed pairs and unposted wakes |
+| InputQueue | input/*, turn/*, stop/interrupt through state.step | accumulated |
+| BranchLine | branch/*, input/*, stop/interrupt, step/tool-use, step/tool-result, turn/end | accumulated |
+| Hooks | 12 followed kinds; replay hands it every event and it filters them itself | accumulated |
+| Loop | input/applied, input/consumed, context/compact, context/compaction-start, context/compaction, stop/interrupt, turn/start, turn/end, step/model-start, context/prepare, step/tool-use-start, step/tool-use, step/model-output-end, step/tool-call, step/tool-result; the turn resets at turn/start | turn state, pending inputs, manual compactions |
+
+What this shows:
+
+- No part folds step/text or step/thinking, so a rebuild never meets a merged row.
+- Two parts need only the last event (Permission, Wait). Six fold unclosed pairs. Three accumulate.
+- A part folds kinds it does not subscribe to (Approval, ToolExecutor, ModelProvider, ContextPreparation, Loop), so its read selection must be written from its rebuild, not copied from its follow keys.
+- Replay hands every part the whole branch prefix to the committed position, unfiltered. The decode of that prefix is shared during Loading (restore-shared-read.md), which lowers its cost but not its size.
+- The hot window holds events until they are dispatched, not only until they are published. The tail a rebuild must add to a stored read is the events not yet dispatched.
+
+Not verified: whether each unclosed pair can cross a turn, so whether reading from the latest turn/start is enough; the kinds steer.apply reads; the second half of the Loop rebuild; how long the undispatched tail is during an opening.
+
 ## 3. What it does not express
 
 | Need | Who | Why |
@@ -180,7 +208,7 @@ Each row was read from the consumer's source: what it takes from the Timeline, h
 
 ## 4. Questions for the owners
 
-1. The published position and the committed position differ. Replay needs the second. Does replay stay on `local`, or does a part's rebuild stop needing it?
+1. Proposed: replay is removed. Each part rebuilds with its own query over the kinds its rebuild folds, and the undispatched tail comes from the hot window. This needs the pair-across-turn check above, and a handover from the rebuild to live delivery that neither drops nor repeats an event.
 2. Does the cut validation need to know a batch end now that a page may end inside a batch?
 3. Does the checkpoint store the resume event id so a chain read can start by `from_event`?
 4. The reads in §1.4 bypass the service. Which migration owns them?
@@ -251,7 +279,7 @@ The request carries no read point. The service passes each segment its bound: an
 
 | Need | Proposal | Question |
 | --- | --- | --- |
-| Read up to the committed position: replay, collaboration rebuild, file reads | Replay stays inside the Dispatcher and is not exported. The other two need their facts checked for when they are published before they move | 1 |
+| Read up to the committed position: replay, collaboration rebuild, file reads | Replay is removed (section 2.3); each part queries what it folds and adds the undispatched tail from the hot window. The other two need their facts checked for when they are published before they move | 1 |
 | Whether a sequence ends an atomic batch | One validation on the store port, not a query field | 2 |
 | A chain read that starts in an ancestor | The checkpoint stores the resume event id and the caller uses `from_event` | 3 |
 
