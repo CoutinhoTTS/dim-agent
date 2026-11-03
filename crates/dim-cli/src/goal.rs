@@ -412,8 +412,8 @@ pub const NOT_AVAILABLE: &str = "Goal is not available on this daemon.";
 pub const USAGE: &str =
     "Usage: /goal [OBJECTIVE | set OBJECTIVE | edit OBJECTIVE | pause | resume | clear]";
 
-/// What `/goal` prints for `branch`: the call it made, none for the read,
-/// and the state the branch's events give through the call.
+/// Reports the call and resulting goal state for `branch`; the read form
+/// prefixes usage before the current state.
 pub fn report(branch: &str, call: Option<Call>, goal: Option<&Goal>) -> Vec<String> {
     let mut lines = if call.is_none() {
         vec![USAGE.to_owned()]

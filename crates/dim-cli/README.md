@@ -498,10 +498,15 @@ rule that reads them are [Goal §A.2–A.3](../../docs/design/plugins/Goal.md#a2
 
 | Form | Call |
 | --- | --- |
-| `/goal` | none; the goal in force on the shown line, or that it has none |
+| `/goal` | none; usage, then the goal in force on the shown line, or that it has none |
 | `/goal OBJECTIVE` | `session.goal.edit` while the goal is active or paused, `session.goal.set` otherwise |
 | `/goal set OBJECTIVE`, `/goal edit OBJECTIVE` | the named method |
 | `/goal pause`, `/goal resume`, `/goal clear` | the method of the same name |
+
+In both TUI modes, selecting `/goal` with Enter or Tab fills `/goal ` and closes the palette
+without dispatching. Submitting that draft without an objective prints usage, followed by the
+current goal/status or the no-goal notice. Bare `/goal` at the line-mode prompt prints the same
+help and state; without a goal, the output has two lines.
 
 Every call sends the shown line's id as `branchId`: the line client always shows `main`, and the
 terminal UI sends the line whose transcript it displays. An objective that is one of the form words
@@ -525,6 +530,7 @@ Goal set on main · active
 Goal paused on main · paused (user)
   Keep the CLI tests green
 > /goal
+Usage: /goal [OBJECTIVE | set OBJECTIVE | edit OBJECTIVE | pause | resume | clear]
 Goal on main · paused (user)
   Keep the CLI tests green
 > /goal clear
@@ -1140,7 +1146,7 @@ The terminal UI reaches the same Session methods as the line client:
 | `/usage` | Reports main's context window from `session.context.usage`: estimated input tokens against the window, the output allowance and the compaction threshold; before a model has answered it says so, and a failed call is reported alone. With the reading it appends the cache read share of the last `model/usage` request on `main` (` · last request cached {percent}`), rounded down: `100%` only when every prompt token was a cache read, one decimal between `99%` and `100%`, an integer between `1%` and `99%`, `<1%` for a positive share below one percent, and `0%` for a request that reported no cache reads; the prompt token count includes cache writes, so a request that only writes the cache reads `0%`. The segment appears only once `main`'s history has finished loading, so a page that is not the last never reports its older request; after that it shows the newest request, whether it came from the history or a live event. It is absent when that request reported no cache read count or its counters cannot produce a share (cache reads above prompt tokens, or a zero prompt) |
 | `/compact` | Asks the shown line to compact its context with `session.context.compact`, during a run too. The matching Timeline row reports the work and its terminal outcome once; the RPC reply adds no second completed, skipped, failed or cancelled notice. Failures of the call itself and invalid replies are reported separately. A daemon without the method says it does not support context compaction |
 | `/rename TITLE`, `/rename --clear` | Sets, or clears, the shown Session's manual title with `session.rename` and reports the stored title or that the Session is untitled. Choosing `/rename` from the palette fills `/rename ` and waits; a bare `/rename` is refused with a notice and sends nothing, so `--clear` is the way to clear it without a title. The text is a command: it is never queued or submitted, also while a turn runs. With no Session shown it says so, and a Session that does not serve `session.rename` (`unknown_method`) reports that instead. The window title shows the stored title, or the first message's topic until the Session has one |
-| `/goal [OBJECTIVE \| set OBJECTIVE \| edit OBJECTIVE \| pause \| resume \| clear]` | Reads and writes the goal of the shown line through `session.goal.*`. The command's first line names the call, the line and the status in force, the objective follows it, and `/goal` alone prints the goal the line's events give; `edited` is the form that found a live goal and changed only its objective, and a typed objective after a finished goal starts a new one. While the shown line follows a goal the status area carries `◎ goal active` or `◎ goal paused`. A daemon whose Session lists no `session.goal.set` says Goal is not available and calls nothing ([Goal](#goal)) |
+| `/goal [OBJECTIVE \| set OBJECTIVE \| edit OBJECTIVE \| pause \| resume \| clear]` | Reads and writes the goal of the shown line through `session.goal.*`. Selecting it with Enter or Tab only fills `/goal ` for a separate submission. Bare `/goal` prints usage before the current goal/status, or before the no-goal notice (two lines when no goal is set). Writing forms start with the call, line and status, followed by the objective; `edited` found a live goal and changed only its objective, and a typed objective after a finished goal starts a new one. While the shown line follows a goal the status area carries `◎ goal active` or `◎ goal paused`. A daemon whose Session lists no `session.goal.set` says Goal is not available and calls nothing ([Goal](#goal)) |
 | `/effort VALUE` (`/reasoning`), `/fast on\|off`, `/agent ID` | Change the Session's reasoning effort, service tier or agent; without a value they list the choices for the adopted model. `/fast` is listed in the palette only while the adopted model's catalog entry advertises priority/default service tiers |
 | Paste of local file paths | An image the model takes becomes an `[Image #N]` token sent as an image block; another file is inserted as its path, and so is an image the model does not take. At most 20 images, a group all or nothing |
 | `Ctrl+V` | Reads the native clipboard off the interface thread: files, then an image, then text. `Enter` waits until the read is in |
