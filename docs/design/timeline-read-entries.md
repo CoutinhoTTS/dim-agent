@@ -125,7 +125,7 @@ flowchart LR
   SS -.-> Sql
 ```
 
-Two things the graph shows. The `Agent` facade reaches the store port without the Timeline service (`local_page`), and the TimelineTree part and the App Server reach a store without it as well, so deleting reads from `Timeline` alone leaves five other routes into the same rows.
+Two things the graph shows. The `Agent` facade reaches the store port without the Timeline service (`local_page`), and the TimelineTree part and the App Server reach a store without it as well, so deleting reads from `Timeline` alone leaves these routes into the same rows: the `Branch` and `Agent` facades (§1.2), the Dispatcher exports (§1.3), `Agent::local_page`, the TimelineTree part's own `TimelineStore::read_page`, and the `SessionStore` reads of the App Server (§1.4).
 
 ## 2. What the query expresses
 
