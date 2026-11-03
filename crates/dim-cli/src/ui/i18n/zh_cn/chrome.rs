@@ -255,6 +255,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "run" => "运行",
         "view" => "视图",
         "model" => "模型",
+        "extensions" => "扩展",
         "app" => "应用",
         "skill" => "技能",
         "start a new session" => "开始新会话",
