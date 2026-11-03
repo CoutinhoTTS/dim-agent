@@ -43,8 +43,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "follow, talk to and end this session's lines" => {
             "ikuti, ajak bicara, dan akhiri jalur sesi ini"
         }
-        "End line" => "Akhiri jalur",
-        "y/N" => "y/N",
+        "End line {id}?" => "Akhiri jalur {id}?",
+        "y end it" => "y akhiri",
+        "n cancel" => "n batal",
         "main is the session itself; a line ends, main does not" => {
             "main adalah sesi itu sendiri; jalur bisa berakhir, main tidak"
         }
