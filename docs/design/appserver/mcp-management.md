@@ -327,6 +327,7 @@ column and no value.
 The write rule follows from the same value: each entry is held as read beside the entry decoded
 from it, and a write serialises from typed values only the entry it changed. Every other entry,
 decoded or broken, goes back as the file wrote it, including member order and unknown fields.
+The file keeps the order of its ids: a new id is appended, and a removed id leaves its place.
 Only the edited entry may change its spelling, so an untouched `streamable-http` entry keeps that
 name and a saved one is written as `http`.
 

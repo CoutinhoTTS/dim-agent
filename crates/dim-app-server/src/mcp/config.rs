@@ -66,22 +66,15 @@ impl fmt::Display for McpEntryError {
 }
 impl std::error::Error for McpEntryError {}
 
-/// One entry that did not decode, kept exactly as the document wrote it so a
-/// later write puts it back unchanged.
-#[derive(Clone, Debug, PartialEq)]
-pub struct InvalidMcpServer {
-    pub value: Value,
-    pub error: McpEntryError,
-}
-
 /// Every entry under `mcpServers`. An entry that does not decode is kept out
-/// of `mcp_servers` and listed in `invalid`; `raw` holds each entry's value as
-/// read so a write can put every untouched entry back as the file wrote it.
+/// of `mcp_servers` and its error is listed in `invalid`; `raw` holds each
+/// entry's value in document order so a write can put every untouched entry
+/// back as the file wrote it.
 #[derive(Clone, Default, PartialEq)]
 pub struct McpSettings {
     mcp_servers: BTreeMap<String, McpServerSettings>,
-    invalid: BTreeMap<String, InvalidMcpServer>,
-    raw: BTreeMap<String, Value>,
+    invalid: BTreeMap<String, McpEntryError>,
+    raw: Map<String, Value>,
     dirty: BTreeSet<String>,
     pub extra: BTreeMap<String, Value>,
 }
@@ -96,9 +89,10 @@ impl McpSettings {
     }
 
     /// Removes a decoded or a broken entry. Only this entry's value is
-    /// dropped from the document.
+    /// dropped from the document; the other ids keep their order.
     pub fn remove(&mut self, id: &str) -> Option<McpServerSettings> {
         self.invalid.remove(id);
+        self.raw.shift_remove(id);
         self.dirty.insert(id.to_owned());
         self.mcp_servers.remove(id)
     }
@@ -112,7 +106,7 @@ impl McpSettings {
     }
 
     pub fn invalid_error(&self, id: &str) -> Option<&McpEntryError> {
-        self.invalid.get(id).map(|entry| &entry.error)
+        self.invalid.get(id)
     }
 
     /// The decoded entries, by id.
@@ -130,8 +124,8 @@ impl McpSettings {
         self.mcp_servers.contains_key(id)
     }
 
-    /// Entries that did not decode, by id.
-    pub fn invalid_entries(&self) -> &BTreeMap<String, InvalidMcpServer> {
+    /// Entries that did not decode, by id, holding only their errors.
+    pub fn invalid_entries(&self) -> &BTreeMap<String, McpEntryError> {
         &self.invalid
     }
 
@@ -140,38 +134,25 @@ impl McpSettings {
         self,
     ) -> (
         BTreeMap<String, McpServerSettings>,
-        BTreeMap<String, InvalidMcpServer>,
+        BTreeMap<String, McpEntryError>,
     ) {
         (self.mcp_servers, self.invalid)
     }
 
-    fn from_entries(entries: BTreeMap<String, Value>, extra: BTreeMap<String, Value>) -> Self {
+    /// Decodes each entry on its own; a broken entry keeps its error and its
+    /// raw value, and the rest load.
+    fn from_entries(entries: Map<String, Value>, extra: BTreeMap<String, Value>) -> Self {
         let mut document = Self {
             extra,
             ..Self::default()
         };
         for (id, value) in entries {
-            let decoded = if id.trim().is_empty() {
-                Err(McpEntryError {
-                    id: id.clone(),
-                    field: None,
-                    expected: "a nonempty id".into(),
-                })
-            } else {
-                decode_entry(&id, &value)
-            };
-            match decoded {
+            match decode_entry(&id, &value) {
                 Ok(configuration) => {
                     document.mcp_servers.insert(id.clone(), configuration);
                 }
                 Err(error) => {
-                    document.invalid.insert(
-                        id.clone(),
-                        InvalidMcpServer {
-                            value: value.clone(),
-                            error,
-                        },
-                    );
+                    document.invalid.insert(id.clone(), error);
                 }
             }
             document.raw.insert(id, value);
@@ -227,13 +208,7 @@ impl McpSettings {
             .filter(|(key, _)| key.as_str() != "mcpServers")
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
-        Ok(Self::from_entries(
-            servers
-                .iter()
-                .map(|(id, value)| (id.clone(), value.clone()))
-                .collect(),
-            extra,
-        ))
+        Ok(Self::from_entries(servers.clone(), extra))
     }
 }
 impl Serialize for McpSettings {
@@ -243,7 +218,7 @@ impl Serialize for McpSettings {
     ) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::{Error as _, SerializeMap};
         let mut map = serializer.serialize_map(Some(1 + self.extra.len()))?;
-        let mut servers = BTreeMap::<&str, Value>::new();
+        let mut servers = Map::<String, Value>::new();
         for (id, raw) in &self.raw {
             if let Some(configuration) = self.mcp_servers.get(id) {
                 let value = if self.dirty.contains(id) {
@@ -251,15 +226,15 @@ impl Serialize for McpSettings {
                 } else {
                     raw.clone()
                 };
-                servers.insert(id, value);
+                servers.insert(id.clone(), value);
             } else if self.invalid.contains_key(id) {
-                servers.insert(id, raw.clone());
+                servers.insert(id.clone(), raw.clone());
             }
         }
         for (id, configuration) in &self.mcp_servers {
             if !self.raw.contains_key(id) {
                 servers.insert(
-                    id,
+                    id.clone(),
                     serde_json::to_value(configuration).map_err(S::Error::custom)?,
                 );
             }
@@ -278,7 +253,7 @@ impl<'de> Deserialize<'de> for McpSettings {
         #[derive(Deserialize)]
         struct Raw {
             #[serde(rename = "mcpServers")]
-            mcp_servers: BTreeMap<String, Value>,
+            mcp_servers: Map<String, Value>,
             #[serde(flatten)]
             extra: BTreeMap<String, Value>,
         }
@@ -1422,18 +1397,18 @@ mod tests {
         assert_eq!(document.entries().len(), 2);
         assert_eq!(document.invalid_entries().len(), 3);
         assert_eq!(
-            document.invalid_entries()["ws"].error.field.as_deref(),
+            document.invalid_entries()["ws"].field.as_deref(),
             Some("type")
         );
         assert_eq!(
-            document.invalid_entries()["ws"].error.expected,
+            document.invalid_entries()["ws"].expected,
             "http or sse; ws is not a supported transport"
         );
         assert_eq!(
-            document.invalid_entries()["untyped"].error.expected,
+            document.invalid_entries()["untyped"].expected,
             "http or sse; an entry with a url must name its type"
         );
-        assert_eq!(document.invalid_entries()["scalar"].error.field, None);
+        assert_eq!(document.invalid_entries()["scalar"].field, None);
         assert!(document.validate().is_ok());
 
         let written = serde_json::to_value(&document).unwrap();
@@ -1463,10 +1438,10 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(document.invalid_entries().len(), 2);
-        let header = &document.invalid_entries()["header"].error;
+        let header = &document.invalid_entries()["header"];
         assert_eq!(header.field.as_deref(), Some("headers.Authorization"));
         assert!(header.to_string().contains("must be a string"));
-        let arg = &document.invalid_entries()["arg"].error;
+        let arg = &document.invalid_entries()["arg"];
         assert_eq!(arg.field.as_deref(), Some("args[1]"));
         assert!(arg.to_string().contains("must be a string"));
         assert!(!header.to_string().contains(marker));
@@ -1588,11 +1563,11 @@ mod tests {
         .unwrap();
         assert_eq!(broken.invalid_entries().len(), 2);
         assert_eq!(
-            broken.invalid_entries()["no-command"].error.field.as_deref(),
+            broken.invalid_entries()["no-command"].field.as_deref(),
             Some("command")
         );
         assert_eq!(
-            broken.invalid_entries()["no-url"].error.field.as_deref(),
+            broken.invalid_entries()["no-url"].field.as_deref(),
             Some("url")
         );
     }

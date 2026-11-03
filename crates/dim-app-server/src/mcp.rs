@@ -396,8 +396,8 @@ impl McpService {
                 // not manage a plugin entry on its own. Refuse the document
                 // with the first broken entry's error rather than drop it.
                 let (servers, invalid) = document.into_parts();
-                if let Some(entry) = invalid.into_values().next() {
-                    return Err(SettingsError::Document(entry.error.to_string()));
+                if let Some(error) = invalid.into_values().next() {
+                    return Err(SettingsError::Document(error.to_string()));
                 }
                 let registration = McpPluginDocument {
                     dir,
@@ -590,14 +590,14 @@ impl McpService {
                         },
                     );
                 }
-                for (id, entry) in invalid_entries {
+                for (id, error) in invalid_entries {
                     catalog.servers.remove(&id);
                     invalid.insert(
                         id.clone(),
                         McpInvalidEntry {
                             id,
                             source,
-                            error: entry.error,
+                            error,
                         },
                     );
                 }

@@ -1966,3 +1966,105 @@ async fn entries_decode_one_by_one_and_writes_keep_every_other_entry_as_written(
 
     fixture.close().await;
 }
+
+/// #951: a write keeps the document's id order and every untouched entry's
+/// bytes: a new id is appended and a removed id leaves its place.
+#[tokio::test]
+async fn a_write_keeps_the_documents_id_order() {
+    fn block<'a>(text: &'a str, id: &str) -> &'a str {
+        let start = text.find(&format!("    \"{id}\": {{\n")).unwrap();
+        let rest = &text[start..];
+        let end = rest
+            .find("\n    },")
+            .or_else(|| rest.find("\n    }\n"))
+            .unwrap();
+        &rest[..end]
+    }
+    fn position(text: &str, id: &str) -> usize {
+        text.find(&format!("    \"{id}\": {{\n")).unwrap()
+    }
+
+    let fixture = Fixture::new().await;
+    let cancel = CancellationToken::new();
+    let path = fixture.home.join("mcp.json");
+    let source = json!({
+        "mcpServers": {
+            "zeta": {"command": "z", "future": {"keep": [1, 2]}},
+            "alpha": {"type": "http", "url": "https://alpha.test/mcp", "auth": {"type": "bearer", "token": "private"}, "unknown": true},
+            "middle": {"command": "m", "enabled": false}
+        },
+        "extension": {"preserve": 17}
+    });
+    fs::write(&path, serde_json::to_vec_pretty(&source).unwrap()).unwrap();
+    let snapshot = fixture
+        .settings
+        .read::<McpSettings>(SettingsScope::User, &cancel)
+        .await
+        .unwrap();
+    let before = fs::read_to_string(&path).unwrap();
+    let replacement =
+        serde_json::from_value(json!({"command": "m-edited", "enabled": false})).unwrap();
+    fixture
+        .mcp
+        .update(
+            SettingsScope::User,
+            snapshot.revision,
+            "middle".into(),
+            McpChange::Put(replacement),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let after = fs::read_to_string(&path).unwrap();
+    assert_eq!(block(&before, "zeta"), block(&after, "zeta"));
+    assert_eq!(block(&before, "alpha"), block(&after, "alpha"));
+    assert!(position(&after, "zeta") < position(&after, "alpha"));
+    assert!(position(&after, "alpha") < position(&after, "middle"));
+    assert!(after.contains("m-edited"), "{after}");
+
+    // A new id is appended after the document's ids.
+    let snapshot = fixture
+        .settings
+        .read::<McpSettings>(SettingsScope::User, &cancel)
+        .await
+        .unwrap();
+    let added = serde_json::from_value(json!({"command": "n"})).unwrap();
+    fixture
+        .mcp
+        .update(
+            SettingsScope::User,
+            snapshot.revision,
+            "new".into(),
+            McpChange::Put(added),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let after = fs::read_to_string(&path).unwrap();
+    assert!(position(&after, "middle") < position(&after, "new"));
+    assert!(position(&after, "new") < after.find("  \"extension\"").unwrap());
+
+    // A removed id leaves its place.
+    let snapshot = fixture
+        .settings
+        .read::<McpSettings>(SettingsScope::User, &cancel)
+        .await
+        .unwrap();
+    fixture
+        .mcp
+        .update(
+            SettingsScope::User,
+            snapshot.revision,
+            "alpha".into(),
+            McpChange::Remove,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let after = fs::read_to_string(&path).unwrap();
+    assert!(!after.contains("\"alpha\""), "{after}");
+    assert!(position(&after, "zeta") < position(&after, "middle"));
+    assert!(position(&after, "middle") < position(&after, "new"));
+    assert_eq!(block(&before, "zeta"), block(&after, "zeta"));
+    fixture.close().await;
+}
