@@ -185,6 +185,10 @@
   },
   {
     "from": "dim-migration",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "dim-migration",
     "to": "dim-app-server"
   },
   {
@@ -234,6 +238,10 @@
   {
     "from": "dim-session-title",
     "to": "rutis"
+  },
+  {
+    "from": "dim-session-title",
+    "to": "dim-agent-runtime"
   },
   {
     "from": "dim-session-title",
