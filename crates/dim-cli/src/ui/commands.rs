@@ -239,7 +239,7 @@ pub const COMMANDS: &[Command] = &[
     slash(
         "tools",
         "view",
-        "cycle tool details: collapsed, summary, expanded",
+        "cycle tool details and compaction summaries",
         &[],
         Needs::Nothing,
     ),

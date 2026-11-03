@@ -8561,7 +8561,16 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
     started.send(()).unwrap();
     terminal.until("Context compacted ▸");
     terminal.write(b"/tools\r");
+    terminal.until("Context compacted ▸");
+    terminal.until("test / model");
+    assert!(
+        !terminal.transcript.contains("The parser is half done."),
+        "summary tool form keeps the compaction body closed"
+    );
+    terminal.write(b"/tools\r");
     terminal.until("The parser is half done.");
+    terminal.write(b"/tools\r");
+    terminal.until("Context compacted ▸");
     terminal.write(b"/tools\r");
     terminal.until("Context compacted ▸");
     terminal.write(b"/tools\r");
@@ -8886,6 +8895,14 @@ fn tui_rebuilds_compaction_rows_from_history_on_resume() {
     command.args(["--resume", "session"]);
     let mut terminal = Terminal::launch_tui(command);
     terminal.until("Context compacted ▸");
+    terminal.until("test / model");
+    terminal.write(b"/tools\r");
+    terminal.until("Context compacted ▸");
+    terminal.until("test / model");
+    assert!(
+        !terminal.transcript.contains("Restored summary text."),
+        "summary tool form keeps the restored compaction body closed"
+    );
     terminal.write(b"/tools\r");
     terminal.until("Restored summary text.");
     terminal.write(b"/exit\r");

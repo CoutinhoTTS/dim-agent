@@ -336,8 +336,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "ir al principio",
         "scroll to the bottom" => "ir al final",
         "pick an earlier message to edit or quote" => "elegir mensaje anterior para editar o citar",
-        "cycle tool details: collapsed, summary, expanded" => {
-            "alternar detalles: contraído, resumen, expandido"
+        "cycle tool details and compaction summaries" => {
+            "alternar detalles de herramientas y resúmenes de compactación"
         }
         "switch between fullscreen and scrollback" => "alternar pantalla completa y desplazamiento",
         "switch theme" => "cambiar tema",

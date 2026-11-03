@@ -326,8 +326,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "pick an earlier message to edit or quote" => {
             "escolher mensagem anterior para editar ou citar"
         }
-        "cycle tool details: collapsed, summary, expanded" => {
-            "alternar detalhes: recolhido, resumo, expandido"
+        "cycle tool details and compaction summaries" => {
+            "alternar detalhes de ferramentas e resumos de compactação"
         }
         "switch between fullscreen and scrollback" => "alternar entre tela cheia e scrollback",
         "switch theme" => "trocar tema",

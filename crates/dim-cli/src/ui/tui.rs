@@ -9128,25 +9128,36 @@ mod tests {
             }));
             press(&mut app, KeyCode::Char(' '));
             let answer = selection(&app);
-            typed(&mut app, "/effort");
-            press(&mut app, KeyCode::Enter);
-            assert!(
-                app.frame((36, 16))
-                    .live
-                    .join("\n")
-                    .contains(t("Loading reasoning efforts…"))
-            );
-            app.apply(Update::EffortChoices(Err("Reasoning not supported".into())));
-            press(&mut app, KeyCode::Enter);
-            assert!(
-                app.frame((36, 16))
-                    .live
-                    .join("\n")
-                    .contains("Reasoning not supported")
-            );
-            assert_eq!(sent.borrow().len(), 1);
-            press(&mut app, KeyCode::Esc);
-            assert_eq!(selection(&app), answer);
+            for (result, message) in [
+                (
+                    Err("Reasoning not supported".into()),
+                    "Reasoning not supported",
+                ),
+                (
+                    Ok(crate::configure::EffortChoices {
+                        model: "relay / reasoner".into(),
+                        current: None,
+                        choices: Vec::new(),
+                    }),
+                    "does not advertise",
+                ),
+            ] {
+                let before = sent.borrow().len();
+                typed(&mut app, "/effort");
+                press(&mut app, KeyCode::Enter);
+                assert!(
+                    app.frame((36, 16))
+                        .live
+                        .join("\n")
+                        .contains(t("Loading reasoning efforts…"))
+                );
+                app.apply(Update::EffortChoices(result));
+                press(&mut app, KeyCode::Enter);
+                assert!(app.frame((36, 16)).live.join("\n").contains(message));
+                assert_eq!(sent.borrow().len(), before + 1);
+                press(&mut app, KeyCode::Esc);
+                assert_eq!(selection(&app), answer);
+            }
 
             for stale in [false, true] {
                 typed(&mut app, "/effort");

@@ -318,8 +318,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "gulir ke atas",
         "scroll to the bottom" => "gulir ke bawah",
         "pick an earlier message to edit or quote" => "pilih pesan lama untuk diedit/dikutip",
-        "cycle tool details: collapsed, summary, expanded" => {
-            "ganti detail tool: terlipat, ringkasan, terbuka"
+        "cycle tool details and compaction summaries" => {
+            "ganti tampilan detail tool dan ringkasan pemadatan"
         }
         "switch between fullscreen and scrollback" => "ganti layar penuh/scrollback",
         "switch theme" => "ganti tema",

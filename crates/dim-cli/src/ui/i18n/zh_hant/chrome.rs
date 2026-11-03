@@ -274,7 +274,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "捲動到頂端",
         "scroll to the bottom" => "捲動到底端",
         "pick an earlier message to edit or quote" => "選擇較早的訊息來編輯或引用",
-        "cycle tool details: collapsed, summary, expanded" => "切換工具詳情：收合、摘要、展開",
+        "cycle tool details and compaction summaries" => "循環切換工具詳情與壓縮摘要",
         "switch between fullscreen and scrollback" => "在全螢幕與回捲模式間切換",
         "switch theme" => "切換主題",
         "switch language" => "切換語言",
