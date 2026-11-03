@@ -56,7 +56,7 @@ provides to place it; the scope it is registered for decides.
 
 ```ts
 import { definePlugin } from '@arcships/rutis'
-import type { Services } from 'dimcode/plugin'
+import type { BranchEvent, Services } from 'dimcode/plugin'
 
 // A Session part: one copy per Session. It closes over the row's config.
 const greeter = (greeting: string) => definePlugin({
@@ -71,13 +71,38 @@ const greeter = (greeting: string) => definePlugin({
 // A branch part: one copy per branch, providing a name in its branch.
 const counter = definePlugin({
   name: 'ExampleCounter',
-  inject: ['dispatcher'],
+  inject: ['dispatcher', 'timeline'],
   provides: { exampleCounter: { get: 'sync' } },
   async apply(ctx) {
+    const dispatcher = ctx.use<Services['dispatcher']>('dispatcher')
+    const timeline = ctx.use<Services['timeline']>('timeline')
     let count = 0
-    await ctx.use<Services['dispatcher']>('dispatcher').consume('example-counter', ['input/message'], delivery => {
-      count += 'live' in delivery ? 1 : delivery.replay.filter(event => event.name === 'message').length
+    const fold = (event: BranchEvent) => {
+      if (event.type === 'input' && event.name === 'message') count++
+    }
+    // Subscribe first, hold what arrives while the fold reads, and release
+    // only the facts above the read's cutoff.
+    let covered: bigint | undefined
+    const held: BranchEvent[] = []
+    await dispatcher.listen('example-counter', ['input/message'], event => {
+      if (covered === undefined) held.push(event)
+      else fold(event)
     })
+    let from: bigint | undefined
+    for (;;) {
+      const page = await timeline.queryWithTail({
+        scope: 'branch', ...(from === undefined ? {} : { from_sequence: from }),
+        direction: 'ascending', kinds: ['input/message'], limit: 256n, offset: 0n,
+      })
+      page.events.forEach(fold)
+      const last = page.events.at(-1)
+      if (last === undefined || page.events.length < 256) {
+        covered = BigInt(page.through)
+        break
+      }
+      from = BigInt(last.sequence) + 1n
+    }
+    held.filter(event => BigInt(event.sequence) > covered!).forEach(fold)
     ctx.provide('exampleCounter', { get: () => ({ count }) })
   },
 })
@@ -667,7 +692,7 @@ parts.
 
 | Service | Contract |
 | --- | --- |
-| `dispatcher` | `consume(name, keys, handler)` registers an ordered consumer on the calling part's context: the handler receives `{ replay }`, the branch's own committed history through a fixed cutoff, then `{ live }` for each matching event after it, and the call resolves once the replay is handled. `listen(name, keys, handler)` registers for live events only. A handler's throw/rejection follows the native branch failure path. `committed/local/history` read committed history. `notify/sequence/changed` expose native dispatch progress and wakeups, not an ordered event subscription. |
+| `dispatcher` | `listen(name, keys, handler)` registers a live consumer on the calling part's context: the handler receives each committed event that matches the keys, in sequence order, and none twice. It delivers live facts only; a part that rebuilds reads its own history through `timeline.queryWithTail` and skips what the read covered (§[Ordered branch consumption](#ordered-branch-consumption)). A handler's throw/rejection follows the native branch failure path. `committed/local/history` read committed history. `notify/sequence/changed` expose native dispatch progress and wakeups, not an ordered event subscription. |
 | `treeCommands` | Session directory `list/info`, validated `input` by branch id and `create`. These are the Rust data methods, not the process `sessions` request envelopes. |
 | `branchLifecycle` | Background work waits for `activated()` and releases its resources when `closing()` resolves. Never wait for activation inside a Dispatcher callback. |
 | `timelineIdentity` | `get()` returns the original Session and branch ids. |
@@ -684,19 +709,37 @@ const provides = { exampleCounter: { get: 'sync' } } as const
 export const counter = definePlugin({
   name: 'ExampleCounter',
   provides,
-  inject: ['dispatcher'],
+  inject: ['dispatcher', 'timeline'],
   async apply(ctx) {
     const dispatcher = ctx.use<Services['dispatcher']>('dispatcher')
+    const timeline = ctx.use<Services['timeline']>('timeline')
     let count = 0
     let through = 0n
     const fold = (event: BranchEvent) => {
       if (event.type === 'input' && event.name === 'message') count++
-      through = BigInt(event.sequence)
     }
-    await dispatcher.consume('example-counter', ['input/message'], delivery => {
-      if ('live' in delivery) fold(delivery.live)
-      else for (const event of delivery.replay) fold(event)
+    let covered: bigint | undefined
+    const held: BranchEvent[] = []
+    await dispatcher.listen('example-counter', ['input/message'], event => {
+      if (covered === undefined) held.push(event)
+      else fold(event)
     })
+    let from: bigint | undefined
+    for (;;) {
+      const page = await timeline.queryWithTail({
+        scope: 'branch', ...(from === undefined ? {} : { from_sequence: from }),
+        direction: 'ascending', kinds: ['input/message'], limit: 256n, offset: 0n,
+      })
+      page.events.forEach(fold)
+      const last = page.events.at(-1)
+      if (last === undefined || page.events.length < 256) {
+        covered = BigInt(page.through)
+        through = covered
+        break
+      }
+      from = BigInt(last.sequence) + 1n
+    }
+    held.filter(event => BigInt(event.sequence) > covered!).forEach(fold)
     ctx.provide('exampleCounter', { get: () => ({ count, through }) })
   },
 })
@@ -705,16 +748,19 @@ export const counter = definePlugin({
 Its plugin registers it for `branch` and lists `"exampleCounter": "branch"` in its row's
 `instanceNames` ([One row per plugin](#one-row-per-plugin)).
 
-`consume` subscribes, fixes the committed cutoff and hands the handler the replay: this branch's
-own events through the cutoff as `local` reads them, without the ancestor prefix and not filtered
-by the keys, since a rebuild may need facts it does not consume live. Live events after the cutoff
-follow through the same handler in sequence order; none is delivered twice. Live events wait until
-the replay call returns, so do what the replay leaves to do, such as ending the operations a
-previous generation left open, in that call. A rebuild repeats no external side effect. Publish a
-derived service after `consume` resolves. This example's state belongs to the branch part and is
-rebuilt on each generation.
+The part subscribes first and holds the events that match the keys, then reads this branch's facts
+through its published head with the facts written and not yet published, a page at a time, and
+folds them itself. The reply's `through` is the cutoff of that read, and it is the last page's
+cutoff when the read pages; an earlier cutoff would re-read what lies between the two. The part
+then releases the held facts above the cutoff, and each later matching fact reaches the handler
+directly; none is folded twice. Live facts wait until the fold returns, so do what the rebuild
+leaves to do, such as ending the operations a previous generation left open, before releasing
+them. A rebuild repeats no external side effect. Publish a derived service after the fold. This
+example's state belongs to the branch part and is rebuilt on each generation.
 
-The hand-written form stays valid: subscribe with `listen` before sampling `committed()`, rebuild
+The kind list of the read is the kinds the rebuild folds, which are not always the keys the part
+consumes: a rebuild may fold the terminals of the operations its part issues. The hand-written
+form also holds without the query: subscribe with `listen` before sampling `committed()`, rebuild
 from `local` through that fixed cutoff while the handler waits, and skip live events at or below
 it. The [real Node part](../runtime/fixtures/branch-part.ts) is written that way.
 
@@ -761,7 +807,7 @@ so ask them through their commands, such as input through `treeCommands.input`, 
 appending their events. The branch's Timeline is closed by the branch itself, so `timeline` has no
 `close`.
 
-Extension events behave like any other branch event. `dispatcher.consume` with a key such as
+Extension events behave like any other branch event. `dispatcher.listen` with a key such as
 `myplugin/*` delivers them in order, `local` and `history` return them, they are persisted and
 restored with the branch, and a restored generation rebuilds from them. They never reach the
 model's context; write an adopted input or return a tool result when the model needs content
@@ -770,7 +816,7 @@ feeds do not deliver them. History keeps them after your plugin is uninstalled.
 
 ```ts
 import { definePlugin } from '@arcships/rutis'
-import type { Services } from 'dimcode/plugin'
+import type { BranchEvent, Services } from 'dimcode/plugin'
 
 export const checkpoints = definePlugin({
   name: 'ExampleCheckpoints',
@@ -781,15 +827,37 @@ export const checkpoints = definePlugin({
     const timeline = ctx.use<Services['timeline']>('timeline')
     // Rebuild from your own events in history; act only on live events.
     let steps = 0
-    await dispatcher.consume('example-checkpoints', ['myplugin/*', 'turn/end'], async delivery => {
-      if ('replay' in delivery) {
-        for (const event of delivery.replay) if (event.type === 'myplugin') steps++
-      } else if (delivery.live.type === 'myplugin') {
-        steps++
+    const fold = (event: BranchEvent) => {
+      if (event.type === 'myplugin') steps++
+    }
+    const release = async (event: BranchEvent) => {
+      if (event.type === 'myplugin') {
+        fold(event)
       } else {
         await timeline.append({ type: 'myplugin', name: 'checkpoint', data: { step: steps + 1 } })
       }
+    }
+    let covered: bigint | undefined
+    const held: BranchEvent[] = []
+    await dispatcher.listen('example-checkpoints', ['myplugin/*', 'turn/end'], async event => {
+      if (covered === undefined) held.push(event)
+      else await release(event)
     })
+    let from: bigint | undefined
+    for (;;) {
+      const page = await timeline.queryWithTail({
+        scope: 'branch', ...(from === undefined ? {} : { from_sequence: from }),
+        direction: 'ascending', kinds: ['myplugin/*'], limit: 256n, offset: 0n,
+      })
+      page.events.forEach(fold)
+      const last = page.events.at(-1)
+      if (last === undefined || page.events.length < 256) {
+        covered = BigInt(page.through)
+        break
+      }
+      from = BigInt(last.sequence) + 1n
+    }
+    for (const event of held) if (BigInt(event.sequence) > covered) await release(event)
   },
 })
 ```

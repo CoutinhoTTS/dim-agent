@@ -46,10 +46,16 @@ export const part = definePlugin({
         })
       }
     }
-    await dispatcher.consume('extension-events-fixture', ['turn/end', 'fixture/*'], async delivery => {
-      if ('live' in delivery) return step(delivery.live, true)
-      for (const event of delivery.replay) await step(event, false)
+    let cutoff = 0n
+    let rebuilt!: () => void
+    const ready = new Promise<void>(resolve => { rebuilt = resolve })
+    await dispatcher.listen('extension-events-fixture', ['turn/end', 'fixture/*'], async event => {
+      await ready
+      if (BigInt(event.sequence) > cutoff) await step(event, true)
     })
+    cutoff = BigInt(await dispatcher.committed())
+    if (cutoff > 0n) for (const event of await dispatcher.local(0, cutoff)) await step(event, false)
+    rebuilt()
   },
 })
 
