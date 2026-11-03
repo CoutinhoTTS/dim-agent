@@ -260,6 +260,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Connected {provider}" => "{provider} conectado",
         "Opened {url}" => "Abierto {url}",
         "Tool details not saved: {error}" => "Detalles no guardados: {error}",
+        "Thinking details not saved: {error}" => "Detalles de razonamiento no guardados: {error}",
         "/{name} needs a session — send a message first" => {
             "/{name} requiere sesión: envía un mensaje primero"
         }
@@ -335,8 +336,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "ir al principio",
         "scroll to the bottom" => "ir al final",
         "pick an earlier message to edit or quote" => "elegir mensaje anterior para editar o citar",
-        "collapse or expand tool details, thoughts and compaction summaries" => {
-            "plegar/desplegar detalles de herramientas, reflexiones y resúmenes de compresión"
+        "collapse or expand tool details and compaction summaries" => {
+            "plegar/desplegar detalles de herramientas y resúmenes de compresión"
         }
         "switch between fullscreen and scrollback" => "alternar pantalla completa y desplazamiento",
         "switch theme" => "cambiar tema",
@@ -380,6 +381,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "fullscreen" => "pantalla completa",
         "scrollback" => "desplazamiento",
         "Tool details" => "Detalles de herramientas",
+        "Thinking details" => "Detalles de razonamiento",
         "expanded" => "expandido",
         "collapsed" => "contraído",
         "Mouse (fullscreen)" => "Ratón (pantalla completa)",
@@ -542,8 +544,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "◎ goal active" => "◎ objetivo activo",
         "◎ goal paused" => "◎ objetivo en pausa",
-        "Kept verbatim" => "Conservado tal cual",
-        "Tool effects" => "Acciones de las herramientas",
         "insufficient space: {parts}" => "espacio insuficiente: {parts}",
         "system prompt" => "indicación del sistema",
         "tools" => "herramientas",

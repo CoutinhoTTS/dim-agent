@@ -18,6 +18,7 @@ TIMELINE_ACCEPTANCE_ROOT=/absolute/test-directory \
 | `rounds [BRANCHES [PER_SECOND [CHAINS]]]` | BRANCHES streaming Sessions (default 64) writing PER_SECOND deltas each (a positive rate, default 200) and CHAINS Sessions (default 0) whose writes each wait for the previous one's publication: write rounds, WAL bytes/syncs, delta publication latency, and each chain step's latency and throughput. Arguments are positional, so CHAINS needs the two before it: `rounds 11 30`, `rounds 64 200 1`, `rounds 0 200 64` |
 | `crashes` | Process termination at transaction/publication barriers and continuity after recovery |
 | `powerloss` | Restore only successfully synced main/WAL images and verify recovery continuity |
+| `read-load [STREAMS [PER_SECOND [EVENTS]]]` | STREAMS streaming Sessions (default 8) writing PER_SECOND deltas each (default 100) while two readers read a Session of EVENTS 2 KiB events (default 12000) and two chains publish dependent writes: read and publication latency over an idle window, during a fork of the large Session and during a delete of the fork |
 
 `rounds` reports `walBytesPerEvent` over all output deltas and chain writes, and
 `checkpointSyncs` counts successful main-database syncs during the measured WAL

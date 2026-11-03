@@ -4,11 +4,14 @@ use std::ops::RangeInclusive;
 
 type DeferredPublication = (Vec<StoredEvent>, PublishCallback, Result<()>);
 
-/// A memory store that counts context reads, records the range of every
+/// A memory store that counts whole-branch reads, records the range of every
 /// event read and can fail, pause or defer chosen calls.
 #[derive(Default)]
 pub(super) struct CountContextReads {
     memory: MemoryTimelineStore,
+    /// Reads that asked for the whole branch: a `read` or `read_segments`
+    /// range with an open end, which the policy path issues to find an event's
+    /// position. The streaming path reads bounded batches and never does.
     reads: AtomicUsize,
     attempts: AtomicUsize,
     earliest_read: std::sync::atomic::AtomicU64,
@@ -23,6 +26,8 @@ pub(super) struct CountContextReads {
     /// Holds the given occurrence of a read of this branch and range:
     /// signals `entered`, then waits for `release`.
     pub(super) hold_range: std::sync::Mutex<Option<ReadOccurrence>>,
+    /// The branch and cursor of every context page read, in call order.
+    pub(super) context_pages: std::sync::Mutex<Vec<(String, u64)>>,
     fail_at: AtomicUsize,
     reject_at: AtomicUsize,
     pause_at: AtomicUsize,
@@ -159,6 +164,9 @@ impl CountContextReads {
     async fn record(&self, branch: &str, range: &RangeInclusive<u64>) -> Result<()> {
         self.earliest_read
             .fetch_min(*range.start(), Ordering::SeqCst);
+        if *range.end() == u64::MAX {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+        }
         self.ranges
             .lock()
             .unwrap()
@@ -287,6 +295,23 @@ impl TimelineStore for CountContextReads {
                 self.record(branch, range).await?;
             }
             self.memory.read_segments(session_id, segments).await
+        })
+    }
+    fn read_context_page<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        after: u64,
+        limit: usize,
+        through: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<Vec<StoredEvent>>> {
+        Box::pin(async move {
+            self.context_pages
+                .lock()
+                .unwrap()
+                .push((key.branch_id.clone(), after));
+            self.memory
+                .read_context_page(key, after, limit, through)
+                .await
         })
     }
     fn trace<'a>(
@@ -719,12 +744,18 @@ async fn each_model_step_reads_full_context_for_policy_and_streams_otherwise() {
                 .await
                 .unwrap();
             session.idle("main").await.unwrap();
-            let expected = 0;
-            assert_eq!(
-                store.reads.load(Ordering::SeqCst) - before,
-                expected,
-                "policy={policy}; the no-policy path streams batches"
-            );
+            // With a compaction policy in force every model step reads the
+            // whole branch to locate the compaction it finds; without one the
+            // context is only ever streamed in bounded batches.
+            let reads = store.reads.load(Ordering::SeqCst) - before;
+            if policy {
+                assert!(reads >= 1, "policy=true; a model step read no full context");
+            } else {
+                assert_eq!(
+                    reads, 0,
+                    "policy=false; the streaming path read the full context"
+                );
+            }
         }
         let history = session.history("main", None).await.unwrap();
         assert_eq!(
@@ -1540,4 +1571,260 @@ async fn a_steer_during_the_context_read_ends_the_request_before_it_is_handed_ov
         1
     );
     agent.close().await.unwrap();
+}
+
+/// A boundary check after a completed compaction folds only the events after
+/// its cut, and its verdict is the one the whole prefix gives. A cut whose
+/// tail cannot start the state fold (a consumed input's event) falls back to
+/// the segment start, and a cut inside an atomic batch is still refused.
+#[tokio::test]
+async fn a_cut_after_a_compaction_reads_only_its_tail_and_keeps_the_verdict() {
+    use super::checkpoint_projection::completed;
+
+    let store = Arc::new(CountContextReads::default());
+    store
+        .create_session("reads", &SessionConfig::default())
+        .await
+        .unwrap();
+    let timeline = Timeline::new(
+        Ctx::root().unwrap(),
+        TimelineKey {
+            session_id: "reads".into(),
+            branch_id: "main".into(),
+        },
+        vec![],
+        store.clone(),
+    );
+    let append = |kind: EventKind| timeline.append(kind.into()).unwrap();
+    let first = append(EventKind::InputMessage(InputMessageData::text(
+        "first", None,
+    )));
+    append(EventKind::InputConsumed(InputConsumedData {
+        input_id: first.id.clone(),
+    }));
+    append(EventKind::TurnStart(TurnStartData {
+        turn_id: "turn-1".into(),
+    }));
+    append(EventKind::ModelStart(ModelStartData {
+        turn_id: "turn-1".into(),
+        request_id: "request-1".into(),
+    }));
+    let early_text = append(EventKind::Text(TextData {
+        turn_id: "turn-1".into(),
+        request_id: "request-1".into(),
+        delta: "hello".into(),
+    }));
+    append(EventKind::ModelOutputEnd(ModelOutputEndData {
+        turn_id: "turn-1".into(),
+        request_id: "request-1".into(),
+        outcome: ModelOutputOutcome::Completed {
+            finish_reason: FinishReason::EndTurn,
+        },
+    }));
+    append(EventKind::TurnEnd(TurnEndData {
+        turn_id: "turn-1".into(),
+        outcome: TurnOutcome::Completed {
+            reason: "end_turn".into(),
+        },
+    }));
+    let second = append(EventKind::InputMessage(InputMessageData::text(
+        "second", None,
+    )));
+    let consumed = append(EventKind::InputConsumed(InputConsumedData {
+        input_id: second.id.clone(),
+    }));
+    let cut = append(EventKind::TurnStart(TurnStartData {
+        turn_id: "turn-2".into(),
+    }));
+    let compaction = append(completed(&cut.id, "short", cut.sequence, vec![]));
+    append(EventKind::ModelStart(ModelStartData {
+        turn_id: "turn-2".into(),
+        request_id: "request-2".into(),
+    }));
+    let call = append(EventKind::ToolUseStart(ToolUseStartData {
+        turn_id: "turn-2".into(),
+        request_id: "request-2".into(),
+        call_id: "call-1".into(),
+        name: "echo".into(),
+    }));
+    append(EventKind::ToolUse(ToolUseData {
+        turn_id: "turn-2".into(),
+        request_id: "request-2".into(),
+        call: ToolCall {
+            id: "call-1".into(),
+            name: "echo".into(),
+            input: JsonObject::new(),
+        },
+    }));
+    let closed = append(EventKind::ModelOutputEnd(ModelOutputEndData {
+        turn_id: "turn-2".into(),
+        request_id: "request-2".into(),
+        outcome: ModelOutputOutcome::Completed {
+            finish_reason: FinishReason::ToolUse,
+        },
+    }));
+    let result = append(EventKind::ToolResult(ToolResultData {
+        turn_id: "turn-2".into(),
+        request_id: "request-2".into(),
+        call_event_id: Some(call.id.clone()),
+        results: vec![ToolCallResult {
+            call_id: "call-1".into(),
+            result: ToolResult::text("done"),
+        }],
+    }));
+    let end = append(EventKind::TurnEnd(TurnEndData {
+        turn_id: "turn-2".into(),
+        outcome: TurnOutcome::Completed {
+            reason: "end_turn".into(),
+        },
+    }));
+
+    for at in [
+        0,
+        early_text.sequence,
+        cut.sequence,
+        compaction.sequence,
+        closed.sequence,
+        result.sequence,
+        end.sequence,
+    ] {
+        let expected = dim_agent_capabilities::history::validate_context_boundary(
+            &timeline.context(at).await.unwrap(),
+        );
+        let actual = dim_agent_capabilities::history::validate_context_boundary_at(&timeline, at)
+            .await
+            .unwrap();
+        assert_eq!(actual, expected, "cut {at}");
+    }
+
+    store.context_pages.lock().unwrap().clear();
+    assert_eq!(
+        dim_agent_capabilities::history::validate_context_boundary_at(&timeline, end.sequence)
+            .await
+            .unwrap(),
+        Ok(())
+    );
+    let pages = store.context_pages.lock().unwrap().clone();
+    assert_eq!(
+        pages
+            .first()
+            .map(|(branch, after)| (branch.as_str(), *after)),
+        Some(("main", cut.sequence - 1)),
+        "{pages:?}"
+    );
+    assert!(
+        pages.iter().all(|(_, after)| *after >= cut.sequence - 1),
+        "{pages:?}"
+    );
+
+    assert_eq!(
+        dim_agent_capabilities::history::validate_context_boundary_at(&timeline, consumed.sequence)
+            .await
+            .unwrap(),
+        Ok(())
+    );
+
+    // A completed compaction whose cut replaced the input a later
+    // `input/consumed` names cannot start the state fold; the check falls back
+    // to the segment start and still gives the verdict.
+    let fallback = append(completed(&consumed.id, "second", end.sequence, vec![]));
+    store.context_pages.lock().unwrap().clear();
+    assert_eq!(
+        dim_agent_capabilities::history::validate_context_boundary_at(&timeline, fallback.sequence)
+            .await
+            .unwrap(),
+        Ok(())
+    );
+    let pages = store.context_pages.lock().unwrap().clone();
+    assert_eq!(
+        pages.first().map(|(_, after)| *after),
+        Some(consumed.sequence - 1),
+        "{pages:?}"
+    );
+    assert_eq!(pages.last().map(|(_, after)| *after), Some(0), "{pages:?}");
+
+    let batch = timeline
+        .append_batch_registered(
+            vec![
+                EventKind::InputMessage(InputMessageData::text("batch", None)).into(),
+                EventKind::InputMessage(InputMessageData::text("batch", None)).into(),
+            ],
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert!(matches!(
+        dim_agent_capabilities::history::validate_context_boundary_at(&timeline, batch[0].sequence)
+            .await,
+        Err(AgentError::InvalidInput(message)) if message.contains("inside an atomic batch")
+    ));
+}
+
+/// A stored cut that names a later event, or lies beyond `through`, is ignored:
+/// the check replays the segment instead of accepting the empty state of a tail
+/// it never read.
+#[tokio::test]
+async fn a_malformed_compaction_cut_replays_the_segment_and_keeps_the_verdict() {
+    use super::checkpoint_projection::completed;
+
+    let store = Arc::new(CountContextReads::default());
+    store
+        .create_session("reads", &SessionConfig::default())
+        .await
+        .unwrap();
+    let timeline = Timeline::new(
+        Ctx::root().unwrap(),
+        TimelineKey {
+            session_id: "reads".into(),
+            branch_id: "main".into(),
+        },
+        vec![],
+        store.clone(),
+    );
+    timeline
+        .append(
+            EventKind::TurnStart(TurnStartData {
+                turn_id: "turn-1".into(),
+            })
+            .into(),
+        )
+        .unwrap();
+    let open = timeline
+        .append(
+            EventKind::ModelStart(ModelStartData {
+                turn_id: "turn-1".into(),
+                request_id: "request".into(),
+            })
+            .into(),
+        )
+        .unwrap();
+    let later = "later-turn";
+    timeline
+        .append(completed(later, "short", open.sequence, vec![]).into())
+        .unwrap();
+    let turn = timeline
+        .append(
+            EventDraft::new(EventKind::TurnStart(TurnStartData {
+                turn_id: "turn-2".into(),
+            }))
+            .with_id(later),
+        )
+        .unwrap();
+
+    for at in [open.sequence + 1, turn.sequence] {
+        let expected = dim_agent_capabilities::history::validate_context_boundary(
+            &timeline.context(at).await.unwrap(),
+        );
+        assert!(
+            expected.is_err(),
+            "the full prefix leaves the model output open at {at}"
+        );
+        assert_eq!(timeline.compaction_cut(at).await.unwrap(), None, "{at}");
+        assert_eq!(
+            dim_agent_capabilities::history::validate_context_boundary_at(&timeline, at)
+                .await
+                .unwrap(),
+            expected,
+            "cut {at}"
+        );
+    }
 }
