@@ -780,7 +780,7 @@ impl Timeline {
             )),
             (Some(event_id), None) => {
                 let mut found = None;
-                for (branch, _) in &clips {
+                for (branch, clip) in &clips {
                     let key = TimelineKey {
                         session_id: self.0.key.session_id.clone(),
                         branch_id: branch.clone(),
@@ -798,7 +798,7 @@ impl Timeline {
                         limit: std::num::NonZeroU64::new(1).expect("one is nonzero"),
                         offset: 0,
                     };
-                    let page = self.0.store.query(&key, &probe, 1, u64::MAX).await?;
+                    let page = self.0.store.query(&key, &probe, 1, *clip).await?;
                     if let Some(position) = page.positions.first() {
                         found = Some((Some(branch.clone()), position.sequence));
                         break;
