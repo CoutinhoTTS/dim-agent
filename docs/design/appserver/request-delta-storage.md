@@ -519,8 +519,8 @@ with no request walk at all. Every read that uses a request (`local`, `history`,
 - A damaged node therefore does not fail a paging read, because that read would not have loaded it. Restore and every
   read that uses requests still fail on it, and a Session with a damaged list is still refused at restore (§8).
 - The streamed projection (§10) reads its history through paging, so the events it projects carry no stored request.
-  The one request an estimate compares against comes from `policy_facts`, whose rows include the `model/call` of the
-  last `model/usage`, not from the projected events.
+  The one request an estimate compares against is the one the newest `model/usage` measured: it comes from the
+  `model/call` the query returns for that usage's `request_id`, not from the projected events.
 
 ## 8. Validation and damaged rows
 

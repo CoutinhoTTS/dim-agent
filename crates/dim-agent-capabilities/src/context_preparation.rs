@@ -1,15 +1,16 @@
 use crate::{
-    context_policy::{ContextPolicy, PolicyContext, configured_request},
-    history::{HistoryRenderer, context_configuration},
+    context_policy::{
+        ContextPolicy, EstimateEvent, PolicyContext, configured_request, estimate_events,
+    },
+    history::{HistoryRenderer, chain_by_id, context_configuration},
     host::*,
     prompt_guide::{GuideEntries, GuideEntry, GuideScope},
     prompt_state::{PromptSnapshot, scope_is_visible},
     steer::{REPLACED_BY_STEER, SteerMark},
 };
 use dim_agent_runtime::{
-    AgentError, BranchLifecycle, BranchPhase, CAPABILITY_RELOADING, Dispatcher, Names, PolicyFacts,
-    Timeline, TimelineIdentity, TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
-    TimelineQueryScope, rebuild_facts,
+    AgentError, BranchLifecycle, BranchPhase, CAPABILITY_RELOADING, Dispatcher, Names, Timeline,
+    TimelineIdentity, rebuild_facts,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
@@ -546,19 +547,17 @@ impl ContextPreparation {
             ContextOpError::Model(HostError::failed("Context compaction is not available"))
         })?;
         let through = self.timeline.sequence();
-        let facts = self
-            .timeline
-            .policy_facts(through, "")
+        let events = estimate_events(&self.timeline)
             .await
             .map_err(ContextOpError::Read)?;
-        if let Some(request) = canary_request(&facts) {
+        if let Some(request) = canary_request(&events) {
             let model = policy
                 .resolver
                 .resolve(request.clone(), cancel.clone())
                 .await
                 .map_err(ContextOpError::Model)?;
             if let Some(input) = self
-                .incremental_usage(&facts, through, &request, model.as_ref())
+                .incremental_usage(&events, through, &request, model.as_ref())
                 .await?
             {
                 return Ok(ContextUsage {
@@ -599,15 +598,15 @@ impl ContextPreparation {
     /// the request's system and tools are unchanged since that call.
     async fn incremental_usage(
         &self,
-        facts: &PolicyFacts,
+        events: &[EstimateEvent],
         through: u64,
         request: &Arc<ModelRequest>,
         model: &dyn crate::host::ContextModel,
     ) -> std::result::Result<Option<f64>, ContextOpError> {
-        let Some(usage) = last_usage(facts) else {
+        let Some(usage) = last_usage(events) else {
             return Ok(None);
         };
-        let Some(call) = last_call(facts, &usage.request_id) else {
+        let Some(call) = last_call(events, &usage.request_id) else {
             return Ok(None);
         };
         let segments = self
@@ -615,16 +614,15 @@ impl ContextPreparation {
             .segments(through)
             .map_err(ContextOpError::Read)?;
         let rank = |branch: &str| segments.iter().position(|(name, _)| name == branch);
-        let Some(call_rank) = rank(&call.position.branch_id) else {
+        let Some(call_rank) = rank(&call.0.branch_id) else {
             return Ok(None);
         };
-        let at = (Some(call_rank), call.position.sequence);
-        if facts.events.iter().any(|fact| {
-            (rank(&fact.position.branch_id), fact.position.sequence) > at
+        let at = (Some(call_rank), call.0.sequence);
+        if events.iter().any(|(position, event)| {
+            (rank(&position.branch_id), position.sequence) > at
                 && matches!(
-                    &fact.event.kind,
+                    &event.kind,
                     dim_agent_types::EventKind::ContextConfigured(_)
-                        | dim_agent_types::EventKind::PromptChanged(_)
                         | dim_agent_types::EventKind::ContextCompaction(
                             dim_agent_types::ContextCompactionData {
                                 outcome: dim_agent_types::ContextCompactionResult::Completed { .. },
@@ -636,11 +634,8 @@ impl ContextPreparation {
             return Ok(None);
         }
         let mut tail: Vec<(String, Vec<Arc<dim_agent_types::AgentEvent>>)> = Vec::new();
-        let mut read = crate::history::FoldRead::timeline(
-            &self.timeline,
-            Some(call.event.id.clone()),
-            through,
-        );
+        let mut read =
+            crate::history::FoldRead::timeline(&self.timeline, Some(call.1.id.clone()), through);
         loop {
             let Some(page) = read.next(256).await.map_err(ContextOpError::Read)? else {
                 break;
@@ -671,33 +666,14 @@ impl ContextPreparation {
                     })
                     && !supplied.iter().any(|seen| seen.id == data.input_id)
                 {
-                    let input = if let Some(fact) = facts
+                    let input = self
+                        .timeline
+                        .query(chain_by_id(&data.input_id))
+                        .await
+                        .map_err(ContextOpError::Read)?
                         .events
-                        .iter()
-                        .find(|fact| fact.event.id == data.input_id)
-                    {
-                        Some(fact.event.clone())
-                    } else {
-                        self.timeline
-                            .query(TimelineQuery {
-                                scope: TimelineQueryScope::Branch,
-                                from_event: None,
-                                from_sequence: None,
-                                order_by: TimelineQueryOrderBy::Sequence,
-                                direction: TimelineQueryDirection::Ascending,
-                                kinds: Vec::new(),
-                                flags: Vec::new(),
-                                event_id: Some(data.input_id.clone()),
-                                predicate: None,
-                                limit: std::num::NonZeroU64::MIN,
-                                offset: 0,
-                            })
-                            .await
-                            .map_err(ContextOpError::Read)?
-                            .events
-                            .into_iter()
-                            .next()
-                    };
+                        .into_iter()
+                        .next();
                     if let Some(input) = input {
                         supplied.push(input);
                     }
@@ -792,14 +768,15 @@ impl ContextPreparation {
         };
         match &self.policy {
             Some(policy) => {
-                let facts = self
-                    .timeline
-                    .policy_facts(source.through, &source.turn_id)
+                let events = estimate_events(&self.timeline)
                     .await
-                    .map_err(|error| HostError::failed(error.to_string()))?;
+                    .map_err(|error| HostError::failed(error.to_string()))?
+                    .into_iter()
+                    .map(|(_, event)| event)
+                    .collect();
                 policy
                     .prepare(
-                        request, &source, context, history, facts, cancel, &cancelled,
+                        request, &source, context, history, events, cancel, &cancelled,
                     )
                     .await
             }
@@ -1070,31 +1047,25 @@ impl DynPlugin for ContextPreparationPlugin {
     }
 }
 
-fn last_usage(facts: &PolicyFacts) -> Option<&dim_agent_types::ModelUsageData> {
-    facts
-        .events
-        .iter()
-        .rev()
-        .find_map(|fact| match &fact.event.kind {
-            dim_agent_types::EventKind::ModelUsage(data) => Some(data),
-            _ => None,
-        })
-}
-
-fn last_call<'a>(
-    facts: &'a PolicyFacts,
-    request_id: &str,
-) -> Option<&'a dim_agent_runtime::PolicyEvent> {
-    facts.events.iter().rev().find(|fact| {
-        matches!(&fact.event.kind, dim_agent_types::EventKind::ModelCall(data) if data.request_id == request_id)
+fn last_usage(facts: &[EstimateEvent]) -> Option<&dim_agent_types::ModelUsageData> {
+    facts.iter().rev().find_map(|(_, event)| match &event.kind {
+        dim_agent_types::EventKind::ModelUsage(data) => Some(data),
+        _ => None,
     })
 }
 
-fn canary_request(facts: &PolicyFacts) -> Option<Arc<ModelRequest>> {
+fn last_call<'a>(facts: &'a [EstimateEvent], request_id: &str) -> Option<&'a EstimateEvent> {
+    facts.iter().find(|(_, event)| {
+        matches!(&event.kind, dim_agent_types::EventKind::ModelCall(data) if data.request_id == request_id)
+    })
+}
+
+fn canary_request(facts: &[EstimateEvent]) -> Option<Arc<ModelRequest>> {
     let usage = last_usage(facts)?;
-    let call = last_call(facts, &usage.request_id)?;
-    match &call.event.kind {
-        dim_agent_types::EventKind::ModelCall(data) => Some(data.request.clone()),
+    facts.iter().rev().find_map(|(_, event)| match &event.kind {
+        dim_agent_types::EventKind::ModelCall(data) if data.request_id == usage.request_id => {
+            Some(data.request.clone())
+        }
         _ => None,
-    }
+    })
 }

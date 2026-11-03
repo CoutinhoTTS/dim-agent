@@ -26,6 +26,54 @@ pub(crate) fn chain_by_id(id: &str) -> TimelineQuery {
     }
 }
 
+/// The newest page of one kind over the branch chain. `from_sequence` bounds
+/// this branch at that sequence, so a caller that knows its own bound reads no
+/// later fact while its ancestors still reach their cuts; `predicate` is the
+/// one equality the store pushes down.
+pub(crate) fn newest_chain(
+    kind: Option<&str>,
+    from_sequence: Option<u64>,
+    predicate: Option<TimelineQueryPredicate>,
+    limit: u64,
+) -> TimelineQuery {
+    TimelineQuery {
+        scope: TimelineQueryScope::Chain,
+        from_event: None,
+        from_sequence: from_sequence.filter(|sequence| *sequence > 0),
+        order_by: TimelineQueryOrderBy::Sequence,
+        direction: TimelineQueryDirection::Descending,
+        kinds: kind.map(str::to_owned).into_iter().collect(),
+        flags: Vec::new(),
+        event_id: None,
+        predicate,
+        limit: NonZeroU64::new(limit).expect("a page keeps at least one event"),
+        offset: 0,
+    }
+}
+
+/// The oldest page of `kinds` over the branch chain, from the event
+/// `from_event` names or from the chain's start.
+pub(crate) fn rising_chain(
+    from_event: Option<&str>,
+    kinds: Vec<String>,
+    offset: u64,
+    limit: u64,
+) -> TimelineQuery {
+    TimelineQuery {
+        scope: TimelineQueryScope::Chain,
+        from_event: from_event.map(str::to_owned),
+        from_sequence: None,
+        order_by: TimelineQueryOrderBy::Sequence,
+        direction: TimelineQueryDirection::Ascending,
+        kinds,
+        flags: Vec::new(),
+        event_id: None,
+        predicate: None,
+        limit: NonZeroU64::new(limit).expect("a page keeps at least one event"),
+        offset,
+    }
+}
+
 /// The chain read a projection folds: the events carrying either context flag,
 /// ascending from the event `from_event` names or from the chain's start.
 fn context_chain(from_event: Option<&str>, offset: u64, limit: u64) -> TimelineQuery {
@@ -620,9 +668,6 @@ impl HistoryRenderer {
                 "a stream needs a positive batch size".into(),
             ));
         }
-        let policy_order = timeline
-            .policy_order(through, dim_agent_runtime::PolicyTurns::Anchors)
-            .await?;
         let checkpoint = timeline
             .checkpoint(through, self.checkpoint_interpreter, self.decode_checkpoint)
             .await?;
@@ -647,7 +692,6 @@ impl HistoryRenderer {
         let mut compaction = None;
         let mut cut_in_effect: Option<(Option<usize>, u64)> = None;
         let mut compaction_cut: Option<dim_agent_types::TimelinePosition> = None;
-        let mut cuts: Vec<(String, dim_agent_types::TimelinePosition)> = Vec::new();
         let mut read = FoldRead::timeline(timeline, begin, through);
         loop {
             let Some(page) = read.next(batch).await? else {
@@ -700,10 +744,7 @@ impl HistoryRenderer {
                     ));
                 }
                 cut_in_effect = Some(at);
-                compaction_cut = Some(cut.clone());
-                if !cuts.iter().any(|(id, _)| id == retain_from) {
-                    cuts.push((retain_from.clone(), cut.clone()));
-                }
+                compaction_cut = Some(cut);
                 let kept = history
                     .iter()
                     .position(|entry| {
@@ -718,20 +759,6 @@ impl HistoryRenderer {
             }
         }
         let state = state.unwrap_or_default();
-        let mut order = policy_order.events;
-        for (id, position) in cuts {
-            if !order.iter().any(|event| event.id == id) {
-                order.push(dim_agent_runtime::PolicyOrderEvent {
-                    id,
-                    branch_id: position.branch_id,
-                    sequence: position.sequence,
-                    turn_start: false,
-                    compaction_start: None,
-                    boundary: false,
-                });
-            }
-        }
-        order.sort_by_key(|event| (rank(&event.branch_id), event.sequence));
         Ok(StreamedContext {
             history,
             configuration: state.configuration,
@@ -741,7 +768,6 @@ impl HistoryRenderer {
                 .into_iter()
                 .map(|(branch, _)| branch)
                 .collect(),
-            order,
             compaction,
             branches: segments.iter().map(|(branch, _)| branch.clone()).collect(),
             compaction_cut,
@@ -756,9 +782,6 @@ pub struct StreamedContext {
     pub configuration: Option<ContextConfiguredData>,
     pub prompt: Option<PromptReference>,
     pub ancestry: Vec<String>,
-    /// The policy order, extended with each completed compaction's cut so a
-    /// cut id resolves to its position.
-    pub order: Vec<dim_agent_runtime::PolicyOrderEvent>,
     pub compaction: Option<Arc<AgentEvent>>,
     /// Root first, the segments the stream read.
     pub branches: Vec<String>,

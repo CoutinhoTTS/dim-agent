@@ -7,7 +7,7 @@ use crate::{
 };
 use dim_agent_runtime::{
     AgentError, CAPABILITY_RELOADING, Dispatcher, LoopPhase, LoopSnapshot, LoopState, Names,
-    PolicyFacts, Result, StateCell, Timeline, TimelineIdentity, rebuild_facts,
+    Result, StateCell, Timeline, TimelineIdentity, rebuild_facts,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
@@ -361,13 +361,17 @@ impl AgentLoop {
         ) else {
             return failed("Context is not configured; adopt a model first".into());
         };
-        let facts = PolicyFacts::from_context(&context, through);
+        let events: Vec<Arc<AgentEvent>> = crate::context_policy::estimate_events_in(&context)
+            .into_iter()
+            .map(|(_, event)| event)
+            .collect();
         let view = policy
             .view(
                 request,
                 crate::context_policy::PolicyContext::from_context(context),
                 history,
-                facts,
+                through,
+                events,
                 Vec::new(),
             )
             .await
