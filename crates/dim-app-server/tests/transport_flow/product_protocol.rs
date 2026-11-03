@@ -1,5 +1,6 @@
 use super::*;
 use dim_agent_capabilities::history::read_context_in;
+use dim_agent_runtime::testing::chain_events;
 use rutis::host::CtxHost;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -825,8 +826,7 @@ async fn reconnect_locates_a_published_submission_without_resubmitting() {
             .await;
         let admitted = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if let Some(event) = session
-                    .history("main", None)
+                if let Some(event) = chain_events(&session, "main", ..)
                     .await
                     .unwrap()
                     .into_iter()
@@ -862,8 +862,7 @@ async fn reconnect_locates_a_published_submission_without_resubmitting() {
             .await;
         assert_eq!(absent["result"], json!({"status":"unknown"}));
         let inputs = || async {
-            session
-                .history("main", None)
+            chain_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()
@@ -1384,7 +1383,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
                         "<dim-state source=\"dim/skills/list\" cleared=\"true\"></dim-state>".into()
                     }
                 };
-                let events = session.history("main", None).await.unwrap();
+                let events = chain_events(session, "main", ..).await.unwrap();
                 let delivered = events.iter().rev().find_map(|event| match &event.kind {
                     EventKind::InputMessage(data) => data.blocks.iter().find_map(|block| {
                         let dim_agent_types::InputBlock::Raw { text, .. } = block;
@@ -3176,7 +3175,7 @@ async fn mcp_app_methods_are_session_built_ins_that_json_rpc_serves() {
         "no endpoint in a reply"
     );
 
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert!(
         events.iter().all(|event| !matches!(
             event.kind,

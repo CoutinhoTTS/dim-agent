@@ -1,8 +1,8 @@
 use crate::prompt_state::PromptSnapshot;
 use dim_agent_runtime::{
-    AgentError, ContextHistory, Session, Timeline, TimelineQuery,
-    TimelineQueryDirection, TimelineQueryFlag, TimelineQueryOrderBy, TimelineQueryPredicate,
-    TimelineQueryReply, TimelineQueryScope,
+    AgentError, ContextHistory, Session, Timeline, TimelineQuery, TimelineQueryDirection,
+    TimelineQueryFlag, TimelineQueryOrderBy, TimelineQueryPredicate, TimelineQueryReply,
+    TimelineQueryScope,
 };
 use dim_agent_types::*;
 use serde::{Deserialize, Serialize};

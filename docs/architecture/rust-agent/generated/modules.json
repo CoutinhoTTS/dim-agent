@@ -1305,9 +1305,7 @@
       "crate": "dim_agent_runtime",
       "parent": "dim_agent_runtime",
       "file": "crates/dim-agent-runtime/src/branch.rs",
-      "unexpandedMacros": [
-        "format"
-      ]
+      "unexpandedMacros": []
     },
     {
       "id": "dim_agent_runtime::config",
@@ -1465,6 +1463,7 @@
       "unexpandedMacros": [
         "format",
         "json",
+        "matches",
         "tracing::error",
         "vec"
       ]
@@ -14667,13 +14666,6 @@
     },
     {
       "from": "dim_agent_runtime::agent",
-      "to": "dim_agent_runtime::timeline_store",
-      "references": [
-        "path TimelineKey"
-      ]
-    },
-    {
-      "from": "dim_agent_runtime::agent",
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
@@ -15411,6 +15403,7 @@
       "to": "dim_agent_runtime::agent",
       "references": [
         "path Agent",
+        "path Session",
         "path agent"
       ]
     },
@@ -15435,6 +15428,20 @@
     },
     {
       "from": "dim_agent_runtime::testing",
+      "to": "dim_agent_runtime::branch",
+      "references": [
+        "path branch"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::testing",
+      "to": "dim_agent_runtime::core::timeline",
+      "references": [
+        "path Timeline"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::testing",
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError::Build",
@@ -15442,6 +15449,40 @@
         "path AgentError::from",
         "path Result",
         "path error"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::testing",
+      "to": "dim_agent_runtime::scope",
+      "references": [
+        "path scope"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::testing",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQuery",
+        "path TimelineQueryDirection::Ascending",
+        "path TimelineQueryOrderBy::Sequence",
+        "path TimelineQueryReply",
+        "path TimelineQueryScope",
+        "path TimelineQueryScope::Branch",
+        "path TimelineQueryScope::Chain"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::testing",
+      "to": "dim_agent_types::checkpoint",
+      "references": [
+        "path dim_agent_types::TimelinePosition"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::testing",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path dim_agent_types::AgentEvent"
       ]
     },
     {
@@ -16768,6 +16809,7 @@
         "path dim_agent_runtime::TimelineQueryDirection::Ascending",
         "path dim_agent_runtime::TimelineQueryOrderBy::Sequence",
         "path dim_agent_runtime::TimelineQueryScope::Branch",
+        "path dim_agent_runtime::TimelineQueryScope::Chain",
         "use dim_agent_runtime::TimelineQuery",
         "use dim_agent_runtime::TimelineQueryDirection",
         "use dim_agent_runtime::TimelineQueryOrderBy",
@@ -17181,6 +17223,14 @@
     },
     {
       "from": "dim_app_server::agents::sessions::tests",
+      "to": "dim_agent_runtime::testing",
+      "references": [
+        "path branch_events",
+        "use dim_agent_runtime::testing::branch_events"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions::tests",
       "to": "dim_agent_types::events",
       "references": [
         "path InputMode::Append",
@@ -17399,6 +17449,14 @@
       "references": [
         "path Feature::new",
         "use dim_agent_runtime::Feature"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests::slots",
+      "to": "dim_agent_runtime::testing",
+      "references": [
+        "path chain_events",
+        "use dim_agent_runtime::testing::chain_events"
       ]
     },
     {
@@ -38860,20 +38918,20 @@
       "path": "F::Output"
     },
     {
-      "module": "dim_agent_runtime::branch",
+      "module": "dim_agent_runtime::config",
+      "path": "P::default"
+    },
+    {
+      "module": "dim_agent_runtime::testing",
       "path": "Bound::Excluded"
     },
     {
-      "module": "dim_agent_runtime::branch",
+      "module": "dim_agent_runtime::testing",
       "path": "Bound::Included"
     },
     {
-      "module": "dim_agent_runtime::branch",
+      "module": "dim_agent_runtime::testing",
       "path": "Bound::Unbounded"
-    },
-    {
-      "module": "dim_agent_runtime::config",
-      "path": "P::default"
     },
     {
       "module": "dim_agent_types",

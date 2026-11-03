@@ -211,16 +211,6 @@ export interface Dispatcher {
    * rebuild's read reaches, and the position live delivery continues from.
    */
   committed(): Promise<number | bigint>
-  /**
-   * This branch's own committed events in `start..=through`.
-   * @throws {AgentErrorThrown}
-   */
-  local(start: number | bigint, through: number | bigint): Promise<import('./plugin.js').BranchEvent[]>
-  /**
-   * The branch's committed events through `through`, ancestor prefix included.
-   * @throws {AgentErrorThrown}
-   */
-  history(through: number | bigint): Promise<import('./plugin.js').BranchEvent[]>
   notify(): Promise<void>
   sequence(): Promise<number | bigint>
   changed(): Promise<void>
@@ -348,8 +338,6 @@ export interface Timeline {
   committed(): Promise<number | bigint>
   /** Pending events participate in idle/close accounting before publication. */
   hasPending(): Promise<boolean>
-  /** @throws {AgentErrorThrown} */
-  history(through?: number | bigint | null): Promise<import('./plugin.js').BranchEvent[]>
   /**
    * One bounded read over this branch or over its chain ([ADR 019](../../../../docs/adr/019-event-query.md),
    * [plugin contract §5.4](../../../../docs/design/plugin-contract.md#54-the-event-query)):

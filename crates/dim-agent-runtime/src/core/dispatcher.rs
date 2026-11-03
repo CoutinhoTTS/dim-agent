@@ -252,24 +252,6 @@ impl Dispatcher {
     pub fn committed(&self) -> u64 {
         self.timeline.committed()
     }
-    // The exported reads spell out `std::result::Result`: rutis' export
-    // generator resolves an alias's item type where the alias is defined
-    // (arcships/rutis#463).
-    /// This branch's own committed events in `start..=through`.
-    pub async fn local(
-        &self,
-        start: u64,
-        through: u64,
-    ) -> std::result::Result<Vec<Arc<AgentEvent>>, AgentError> {
-        self.timeline.local(start..=through).await
-    }
-    /// The branch's committed events through `through`, ancestor prefix included.
-    pub async fn history(
-        &self,
-        through: u64,
-    ) -> std::result::Result<Vec<Arc<AgentEvent>>, AgentError> {
-        self.timeline.history(Some(through)).await
-    }
     pub fn notify(&self) {
         self.state.send_modify(|_| {});
     }

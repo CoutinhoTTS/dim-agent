@@ -6,8 +6,8 @@ use crate::{
     host::*,
 };
 use dim_agent_runtime::{
-    ContextHistory, Timeline, TimelineQuery, TimelineQueryDirection,
-    TimelineQueryOrderBy, TimelineQueryPredicate, TimelineQueryScope,
+    ContextHistory, Timeline, TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
+    TimelineQueryPredicate, TimelineQueryScope,
 };
 use dim_agent_types::*;
 use serde_json::json;

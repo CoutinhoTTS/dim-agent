@@ -339,7 +339,7 @@ release 构建，同一台 Apple M4，一次性存储放在隔离的 home 下，
 | ADR 002 D2（不设接线模块） | 不新增模块或插件 |
 | ADR 002 D3（依赖跟随作用域） | 不新增依赖 |
 | ADR 002 D4（配置） | 无 |
-| ADR 002 D5（合同语言中立） | 合同不变；经 `Dispatcher::local` 读取的 TypeScript 部件也同样由副本服务 |
+| ADR 002 D5（合同语言中立） | 合同不变；经 Timeline 查询读取的 TypeScript 部件也同样由副本服务 |
 
 ## 11. 向机制所有者提出的需求
 

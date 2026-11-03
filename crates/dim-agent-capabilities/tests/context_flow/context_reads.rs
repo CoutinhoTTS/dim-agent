@@ -1,4 +1,6 @@
 use super::*;
+use dim_agent_runtime::TimelineQueryScope;
+use dim_agent_runtime::testing::{chain_events, timeline_events};
 use rutis::host::CtxHost;
 use std::ops::RangeInclusive;
 
@@ -175,18 +177,8 @@ impl ModelDriver for CancelThenEcho {
     }
 }
 impl CountContextReads {
-    /// Records a read of `range` of `branch`, then fails or holds it when it
-    /// is the occurrence set for that.
-    async fn record(&self, branch: &str, range: &RangeInclusive<u64>) -> Result<()> {
-        if *range.end() == u64::MAX {
-            self.reads.fetch_add(1, Ordering::SeqCst);
-        }
-        self.ranges
-            .lock()
-            .unwrap()
-            .push((branch.to_owned(), range.clone()));
-        let _ = TASK_READS
-            .try_with(|reads| reads.borrow_mut().push((branch.to_owned(), range.clone())));
+    /// Fails or holds the occurrence set for a read of `range` of `branch`.
+    async fn gate(&self, branch: &str, range: &RangeInclusive<u64>) -> Result<()> {
         let due = |slot: &std::sync::Mutex<Option<ReadOccurrence>>| {
             let mut slot = slot.lock().unwrap();
             let Some((read, range_set, occurrence)) = slot.as_mut() else {
@@ -210,6 +202,20 @@ impl CountContextReads {
             self.release.notified().await;
         }
         Ok(())
+    }
+    /// Records a read of `range` of `branch`, then fails or holds it when it
+    /// is the occurrence set for that.
+    async fn record(&self, branch: &str, range: &RangeInclusive<u64>) -> Result<()> {
+        if *range.end() == u64::MAX {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+        }
+        self.ranges
+            .lock()
+            .unwrap()
+            .push((branch.to_owned(), range.clone()));
+        let _ = TASK_READS
+            .try_with(|reads| reads.borrow_mut().push((branch.to_owned(), range.clone())));
+        self.gate(branch, range).await
     }
 }
 impl TimelineStore for CountContextReads {
@@ -393,6 +399,7 @@ impl TimelineStore for CountContextReads {
                 .unwrap()
                 .push((key.branch_id.clone(), from..=through));
             self.query_kinds.lock().unwrap().push(query.kinds.clone());
+            self.gate(&key.branch_id, &(from..=through)).await?;
             let page = self.memory.query(key, query, from, through).await?;
             if query.flags.len() == 2 {
                 self.context_pages.lock().unwrap().push(ContextPageRead {
@@ -500,10 +507,13 @@ async fn recovery_reads_a_fixed_committed_prefix_before_publication() {
             .unwrap();
         let through = timeline.committed();
         timeline.append(input()).unwrap();
-        let recovered = tokio::time::timeout(Duration::from_secs(1), timeline.local(..=through))
-            .await
-            .unwrap()
-            .unwrap();
+        let recovered = tokio::time::timeout(
+            Duration::from_secs(1),
+            timeline_events(&timeline, TimelineQueryScope::Branch, ..=through),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(
             recovered
                 .iter()
@@ -514,7 +524,7 @@ async fn recovery_reads_a_fixed_committed_prefix_before_publication() {
         );
         assert_eq!(timeline.sequence(), 0, "recovery must not need publication");
         assert!(matches!(
-            timeline.local(..=2).await,
+            timeline.batch_end(2).await,
             Err(AgentError::InvalidInput(_))
         ));
         let (_, publish, result) = publications.recv().await.unwrap();
@@ -615,7 +625,7 @@ async fn model_reload_recovers_the_old_terminal_before_its_publication() {
             }
             tokio::task::yield_now().await;
         }
-        assert!(session.history("main", None).await.unwrap().iter().all(|event| {
+        assert!(chain_events(&session, "main", ..).await.unwrap().iter().all(|event| {
             !matches!(event.kind, EventKind::ModelOutputEnd(_))
         }), "the external history must not expose the unpublished terminal");
 
@@ -628,7 +638,7 @@ async fn model_reload_recovers_the_old_terminal_before_its_publication() {
                 result => { result.unwrap(); break; }
             }
         }
-        let first_turn = session.history("main", None).await.unwrap();
+        let first_turn = chain_events(&session, "main", ..).await.unwrap();
         assert_eq!(
             first_turn
                 .iter()
@@ -653,7 +663,7 @@ async fn model_reload_recovers_the_old_terminal_before_its_publication() {
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        assert!(session.history("main", None).await.unwrap().iter().any(|event| {
+        assert!(chain_events(&session, "main", ..).await.unwrap().iter().any(|event| {
             event.sequence > through
                 && matches!(&event.kind, EventKind::Text(data) if data.delta.contains("after reload"))
         }));
@@ -717,7 +727,7 @@ async fn stop_waits_for_an_unpublished_turn_end_seen_by_a_reloaded_loop() {
         let mut stop = tokio::spawn(async move { stopping.stop("main", "user stop".into()).await });
         let end = ends.recv().await.unwrap();
         assert_eq!(old_loop.state().phase, LoopPhase::Stopping);
-        assert!(!session.history("main", None).await.unwrap().iter()
+        assert!(!chain_events(&session, "main", ..).await.unwrap().iter()
             .any(|event| matches!(event.kind, EventKind::TurnEnd(_))));
         reload.restart().await;
         loop {
@@ -732,11 +742,11 @@ async fn stop_waits_for_an_unpublished_turn_end_seen_by_a_reloaded_loop() {
         assert!(premature.is_err(), "stop returned before turn/end {end} publication: {premature:?}");
         let returned = stop.await.unwrap().unwrap();
         assert!(returned >= end, "stop returned {returned} before turn/end {end}");
-        assert_eq!(session.history("main", None).await.unwrap().iter()
+        assert_eq!(chain_events(&session, "main", ..).await.unwrap().iter()
             .filter(|event| matches!(event.kind, EventKind::TurnEnd(_))).count(), 1);
         session.submit("after stop".into(), InputMode::Queue, "main").await.unwrap();
         session.idle("main").await.unwrap();
-        assert!(session.history("main", None).await.unwrap().iter()
+        assert!(chain_events(&session, "main", ..).await.unwrap().iter()
             .any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("after stop"))));
         agent.close().await.unwrap();
         publication_task.abort();
@@ -768,7 +778,7 @@ async fn either_context_read_failure_ends_the_turn_and_allows_the_next_input() {
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let failed = session.history("main", None).await.unwrap();
+        let failed = chain_events(&session, "main", ..).await.unwrap();
         assert!(
             !failed
                 .iter()
@@ -792,7 +802,7 @@ async fn either_context_read_failure_ends_the_turn_and_allows_the_next_input() {
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let recovered = session.history("main", None).await.unwrap();
+        let recovered = chain_events(&session, "main", ..).await.unwrap();
         assert!(
             recovered
                 .iter()
@@ -864,7 +874,7 @@ async fn each_model_step_reads_full_context_for_policy_and_streams_otherwise() {
                 );
             }
         }
-        let history = session.history("main", None).await.unwrap();
+        let history = chain_events(&session, "main", ..).await.unwrap();
         assert_eq!(
             history
                 .iter()
@@ -994,7 +1004,7 @@ async fn a_second_compaction_saves_a_snapshot_that_decodes() {
             .unwrap();
         session.idle("main").await.unwrap();
     }
-    let history = session.history("main", None).await.unwrap();
+    let history = chain_events(&session, "main", ..).await.unwrap();
     let compactions: Vec<_> = history
         .iter()
         .filter(|event| {
@@ -1121,8 +1131,7 @@ async fn stop_is_dispatched_while_either_context_read_is_waiting() {
         let mut dispatch = session.dispatch_watch("main").unwrap();
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
-                let interrupt = session
-                    .history("main", None)
+                let interrupt = chain_events(&session, "main", ..)
                     .await
                     .unwrap()
                     .iter()
@@ -1145,7 +1154,7 @@ async fn stop_is_dispatched_while_either_context_read_is_waiting() {
             .unwrap()
             .unwrap()
             .unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(
             !events
                 .iter()
@@ -1217,8 +1226,7 @@ async fn configure_context_read_failure_keeps_the_previous_state_and_allows_retr
             Err(AgentError::Storage(message)) if message.contains("injected context read failure")));
         assert!(session.failure().is_none());
         assert!(
-            !session
-                .history("main", None)
+            !chain_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()
@@ -1236,7 +1244,7 @@ async fn configure_context_read_failure_keeps_the_previous_state_and_allows_retr
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        assert!(session.history("main", None).await.unwrap().iter().any(|event|
+        assert!(chain_events(&session, "main", ..).await.unwrap().iter().any(|event|
             matches!(&event.kind, EventKind::Text(data) if data.delta.contains("after configure retry"))));
         agent.close().await.unwrap();
     }
@@ -1303,7 +1311,7 @@ async fn concurrent_system_adoptions_include_previous_unpublished_updates() {
         .expect("publication and dispatch must settle both configure calls");
         assert_eq!(alpha.unwrap(), ConfigureOutcome::Adopted);
         assert_eq!(beta.unwrap(), ConfigureOutcome::Adopted);
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let prompts: Vec<_> = events
             .iter()
             .filter_map(|event| match &event.kind {
@@ -1465,7 +1473,7 @@ async fn a_request_written_after_an_interrupt_loop_has_not_handled_does_not_run(
     store.release.notify_one();
     let prepare = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             if let Some(event) = events
                 .iter()
                 .find(|event| matches!(event.kind, EventKind::ContextPrepare(_)))
@@ -1484,7 +1492,7 @@ async fn a_request_written_after_an_interrupt_loop_has_not_handled_does_not_run(
         .unwrap()
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let interrupt = events
         .iter()
         .find(|event| matches!(event.kind, EventKind::StopInterrupt(_)))
@@ -1593,8 +1601,7 @@ async fn progress_keeps_committed_output_until_it_is_published() {
             .unwrap();
         held.notified().await;
         assert!(
-            !session
-                .history("main", None)
+            !chain_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()
@@ -1610,8 +1617,7 @@ async fn progress_keeps_committed_output_until_it_is_published() {
             .await
             .unwrap();
         assert!(
-            session
-                .history("main", None)
+            chain_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()
@@ -1660,7 +1666,7 @@ async fn a_steer_during_the_context_read_ends_the_request_before_it_is_handed_ov
         .await
         .unwrap()
         .unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let starts: Vec<_> = events
         .iter()
         .filter_map(|event| match &event.kind {

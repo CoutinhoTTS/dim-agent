@@ -17,6 +17,7 @@ use dim_agent_capabilities::{
     recall::{self, RECALL_TOOL, testing::Narrative},
 };
 use dim_agent_runtime::testing::MinimalHost;
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use serde_json::{Value, json};
@@ -127,8 +128,7 @@ async fn recall(session: &Session, branch: &str, arguments: Value) -> (String, b
 }
 
 async fn tool_results(session: &Session, branch: &str) -> Vec<ToolResult> {
-    session
-        .history(branch, None)
+    chain_events(session, branch, ..)
         .await
         .unwrap()
         .iter()
@@ -152,7 +152,7 @@ async fn wait_for_events(
     let mut seen = String::new();
     let waited = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            let events = session.history(branch, None).await.unwrap();
+            let events = chain_events(session, branch, ..).await.unwrap();
             seen = events
                 .iter()
                 .map(|event| event.kind.key().to_owned())
@@ -216,7 +216,7 @@ async fn the_turn_index_lists_turns_latest_first_and_pages_back_to_nothing_earli
                 .unwrap();
             session.idle("main").await.unwrap();
         }
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let turns: Vec<_> = events
             .iter()
             .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
@@ -229,7 +229,7 @@ async fn the_turn_index_lists_turns_latest_first_and_pages_back_to_nothing_earli
         // A date line, 20 entries and the last line.
         assert_eq!(lines.len(), 22, "{page}");
         assert!(lines[0].ends_with(" (UTC)"), "{page}");
-        let calling = last_turn(&session.history("main", None).await.unwrap());
+        let calling = last_turn(&chain_events(&session, "main", ..).await.unwrap());
         assert!(
             lines[1].contains(&format!("{calling} turn: user \"tool:{RECALL_TOOL}\""))
                 && lines[1].contains("you called recall")
@@ -298,7 +298,7 @@ async fn a_turn_is_indexed_by_its_first_user_text_not_by_the_block_that_came_fir
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let turn = events
             .iter()
             .find(|event| matches!(event.kind, EventKind::TurnStart(_)))
@@ -353,7 +353,7 @@ async fn a_turn_tells_its_input_its_replies_its_calls_with_results_and_an_interr
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let turns: Vec<_> = events
             .iter()
             .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
@@ -407,7 +407,7 @@ async fn a_turn_tells_its_input_its_replies_its_calls_with_results_and_an_interr
         .await;
         session.stop("main", "user stop".into()).await.unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let interrupted = last_turn(&events);
         let (page, error) = recall(&session, "main", json!({ "open": interrupted })).await;
         assert!(!error, "{page}");
@@ -446,7 +446,7 @@ async fn one_thing_shows_its_full_input_and_result_paged_by_characters() {
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let call = events
             .iter()
             .find_map(|event| match &event.kind {
@@ -503,7 +503,7 @@ async fn one_thing_shows_its_full_input_and_result_paged_by_characters() {
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let input = id_of_input(&events, "carry three blocks");
         let (page, error) = recall(&session, "main", json!({ "open": input })).await;
         assert!(!error, "{page}");
@@ -562,7 +562,7 @@ async fn only_the_kinds_of_the_allowlist_are_told_and_nothing_in_context_is_miss
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let narrative = Narrative::new(&events);
 
         for event in &events {
@@ -777,7 +777,7 @@ async fn a_child_branch_opens_inherited_ids_and_tells_its_fork_and_the_cut_paren
         session.idle(&child).await.unwrap();
 
         let inherited = {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             id_of_input(&events, "first parent task")
         };
         let (page, error) = recall(&session, &child, json!({ "open": inherited })).await;
@@ -893,13 +893,13 @@ async fn a_recall_call_writes_only_the_events_any_tool_call_writes() {
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let counted: std::collections::HashSet<_> =
             events.iter().map(|event| event.kind.key()).collect();
         let before = events.len();
         let (page, error) = recall(&session, "main", json!({})).await;
         assert!(!error, "{page}");
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         for event in &events[before..] {
             assert!(
                 counted.contains(event.kind.key()),
@@ -937,7 +937,7 @@ async fn the_read_only_preset_runs_recall_without_an_approval_request() {
         let (page, error) = recall(&session, "main", json!({})).await;
         assert!(!error, "{page}");
         assert!(page.contains("look back"), "{page}");
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(
             !events
                 .iter()
@@ -3090,7 +3090,7 @@ async fn recall_is_the_whole_fold(
     let before = reads.decoded();
     let (text, error) = recall(session, branch, arguments.clone()).await;
     let read = reads.decoded() - before;
-    let history = session.history(branch, None).await.unwrap();
+    let history = chain_events(session, branch, ..).await.unwrap();
     let pinned = &history[..history
         .iter()
         .rposition(|event| matches!(event.kind, EventKind::ToolResult(_)))
@@ -3121,7 +3121,7 @@ async fn recall_is_the_whole_fold(
 /// newest first, in the kinds the first query names, without the event the
 /// store wrote between two pages.
 async fn selected_ids(session: &Session, branch: &str, reads: &PageReads) -> Vec<String> {
-    let history = session.history(branch, None).await.unwrap();
+    let history = chain_events(session, branch, ..).await.unwrap();
     let pinned = &history[..history
         .iter()
         .rposition(|event| matches!(event.kind, EventKind::ToolResult(_)))
@@ -3185,7 +3185,7 @@ async fn a_long_history_is_answered_from_bounded_pages_read_backwards() {
                 .unwrap();
             session.idle("main").await.unwrap();
         }
-        let history = session.history("main", None).await.unwrap();
+        let history = chain_events(&session, "main", ..).await.unwrap();
         assert!(
             history.len() > 600,
             "the history is long: {}",
@@ -3302,7 +3302,7 @@ async fn a_child_branch_pages_through_its_inherited_prefix() {
                 .unwrap();
             session.idle(&child).await.unwrap();
         }
-        let history = session.history(&child, None).await.unwrap();
+        let history = chain_events(&session, &child, ..).await.unwrap();
 
         reads.pin_head(&session, &child);
         let (index, read) = recall_is_the_whole_fold(&session, &reads, &child, json!({})).await;
@@ -3315,7 +3315,7 @@ async fn a_child_branch_pages_through_its_inherited_prefix() {
         );
 
         let inherited = {
-            let parent = session.history("main", None).await.unwrap();
+            let parent = chain_events(&session, "main", ..).await.unwrap();
             id_of_input(&parent, "first parent task")
         };
         let (page, _) =

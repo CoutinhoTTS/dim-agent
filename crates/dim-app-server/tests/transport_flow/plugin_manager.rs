@@ -2,6 +2,7 @@
 //! the `plugin.*` methods and the loader rows they command.
 use super::session_typescript::{fixture, start, submit, when_served};
 use super::*;
+use dim_agent_runtime::testing::chain_events;
 use std::path::{Path, PathBuf};
 
 pub(super) fn home() -> PathBuf {
@@ -508,7 +509,7 @@ async fn last_tool_text(server: &RunningServer, session: &str) -> String {
 /// The text of the last tool result in `session` and whether it is an error.
 async fn last_tool_result(server: &RunningServer, session: &str) -> (String, bool) {
     let session = server.agent().unwrap().get_session(session).unwrap();
-    let history = session.history("main", None).await.unwrap();
+    let history = chain_events(&session, "main", ..).await.unwrap();
     let result = history
         .iter()
         .rev()

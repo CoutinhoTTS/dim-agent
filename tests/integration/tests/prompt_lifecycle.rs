@@ -4,7 +4,8 @@ use dim_agent_capabilities::{
     history::HistoryRenderer,
     host::*,
 };
-use dim_agent_runtime::{testing::MinimalHost, *};
+use dim_agent_runtime::testing::{branch_events, chain_events, timeline_events};
+use dim_agent_runtime::{TimelineQueryScope, testing::MinimalHost, *};
 use dim_agent_types::*;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -180,7 +181,7 @@ async fn model_adoption_preserves_enabled_tools_on_initialization_and_refresh() 
                 .await
                 .unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             let call = events
                 .iter()
                 .rev()
@@ -269,7 +270,7 @@ async fn input_guide_survives_configuration_refresh_and_revocation_without_dupli
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let call = events
             .iter()
             .rev()
@@ -476,7 +477,7 @@ async fn configuration_publication_preserves_trusted_before_changes_atomically()
                 .unwrap(),
             ConfigureOutcome::Adopted
         );
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         assert_eq!(
             events
                 .iter()
@@ -523,7 +524,7 @@ async fn configuration_publication_preserves_trusted_before_changes_atomically()
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        assert!(session.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind,
+        assert!(chain_events(&session, "main", ..).await.unwrap().iter().any(|event| matches!(&event.kind,
             EventKind::ModelCall(data) if data.configuration.as_ref().is_some_and(|reference| reference.revision == configured.revision))));
         agent.close().await.unwrap();
     }
@@ -566,8 +567,7 @@ async fn prepared_model_call_keeps_its_configuration_while_later_turn_uses_refre
             )
             .await
             .unwrap();
-        let version_one = session
-            .history("main", None)
+        let version_one = chain_events(&session, "main", ..)
             .await
             .unwrap()
             .into_iter()
@@ -634,7 +634,7 @@ async fn prepared_model_call_keeps_its_configuration_while_later_turn_uses_refre
             .unwrap();
         session.idle("main").await.unwrap();
 
-        let child_events = session.history(&child, None).await.unwrap();
+        let child_events = chain_events(&session, &child, ..).await.unwrap();
         let child_configured = child_events
             .iter()
             .find_map(|event| match &event.kind {
@@ -673,7 +673,7 @@ async fn prepared_model_call_keeps_its_configuration_while_later_turn_uses_refre
         );
         assert_eq!(first_call.prompt, version_one.prompt);
 
-        let main_events = session.history("main", None).await.unwrap();
+        let main_events = chain_events(&session, "main", ..).await.unwrap();
         let latest_configured = main_events
             .iter()
             .rev()
@@ -783,7 +783,7 @@ async fn configuration_is_atomic_failure_safe_and_inherited() {
                 .model_id,
             "one"
         );
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let changed = events
             .iter()
             .position(|event| matches!(event.kind, EventKind::PromptChanged(_)))
@@ -814,8 +814,7 @@ async fn configuration_is_atomic_failure_safe_and_inherited() {
                 .is_err()
         );
         assert_eq!(
-            session
-                .history("main", None)
+            chain_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()
@@ -837,7 +836,7 @@ async fn configuration_is_atomic_failure_safe_and_inherited() {
             )
             .await
             .unwrap();
-        let inherited = session.history(&child, None).await.unwrap();
+        let inherited = chain_events(&session, &child, ..).await.unwrap();
         assert!(inherited.iter().any(|event| matches!(&event.kind, EventKind::PromptChanged(data) if data.changes.iter().any(|change| matches!(change, PromptChange::Set { entry } if entry.version == "1")))));
         session.idle(&child).await.unwrap();
         session
@@ -1107,7 +1106,7 @@ async fn initial_configuration_loads_before_start_and_failure_rolls_back() {
         .create_session(SessionConfig::default())
         .await
         .unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert!(matches!(events[0].kind, EventKind::BranchStart(_)));
     assert!(matches!(events[1].kind, EventKind::PromptChanged(_)));
     assert!(matches!(events[2].kind, EventKind::ContextConfigured(_)));
@@ -1240,14 +1239,28 @@ impl DynPlugin for SlowOpening {
                                 let (timeline, completed) = (timeline.clone(), completed.clone());
                                 opening.register(Box::pin(async move {
                                     tokio::time::sleep(Duration::from_millis(200 * step)).await;
-                                    assert!(timeline.local(..=1001).await?.len() >= 1001);
+                                    assert!(
+                                        timeline_events(
+                                            &timeline,
+                                            TimelineQueryScope::Branch,
+                                            ..=1001
+                                        )
+                                        .await?
+                                        .len()
+                                            >= 1001
+                                    );
                                     completed.fetch_add(1, Ordering::SeqCst);
                                     Ok(())
                                 }))?;
                             }
                         } else {
                             opening.register(Box::pin(async move {
-                                assert!(timeline.local(..=1001).await?.len() >= 1001);
+                                assert!(
+                                    timeline_events(&timeline, TimelineQueryScope::Branch, ..=1001)
+                                        .await?
+                                        .len()
+                                        >= 1001
+                                );
                                 let mut dispatched = dispatcher.watch();
                                 for step in 0..7 {
                                     let event = timeline.append(
@@ -1825,7 +1838,7 @@ async fn restoring_a_session_keeps_its_adopted_system_and_model() {
         LoopPhase::Idle
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let configured: Vec<_> = events
         .iter()
         .filter_map(|event| match &event.kind {
@@ -1867,8 +1880,7 @@ async fn restoring_a_session_keeps_its_adopted_system_and_model() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let call = session
-        .history("main", None)
+    let call = chain_events(&session, "main", ..)
         .await
         .unwrap()
         .into_iter()
@@ -1925,7 +1937,7 @@ async fn restoring_a_session_keeps_its_adopted_system_and_model() {
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let configured = events
             .iter()
             .rev()
@@ -1985,7 +1997,7 @@ async fn restoring_a_never_started_session_starts_it() {
         .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(matches!(
-        session.history("main", None).await.unwrap()[0].kind,
+        chain_events(&session, "main", ..).await.unwrap()[0].kind,
         EventKind::BranchStart(BranchStartData { parent: None, .. })
     ));
     agent.close().await.unwrap();
@@ -2019,8 +2031,7 @@ async fn context_only_initial_prompt_is_inherited_and_unchanged_in_a_child() {
         .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(
-        !session
-            .history("main", None)
+        !chain_events(&session, "main", ..)
             .await
             .unwrap()
             .iter()
@@ -2041,8 +2052,7 @@ async fn context_only_initial_prompt_is_inherited_and_unchanged_in_a_child() {
         .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert!(
-        !session
-            .local(&child, ..)
+        !branch_events(&session, &child, ..)
             .await
             .unwrap()
             .iter()
@@ -2106,8 +2116,7 @@ async fn same_body_new_version_reconfigures_but_identical_update_is_unchanged() 
             .unwrap(),
         ConfigureOutcome::Adopted
     );
-    let configured = session
-        .history("main", None)
+    let configured = chain_events(&session, "main", ..)
         .await
         .unwrap()
         .into_iter()
@@ -2327,7 +2336,7 @@ async fn before_retargeting_requires_matching_capabilities_without_remerging_par
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let request = events
             .iter()
             .find_map(|event| match &event.kind {

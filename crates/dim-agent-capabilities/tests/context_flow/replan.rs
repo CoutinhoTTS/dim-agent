@@ -4,6 +4,7 @@
 //! acceptance 9).
 use super::*;
 use dim_agent_capabilities::history::summary_message;
+use dim_agent_runtime::testing::chain_events;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A strategy returning its summaries in order and recording the cut it took
@@ -165,7 +166,7 @@ async fn compact_now(session: &dim_agent_runtime::Session) -> (u64, Vec<Arc<Agen
         .unwrap();
     let events = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(session, "main", ..).await.unwrap();
             if events.iter().any(|event| {
                 matches!(&event.kind, EventKind::ContextCompaction(data)
                     if data.command == Some(command))
@@ -201,7 +202,7 @@ async fn rejected_candidates_keep_their_size_and_report_the_failed_condition() {
         .await;
         turns(&session, 2, chars).await;
         let calls_before = strategy.cuts().len();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let before = read_context_in(&session, "main", events.last().unwrap().sequence)
             .await
             .unwrap();
@@ -486,7 +487,7 @@ async fn a_recovery_compaction_is_re_planned_once() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let starts: Vec<_> = events
         .iter()
         .filter_map(|event| match &event.kind {

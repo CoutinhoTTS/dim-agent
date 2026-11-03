@@ -197,7 +197,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 
 ### 9.2 固定前缀读取
 
-已撤回（[#50](https://github.com/arcships/dim/issues/50)）：现有的 Session 门面组合即可实现，不需要改运行时。`Session::sequence(branch)` 返回已发布的 head；若它低于 `atLeast`，读取以 `future_sequence` 失败，否则用 `Session::history(branch, Some(head))` 读到该 head。两者都只读已发布的事件，head 只会前移，因此前缀是固定的（A.5）。进程调用方用 `Session::local_page` 分页读取同一前缀（A.5）。
+已撤回（[#50](https://github.com/arcships/dim/issues/50)）：现有的 Session 门面组合即可实现，不需要改运行时。`Session::sequence(branch)` 返回已发布的 head；若它低于 `atLeast`，读取以 `future_sequence` 失败，否则用 `Session::query(branch, query)` 读到该 head 及以下。两者都只读已发布的事件，head 只会前移，因此前缀是固定的（A.5）。进程调用方用 `AgentIndex::history_page` 分页读取同一前缀（A.5）。
 
 ### 9.3 由插件身份确定调用方来源
 
@@ -327,7 +327,7 @@ fork 复制源 Session 的整个 `SessionConfig`；权限预设随复制过来�
 
 ### A.5 固定前缀读取
 
-带 `atLeast` 的 `sessions.history` 把 `through` 固定为调用时的已发布 head。若该 head 低于 `atLeast`，则以 `future_sequence` 失败，否则返回该分支自己截至该 head 的事件，按 `after` 与 `limit` 分页。它由现有门面组合实现：先用 `Session::sequence(branch)` 读 head，再用 `AgentIndex::history_page` 分页读取；已装载的线经该分支的 query 分页，已结束或本进程未装载的线经 App Server 自己的页读取。需要祖先前缀的分支部分读 `Session::history(branch, Some(head))`（§9.2）。分支 Dispatcher 或 Session 广播投递的每个事件都已发布，因此只要分支存在，`atLeast = event.sequence` 就会成功。
+带 `atLeast` 的 `sessions.history` 把 `through` 固定为调用时的已发布 head。若该 head 低于 `atLeast`，则以 `future_sequence` 失败，否则返回该分支自己截至该 head 的事件，按 `after` 与 `limit` 分页。它由现有门面组合实现：先用 `Session::sequence(branch)` 读 head，再用 `AgentIndex::history_page` 分页读取；已装载的线经该分支的 query 分页，已结束或本进程未装载的线经 App Server 自己的页读取。需要祖先前缀的分支部分用同一个 query 读祖先链（§9.2）。分支 Dispatcher 或 Session 广播投递的每个事件都已发布，因此只要分支存在，`atLeast = event.sequence` 就会成功。
 
 ### A.6 错误
 

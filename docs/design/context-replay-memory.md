@@ -156,17 +156,14 @@ compaction（[agent_loop.rs:359](../../crates/dim-agent-capabilities/src/agent_l
 
 #### policy 不再消费整份 ContextHistory
 
-policy 需要的事实和窗口单独查询，不经过 `ContextHistory.events`：
+`ContextPolicy` 的输入是 `PolicyContext`，不经过 `ContextHistory.events`：
 
-- `PolicyFacts`：`context/configured`、`context/compaction`、`model/usage` 及其 `model/call`、
-  当前 turn 的输入、预算；SQLite 直接选行，默认 store 用同一选择。
-- `PolicyOrder`：只含 id、branch、sequence、turn start、compaction start；合并 ancestry，
-  用于合法 cut 枚举和 `regrown`。
-- `PolicyWindow`：锚点、当前 turn 输入、`input/consumed`、上一次 cut 之后的 tool-result；
-  合并 ancestry，用于 pinning 和 digest。
-- `ContextPolicy` 的输入改为 `PolicyContext`，只持有 configuration、compaction、order、
-  streamed checkpoint 和可选的 full context；`full` 只用于显式的 `rendered_context` 读取，
-  准备路径总是用默认投影。
+- `PolicyContext` 持有有效 configuration、`context/compaction`、各段的顺序（root first）、
+  流式切分给出的 cut 位置，以及可选的整份 `ContextHistory`；`full` 只用于显式的
+  `rendered_context` 读取和压缩快照，准备路径用流式投影。
+- 上一次尝试写下的 `context/compaction`、`context/budget` 由一次事件查询按 `turn_id` 取出，
+  读取包含已写入但尚未发布的事实。
+- 合法 cut 枚举与 `regrown`、pinning 和 digest 都从这份流式上下文算出。
 - `compact_step` 的 snapshot 由 `stream_checkpoint` 从最近的有效快照折叠到 cut。
 
 #### 与快照的关系

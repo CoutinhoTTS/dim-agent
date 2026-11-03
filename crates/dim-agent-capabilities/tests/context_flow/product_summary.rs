@@ -12,6 +12,7 @@ use dim_agent_capabilities::{
         SummaryReasoning, TargetRule,
     },
 };
+use dim_agent_runtime::testing::chain_events;
 use serde_json::Value;
 use std::{
     collections::VecDeque,
@@ -58,7 +59,7 @@ async fn compact_now(session: &dim_agent_runtime::Session) -> (u64, Vec<Arc<Agen
         .unwrap();
     let events = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(session, "main", ..).await.unwrap();
             if events.iter().any(|event| {
                 matches!(&event.kind,
                 EventKind::ContextCompaction(data) if data.command == Some(command))
@@ -333,7 +334,7 @@ async fn every_summary_request_fits_the_window_for_cjk_history() {
         .unwrap();
     let events = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             if events.iter().any(|event| {
                 matches!(&event.kind,
                 EventKind::ContextCompaction(data) if data.command == Some(command))
@@ -505,7 +506,7 @@ async fn compact_first_turn(session: &dim_agent_runtime::Session) -> Vec<Arc<Age
         .unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(session, "main", ..).await.unwrap();
             if events.iter().any(|event| {
                 matches!(&event.kind,
                 EventKind::ContextCompaction(data) if data.command == Some(command))
@@ -760,7 +761,7 @@ async fn a_second_compaction_carries_the_previous_summary_and_pins_only() {
     );
     session.submit(old, InputMode::Queue, "main").await.unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let completed = |events: &[Arc<AgentEvent>]| {
         events
             .iter()
@@ -828,7 +829,7 @@ async fn a_second_compaction_carries_the_previous_summary_and_pins_only() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert_eq!(completed(&events), 2, "the second turn compacts");
     let requests = recorder.requests.lock().unwrap().clone();
     assert!(requests.len() > first, "the second compaction summarized");

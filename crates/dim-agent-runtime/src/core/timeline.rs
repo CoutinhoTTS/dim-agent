@@ -1,8 +1,8 @@
 use super::keys::KeyFilter;
 use crate::{
     AgentError, BoxFuture, BranchLifecycle, FaultReporter, Result, StoredEvent, TimelineKey,
-    TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
-    TimelineQueryPage, TimelineQueryReply, TimelineQueryScope, TimelineStore,
+    TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryPage,
+    TimelineQueryReply, TimelineQueryScope, TimelineStore,
 };
 use dim_agent_types::{
     AgentEvent, EventDraft, EventKind, InputMessageData, ProjectionCheckpoint, RecoverySnapshot,
@@ -17,7 +17,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
     num::NonZeroU64,
-    ops::{Bound, RangeBounds},
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Mutex, OnceLock, Weak},
     time::{SystemTime, UNIX_EPOCH},
@@ -687,45 +686,6 @@ impl Timeline {
         }
         Ok(Some(shared))
     }
-    async fn history_records(
-        &self,
-        segments: Vec<(String, u64, u64)>,
-    ) -> Result<Vec<Vec<Arc<AgentEvent>>>> {
-        if let [(branch, start, end)] = &segments[..] {
-            return Ok(vec![self.records(branch, *start, *end).await?]);
-        }
-        let own = segments
-            .last()
-            .filter(|(branch, _, _)| *branch == self.0.key.branch_id)
-            .cloned();
-        let ancestors: Vec<_> = segments
-            .into_iter()
-            .take_while(|(branch, _, _)| *branch != self.0.key.branch_id)
-            .collect();
-        let mut records = if ancestors.is_empty() {
-            Vec::new()
-        } else if let Some(shared) = self.shared_ancestry(&ancestors).await? {
-            shared
-        } else {
-            self.0
-                .store
-                .read_segments(
-                    &self.0.key.session_id,
-                    ancestors
-                        .into_iter()
-                        .map(|(branch, start, end)| (branch, start..=end))
-                        .collect(),
-                )
-                .await?
-                .into_iter()
-                .map(events)
-                .collect()
-        };
-        if let Some((branch, start, end)) = own {
-            records.push(self.records(&branch, start, end).await?);
-        }
-        Ok(records)
-    }
     /// Starts the branch opening: while `lifecycle` is `Loading`, reads of
     /// the history this Timeline was built with share one decoded copy (see
     /// [`Opening`]). The lifecycle holds the opening and drops it when the
@@ -758,24 +718,6 @@ impl Timeline {
     }
     fn opening(&self) -> Option<Arc<Opening>> {
         self.0.opening.get().and_then(Weak::upgrade)
-    }
-    pub async fn history(&self, through: Option<u64>) -> Result<Vec<Arc<AgentEvent>>> {
-        let through = self.through(through)?;
-        let segments = self
-            .0
-            .ancestors
-            .iter()
-            .cloned()
-            .chain(std::iter::once((self.0.key.branch_id.clone(), through)))
-            .filter(|(_, cut)| *cut > 0)
-            .map(|(branch, cut)| (branch, 1, cut))
-            .collect();
-        Ok(self
-            .history_records(segments)
-            .await?
-            .into_iter()
-            .flatten()
-            .collect())
     }
     /// One bounded read over this branch or over its chain ([ADR 019](../../../../docs/adr/019-event-query.md),
     /// [plugin contract §5.4](../../../../docs/design/plugin-contract.md#54-the-event-query)):
@@ -1052,25 +994,6 @@ impl Timeline {
             events,
             skipped: skipped as u64,
         }
-    }
-    #[service(skip)]
-    pub async fn local<R: RangeBounds<u64> + Send>(
-        &self,
-        range: R,
-    ) -> Result<Vec<Arc<AgentEvent>>> {
-        let start = match range.start_bound() {
-            Bound::Included(n) => *n,
-            Bound::Excluded(n) => n.saturating_add(1),
-            Bound::Unbounded => 1,
-        }
-        .max(1);
-        let end = match range.end_bound() {
-            Bound::Included(n) => *n,
-            Bound::Excluded(n) => n.saturating_sub(1),
-            Bound::Unbounded => self.committed(),
-        };
-        let end = self.through(Some(end))?;
-        self.records(&self.0.key.branch_id, start, end).await
     }
     /// Checks that `sequence` ends an atomic batch: a stored row's structure,
     /// not event content, so the store answers it and it is not a query

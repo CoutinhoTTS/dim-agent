@@ -18,8 +18,7 @@ use crate::{
 use chrono::{DateTime, TimeZone, Utc};
 use dim_agent_runtime::{
     AgentBuilder, AgentError, CAPABILITY_RELOADING, Feature, Names, TimelineQuery,
-    TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryReply,
-    TimelineQueryScope,
+    TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryReply, TimelineQueryScope,
 };
 use dim_agent_types::*;
 use rutis::Ctx;

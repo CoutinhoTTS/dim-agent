@@ -1,6 +1,7 @@
 mod local_support;
 
 use dim_agent_capabilities::prompt_sources::refresh_update;
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use local_support::*;
@@ -145,7 +146,7 @@ async fn user_instructions_appear_once_and_absent_files_produce_no_entry() {
     let bare = dirs.dir("bare");
     std::fs::remove_file(dirs.home.join("AGENTS.md")).unwrap();
     let session = env.session(&bare, "").await.unwrap();
-    let changes = prompt_changes(&session.history("main", None).await.unwrap());
+    let changes = prompt_changes(&chain_events(&session, "main", ..).await.unwrap());
     let sources: Vec<_> = changes
         .iter()
         .flat_map(|data| &data.changes)
@@ -202,7 +203,7 @@ async fn agents_md_changes_arrive_as_rules_from_the_periodic_check() {
 
     std::fs::remove_file(&project).unwrap();
     until_delivered(&session, PROJECT_RULE, 3).await;
-    let changes = prompt_changes(&session.history("main", None).await.unwrap());
+    let changes = prompt_changes(&chain_events(&session, "main", ..).await.unwrap());
     assert_eq!(
         changes.last().unwrap().changes,
         vec![PromptChange::Revoke {
@@ -288,7 +289,7 @@ async fn unreadable_project_instructions_keep_the_adopted_version() {
     if std::fs::read(&project).is_ok() {
         return;
     }
-    let before = prompt_changes(&session.history("main", None).await.unwrap()).len();
+    let before = prompt_changes(&chain_events(&session, "main", ..).await.unwrap()).len();
     let error = session
         .configure(refresh_update(), "main")
         .await
@@ -300,7 +301,7 @@ async fn unreadable_project_instructions_keep_the_adopted_version() {
     );
     assert!(!error.contains("SECRET-P") && !error.contains(&*dirs.root.to_string_lossy()));
     assert_eq!(
-        prompt_changes(&session.history("main", None).await.unwrap()).len(),
+        prompt_changes(&chain_events(&session, "main", ..).await.unwrap()).len(),
         before
     );
     run(&session, "second").await;

@@ -20,8 +20,8 @@ use crate::{
 };
 use dim_agent_runtime::{
     AgentError, Dispatcher, Names, Registration, Registrations, SessionConfig, SessionIdentity,
-    StateCell, Timeline, TimelineQuery, TimelineQueryDirection,
-    TimelineQueryOrderBy, TimelineQueryScope,
+    StateCell, Timeline, TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
+    TimelineQueryScope,
 };
 use dim_agent_types::{
     AgentEvent, ApprovalCallData, BranchSource, COMMAND_SEPARATORS, CommandMatch, CommandRule,

@@ -111,40 +111,6 @@ impl Branch {
     pub fn sequence(&self) -> u64 {
         self.0.timeline().sequence()
     }
-    /// Outside the branch only published (durable) events are visible;
-    /// capabilities read the Timeline itself, through committed events.
-    fn published(&self, through: Option<u64>) -> Result<u64> {
-        let published = self.sequence();
-        match through {
-            Some(through) if through > published => Err(AgentError::InvalidInput(format!(
-                "future timeline sequence {through}"
-            ))),
-            Some(through) => Ok(through),
-            None => Ok(published),
-        }
-    }
-    pub async fn history(&self, through: Option<u64>) -> Result<Vec<Arc<AgentEvent>>> {
-        let through = self.published(through)?;
-        self.0.timeline().history(Some(through)).await
-    }
-    pub async fn local<R: std::ops::RangeBounds<u64> + Send>(
-        &self,
-        range: R,
-    ) -> Result<Vec<Arc<AgentEvent>>> {
-        use std::ops::Bound;
-        let start = match range.start_bound() {
-            Bound::Included(n) => *n,
-            Bound::Excluded(n) => n.saturating_add(1),
-            Bound::Unbounded => 1,
-        };
-        let end = match range.end_bound() {
-            Bound::Included(n) => Some(*n),
-            Bound::Excluded(n) => Some(n.saturating_sub(1)),
-            Bound::Unbounded => None,
-        };
-        let end = self.published(end)?;
-        self.0.timeline().local(start..=end).await
-    }
     /// Checks that `sequence` ends an atomic batch, so a cut there can start a
     /// read (ADR 020 D4). See [`Timeline::batch_end`].
     pub async fn batch_end(&self, sequence: u64) -> Result<()> {

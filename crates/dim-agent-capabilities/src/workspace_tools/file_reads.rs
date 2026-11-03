@@ -7,8 +7,8 @@
 
 use crate::{history::chain_by_id, host::HostError};
 use dim_agent_runtime::{
-    Names, Timeline, TimelineQuery, TimelineQueryDirection,
-    TimelineQueryOrderBy, TimelineQueryScope,
+    Names, Timeline, TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
+    TimelineQueryScope,
 };
 use dim_agent_types::{ContextCompactionResult, EventKind};
 use rutis::Ctx;

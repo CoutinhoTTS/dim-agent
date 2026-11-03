@@ -11,6 +11,7 @@ use dim_agent_capabilities::{
     methods::{RpcError, SessionMethods},
     tool_registry::{ToolContribution, ToolRegistry},
 };
+use dim_agent_runtime::testing::branch_events;
 use dim_agent_runtime::{testing::MinimalHost, *};
 use dim_agent_types::*;
 use rutis::Ctx;
@@ -249,7 +250,7 @@ fn named(events: &[Arc<AgentEvent>], branch: &str, call: &str) -> Option<Asked> 
 /// Waits until the latest call `call` of `branch` waits, and names it.
 async fn waiting(session: &Session, branch: &str, call: &str) -> Asked {
     for _ in 0..2000 {
-        let events = session.local(branch, ..).await.unwrap();
+        let events = branch_events(session, branch, ..).await.unwrap();
         if let Some(asked) = named(&events, branch, call)
             && waits(session, &asked).await
         {
@@ -295,7 +296,7 @@ async fn turn(session: &Session, branch: &str) -> Vec<Arc<AgentEvent>> {
         .await
         .unwrap()
         .unwrap();
-    session.local(branch, ..).await.unwrap()
+    branch_events(session, branch, ..).await.unwrap()
 }
 
 /// Acceptance 1, 4 and 8: answers and a decline become the result the model

@@ -25,8 +25,7 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::{
     AgentBuilder, AgentError, BranchLifecycle, CollaborationRole, Dispatcher, Names, Session,
     SessionConfig, SessionHold, SessionIdentity, SessionLifecycle, Timeline, TimelineIdentity,
-    TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
-    TimelineQueryScope, rebuild_facts,
+    TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryScope, rebuild_facts,
 };
 use dim_agent_types::*;
 use futures_util::{
