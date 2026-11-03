@@ -32,7 +32,7 @@ fn detached_eof(wire: &mut Wire) {
 fn accept_native(listener: &UnixListener) -> Wire {
     let (stream, _) = listener.accept().unwrap();
     stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
-    Wire(BufReader::new(stream))
+    Wire::new(stream)
 }
 fn recovery_hello(wire: &mut Wire, instance: &str) {
     let hello = wire.read("hello");
