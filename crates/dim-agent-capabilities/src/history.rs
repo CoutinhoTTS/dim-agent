@@ -1273,6 +1273,13 @@ impl CutReads<'_> {
                 .then_some(cut.sequence),
         )
     }
+    /// The line's published head, which a cut may not pass.
+    fn head(&self) -> dim_agent_runtime::Result<u64> {
+        match self {
+            Self::Timeline(timeline) => Ok(timeline.sequence()),
+            Self::Session(session, branch) => session.sequence(branch),
+        }
+    }
     /// One page of the branch's context events from `from`.
     async fn page(
         &self,
@@ -1319,6 +1326,11 @@ async fn boundary_at(
     reads: CutReads<'_>,
     through: u64,
 ) -> dim_agent_runtime::Result<Result<(), String>> {
+    if through > reads.head()? {
+        return Err(AgentError::InvalidInput(format!(
+            "future timeline sequence {through}"
+        )));
+    }
     reads.batch_end(through).await?;
     let projection = match reads.cut(through).await? {
         Some(cut) => match folded(&reads, cut, through).await? {
@@ -1333,8 +1345,8 @@ async fn boundary_at(
 /// Verifies that the cut at `through` splits no tool call from its result and
 /// leaves no model output open, folding pages from the branch's last completed
 /// compaction instead of materializing the whole prefix. The outer error is the
-/// read's (an unknown branch, a cut past the head or inside an atomic batch);
-/// the inner one is the verdict [`validate_context_boundary`] returns.
+/// cut's (an unknown branch, a cut past the line's head or inside an atomic
+/// batch); the inner one is the verdict [`validate_context_boundary`] returns.
 ///
 /// A completed compaction replaces the entries before its `retain_from` from a
 /// validated boundary, so the projection's open calls and output are empty at
