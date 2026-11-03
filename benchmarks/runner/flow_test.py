@@ -608,7 +608,15 @@ class BaselineFlowTest(unittest.TestCase):
             env = run_l2.verifier_env()
             self.assertNotIn("HTTP_PROXY", env)
             self.assertNotIn("HTTPS_PROXY", env)
+            self.assertEqual(env["CURL_HOME"], "/opt/eval-cache/curl-home")
+            self.assertEqual(
+                env["UV_INSTALLER_GITHUB_BASE_URL"],
+                "file:///opt/eval-cache/uv-releases",
+            )
             self.assertEqual(env["UV_PYTHON_INSTALL_DIR"], "/opt/eval-cache/python")
+            self.assertEqual(env["UV_CACHE_DIR"], "/tmp/uv-cache")
+            self.assertNotIn("UV_INSTALL_DIR", env)
+            self.assertNotIn("PATH", env)
 
     def test_verifier_no_proxy_can_add_container_service_names(self) -> None:
         proxy = "http://proxy.invalid:3128"

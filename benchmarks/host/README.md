@@ -92,6 +92,34 @@ cron ─► nightly.sh ─► git fetch dim 与 dim-eval-data（SSH）─► cor
    两条共用一把锁，后一条等前一条结束。日志在 `~/dim-eval/logs/`，harbor 结果在
    `~/dim-eval/results/`，保留 30 天。
 
+## verifier 缓存
+
+30 个 Terminal-Bench 任务的 verifier 会在评分时安装 uv 并下载 CPython。评测机连 GitHub
+不稳定时，这两步会把一次正常的 agent 运行变成 0。评测机预先准备一个只读缓存，`run_l2.py`
+把它挂到任务容器的 `/opt/eval-cache`：
+
+```sh
+cache=~/dim-eval/eval-cache
+mkdir -p "$cache/curl-home" "$cache/uv-releases/astral-sh/uv/releases/download/0.9.5" \
+  "$cache/python" "$cache/uv"
+printf 'http1.1\n' > "$cache/curl-home/.curlrc"
+curl -LsSf -o \
+  "$cache/uv-releases/astral-sh/uv/releases/download/0.9.5/uv-x86_64-unknown-linux-gnu.tar.gz" \
+  https://github.com/astral-sh/uv/releases/download/0.9.5/uv-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf \
+  "$cache/uv-releases/astral-sh/uv/releases/download/0.9.5/uv-x86_64-unknown-linux-gnu.tar.gz" \
+  -C "$cache/uv" --strip-components=1
+UV_PYTHON_INSTALL_DIR="$cache/python" UV_CACHE_DIR=/tmp/uv-cache \
+  "$cache/uv/uv" python install 3.13
+```
+
+`UV_INSTALLER_GITHUB_BASE_URL` 指向本地的 0.9.5 release 归档，verifier 的
+`curl .../install.sh | sh` 仍会执行，但 tarball 从本地读；`UV_PYTHON_INSTALL_DIR` 让
+`uvx -p 3.13` 命中 `cpython-3.13.9`。`CURL_HOME` 让 curl 用 HTTP/1.1，避开代理的 HTTP/2
+问题；uv 自己是 reqwest，不读 curlrc，它的下载仍走代理，只是 CPython 和 uv 安装包不再从
+GitHub 取。缓存挂载是只读的，agent 阶段改不了它；`UV_CACHE_DIR` 放在容器的 `/tmp`，每个
+trial 独立。缓存缺失时 `run_l2.py` 会打印 warning，verifier 退回网络下载。
+
 ## 试运行
 
 ```sh
