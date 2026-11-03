@@ -129,8 +129,8 @@ same-module snapshots, online metadata, disablement and Pending apply unchanged.
 ## Subscription, rebuild and recovery
 
 1. Register once with `dispatcher.consume`: it subscribes first and holds the matching events, then
-   runs the rebuild, which reads the branch's own facts through `timeline.queryWithTail`, with the
-   ones written and not yet published, folds them, and returns the reply's `through` as the cutoff.
+   runs the rebuild, which reads the branch's own facts through `timeline.query` at the committed
+   bound, unpublished tail included, folds them, and returns the reply's `through` as the cutoff.
    The held events above the cutoff and each later matching event then reach the handler directly.
    Live events wait until the rebuild returns, so what the rebuild owes is written before them. The
    native Capabilities register the same way

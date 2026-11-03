@@ -29,9 +29,11 @@ The Timeline exposes one read for capabilities: the scope (this branch, or the b
 each ancestor up to its cut, root first, then this branch to its head), the accepted event kinds
 plus the envelope's two
 context flags, one event id, one equality predicate over a data field, where the read begins
-(an event id or a sequence), the order and its direction, and the page: how many matching events
-it skips and how many it returns, the second nonzero by type. It returns
-decoded events, each with its chain position.
+(an event id or a sequence), the order and its direction, how far it reaches — what is published,
+the default, or what is committed, so a part that rebuilds sees the branch's own facts written but
+not yet published — and the page: how many matching events it skips and how many it returns, the
+second nonzero by type. It returns decoded events, each with its chain position, and the cutoff
+the read took.
 
 A kind or field path the store does not know matches no rows; it is not an error. A capability
 that needs a different selection extends this query; it does not add a method.
@@ -46,7 +48,9 @@ Paging is skipping, not a cursor: the caller repeats the query with a larger ski
 shorter than the count is what says the selection is exhausted. A page therefore does not align
 with an atomic batch — it may end inside one, and the next page carries the rest, which a
 consumer folding in order handles. A read is taken at what is published when it runs, so a consumer
-that folds several pages drops what it has already folded.
+that folds several pages drops what it has already folded. A read that asks for the committed bound
+is the exception: it takes the write head when it starts, so a part whose rebuild must see its own
+unpublished facts reads them in the same query, and the reply's cutoff is where that read ends.
 
 The existing reads do not share this convention: the context page accepts a cursor inside a batch
 and returns the row it names, and the history read has no page. A consumer that still uses its own

@@ -90,7 +90,7 @@ v17
 - **`h` 之前的 `S` 相同。** Timeline 以最后存储的序号 `h` 构建；没有追加时 `committed()` 就是 `h`。重启前留有未完成的工作时，部分能力在 `apply` 中追加结算终态（ToolExecutor、ContextPreparation、ModelProvider、InputQueue 欠写的决定、BackgroundExec 的唤醒输入；[单树装配](../../../architecture/rust-agent/single-tree.md#能力重载协议)“装载：失败判定”），于是后面几波的读者固定的 `S` 更大。并非每个读者都读到 `committed()`：ToolBinding 和 Prompt 的发布读到 `sequence()`，即已发布序号，终态尚未发布时它小于 `committed()`；Prompt 的采用读到 `branch/resume` 事件；上表逐一列出。这些位置都不小于 `h`，所以每个读者的范围都以同一段 `1..=h` 开头，只在打开期间写入的短尾上不同。
 - **热窗口还是存储。** 构建时热窗口为空，已发布序号就是 `h`，所以 `1..=h` 来自存储。打开期间追加的事件进入热窗口（Dispatcher 在 `TimelineContext::start` 之前不运行），写入任务提交后它们也在存储中。Dispatcher 自己只读热窗口。
 
-上表中点名 `read_context` 的行自 #942 起由事件查询的页满足，不再经过副本：`Timeline::query` 与 `query_with_tail` 直接读取存储的页，上下文投影经它们折叠（`history::read_context`，从检查点的 `resume` 或从祖先链起点）。副本服务剩下仍按区间读取的读取——`local`、`history`、检查点选取的锚点读取（`Timeline::checkpoint`）以及它们在 `Dispatcher`、`Branch`、`Session` 上的包装。
+上表中点名 `read_context` 的行自 #942 起由事件查询的页满足，不再经过副本：`Timeline::query`（界为已发布或已提交）直接读取存储的页，上下文投影经它折叠（`history::read_context`，从检查点的 `resume` 或从祖先链起点）。副本服务剩下仍按区间读取的读取——`local`、`history`、检查点选取的锚点读取（`Timeline::checkpoint`）以及它们在 `Dispatcher`、`Branch`、`Session` 上的包装。
 
 ### 2.3 倍数
 
