@@ -31201,6 +31201,13 @@
       ]
     },
     {
+      "from": "dim_cli::ui::list_panel::tests",
+      "to": "dim_cli::ui::theme::palette",
+      "references": [
+        "path Palette"
+      ]
+    },
+    {
       "from": "dim_cli::ui::management_panel",
       "to": "dim_cli::management",
       "references": [
@@ -36173,6 +36180,13 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::render",
+      "references": [
+        "path crate::ui::render::live_row_budget"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::render::fullscreen",
       "references": [
         "path FullScreen",
@@ -36199,7 +36213,9 @@
       "to": "dim_cli::ui::render::screen",
       "references": [
         "path Screen",
-        "path Screen::new"
+        "path Screen::new",
+        "path crate::ui::render::screen::Frame",
+        "path crate::ui::render::screen::MIN_HISTORY_ROWS"
       ]
     },
     {
@@ -36323,6 +36339,8 @@
         "path boxed",
         "path chunk",
         "path goodbye_panel",
+        "path live_panel_rows",
+        "path overlay_panel_rows",
         "path queue_strip",
         "path side_reply",
         "path web_panel"
@@ -38609,6 +38627,18 @@
     },
     {
       "module": "dim_cli::ui::lines_panel::tests",
+      "path": "Theme::system"
+    },
+    {
+      "module": "dim_cli::ui::list_panel::tests",
+      "path": "Appearance::Dark"
+    },
+    {
+      "module": "dim_cli::ui::list_panel::tests",
+      "path": "ColorMode::TrueColor"
+    },
+    {
+      "module": "dim_cli::ui::list_panel::tests",
       "path": "Theme::system"
     },
     {

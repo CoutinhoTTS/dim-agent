@@ -326,14 +326,15 @@ impl ListPanel {
     /// As [`ListPanel::render`], with `footer` lines above the bottom border:
     /// the caller colours them, and they take their rows from the list.
     ///
-    /// The panel never draws more than `rows` rows. While the list cannot
-    /// draw its first three entries, the notes give up lines from the end,
-    /// the blank row going with the last line. When not even one list row
-    /// fits beside the other parts, it gives them up in this order: the rest
-    /// of the notes, the filter's padding (the row below the query first),
-    /// the footer's first line first, the hint's rows above the border, the
-    /// query row, and the list's last row. The selected entry and the hint's
-    /// closing key stay the longest.
+    /// The panel never draws more than `rows` rows, and under two rows it
+    /// draws nothing: the two borders alone would take the budget. While the
+    /// list cannot draw its first three entries, the notes give up lines
+    /// from the end, the blank row going with the last line. When not even
+    /// one list row fits beside the other parts, it gives them up in this
+    /// order: the rest of the notes, the filter's padding (the row below the
+    /// query first), the footer's first line first, the hint's rows above
+    /// the border, the query row, and the list's last row. The selected
+    /// entry and the hint's closing key stay the longest.
     pub fn render_with_footer(
         &self,
         width: usize,
@@ -341,6 +342,11 @@ impl ListPanel {
         p: &Palette,
         footer: &[String],
     ) -> Vec<String> {
+        if rows < 2 {
+            self.query_row.set(None);
+            self.page.set(0);
+            return Vec::new();
+        }
         let inner = width.saturating_sub(4).max(1);
         let shown = self.shown();
         let hint_above = hint_rows(&self.hint, width);
@@ -670,6 +676,56 @@ mod tests {
             None,
         );
         panel
+    }
+
+    fn palette() -> Palette {
+        use crate::ui::theme::{Appearance, ColorMode, Theme};
+        Theme::system(ColorMode::TrueColor, Appearance::Dark, None).palette
+    }
+
+    /// A panel draws no more rows than it is given, and nothing under two
+    /// rows: the two borders alone would take that budget.
+    #[test]
+    fn a_list_panel_draws_within_its_row_budget() {
+        let mut hinted = three_rows();
+        hinted.set_hint("Enter open · Ctrl+R refresh · Ctrl+F filter · Esc close".to_owned());
+        let configurations = [
+            ("plain", three_rows().without_filter(), Vec::new()),
+            ("filterable", three_rows(), Vec::new()),
+            (
+                "notes",
+                three_rows().with_notes(vec![
+                    "A note that takes its lines from the list beside it.".to_owned(),
+                ]),
+                Vec::new(),
+            ),
+            ("hint above the border", hinted, Vec::new()),
+            (
+                "footer",
+                three_rows(),
+                vec![
+                    "first footer line".to_owned(),
+                    "second footer line".to_owned(),
+                ],
+            ),
+        ];
+        for (name, panel, footer) in configurations {
+            for width in [20, 40, 80] {
+                for budget in 0..=8 {
+                    let rows = panel.render_with_footer(width, budget, &palette(), &footer);
+                    assert!(
+                        rows.len() <= budget,
+                        "{name} at {width}x{budget}: {} rows drawn: {rows:#?}",
+                        rows.len()
+                    );
+                    assert_eq!(
+                        rows.is_empty(),
+                        budget < 2,
+                        "{name} at {width}x{budget}: {rows:#?}"
+                    );
+                }
+            }
+        }
     }
 
     /// A part wider than a row wraps instead of being cut: the remove

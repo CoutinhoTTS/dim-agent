@@ -1054,6 +1054,25 @@ const OVERLAY_MAX_ROWS: usize = 30;
 /// Least rows inside the fullscreen composer box.
 const FULLSCREEN_COMPOSER_ROWS: usize = 3;
 
+/// The rows the live region leaves a scrollback panel: below the composer,
+/// the blank row above the panel and the status line, never more than 18.
+fn live_panel_rows(live_budget: usize, composer_rows: usize, status_rows: usize) -> usize {
+    live_budget
+        .saturating_sub(composer_rows + 1 + status_rows)
+        .min(18)
+}
+
+/// The rows a fullscreen overlay gives a panel: the terminal less the
+/// composer and two rows on either side, never under six unless the terminal
+/// cannot hold that.
+fn overlay_panel_rows(terminal_rows: usize, composer_rows: usize) -> usize {
+    terminal_rows
+        .saturating_sub(composer_rows + 2 + 2)
+        .max(6)
+        .min(terminal_rows.saturating_sub(composer_rows + 1))
+        .min(OVERLAY_MAX_ROWS)
+}
+
 /// Messages a resume shows at first, and per load-more page.
 const HISTORY_WINDOW: usize = 100;
 
@@ -4356,9 +4375,7 @@ impl App {
         let panel_rows = if native_selection {
             size.1 as usize
         } else {
-            live_budget
-                .saturating_sub(composer_rows + 1 + status_rows)
-                .min(18)
+            live_panel_rows(live_budget, composer_rows, status_rows)
         };
         let panel_cursor = |width: usize, height: usize| match &self.prompt {
             Some(Prompt::Sessions(prompt)) => Some(prompt.cursor(width)),
@@ -4377,11 +4394,7 @@ impl App {
             let budget = if native_selection {
                 size.1 as usize
             } else {
-                (size.1 as usize)
-                    .saturating_sub(composer_rows + 2 + 2)
-                    .max(6)
-                    .min((size.1 as usize).saturating_sub(composer_rows + 1))
-                    .min(OVERLAY_MAX_ROWS)
+                overlay_panel_rows(size.1 as usize, composer_rows)
             };
             let list_width = if native_selection {
                 cols
@@ -6167,10 +6180,12 @@ mod tests {
     }
 
     /// From the smallest size the App gives a panel to the panel's own full
-    /// height, in both layouts: the composer and the hint's closing key stay
-    /// on the screen, the panel ends above the composer, and the selected
-    /// entry is drawn whenever the panel has a list row. The panel with notes
-    /// keeps its first three list rows while it can still show a note.
+    /// height, in both layouts: the composer's rows stay on the screen, the
+    /// panel never draws more rows than its budget and draws nothing under
+    /// two rows, and it ends above the composer. A drawn panel keeps the
+    /// hint's closing key and, whenever it has a list row, the selected
+    /// entry. The panel with notes keeps its first three list rows while it
+    /// can still show a note.
     #[test]
     fn list_panels_keep_their_row_budget_on_short_screens() {
         use crate::model::session::{
@@ -6274,20 +6289,49 @@ mod tests {
             _ => unreachable!(),
         };
 
+        // The composer's rows, from the first row after the dock's blank
+        // line to its bottom border.
+        let composer_rows = |frame: &crate::ui::render::screen::Frame| {
+            let live: Vec<String> = frame.live.iter().map(|row| strip_escapes(row)).collect();
+            let start = frame.dock + 1;
+            let end = (start..live.len())
+                .find(|&row| live[row].trim_start().starts_with('╰'))
+                .unwrap_or(live.len() - 1);
+            end + 1 - start
+        };
+
         let sweep = |fullscreen: bool,
                      open: &dyn Fn() -> Prompt,
                      title: &str,
                      selected: &str,
+                     keys: &str,
                      notes: bool| {
             let mut drawn = Drawn::new((40, 8), None, true);
             drawn.app.fullscreen = fullscreen;
             let mut natural = None;
             let mut reached = false;
+            let mut budgets = Vec::new();
             for height in 8..=40u16 {
                 let size = (40, height);
-                drawn.app.composer.set_draft("draft");
+                // The composer's longest draft: the shortest terminals leave
+                // the panel no rows at all.
+                drawn.app.composer.set_draft("l1\nl2\nl3\nl4\nl5\nl6\nl7");
                 drawn.app.prompt = Some(open());
                 let frame = drawn.app.frame(size);
+                let budget = if fullscreen {
+                    overlay_panel_rows(size.1 as usize, composer_rows(&frame))
+                } else {
+                    live_panel_rows(
+                        crate::ui::render::live_row_budget(
+                            size.1 as usize,
+                            crate::ui::render::screen::MIN_HISTORY_ROWS as usize,
+                        ),
+                        composer_rows(&frame),
+                        1,
+                    )
+                };
+                budgets.push(budget);
+                let live: Vec<String> = frame.live.iter().map(|row| strip_escapes(row)).collect();
                 let mut top = 0;
                 let panel: Vec<String> = if fullscreen {
                     let overlay = frame
@@ -6296,22 +6340,39 @@ mod tests {
                         .unwrap_or_else(|| panic!("no overlay for {title}"));
                     overlay.rows.iter().map(|row| strip_escapes(row)).collect()
                 } else {
-                    let live: Vec<String> =
-                        frame.live.iter().map(|row| strip_escapes(row)).collect();
-                    top = live
+                    match live
                         .iter()
                         .rposition(|row| row.contains(&format!("╭─ {title}")))
-                        .unwrap_or_else(|| panic!("no {title} panel: {live:#?}"));
-                    live[top..live.len() - 1].to_vec()
+                    {
+                        Some(panel_top) => {
+                            top = panel_top;
+                            live[top..live.len() - 1].to_vec()
+                        }
+                        None => Vec::new(),
+                    }
                 };
-                let natural = *natural.get_or_insert_with(|| {
-                    render(&open(), &drawn.app, visible_width(&panel[0]), 100).len()
-                });
-                let text = panel.join("\n");
                 assert!(
-                    text.contains("Esc close"),
-                    "{title} {size:?} fullscreen={fullscreen}: the closing key: {text}"
+                    panel.len() <= budget,
+                    "{title} {size:?} fullscreen={fullscreen}: {} rows drawn of {budget}: {panel:#?}",
+                    panel.len()
                 );
+                assert_eq!(
+                    panel.is_empty(),
+                    budget < 2,
+                    "{title} {size:?} fullscreen={fullscreen}: a {budget}-row budget drew {} rows: {live:#?}",
+                    panel.len()
+                );
+                if natural.is_none() && !panel.is_empty() {
+                    natural =
+                        Some(render(&open(), &drawn.app, visible_width(&panel[0]), 100).len());
+                }
+                let text = panel.join("\n");
+                if !panel.is_empty() {
+                    assert!(
+                        text.contains(keys),
+                        "{title} {size:?} fullscreen={fullscreen}: the closing key: {text}"
+                    );
+                }
                 if fullscreen {
                     let dock = frame.live.len() - frame.dock;
                     let overlay = frame.overlay.as_ref().unwrap().rows.len();
@@ -6328,9 +6389,9 @@ mod tests {
                 }
                 if panel.len() >= 3 {
                     assert!(
-                        panel
-                            .iter()
-                            .any(|row| row.contains(selected) && !row.contains("End line")),
+                        panel.iter().any(|row| row.contains(selected)
+                            && !row.contains("End line")
+                            && !row.contains("y end it")),
                         "{title} {size:?} fullscreen={fullscreen}: the selection: {text}"
                     );
                 }
@@ -6386,18 +6447,30 @@ mod tests {
                     crate::ui::render::testterm::Emu::new(size.0 as usize, size.1 as usize);
                 emu.feed(&bytes);
                 let screen = emu.rows_text().join("\n").replace('\0', "");
-                assert!(
-                    screen.contains("draft"),
-                    "{title} {size:?} fullscreen={fullscreen}: the composer: {screen}"
-                );
-                assert!(
-                    screen.contains("Esc close"),
-                    "{title} {size:?} fullscreen={fullscreen}: the keys: {screen}"
-                );
-                if panel.len() >= natural {
+                let screen_rows: Vec<&str> = screen.lines().collect();
+                for row in live.iter().skip(frame.dock + 1).take(composer_rows(&frame)) {
+                    let row = row.trim_end();
+                    assert!(
+                        screen_rows.iter().any(|line| line.trim_end() == row),
+                        "{title} {size:?} fullscreen={fullscreen}: the composer row {row:?} is cut: {screen}"
+                    );
+                }
+                if !panel.is_empty() {
+                    assert!(
+                        screen.contains(keys),
+                        "{title} {size:?} fullscreen={fullscreen}: the keys: {screen}"
+                    );
+                }
+                if natural.is_some_and(|natural| panel.len() >= natural) {
                     reached = true;
                     break;
                 }
+            }
+            for budget in [0, 1, 2] {
+                assert!(
+                    budgets.contains(&budget),
+                    "{title} fullscreen={fullscreen}: never gave the panel {budget} rows: {budgets:?}"
+                );
             }
             assert!(
                 reached,
@@ -6406,10 +6479,31 @@ mod tests {
         };
 
         for fullscreen in [false, true] {
-            sweep(fullscreen, &sessions, "Sessions", "item0", false);
-            sweep(fullscreen, &workflow, "Workflow", "cleanup", false);
-            sweep(fullscreen, &lines, "Lines", "b-7c", false);
-            sweep(fullscreen, &isolation, "Process isolation", "Off", true);
+            sweep(
+                fullscreen,
+                &sessions,
+                "Sessions",
+                "item0",
+                "Esc close",
+                false,
+            );
+            sweep(
+                fullscreen,
+                &workflow,
+                "Workflow",
+                "cleanup",
+                "Esc close",
+                false,
+            );
+            sweep(fullscreen, &lines, "Lines", "b-7c", "Esc close", false);
+            sweep(
+                fullscreen,
+                &isolation,
+                "Process isolation",
+                "Off",
+                "Esc close",
+                true,
+            );
         }
     }
 
