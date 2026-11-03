@@ -2,8 +2,8 @@ use super::keys::KeyFilter;
 use crate::{
     AgentError, BoxFuture, BranchCursor, BranchLifecycle, BranchPage, FaultReporter, PolicyFacts,
     PolicyOrder, PolicyOrderEvent, PolicyWindow, Result, StoredEvent, TimelineKey, TimelineQuery,
-    TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryReply, TimelineQueryScope,
-    TimelineStore,
+    TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryPage, TimelineQueryReply,
+    TimelineQueryScope, TimelineStore, TimelineTailReply,
 };
 use dim_agent_types::{
     AgentEvent, EventDraft, EventKind, InputMessageData, ProjectionCheckpoint, RecoverySnapshot,
@@ -767,10 +767,51 @@ impl Timeline {
     /// never returns a fact above a branch's coverage: an ancestor to its cut,
     /// this branch to its published head.
     pub async fn query(&self, query: TimelineQuery) -> Result<TimelineQueryReply> {
+        let published = self.sequence();
+        self.query_page(query, published, None).await
+    }
+    /// [`Self::query`] plus this branch's own facts written above the
+    /// published head: one page of the same selection, with the branch's
+    /// facts in `published+1..=through` joined to its own segment in sequence
+    /// order. The cutoff `through` is the branch's committed sequence when the
+    /// call starts, so a write during the call stays out of this page, and no
+    /// fact above it is returned. The published part and the tail are disjoint
+    /// in sequence, so each fact is returned once. The reply reports the cutoff
+    /// it took; a caller that holds live events releases the ones above it
+    /// ([ADR 020 D3](../../../../docs/adr/020-timeline-read-convergence.md)).
+    pub async fn query_with_tail(&self, query: TimelineQuery) -> Result<TimelineTailReply> {
+        let published = self.sequence();
+        let through = self.committed();
+        let page = self.query_page(query, published, Some(through)).await?;
+        Ok(TimelineTailReply {
+            events: page.events,
+            positions: page.positions,
+            through,
+        })
+    }
+    /// [`Self::query`] with this branch clipped at `published` and, when
+    /// `tail` names a committed sequence above it, the branch's own facts in
+    /// `published+1..=tail` merged in. The query's start, selection and page
+    /// apply to the merged result: the tail continues the published page when
+    /// ascending and precedes it when descending, and a page shorter than the
+    /// limit means the selection is exhausted up to the tail's end.
+    async fn query_page(
+        &self,
+        query: TimelineQuery,
+        published: u64,
+        tail: Option<u64>,
+    ) -> Result<TimelineQueryReply> {
         use TimelineQueryDirection::Descending;
 
         query.validate()?;
-        let published = self.sequence();
+        let tail = match tail {
+            Some(through) if through > published => Some((
+                self.records(&self.0.key.branch_id, published + 1, through)
+                    .await?,
+                through,
+            )),
+            _ => None,
+        };
         let clips: Vec<(String, u64)> = match query.scope {
             TimelineQueryScope::Branch => vec![(self.0.key.branch_id.clone(), published)],
             TimelineQueryScope::Chain => self
@@ -816,6 +857,14 @@ impl Timeline {
                         found = Some((Some(branch.clone()), position.sequence));
                         break;
                     }
+                }
+                if found.is_none() {
+                    found = tail.as_ref().and_then(|(events, _)| {
+                        events
+                            .iter()
+                            .find(|event| &event.id == event_id)
+                            .map(|event| (Some(self.0.key.branch_id.clone()), event.sequence))
+                    });
                 }
                 found
             }
@@ -890,39 +939,109 @@ impl Timeline {
                 session_id: self.0.key.session_id.clone(),
                 branch_id: branch.clone(),
             };
-            let page = self
-                .0
-                .store
-                .query(
-                    &key,
-                    &TimelineQuery {
-                        scope: TimelineQueryScope::Branch,
-                        from_event: None,
-                        from_sequence: None,
-                        order_by: query.order_by,
-                        direction: query.direction,
-                        kinds: query.kinds.clone(),
-                        flags: query.flags.clone(),
-                        event_id: query.event_id.clone(),
-                        predicate: query.predicate.clone(),
-                        limit: std::num::NonZeroU64::new(
-                            u64::try_from(limit - events.len())
-                                .unwrap_or(u64::MAX)
-                                .max(1),
+            let tail_bounds = match (&tail, *branch == self.0.key.branch_id) {
+                (Some((_, through)), true) => Some(match query.direction {
+                    TimelineQueryDirection::Ascending => (from, *through),
+                    Descending => (
+                        1,
+                        match (&anchor, anchor_index) {
+                            (Some((Some(_), sequence)), Some(start_index))
+                                if index == start_index =>
+                            {
+                                *sequence
+                            }
+                            (Some((None, sequence)), _) => *sequence,
+                            _ => *through,
+                        }
+                        .min(*through),
+                    ),
+                }),
+                _ => None,
+            };
+            let parts: [bool; 2] = match query.direction {
+                TimelineQueryDirection::Ascending => [false, true],
+                Descending => [true, false],
+            };
+            for is_tail in parts {
+                if events.len() >= limit {
+                    break;
+                }
+                let page = if is_tail {
+                    let (Some((tail_events, _)), Some((from, bound))) = (&tail, tail_bounds) else {
+                        continue;
+                    };
+                    self.tail_page(tail_events, &query, from, bound, limit - events.len(), skip)
+                } else {
+                    self.0
+                        .store
+                        .query(
+                            &key,
+                            &TimelineQuery {
+                                scope: TimelineQueryScope::Branch,
+                                from_event: None,
+                                from_sequence: None,
+                                order_by: query.order_by,
+                                direction: query.direction,
+                                kinds: query.kinds.clone(),
+                                flags: query.flags.clone(),
+                                event_id: query.event_id.clone(),
+                                predicate: query.predicate.clone(),
+                                limit: std::num::NonZeroU64::new(
+                                    u64::try_from(limit - events.len())
+                                        .unwrap_or(u64::MAX)
+                                        .max(1),
+                                )
+                                .expect("a read keeps one event of its limit"),
+                                offset: skip,
+                            },
+                            from,
+                            bound,
                         )
-                        .expect("a read keeps one event of its limit"),
-                        offset: skip,
-                    },
-                    from,
-                    bound,
-                )
-                .await?;
-            let reached = page.skipped + page.events.len() as u64;
-            skip = skip.saturating_sub(reached);
-            events.extend(page.events);
-            positions.extend(page.positions);
+                        .await?
+                };
+                let reached = page.skipped + page.events.len() as u64;
+                skip = skip.saturating_sub(reached);
+                events.extend(page.events);
+                positions.extend(page.positions);
+            }
         }
         Ok(TimelineQueryReply { events, positions })
+    }
+    /// The part of one page the tail holds: the facts `query` accepts in
+    /// `from..=bound`, in the query's direction, with the read's offset
+    /// applied.
+    fn tail_page(
+        &self,
+        tail: &[Arc<AgentEvent>],
+        query: &TimelineQuery,
+        from: u64,
+        bound: u64,
+        limit: usize,
+        offset: u64,
+    ) -> TimelineQueryPage {
+        let mut events: Vec<Arc<AgentEvent>> = tail
+            .iter()
+            .filter(|event| (from..=bound).contains(&event.sequence) && query.accepts(event))
+            .cloned()
+            .collect();
+        if query.direction == TimelineQueryDirection::Descending {
+            events.reverse();
+        }
+        let skipped = events
+            .len()
+            .min(usize::try_from(offset).unwrap_or(usize::MAX));
+        let events: Vec<Arc<AgentEvent>> = events.into_iter().skip(skipped).take(limit).collect();
+        TimelineQueryPage {
+            positions: events
+                .iter()
+                .map(|event| TimelinePosition {
+                    branch_id: self.0.key.branch_id.clone(),
+                    sequence: event.sequence,
+                })
+                .collect(),
+            events,
+            skipped: skipped as u64,
+        }
     }
     /// The first page of a backward, kind-filtered read of the branch chain
     /// at a published `through`.

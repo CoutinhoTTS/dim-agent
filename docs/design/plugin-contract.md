@@ -242,6 +242,14 @@ The query returns facts; it does not fold, project or aggregate them. What a par
 is its own state and stays with it ([ADR 002](../adr/002-plugin-scope.md) D1). A part that needs a
 whole prefix reads pages and folds them itself.
 
+A part that rebuilds reads the query with its unpublished tail
+([ADR 020](../adr/020-timeline-read-convergence.md) D3). That read answers what the query would,
+plus the facts written before it ran that are not yet published, in sequence order and without
+overlapping the published page; the reply carries the cutoff it took. A rebuild that then receives
+live events from that cutoff loses and repeats nothing. The cutoff belongs to the read: a caller
+that fixes an earlier one replays what lies between the two. Paging is skipping over both parts,
+the published page first.
+
 | Input | Result |
 | --- | --- |
 | A kind or a data path the store does not know | No rows; not an error |

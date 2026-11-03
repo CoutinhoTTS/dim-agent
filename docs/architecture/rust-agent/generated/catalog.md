@@ -103,7 +103,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `permission` | branch | Permission | Rust-only | — |
 | `prompt` | branch | Prompt | Rust-only | — |
 | `skillsBranch` | branch | SkillsBranch | Rust-only | — |
-| `timeline` | branch | BranchScope | yes | `ancestors` async, `append` async, `branchId` async, `committed` async, `hasPending` async, `history` async, `query` async, `sequence` async, `storedContextPage` async |
+| `timeline` | branch | BranchScope | yes | `ancestors` async, `append` async, `branchId` async, `committed` async, `hasPending` async, `history` async, `query` async, `queryWithTail` async, `sequence` async, `storedContextPage` async |
 | `timelineIdentity` | branch | BranchScope | yes | `get` async |
 | `toolBinding` | branch | ToolBinding | Rust-only | — |
 | `toolExecutor` | branch | ToolExecutor | Rust-only | — |

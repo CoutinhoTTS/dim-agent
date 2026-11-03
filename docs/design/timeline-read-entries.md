@@ -195,7 +195,7 @@ What this shows:
 - Two parts need only the last event (Permission, Wait). Six fold unclosed pairs. Three accumulate.
 - A part folds kinds it does not subscribe to (Approval, ToolExecutor, ModelProvider, ContextPreparation, Loop), so its read selection must be written from its rebuild, not copied from its follow keys.
 - Replay hands every part the whole branch prefix to the committed position, unfiltered. The decode of that prefix is shared during Loading ([restore-shared-read](appserver/restore-shared-read.md)), which lowers its cost but not its size.
-- The hot window holds events until they are dispatched, not only until they are published. The tail a rebuild must add to a stored read is the events not yet dispatched.
+- The hot window holds events until they are dispatched, not only until they are published. The query reads to the published head, so the tail a rebuild must add to it is this branch's own events written and not yet published; events published and not yet dispatched are in the store and the query returns them.
 
 Not verified: whether each unclosed pair can cross a turn, so whether reading from the latest turn/start is enough; the second half of the Loop rebuild; how long the undispatched tail is during an opening.
 
@@ -373,9 +373,9 @@ Still open: the handover details (section 7.7), which of goal, file reads and th
 
 - Replay is removed. Dispatcher delivers live events only; it no longer reads history.
 - History for a rebuild is read with the query, limited to the kinds the part folds (section 2.3).
-- A part that must also see facts written but not yet dispatched adds the undispatched tail through a Timeline read. The hot window is that queue (section 7.6); parts do not touch it directly.
+- A part that must also see facts written and not yet published adds the tail through a Timeline read. The hot window is that queue (section 7.6); parts do not touch it directly.
 - A part with no such need rebuilds from the query and its subscription.
-- Handover, as designed so far: subscribe and hold live events, take the cutoff, read history and tail up to it, then release held events above it. Not yet checked against the current subscription mechanism.
+- Handover: subscribe and hold live events, take the cutoff `S`, read history and tail up to it, then release the held events above it and drop the rest. The query stops at the published head on its own, so the facts between that head and `S` come from the tail, and a fact at or below `S` that the read already returned is dropped rather than released, so each sequence is folded once. Checked against the current subscription mechanism by the flow test that folds every fact of a branch exactly once.
 - The batch-end check lives on the store port.
 - Per consumer, whether it needs in-flight facts is still to be settled: goal, file reads, collaboration rebuild. Each is decided when its own migration starts.
 - The checkpoint stores the resume event id and the caller continues with from_event (proposed; needs a format decision, ADR 020 D5).

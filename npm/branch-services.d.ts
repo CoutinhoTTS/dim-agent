@@ -316,6 +316,23 @@ export interface TimelineQueryReply {
   positions: ({ branch_id: string; sequence: number | bigint })[]
 }
 
+/**
+ * The facts a read that adds the branch's unpublished tail returned, and the
+ * cutoff it took.
+ */
+export interface TimelineTailReply {
+  /** The page, in the query's order, each fact with its position. */
+  events: import('./plugin.js').BranchEvent[]
+  /** One position per event, in the same order. */
+  positions: ({ branch_id: string; sequence: number | bigint })[]
+  /**
+   * The committed sequence the page is cut at: no fact above it was read,
+   * and a fact written after the read started is above it. A caller
+   * holding live events releases the ones above this sequence.
+   */
+  through: number | bigint
+}
+
 export interface Timeline {
   branchId(): Promise<string>
   ancestors(): Promise<[string, number | bigint][]>
@@ -354,6 +371,19 @@ export interface Timeline {
    * @throws {AgentErrorThrown}
    */
   query(query: TimelineQuery): Promise<TimelineQueryReply>
+  /**
+   * [`Self::query`] plus this branch's own facts written above the
+   * published head: one page of the same selection, with the branch's
+   * facts in `published+1..=through` joined to its own segment in sequence
+   * order. The cutoff `through` is the branch's committed sequence when the
+   * call starts, so a write during the call stays out of this page, and no
+   * fact above it is returned. The published part and the tail are disjoint
+   * in sequence, so each fact is returned once. The reply reports the cutoff
+   * it took; a caller that holds live events releases the ones above it
+   * ([ADR 020 D3](../../../../docs/adr/020-timeline-read-convergence.md)).
+   * @throws {AgentErrorThrown}
+   */
+  queryWithTail(query: TimelineQuery): Promise<TimelineTailReply>
   /**
    * Reads the rows this projection consumes after an event cursor; a cursor
    * inside an atomic batch reads that row and filters by sequence. The event
