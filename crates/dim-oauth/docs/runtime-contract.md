@@ -6,6 +6,25 @@ The flow is a public OAuth client: there is no client secret. The `dimagent.com`
 
 Login selects a directory (`--directory` or the CLI entry's default) and optional enterprise email. Discovery reads the directory's `/.well-known/openid-configuration`, falling back to `/oauth/authorize`, `/oauth/token` and `/oauth/device_authorization` under the issuer, and the relay is `{issuer}/v1`. Browser redirects permit only HTTP localhost, 127.0.0.1 or ::1 at `/auth/callback`; the host owns the callback listener and browser, the provider owns code exchange and the `/oauth/userinfo` confirmation. Device polling continues in the provider after the initiating call returns.
 
+## Session title generation
+
+DimOAuth also provides the optional process service `sessionTitleGenerator`, implementing the
+[SessionTitle contract](../../../docs/design/plugins/SessionTitle.md#33-generation-routing-and-optional-service).
+It accepts only its own provider id; another provider returns `unsupported_provider` before
+reading account data or making a request. It sends `POST {issuer}/v1/session/rename` with
+`{"messages":[{"role":"user","content":text}]}`, the existing identity headers and the account
+Bearer token. The caller cannot supply credentials or an issuer. Each HTTP exchange has a 10 s
+timeout and uses the existing single controlled refresh after 401. The server owns its model,
+prompt and quota. A successful reply must contain nonblank `title` text.
+
+Missing or unusable accounts return `account_unavailable`. The server error codes
+`session_rename_disabled`, `session_rename_not_entitled` and `session_rename_quota_exhausted`
+map to the corresponding unavailable reasons; other rejection, transport and response failures
+return `failed`. No upstream response, account secrets or error messages are returned. There is
+no rejection cache: every request uses the current account. Closing cancels request I/O; an
+already-started token rotation remains Store-owned and settles before unload. Cancellation is
+terminal and returns `cancelled`. DimOAuth never writes Session metadata or chooses a fallback.
+
 ## Account record
 
 `<product home>/auth.json` is the only persisted source of Dim credentials (`nextApiOauth`) and account state (`dimAccountState`, schema 1: `credentialEpoch`, `generation`, `credentialRevision`, `state`, and when authenticated `identity` and `tokenDigest`). It is plain JSON shared with the native subscription providers; other root fields belong to their owners and are preserved. Writes go through the product root's FileStorage lease, which also serializes concurrent processes, with Unix mode 0600. A lookup that finds a usable record reads the file atomically without that lease, so a fresh grant creates no `auth.json.lock` marker and no fsync; the lease is taken when a refresh, normalization or any other write is needed. `tokenDigest` is the SHA-256 of the grant's RFC 8785 canonical JSON.

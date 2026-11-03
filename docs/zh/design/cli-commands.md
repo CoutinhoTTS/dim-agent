@@ -334,7 +334,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 │ › node      download  24.21.0    ready                                    │
 │   python    system    3.12.15    off      未安装                          │
 │                                                                           │
-│   4 个插件在等 node：goal、session-title、scheduler、workflow             │
+│   3 个插件在等 node：goal、scheduler、workflow                            │
 ╰─ Enter 安装或应用 · s 来源 · a 自动 · r 重试 · Esc 关闭 ──────────────────╯
 ```
 
@@ -352,7 +352,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 │               https://npmmirror.com/mirrors/node/v24.21.0/…：404          │
 │   python    system    3.12.15    off      未安装                          │
 │                                                                           │
-│   4 个插件在等 node：goal、session-title、scheduler、workflow             │
+│   3 个插件在等 node：goal、scheduler、workflow                            │
 ╰─ Enter 重试 · s 把 node 换成 system · Esc 关闭 ───────────────────────────╯
 ```
 
@@ -400,7 +400,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 /plugins
 ╭─ 插件 ────────────────────────────────────────────────────────────────────╮
 │ › goal           on     pending · 等待 node 运行时                        │
-│   session-title  on     pending · 等待 node 运行时                        │
+│   session-title  on     ready · 内置                                     │
 │   scheduler      on     pending · 等待 node 运行时                        │
 │   workflow       on     pending · 等待 node 运行时                        │
 ╰─ Enter 打开 /runtime · o 开/关 · r 重载 · Esc 关闭 ───────────────────────╯

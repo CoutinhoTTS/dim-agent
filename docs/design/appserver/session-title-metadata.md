@@ -7,7 +7,7 @@ is admitted and how unload settles it (§6, D14). Requirement: [SessionTitle](..
 [A.2](../plugins/SessionTitle.md#a2-depended-on-shapes-owners-define-them). Overview:
 [Appendix B.2](../overview.md#b2-app-server-process-plugins), SessionStore and Rpc rows. Scope:
 [ADR 002](../../adr/002-plugin-scope.md) process scope, inside the existing SessionStore plugin, with three Rpc list
-fields. Consumer: SessionTitle (P4, TypeScript first).
+fields. Consumer: SessionTitle.
 
 ## 1. Summary
 
@@ -38,7 +38,7 @@ protocol version.
 ```text
  Session scope                          Process scope (control node)
  ----------------------------           --------------------------------------------------------------
- SessionTitle (TypeScript row)          SessionStore (existing plugin)
+ SessionTitle (Session part)          SessionStore (existing plugin)
    inject 'sessionMetadata'               sessionMetadata (HostDispatch)
      read -------------------------->       read     -> metadata()   ------------------+
      setTitle ---------------------->       setTitle -> set_title()                    |
