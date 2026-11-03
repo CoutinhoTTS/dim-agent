@@ -1297,6 +1297,122 @@ fn mcp_inspect_prints_the_effective_entry_and_connections() {
     );
 }
 
+/// #953: `mcp add` takes `timeout` as a member of the definition document.
+#[test]
+fn mcp_add_passes_a_tool_call_timeout_through() {
+    let home = Home::new();
+    let path = home.0.join("entry.json");
+    let document = json!({
+        "id": "example",
+        "source": "user",
+        "configuration": {
+            "type": "stdio", "command": "npx", "args": [], "env": {},
+            "enabled": false, "timeout": 1000,
+        },
+    });
+    fs::write(&path, document.to_string()).unwrap();
+    let saved = document["configuration"].clone();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, cli_catalog());
+        let request = wire.read("mcp.save");
+        assert_eq!(request["params"]["configuration"], saved);
+        wire.reply(&request, json!({}));
+        area(wire, cli_catalog(), docs(true));
+    });
+    let output = home
+        .command()
+        .args(["mcp", "add"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Added example.\n"
+    );
+}
+
+/// #953: `mcp set` writes a `timeout` and clears one with `null`.
+#[test]
+fn mcp_set_writes_and_clears_a_tool_call_timeout() {
+    for (text, patch) in [
+        (json!({"timeout": 1000}), json!({"timeout": 1000})),
+        (json!({"timeout": null}), json!({"timeout": null})),
+    ] {
+        let home = Home::new();
+        let path = home.0.join("patch.json");
+        fs::write(&path, text.to_string()).unwrap();
+        let daemon = home.daemon(move |wire| {
+            hello(wire);
+            let request = wire.read("mcp.catalog");
+            wire.reply(&request, cli_catalog());
+            configuration(wire, "docs", "user", docs(true));
+            let request = wire.read("mcp.catalog");
+            wire.reply(&request, cli_catalog());
+            let request = wire.read("mcp.update");
+            assert_eq!(request["params"]["patch"], patch);
+            wire.reply(&request, json!({}));
+            area(wire, cli_catalog(), docs(true));
+        });
+        let output = home
+            .command()
+            .args(["mcp", "set", "docs"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        daemon.join().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), "Saved docs.\n");
+    }
+}
+
+/// #953: an entry's stated limit shows in `mcp inspect`.
+#[test]
+fn mcp_inspect_shows_a_stated_tool_call_timeout() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, cli_catalog());
+        let request = wire.read("mcp.inspect");
+        let mut configuration = docs(true)["configuration"].clone();
+        configuration["timeout"] = json!(1000);
+        wire.reply(
+            &request,
+            json!({"enabled": true, "configuration": configuration, "connections": []}),
+        );
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            assert!(!line.contains("mcp.update"), "the inspect wrote back");
+            line.clear();
+        }
+    });
+    let output = home
+        .command()
+        .args(["mcp", "inspect", "docs"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Tool call timeout: 1000 ms"), "{stdout}");
+}
+
 /// A daemon without the namespace refuses each new verb before any read.
 #[test]
 fn mcp_commands_refuse_a_daemon_without_the_namespace() {

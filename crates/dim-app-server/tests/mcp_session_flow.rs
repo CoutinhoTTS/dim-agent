@@ -3150,3 +3150,52 @@ async fn a_probe_runs_a_project_cwd_where_the_published_connection_runs() {
     env.close().await;
     std::fs::remove_dir_all(tools).unwrap();
 }
+
+/// #953: the management read shows an entry's `timeout` when it is set,
+/// `mcp.update` sets and clears it, and an invalid value is the entry's own
+/// field error.
+#[tokio::test]
+async fn management_reads_sets_and_clears_the_tool_call_timeout() {
+    let env = Env::new().await;
+    let read = || {
+        management(
+            &env.agent,
+            "mcp.configuration",
+            json!({"source":"user","id":"docs"}),
+        )
+    };
+    let before = read().await.unwrap();
+    assert!(before["configuration"].get("timeout").is_none(), "{before}");
+    management(
+        &env.agent,
+        "mcp.update",
+        json!({"source":"user","id":"docs","expectedVersion":before["revision"],"patch":{"timeout":1000}}),
+    )
+    .await
+    .unwrap();
+    let after = read().await.unwrap();
+    assert_eq!(after["configuration"]["timeout"], 1000, "{after}");
+    management(
+        &env.agent,
+        "mcp.update",
+        json!({"source":"user","id":"docs","expectedVersion":after["revision"],"patch":{"timeout":null}}),
+    )
+    .await
+    .unwrap();
+    let cleared = read().await.unwrap();
+    assert!(
+        cleared["configuration"].get("timeout").is_none(),
+        "{cleared}"
+    );
+    let refused = management(
+        &env.agent,
+        "mcp.update",
+        json!({"source":"user","id":"docs","expectedVersion":cleared["revision"],"patch":{"timeout":86400001}}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(refused.data.unwrap().app_error, "mcp_invalid_config");
+    assert!(refused.message.contains("timeout"), "{}", refused.message);
+    assert!(!refused.message.contains("86400001"), "{}", refused.message);
+    env.close().await;
+}
