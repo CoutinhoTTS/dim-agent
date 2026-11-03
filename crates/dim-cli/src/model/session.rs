@@ -346,6 +346,16 @@ impl Area {
             Self::Scheduled | Self::Mcp | Self::Models { .. } | Self::Workflow
         )
     }
+
+    /// Whether a request for this area names the workspace: the areas that
+    /// read or write this project's own files. The Scheduler's jobs are the
+    /// host's, but a new job's document takes its `cwd` from the workspace.
+    pub fn names_workspace(&self) -> bool {
+        matches!(
+            self,
+            Self::Skills | Self::Hooks | Self::Mcp | Self::Scheduled | Self::Workflow
+        )
+    }
 }
 
 /// What a management request asks of its area's owner.

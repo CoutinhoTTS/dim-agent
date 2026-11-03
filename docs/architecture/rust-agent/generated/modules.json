@@ -2835,6 +2835,16 @@
       ]
     },
     {
+      "id": "dim_cli::args::workspace_tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::args",
+      "file": "crates/dim-cli/src/args.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq"
+      ]
+    },
+    {
       "id": "dim_cli::attachments",
       "crate": "dim_cli",
       "parent": "dim_cli",
@@ -25098,6 +25108,13 @@
     },
     {
       "from": "dim_cli::args",
+      "to": "dim_cli::args::workspace_tests",
+      "references": [
+        "mod workspace_tests"
+      ]
+    },
+    {
+      "from": "dim_cli::args",
       "to": "dim_cli::attachments",
       "references": [
         "path crate::attachments::MAX_IMAGES"
@@ -25155,6 +25172,75 @@
       "to": "dim_cli::update",
       "references": [
         "path crate::update::channel"
+      ]
+    },
+    {
+      "from": "dim_cli::args::workspace_tests",
+      "to": "dim_cli::args",
+      "references": [
+        "path Action",
+        "path Action::Account",
+        "path Action::Acp",
+        "path Action::Chat",
+        "path Action::DaemonStop",
+        "path Action::DaemonVacuum",
+        "path Action::DefaultTerminalMode",
+        "path Action::Exec",
+        "path Action::Export",
+        "path Action::Help",
+        "path Action::Login",
+        "path Action::Logout",
+        "path Action::Management",
+        "path Action::ManagementAdd",
+        "path Action::ManagementEdit",
+        "path Action::ManagementSet",
+        "path Action::ManagementStart",
+        "path Action::McpDisconnect",
+        "path Action::McpEnable",
+        "path Action::McpList",
+        "path Action::McpLogin",
+        "path Action::McpLogout",
+        "path Action::Models",
+        "path Action::Plugin",
+        "path Action::Recording",
+        "path Action::RuntimeConfig",
+        "path Action::RuntimeInstall",
+        "path Action::RuntimeList",
+        "path Action::SessionCleanup",
+        "path Action::SessionDelete",
+        "path Action::SessionRename",
+        "path Action::Timeline",
+        "path Action::Tui",
+        "path Action::Version",
+        "path Action::Web",
+        "path Action::WebInstall",
+        "path workspace_for"
+      ]
+    },
+    {
+      "from": "dim_cli::args::workspace_tests",
+      "to": "dim_cli::export",
+      "references": [
+        "path Format::Json"
+      ]
+    },
+    {
+      "from": "dim_cli::args::workspace_tests",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path Area",
+        "path Area::Hooks",
+        "path Area::Mcp",
+        "path Area::Models",
+        "path Area::Permissions",
+        "path Area::Scheduled",
+        "path Area::Skills",
+        "path Area::Workflow",
+        "path ManagementAction::List",
+        "path ManagementRequest",
+        "use crate::model::session::Area",
+        "use crate::model::session::ManagementAction",
+        "use crate::model::session::ManagementRequest"
       ]
     },
     {
@@ -28969,6 +29055,13 @@
         "path EventContent::BranchCreate",
         "path EventContent::BranchCreateFailed",
         "path EventContent::BranchStart"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::tests",
+      "to": "dim_cli::args",
+      "references": [
+        "path crate::args::Options::parse"
       ]
     },
     {

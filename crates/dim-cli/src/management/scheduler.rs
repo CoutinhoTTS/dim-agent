@@ -7,8 +7,6 @@
 //! request, not in the document, and the owner derives `created_by`,
 //! `policy_cap` and `enabled_at`.
 
-use std::path::Path;
-
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
@@ -445,7 +443,7 @@ pub async fn catalog(client: &mut Client) -> Result<Catalog, String> {
 }
 
 /// The jobs as entries, with the kinds the daemon can serve.
-pub(super) fn view(catalog: &Catalog, available: &[ActionKind], cwd: &Path) -> ManagementView {
+pub(super) fn view(catalog: &Catalog, available: &[ActionKind], cwd: &str) -> ManagementView {
     let mut groups = Groups::default();
     for job in &catalog.jobs {
         let mut states = Vec::new();
@@ -554,11 +552,11 @@ fn label(catalog: &Catalog, id: &str) -> String {
 
 /// The document an add starts from: the owner's create shape, filled with
 /// example values.
-fn create(cwd: &Path) -> Value {
+fn create(cwd: &str) -> Value {
     json!({
         "name": "example",
         "schedule": {"every_minutes": 60},
         "prompt": "Summarize what changed in this workspace today.",
-        "cwd": cwd.to_string_lossy(),
+        "cwd": cwd,
     })
 }

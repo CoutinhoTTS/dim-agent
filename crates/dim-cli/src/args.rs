@@ -1,6 +1,6 @@
 use crate::{Result, export::Format, permission};
 use dim_agent_types::PermissionPreset;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// What `--server` must name, shared by every error about the value it
 /// supplies.
@@ -299,6 +299,35 @@ pub struct UiIdentity {
     pub token: String,
 }
 
+/// The workspace every request names: the launch directory, resolved once as
+/// a UTF-8 string. A `Path` cannot stand in for it, so no request can carry a
+/// path serde refuses or one a lossy conversion would alter; the client's own
+/// file system work asks for [`Workspace::path`] instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Workspace(String);
+
+impl Workspace {
+    /// The workspace `path` names. A path that is not valid UTF-8 names none:
+    /// the refusal shows it with the invalid bytes replaced.
+    fn resolve(path: &Path) -> Result<Self> {
+        match path.to_str() {
+            Some(text) => Ok(Self(text.to_owned())),
+            None => {
+                Err(format!("The workspace path {} must be valid UTF-8", path.display()).into())
+            }
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The same workspace, for the client's own file system work.
+    pub fn path(&self) -> &Path {
+        Path::new(&self.0)
+    }
+}
+
 #[derive(Clone)]
 pub struct Options {
     pub action: Action,
@@ -308,7 +337,13 @@ pub struct Options {
     pub resume: Option<String>,
     pub home: PathBuf,
     pub home_explicit: bool,
-    pub cwd: PathBuf,
+    /// The launch directory: where the daemon starts and what the client's
+    /// own file system work resolves against. Requests carry [`Self::workspace`]
+    /// instead.
+    cwd: PathBuf,
+    /// The workspace the command names in its requests, resolved while the
+    /// options are parsed; `None` for a command that names none.
+    workspace: Option<Workspace>,
     pub server: Option<PathBuf>,
     pub model_config: Option<PathBuf>,
     pub provider: Option<String>,
@@ -351,6 +386,7 @@ impl Options {
             home: default_home(),
             home_explicit: false,
             cwd: std::env::current_dir()?,
+            workspace: None,
             server: None,
             model_config: None,
             provider: None,
@@ -1176,6 +1212,7 @@ impl Options {
         if !options.cwd.is_dir() {
             return Err("--cwd must name a directory".into());
         }
+        options.workspace = workspace_for(&options.action, &options.cwd)?;
         if matches!(options.action, Action::DaemonStop) {
             return Ok(options);
         }
@@ -1202,6 +1239,78 @@ impl Options {
             }
         }
         Ok(options)
+    }
+
+    /// The launch directory, for the client's own file system work.
+    pub fn launch_dir(&self) -> &Path {
+        &self.cwd
+    }
+
+    /// The workspace every request this command sends names, resolved while
+    /// the options were parsed. Only a command that names one reaches a
+    /// request.
+    pub fn workspace(&self) -> &Workspace {
+        self.workspace
+            .as_ref()
+            .expect("a command that names the workspace resolved it")
+    }
+
+    /// The workspace a request names, for a command that names one.
+    pub fn named_workspace(&self) -> Option<&str> {
+        self.workspace.as_ref().map(Workspace::as_str)
+    }
+}
+
+/// The workspace `action` names in its requests, resolved from the launch
+/// directory; `None` for a command that names none.
+fn workspace_for(action: &Action, cwd: &Path) -> Result<Option<Workspace>> {
+    action
+        .names_workspace()
+        .then(|| Workspace::resolve(cwd))
+        .transpose()
+}
+
+impl Action {
+    /// Whether this command names the workspace in a request it sends. Such a
+    /// command resolves it while its options are parsed, so a path that is
+    /// not valid UTF-8 is refused before the daemon is contacted.
+    fn names_workspace(&self) -> bool {
+        match self {
+            Self::Chat | Self::Tui | Self::Exec => true,
+            Self::McpList
+            | Self::McpLogin(_)
+            | Self::McpLogout(_)
+            | Self::McpEnable { .. }
+            | Self::McpDisconnect(_) => true,
+            Self::Management(request) => request.area.names_workspace(),
+            Self::ManagementEdit { area, .. }
+            | Self::ManagementSet { area, .. }
+            | Self::ManagementAdd { area, .. }
+            | Self::ManagementStart { area, .. } => area.names_workspace(),
+            Self::Migration(_)
+            | Self::Acp { .. }
+            | Self::Export { .. }
+            | Self::SessionRename { .. }
+            | Self::SessionDelete { .. }
+            | Self::SessionCleanup { .. }
+            | Self::Timeline { .. }
+            | Self::DaemonVacuum { .. }
+            | Self::Login(_)
+            | Self::Account(_)
+            | Self::Logout(_)
+            | Self::Models(_)
+            | Self::Recording { .. }
+            | Self::Plugin { .. }
+            | Self::RuntimeList
+            | Self::RuntimeInstall(_)
+            | Self::RuntimeConfig { .. }
+            | Self::DaemonStop
+            | Self::Web { .. }
+            | Self::WebInstall
+            | Self::DefaultTerminalMode { .. }
+            | Self::Help
+            | Self::Version => false,
+        }
     }
 }
 
@@ -1259,4 +1368,166 @@ pub fn default_home() -> PathBuf {
                 .map(|home| PathBuf::from(home).join(directory))
                 .unwrap_or_default()
         })
+}
+
+#[cfg(all(test, unix))]
+mod workspace_tests {
+    use super::*;
+    use crate::model::session::{Area, ManagementAction, ManagementRequest};
+    use std::os::unix::ffi::OsStrExt;
+
+    /// A path the macOS file system refuses to hold, built from bytes as one
+    /// on a file system that keeps names as bytes does.
+    fn not_utf8() -> PathBuf {
+        PathBuf::from(std::ffi::OsStr::from_bytes(b"/tmp/dim-\xff-work"))
+    }
+
+    fn management(area: Area) -> Action {
+        Action::Management(ManagementRequest {
+            area,
+            action: ManagementAction::List,
+        })
+    }
+
+    /// The path is shown with its invalid bytes replaced, and the sentence
+    /// names what the workspace must be.
+    #[test]
+    fn a_workspace_that_is_not_utf8_is_refused() {
+        let error = workspace_for(&Action::Exec, &not_utf8()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "The workspace path /tmp/dim-\u{FFFD}-work must be valid UTF-8"
+        );
+    }
+
+    /// Every entry that panicked or sent a substituted path when it built a
+    /// request from a path now refuses the workspace instead, so no request is
+    /// built.
+    #[test]
+    fn every_command_that_names_a_workspace_refuses_a_path_that_is_not_utf8() {
+        let entries = [
+            Action::Chat,
+            Action::Tui,
+            Action::Exec,
+            Action::McpList,
+            Action::McpLogin("id".into()),
+            Action::McpLogout("id".into()),
+            Action::McpEnable {
+                id: "id".into(),
+                enabled: true,
+            },
+            Action::McpDisconnect("id".into()),
+            management(Area::Skills),
+            management(Area::Hooks),
+            management(Area::Mcp),
+            management(Area::Scheduled),
+            management(Area::Workflow),
+            Action::ManagementEdit {
+                area: Area::Mcp,
+                id: Some("id".into()),
+            },
+            Action::ManagementSet {
+                area: Area::Hooks,
+                id: None,
+                path: "document.json".into(),
+            },
+            Action::ManagementAdd {
+                area: Area::Scheduled,
+                path: "job.json".into(),
+            },
+            Action::ManagementStart {
+                area: Area::Workflow,
+                id: "name".into(),
+                path: None,
+            },
+        ];
+        for entry in entries {
+            assert!(
+                workspace_for(&entry, &not_utf8()).is_err(),
+                "{entry:?} must refuse a workspace that is not UTF-8"
+            );
+        }
+    }
+
+    /// A command that sends no workspace keeps working in such a directory:
+    /// it has no value to resolve and no request to build.
+    #[test]
+    fn a_command_that_names_no_workspace_keeps_its_launch_directory() {
+        let entries = [
+            Action::Help,
+            Action::Version,
+            Action::Login(None),
+            Action::Account("provider".into()),
+            Action::Logout("provider".into()),
+            Action::Models("provider".into()),
+            management(Area::Models {
+                provider_id: "provider".into(),
+            }),
+            management(Area::Permissions),
+            Action::Export {
+                session_id: "session".into(),
+                format: Format::Json,
+                output: None,
+            },
+            Action::Timeline {
+                session_id: "session".into(),
+                output: None,
+                database: None,
+            },
+            Action::SessionRename {
+                session_id: "session".into(),
+                title: Some("title".into()),
+                clear: false,
+            },
+            Action::SessionDelete {
+                session_id: "session".into(),
+            },
+            Action::SessionCleanup {
+                older_than: None,
+                keep: Some(1),
+                yes: true,
+            },
+            Action::Recording { enabled: None },
+            Action::Plugin {
+                method: "plugin.list".into(),
+                params: serde_json::Value::Null,
+            },
+            Action::RuntimeList,
+            Action::RuntimeInstall("node".into()),
+            Action::RuntimeConfig {
+                name: "node".into(),
+                source: None,
+                auto: None,
+            },
+            Action::DaemonStop,
+            Action::DaemonVacuum { database: None },
+            Action::Web {
+                port: None,
+                open_browser: true,
+                off: false,
+            },
+            Action::WebInstall,
+            Action::DefaultTerminalMode { fullscreen: true },
+            Action::Acp {
+                agent_id: None,
+                auth_setup: None,
+            },
+        ];
+        for entry in entries {
+            assert_eq!(
+                workspace_for(&entry, &not_utf8()).unwrap(),
+                None,
+                "{entry:?} names no workspace"
+            );
+        }
+    }
+
+    #[test]
+    fn a_workspace_that_is_utf8_resolves_as_its_path() {
+        let workspace = workspace_for(&Action::Exec, Path::new("/tmp/dim-work"))
+            .unwrap()
+            .expect("exec names the workspace");
+        assert_eq!(workspace.as_str(), "/tmp/dim-work");
+        assert_eq!(workspace.path(), Path::new("/tmp/dim-work"));
+    }
 }

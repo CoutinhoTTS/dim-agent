@@ -894,7 +894,8 @@ Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
 ### `/resume` 选择面板
 
 `/resume` 打开在 `dimcode` 启动时的工作区上：`--cwd` 指定的目录，经过规范化，也就是
-`session.create` 为在那里创建的 Session 记录的工作区。列表只含恰好属于该工作区的已存 Session，
+`session.create` 为在那里创建的 Session 记录的工作区。客户端只把它解析一次为 UTF-8，
+不是合法 UTF-8 的路径在连接守护进程之前就被拒绝。列表只含恰好属于该工作区的已存 Session，
 最新在前，每次打开都从这里开始。`Ctrl+S` 依次循环当前工作区、当前仓库与所有工作区，标题写明
 当前范围。过滤框保留输入框的 `Ctrl+A` 与 `Ctrl+W`，`Tab` 向下移动选择。
 

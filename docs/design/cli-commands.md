@@ -1312,11 +1312,12 @@ Subcommands do not create a plugin command registry.
 
 `/resume` opens on the workspace `dimcode` was launched in: the directory
 `--cwd` names, canonicalized, which is also the workspace `session.create`
-records for a Session it creates there. The list holds the stored Sessions of
-exactly that workspace, newest first, and every open starts there. `Ctrl+S`
-cycles this workspace, this repository and all workspaces, and the title names
-the scope shown. The filter keeps the composer's `Ctrl+A` and `Ctrl+W`, and
-`Tab` moves the selection down.
+records for a Session it creates there. The client resolves it once as UTF-8
+and refuses a path that is not, before it connects to the daemon. The list
+holds the stored Sessions of exactly that workspace, newest first, and every
+open starts there. `Ctrl+S` cycles this workspace, this repository and all
+workspaces, and the title names the scope shown. The filter keeps the
+composer's `Ctrl+A` and `Ctrl+W`, and `Tab` moves the selection down.
 
 ```text
 ╭─ Sessions · This workspace ──────────────────────────────────────────────────╮
