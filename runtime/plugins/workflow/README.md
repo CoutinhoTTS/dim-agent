@@ -112,8 +112,10 @@ every active run's record, the stage identities, `agent_id` copies, results and 
 later, plus the new record; if that exceeds the payload it first expires the oldest settled
 terminal runs and otherwise returns `limit_exceeded` without persisting. The retained store,
 therefore, keeps each read, write and `workflow.status` reply within one bridge frame; a record
-committed before these bounds keeps its original size. The token is bumped inside the store
-transaction; a failed token read or write is a storage failure, and a poll reaches the frame with the
+committed before these bounds keeps its original size. The token is written in its own transaction
+after the store replace, so a crash between them leaves it naming older text; recovery reads the
+store and does not depend on it. A failed token read or write is a storage failure, a failed store
+access drops the snapshot so committed bytes stay visible, and a poll reaches the frame with the
 token, never the store. Invalid, v1,
 unknown-version or missing-marker records return `invalid_data` and preserve their bytes. There is
 no migration. After a crash, unfinished runs become interrupted/lost without relaunch; a lost
@@ -163,7 +165,7 @@ Node rows, Settings, file authority, S2 calls, publication and Session history. 
 | 6 | Native project default-disabled/client enablement, editing a running definition and the next run reading the edit |
 | 7 | Native running-stage Node crash, row/runtime report replacement, complete host restart and Agents-index reload; no stage relaunch |
 | 8–11 | Native live first-admission narrowing with the sibling launch gated, cap persistence before siblings, starter loss, non-interactive/default-profile stage Sessions with and without `workflow` in the mount list, ReadOnly denial and handler refusal when it is declared |
-| 12 | Native retention keeps the latest 100 terminal records, newer active/pending work and retained references; SDK flows prove that older active/pending records also survive the terminal limit and that a start expires older settled records for frame space; user forks and external Sessions survive owned-parent deletion. Real deletion/read/atomic-replace failures preserve ownership, minute maintenance retries without active runs or definitions, and Node restart reconciles deletion before record removal. Native terminal/report-settlement triggers continue with an unreadable definition source; native source CAS and invalid-file preservation are also covered |
+| 12 | Native retention keeps the latest 100 terminal records, newer active/pending work and retained references; SDK flows prove that older active/pending records also survive the terminal limit and that a start expires older settled records for frame space; user forks and external Sessions survive owned-parent deletion. Real deletion/read/atomic-replace failures preserve ownership, minute maintenance retries without active runs or definitions, and Node restart reconciles deletion before record removal. A failed change-token write after a committed store replace leaves the run readable in the same generation. Native terminal/report-settlement triggers continue with an unreadable definition source; native source CAS and invalid-file preservation are also covered |
 | 13 | Native resubmission across row/runtime replacement with the append held, before/after-input crashes, failed atomic replacement, a resubmitted report written once and host restart; SDK rejected, failed, ambiguous, reloading and publication-unknown replies |
 | 14 | SDK definition, user-document, run-store and listing payload flows: over-1-MiB definitions are rejected, a user save over the 8 MiB document is rejected without writing, quote/backslash/control-character results and logs are measured in their committed JSON form and a run's results stop at 512 KiB, `agent_id` copies are charged, an over-payload active admission returns `limit_exceeded` without persisting, a start expires older settled records to fit, the listing is sent once and stops at its payload with `truncated`, and the store and status replies stay within 8 MiB. Native inner-v2 records remain decodable |
 

@@ -1174,6 +1174,71 @@ async fn node_workflow_rejects_invalid_inner_records_without_changing_bytes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_workflow_failed_token_write_keeps_the_committed_run_readable() {
+    let home = std::env::temp_dir().join(format!("dim-workflow-token-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(home.join("workflow")).unwrap();
+    let home = home.canonicalize().unwrap();
+    let mut config = ServerConfig {
+        product_home: Some(home.clone()),
+        database_path: Some(home.join("native.sqlite")),
+        session_typescript: Some(probe_rows()),
+        ..Default::default()
+    };
+    config.session_defaults.tools = Some(vec!["echo".into(), "workflow".into()]);
+    let (server, _) = launch_with_agent(Arc::new(MockTools), config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    process_typescript::select_model(&mut client).await;
+    ready(&mut client).await;
+    assert_ok(
+        &client
+            .rpc("session.create", json!({"cwd":home,"tools":[]}))
+            .await,
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "workflow.save",
+                json!({"source":"user","document":{
+        "schema":"dim.workflow/v1","name":"token","description":"Token write",
+        "steps":[{"stage":{"id":"one","prompt":"done"}}]}}),
+            )
+            .await,
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "workflowprobe.configure",
+                json!({"failReplace":"workflow/runs.version"}),
+            )
+            .await,
+    );
+    let started = client
+        .rpc("workflow.start", json!({"name":"token","cwd":home}))
+        .await;
+    assert!(
+        started.get("error").is_some(),
+        "the failed change-token write surfaces: {started}"
+    );
+    assert_eq!(
+        stored(&home)["runs"].as_array().unwrap().len(),
+        1,
+        "started: {started}"
+    );
+    let listed = client.rpc("workflow.status", json!({})).await;
+    assert_ok(&listed);
+    assert_eq!(
+        listed["result"].as_array().unwrap().len(),
+        1,
+        "the committed run stays readable after its token write failed"
+    );
+    assert_eq!(listed["result"][0]["state"], "running");
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_workflow_captures_live_first_admission_and_survives_starter_and_index_changes() {
     let home = std::env::temp_dir().join(format!("dim-workflow-policy-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(home.join("workflow")).unwrap();
