@@ -895,46 +895,16 @@ fn apply_provider_option_passthrough(
     }
 }
 
-/// `service_tier` with model-capability validation.
-fn apply_service_tier(
-    body: &mut Value,
-    provider_opts: &Option<SharedProviderOptions>,
-    caps: &ModelCapabilities,
-    warnings: &mut Vec<Warning>,
-) {
-    let service_tier = openai_option(provider_opts, "serviceTier")
-        .and_then(|v| v.as_str().map(std::string::ToString::to_string));
-    if let Some(ref st) = service_tier {
-        match st.as_str() {
-            "flex" => {
-                if caps.supports_flex_processing {
-                    body["service_tier"] = json!(st);
-                } else {
-                    warnings.push(Warning::Unsupported {
-                        feature: "serviceTier".to_string(),
-                        details: Some(
-                            "flex processing is only available for o3, o4-mini, and gpt-5 models"
-                                .to_string(),
-                        ),
-                    });
-                }
-            }
-            "priority" | "fast" => {
-                if caps.supports_priority_processing {
-                    body["service_tier"] = json!(st);
-                } else {
-                    warnings.push(Warning::Unsupported {
-                        feature: "serviceTier".to_string(),
-                        details: Some(
-                            "priority processing is only available for supported models (gpt-4, gpt-5, gpt-5-mini, o3, o4-mini) and requires Enterprise access. gpt-5-nano is not supported".to_string(),
-                        ),
-                    });
-                }
-            }
-            _ => {
-                body["service_tier"] = json!(st);
-            }
-        }
+/// `service_tier` from the provider options.
+///
+/// dim patch (arcships/aimux#462): an explicitly selected tier is sent for
+/// every model id, deployment aliases included. The product catalog and the
+/// remote account entitlement remain the authorities.
+fn apply_service_tier(body: &mut Value, provider_opts: &Option<SharedProviderOptions>) {
+    if let Some(st) =
+        openai_option(provider_opts, "serviceTier").and_then(|v| v.as_str().map(str::to_owned))
+    {
+        body["service_tier"] = json!(st);
     }
 }
 
@@ -1123,7 +1093,7 @@ pub(crate) fn build_request_body_with_chat_options(
         body["reasoning_effort"] = json!(effort);
     }
 
-    apply_service_tier(&mut body, provider_opts, &caps, &mut warnings);
+    apply_service_tier(&mut body, provider_opts);
     apply_tools(&mut body, options, &mut warnings)?;
 
     Ok(RequestBodyResult { body, warnings })

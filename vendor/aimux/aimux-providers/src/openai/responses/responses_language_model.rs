@@ -809,37 +809,20 @@ fn apply_responses_provider_options(
     }
 }
 
-/// `service_tier` with model-capability validation.
+/// `service_tier` from the provider options.
+///
+/// dim patch (arcships/aimux#462): an explicitly selected tier is sent for
+/// every model id, deployment aliases included. The product catalog and the
+/// remote account entitlement remain the authorities.
 fn apply_responses_service_tier(
     ns: ResponsesNamespace,
     body: &mut Value,
     provider_opts: &Option<SharedProviderOptions>,
-    caps: &ModelCapabilities,
-    warnings: &mut Vec<Warning>,
 ) {
-    if let Some(st) = openai_option(ns, provider_opts, "serviceTier")
-        .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+    if let Some(st) =
+        openai_option(ns, provider_opts, "serviceTier").and_then(|v| v.as_str().map(str::to_owned))
     {
-        match st.as_str() {
-            "flex" if !caps.supports_flex_processing => {
-                warnings.push(Warning::Unsupported {
-                    feature: "serviceTier".to_string(),
-                    details: Some(
-                        "flex processing is only available for o3, o4-mini, and gpt-5 models"
-                            .to_string(),
-                    ),
-                });
-            }
-            "priority" | "fast" if !caps.supports_priority_processing => {
-                warnings.push(Warning::Unsupported {
-                    feature: "serviceTier".to_string(),
-                    details: Some("priority processing is only available for supported models (gpt-4, gpt-5, gpt-5-mini, o3, o4-mini) and requires Enterprise access. gpt-5-nano is not supported".to_string()),
-                });
-            }
-            _ => {
-                body["service_tier"] = json!(st);
-            }
-        }
+        body["service_tier"] = json!(st);
     }
 }
 
@@ -1080,8 +1063,8 @@ pub fn build_responses_request_body_for(
         }
     }
 
-    // -- service_tier (with capability validation) --
-    apply_responses_service_tier(ns, &mut body, provider_opts, &caps, &mut warnings);
+    // -- service_tier --
+    apply_responses_service_tier(ns, &mut body, provider_opts);
 
     // -- reasoning block (reasoning models only) --
     apply_responses_reasoning_block(
