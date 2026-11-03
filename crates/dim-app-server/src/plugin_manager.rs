@@ -495,7 +495,13 @@ fn using(
     match choice.use_.as_deref() {
         None => shipped(defaults, builtins, name),
         Some("builtin") => builtins.contains(name).then_some(Use::Builtin),
-        Some("default") => defaults.plugins.contains_key(name).then_some(Use::Default),
+        Some("default") => {
+            if defaults.plugins.contains_key(name) {
+                Some(Use::Default)
+            } else {
+                builtins.contains(name).then_some(Use::Builtin)
+            }
+        }
         Some(id) => record
             .installed(id)
             .filter(|entry| entry.name == name)
@@ -1175,13 +1181,7 @@ impl Manager {
                 }
                 choice.off = false;
                 let choice = choice.clone();
-                let valid = match choice.use_.as_deref() {
-                    None => self.shipped(&name).is_some(),
-                    Some("builtin") => self.builtins().contains(&name),
-                    Some("default") => self.state.defaults.plugins.contains_key(&name),
-                    Some(id) => record.installed(id).is_some_and(|entry| entry.name == name),
-                };
-                if !valid {
+                if self.using(record, &name).is_none() {
                     return Err(match &choice.use_ {
                         Some(use_) => not_found(use_),
                         None => PluginError::new(

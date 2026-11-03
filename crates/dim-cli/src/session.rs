@@ -232,7 +232,7 @@ pub async fn chat(
     let session_id = if let Some(id) = &options.resume {
         id.clone()
     } else {
-        let mut params = json!({"cwd":options.cwd});
+        let mut params = json!({"cwd": options.workspace().as_str()});
         let mut preferences = None;
         let mut target = None;
         if let (Some(provider), Some(model)) = (&options.provider, &options.model) {
@@ -290,7 +290,7 @@ pub async fn chat(
         } else {
             "workspace"
         },
-        options.cwd.display(),
+        options.launch_dir().display(),
         session_id
     ))?;
     let policy = match (selected, options.permission) {
@@ -339,7 +339,7 @@ pub async fn chat(
         let mut listing = None;
         loop {
             let reader = input.as_mut().expect("interactive input");
-            if !composer::edit(reader, &mut draft, notice.take(), &options.cwd, &mut interrupts).await? {
+            if !composer::edit(reader, &mut draft, notice.take(), options.workspace().path(), &mut interrupts).await? {
                 break;
             }
             let text = draft.plain().map(str::to_owned);

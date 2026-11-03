@@ -1,9 +1,0 @@
-{
-  "name": "@dimcode/session-title",
-  "private": true,
-  "version": "0.1.0",
-  "type": "module",
-  "exports": "./index.ts",
-  "dependencies": { "@arcships/rutis": "0.19.3" },
-  "devDependencies": { "@types/node": "24.10.0" }
-}

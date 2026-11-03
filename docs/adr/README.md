@@ -26,6 +26,8 @@ original text.
 | [016 — An opt-in request record for model calls](016-model-request-log.md) | Accepted by the repository owner | Supersedes 005 D1's "no third channel" for opt-in model request recording |
 | [017 — Independent file access and tool approval](017-independent-permission-controls.md) | Accepted | Extends 009 and 014 with additive policy overrides; replaces 011's visible Execution presentation, preserving its settings contract |
 | [018 — Permission is the preset; file scope and isolation are sandbox settings](018-permission-is-the-preset.md) | Accepted | Supersedes 017 D1's two overrides and D3; narrows 017 D2 to this type; the preset is the policy of record and unknown keys are ignored |
+| [019 — One bounded event query is the Timeline read surface](019-event-query.md) | Proposed | Follows 006 D1; replaces the consumer-shaped reads on the Timeline service |
+| [020 — Timeline reads converge on the event query and replay is removed](020-timeline-read-convergence.md) | Proposed | Refines 019 D5; follows 006 D1 |
 
 Source baseline: [initial foundation parent](https://github.com/arcships/dim/commit/aaaffa5768e031d781abb73e45b1915b05dc2aa0).
 This baseline includes lifecycle fixes not necessarily present on the default branch.

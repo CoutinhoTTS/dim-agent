@@ -178,7 +178,20 @@ that failed.
 ### D9. The probe and the run view answer different questions
 
 - `mcp.inspect` is the run view: it reports the connection generations the Sessions hold now,
-  their state and their last complete discovery, and it contacts nothing.
+  their state, their last start or transport failure and their last complete discovery, and it
+  contacts nothing.
+- A transport close moves the connection to `disconnected`, keeps the last tools published and
+  callable, and keeps the reason in both `mcp.inspect` and `session.mcp`. `session.mcp` reports
+  such a server as `disconnected`, with the reason as its `message`. A failed start is `failed`
+  only while its cooldown holds; the cooldown moves it to `disconnected`, and discovery starts
+  the server again after each cooldown. The reason stays until a connection succeeds.
+  Diagnostic text is bounded to 4 KiB on UTF-8 boundaries. A stdio failure may include
+  up to 20 recent stderr lines within that bound; server-emitted text may contain
+  secrets and is exposed only to management/status clients, never model requests or logs.
+- A remote server that answers HTTP 404 to a request carrying its session id ended that session
+  without processing the request: the connection starts a new session and the request is
+  replayed once. A second 404 in a row fails the call. The replacement is a new connection
+  generation, so a Session republishes its tool list.
 - `mcp.test` is a one-shot diagnostic: it contacts the server for a saved entry or a draft and
   reports one terminal outcome. It attaches no Session, publishes no tool, registers no
   connection and writes no configuration, so it says nothing about what runs.

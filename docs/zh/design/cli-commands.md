@@ -334,7 +334,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 │ › node      download  24.21.0    ready                                    │
 │   python    system    3.12.15    off      未安装                          │
 │                                                                           │
-│   4 个插件在等 node：goal、session-title、scheduler、workflow             │
+│   3 个插件在等 node：goal、scheduler、workflow                            │
 ╰─ Enter 安装或应用 · s 来源 · a 自动 · r 重试 · Esc 关闭 ──────────────────╯
 ```
 
@@ -352,7 +352,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 │               https://npmmirror.com/mirrors/node/v24.21.0/…：404          │
 │   python    system    3.12.15    off      未安装                          │
 │                                                                           │
-│   4 个插件在等 node：goal、session-title、scheduler、workflow             │
+│   3 个插件在等 node：goal、scheduler、workflow                            │
 ╰─ Enter 重试 · s 把 node 换成 system · Esc 关闭 ───────────────────────────╯
 ```
 
@@ -400,7 +400,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 /plugins
 ╭─ 插件 ────────────────────────────────────────────────────────────────────╮
 │ › goal           on     pending · 等待 node 运行时                        │
-│   session-title  on     pending · 等待 node 运行时                        │
+│   session-title  on     ready · 内置                                     │
 │   scheduler      on     pending · 等待 node 运行时                        │
 │   workflow       on     pending · 等待 node 运行时                        │
 ╰─ Enter 打开 /runtime · o 开/关 · r 重载 · Esc 关闭 ───────────────────────╯
@@ -932,7 +932,11 @@ Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
 ### `/resume` 选择面板
 
 `/resume` 打开在 `dimcode` 启动时的工作区上：`--cwd` 指定的目录，经过规范化，也就是
-`session.create` 为在那里创建的 Session 记录的工作区。列表只含恰好属于该工作区的已存 Session，
+`session.create` 为在那里创建的 Session 记录的工作区。客户端只把它解析一次为 UTF-8，
+不是合法 UTF-8 的路径在连接守护进程之前就被拒绝。恢复 Session 并在提示词上运行的对话
+（`--resume ID -p TEXT`，或从标准输入读入的提示词）不指名工作区：它只连接、读历史并提交，
+输入框不会运行，因此在路径不是合法 UTF-8 的目录里照常工作。交互式恢复、新建 Session 与
+TUI 仍然指名工作区。列表只含恰好属于该工作区的已存 Session，
 最新在前，每次打开都从这里开始。`Ctrl+S` 依次循环当前工作区、当前仓库与所有工作区，标题写明
 当前范围。过滤框保留输入框的 `Ctrl+A` 与 `Ctrl+W`，`Tab` 向下移动选择。
 

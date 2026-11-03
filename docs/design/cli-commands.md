@@ -432,7 +432,7 @@ as `runtime.list` reports it.
 │ › node      download  24.21.0    ready                                    │
 │   python    system    3.12.15    off      not installed                   │
 │                                                                           │
-│   4 plugins wait for node: goal, session-title, scheduler, workflow       │
+│   3 plugins wait for node: goal, scheduler, workflow                      │
 ╰─ Enter install or apply · s source · a auto · r retry · Esc close ────────╯
 ```
 
@@ -450,7 +450,7 @@ as `runtime.list` reports it.
 │               https://npmmirror.com/mirrors/node/v24.21.0/…: 404         │
 │   python    system    3.12.15    off      not installed                   │
 │                                                                           │
-│   4 plugins wait for node: goal, session-title, scheduler, workflow       │
+│   3 plugins wait for node: goal, scheduler, workflow                      │
 ╰─ Enter retry · s switch node to system · Esc close ───────────────────────╯
 ```
 
@@ -505,7 +505,7 @@ with that runtime selected. Today the row says only `pending`.
 /plugins
 ╭─ Plugins ─────────────────────────────────────────────────────────────────╮
 │ › goal           on     pending · waits for the node runtime              │
-│   session-title  on     pending · waits for the node runtime              │
+│   session-title  on     ready · built-in                                  │
 │   scheduler      on     pending · waits for the node runtime              │
 │   workflow       on     pending · waits for the node runtime              │
 ╰─ Enter open /runtime · o on/off · r reload · Esc close ───────────────────╯
@@ -526,7 +526,7 @@ The typed forms are the whole area, so a caller needs no panel:
 $ dimcode runtime list
 node    download  24.21.0   ready
 python  system    3.12.15   off       not installed
-4 plugins wait for node: goal, session-title, scheduler, workflow
+3 plugins wait for node: goal, scheduler, workflow
 $ dimcode runtime install node
 node    download  24.21.0   acquiring
 $ dimcode runtime config python --source system --auto on
@@ -1367,11 +1367,16 @@ Subcommands do not create a plugin command registry.
 
 `/resume` opens on the workspace `dimcode` was launched in: the directory
 `--cwd` names, canonicalized, which is also the workspace `session.create`
-records for a Session it creates there. The list holds the stored Sessions of
-exactly that workspace, newest first, and every open starts there. `Ctrl+S`
-cycles this workspace, this repository and all workspaces, and the title names
-the scope shown. The filter keeps the composer's `Ctrl+A` and `Ctrl+W`, and
-`Tab` moves the selection down.
+records for a Session it creates there. The client resolves it once as UTF-8
+and refuses a path that is not, before it connects to the daemon. A chat that
+resumes a Session and runs on a prompt (`--resume ID -p TEXT`, or a prompt read
+from stdin) names no workspace: it attaches, reads history and submits, and the
+composer never runs, so it keeps working in a directory whose path is not valid
+UTF-8. An interactive resume, a new Session and the TUI still name it. The list
+holds the stored Sessions of exactly that workspace, newest first, and every
+open starts there. `Ctrl+S` cycles this workspace, this repository and all
+workspaces, and the title names the scope shown. The filter keeps the
+composer's `Ctrl+A` and `Ctrl+W`, and `Tab` moves the selection down.
 
 ```text
 ╭─ Sessions · This workspace ──────────────────────────────────────────────────╮

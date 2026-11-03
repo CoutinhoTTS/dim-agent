@@ -1,8 +1,98 @@
 //! `dimcode session rename|delete|cleanup` and `/rename`, over the scripted
-//! daemon and, for the server guarantees they rely on, the App Server's own
-//! flow tests (`crates/dim-app-server/tests/transport_flow/session_title.rs`).
+//! daemon, with title behavior covered by the SessionTitle plugin's public
+//! flows (`crates/dim-session-title/tests/native_flow.rs`).
 use super::*;
 use std::sync::mpsc;
+
+#[test]
+fn the_product_profile_installs_native_titles_without_a_foreign_runtime() {
+    let home = Home::new();
+    let _daemon = OwnedDaemon(home.0.join("rust/daemon.sock"));
+    let output = home.command().args(["mcp", "list"]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stream = UnixStream::connect(home.0.join("rust/daemon.sock")).unwrap();
+    stream.set_read_timeout(Some(PATIENCE)).unwrap();
+    let mut wire = Wire(BufReader::new(stream));
+    let mut id = 0;
+    let mut call = |method: &str, params: Value| {
+        id += 1;
+        wire.send(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}));
+        loop {
+            let mut line = String::new();
+            assert_ne!(wire.0.read_line(&mut line).unwrap(), 0);
+            let reply: Value = serde_json::from_str(&line).unwrap();
+            if reply["id"] == id {
+                break reply;
+            }
+        }
+    };
+    let hello = call("hello", json!({"protocolVersion":3,"clientKind":"cli"}));
+    assert!(hello.get("result").is_some(), "{hello}");
+    let settings = call(
+        "settings.read",
+        json!({"source":"session-title","scope":"user"}),
+    );
+    assert_eq!(
+        settings["result"]["document"]["enabled"], true,
+        "{settings}"
+    );
+    let provider = "018ec73f-0000-7000-8000-000000000098";
+    let configured = call(
+        "provider.create",
+        json!({"providerId":provider,"displayName":"Title profile fixture",
+        "connection":{"driverKind":"openai-compatible","baseUrl":"http://127.0.0.1:1/v1","auth":{"type":"anonymous"}},
+        "models":[{"modelId":"title","displayName":"Title","status":"active",
+            "capabilities":dim_agent_types::CatalogCapabilities::with_limits(32_000,128)}],"enabled":true}),
+    );
+    assert!(configured.get("result").is_some(), "{configured}");
+    let selected = call(
+        "provider.select",
+        json!({"providerId":provider,"modelId":"title"}),
+    );
+    assert!(selected.get("result").is_some(), "{selected}");
+    let created = call(
+        "session.create",
+        json!({"cwd":home.0,"interactive":true,"tools":[]}),
+    );
+    let session = created["result"]["sessionId"]
+        .as_str()
+        .expect("the product creates a Session");
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let renamed = call(
+            "session.rename",
+            json!({"sessionId":session,"title":"Native profile title"}),
+        );
+        if let Some(result) = renamed.get("result") {
+            assert_eq!(result["title"], "Native profile title");
+            assert_eq!(result["titleSource"], "manual");
+            break;
+        }
+        assert!(
+            ["service_reloading", "unknown_method"]
+                .iter()
+                .any(|code| renamed["error"]["data"]["appError"] == *code),
+            "{renamed}"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "SessionTitle activates in the product profile"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        home.command()
+            .args(["daemon", "stop"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+}
 
 /// The `session.rename` reply for the title the call carried.
 fn renamed(request: &Value) -> Value {

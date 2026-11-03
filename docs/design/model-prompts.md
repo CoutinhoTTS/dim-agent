@@ -200,7 +200,7 @@ The format follows [Timeline branches §17](timeline-branches.md#17-requirements
 - It exposes its policy texts at its factory configuration, so a candidate can run through the shipped assembly (§8.1). The install call registers the configuration's name and provides the value, and a part the profile places without that call declares and reads none, keeping the built-in text.
 - It ships a protocol change with the behaviour, the flow test and the compatibility of histories resumed under the older form (§4).
 
-SessionTitle is out of scope: its `SYSTEM` (`runtime/plugins/session-title/index.ts`) is the system text of an auxiliary title call, not text that enters a Session's model context — the title request is not a Session request (§3's channels).
+SessionTitle is out of scope: its `SYSTEM` (`crates/dim-session-title/src/lib.rs`) is the system text of an auxiliary title call, not text that enters a Session's model context — the title request is not a Session request (§3's channels).
 
 ### 9.3 ToolRegistry and ToolBinding
 
