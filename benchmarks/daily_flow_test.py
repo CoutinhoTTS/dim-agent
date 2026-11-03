@@ -78,7 +78,7 @@ def git(repo: Path, *args: str) -> str:
 
 
 def write_harbor_job(job: Path, k: int, unscored: int = 0,
-                     task_names: tuple[str, ...] = ("a",),
+                     task_names: tuple[str, ...] = ("terminal-bench/a",),
                      all_zero: bool = False) -> None:
     """A minimal, scoreable harbor job: each task run k times, all passing.
 
@@ -88,10 +88,11 @@ def write_harbor_job(job: Path, k: int, unscored: int = 0,
     advanced over. `all_zero` scores every trial 0, the shape of a build or
     verifier that ran and failed everything.
 
-    Task names come from the corpus's manifest, because harbor names its trials
-    after the task.toml name and the manifest keys are that same name — the run's
-    job and the corpus it claims have to agree for the completeness guard to
-    have anything to say.
+    Task names come from ``corpus_tasks``: harbor names its trials after the
+    ``[task] name`` in each task's ``task.toml``, which is prefixed differently
+    from the manifest directory key (``terminal-bench/...``, ``datacurve/...``).
+    The job and the corpus it claims have to agree on those names for the
+    completeness guard to have anything to say.
     """
     reward = 0.0 if all_zero else 1.0
     trials = []
@@ -132,11 +133,17 @@ def write_harbor_job(job: Path, k: int, unscored: int = 0,
 
 
 def make_corpus(path: Path, *names: str) -> str:
-    """A corpus tree with a manifest that pins it; returns its tree digest."""
+    """A corpus tree with a manifest that pins it; returns its tree digest.
+
+    Each directory is named by the manifest key, but its ``task.toml`` carries a
+    ``[task] name`` prefixed the way harbor reports it, distinct from the
+    directory key — the production shape the completeness guard must match.
+    """
     tasks = {}
     for name in names:
         (path / name).mkdir(parents=True)
-        (path / name / "task.toml").write_text(f'[task]\nname = "{name}"\n')
+        (path / name / "task.toml").write_text(
+            f'[task]\nname = "terminal-bench/{name}"\n')
         tasks[name] = {"digest": digest_dir(path / name), "upstream": "test", "overlaid": []}
     pin = hashlib.sha256(json.dumps(tasks, sort_keys=True).encode()).hexdigest()
     (path / "MANIFEST.json").write_text(json.dumps({"tree_digest": pin, "tasks": tasks}))
@@ -222,7 +229,8 @@ class DailyFlowTest(unittest.TestCase):
              tasks_dir: Path | None = None, job_tasks: int | None = None,
              all_zero: bool = False, env: dict | None = None,
              with_sidecar: bool = False,
-             sidecar_k: int | None = None) -> int:
+             sidecar_k: int | None = None,
+             extra_tasks: tuple[str, ...] = ()) -> int:
         tasks = tasks_dir or self.tasks
         if dirty:
             (self.tooling / "benchmarks" / "scratch.py").write_text("edit\n")
@@ -266,11 +274,13 @@ class DailyFlowTest(unittest.TestCase):
             The model identity comes back beside the job, because that is what
             the real fetch does — run_l2 captures it from the endpoint and rsync
             brings it along. `no_model` is the case where it does not. The job's
-            task names come from the corpus manifest, which is the same naming
-            harbor uses; `job_tasks` truncates it to simulate a job that ran a
-            subset of the corpus. `with_sidecar` also brings back the job config
-            run_l2 wrote beside the results, which is what makes the frozen
-            params measured rather than asserted.
+            task names come from `corpus_tasks`, the same prefixed ``[task] name``
+            harbor reports; `job_tasks` truncates it to simulate a job that ran a
+            subset of the corpus, and `extra_tasks` appends names harbor could
+            never have run to exercise the outside-the-corpus refusal.
+            `with_sidecar` also brings back the job config run_l2 wrote beside
+            the results, which is what makes the frozen params measured rather
+            than asserted.
             """
             self.fetched.append(run_id)
             if fetch_error is not None:
@@ -278,10 +288,10 @@ class DailyFlowTest(unittest.TestCase):
             harbor = Path(out) / "harbor"
             if harbor.exists():
                 shutil.rmtree(harbor)
-            names = sorted(json.loads(
-                (tasks / "MANIFEST.json").read_text())["tasks"])
+            names = list(daily_run.corpus_tasks(tasks))
             if job_tasks is not None:
                 names = names[:job_tasks]
+            names += list(extra_tasks)
             write_harbor_job(harbor, k, unscored=unscored,
                              task_names=tuple(names), all_zero=all_zero)
             if with_sidecar:
@@ -792,6 +802,38 @@ class DailyFlowTest(unittest.TestCase):
         self.assertEqual((run.outcome, run.invalid_reason),
                          ("invalid", "unscoreable"))
 
+    def test_a_job_that_ran_a_subset_of_the_corpus_holds_the_window(self) -> None:
+        """A partial job measured some tasks, and the ones it never ran keep the
+        window where it was — and the guard reports the intersection, not the
+        number of tasks the job happened to return.
+        """
+        tasks = self.root / "two-tasks"
+        make_corpus(tasks, "a", "b")
+        self.state.write_text(json.dumps({"last_l2_head": self.base}))
+        head = self._merge("feat", "a.txt", "a\n")
+        self.assertEqual(self._run(mode="visible", tasks_dir=tasks, job_tasks=1),
+                         daily_run.EXIT_INVALID)
+        self.assertEqual(self._state_head(), self.base)
+
+        problem = self._manifest_for(head)["l2"]["problems"][0]
+        self.assertIn("covered 1/2 corpus task(s)", problem)
+        self.assertIn("terminal-bench/b", problem)
+
+    def test_a_job_that_ran_tasks_outside_the_corpus_holds_the_window(self) -> None:
+        """A job that reported a task the corpus never pinned cannot be trusted
+        as a measurement of that corpus, even when every pinned task is present.
+        """
+        self.state.write_text(json.dumps({"last_l2_head": self.base}))
+        head = self._merge("feat", "a.txt", "a\n")
+        self.assertEqual(self._run(mode="visible",
+                                   extra_tasks=("terminal-bench/ghost",)),
+                         daily_run.EXIT_INVALID)
+        self.assertEqual(self._state_head(), self.base)
+
+        problem = self._manifest_for(head)["l2"]["problems"][0]
+        self.assertIn("outside the corpus", problem)
+        self.assertIn("terminal-bench/ghost", problem)
+
     def test_an_all_zero_run_does_not_freeze_a_baseline(self) -> None:
         """Every trial scored, and not one passed: on this corpus that has meant
         a broken measurement, never a weak model (runner/assemble_tasks.py, the
@@ -1194,7 +1236,7 @@ class DailyFlowTest(unittest.TestCase):
         self.assertEqual(frozen["measured_versions"], ["0.5.1"])
         self.assertEqual(frozen["k"], 3)
         self.assertEqual(frozen["corpus_pin"], pin)
-        self.assertEqual(frozen["tasks"]["a"]["passes"], 3)
+        self.assertEqual(frozen["tasks"]["terminal-bench/a"]["passes"], 3)
         self.assertEqual(self._manifest()["l2"]["baseline_written"],
                          str(self.baselines / f"{pin}.json"))
         # The identity that came back beside the results. Without it in here,

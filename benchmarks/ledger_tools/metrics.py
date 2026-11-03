@@ -77,8 +77,10 @@ def health(
             covered.update(run.covers)
         # `pass` has meant two things over this ledger's life: before gate_armed
         # it also covered runs compared against a gate wired to nothing. Only the
-        # armed ones clear — an unarmed run measured, and its merges stay in the
-        # escape denominator until something actually gated them.
+        # armed ones clear — an unarmed run is `covered` (so out of the L1
+        # false-negative denominator) but not `cleared` (so out of the escape
+        # denominator), which leaves the escape rate `None`, not zero, until a
+        # criterion is armed. That is the honest reading.
         if run.conclusive and run.outcome == "pass" and run.gate_armed:
             cleared.update(run.covers)
 

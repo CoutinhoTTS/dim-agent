@@ -45,6 +45,11 @@ L1Trigger = Literal["path_rule", "agent", "fail_open", "oversize"]
 #: a verdict. Note what it claims that `invalid` does not: that a measurement
 #: exists. A screen whose job could not be scored is not a screen — it is a run
 #: with nothing in it, and `invalid` is the only thing it may be recorded as.
+#:
+#: `observed` is conclusive and measured but decides nothing: it ran against a
+#: gate wired to nothing (or had no comparison at all, as a baseline does), so
+#: there is nothing to breach and nothing to clear. `pass` is only constructible
+#: from an armed gate that did not breach; see `gate_armed`.
 RunOutcome = Literal["pass", "fail", "invalid", "screen", "observed"]
 
 #: Why a run is `invalid`, recorded because the four are not interchangeable and

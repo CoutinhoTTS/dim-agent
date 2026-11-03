@@ -47,6 +47,7 @@ import secrets
 import shlex
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -197,16 +198,24 @@ DEFAULT_PROJECT = "arcships/dim"
 
 
 def corpus_tasks(tasks_dir: Path) -> tuple[str, ...]:
-    """The task names the corpus's manifest pins.
+    """The task names harbor reports, read from each task's ``task.toml``.
 
-    `corpus_pin` has already verified the tree against this manifest by the time
-    this runs, so the names are read without re-verifying: this exists so the
-    run's job can be held to the corpus it claimed — a job that came back with a
-    subset of the tasks (a harbor hiccup, a container that never started) must
-    not settle a window as if it had measured all of them.
+    The manifest pins *directory* names, but harbor names each trial after the
+    ``[task] name`` inside the task's ``task.toml``, and the two namespaces
+    differ on both corpora (``datacurve/...``, ``terminal-bench/...``,
+    ``databricks/officeqa-pro__...``). ``corpus_pin`` has already verified the
+    tree against the manifest by the time this runs, so the files are read
+    without re-verifying: this exists so the run's job can be held to the corpus
+    it claimed — a job that came back with a subset of the tasks (a harbor
+    hiccup, a container that never started) must not settle a window as if it
+    had measured all of them.
     """
     manifest = json.loads((tasks_dir / "MANIFEST.json").read_text())
-    return tuple(sorted(manifest["tasks"]))
+    names = []
+    for key in manifest["tasks"]:
+        config = tomllib.loads((tasks_dir / key / "task.toml").read_text())
+        names.append(config["task"]["name"])
+    return tuple(sorted(names))
 
 
 def baseline_for(pin: str, directory: Path) -> Path | None:
@@ -681,11 +690,14 @@ def record_run(ledger: ledger_tools.Ledger, *, run_id: str, run_type: RunType,
     covered — which is the shape of an L1 false negative. A crashed harness was
     being written down as L1 waving things through.
 
-    The outcome comes from `conclusive`, not from the numbers: a k=1 screen has
-    no verdict to record however good its numbers look, and `RunRecord` refuses
-    to store one. What it does not refuse is `invalid` at k=1, because that is
-    not a verdict either — it is the absence of one, and a screen that could not
-    be scored has to be able to say so.
+    The outcome comes from `conclusive` plus the comparison's gate, not from the
+    numbers: a k=1 screen has no verdict to record however good its numbers look,
+    and `RunRecord` refuses to store one. A conclusive run records `pass` only
+    when its gate was armed and nothing breached, `fail` when an armed criterion
+    breached, and `observed` when a disarmed gate — or no comparison at all, as
+    for a baseline — measured it but decided nothing. What no k refuses is
+    `invalid`: it is not a verdict but the absence of one, and a screen that
+    could not be scored has to be able to say so.
     """
     comparison = (summary or {}).get("comparison")
     # Order is chronological, and the three failures come before k because none
@@ -798,9 +810,10 @@ def settle(out: Path, run_id: str, run_type: RunType, k: int, pin: str,
     # fraction of the measurement. Unlike "no baseline" this is fixed by running
     # again, so it lands in `unscoreable` and holds the window.
     if expected_tasks:
-        covered = {task.task_name for task in report.tasks}
-        missing_tasks = sorted(set(expected_tasks) - covered)
-        extra_tasks = sorted(covered - set(expected_tasks))
+        reported = {task.task_name for task in report.tasks}
+        covered = reported & set(expected_tasks)
+        missing_tasks = sorted(set(expected_tasks) - reported)
+        extra_tasks = sorted(reported - set(expected_tasks))
         if missing_tasks:
             problem = (f"job covered {len(covered)}/{len(expected_tasks)} corpus "
                        f"task(s); missing: {', '.join(missing_tasks[:5])}")

@@ -722,7 +722,7 @@ L3 周五触发，回归的 blame window 从**上一次绿色 L3** 起算：顺�
 | ledger 中的记录 | 归因 |
 |---|---|
 | L1 判 invisible，L2 未跑 | L1 假阴性 |
-| L1 判 visible，L2 跑了并 Pass | **L2 漏放**——阈值过松或噪声，触发阈值重标，与 L1 无关 |
+| L1 判 visible，L2 跑了并在 armed 门禁下 Pass | **L2 漏放**——阈值过松或噪声，触发阈值重标，与 L1 无关 |
 | L1 判 visible，L2 判 Fail，但该批次未被 revert | 流程问题，回溯为什么带着已知回归继续发布 |
 
 没有第 4 步，L3 只能告诉你"这周变差了"，无法定位。没有第 5 步，即使定位到 commit 也分不清是哪一层的责任。
@@ -734,9 +734,9 @@ L3 周五触发，回归的 blame window 从**上一次绿色 L3** 起算：顺�
 有一类回归没有载体任务——例如往 system prompt 加了 200 token，每个任务都多花 3%，聚合越界但没有任何单任务超出自己的噪声带。此时二分无从下手，改走：
 
 1. 先取**自上一次绿色 L3 以来**合并进 main、且**没有任何 run 覆盖过**的 merge，逐个补跑 L2
-2. 若这批都不能解释，再取**被某次 conclusive 且 Pass 的 run 覆盖**的 merge 补跑
+2. 若这批都不能解释，再取**被某次 conclusive 且 `pass`（`gate_armed`）的 run 覆盖**的 merge 补跑
 
-顺序不能反过来：第一批更可能是元凶且从未被 L2 检验过，成本也更低。但**第二批不能省**——弥散型回归同样可能来自一个 L2 判 Pass 的 MR，只查第一批会把所有弥散回归都记到 L1 头上，重演"只记 invisible"那个错误。
+顺序不能反过来：第一批更可能是元凶且从未被 L2 检验过，成本也更低。但**第二批不能省**——弥散型回归同样可能来自一个 L2 在 armed 门禁下判 Pass 的 MR，只查第一批会把所有弥散回归都记到 L1 头上，重演"只记 invisible"那个错误。
 
 补跑结果直接作为归因，并按 [bisect 的归因表](#自动-bisect)分别喂给 L1 假阴性率或 L2 漏放率。
 
@@ -784,7 +784,8 @@ ledger 记两种记录，因为判定的两个部分归属不同的单位：**L1
 | `window_base` / `window_head` | 答复的 main 区间；baseline 无 base |
 | `covers` | 本次运行答复的 merge commit sha（全长） |
 | `unjudged` | 本次答复了、但**没有任何 L1 记录**的 commit —— 即直推 main 的提交。judge 失联的 merge 不在此列：它有自己的 MR 记录，`l1_trigger = fail_open` 已经说明它未被判定，而它的代码确实进了被测构建 |
-| `outcome` | `pass` / `fail` / `invalid` / `screen` |
+| `outcome` | `pass` / `fail` / `invalid` / `screen` / `observed` |
+| `gate_armed` | 本次运行的比较是否有 armed（阻断）判据。`pass` 仅在它为真时构成 clearance；`observed` 时它必为假（armed 且未破应记 `pass`） |
 | `invalid_reason` | `outcome = invalid` 时**必填**，否则必须为空：`l2_failed` / `settle_failed` / `unscoreable` / `no_reference`。`measured` 由它派生，所以不写就没人读得懂这条记录 |
 | `l2_exit_code` | harbor 的非零退出码；只在非零时记 |
 | `settle_error` | 打分失败时抛的异常，或结果根本没取回来的原因 |
@@ -792,6 +793,16 @@ ledger 记两种记录，因为判定的两个部分归属不同的单位：**L1
 | `disputed` | 本次重判、且与已有 L1 判定不一致的 merge sha（verdict、trigger、identity 或文件清单任一不同）。已有判定不被覆盖，分歧记在这里。已有记录是 `fail_open` 时不算分歧：它被本次的判定替换（见 Merge 记录一节） |
 | `runner_dirty` | 评测 harness 有未提交改动时为真。只有显式 `--allow-dirty` 才可能出现，且 baseline 禁止 |
 | `infra_rate` | 本次运行的 infra 失败率。`measured` 为假时它是默认值 `0.0`，不是观测值 |
+
+**`observed` 是 conclusive 且 measured 的，但它什么都不决定。** 当门禁没有 armed 阻断判据
+（或根本没有比较对象，如 baseline）时，conclusive 的运行照样测量了、也照样完整，但「没破」
+无从谈起——`pass` 只在「有 armed 判据且未破」时可构造。因此：
+
+- clearance（clear 一个 merge）= `conclusive` 且 `outcome = pass` 且 `gate_armed = true`；
+- `observed` = `conclusive`、`measured`、`gate_armed = false`：进覆盖，不进 clearance。
+
+在有任何判据被 armed 之前，L2 漏放率的分母为空，指标**无法测量**（不是 0）；把无武装的
+历史 `pass` 记成「L2 放行过」正是这次修正要停止的口径。
 
 **`conclusive` 为假时 `outcome` 只能是 `screen` 或 `invalid`。** 日常 batch 是 k=1，[Experiment parameters](#experiment-parameters) 禁止单轮 k=1 作为判定依据；把这条写成 schema 约束而不是惯例，k=1 的 `pass` / `fail` 就根本构造不出来，不依赖任何读取方记得这条规矩。
 
@@ -826,9 +837,9 @@ k=1 同样适用这一整套。日常 screen 打不出分时记 `invalid` / `uns
 
 ### 两种记录如何 join
 
-L2 漏放率的分母是「跑了 L2 且 Pass 的 MR」。batch 模式下没有任何 MR 记录满足这个条件，因此分母必须经 run 记录取得：
+L2 漏放率的分母是「跑了 L2 且在 armed 门禁下 Pass 的 MR」。batch 模式下没有任何 MR 记录满足这个条件，因此分母必须经 run 记录取得：
 
-> 被某次 `conclusive` 且 `outcome = pass` 的 run 的 `covers` 认领、且已合并的 commit。
+> 被某次 `conclusive` 且 `outcome = pass` 且 `gate_armed` 的 run 的 `covers` 认领、且已合并的 commit。
 
 join 方向只能是 run → MR。MR 记录在 L1 判定时就写入，run 记录在运行结束后才写入；若改为在 MR 记录上回填 run 指针，就需要修改已写入的记录，而 MR 记录写入后不再修改——唯一的例外是 `fail_open` 被真实判定替换。
 
@@ -840,7 +851,7 @@ join 方向只能是 run → MR。MR 记录在 L1 判定时就写入，run 记�
 |---|---|---|---|
 | **L1 假阴性率** | 判 invisible 且**没有任何 run 覆盖过**的 merge（见下） | 其中经 L3 bisect 或弥散型补跑确认引入 Primary 回归（含 cost / turns）的 MR | > 5%：先看漏掉的类别能否写成路径规则，其次收紧 agent 的 prompt；不通过"换更强的模型"解决 |
 | **L1 visible 率** | 全部 MR | 判为 visible 的 MR | 长期 > 60%：L1 名存实亡，等于每个 MR 都跑 L2，只贡献延迟。先排查是否在只改测试文件、只改注释这类 MR 上误触发，再考虑收窄可见面定义 |
-| **L2 漏放率** | 被某次 conclusive 且 Pass 的 run 覆盖的 merge | 其中日后被确认引入 Primary 回归的 MR | > 5%：L2 阈值过松 |
+| **L2 漏放率** | 被某次 conclusive 且 `pass`（`gate_armed`）的 run 覆盖的 merge | 其中日后被确认引入 Primary 回归的 MR | > 5%：L2 阈值过松 |
 
 L2 漏放率是 [L2 门禁](#l2-门禁)阈值的唯一实证来源。那些阈值的初值均为拍定，不靠这个指标就永远没有修正依据。
 
