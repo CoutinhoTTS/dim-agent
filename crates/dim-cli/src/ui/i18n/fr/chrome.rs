@@ -505,8 +505,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Show ACP sessions" => "Afficher les sessions ACP",
         "Prompt suggestion" => "Suggestion de prompt",
         "Prompt suggestion: {error}" => "Suggestion de prompt: {error}",
-        "Suggestions paused in this session after 20 unused. Turn them off and on in /settings to resume." => {
-            "Les suggestions sont en pause dans cette session après 20 inutilisées. Désactivez puis réactivez dans /settings pour reprendre."
+        "Suggestions are paused in this session because offers went unused. Turn them off and on in /settings to resume." => {
+            "Les suggestions sont en pause dans cette session parce que des propositions sont restées inutilisées. Désactivez puis réactivez dans /settings pour reprendre."
         }
         // keys.rs
         "show the key bindings" => "afficher les raccourcis",

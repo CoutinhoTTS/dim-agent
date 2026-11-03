@@ -501,8 +501,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Show ACP sessions" => "Tampilkan sesi ACP",
         "Prompt suggestion" => "Saran prompt",
         "Prompt suggestion: {error}" => "Saran prompt: {error}",
-        "Suggestions paused in this session after 20 unused. Turn them off and on in /settings to resume." => {
-            "Saran dijeda di sesi ini setelah 20 tidak dipakai. Matikan lalu nyalakan lagi di /settings untuk melanjutkan."
+        "Suggestions are paused in this session because offers went unused. Turn them off and on in /settings to resume." => {
+            "Saran dijeda di sesi ini karena ada tawaran yang tidak dipakai. Matikan lalu nyalakan lagi di /settings untuk melanjutkan."
         }
         // keys.rs
         "show the key bindings" => "lihat pintasan tombol",

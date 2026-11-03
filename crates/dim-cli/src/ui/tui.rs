@@ -2309,8 +2309,10 @@ impl App {
             }
             Update::SuggestionThrottled => {
                 self.notices.push(
-                    t("Suggestions paused in this session after 20 unused. \
-                       Turn them off and on in /settings to resume.")
+                    t(
+                        "Suggestions are paused in this session because offers went unused. \
+                       Turn them off and on in /settings to resume.",
+                    )
                     .to_owned(),
                 );
             }

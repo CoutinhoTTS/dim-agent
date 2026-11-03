@@ -481,8 +481,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Show ACP sessions" => "ACP セッションを表示",
         "Prompt suggestion" => "プロンプト候補",
         "Prompt suggestion: {error}" => "プロンプト候補：{error}",
-        "Suggestions paused in this session after 20 unused. Turn them off and on in /settings to resume." => {
-            "このセッションでは未使用が 20 回に達したため、プロンプト候補を一時停止しました。再開するには /settings でオフにしてからオンにします。"
+        "Suggestions are paused in this session because offers went unused. Turn them off and on in /settings to resume." => {
+            "このセッションでは提案が使われなかったため、プロンプト候補を一時停止しました。再開するには /settings でオフにしてからオンにします。"
         }
         // keys.rs
         "show the key bindings" => "キーバインドを表示",

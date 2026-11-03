@@ -410,7 +410,7 @@ fn the_pause_is_announced_once_per_session() {
         wire.hold();
     });
     let mut terminal = Terminal::launch_tui(home.command());
-    terminal.until("Suggestions paused in this session");
+    terminal.until("Suggestions are paused in this session");
     settle.recv_timeout(PATIENCE).unwrap();
     terminal.write(b"/exit\r");
     terminal.until("Bye!");
@@ -419,7 +419,7 @@ fn the_pause_is_announced_once_per_session() {
     assert_eq!(
         terminal
             .transcript
-            .matches("Suggestions paused in this session")
+            .matches("Suggestions are paused in this session")
             .count(),
         1
     );

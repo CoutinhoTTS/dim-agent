@@ -434,8 +434,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Show ACP sessions" => "显示 ACP 会话",
         "Prompt suggestion" => "提示建议",
         "Prompt suggestion: {error}" => "提示建议：{error}",
-        "Suggestions paused in this session after 20 unused. Turn them off and on in /settings to resume." => {
-            "本会话在 20 次未采用后暂停了提示建议。在 /settings 中关闭再开启即可恢复。"
+        "Suggestions are paused in this session because offers went unused. Turn them off and on in /settings to resume." => {
+            "本会话因提示建议未被采用而暂停。在 /settings 中关闭再开启即可恢复。"
         }
         "show the key bindings" => "显示快捷键",
         "Application keys" => "应用快捷键",

@@ -272,7 +272,7 @@ mod tests {
             for key in [
                 "Prompt suggestion",
                 "Prompt suggestion: {error}",
-                "Suggestions paused in this session after 20 unused. Turn them off and on in /settings to resume.",
+                "Suggestions are paused in this session because offers went unused. Turn them off and on in /settings to resume.",
             ] {
                 assert!(lookup(key).is_some(), "{code} lacks {key:?}");
             }
