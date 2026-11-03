@@ -122,7 +122,7 @@ fork 与 Session 删除在复制连接上分块提交（事件与快照每 256 �
 | 字段 | 内容 |
 | --- | --- |
 | `resume` | 祖先链中的 resume 事件 `(branch_id, sequence, event_id)`：产生游标之后第一条历史条目的事件，不晚于该次准备的 `through`；读取按 `event_id` 定位该事件并从此处续读 |
-| `state` | 投影在 `resume` 之前的状态：`compacted_through` 游标、prompt 条目与 revision、已投递的上下文基线、已提交但未采用的输入、最新 `context/configured`、未闭合的输出与工具 |
+| `state` | 投影在 `resume` 之前的状态：`retain_from` 锚点、prompt 条目与 revision、已投递的上下文基线、已提交但未采用的输入、最新 `context/configured`、未闭合的输出与工具 |
 
 - 写入：ContextPolicy 在 completed 事实被采用后构建快照，`Timeline::save_snapshot` 等锚点发布后才写缓存；构建或保存失败只记录告警，不回滚事实、不重做模型工作。
 - 读取：`context_with_checkpoint` 按解释器选候选，校验锚点 ID、sequence、completed 种类、游标，并按 `resume.event_id` 定位后校验 resume 位于固定祖先链和 source through 之内（按 ID 查不到时用记录的位置）；解码失败、摘要不符、越界或孤立快照一律忽略并回退完整事实重放。默认解释器有两个读取入口：`HistoryRenderer::rendered_context` 返回上下文与其渲染，校验检查点的那次渲染就是调用方使用的渲染，没有检查点时也在这里渲染一次；`HistoryRenderer::context` 只返回上下文，有检查点时渲染一次用于校验并丢弃结果，没有检查点时不渲染。两者的检查点渲染失败都回退完整重放（`rendered_context` 渲染该重放，`context` 不渲染）；读取必需事实的错误不被吞掉，`history::read_context` 与 ContextPolicy 的预算校验走 `context`。
