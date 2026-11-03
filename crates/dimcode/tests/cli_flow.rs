@@ -86,14 +86,14 @@ impl Home {
         thread::spawn(move || {
             // A client that fails before connecting must fail the test, not
             // hang the run.
-            let deadline = Instant::now() + PATIENCE;
+            let deadline = Instant::now() + HANG_GUARD;
             let stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         assert!(
                             Instant::now() < deadline,
-                            "no client connected within {PATIENCE:?}"
+                            "no client connected within {HANG_GUARD:?}"
                         );
                         thread::sleep(Duration::from_millis(10));
                     }
@@ -101,7 +101,7 @@ impl Home {
                 }
             };
             stream.set_nonblocking(false).unwrap();
-            stream.set_read_timeout(Some(PATIENCE)).unwrap();
+            stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
             let mut wire = Wire(BufReader::new(stream));
             flow(&mut wire);
         })
@@ -125,20 +125,47 @@ impl Drop for Home {
 /// can take several seconds; a passing step never waits this long.
 const PATIENCE: Duration = Duration::from_secs(30);
 
+/// Bounds a peer frame that never arrives, so a broken path fails instead of
+/// hanging; it is not a step's budget. A frame is due when the CLI and the
+/// fixture's daemon reach it, and a debug CLI starting on a loaded machine can
+/// take tens of seconds, so ten times the 30 s step budget keeps machine load
+/// out of the result: the scripted daemon's socket reads and the deadline
+/// `Wire::frame` retries within (#807).
+const HANG_GUARD: Duration = Duration::from_secs(300);
+
 struct Wire(BufReader<UnixStream>);
 impl Wire {
     fn read(&mut self, method: &str) -> Value {
-        let mut line = String::new();
-        self.0.read_line(&mut line).unwrap();
-        let value: Value = serde_json::from_str(&line).unwrap();
+        let value = self.frame();
         assert_eq!(value["method"], method);
         value
     }
     /// The next request, whichever it is: for requests whose order the
     /// flow does not fix.
     fn read_any(&mut self) -> Value {
+        self.frame()
+    }
+    fn frame(&mut self) -> Value {
+        let deadline = Instant::now() + HANG_GUARD;
         let mut line = String::new();
-        self.0.read_line(&mut line).unwrap();
+        loop {
+            match self.0.read_line(&mut line) {
+                Ok(0) => panic!("the CLI closed before a frame: {line:?}"),
+                Ok(_) => break,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    assert!(
+                        Instant::now() < deadline,
+                        "no frame within {HANG_GUARD:?}: {line:?}"
+                    );
+                }
+                Err(error) => panic!("{error}"),
+            }
+        }
         serde_json::from_str(&line).unwrap()
     }
     fn send(&mut self, value: Value) {
@@ -846,7 +873,7 @@ fn a_daemon_of_another_version_is_stopped_and_replaced() {
         successor.set_nonblocking(true).unwrap();
         wire.reply(&shutdown, json!({}));
         wire.0.get_mut().shutdown(std::net::Shutdown::Write).unwrap();
-        let deadline = Instant::now() + PATIENCE;
+        let deadline = Instant::now() + HANG_GUARD;
         loop {
             let stream = match successor.accept() {
                 Ok((stream, _)) => stream,
@@ -858,7 +885,7 @@ fn a_daemon_of_another_version_is_stopped_and_replaced() {
                 Err(error) => panic!("{error}"),
             };
             stream.set_nonblocking(false).unwrap();
-            stream.set_read_timeout(Some(PATIENCE)).unwrap();
+            stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
             let mut wire = Wire(BufReader::new(stream));
             let mut line = String::new();
             if wire.0.read_line(&mut line).unwrap() == 0 {
@@ -6764,7 +6791,7 @@ fn daemon_start_waits_for_private_permissions_without_trusting_existing_public_s
         }
     };
     stream.set_nonblocking(false).unwrap();
-    stream.set_read_timeout(Some(PATIENCE)).unwrap();
+    stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
     let mut wire = Wire(BufReader::new(stream));
     let hello = wire.read("hello");
     wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
