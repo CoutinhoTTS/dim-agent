@@ -91,6 +91,11 @@ impl Home {
         terminal.signal(libc::SIGKILL);
     }
     fn daemon(&self, flow: impl FnOnce(&mut Wire) + Send + 'static) -> thread::JoinHandle<()> {
+        // Each flow owns the deliberate-kill mark. A prior flow's `kill` must
+        // not make this one accept an unexpected close, and a flow's own kill
+        // is only set while it runs: the tests join an earlier daemon before
+        // starting the next, so nothing is pending here.
+        self.1.store(false, Ordering::SeqCst);
         let path = self.0.join("rust/daemon.sock");
         let listener = UnixListener::bind(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
@@ -236,7 +241,7 @@ impl Wire {
                     std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
                 ) =>
             {
-                std::panic::panic_any(PeerGone);
+                self.closed(format!("the CLI closed while the flow replied: {value}"));
             }
             Err(error) => panic!("{error}"),
         }
