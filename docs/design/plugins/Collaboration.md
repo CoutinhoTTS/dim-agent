@@ -85,7 +85,7 @@ The producer keeps these invariants:
 - An owned Agent's owner is the leader Session whose `request` created it, and it never changes. Re-homing an Agent to another owner or to the public directory is not a supported operation.
 - An owned Agent has at least one member Session. One with none is an incomplete delegation, not a reusable Agent.
 - A member Session's leader is the leader that created it, and it equals its Agent's owner whenever that Agent is owned.
-- A Team is one leader Session and the member Sessions whose leader it is. Only a leader delegates: the `agent` tool refuses `request`, `cancel`, `close`, `inspect` and `result` to a member, so a Team has one level.
+- A Team is one leader Session and the member Sessions whose leader it is. Only a leader delegates: the `agent` tool refuses `request`, `cancel`, `close`, `inspect`, `result` and `models` to a member, so a Team has one level.
 
 ### 6.2 Who may address what
 

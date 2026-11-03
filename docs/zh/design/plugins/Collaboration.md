@@ -85,7 +85,7 @@ Issue：[#593](https://github.com/arcships/dim/issues/593)。本节拥有一次�
 - 被拥有 Agent 的 owner 是它的 `request` 创建它时所在的 leader Session，之后不再改变。把 Agent 改到别的 owner 名下或转为公开都不是受支持的操作。
 - 被拥有的 Agent 至少有一个成员 Session。没有成员 Session 的是未完成的委派，不是可复用的 Agent。
 - 成员 Session 的 leader 是创建它的 leader，且当它的 Agent 有 owner 时与之相等。
-- 一个 Team 是一个 leader Session，加上 leader 为它的成员 Session。只有 leader 能委派：`agent` 工具对成员拒绝 `request`、`cancel`、`close`、`inspect` 与 `result`，因此 Team 只有一层。
+- 一个 Team 是一个 leader Session，加上 leader 为它的成员 Session。只有 leader 能委派：`agent` 工具对成员拒绝 `request`、`cancel`、`close`、`inspect`、`models` 与 `result`，因此 Team 只有一层。
 
 ### 6.2 谁能寻址什么
 
