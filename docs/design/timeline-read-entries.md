@@ -188,4 +188,84 @@ Each row was read from the consumer's source: what it takes from the Timeline, h
 
 ## 5. Order of work
 
-To be written once §4 is answered. #942 and #975 land first; reads with no dependency on §4 can move independently.
+The order follows dependency. Steps 4 and 5 wait on the answers to §4.
+
+1. #942, #996 (merged) and #975 land first: the query, its start, and the contract text.
+2. Reads with no dependency on §4: by-id reads, `compaction_cut`, and deleting `stored_page`, `stored_local` and `trace`, which have no production caller.
+3. Consumers that need one or two events: permission, manual compaction wait, collaboration result, committed input, budget lookup.
+4. Consumers that fold a few kinds: branch resume, submission index, recall, context folding. Folding from a checkpoint depends on §4 question 3.
+5. Replay, collaboration rebuild, the reads that bypass the service, and finally the `Branch`, `Agent` and Dispatcher reads. These depend on §4 questions 1 and 2.
+
+## 6. Target design
+
+Status of this section: proposed. Items that depend on §4 are marked.
+
+### 6.1 Principle
+
+One read selects events: `query`. Everything that is not selecting events (batch structure, the committed position) is not a field of the query and has its own place (§6.4).
+
+### 6.2 Dependencies
+
+```mermaid
+flowchart LR
+  subgraph Consumers
+    parts[capability parts]
+    goal[goal plugin, TypeScript]
+    app[App Server, loaded sessions]
+    unl[App Server, unloaded sessions]
+  end
+  subgraph Runtime
+    Facade[Branch and Session facade: query only]
+    TL[Timeline service: query, append, sequence, segments, snapshots]
+    Disp[Dispatcher: delivers, does not read]
+  end
+  subgraph Stores
+    Port[TimelineStore port]
+    SS[SessionStore: unloaded sessions only]
+    Sql[SQLite]
+    Mem[Memory]
+  end
+  parts --> TL
+  goal --> TL
+  app --> Facade --> TL
+  unl --> SS
+  TL --> Port
+  Port --> Sql
+  Port --> Mem
+  SS -.-> Sql
+```
+
+### 6.3 API by layer
+
+| Layer | Provides | Does not provide |
+| --- | --- | --- |
+| Timeline service | `query`, `append`, `sequence()`, branch segments, snapshot save and read | `history`, `local`, `page`, `page_cursor`, `context`, `policy_*`, `event_by_id`, `event_position`, `compaction_cut`, `ancestor_events_of_kind`, `stored_*` |
+| Branch and Session facade | `query`, forwarding only, bounded at the published head | every other read |
+| Dispatcher | `subscribe`, `follow`, `consume`, `sequence`, `committed` | `local`, `history` |
+| Store port | `query(key, query, from, through)`, `append`, `head`, `read` and `read_segments` for restore and export, snapshots | reads shaped for one consumer |
+| SessionStore | a paged read for sessions that are not loaded, with the page shape of `query` | anything for loaded sessions |
+
+The request carries no read point. The service passes each segment its bound: an ancestor its cut, this branch its published head.
+
+### 6.4 What stays outside the query (depends on §4)
+
+| Need | Proposal | Question |
+| --- | --- | --- |
+| Read up to the committed position: replay, collaboration rebuild, file reads | Replay stays inside the Dispatcher and is not exported. The other two need their facts checked for when they are published before they move | 1 |
+| Whether a sequence ends an atomic batch | One validation on the store port, not a query field | 2 |
+| A chain read that starts in an ancestor | The checkpoint stores the resume event id and the caller uses `from_event` | 3 |
+
+### 6.5 Wiring
+
+- Capability parts declare a dependency on the branch's Timeline service and call `query` on it. The facades are not in their path.
+- The goal plugin injects the Timeline service instead of `dispatcher` for reads and calls `Timeline.query`. `npm/branch-services.d.ts` already declares `query` on `Timeline`. Whether the goal binding can obtain that service has not been verified.
+- The App Server reads a loaded session through `Session::query(branch, query)`, which forwards to `Branch::query` and then to the Timeline service.
+- The App Server reads an unloaded session through `SessionStore`, because no Timeline service exists for it. The page shape matches `query`, so loading a session does not change the protocol.
+- After the reads are deleted, `xtask types` regenerates `npm/branch-services.d.ts` and `xtask graph` regenerates `catalog.md`; nothing else in the generated files may change.
+
+### 6.6 Not verified
+
+- Session summary (`agents.rs:1003`): what it computes from the events it reads.
+- Compaction policy reuse (`context_policy.rs:531`): whether those facts are published when read.
+- The goal plugin binding to the Timeline service.
+- The Mermaid diagrams in this document have not been rendered.
