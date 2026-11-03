@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import shutil
 import stat
 import sys
 import tempfile
@@ -877,6 +878,52 @@ class DimEventTotalsTest(unittest.TestCase):
 
     def test_no_stream_reads_as_nothing(self) -> None:
         self.assertIsNone(dim_events.read_totals(self.root / "absent.jsonl"))
+
+
+class JobConfigKeyVarTest(unittest.TestCase):
+    """The job config's agent env carries the key variable's NAME under the
+    carrier harbor cannot redact.
+
+    `DIM_EVAL_API_VAR` holds the name of the provider key variable. The old
+    carrier's name (`DIM_EVAL_API_KEY_ENV`) matched harbor's sensitive regex,
+    so its VALUE — which is that very name — arrived redacted on resume and the
+    agent died before its first trial. This is the harbor boundary: whatever
+    else drifts, the config must keep emitting the safe carrier and must not
+    re-introduce the sensitive one.
+    """
+
+    def test_the_config_emits_the_safe_carrier_and_not_the_sensitive_one(self) -> None:
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        model_config = {
+            "defaultModel": {"providerId": "test-provider", "modelId": "test-model"},
+            "providers": [{
+                "id": "test-provider", "kind": "openai-chat",
+                "apiKeyEnv": "MODEL_API_KEY",
+                "baseUrl": "https://endpoint.invalid/v1",
+                "models": [{"id": "test-model"}],
+            }],
+        }
+        (root / "model-config.json").write_text(json.dumps(model_config))
+        (root / "tasks" / "tb-t").mkdir(parents=True)
+        (root / "tasks" / "tb-t" / "task.toml").write_text(
+            '[task]\nname = "tb/t"\n')
+        env = {
+            "DIM_EVAL_MODEL_CONFIG": str(root / "model-config.json"),
+            "DIM_EVAL_TASKS": str(root / "tasks"),
+            "DIM_EVAL_OUT": str(root / "out"),
+            "DIM_EVAL_CLI_IMAGE": "eval:test",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            settings = run_l2.provider_settings()
+            config = run_l2.build_job_config(settings)
+        agent_env = config["agents"][0]["env"]
+        self.assertEqual(agent_env["DIM_EVAL_API_VAR"], "MODEL_API_KEY")
+        self.assertNotIn("DIM_EVAL_API_KEY_ENV", agent_env)
+        # The key itself keeps its `${VAR}` reference form: the secret must
+        # never be written into the recorded config.
+        self.assertEqual(agent_env["MODEL_API_KEY"], "${MODEL_API_KEY}")
+        self.assertEqual(agent_env["DIM_EVAL_MODEL_CONFIG_JSON"], settings.model_config)
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ extracted here rather than reconstructed later from trajectories.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import sys
 import tomllib
@@ -40,6 +41,11 @@ from harbor.models.agent.context import AgentContext
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import dim_events  # noqa: E402  (sibling module, stdlib-only)
+
+#: What a usable key-variable name looks like. Valid names only — a redacted
+#: "DEEP****KEY", a "${VAR}" template, or an empty value all fail this, and all
+#: three have been produced by harbor's sensitive-value handling.
+_KEY_VAR_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 #: Read-only mount point of the build under test, laid out like a release
 #: payload: dimcode finds its default plugins one level above ``bin/``.
@@ -137,9 +143,24 @@ class DimAgent(BaseInstalledAgent):
             "SSL_CERT_FILE": CA_BUNDLE,
             **self.extra_env,
         }
-        key_var = env.get("DIM_EVAL_API_VAR") or env.get("DIM_EVAL_API_KEY_ENV", "DEEPSEEK_API_KEY")
-        if "****" in key_var:
-            key_var = "DEEPSEEK_API_KEY"
+        key_var = (env.get("DIM_EVAL_API_VAR")
+                   or env.get("DIM_EVAL_API_KEY_ENV")
+                   or "")
+        # A variable name, not a secret — but harbor's templatize_sensitive_env
+        # corrupts the *value* of any carrier whose name matches
+        # KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL|AUTH, and a job queued before the
+        # rename can still arrive with "DEEP****KEY" here, or with a
+        # "${DIM_EVAL_API_KEY_ENV}" template when harbor's own environment held
+        # the same value. Either shape produces a shell that tests a variable
+        # that cannot exist; refusing here names the cause instead of leaving
+        # "DEEPSEEK_API_KEY is empty" — or the wrong provider's name — as the
+        # only clue.
+        if not _KEY_VAR_NAME.fullmatch(key_var):
+            raise RuntimeError(
+                f"no usable key-variable name {key_var!r}: DIM_EVAL_API_VAR "
+                "must carry the provider key variable's name (the legacy "
+                "DIM_EVAL_API_KEY_ENV carrier is redacted by harbor)"
+            )
 
         # The model config travels as an env value and is written by the shell,
         # so no quoting of its JSON is needed. Missing credentials otherwise
