@@ -26,13 +26,13 @@ pub struct Catalog {
 }
 /// One entry that did not decode, with an error that names the entry and the
 /// field and never repeats a value.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct Invalid {
     pub id: String,
     pub source: String,
     pub error: String,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct Server {
     pub id: String,
     /// `user`, `project` or `plugin`.
@@ -41,7 +41,7 @@ pub struct Server {
     pub transport: String,
     pub auth: Option<Auth>,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Auth {
     /// `required`, `authorized` or `expired`.
@@ -125,20 +125,111 @@ pub async fn catalog_report(
     Ok((rows, notes))
 }
 
-pub async fn target(client: &mut Client, options: &Options, id: &str) -> Result<Value> {
-    let catalog: Catalog = client
-        .typed("mcp.catalog", json!({"cwd": options.workspace().as_str()}))
-        .await?;
-    let server = catalog.servers.into_iter().find(|server| server.id == id);
-    let Some(server) = server else {
-        let invalid = catalog
-            .invalid
-            .into_iter()
-            .find(|entry| entry.id == id)
-            .ok_or("No matching MCP server; inspect mcp list")?;
-        return Err(invalid.error.into());
-    };
-    Ok(json!({"id":id,"source":server.source,"cwd":options.workspace().as_str()}))
+/// The sources an entry can be in, as `mcp list` prints them. `--source`
+/// takes one of these, on the command line and in a slash command alike.
+pub const SOURCES: [&str; 3] = ["user", "project", "plugin"];
+
+/// `value` when it names one of [`SOURCES`].
+pub fn source(value: &str) -> Option<&str> {
+    SOURCES.into_iter().find(|source| *source == value)
+}
+
+/// Takes the `--source SOURCE` a slash command names out of its `words`,
+/// wherever it stands after the verb, and returns it beside the words that
+/// name the entry. The value is checked by [`source`].
+pub fn take_source<'a>(
+    words: &[&'a str],
+) -> std::result::Result<(Option<&'a str>, Vec<&'a str>), String> {
+    let mut named = None;
+    let mut rest = Vec::new();
+    let mut words = words.iter().copied();
+    while let Some(word) = words.next() {
+        if word == "--source" {
+            let value = words
+                .next()
+                .ok_or("--source requires a value: user, project or plugin")?;
+            if named.replace(value).is_some() {
+                return Err("Supply --source only once".into());
+            }
+        } else {
+            rest.push(word);
+        }
+    }
+    match named {
+        Some(value) => match source(value) {
+            Some(source) => Ok((Some(source), rest)),
+            None => Err(format!("--source is user, project or plugin, not {value}")),
+        },
+        None => Ok((None, rest)),
+    }
+}
+
+/// One entry a catalog lists, valid or broken, and the source holding it.
+pub enum Resolved {
+    Server(Server),
+    /// An entry that did not decode, with the error that keeps it out of the
+    /// effective catalog.
+    Broken(Invalid),
+}
+
+impl Resolved {
+    pub fn source(&self) -> &str {
+        match self {
+            Self::Server(server) => &server.source,
+            Self::Broken(entry) => &entry.source,
+        }
+    }
+
+    /// The effective entry, or the error the broken one carries instead.
+    pub fn server(self) -> std::result::Result<Server, String> {
+        match self {
+            Self::Server(server) => Ok(server),
+            Self::Broken(entry) => Err(entry.error),
+        }
+    }
+}
+
+/// The one entry `(id, source)` names in `catalog`, valid or broken.
+///
+/// With a `source`, the entry that source lists, or `Ok(None)` when it lists
+/// none. Without one, the entry when exactly one source lists the id, and
+/// the sources when more do: the client never guesses which row the user
+/// meant.
+pub fn resolve(
+    catalog: &Catalog,
+    id: &str,
+    source: Option<&str>,
+) -> std::result::Result<Option<Resolved>, Vec<String>> {
+    let named = |listed: &str| source.is_none_or(|source| listed == source);
+    let listed: Vec<Resolved> = catalog
+        .servers
+        .iter()
+        .filter(|server| server.id == id && named(&server.source))
+        .cloned()
+        .map(Resolved::Server)
+        .chain(
+            catalog
+                .invalid
+                .iter()
+                .filter(|entry| entry.id == id && named(&entry.source))
+                .cloned()
+                .map(Resolved::Broken),
+        )
+        .collect();
+    // The sources in catalog order, each once: a source lists one entry per
+    // id, and the two lists are walked in the order the catalog reports.
+    let mut sources: Vec<String> = Vec::new();
+    for entry in &listed {
+        let source = entry.source();
+        if !sources.iter().any(|seen| seen.as_str() == source) {
+            sources.push(source.to_owned());
+        }
+    }
+    match sources.len() {
+        0 => Ok(None),
+        1 => Ok(listed.into_iter().next()),
+        _ => Err(sources),
+    }
 }
 
 pub fn error(error: crate::Error) -> crate::Error {

@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 
 use super::Groups;
 use crate::client::Client;
-use crate::mcp::{Auth, Catalog, Server};
+use crate::mcp::{Auth, Catalog, Resolved, Server, resolve};
 use crate::model::session::{
     ActionKind, EntryDocument, EntryState, ManagementAction, ManagementDetail, ManagementEntry,
     ManagementView, RemoveVerb,
@@ -337,24 +337,29 @@ impl Enabled {
 /// Enables or disables one entry, as `mcp enable|disable`, both `/mcp`
 /// clients and the panel's toggle do: one owner operation, one set of rules.
 ///
-/// A disable withdraws the workspace's enablement when the catalog cannot be
-/// read, and a project enable says what it turned on. A plugin entry is
-/// refused before the write, since its source has no Settings document.
+/// `source` is the source the command named or the row reported; without one
+/// the entry is the only one the catalog lists for `id`, and an id more than
+/// one source lists is refused rather than guessed. A disable withdraws the
+/// workspace's enablement when the catalog cannot be read, and a project
+/// enable says what it turned on. A plugin entry is refused before the
+/// write, since its source has no Settings document.
 pub async fn set_enabled(
     client: &mut Client,
     cwd: &str,
     id: &str,
+    source: Option<&str>,
     enabled: bool,
 ) -> crate::Result<Enabled> {
+    // Only the workspace's own record can be withdrawn without a readable
+    // source, so a named source that is not the project's cannot take this
+    // path.
+    let withdraws_workspace = !enabled && source.is_none_or(|source| source == "project");
     let catalog: Catalog = match client.typed("mcp.catalog", json!({"cwd": cwd})).await {
         Ok(catalog) => catalog,
-        Err(error) if !enabled && error.downcast_ref::<crate::client::RpcError>().is_some() => {
-            client
-                .rpc(
-                    "mcp.set_enabled",
-                    json!({"cwd":cwd,"id":id,"source":"project","expectedVersion":"","enabled":false}),
-                )
-                .await?;
+        Err(error)
+            if withdraws_workspace && error.downcast_ref::<crate::client::RpcError>().is_some() =>
+        {
+            withdraw(client, cwd, id, String::new()).await?;
             return Ok(Enabled {
                 source: "project".into(),
                 id: id.into(),
@@ -370,20 +375,44 @@ pub async fn set_enabled(
         }
         Err(error) => return Err(error),
     };
-    let (source, listed) =
-        if let Some(server) = catalog.servers.iter().find(|server| server.id == id) {
+    let entry = match resolve(&catalog, id, source) {
+        Ok(Some(entry)) => entry,
+        Err(sources) => return Err(more_than_one(id, &sources).into()),
+        // A disable of an id no source lists withdraws this workspace's
+        // record and nothing else.
+        Ok(None) if withdraws_workspace => {
+            let Some(expected) = catalog.project_revision.clone() else {
+                return Err(format!("No MCP server {id:?} in mcp list").into());
+            };
+            withdraw(client, cwd, id, expected).await?;
+            return Ok(Enabled {
+                source: "project".into(),
+                id: id.to_owned(),
+                enabled: false,
+                notes: vec![tf(
+                    "{id} is not in mcp list; withdrew any stored enablement of it in this workspace.",
+                    &[("id", &format!("{id:?}"))],
+                )],
+            });
+        }
+        Ok(None) => {
+            return Err(match source {
+                Some(source) => unlisted(id, Some(source)),
+                None => format!("No MCP server {id:?} in mcp list"),
+            }
+            .into());
+        }
+    };
+    let source = match entry {
+        Resolved::Server(server) => {
             if server.source == "plugin" {
                 return Err(PLUGIN.into());
             }
-            (server.source.clone(), true)
-        } else if let Some(entry) = catalog.invalid.iter().find(|entry| entry.id == id) {
-            // A broken entry is not enableable; its own error says why.
-            return Err(entry.error.clone().into());
-        } else if !enabled && catalog.project_revision.is_some() {
-            ("project".into(), false)
-        } else {
-            return Err(format!("No MCP server {id:?} in mcp list").into());
-        };
+            server.source
+        }
+        // A broken entry is not enableable; its own error says why.
+        Resolved::Broken(entry) => return Err(entry.error.into()),
+    };
     let expected = if source == "project" {
         catalog
             .project_revision
@@ -401,18 +430,25 @@ pub async fn set_enabled(
     if enabled && source == "project" {
         notes.push(t("It runs this workspace's .mcp.json entry, including later edits to it, in active and new sessions.").to_owned());
     }
-    if !listed {
-        notes.push(tf(
-            "{id} is not in mcp list; withdrew any stored enablement of it in this workspace.",
-            &[("id", &format!("{id:?}"))],
-        ));
-    }
     Ok(Enabled {
         source,
         id: id.to_owned(),
         enabled,
         notes,
     })
+}
+
+/// Withdraws this workspace's enablement of `id` at `expected`: the one
+/// write a disable makes without the entry, since only the project record
+/// needs none.
+async fn withdraw(client: &mut Client, cwd: &str, id: &str, expected: String) -> crate::Result<()> {
+    client
+        .rpc(
+            "mcp.set_enabled",
+            json!({"cwd":cwd,"id":id,"source":"project","expectedVersion":expected,"enabled":false}),
+        )
+        .await?;
+    Ok(())
 }
 
 /// Why an MCP action did not happen.
@@ -465,20 +501,36 @@ pub async fn catalog(client: &mut Client, cwd: &str) -> Result<Catalog, String> 
         .map_err(|error| error.to_string())
 }
 
-/// The effective entry `id` names, or why the area has none. A broken entry
+/// The effective entry `(id, source)` names, or why the area has none.
+///
+/// `source` is the source the command named or the row reported; without one
+/// the entry is the only one the catalog lists for `id`. A broken entry
 /// answers with its own error: it has no effective configuration to test or
 /// inspect.
-pub async fn target(client: &mut Client, cwd: &str, id: &str) -> Result<Server, String> {
-    let Catalog {
-        servers, invalid, ..
-    } = catalog(client, cwd).await?;
-    if let Some(server) = servers.into_iter().find(|server| server.id == id) {
-        return Ok(server);
+pub async fn target(
+    client: &mut Client,
+    cwd: &str,
+    id: &str,
+    source: Option<&str>,
+) -> Result<Server, String> {
+    let catalog = catalog(client, cwd).await?;
+    match resolve(&catalog, id, source) {
+        Ok(Some(entry)) => entry.server(),
+        Err(sources) => Err(more_than_one(id, &sources)),
+        Ok(None) => Err(unlisted(id, source)),
     }
-    if let Some(entry) = invalid.into_iter().find(|entry| entry.id == id) {
-        return Err(entry.error);
-    }
-    Err(t("No MCP server has that id.").to_owned())
+}
+
+/// The params `mcp.auth.*` and `mcp.disconnect` take for the entry `id`
+/// names: the source a command named or the only one the catalog lists.
+pub async fn target_params(
+    client: &mut Client,
+    cwd: &str,
+    id: &str,
+    source: Option<&str>,
+) -> crate::Result<Value> {
+    let server = target(client, cwd, id, source).await?;
+    Ok(json!({"id": server.id, "source": server.source, "cwd": cwd}))
 }
 
 /// One entry's configuration as its owner reports it.
@@ -555,7 +607,38 @@ async fn refused(client: &mut Client, cwd: &str, error: &crate::Error, kind: Con
     }
 }
 
-/// Performs `action`, then reads the area back as its owner reports it.
+/// The refusal for an id more than one source lists: it names every source
+/// and the flag that settles one.
+fn more_than_one(id: &str, sources: &[String]) -> String {
+    tf(
+        "{id} is in more than one MCP source: {sources}. Name one with --source.",
+        &[("id", &format!("{id:?}")), ("sources", &sources.join(", "))],
+    )
+}
+
+/// The refusal for an id no source lists, or that the source a reader named
+/// does not.
+fn unlisted(id: &str, source: Option<&str>) -> String {
+    match source {
+        Some(source) => tf(
+            "No MCP server {id} is in source {source}.",
+            &[
+                ("id", &format!("{id:?}")),
+                ("source", &format!("{source:?}")),
+            ],
+        ),
+        None => t("No MCP server has that id.").to_owned(),
+    }
+}
+
+/// The refusal for an action on one entry that names no source: a row always
+/// carries the source its owner reported, and the adapter never searches the
+/// catalog for one.
+const NO_SOURCE: &str =
+    "The action names no MCP source; a row carries the source its owner reported.";
+
+/// Performs `action` for the row it came from, then reads the area back as
+/// its owner reports it.
 ///
 /// A toggle and a remove write at the source revision the catalog reports
 /// immediately before them, so the compare-and-swap covers that window only;
@@ -569,11 +652,52 @@ pub async fn apply(
     action: &ManagementAction,
     cwd: &str,
 ) -> Result<Answer, Failure> {
+    perform(client, action, cwd, row_source(action)?).await
+}
+
+/// Performs `action` for a command line that named `source`, or none: the
+/// resolver then settles the id, and one more than a source lists is refused
+/// rather than guessed.
+pub async fn apply_named(
+    client: &mut Client,
+    action: &ManagementAction,
+    cwd: &str,
+    source: Option<&str>,
+) -> Result<Answer, Failure> {
+    perform(client, action, cwd, source).await
+}
+
+/// The source of the row `action` came from. A row always carries one, so an
+/// action without it is refused instead of searched for.
+fn row_source(action: &ManagementAction) -> Result<Option<&str>, Failure> {
+    let source = match action {
+        ManagementAction::Toggle { source, .. }
+        | ManagementAction::Save { source, .. }
+        | ManagementAction::Remove { source, .. }
+        | ManagementAction::Run { source, .. }
+        | ManagementAction::Inspect { source, .. } => source.as_deref(),
+        ManagementAction::List | ManagementAction::Reload | ManagementAction::Add { .. } => {
+            return Ok(None);
+        }
+    };
+    source
+        .map(Some)
+        .ok_or_else(|| Failure::Refused(t(NO_SOURCE).to_owned()))
+}
+
+/// `apply` for one row or one command line, with the source already decided:
+/// `None` leaves the resolver to settle the id.
+async fn perform(
+    client: &mut Client,
+    action: &ManagementAction,
+    cwd: &str,
+    source: Option<&str>,
+) -> Result<Answer, Failure> {
     let mut note = None;
     match action {
         ManagementAction::List | ManagementAction::Reload => {}
-        ManagementAction::Toggle { id, enabled } => {
-            match set_enabled(client, cwd, id, *enabled).await {
+        ManagementAction::Toggle { id, enabled, .. } => {
+            match set_enabled(client, cwd, id, source, *enabled).await {
                 Ok(state) => note = Some(state.note()),
                 Err(error) => return Err(refused(client, cwd, &error, Conflict::Toggle).await),
             }
@@ -582,6 +706,7 @@ pub async fn apply(
             id,
             expected_revision,
             document,
+            ..
         } => {
             let Some(id) = id else {
                 return Err(Failure::Refused(
@@ -591,12 +716,9 @@ pub async fn apply(
             let patch: Patch = serde_json::from_value(document.clone())
                 .map_err(|error| Failure::Refused(format!("mcp.update: {error}")))?;
             let catalog = catalog(client, cwd).await.map_err(Failure::Refused)?;
-            let Some(server) = catalog.servers.iter().find(|server| &server.id == id) else {
-                if let Some(entry) = catalog.invalid.iter().find(|entry| &entry.id == id) {
-                    return Err(Failure::Refused(entry.error.clone()));
-                }
-                return Err(Failure::Refused(t("No MCP server has that id.").to_owned()));
-            };
+            let server = resolved(&catalog, id, source)?
+                .server()
+                .map_err(Failure::Refused)?;
             if server.source == "plugin" {
                 return Err(Failure::Refused(PLUGIN.to_owned()));
             }
@@ -686,19 +808,19 @@ pub async fn apply(
                 tf("Added {id}.", &[("id", &safe_line(&entry.id))])
             });
         }
-        ManagementAction::Remove { id } => {
+        ManagementAction::Remove { id, .. } => {
             let catalog = catalog(client, cwd).await.map_err(Failure::Refused)?;
-            let source =
-                if let Some(server) = catalog.servers.iter().find(|server| &server.id == id) {
+            // A broken entry is removable, so only a plugin entry is refused
+            // here.
+            let source = match resolved(&catalog, id, source)? {
+                Resolved::Server(server) => {
                     if server.source == "plugin" {
                         return Err(Failure::Refused(PLUGIN.to_owned()));
                     }
-                    server.source.clone()
-                } else if let Some(entry) = catalog.invalid.iter().find(|entry| &entry.id == id) {
-                    entry.source.clone()
-                } else {
-                    return Err(Failure::Refused(t("No MCP server has that id.").to_owned()));
-                };
+                    server.source
+                }
+                Resolved::Broken(entry) => entry.source,
+            };
             let expected = if source == "project" {
                 catalog.project_revision.clone().ok_or_else(|| {
                     Failure::Refused(t("This workspace has no project MCP source.").to_owned())
@@ -730,9 +852,9 @@ pub async fn apply(
                     t("An MCP server's test takes no input document.").to_owned(),
                 ));
             }
-            return test(client, cwd, id).await;
+            return test(client, cwd, id, source).await;
         }
-        ManagementAction::Inspect { id } => return inspect(client, cwd, id).await,
+        ManagementAction::Inspect { id, .. } => return inspect(client, cwd, id, source).await,
     }
     match catalog(client, cwd).await {
         Ok(catalog) => Ok(Answer::Area {
@@ -827,10 +949,26 @@ fn probe_failure(probe: &Probe) -> String {
     }
 }
 
+/// The one entry `(id, source)` names in `catalog`, or why the area has
+/// none. The answer is kept as one entry so a remove can take a broken one
+/// while every other action refuses it with its own error.
+fn resolved(catalog: &Catalog, id: &str, source: Option<&str>) -> Result<Resolved, Failure> {
+    resolve(catalog, id, source)
+        .map_err(|sources| Failure::Refused(more_than_one(id, &sources)))?
+        .ok_or_else(|| Failure::Refused(unlisted(id, source)))
+}
+
 /// `mcp.test`: the tools a temporary connection found, typed for each
 /// surface to format.
-async fn test(client: &mut Client, cwd: &str, id: &str) -> Result<Answer, Failure> {
-    let server = target(client, cwd, id).await.map_err(Failure::Refused)?;
+async fn test(
+    client: &mut Client,
+    cwd: &str,
+    id: &str,
+    source: Option<&str>,
+) -> Result<Answer, Failure> {
+    let server = target(client, cwd, id, source)
+        .await
+        .map_err(Failure::Refused)?;
     let probe: Probe = client
         .typed(
             "mcp.test",
@@ -873,8 +1011,15 @@ struct ConnectionState {
 }
 
 /// `mcp.inspect`: the effective entry and its connections, as a detail.
-async fn inspect(client: &mut Client, cwd: &str, id: &str) -> Result<Answer, Failure> {
-    let server = target(client, cwd, id).await.map_err(Failure::Refused)?;
+async fn inspect(
+    client: &mut Client,
+    cwd: &str,
+    id: &str,
+    source: Option<&str>,
+) -> Result<Answer, Failure> {
+    let server = target(client, cwd, id, source)
+        .await
+        .map_err(Failure::Refused)?;
     let inspection: Inspection = client
         .typed(
             "mcp.inspect",
@@ -1021,6 +1166,7 @@ pub(super) async fn view(
                 source,
                 ManagementEntry {
                     id: server.id.clone(),
+                    source: Some(server.source.clone()),
                     label: server.id.clone(),
                     detail: lines,
                     enabled: Some(server.enabled),
@@ -1045,6 +1191,7 @@ pub(super) async fn view(
                 source,
                 ManagementEntry {
                     id: entry.id.clone(),
+                    source: Some(entry.source.clone()),
                     label: entry.id.clone(),
                     detail: vec![
                         header(&entry.source, t("invalid"), None, None),

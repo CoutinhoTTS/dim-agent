@@ -44,8 +44,8 @@ pub struct ManagementPanel {
     area: Area,
     list: ListPanel,
     view: Option<ManagementView>,
-    /// The entry a remove waits to confirm.
-    confirming: Option<String>,
+    /// The row a remove waits to confirm.
+    confirming: Option<Confirming>,
     /// A detail the adapter reported, shown in place of the list.
     detail: Option<ShownDetail>,
     /// A request is in flight: only Esc answers.
@@ -64,6 +64,16 @@ pub struct ManagementPanel {
     creating: bool,
     /// The editor the panel asked for without a key, for the event loop.
     effect: Option<Effect>,
+}
+
+/// The row a remove waits to confirm: what the question names and what the
+/// answer sends. It is kept here rather than looked up again, because a
+/// view can hold two rows of one id.
+struct Confirming {
+    id: String,
+    source: Option<String>,
+    label: String,
+    verb: RemoveVerb,
 }
 
 /// A detail in place of the list, with the rows it starts at.
@@ -238,13 +248,24 @@ impl ManagementPanel {
         self.refresh_hint();
     }
 
-    fn entry(&self, id: &str) -> Option<&ManagementEntry> {
+    /// The entry the row key `key` names.
+    fn entry(&self, key: &str) -> Option<&ManagementEntry> {
         self.view
             .as_ref()?
             .groups
             .iter()
             .flat_map(|group| &group.entries)
-            .find(|entry| entry.id == id)
+            .find(|entry| row_key(entry) == key)
+    }
+
+    /// The entry `(id, source)` names: two sources may list one id.
+    fn entry_at(&self, id: &str, source: Option<&str>) -> Option<&ManagementEntry> {
+        self.view
+            .as_ref()?
+            .groups
+            .iter()
+            .flat_map(|group| &group.entries)
+            .find(|entry| entry.id == id && entry.source.as_deref() == source)
     }
 
     /// The label of the entry `action` names, from the view the panel shows:
@@ -280,12 +301,9 @@ impl ManagementPanel {
     }
 
     fn refresh_hint(&mut self) {
-        if let Some(id) = &self.confirming {
-            let (label, verb) = self
-                .entry(id)
-                .map(|entry| (safe_line(&entry.label), entry.remove_verb))
-                .unwrap_or_else(|| (safe_line(id), RemoveVerb::default()));
-            let question = match verb {
+        if let Some(confirming) = &self.confirming {
+            let label = safe_line(&confirming.label);
+            let question = match confirming.verb {
                 RemoveVerb::Remove => "Remove {name}?",
                 RemoveVerb::Reset => "Reset {name}?",
             };
@@ -330,8 +348,8 @@ impl ManagementPanel {
         match target {
             WriteTarget::Create => self.view.as_ref()?.create.as_ref(),
             WriteTarget::Area { .. } => self.view.as_ref()?.document.as_ref(),
-            WriteTarget::Entry { id, .. } => self
-                .entry(id)?
+            WriteTarget::Entry { id, source, .. } => self
+                .entry_at(id, source.as_deref())?
                 .document
                 .as_ref()
                 .map(|document| &document.document),
@@ -392,9 +410,9 @@ impl ManagementPanel {
         if self.detail.is_some() {
             return self.detail_key(key);
         }
-        // The confirmation takes every key: Enter removes, anything else
-        // cancels and changes nothing.
-        if let Some(id) = self.confirming.take() {
+        // The confirmation takes every key: Enter removes the row it names,
+        // anything else cancels and changes nothing.
+        if let Some(confirming) = self.confirming.take() {
             self.refresh_hint();
             if key.code != KeyCode::Enter {
                 return Effect::None;
@@ -402,7 +420,10 @@ impl ManagementPanel {
             self.busy = true;
             return Effect::Management(ManagementRequest {
                 area: self.area.clone(),
-                action: ManagementAction::Remove { id },
+                action: ManagementAction::Remove {
+                    id: confirming.id,
+                    source: confirming.source,
+                },
             });
         }
         if key.code == KeyCode::Esc {
@@ -454,7 +475,10 @@ impl ManagementPanel {
             if !self.entry_offers(ActionKind::Inspect) {
                 return Effect::None;
             }
-            return self.send_entry(ActionKind::Inspect, |id| ManagementAction::Inspect { id });
+            return self.send_entry(ActionKind::Inspect, |entry| ManagementAction::Inspect {
+                id: entry.id.clone(),
+                source: entry.source.clone(),
+            });
         }
         // Space toggles as Enter does, as in `/settings > Execution`.
         let key = if matches!(key.code, KeyCode::Char(' ')) {
@@ -464,10 +488,10 @@ impl ManagementPanel {
         };
         let event = self.list.handle_key(key);
         self.refresh_hint();
-        let Event::Pick(id) = event else {
+        let Event::Pick(key) = event else {
             return Effect::None;
         };
-        let Some(entry) = self.entry(&id) else {
+        let Some(entry) = self.entry(&key) else {
             return Effect::None;
         };
         if !entry.actions.contains(&ActionKind::Toggle) {
@@ -481,6 +505,7 @@ impl ManagementPanel {
             area: self.area.clone(),
             action: ManagementAction::Toggle {
                 id: entry.id.clone(),
+                source: entry.source.clone(),
                 enabled: !enabled,
             },
         };
@@ -522,15 +547,23 @@ impl ManagementPanel {
             return Effect::None;
         }
         let id = entry.id.clone();
+        let source = entry.source.clone();
         let document = entry.run.clone();
         match document {
-            Some(document) => self.open_editor(WriteTarget::Run { id }, &document),
+            Some(document) => self.open_editor(
+                WriteTarget::Run {
+                    id,
+                    source: source.clone(),
+                },
+                &document,
+            ),
             None => {
                 self.busy = true;
                 Effect::Management(ManagementRequest {
                     area: self.area.clone(),
                     action: ManagementAction::Run {
                         id,
+                        source,
                         document: None,
                         seed: None,
                     },
@@ -544,7 +577,7 @@ impl ManagementPanel {
     fn send_entry(
         &mut self,
         kind: ActionKind,
-        action: impl FnOnce(String) -> ManagementAction,
+        action: impl FnOnce(&ManagementEntry) -> ManagementAction,
     ) -> Effect {
         let Some(entry) = self.selected() else {
             return Effect::None;
@@ -554,7 +587,7 @@ impl ManagementPanel {
         }
         let request = ManagementRequest {
             area: self.area.clone(),
-            action: action(entry.id.clone()),
+            action: action(entry),
         };
         self.busy = true;
         Effect::Management(request)
@@ -568,7 +601,12 @@ impl ManagementPanel {
         if !entry.actions.contains(&ActionKind::Remove) {
             return Effect::None;
         }
-        self.confirming = Some(entry.id.clone());
+        self.confirming = Some(Confirming {
+            id: entry.id.clone(),
+            source: entry.source.clone(),
+            label: entry.label.clone(),
+            verb: entry.remove_verb,
+        });
         self.refresh_hint();
         Effect::None
     }
@@ -595,6 +633,7 @@ impl ManagementPanel {
             Some((
                 WriteTarget::Entry {
                     id: entry.id.clone(),
+                    source: entry.source.clone(),
                     revision: document.revision.clone(),
                 },
                 document.document.clone(),
@@ -782,6 +821,17 @@ fn hint(area: &Area, kinds: &[ActionKind]) -> String {
     parts.join(" · ")
 }
 
+/// The list key of one row: its id and, when the owner reports one, its
+/// source. Two sources' entries of one id are two rows, each selected and
+/// acted on on its own; an area whose ids are unique on their own keys a row
+/// by its id, as it always has.
+fn row_key(entry: &ManagementEntry) -> String {
+    match &entry.source {
+        Some(source) => format!("{source}\u{1f}{}", entry.id),
+        None => entry.id.clone(),
+    }
+}
+
 /// The rows: each group's heading, its entries, then what the owner could
 /// not use.
 fn items(view: &ManagementView) -> Vec<Item> {
@@ -793,11 +843,16 @@ fn items(view: &ManagementView) -> Vec<Item> {
             // kept on that line before it is stored: an escape sequence, a
             // newline or a tab in a name cannot reach or break the screen.
             let mut item = Item::new(
-                entry.id.clone(),
+                row_key(entry),
                 safe_line(&entry.label),
                 safe_line(&states(entry).join("  ")),
             );
-            item.search = format!("{} {}", entry.id, entry.detail.join(" "));
+            // The source is not drawn beside the row, since its group is the
+            // source; filtering still finds a row by it.
+            item.search = match &entry.source {
+                Some(source) => format!("{} {} {}", entry.id, source, entry.detail.join(" ")),
+                None => format!("{} {}", entry.id, entry.detail.join(" ")),
+            };
             items.push(item);
         }
     }
@@ -865,6 +920,7 @@ mod tests {
     ) -> ManagementEntry {
         ManagementEntry {
             id: id.into(),
+            source: None,
             label: label.into(),
             detail: vec![
                 format!("{label} does its work."),
@@ -1007,6 +1063,7 @@ mod tests {
                     request.action,
                     ManagementAction::Toggle {
                         id: "user:commit".into(),
+                        source: None,
                         enabled: false
                     }
                 );
@@ -1017,6 +1074,7 @@ mod tests {
             Area::Skills,
             ManagementAction::Toggle {
                 id: "user:commit".into(),
+                source: None,
                 enabled: false,
             },
             view(),
@@ -1180,6 +1238,7 @@ mod tests {
                 entries: vec![
                     ManagementEntry {
                         id: "user".into(),
+                        source: None,
                         label: "user".into(),
                         detail: vec!["The user's own document; always in effect.".into()],
                         enabled: Some(true),
@@ -1191,6 +1250,7 @@ mod tests {
                     },
                     ManagementEntry {
                         id: "plugin:kit".into(),
+                        source: None,
                         label: "plugin:kit".into(),
                         detail: vec!["Owned by plugin kit.".into()],
                         enabled: Some(true),
@@ -1367,6 +1427,7 @@ mod tests {
             Area::Hooks,
             ManagementAction::Save {
                 id: None,
+                source: None,
                 expected_revision: "user:1".into(),
                 document: serde_json::json!({"hooks": {}}),
             },
@@ -1411,6 +1472,7 @@ mod tests {
                 Area::Hooks,
                 ManagementAction::Save {
                     id: None,
+                    source: None,
                     expected_revision: "user:1".into(),
                     document: serde_json::json!({"hooks": {}}),
                 },
@@ -1455,6 +1517,7 @@ mod tests {
                 entries: vec![
                     ManagementEntry {
                         id: "job-1".into(),
+                        source: None,
                         label: "nightly".into(),
                         detail: vec!["every 60 minutes".into(), "no run yet".into()],
                         enabled: Some(true),
@@ -1475,6 +1538,7 @@ mod tests {
                     },
                     ManagementEntry {
                         id: "job-2".into(),
+                        source: None,
                         label: "release".into(),
                         detail: vec!["at 2030-01-01T00:00:00Z".into()],
                         enabled: Some(false),
@@ -1532,7 +1596,10 @@ mod tests {
         match panel.handle_key(key(KeyCode::Enter)) {
             Effect::Management(request) => assert_eq!(
                 request.action,
-                ManagementAction::Remove { id: "job-1".into() }
+                ManagementAction::Remove {
+                    id: "job-1".into(),
+                    source: None,
+                }
             ),
             _ => panic!("expected a remove"),
         }
@@ -1560,7 +1627,10 @@ mod tests {
         match panel.handle_key(key(KeyCode::Enter)) {
             Effect::Management(request) => assert_eq!(
                 request.action,
-                ManagementAction::Remove { id: "job-1".into() }
+                ManagementAction::Remove {
+                    id: "job-1".into(),
+                    source: None,
+                }
             ),
             _ => panic!("expected a remove"),
         }
@@ -1571,7 +1641,10 @@ mod tests {
         // anything. The panel reports the owner's answer as it stands.
         panel.set_result(&reply(
             Area::Skills,
-            ManagementAction::Remove { id: "job-1".into() },
+            ManagementAction::Remove {
+                id: "job-1".into(),
+                source: None,
+            },
             ManagementResult::View {
                 view: Box::new(after),
                 note: Some("Reset nightly to its catalog entry.".into()),
@@ -1630,13 +1703,19 @@ mod tests {
         match panel.handle_key(key(KeyCode::Tab)) {
             Effect::Management(request) => assert_eq!(
                 request.action,
-                ManagementAction::Inspect { id: "job-1".into() }
+                ManagementAction::Inspect {
+                    id: "job-1".into(),
+                    source: None,
+                }
             ),
             _ => panic!("expected an inspect"),
         }
         panel.set_result(&reply(
             Area::Skills,
-            ManagementAction::Inspect { id: "job-1".into() },
+            ManagementAction::Inspect {
+                id: "job-1".into(),
+                source: None,
+            },
             ManagementResult::Detail(ManagementDetail {
                 title: "Recent runs of nightly".into(),
                 lines: vec!["2026-11-01T09:00:12.000Z  completed".into()],
@@ -1670,7 +1749,10 @@ mod tests {
         let mut panel = opened_catalogue();
         panel.set_result(&reply(
             Area::Skills,
-            ManagementAction::Inspect { id: "job-1".into() },
+            ManagementAction::Inspect {
+                id: "job-1".into(),
+                source: None,
+            },
             ManagementResult::Detail(ManagementDetail {
                 title: "Recent runs of nightly".into(),
                 lines: (0..30).map(|index| format!("run {index}")).collect(),
@@ -1766,6 +1848,7 @@ mod tests {
             target,
             WriteTarget::Entry {
                 id: "job-1".into(),
+                source: None,
                 revision: "3".into()
             }
         );
@@ -1786,6 +1869,7 @@ mod tests {
                     request.action,
                     ManagementAction::Run {
                         id: "job-1".into(),
+                        source: None,
                         document: None,
                         seed: None,
                     }
@@ -1797,6 +1881,7 @@ mod tests {
             Area::Skills,
             ManagementAction::Run {
                 id: "job-1".into(),
+                source: None,
                 document: None,
                 seed: None,
             },
@@ -1825,7 +1910,13 @@ mod tests {
                 seed,
             } => {
                 assert_eq!(area, Area::Skills);
-                assert_eq!(target, WriteTarget::Run { id: "job-1".into() });
+                assert_eq!(
+                    target,
+                    WriteTarget::Run {
+                        id: "job-1".into(),
+                        source: None,
+                    }
+                );
                 assert_eq!(
                     seed,
                     Some(serde_json::json!({"target": "", "style": "concise"})),
@@ -1850,7 +1941,10 @@ mod tests {
         after.groups[0].entries.retain(|entry| entry.id != "job-1");
         panel.set_result(&view_reply(
             Area::Skills,
-            ManagementAction::Remove { id: "job-1".into() },
+            ManagementAction::Remove {
+                id: "job-1".into(),
+                source: None,
+            },
             after,
         ));
         let text = shown(&panel, 100, 20).join(" ");
@@ -1867,7 +1961,10 @@ mod tests {
         panel.handle_key(key(KeyCode::Enter));
         panel.set_result(&reply(
             Area::Skills,
-            ManagementAction::Remove { id: "job-1".into() },
+            ManagementAction::Remove {
+                id: "job-1".into(),
+                source: None,
+            },
             ManagementResult::Applied {
                 note: None,
                 read_error: "the scheduler is unavailable".into(),
@@ -1893,6 +1990,7 @@ mod tests {
             Area::Skills,
             ManagementAction::Toggle {
                 id: "job-1".into(),
+                source: None,
                 enabled: false,
             },
             ManagementResult::Applied {
@@ -1915,6 +2013,7 @@ mod tests {
             Area::Skills,
             ManagementAction::Run {
                 id: "job-1".into(),
+                source: None,
                 document: None,
                 seed: None,
             },
@@ -1947,6 +2046,7 @@ mod tests {
             Area::Skills,
             ManagementAction::Run {
                 id: "job-1".into(),
+                source: None,
                 document: None,
                 seed: None,
             },
@@ -1961,7 +2061,10 @@ mod tests {
         // The detail's title and lines are made safe the same way.
         panel.set_result(&reply(
             Area::Skills,
-            ManagementAction::Inspect { id: "job-1".into() },
+            ManagementAction::Inspect {
+                id: "job-1".into(),
+                source: None,
+            },
             ManagementResult::Detail(ManagementDetail {
                 title: "Recent runs of nightly\u{1b}[2J".into(),
                 lines: vec!["2026-11-01T09:00:12.000Z  completed\u{1b}[2J".into()],
@@ -2009,12 +2112,226 @@ mod tests {
                     request.action,
                     ManagementAction::Run {
                         id: "docs".into(),
+                        source: None,
                         document: None,
                         seed: None,
                     }
                 );
             }
             _ => panic!("expected a run"),
+        }
+    }
+
+    /// The catalog of the reviewer's scenario: a valid user entry and a
+    /// broken project entry of one id, as two rows.
+    fn two_sources() -> ManagementView {
+        let mut user = entry(
+            "docs",
+            "docs",
+            Some(true),
+            Vec::new(),
+            vec![ActionKind::Toggle, ActionKind::Remove, ActionKind::Inspect],
+        );
+        user.source = Some("user".into());
+        user.detail = vec!["user · stdio · enabled".into(), "Executable: npx".into()];
+        let mut project = entry(
+            "docs",
+            "docs",
+            None,
+            vec![EntryState::Invalid],
+            vec![ActionKind::Remove],
+        );
+        project.source = Some("project".into());
+        project.detail = vec![
+            "project · invalid".into(),
+            "MCP server docs: field type must be http or sse".into(),
+        ];
+        ManagementView {
+            actions: vec![ActionKind::Reload],
+            groups: vec![
+                ManagementGroup {
+                    heading: "user".into(),
+                    entries: vec![user],
+                },
+                ManagementGroup {
+                    heading: "project".into(),
+                    entries: vec![project],
+                },
+            ],
+            ..ManagementView::default()
+        }
+    }
+
+    /// Two sources' entries of one id are two rows: selecting the second
+    /// shows that row, and every action on it names its own source, so the
+    /// other source's entry is never the one acted on.
+    #[test]
+    fn rows_keep_two_sources_of_one_id_apart() {
+        let mut panel = ManagementPanel::new(Area::Mcp, None);
+        panel.set_result(&view_reply(
+            Area::Mcp,
+            ManagementAction::List,
+            two_sources(),
+        ));
+        assert!(
+            shown(&panel, 100, 20)
+                .join("\n")
+                .contains("Executable: npx"),
+            "the user row is selected first"
+        );
+        // The project row is its own row: the selection reaches it and its
+        // detail says so.
+        panel.handle_key(key(KeyCode::Down));
+        let text = shown(&panel, 100, 20).join("\n");
+        assert!(text.contains("must be http or sse"), "{text}");
+        // A broken entry offers no toggle, so Enter sends nothing.
+        assert!(matches!(
+            panel.handle_key(key(KeyCode::Enter)),
+            Effect::None
+        ));
+        // Removing that row names the project entry, not the user one.
+        assert!(matches!(panel.handle_key(ctrl('x')), Effect::None));
+        assert!(
+            shown(&panel, 100, 20)
+                .join(" ")
+                .contains("Remove docs? Enter confirm · Esc cancel")
+        );
+        match panel.handle_key(key(KeyCode::Enter)) {
+            Effect::Management(request) => assert_eq!(
+                request.action,
+                ManagementAction::Remove {
+                    id: "docs".into(),
+                    source: Some("project".into()),
+                }
+            ),
+            _ => panic!("expected a remove"),
+        }
+        // The user row still removes the user entry.
+        let mut panel = ManagementPanel::new(Area::Mcp, None);
+        panel.set_result(&view_reply(
+            Area::Mcp,
+            ManagementAction::List,
+            two_sources(),
+        ));
+        panel.handle_key(ctrl('x'));
+        match panel.handle_key(key(KeyCode::Enter)) {
+            Effect::Management(request) => assert_eq!(
+                request.action,
+                ManagementAction::Remove {
+                    id: "docs".into(),
+                    source: Some("user".into()),
+                }
+            ),
+            _ => panic!("expected a remove"),
+        }
+    }
+
+    /// Two broken rows of one id: the row the user selected is the source
+    /// the remove names.
+    #[test]
+    fn a_remove_names_the_source_of_the_broken_row_it_came_from() {
+        let broken = |source: &str, error: &str| {
+            let mut row = entry(
+                "docs",
+                "docs",
+                None,
+                vec![EntryState::Invalid],
+                vec![ActionKind::Remove],
+            );
+            row.source = Some(source.into());
+            row.detail = vec![format!("{source} · invalid"), error.into()];
+            row
+        };
+        let view = ManagementView {
+            actions: vec![ActionKind::Reload],
+            groups: vec![
+                ManagementGroup {
+                    heading: "user".into(),
+                    entries: vec![broken("user", "the user entry did not decode")],
+                },
+                ManagementGroup {
+                    heading: "project".into(),
+                    entries: vec![broken("project", "the project entry did not decode")],
+                },
+            ],
+            ..ManagementView::default()
+        };
+        let mut panel = ManagementPanel::new(Area::Mcp, None);
+        panel.set_result(&view_reply(Area::Mcp, ManagementAction::List, view));
+        panel.handle_key(key(KeyCode::Down));
+        assert!(
+            shown(&panel, 100, 20)
+                .join("\n")
+                .contains("the project entry did not decode"),
+            "the second broken row is selected"
+        );
+        panel.handle_key(ctrl('x'));
+        match panel.handle_key(key(KeyCode::Enter)) {
+            Effect::Management(request) => assert_eq!(
+                request.action,
+                ManagementAction::Remove {
+                    id: "docs".into(),
+                    source: Some("project".into()),
+                }
+            ),
+            _ => panic!("expected a remove"),
+        }
+    }
+
+    /// A toggle and an inspect carry the selected row's source beside its id.
+    #[test]
+    fn a_toggle_and_an_inspect_carry_the_rows_source() {
+        let listed = |source: &str| {
+            let mut row = entry(
+                "docs",
+                "docs",
+                Some(source == "user"),
+                Vec::new(),
+                vec![ActionKind::Toggle, ActionKind::Inspect],
+            );
+            row.source = Some(source.into());
+            row
+        };
+        let view = || ManagementView {
+            actions: vec![ActionKind::Reload],
+            groups: vec![
+                ManagementGroup {
+                    heading: "user".into(),
+                    entries: vec![listed("user")],
+                },
+                ManagementGroup {
+                    heading: "project".into(),
+                    entries: vec![listed("project")],
+                },
+            ],
+            ..ManagementView::default()
+        };
+        let mut panel = ManagementPanel::new(Area::Mcp, None);
+        panel.set_result(&view_reply(Area::Mcp, ManagementAction::List, view()));
+        panel.handle_key(key(KeyCode::Down));
+        match panel.handle_key(key(KeyCode::Enter)) {
+            Effect::Management(request) => assert_eq!(
+                request.action,
+                ManagementAction::Toggle {
+                    id: "docs".into(),
+                    source: Some("project".into()),
+                    enabled: true,
+                }
+            ),
+            _ => panic!("expected a toggle"),
+        }
+        let mut panel = ManagementPanel::new(Area::Mcp, None);
+        panel.set_result(&view_reply(Area::Mcp, ManagementAction::List, view()));
+        panel.handle_key(key(KeyCode::Down));
+        match panel.handle_key(key(KeyCode::Tab)) {
+            Effect::Management(request) => assert_eq!(
+                request.action,
+                ManagementAction::Inspect {
+                    id: "docs".into(),
+                    source: Some("project".into()),
+                }
+            ),
+            _ => panic!("expected an inspect"),
         }
     }
 }

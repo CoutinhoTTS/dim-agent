@@ -6785,9 +6785,9 @@ fn interactive_mcp_sign_in_hides_secrets_retries_callbacks_and_drains_before_nex
     terminal.until("Usage: /mcp login");
     terminal.until("\n> ");
     terminal.write(b"/mcp login --client-secret argument-secret docs\n");
-    terminal.until("No matching MCP server");
+    terminal.until("No MCP server has that id.");
     terminal.until("\n> ");
-    terminal.write(b"/mcp login --no-browser --client-secret docs team\n");
+    terminal.write(b"/mcp login --no-browser --client-secret --source project docs team\n");
     terminal.until("Client secret (hidden): ");
     terminal.write(b"fixture-confidential-secret\n");
     terminal.until("Resource: https://resource.example/mcp");

@@ -2538,9 +2538,10 @@ impl Worker {
 
     /// `/mcp [list]`, `/mcp login [--no-browser] ID`, `/mcp callback URL`,
     /// `/mcp logout ID`, `/mcp disconnect ID`, `/mcp enable ID`,
-    /// `/mcp disable ID`.
+    /// `/mcp disable ID`; every command that names one entry takes
+    /// `--source SOURCE`.
     async fn mcp(&mut self, args: &str) -> crate::Result<()> {
-        const USAGE: &str = "Usage: /mcp [list|login [--no-browser] ID|callback URL|logout ID|disconnect ID|enable ID|disable ID]";
+        const USAGE: &str = "Usage: /mcp [list|login [--no-browser] ID|callback URL|logout ID|disconnect ID|enable ID|disable ID] [--source SOURCE]";
         let words: Vec<&str> = args.split_whitespace().collect();
         match words.as_slice() {
             [] | ["list"] => {
@@ -2559,11 +2560,12 @@ impl Worker {
                 if rest.contains(&"--client-secret") {
                     return Err("A client secret needs hidden input; run dimcode mcp login ID --client-secret in a terminal".into());
                 }
+                let (source, rest) = crate::mcp::take_source(rest)?;
                 let ids: Vec<_> = rest.iter().filter(|word| !word.starts_with("--")).collect();
                 let [id] = ids.as_slice() else {
                     return Err(USAGE.into());
                 };
-                self.mcp_login(id, no_browser).await?;
+                self.mcp_login(id, source, no_browser).await?;
             }
             ["callback", url] => {
                 let Some(attempt) = &self.mcp_attempt else {
@@ -2572,12 +2574,22 @@ impl Worker {
                 let attempt_id = attempt.attempt_id.clone();
                 self.mcp_complete(attempt_id, url.to_string(), None).await;
             }
-            ["logout", id] => {
+            ["logout", rest @ ..] => {
                 #[derive(Deserialize)]
                 struct LoggedOut {
                     revoked: bool,
                 }
-                let params = mcp::target(&mut self.client, &self.options, id).await?;
+                let (source, rest) = crate::mcp::take_source(rest)?;
+                let [id] = rest.as_slice() else {
+                    return Err(USAGE.into());
+                };
+                let params = crate::management::mcp::target_params(
+                    &mut self.client,
+                    self.options.workspace().as_str(),
+                    id,
+                    source,
+                )
+                .await?;
                 let result: LoggedOut = self.client.typed("mcp.auth.logout", params).await?;
                 self.report(
                     format!("Signed out of {id:?}. Revoked: {}.", result.revoked),
@@ -2585,37 +2597,38 @@ impl Worker {
                 );
             }
             // The ID is the rest of the line, spaces included.
-            ["disconnect", ..] => {
-                let (_, id) = args
-                    .trim()
-                    .split_once(char::is_whitespace)
-                    .unwrap_or((args.trim(), ""));
-                let id = id.trim();
+            ["disconnect", rest @ ..] => {
+                let (source, rest) = crate::mcp::take_source(rest)?;
+                let id = rest.join(" ");
                 if id.is_empty() {
                     return Err(USAGE.into());
                 }
-                let params = mcp::target(&mut self.client, &self.options, id).await?;
+                let params = crate::management::mcp::target_params(
+                    &mut self.client,
+                    self.options.workspace().as_str(),
+                    &id,
+                    source,
+                )
+                .await?;
                 self.client.rpc("mcp.disconnect", params).await?;
                 self.report(
-                    format!("Disconnected {}.", crate::sanitize::safe(id)),
+                    format!("Disconnected {}.", crate::sanitize::safe(&id)),
                     false,
                 );
             }
             // The ID is the rest of the line, spaces included.
-            ["enable", ..] | ["disable", ..] => {
-                let (command, id) = args
-                    .trim()
-                    .split_once(char::is_whitespace)
-                    .unwrap_or((args.trim(), ""));
-                let id = id.trim();
+            ["enable", rest @ ..] | ["disable", rest @ ..] => {
+                let (source, rest) = crate::mcp::take_source(rest)?;
+                let id = rest.join(" ");
                 if id.is_empty() {
                     return Err(USAGE.into());
                 }
                 let state = crate::management::mcp::set_enabled(
                     &mut self.client,
                     self.options.workspace().as_str(),
-                    id,
-                    command == "enable",
+                    &id,
+                    source,
+                    words[0] == "enable",
                 )
                 .await?;
                 let mut lines = vec![state.sentence()];
@@ -2641,9 +2654,20 @@ impl Worker {
         Ok(crate::recording::report(&state, &self.options))
     }
 
-    async fn mcp_login(&mut self, id: &str, no_browser: bool) -> crate::Result<()> {
+    async fn mcp_login(
+        &mut self,
+        id: &str,
+        source: Option<&str>,
+        no_browser: bool,
+    ) -> crate::Result<()> {
         self.end_mcp_attempt();
-        let params = mcp::target(&mut self.client, &self.options, id).await?;
+        let params = crate::management::mcp::target_params(
+            &mut self.client,
+            self.options.workspace().as_str(),
+            id,
+            source,
+        )
+        .await?;
         let started: mcp::Started = self.client.typed("mcp.auth.start", params).await?;
         let issuer = url::Url::parse(&started.issuer)?;
         let now = std::time::SystemTime::now()

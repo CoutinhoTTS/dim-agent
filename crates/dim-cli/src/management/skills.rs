@@ -72,7 +72,7 @@ pub async fn apply(client: &mut Client, action: &ManagementAction, cwd: &str) ->
             }
             true
         }
-        ManagementAction::Toggle { id, enabled } => {
+        ManagementAction::Toggle { id, enabled, .. } => {
             let mut params = params;
             params["id"] = json!(id);
             params["enabled"] = json!(enabled);
@@ -117,6 +117,7 @@ pub(super) fn view(catalog: &Catalog, actions: &[ActionKind]) -> ManagementView 
             entry.source.as_deref().unwrap_or(t("skills")),
             ManagementEntry {
                 id: entry.id.clone(),
+                source: None,
                 label: entry.name.clone(),
                 detail: [entry.description.clone(), entry.file_path.clone()].to_vec(),
                 enabled: Some(entry.enabled),

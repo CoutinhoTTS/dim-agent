@@ -2936,6 +2936,18 @@
       ]
     },
     {
+      "id": "dim_cli::args::source_tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::args",
+      "file": "crates/dim-cli/src/args.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "panic",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_cli::args::workspace_tests",
       "crate": "dim_cli",
       "parent": "dim_cli::args",
@@ -26025,6 +26037,13 @@
     },
     {
       "from": "dim_cli::args",
+      "to": "dim_cli::args::source_tests",
+      "references": [
+        "mod source_tests"
+      ]
+    },
+    {
+      "from": "dim_cli::args",
       "to": "dim_cli::args::workspace_tests",
       "references": [
         "mod workspace_tests"
@@ -26051,6 +26070,13 @@
       "to": "dim_cli::management::hooks",
       "references": [
         "path crate::management::hooks::PROJECT"
+      ]
+    },
+    {
+      "from": "dim_cli::args",
+      "to": "dim_cli::mcp",
+      "references": [
+        "path crate::mcp::source"
       ]
     },
     {
@@ -26089,6 +26115,14 @@
       "to": "dim_cli::update",
       "references": [
         "path crate::update::channel"
+      ]
+    },
+    {
+      "from": "dim_cli::args::source_tests",
+      "to": "dim_cli::args",
+      "references": [
+        "path Action::Migration",
+        "path Options::parse"
       ]
     },
     {
@@ -27162,10 +27196,16 @@
       "references": [
         "path Auth",
         "path Catalog",
+        "path Resolved",
+        "path Resolved::Broken",
+        "path Resolved::Server",
         "path Server",
+        "path resolve",
         "use crate::mcp::Auth",
         "use crate::mcp::Catalog",
-        "use crate::mcp::Server"
+        "use crate::mcp::Resolved",
+        "use crate::mcp::Server",
+        "use crate::mcp::resolve"
       ]
     },
     {
@@ -27670,7 +27710,7 @@
         "path mcp::Answer::Detail",
         "path mcp::Answer::Tools",
         "path mcp::Failure::ReadFailed",
-        "path mcp::apply",
+        "path mcp::apply_named",
         "path mcp::editable",
         "path mcp::seed",
         "path mcp::target",
@@ -27898,7 +27938,9 @@
       "from": "dim_cli::mcp_command",
       "to": "dim_cli::management::mcp",
       "references": [
-        "path crate::management::mcp::set_enabled"
+        "path crate::management::mcp::set_enabled",
+        "path mcp::target_params",
+        "use crate::management::mcp"
       ]
     },
     {
@@ -27907,15 +27949,14 @@
       "references": [
         "path Started",
         "path catalog_report",
+        "path crate::mcp::take_source",
         "path error",
         "path self::error",
         "path session_report",
-        "path target",
         "use crate::mcp::Started",
         "use crate::mcp::catalog_report",
         "use crate::mcp::error",
-        "use crate::mcp::session_report",
-        "use crate::mcp::target"
+        "use crate::mcp::session_report"
       ]
     },
     {
@@ -29374,7 +29415,8 @@
       "from": "dim_cli::session_host",
       "to": "dim_cli::management::mcp",
       "references": [
-        "path crate::management::mcp::set_enabled"
+        "path crate::management::mcp::set_enabled",
+        "path crate::management::mcp::target_params"
       ]
     },
     {
@@ -29388,12 +29430,12 @@
       "from": "dim_cli::session_host",
       "to": "dim_cli::mcp",
       "references": [
+        "path crate::mcp::take_source",
         "path mcp::Started",
         "path mcp::State",
         "path mcp::catalog_report",
         "path mcp::error",
         "path mcp::session_report",
-        "path mcp::target",
         "use crate::mcp"
       ]
     },
@@ -32118,9 +32160,9 @@
         "path ManagementResult::Refused",
         "path ManagementResult::View",
         "path ManagementView",
+        "path RemoveVerb",
         "path RemoveVerb::Remove",
         "path RemoveVerb::Reset",
-        "path RemoveVerb::default",
         "use crate::model::session::ActionKind",
         "use crate::model::session::Area",
         "use crate::model::session::EntryState",
@@ -39803,10 +39845,6 @@
     {
       "module": "dim_cli::session_host",
       "path": "State::Pending"
-    },
-    {
-      "module": "dim_cli::session_host",
-      "path": "char::is_whitespace"
     },
     {
       "module": "dim_cli::session_host::tests",

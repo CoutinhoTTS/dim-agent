@@ -281,6 +281,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "MCP's documents belong to one entry; this save names none." => {
             "Dokumen MCP milik satu entri; penyimpanan ini tidak menyebut entri."
         }
+        "{id} is in more than one MCP source: {sources}. Name one with --source." => {
+            "{id} ada di lebih dari satu sumber MCP: {sources}. Sebutkan salah satunya dengan --source."
+        }
+        "The action names no MCP source; a row carries the source its owner reported." => {
+            "Tindakan ini tidak menyebutkan sumber MCP; setiap baris membawa sumber yang dilaporkan pemiliknya."
+        }
+        "No MCP server {id} is in source {source}." => {
+            "Tidak ada server MCP {id} di sumber {source}."
+        }
         "No MCP server has that id." => "Tidak ada server MCP dengan id itu.",
         "This workspace has no project MCP source." => {
             "Workspace ini tidak memiliki sumber MCP proyek."
