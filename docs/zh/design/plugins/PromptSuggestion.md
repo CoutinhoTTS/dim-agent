@@ -155,7 +155,7 @@ You predict the next message the user will send in this conversation. Reply with
 
 | 方法 | 参数 | 回复 | 错误 |
 | --- | --- | --- | --- |
-| `session.suggestion.request` | `{sessionId, turnId}` | `{accepted: bool, reason?: string}`；`accepted` 表示提示将以通知到达，或同一轮已有在途请求 | `invalid_params`、Session 边界的派发错误 |
+| `session.suggestion.request` | `{sessionId, turnId}` | `{accepted: bool, reason?: string}`；`accepted` 表示该轮的模型调用已经开始，由本请求或与它共享的请求发起 | `invalid_params`、Session 边界的派发错误 |
 | `session.suggestion.respond` | `{sessionId, turnId, action: "accept" \| "dismiss"}` | `{}` | `invalid_params`、Session 边界的派发错误 |
 
 通知遵循 [Session 广播通知](../appserver/session-notices.md)；Rpc 补上 `sessionId`：
@@ -179,7 +179,7 @@ session.notice {sessionId, source: "PromptSuggestion", kind: "cleared", data: {t
 | 4 | 该轮以 `Completed` 结束 | `turn_not_completed` |
 | 5 | 该轮最后一次 `model/content` 属于其最后一次 `model/call` 且含文本 | `no_text` |
 | 6 | 未采用计数未达 20 | `throttled` |
-| 7 | 该轮没有在途请求；若有，一个请求同时答复双方 | `accepted: true` |
+| 7 | 该轮没有在途请求；若有，待其预检结束，一个请求同时答复双方 | `accepted: true` |
 | 8 | `main` 已提交的头不会先压缩：`estimatedInputTokens` 加指令的 token 未超过 `thresholdTokens` | `compaction_due` |
 
 运行中的轮次消费的输入（例如 steer）在该轮结束之前到达，不算更新的输入：接受了它的轮次仍然提供建议。
@@ -192,7 +192,7 @@ session.notice {sessionId, source: "PromptSuggestion", kind: "cleared", data: {t
 
 每个被接受的请求都有自己的调用标识：只有槽中仍是该标识时，完成才会修改槽并发出通知，因此被取消的请求稍后返回时不改变任何东西，也不发出任何通知。
 
-请求在异步预检（`compaction_due`）之前连同取消令牌一起登记到槽中。设置变更、新输入、拒绝与 Session 关闭会像取消在途请求一样取消它；预检之后的启动再次依据当时的状态与设置决定，绝不依据预检之前读到的值。在预检期间被取消的请求不发起模型调用，以它现在未能通过的门（或 `dismissed`）答复 `{accepted: false, reason}`，且不发通知。
+请求在异步预检（`compaction_due`）之前连同取消令牌一起登记到槽中。设置变更、新输入、拒绝与 Session 关闭会像取消在途请求一样取消它；预检之后的启动再次依据当时的状态与设置决定，绝不依据预检之前读到的值。在预检期间被取消的请求不发起模型调用，以它现在未能通过的门（或 `dismissed`）答复 `{accepted: false, reason}`，且不发通知。对于其请求仍在预检中的轮次，新的请求等待该预检结束并答复与它相同的答案，因此共享者绝不会因一个不会启动的请求而被接受。
 
 取消始终让 Session 唯一的在途槽保持一致；当提示正在显示或请求已被接受时，每种取消都会发 `cleared` 并带原因：
 

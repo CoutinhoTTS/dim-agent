@@ -36,6 +36,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -323,6 +324,18 @@ struct Offer {
     turn_id: String,
 }
 
+/// What a request that shares another request's preflight is told once that
+/// request settles: the owner's answer, never an early acceptance.
+#[derive(Clone)]
+enum Settled {
+    /// The owner started the turn's model call.
+    Started,
+    /// The owner refused with this reason.
+    Refused(&'static str),
+    /// The owner's settings read failed with this error.
+    Failed(RpcError),
+}
+
 struct InFlight {
     turn_id: String,
     /// The identity of this invocation, told apart from another request for
@@ -334,6 +347,11 @@ struct InFlight {
     /// cancelled before that answers its caller and announces nothing; only
     /// a started request is settled with `cleared` when it is cancelled.
     started: bool,
+    /// The outcome this invocation settles to, sent under the state lock on
+    /// every exit after registration. A request that shares an unstarted
+    /// flight subscribes here, so it answers what the owner answers; a
+    /// dropped sender settles it with the state as it is then.
+    outcome: watch::Sender<Option<Settled>>,
 }
 
 #[derive(Default)]
@@ -361,6 +379,20 @@ impl State {
         let flight = self.in_flight.take()?;
         flight.cancel.cancel();
         Some((flight.turn_id, flight.started))
+    }
+    /// Settles the invocation's flight with `outcome` and takes it out of the
+    /// slot, so a request that shared its preflight answers what it settled
+    /// to. A slot another invocation holds is left alone.
+    fn settle_in_flight(&mut self, invocation: u64, outcome: Settled) {
+        if !self
+            .in_flight
+            .as_ref()
+            .is_some_and(|flight| flight.invocation == invocation)
+        {
+            return;
+        }
+        let flight = self.in_flight.take().expect("just checked");
+        let _ = flight.outcome.send(Some(outcome));
     }
     /// The next invocation identity; never reused within the part.
     fn next_invocation(&mut self) -> u64 {
@@ -765,31 +797,63 @@ impl Part {
         let token = cancel.child_token();
         let settings = self.read_settings(token.clone()).await?;
         let max_chars = settings.max_chars.clamp(10, 200);
-        let invocation = {
+        // The state lock leaves the request either registered as this
+        // turn's owner, or holding the flight it shares and waits on.
+        let mut registered = None;
+        let shared = {
             let mut state = self.state.lock().unwrap();
             state.enabled = Some(settings.enabled);
             match self.decision(&state, &params.turn_id, &settings, None) {
                 Decision::Refused(reason) => return Ok(refused(reason)),
-                Decision::Shared => return Ok(json!({"accepted": true})),
+                Decision::Shared => {
+                    let flight = state
+                        .in_flight
+                        .as_ref()
+                        .expect("a shared decision names a flight");
+                    // A request that shares a started flight is accepted at
+                    // once: the turn's model call already runs. One that
+                    // shares a preflight waits for the owner to settle it,
+                    // so `accepted` always means the call started.
+                    if flight.started {
+                        return Ok(json!({"accepted": true}));
+                    }
+                    let invocation = flight.invocation;
+                    let outcome = flight.outcome.subscribe();
+                    let settled = outcome.borrow().clone();
+                    Some((invocation, outcome, settled))
+                }
                 Decision::Ready(_, _) => {
                     let invocation = state.next_invocation();
                     let _ = state.cancel_in_flight();
                     state.take_offer();
+                    let (outcome, _) = watch::channel(None);
                     state.in_flight = Some(InFlight {
                         turn_id: params.turn_id.clone(),
                         invocation,
                         cancel: token.clone(),
                         started: false,
+                        outcome,
                     });
-                    invocation
+                    registered = Some(invocation);
+                    None
                 }
             }
+        };
+        let invocation = match shared {
+            Some((invocation, outcome, settled)) => {
+                #[cfg(feature = "testing")]
+                testing::sharing(&self.session_id);
+                return self
+                    .shared(&params.turn_id, invocation, outcome, settled, cancel)
+                    .await;
+            }
+            None => registered.expect("a ready request registers its flight"),
         };
         // The pending registration holds the slot across the preflight, so a
         // settings change, a new input, a dismissal or the Session's close
         // cancels this request like one already in flight.
         if self.compaction_due(max_chars, token.clone()).await {
-            self.finish_invocation(invocation);
+            self.settle(invocation, Settled::Refused("compaction_due"));
             return Ok(refused("compaction_due"));
         }
         // The preflight awaited: the start is decided again against the
@@ -800,7 +864,7 @@ impl Part {
         let settings = match self.read_settings(self.stopping.child_token()).await {
             Ok(settings) => settings,
             Err(error) => {
-                self.finish_invocation(invocation);
+                self.settle(invocation, Settled::Failed(error.clone()));
                 return Err(error);
             }
         };
@@ -812,27 +876,26 @@ impl Part {
                 .as_ref()
                 .is_some_and(|flight| flight.invocation == invocation);
             if !ours || token.is_cancelled() {
+                let reason = self.cancelled_reason(&state, &params.turn_id, &settings, invocation);
                 if ours {
-                    state.in_flight = None;
+                    state.settle_in_flight(invocation, Settled::Refused(reason));
                 }
-                return Ok(refused(self.cancelled_reason(
-                    &state,
-                    &params.turn_id,
-                    &settings,
-                    invocation,
-                )));
+                return Ok(refused(reason));
             }
             let ready = match self.decision(&state, &params.turn_id, &settings, Some(invocation)) {
                 Decision::Refused(reason) => {
-                    state.in_flight = None;
+                    state.settle_in_flight(invocation, Settled::Refused(reason));
                     return Ok(refused(reason));
                 }
-                Decision::Shared => return Ok(json!({"accepted": true})),
+                // `ours` was just checked: the slot holds this invocation,
+                // and a decision about its own flight is never shared.
+                Decision::Shared => unreachable!("a request never shares its own flight"),
                 Decision::Ready(call, content) => (call, content),
             };
             state.enabled = Some(settings.enabled);
             if let Some(flight) = state.in_flight.as_mut() {
                 flight.started = true;
+                let _ = flight.outcome.send(Some(Settled::Started));
             }
             ready
         };
@@ -845,17 +908,69 @@ impl Part {
         Ok(json!({"accepted": true}))
     }
 
-    /// Removes an invocation's pending registration when the slot still
-    /// holds it; every exit path after registration ends here.
-    fn finish_invocation(&self, invocation: u64) {
-        let mut state = self.state.lock().unwrap();
-        if state
-            .in_flight
-            .as_ref()
-            .is_some_and(|flight| flight.invocation == invocation)
-        {
-            state.in_flight = None;
+    /// Settles an invocation's flight with its outcome, so a request that
+    /// shared its preflight answers what it settled to. Every exit path after
+    /// registration ends here; a slot another invocation holds is left alone.
+    fn settle(&self, invocation: u64, outcome: Settled) {
+        self.state
+            .lock()
+            .unwrap()
+            .settle_in_flight(invocation, outcome);
+    }
+
+    /// Answers a request that found another request for its turn still in
+    /// its preflight. It waits, without the state lock, for that request to
+    /// settle, for its own cancellation or for the part to end, and answers
+    /// what the owner answers: it never accepts a request that does not
+    /// start, and it never takes the owner's flight.
+    async fn shared(
+        self: Arc<Self>,
+        turn_id: &str,
+        invocation: u64,
+        mut outcome: watch::Receiver<Option<Settled>>,
+        settled: Option<Settled>,
+        cancel: CancellationToken,
+    ) -> Result<Value, RpcError> {
+        let settled = match settled {
+            Some(settled) => settled,
+            None => tokio::select! {
+                biased;
+                changed = outcome.changed() => match changed {
+                    Ok(()) => outcome
+                        .borrow()
+                        .clone()
+                        .expect("a settled flight carries its outcome"),
+                    // The owner left the slot without settling: the
+                    // cancellation paths answer what its own read would.
+                    Err(_) => return self.shared_refusal(turn_id, invocation).await,
+                },
+                _ = self.stopping.cancelled() => {
+                    return Err(RpcError::service(
+                        "failed",
+                        "the Session part ended before the shared request settled",
+                    ));
+                }
+                _ = cancel.cancelled() => {
+                    return self.shared_refusal(turn_id, invocation).await;
+                }
+            },
+        };
+        match settled {
+            Settled::Started => Ok(json!({"accepted": true})),
+            Settled::Refused(reason) => Ok(refused(reason)),
+            Settled::Failed(error) => Err(error),
         }
+    }
+
+    /// What a sharer answers when its owner leaves the slot without settling:
+    /// the reason the owner's own cancelled read would answer, from the state
+    /// and the settings as they are now.
+    async fn shared_refusal(&self, turn_id: &str, invocation: u64) -> Result<Value, RpcError> {
+        let settings = self.read_settings(self.stopping.child_token()).await?;
+        let state = self.state.lock().unwrap();
+        Ok(refused(
+            self.cancelled_reason(&state, turn_id, &settings, invocation),
+        ))
     }
 
     /// What a request cancelled during its preflight answers. The gates see
@@ -1184,6 +1299,47 @@ pub mod testing {
             .rev()
             .find(|(held, _)| held == session_id)
             .map(|(_, record)| *record)
+    }
+
+    /// The requests of each Session that wait on another request's
+    /// preflight, in the order they started waiting.
+    static SHARERS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static SHARED: Notify = Notify::const_new();
+
+    /// Records that a request of `session_id` now waits on another request's
+    /// preflight, after installing its receiver and reading the flight's
+    /// current outcome under the state lock: a settlement after this point
+    /// reaches that receiver, and an earlier one is already in that outcome.
+    pub(crate) fn sharing(session_id: &str) {
+        SHARERS.lock().unwrap().push(session_id.to_owned());
+        SHARED.notify_waiters();
+    }
+
+    /// The number of requests of `session_id` that have waited on another
+    /// request's preflight.
+    pub fn shared_requests(session_id: &str) -> usize {
+        SHARERS
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|held| *held == session_id)
+            .count()
+    }
+
+    /// Resolves once `session_id` has more than `seen` requests waiting on
+    /// another request's preflight.
+    pub async fn shared_after(session_id: &str, seen: usize) {
+        loop {
+            let notified = SHARED.notified();
+            tokio::pin!(notified);
+            // Register before the check, so a share landing between the two
+            // wakes this wait instead of being missed.
+            notified.as_mut().enable();
+            if shared_requests(session_id) > seen {
+                return;
+            }
+            notified.await;
+        }
     }
 
     static NEXT: Mutex<Option<(String, Arc<Completion>)>> = Mutex::new(None);

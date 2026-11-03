@@ -155,7 +155,7 @@ Two methods are registered on `sessionMethods` under the namespace `session.sugg
 
 | Method | Params | Reply | Errors |
 | --- | --- | --- | --- |
-| `session.suggestion.request` | `{sessionId, turnId}` | `{accepted: bool, reason?: string}`; `accepted` means the offer will arrive as a notice, or that a request for the same turn is already in flight | `invalid_params`, dispatch errors of the Session boundary |
+| `session.suggestion.request` | `{sessionId, turnId}` | `{accepted: bool, reason?: string}`; `accepted` means the model call for the turn started, by this request or by one it shares | `invalid_params`, dispatch errors of the Session boundary |
 | `session.suggestion.respond` | `{sessionId, turnId, action: "accept" \| "dismiss"}` | `{}` | `invalid_params`, dispatch errors of the Session boundary |
 
 Notices follow [Session broadcast notices](../appserver/session-notices.md); Rpc adds `sessionId`:
@@ -179,7 +179,7 @@ The gates of `request`, in order. A refused request answers `{accepted: false, r
 | 4 | That turn ended `Completed` | `turn_not_completed` |
 | 5 | The turn's last `model/content` belongs to its last `model/call` and holds text | `no_text` |
 | 6 | The unused count has not reached 20 | `throttled` |
-| 7 | No request is in flight for this turn; if one is, it answers for both | `accepted: true` |
+| 7 | No request is in flight for this turn; if one is, it answers for both once that request's preflight settles | `accepted: true` |
 | 8 | `main`'s committed head is not about to compact: `estimatedInputTokens` plus the instruction's tokens does not exceed `thresholdTokens` | `compaction_due` |
 
 Input that the running turn consumes, such as a steer, arrives before that turn's end and does not count as newer input: the turn that took it still offers.
@@ -192,7 +192,7 @@ A committed write that leaves the switch on cancels nothing: the shown offer and
 
 Every accepted request carries its own invocation identity: a completion changes the slot and emits a notice only when the slot still holds that invocation, so a cancelled request that returns later changes nothing and announces nothing.
 
-A request registers in the slot, with its cancellation token, before its asynchronous preflight (`compaction_due`). A settings change, a new input, a dismissal and the Session's close cancel it there as they cancel one in flight; the start afterwards is decided again against the state and the settings as they are then, never against the values read before the preflight. A request cancelled during its preflight starts no model call, answers `{accepted: false, reason}` with the gate it now fails (or `dismissed`) and announces nothing.
+A request registers in the slot, with its cancellation token, before its asynchronous preflight (`compaction_due`). A settings change, a new input, a dismissal and the Session's close cancel it there as they cancel one in flight; the start afterwards is decided again against the state and the settings as they are then, never against the values read before the preflight. A request cancelled during its preflight starts no model call, answers `{accepted: false, reason}` with the gate it now fails (or `dismissed`) and announces nothing. A request for a turn whose request is still in its preflight waits for that preflight and answers what it answers, so a sharer is never accepted for a request that does not start.
 
 Cancellation always keeps the Session's one in-flight slot consistent, and each one emits `cleared` with its reason when an offer is showing or a request was accepted:
 

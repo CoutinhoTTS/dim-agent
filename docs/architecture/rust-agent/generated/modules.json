@@ -802,6 +802,7 @@
         "json",
         "matches",
         "tokio::select",
+        "unreachable",
         "vec"
       ]
     },
@@ -810,7 +811,9 @@
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities::prompt_suggestion",
       "file": "crates/dim-agent-capabilities/src/prompt_suggestion.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "tokio::pin"
+      ]
     },
     {
       "id": "dim_agent_capabilities::recall",
@@ -10965,6 +10968,7 @@
       "references": [
         "mod testing",
         "path testing::completion",
+        "path testing::sharing",
         "path testing::unloaded"
       ]
     },

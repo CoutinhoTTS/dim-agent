@@ -346,9 +346,20 @@ struct Held {
     armed: std::sync::atomic::AtomicBool,
     entered: tokio::sync::Notify,
     release: tokio::sync::Notify,
+    /// Answer with the window the head is already past, so the preflight
+    /// refuses for compaction once it is released.
+    tiny: std::sync::atomic::AtomicBool,
 }
 
 impl Held {
+    /// A resolver that holds the next resolution and then answers with a
+    /// window the head is already past.
+    fn holding_tiny() -> Self {
+        Self {
+            tiny: std::sync::atomic::AtomicBool::new(true),
+            ..Self::default()
+        }
+    }
     /// Holds the next resolution.
     fn hold(&self) {
         self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -373,7 +384,11 @@ impl ResolveContextModel for Held {
                 self.entered.notify_one();
                 self.release.notified().await;
             }
-            Ok(Arc::new(Room) as Arc<dyn ContextModel>)
+            if self.tiny.load(std::sync::atomic::Ordering::SeqCst) {
+                Ok(Arc::new(Tiny) as Arc<dyn ContextModel>)
+            } else {
+                Ok(Arc::new(Room) as Arc<dyn ContextModel>)
+            }
         })
     }
 }
@@ -575,6 +590,18 @@ async fn suggestion_notice(client: &mut Client, kind: &str) -> Value {
     })
     .await
     .expect("the suggestion notice arrives")
+}
+
+/// Asserts no PromptSuggestion notice of `kind` arrives: a request that
+/// never started announces nothing.
+async fn no_suggestion_notice(client: &mut Client, kind: &str) {
+    let notice =
+        tokio::time::timeout(Duration::from_millis(300), suggestion_notice(client, kind)).await;
+    assert!(
+        notice.is_err(),
+        "a {kind} notice arrived for a request that never started: {:?}",
+        notice.ok()
+    );
 }
 
 async fn suggest(client: &mut Client, id: &str, turn: &str) -> Value {
@@ -900,6 +927,124 @@ async fn one_request_in_flight_is_shared() {
     );
     gate.notify_one();
     let offer = suggestion_notice(&mut client, "offer").await;
+    assert_eq!(offer["params"]["data"]["text"], "run the tests");
+    assert_eq!(fixture.model.suggestions().len(), 1, "one model call");
+    fixture.end().await;
+}
+
+/// Waits until the part records that `asking` waits on another request's
+/// preflight, with its receiver installed, so the caller is ordered before it
+/// changes anything. An early answer fails the test: that is the bug it pins.
+async fn ordered_sharing<F>(id: &str, mut asking: std::pin::Pin<&mut F>)
+where
+    F: std::future::Future<Output = Value>,
+{
+    let seen = prompt_suggestion::testing::shared_requests(id);
+    tokio::select! {
+        () = prompt_suggestion::testing::shared_after(id, seen) => {}
+        answer = asking.as_mut() => {
+            panic!("the sharer answered before its preflight settled: {answer:?}");
+        }
+    }
+}
+
+/// A request that shares a preflight which turns off is refused as its owner
+/// is: it is never accepted for a model call that does not start, and
+/// nothing announces.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sharer_answers_disabled_when_the_shared_preflight_is_disabled() {
+    let held = Arc::new(Held::default());
+    let fixture =
+        serve_compaction_fixture_with(Reply::Text("run the tests".into()), held.clone()).await;
+    let (mut client, id) = create(&fixture, true).await;
+    submit(&mut client, &id, "add a test").await;
+    let turn = latest_turn(&mut client, &id).await;
+    configure(&mut client, json!({"enabled":true})).await;
+    let mut other = attach(&fixture, &id).await;
+    let mut writer = attach(&fixture, &id).await;
+
+    held.hold();
+    let asked = (id.clone(), turn.clone());
+    let owner = tokio::spawn(async move { suggest(&mut client, &asked.0, &asked.1).await });
+    held.entered().await;
+    let mut asking = Box::pin(suggest(&mut other, &id, &turn));
+    ordered_sharing(&id, asking.as_mut()).await;
+    // The write reaches the part while the owner is still held and the
+    // sharer already waits on its preflight.
+    configure(&mut writer, json!({"enabled":false})).await;
+    held.release();
+    assert_eq!(
+        asking.await,
+        json!({"accepted": false, "reason": "disabled"})
+    );
+    assert_eq!(
+        owner.await.unwrap(),
+        json!({"accepted": false, "reason": "disabled"})
+    );
+    assert!(fixture.model.suggestions().is_empty(), "no model call");
+    no_suggestion_notice(&mut other, "offer").await;
+    no_suggestion_notice(&mut other, "cleared").await;
+    fixture.end().await;
+}
+
+/// A request that shares a preflight which refuses for compaction answers
+/// `compaction_due`, exactly as its owner does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sharer_answers_compaction_due_when_the_shared_preflight_refuses() {
+    let held = Arc::new(Held::holding_tiny());
+    let fixture =
+        serve_compaction_fixture_with(Reply::Text("run the tests".into()), held.clone()).await;
+    let (mut client, id) = create(&fixture, true).await;
+    submit(&mut client, &id, "add a test").await;
+    let turn = latest_turn(&mut client, &id).await;
+    configure(&mut client, json!({"enabled":true})).await;
+    let mut other = attach(&fixture, &id).await;
+
+    held.hold();
+    let asked = (id.clone(), turn.clone());
+    let owner = tokio::spawn(async move { suggest(&mut client, &asked.0, &asked.1).await });
+    held.entered().await;
+    let mut asking = Box::pin(suggest(&mut other, &id, &turn));
+    ordered_sharing(&id, asking.as_mut()).await;
+    held.release();
+    assert_eq!(
+        asking.await,
+        json!({"accepted": false, "reason": "compaction_due"})
+    );
+    assert_eq!(
+        owner.await.unwrap(),
+        json!({"accepted": false, "reason": "compaction_due"})
+    );
+    assert!(fixture.model.suggestions().is_empty(), "no model call");
+    no_suggestion_notice(&mut other, "offer").await;
+    no_suggestion_notice(&mut other, "cleared").await;
+    fixture.end().await;
+}
+
+/// A request that shares a preflight which starts is accepted once the model
+/// call starts: one call for the turn and one offer, and both callers answer
+/// accepted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sharer_is_accepted_when_the_shared_preflight_starts() {
+    let held = Arc::new(Held::default());
+    let fixture =
+        serve_compaction_fixture_with(Reply::Text("run the tests".into()), held.clone()).await;
+    let (mut client, id) = create(&fixture, true).await;
+    submit(&mut client, &id, "add a test").await;
+    let turn = latest_turn(&mut client, &id).await;
+    configure(&mut client, json!({"enabled":true})).await;
+    let mut other = attach(&fixture, &id).await;
+
+    held.hold();
+    let asked = (id.clone(), turn.clone());
+    let owner = tokio::spawn(async move { suggest(&mut client, &asked.0, &asked.1).await });
+    held.entered().await;
+    let mut asking = Box::pin(suggest(&mut other, &id, &turn));
+    ordered_sharing(&id, asking.as_mut()).await;
+    held.release();
+    assert_eq!(asking.await, json!({"accepted": true}));
+    assert_eq!(owner.await.unwrap(), json!({"accepted": true}));
+    let offer = suggestion_notice(&mut other, "offer").await;
     assert_eq!(offer["params"]["data"]["text"], "run the tests");
     assert_eq!(fixture.model.suggestions().len(), 1, "one model call");
     fixture.end().await;
