@@ -7949,6 +7949,9 @@ fn query(
 ) -> dim_agent_runtime::TimelineQuery {
     dim_agent_runtime::TimelineQuery {
         scope,
+        from_event: None,
+        from_sequence: None,
+        order_by: Default::default(),
         direction: Default::default(),
         kinds: vec![],
         flags: vec![],
@@ -8365,11 +8368,11 @@ async fn a_query_ignores_records_beyond_the_read_bound() {
     request.direction = Descending;
     request.predicate = Some(predicate("delta", serde_json::json!("hit")));
     let sqlite_page = store
-        .query(&key("query", "main"), &request, 3)
+        .query(&key("query", "main"), &request, 1, 3)
         .await
         .unwrap();
     let memory_page = memory_store
-        .query(&key("query", "main"), &request, 3)
+        .query(&key("query", "main"), &request, 1, 3)
         .await
         .unwrap();
     assert_eq!(
@@ -8652,6 +8655,7 @@ async fn a_query_page_reports_the_facts_it_skipped() {
                 offset: 3,
                 ..query(Branch, 16)
             },
+            1,
             1_000,
         )
         .await
@@ -8672,6 +8676,7 @@ async fn a_query_page_reports_the_facts_it_skipped() {
                 offset: 9,
                 ..query(Branch, 16)
             },
+            1,
             1_000,
         )
         .await
@@ -8690,6 +8695,7 @@ async fn a_query_page_reports_the_facts_it_skipped() {
                 limit: std::num::NonZeroU64::new(2).unwrap(),
                 ..query(Branch, 16)
             },
+            1,
             1_000,
         )
         .await
@@ -8959,6 +8965,7 @@ async fn a_query_page_ends_only_when_no_more_facts_match() {
                 limit: std::num::NonZeroU64::new(1).unwrap(),
                 ..query(Branch, 16)
             },
+            1,
             1_000,
         )
         .await
