@@ -431,7 +431,7 @@ as `runtime.list` reports it.
 │ › node      download  24.21.0    ready                                    │
 │   python    system    3.12.15    off      not installed                   │
 │                                                                           │
-│   4 plugins wait for node: goal, session-title, scheduler, workflow       │
+│   3 plugins wait for node: goal, scheduler, workflow                      │
 ╰─ Enter install or apply · s source · a auto · r retry · Esc close ────────╯
 ```
 
@@ -449,7 +449,7 @@ as `runtime.list` reports it.
 │               https://npmmirror.com/mirrors/node/v24.21.0/…: 404         │
 │   python    system    3.12.15    off      not installed                   │
 │                                                                           │
-│   4 plugins wait for node: goal, session-title, scheduler, workflow       │
+│   3 plugins wait for node: goal, scheduler, workflow                      │
 ╰─ Enter retry · s switch node to system · Esc close ───────────────────────╯
 ```
 
@@ -504,7 +504,7 @@ with that runtime selected. Today the row says only `pending`.
 /plugins
 ╭─ Plugins ─────────────────────────────────────────────────────────────────╮
 │ › goal           on     pending · waits for the node runtime              │
-│   session-title  on     pending · waits for the node runtime              │
+│   session-title  on     ready · built-in                                  │
 │   scheduler      on     pending · waits for the node runtime              │
 │   workflow       on     pending · waits for the node runtime              │
 ╰─ Enter open /runtime · o on/off · r reload · Esc close ───────────────────╯
@@ -525,7 +525,7 @@ The typed forms are the whole area, so a caller needs no panel:
 $ dimcode runtime list
 node    download  24.21.0   ready
 python  system    3.12.15   off       not installed
-4 plugins wait for node: goal, session-title, scheduler, workflow
+3 plugins wait for node: goal, scheduler, workflow
 $ dimcode runtime install node
 node    download  24.21.0   acquiring
 $ dimcode runtime config python --source system --auto on

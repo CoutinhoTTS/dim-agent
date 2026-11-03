@@ -3,28 +3,29 @@ flowchart LR
   subgraph process["process"]
     p1["root"]
     p2["rutis-loader"]
-    p61["Attachments"]
-    p60["Questions"]
-    p59["PrepareModelHost"]
-    p58["ContextCompaction"]
-    p57["CommandRules"]
-    p56["PromptSources"]
-    p55["ShellInput"]
-    p54["Recall"]
-    p53["Wait"]
-    p52["WorkspaceTools"]
-    p51["BranchTool"]
-    p50["ToolExecution"]
-    p49["Permission"]
-    p48["ModelProvider"]
-    p47["Loop"]
-    p46["Prompt"]
-    p45["ContextPreparation"]
-    p44["ToolRegistry"]
-    p43["InputQueue"]
-    p42["SessionMethods"]
-    p41["TimelineTree"]
-    p40["SessionBroadcast"]
+    p62["Attachments"]
+    p61["Questions"]
+    p60["PrepareModelHost"]
+    p59["ContextCompaction"]
+    p58["CommandRules"]
+    p57["PromptSources"]
+    p56["ShellInput"]
+    p55["Recall"]
+    p54["Wait"]
+    p53["WorkspaceTools"]
+    p52["BranchTool"]
+    p51["ToolExecution"]
+    p50["Permission"]
+    p49["ModelProvider"]
+    p48["Loop"]
+    p47["Prompt"]
+    p46["ContextPreparation"]
+    p45["ToolRegistry"]
+    p44["InputQueue"]
+    p43["SessionMethods"]
+    p42["TimelineTree"]
+    p41["SessionBroadcast"]
+    p40["session-title"]
     p39["PartRegistry"]
     p38["Transport"]
     p37["Rpc"]
@@ -63,6 +64,7 @@ flowchart LR
     p4["FileStorage"]
     p3["ServerControl"]
   end
+  p39 -->|"dim_agent_runtime::parts::PartRegistry"| p62
   p39 -->|"dim_agent_runtime::parts::PartRegistry"| p61
   p39 -->|"dim_agent_runtime::parts::PartRegistry"| p60
   p39 -->|"dim_agent_runtime::parts::PartRegistry"| p59
@@ -85,6 +87,7 @@ flowchart LR
   p39 -->|"dim_agent_runtime::parts::PartRegistry"| p42
   p39 -->|"dim_agent_runtime::parts::PartRegistry"| p41
   p39 -->|"dim_agent_runtime::parts::PartRegistry"| p40
+  p16 -->|"dim_app_server::settings::SettingsService"| p40
   p36 -->|"dim_app_server::connection::ConnectionHub"| p38
   p3 -->|"dim_app_server::control::ServerControl"| p38
   p6 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p38

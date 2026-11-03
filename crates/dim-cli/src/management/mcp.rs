@@ -830,6 +830,7 @@ struct Inspection {
 #[derive(Debug, Deserialize)]
 struct Connection {
     state: ConnectionState,
+    failure: Option<String>,
     #[serde(default)]
     tools: Option<Vec<Tool>>,
 }
@@ -878,6 +879,9 @@ async fn inspect(client: &mut Client, cwd: &str, id: &str) -> Result<Answer, Fai
             head.push_str(" expired");
         }
         lines.push(head);
+        if let Some(failure) = &connection.failure {
+            lines.push(format!("  {}", safe_line(failure)));
+        }
         match &connection.tools {
             Some(tools) if !tools.is_empty() => {
                 lines.extend(tools.iter().map(|tool| format!("  {}", tool_line(tool))));
