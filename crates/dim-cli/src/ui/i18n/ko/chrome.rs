@@ -39,8 +39,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "이전 메시지 {count}개 · Enter 또는 클릭으로 불러오기"
         }
         "follow, talk to and end this session's lines" => "이 세션의 라인을 보고, 대화하고, 종료",
-        "End line" => "라인 종료",
-        "y/N" => "y/N",
+        "End line {id}?" => "{id} 라인을 종료할까요?",
+        "y end it" => "y 종료",
+        "n cancel" => "n 취소",
         "main is the session itself; a line ends, main does not" => {
             "main은 세션 자체입니다. 라인은 종료되지만 main은 그렇지 않습니다"
         }
