@@ -3,7 +3,7 @@
 use crate::{
     document::{
         DEFAULT_MAX_RUN_MINUTES, Job, Mode, ModelSelection, Origin, Schedule, ScheduleDocument,
-        canonical_instant, preset_rank,
+        canonical_instant,
     },
     runs::{self, Run, SchedulerError, stamp},
 };
@@ -377,7 +377,7 @@ fn build_job(
     if input
         .policy
         .as_ref()
-        .is_some_and(|preset| preset_rank(preset) > preset_rank(&cap.preset))
+        .is_some_and(|preset| preset.rank() > cap.preset.rank())
     {
         return Err(SchedulerError::new(
             "schedule_invalid",

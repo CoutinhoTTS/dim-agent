@@ -265,6 +265,10 @@
   },
   {
     "from": "dim-session-title",
+    "to": "dim-agent-scheduler"
+  },
+  {
+    "from": "dim-session-title",
     "to": "dim-app-server"
   },
   {

@@ -5,7 +5,6 @@
 use crate::{
     document::{Job, Mode, Origin, Schedule, canonical_instant},
     methods::{Binding, Shared, bind_job, host_bound, read_document, session_policy, window_after},
-    policy::{self, within},
     runs::{self, ReportTo, Run, RunState, SchedulerError, SessionOrigin, stamp},
 };
 use chrono::{DateTime, Duration, Utc};
@@ -727,7 +726,7 @@ async fn reuse(
             return Ok(false);
         }
     };
-    if !within(&actual, requested) || !within(&actual, &live) {
+    if !actual.within(requested) || !actual.within(&live) {
         settle_checked(shared, job, run, RunState::Skipped, "policy").await?;
         return Ok(false);
     }
@@ -800,12 +799,7 @@ async fn drive(shared: &Arc<Shared>, job: &Job, run: &Run) -> Result<(), Schedul
     if !still_eligible(shared, job, run, job.revision, job.session_id.as_deref()).await? {
         return Ok(());
     }
-    let requested = match policy::cap(&requested_policy(job), &job.policy_cap) {
-        Ok(requested) => requested,
-        Err(error) => {
-            return finish(shared, &run.run_id, RunState::Failed, error.code.into()).await;
-        }
-    };
+    let requested = requested_policy(job).cap(&job.policy_cap);
     let session_id = match (&job.mode, &job.session_id) {
         (Mode::Reuse, Some(bound)) => {
             if !reuse(shared, job, run, &requested, bound).await? {

@@ -250,12 +250,3 @@ fn cron_for(cron: &CronSchedule) -> Result<ParsedCron, String> {
     let parsed = Cron::from_str(&cron.cron).map_err(|error| error.to_string())?;
     Ok(ParsedCron { cron: parsed, zone })
 }
-
-/// A preset's rank: read-only < workspace-write < full-access (§3.3).
-pub fn preset_rank(preset: &PermissionPreset) -> u8 {
-    match preset {
-        PermissionPreset::ReadOnly => 0,
-        PermissionPreset::WorkspaceWrite => 1,
-        PermissionPreset::FullAccess => 2,
-    }
-}

@@ -7,7 +7,6 @@
 mod document;
 mod engine;
 mod methods;
-mod policy;
 mod runs;
 mod session;
 
