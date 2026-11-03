@@ -243,7 +243,9 @@ impl McpProbe {
                 missing_scopes: Some(scopes.split_whitespace().map(str::to_owned).collect()),
                 ..Self::base(ProbeStatus::AuthRequired, latency)
             },
-            server::McpServerError::Timeout => Self::failed(ProbeReason::Timeout, error, latency),
+            server::McpServerError::Timeout { .. } => {
+                Self::failed(ProbeReason::Timeout, error, latency)
+            }
             server::McpServerError::InvalidResponse(_) => {
                 Self::failed(ProbeReason::Response, error, latency)
             }
@@ -996,7 +998,10 @@ impl McpService {
                 Ok(Err(error)) => Err(error),
                 Err(_deadline) => Ok(McpProbe::failed(
                     ProbeReason::Timeout,
-                    server::McpServerError::Timeout,
+                    server::McpServerError::Timeout {
+                        millis: PROBE_DEADLINE.as_millis() as u64,
+                        origin: "the probe deadline",
+                    },
                     latency,
                 )),
             };

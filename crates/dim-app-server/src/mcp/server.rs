@@ -60,8 +60,12 @@ pub enum McpServerError {
     Closed,
     #[error("MCP operation cancelled; remote effects may already have occurred")]
     Cancelled,
-    #[error("MCP operation timed out; remote effects may already have occurred")]
-    Timeout,
+    /// `origin` names where the limit came from: the entry's `timeout`, the
+    /// request kind's default, or a fixed deadline.
+    #[error(
+        "MCP operation timed out after {millis} ms ({origin}); remote effects may already have occurred"
+    )]
+    Timeout { millis: u64, origin: &'static str },
     #[error("invalid MCP configuration: {0}")]
     Configuration(&'static str),
     #[error(
@@ -527,8 +531,53 @@ enum TransportConfig {
     Stdio(stdio::Config),
 }
 
+/// The limit every request except a tool call waits under.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// A tool call without an entry `timeout` waits this long.
+const TOOL_CALL_TIMEOUT: Duration = Duration::from_secs(600);
+/// Starting a server, including the initial handshake.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The limit a request waits under and the source a timeout names.
+#[derive(Clone, Copy)]
+struct RequestLimit {
+    limit: Duration,
+    origin: &'static str,
+}
+impl RequestLimit {
+    fn millis(self) -> u64 {
+        self.limit.as_millis() as u64
+    }
+    fn timeout(self) -> McpServerError {
+        McpServerError::Timeout {
+            millis: self.millis(),
+            origin: self.origin,
+        }
+    }
+}
+
+/// A tool call takes its entry's `timeout`, or `TOOL_CALL_TIMEOUT` without
+/// one; every other request keeps `REQUEST_TIMEOUT`.
+fn request_limit(request: &ClientRequest, entry: Option<Duration>) -> RequestLimit {
+    match (request, entry) {
+        (ClientRequest::CallToolRequest(_), Some(limit)) => RequestLimit {
+            limit,
+            origin: "the entry's timeout",
+        },
+        (ClientRequest::CallToolRequest(_), None) => RequestLimit {
+            limit: TOOL_CALL_TIMEOUT,
+            origin: "the default",
+        },
+        _ => RequestLimit {
+            limit: REQUEST_TIMEOUT,
+            origin: "the request limit",
+        },
+    }
+}
+
 pub struct McpServer {
     transport: TransportConfig,
+    tool_call_timeout: Option<Duration>,
     authorization: Option<Authorization>,
     state: StateCell<McpServerState>,
     tool_changes: StateCell<u64>,
@@ -940,7 +989,7 @@ impl McpServer {
 
     async fn connect(&self, cancel: &CancellationToken) -> Result<Connection> {
         let handshake_cancel = CancellationToken::new();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let deadline = tokio::time::Instant::now() + CONNECT_TIMEOUT;
         match &self.transport {
             TransportConfig::Http(config) => {
                 let transport = StreamableHttpClientTransport::with_client(
@@ -958,7 +1007,12 @@ impl McpServer {
                 let transport = tokio::select! {
                     biased;
                     _ = cancel.cancelled() => return Err(McpServerError::Cancelled),
-                    _ = tokio::time::sleep_until(deadline) => return Err(McpServerError::Timeout),
+                    _ = tokio::time::sleep_until(deadline) => {
+                        return Err(McpServerError::Timeout {
+                            millis: CONNECT_TIMEOUT.as_millis() as u64,
+                            origin: "the connection deadline",
+                        });
+                    }
                     result = sse::SseTransport::connect(http_client()?, config, self.authorization.clone(), handshake_cancel.clone()) => result?,
                 };
                 self.initialize(transport, cancel, handshake_cancel, deadline)
@@ -1020,7 +1074,10 @@ impl McpServer {
                 }
             }
             _ = cancel.cancelled() => McpServerError::Cancelled,
-            _ = tokio::time::sleep_until(deadline) => McpServerError::Timeout,
+            _ = tokio::time::sleep_until(deadline) => McpServerError::Timeout {
+                millis: CONNECT_TIMEOUT.as_millis() as u64,
+                origin: "the connection deadline",
+            },
         };
         handshake_cancel.cancel();
         lifetime.cancel();
@@ -1071,6 +1128,7 @@ impl McpServer {
         request: ClientRequest,
         cancel: &CancellationToken,
     ) -> std::result::Result<ServerResult, ViewFailure> {
+        let limit = request_limit(&request, self.tool_call_timeout);
         let mut retried = false;
         loop {
             let (peer, generation) = self
@@ -1087,7 +1145,7 @@ impl McpServer {
             let failure = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => McpServerError::Cancelled,
-                _ = tokio::time::sleep(Duration::from_secs(60)) => McpServerError::Timeout,
+                _ = tokio::time::sleep(limit.limit) => limit.timeout(),
                 response = &mut handle.rx => {
                     match response {
                         Err(_) => McpServerError::RequestFailed,
@@ -1110,11 +1168,13 @@ impl McpServer {
                     }
                 }
             };
-            let _ = tokio::time::timeout(
-                Duration::from_secs(5),
-                handle.cancel(Some("MCP operation cancelled".into())),
-            )
-            .await;
+            let notice = match &failure {
+                McpServerError::Timeout { millis, origin } => {
+                    format!("MCP operation timed out after {millis} ms ({origin})")
+                }
+                _ => "MCP operation cancelled".to_owned(),
+            };
+            let _ = tokio::time::timeout(Duration::from_secs(5), handle.cancel(Some(notice))).await;
             return Err(ViewFailure::Unanswered(failure));
         }
     }
@@ -1276,11 +1336,13 @@ fn http_client() -> Result<Client> {
 pub(super) struct McpServerPlugin {
     pub key: Key<McpServer>,
     transport: TransportConfig,
+    tool_call_timeout: Option<Duration>,
     oauth: Option<(super::auth::CredentialKey, reqwest_mcp::Url)>,
 }
 impl McpServerPlugin {
     pub fn new(id: &str, configuration: McpServerSettings, key: Key<McpServer>) -> Result<Self> {
         let oauth = credential_key(id, &configuration);
+        let tool_call_timeout = configuration.timeout().map(Duration::from_millis);
         let transport = match &configuration {
             McpServerSettings::Stdio {
                 command,
@@ -1306,6 +1368,7 @@ impl McpServerPlugin {
         Ok(Self {
             key,
             transport,
+            tool_call_timeout,
             oauth,
         })
     }
@@ -1319,6 +1382,7 @@ impl Plugin for McpServerPlugin {
         let state = StateCell::new(McpServerState::Disconnected);
         let service = Arc::new(McpServer {
             transport: self.transport.clone(),
+            tool_call_timeout: self.tool_call_timeout,
             authorization: self.oauth.clone().map(|(key, server)| Authorization {
                 credential: auth.credential(key),
                 server,
@@ -1356,5 +1420,40 @@ impl Plugin for McpServerPlugin {
         })?;
         ctx.provide_at(self.key.clone(), service)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmcp::model::{
+        InitializeRequest, InitializeRequestParams, ListToolsRequest, PaginatedRequestParams,
+    };
+
+    #[test]
+    fn a_tool_call_takes_its_entry_timeout_and_every_other_request_the_fixed_limit() {
+        let call = ClientRequest::CallToolRequest(CallToolRequest::new(
+            CallToolRequestParams::new("tool"),
+        ));
+        let default = request_limit(&call, None);
+        assert_eq!(default.limit, Duration::from_secs(600));
+        assert_eq!(default.origin, "the default");
+        let entry = request_limit(&call, Some(Duration::from_millis(1_000)));
+        assert_eq!(entry.limit, Duration::from_millis(1_000));
+        assert_eq!(entry.origin, "the entry's timeout");
+
+        let list = ClientRequest::ListToolsRequest(ListToolsRequest::with_param(
+            PaginatedRequestParams::default(),
+        ));
+        let fixed = request_limit(&list, Some(Duration::from_millis(1_000)));
+        assert_eq!(fixed.limit, Duration::from_secs(60));
+        assert_eq!(fixed.origin, "the request limit");
+        let initialize = ClientRequest::InitializeRequest(InitializeRequest::new(
+            InitializeRequestParams::new(ClientCapabilities::default(), Implementation::default()),
+        ));
+        assert_eq!(
+            request_limit(&initialize, Some(Duration::from_millis(1_000))).limit,
+            Duration::from_secs(60)
+        );
     }
 }
