@@ -322,7 +322,8 @@ a credential. `ws` and an entry with a `url` but no `type` say the transport mus
 `sse`; `streamable-http` decodes as `http`. An optional member set to `null` is absent, as it was
 before this rule; the required `command` and `url` are not optional and reject `null`. A non-JSON
 file and a non-object `mcpServers` still fail the whole document, with the decoder's line and
-column and no value.
+column and no value. An entry id that is empty or only whitespace fails the whole document too,
+because no management call can name it; the error says an entry id is empty and quotes no value.
 
 The write rule follows from the same value: each entry is held as read beside the entry decoded
 from it, and a write serialises from typed values only the entry it changed. Every other entry,

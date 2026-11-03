@@ -19824,6 +19824,7 @@
         "path McpServerSettings::Stdio",
         "path McpSettings",
         "path McpSettings::default",
+        "path McpSettings::from_value",
         "path config::effective",
         "path config::merge_secret",
         "path config::split_entry",

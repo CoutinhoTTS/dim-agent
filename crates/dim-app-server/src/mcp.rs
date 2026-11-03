@@ -389,9 +389,7 @@ impl McpService {
         document: serde_json::Value,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        let valid = serde_json::from_value::<McpSettings>(document)
-            .map_err(|_| SettingsError::Invalid("invalid MCP configuration"))
-            .and_then(|document| {
+        let valid = McpSettings::from_value(document).and_then(|document| {
                 // A plugin registers its MCP content as one unit, and dim does
                 // not manage a plugin entry on its own. Refuse the document
                 // with the first broken entry's error rather than drop it.

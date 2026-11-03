@@ -139,9 +139,14 @@ impl McpSettings {
         (self.mcp_servers, self.invalid)
     }
 
-    /// Decodes each entry on its own; a broken entry keeps its error and its
-    /// raw value, and the rest load.
-    fn from_entries(entries: Map<String, Value>, extra: BTreeMap<String, Value>) -> Self {
+    /// Decodes each entry on its own. An id that is empty names no entry that
+    /// any management call could address, so it fails the whole document.
+    fn from_entries(entries: Map<String, Value>, extra: BTreeMap<String, Value>) -> Result<Self> {
+        if entries.keys().any(|id| id.trim().is_empty()) {
+            return Err(SettingsError::Document(
+                "MCP server entry id is empty".to_owned(),
+            ));
+        }
         let mut document = Self {
             extra,
             ..Self::default()
@@ -157,7 +162,38 @@ impl McpSettings {
             }
             document.raw.insert(id, value);
         }
-        document
+        Ok(document)
+    }
+
+    /// Decodes a document that is already parsed, as an RPC request carries
+    /// it.
+    pub fn from_value(value: Value) -> Result<Self> {
+        let object = match value {
+            Value::Object(object) => object,
+            _ => {
+                return Err(SettingsError::Document(
+                    "MCP document must be a JSON object".to_owned(),
+                ));
+            }
+        };
+        let servers = match object.get("mcpServers") {
+            Some(Value::Object(servers)) => servers.clone(),
+            Some(_) => {
+                return Err(SettingsError::Document(
+                    "mcpServers must be a JSON object".to_owned(),
+                ));
+            }
+            None => {
+                return Err(SettingsError::Document(
+                    "MCP document must contain an mcpServers object".to_owned(),
+                ));
+            }
+        };
+        let extra = object
+            .into_iter()
+            .filter(|(key, _)| key != "mcpServers")
+            .collect();
+        Self::from_entries(servers, extra)
     }
 
     /// Decodes each entry on its own. Only a file that is not JSON and an
@@ -208,7 +244,7 @@ impl McpSettings {
             .filter(|(key, _)| key.as_str() != "mcpServers")
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
-        Ok(Self::from_entries(servers.clone(), extra))
+        Self::from_entries(servers.clone(), extra)
     }
 }
 impl Serialize for McpSettings {
@@ -257,8 +293,9 @@ impl<'de> Deserialize<'de> for McpSettings {
             #[serde(flatten)]
             extra: BTreeMap<String, Value>,
         }
+        use serde::de::Error as _;
         let raw = Raw::deserialize(deserializer)?;
-        Ok(Self::from_entries(raw.mcp_servers, raw.extra))
+        Self::from_entries(raw.mcp_servers, raw.extra).map_err(D::Error::custom)
     }
 }
 #[derive(Deserialize)]
@@ -1132,6 +1169,11 @@ impl BusinessDocument for McpSettings {
         if self.extra.contains_key("mcpServers") {
             return Err(SettingsError::Invalid("reserved MCP configuration field"));
         }
+        if self.mcp_servers.keys().any(|id| id.trim().is_empty()) {
+            return Err(SettingsError::Document(
+                "MCP server entry id is empty".to_owned(),
+            ));
+        }
         Ok(())
     }
 }
@@ -1572,4 +1614,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_empty_entry_id_fails_the_document() {
+        for source in [
+            br#"{"mcpServers":{"": {"command": "server"}}}"#.as_slice(),
+            br#"{"mcpServers":{"   ": {"command": "server"}}}"#.as_slice(),
+        ] {
+            let error = McpSettings::from_file(source).err().unwrap();
+            assert!(matches!(error, SettingsError::Document(_)), "{error}");
+            let text = error.to_string();
+            assert!(text.contains("entry id is empty"), "{text}");
+            assert!(!text.contains("command") && !text.contains('{'), "{text}");
+        }
+    }
 }
