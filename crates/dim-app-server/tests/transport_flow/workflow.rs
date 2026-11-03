@@ -2091,6 +2091,13 @@ async fn native_retention(fault: &str) {
         ready(&mut client).await;
     } else if fault == "read" {
         let mode = std::fs::metadata(&path).unwrap().permissions();
+        // Move the change signal so the next poll reads the store, then make
+        // that read fail.
+        std::fs::write(
+            home.join("workflow/runs.version"),
+            serde_json::to_vec(&json!({"version":1,"text":"changed"})).unwrap(),
+        )
+        .unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
         let observed = tokio::time::timeout(Duration::from_secs(75), async {
             loop {

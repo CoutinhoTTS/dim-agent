@@ -103,13 +103,18 @@ An `ambiguous` reply (duplicates written before branches accepted each id once) 
 delivered and records a violation. Missing destinations are undeliverable.
 
 Run storage is `workflow/runs.json`, with inner `{version:2,runs:[...]}` inside the host's S10 v1
-wrapper. Runs admitted under the bounds below keep the text within the 8 MiB payload as the file
+wrapper. `workflow/runs.version` holds the token of the last committed store write: a running stage's
+one-second wait reads that token (36 bytes) and reuses the owner's snapshot, so its per-second cost
+does not grow with the store; only a changed token, startup recovery and every write read the store
+itself. Runs admitted under the bounds below keep the text within the 8 MiB payload as the file
 service carries it (the JSON string, where escapes can double): a start projects the store with
 every active run's record, the stage identities, `agent_id` copies, results and logs it can gain
 later, plus the new record; if that exceeds the payload it first expires the oldest settled
 terminal runs and otherwise returns `limit_exceeded` without persisting. The retained store,
 therefore, keeps each read, write and `workflow.status` reply within one bridge frame; a record
-committed before these bounds keeps its original size. Invalid, v1,
+committed before these bounds keeps its original size. The token is bumped inside the store
+transaction; a failed token read or write is a storage failure, and a poll reaches the frame with the
+token, never the store. Invalid, v1,
 unknown-version or missing-marker records return `invalid_data` and preserve their bytes. There is
 no migration. After a crash, unfinished runs become interrupted/lost without relaunch; a lost
 stage's running turn or pending approval is left untouched. Only orderly unload stops stages under
