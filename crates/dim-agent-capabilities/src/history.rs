@@ -75,17 +75,18 @@ pub(crate) struct ContextPage {
 /// begins, then this branch by sequence.
 ///
 /// A fold starts at the event a checkpoint names, which may sit in an ancestor,
-/// and only a chain read begins there; a chain read pages by skipping, so while
-/// it reads the ancestor prefix a page re-selects what the last one folded. A
-/// checkpoint resumes past that prefix, and the fold switches to this branch as
-/// soon as a page reaches it, so a page then costs what it returns.
+/// and only a chain read begins there; the next chain page begins at the event
+/// the last one ended at, so the ancestor prefix costs one id lookup a page
+/// instead of a page that re-selects what it folded. The fold switches to this
+/// branch as soon as a page reaches it, and a page then costs what it returns.
 pub(crate) struct FoldRead<'a> {
     timeline: &'a Timeline,
     /// The event the chain read begins at; `None` at the chain's start.
     begin: Option<String>,
     own: String,
-    /// The facts the chain read skips.
-    skip: u64,
+    /// The position the last chain page ended at; a read that names it again
+    /// returns the same fact, which the fold drops.
+    last: Option<TimelinePosition>,
     /// The sequence this branch continues at; `None` while the fold reads the
     /// chain.
     sequence: Option<u64>,
@@ -99,7 +100,7 @@ impl<'a> FoldRead<'a> {
             own: timeline.branch_id(),
             timeline,
             begin,
-            skip: 0,
+            last: None,
             sequence: None,
             through,
         }
@@ -114,18 +115,24 @@ impl<'a> FoldRead<'a> {
     ) -> dim_agent_runtime::Result<Option<ContextPage>> {
         let query = match self.sequence {
             Some(sequence) => context_branch(sequence, limit),
-            None => context_chain(self.begin.as_deref(), self.skip, limit),
+            None => context_chain(self.begin.as_deref(), 0, limit),
         };
-        let Some(page) = bounded(self.timeline.query(query).await?, &self.own, self.through) else {
+        let Some(mut page) = bounded(self.timeline.query(query).await?, &self.own, self.through)
+        else {
             return Ok(None);
         };
-        let Some(last) = page.positions.last() else {
+        if self.last.as_ref() == page.positions.first() {
+            page.events.remove(0);
+            page.positions.remove(0);
+        }
+        let Some(last) = page.positions.last().cloned() else {
             return Ok(None);
         };
         if last.branch_id == self.own {
             self.sequence = Some(last.sequence + 1);
         } else {
-            self.skip += page.events.len() as u64;
+            self.begin = page.events.last().map(|event| event.id.clone());
+            self.last = Some(last);
         }
         Ok(Some(page))
     }
