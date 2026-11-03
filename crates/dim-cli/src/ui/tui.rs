@@ -9817,6 +9817,33 @@ mod tests {
             .collect()
     }
 
+    /// Tab in the palette only completes, so repeating it never runs a
+    /// command and never exits, in either layout.
+    #[test]
+    fn repeated_tab_in_the_palette_only_completes() {
+        let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
+        for fullscreen in [false, true] {
+            let (mut app, sent, _home) = session_with_queue(false, &[]);
+            app.fullscreen = fullscreen;
+            assert!(matches!(
+                app.handle(key(KeyCode::Char('/'))),
+                Outcome::Continue
+            ));
+            for _ in 0..3 {
+                assert!(matches!(app.handle(key(KeyCode::Tab)), Outcome::Continue));
+                assert_eq!(app.composer.text(), "/new");
+            }
+            assert!(sent.borrow().is_empty(), "Tab ran nothing");
+
+            let (mut app, sent, _home) = session_with_queue(false, &[]);
+            app.fullscreen = fullscreen;
+            typed(&mut app, "/ke");
+            assert!(matches!(app.handle(key(KeyCode::Tab)), Outcome::Continue));
+            assert_eq!(app.composer.text(), "/keys");
+            assert!(sent.borrow().is_empty(), "the key bindings did not open");
+        }
+    }
+
     /// During a run Enter queues the draft, and Ctrl+S steers a draft that is
     /// not empty.
     #[test]
