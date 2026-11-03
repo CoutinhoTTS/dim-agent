@@ -1,3 +1,4 @@
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::{
     AgentBuilder, AgentConfig, BRANCH_GROUP, Dispatcher, Feature, Names, SessionConfig, Timeline,
     names, testing::MinimalHost,
@@ -30,7 +31,7 @@ async fn interrupt_commits_before_later_input_without_waiting_for_dispatch() {
         .unwrap();
     assert!(interrupt < input.sequence);
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert!(events.iter().any(|event| event.sequence == interrupt
         && matches!(&event.kind, EventKind::StopInterrupt(data) if data.reason == "reload")));
     assert!(events.iter().any(|event| matches!(&event.kind,
@@ -195,7 +196,7 @@ async fn external_capability_receives_interrupt_and_owns_cleanup_outside_the_sto
         .await
         .unwrap();
     let sequence = observed.borrow().unwrap();
-    let snapshot = session.history("main", None).await.unwrap();
+    let snapshot = chain_events(&session, "main", ..).await.unwrap();
     assert!(snapshot.iter().any(|event| event.sequence == sequence && matches!(&event.kind, EventKind::StopInterrupt(data) if data.reason == "user interrupt")));
     tokio::time::timeout(Duration::from_secs(2), first)
         .await
@@ -205,8 +206,7 @@ async fn external_capability_receives_interrupt_and_owns_cleanup_outside_the_sto
     assert!(!session.state("main").unwrap().stopping);
     probe.release.notify_one();
     assert_eq!(
-        session
-            .history("main", None)
+        chain_events(&session, "main", ..)
             .await
             .unwrap()
             .iter()
@@ -222,7 +222,7 @@ async fn external_capability_receives_interrupt_and_owns_cleanup_outside_the_sto
         .await
         .unwrap()
         .unwrap();
-    assert!(session.history("main", None).await.unwrap().iter().any(
+    assert!(chain_events(&session, "main", ..).await.unwrap().iter().any(
         |event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("continue"))
     ));
     agent.close().await.unwrap();
@@ -292,7 +292,7 @@ async fn a_large_interrupt_and_later_input_need_no_byte_budget() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert!(events.iter().any(
         |event| matches!(&event.kind, EventKind::InputMessage(data) if matches!(
             data.user.as_ref().map(|user| user.content.as_slice()),

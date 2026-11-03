@@ -521,68 +521,13 @@ impl Session {
         }
         idle
     }
-    pub async fn context(&self, branch: &str, through: u64) -> Result<ContextHistory> {
-        self.published(branch)?.context(through).await
+    /// See [`Branch::query`].
+    pub async fn query(&self, branch: &str, query: TimelineQuery) -> Result<TimelineQueryReply> {
+        self.published(branch)?.query(query).await
     }
-    /// See [`Branch::compaction_cut`].
-    pub async fn compaction_cut(&self, branch: &str, through: u64) -> Result<Option<u64>> {
-        self.published(branch)?.compaction_cut(through).await
-    }
-    /// See [`Branch::context_page`].
-    pub async fn context_page(
-        &self,
-        branch: &str,
-        after: u64,
-        limit: usize,
-        through: u64,
-    ) -> Result<Vec<Arc<AgentEvent>>> {
-        self.published(branch)?
-            .context_page(after, limit, through)
-            .await
-    }
-    pub async fn history(
-        &self,
-        branch: &str,
-        through: Option<u64>,
-    ) -> Result<Vec<Arc<AgentEvent>>> {
-        self.published(branch)?.history(through).await
-    }
-    pub async fn local<R: std::ops::RangeBounds<u64> + Send>(
-        &self,
-        branch: &str,
-        range: R,
-    ) -> Result<Vec<Arc<AgentEvent>>> {
-        self.published(branch)?.local(range).await
-    }
-    /// Reads a local page of complete batches without exceeding the line's
-    /// head: its published head while it is open, its fixed head once it ended.
-    /// A paging read does not rebuild stored requests: `context/prepare` and
-    /// `model/call` records carry an empty request. Use [`Self::local`] for
-    /// complete events.
-    pub async fn local_page(
-        &self,
-        branch: &str,
-        after: u64,
-        limit: usize,
-        through: u64,
-    ) -> Result<Vec<Arc<AgentEvent>>> {
-        if through > self.sequence(branch)? {
-            return Err(AgentError::InvalidInput("future Timeline sequence".into()));
-        }
-        let key = TimelineKey {
-            session_id: self.id().into(),
-            branch_id: branch.into(),
-        };
-        Ok(self
-            .0
-            .owner
-            .assembly
-            .store
-            .read_page_without_request_bodies(&key, after, limit, through)
-            .await?
-            .into_iter()
-            .map(|record| record.event)
-            .collect())
+    /// See [`Branch::batch_end`].
+    pub async fn batch_end(&self, branch: &str, sequence: u64) -> Result<()> {
+        self.published(branch)?.batch_end(sequence).await
     }
     pub fn sequence(&self, branch: &str) -> Result<u64> {
         if let Some(head) = self.0.tree.ended_head(branch) {
@@ -655,9 +600,6 @@ impl Session {
         branch: &str,
     ) -> Result<rutis::host::diagnostics::RuntimeDiagnostics> {
         Ok(self.published(branch)?.diagnostics())
-    }
-    pub async fn trace(&self, branch: &str, sequence: u64) -> Result<Option<TimelineTrace>> {
-        self.published(branch)?.trace(sequence).await
     }
     pub fn get<S: Clone + Send + Sync + 'static>(&self, branch: &str) -> Result<Option<S>> {
         Ok(self.published(branch)?.get::<S>())

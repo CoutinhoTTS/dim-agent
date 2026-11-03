@@ -11,7 +11,7 @@ use crate::{
     prompt_guide::{GuideEntries, GuideEntry, GuideScope},
 };
 use dim_agent_runtime::{
-    AgentError, Delivery, Dispatcher, Names, SessionLifecycle, Timeline, TimelineIdentity,
+    AgentError, Dispatcher, Names, SessionLifecycle, Timeline, TimelineIdentity, rebuild_facts,
 };
 use dim_agent_types::*;
 use rutis::Ctx;
@@ -503,19 +503,33 @@ impl DynPlugin for BackgroundExecPlugin {
                 Ok(())
             })?;
             let consumer = service.clone();
+            let read = service.clone();
+            let read_timeline = service.timeline.clone();
             dispatcher
-                .follow(
+                .consume(
                     ctx,
-                    "BackgroundExec",
-                    &["exec/ended", "stop/interrupt"],
-                    move |delivery| match delivery {
-                        Delivery::Replay(events) => {
-                            let unposted = consumer.rebuild(&events);
-                            consumer.repost(unposted);
-                            Box::pin(async { Ok(()) })
-                        }
-                        Delivery::Live(event) => consumer.consume(event),
-                    },
+                    "BackgroundExec".into(),
+                    ["exec/ended", "stop/interrupt"].map(String::from).to_vec(),
+                    Arc::new(move || {
+                        let read = read.clone();
+                        let timeline = read_timeline.clone();
+                        Box::pin(async move {
+                            let reply = rebuild_facts(
+                                &timeline,
+                                &[
+                                    "exec/started",
+                                    "exec/ended",
+                                    "stop/interrupt",
+                                    "input/message",
+                                ],
+                            )
+                            .await?;
+                            let unposted = read.rebuild(&reply.events);
+                            read.repost(unposted);
+                            Ok(reply.through)
+                        })
+                    }),
+                    Arc::new(move |event| consumer.consume(Arc::new(event))),
                 )
                 .await?;
             ctx.provide_at(self.exec.clone(), service)?;

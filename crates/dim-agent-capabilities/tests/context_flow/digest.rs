@@ -2,6 +2,7 @@
 //! (ContextCompaction §5.10, acceptance 18).
 use super::*;
 use dim_agent_capabilities::{agent_loop::AgentLoop, history::digest_message};
+use dim_agent_runtime::testing::chain_events;
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
@@ -190,7 +191,7 @@ async fn compact_now(session: &dim_agent_runtime::Session) -> (u64, Vec<Arc<Agen
         .unwrap();
     let events = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(session, "main", ..).await.unwrap();
             if events.iter().any(|event| {
                 matches!(&event.kind,
                     EventKind::ContextCompaction(data) if data.command == Some(command))
@@ -280,7 +281,7 @@ async fn declarations_travel_on_the_tool_result_fact() {
         ],
     )
     .await;
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let results: Vec<ToolResult> = events
         .iter()
         .filter_map(|event| match &event.kind {
@@ -340,7 +341,7 @@ async fn the_digest_message_and_its_record_hold_the_declared_effects() {
     turn(&script, &session, "next", vec![Step::Says("ok")]).await;
     let (command, _) = compact_now(&session).await;
     turn(&script, &session, "after", vec![Step::Says("ok")]).await;
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let (parts, entries, replacement) = parts(&completed(&events, command));
     assert_eq!(
         parts,
@@ -518,7 +519,7 @@ async fn the_roll_forward_reads_the_compaction_in_effect_before_the_new_cut() {
         vec![Step::Says("ok")],
     )
     .await;
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let record = events
         .iter()
         .position(|event| {
@@ -929,7 +930,7 @@ async fn a_turn_start_cut_keeps_the_digest_of_the_compacted_turn() {
     )
     .await;
     turn(&script, &session, "second", vec![Step::Says("ok")]).await;
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let (retain_from, digest, replacement) = events
         .iter()
         .find_map(|event| match &event.kind {

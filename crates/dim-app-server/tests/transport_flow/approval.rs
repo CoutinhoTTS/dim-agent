@@ -1,5 +1,6 @@
 use super::*;
 use dim_agent_capabilities::tool_executor::ToolExecutor;
+use dim_agent_runtime::testing::{branch_events, chain_events};
 use dim_agent_runtime::{Dispatcher, Session, Timeline};
 use dim_agent_types::{
     ApprovalDecision, ContentBlock, EventKind, InputMode, InterruptScope, StopInterruptData,
@@ -295,8 +296,7 @@ async fn gate(session: &Session, probe: &Probe) {
 async fn wait_events(session: &Session, key: &str, count: usize) {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if session
-                .history("main", None)
+            if chain_events(session, "main", ..)
                 .await
                 .unwrap()
                 .iter()
@@ -313,8 +313,7 @@ async fn wait_events(session: &Session, key: &str, count: usize) {
     .expect("event was submitted");
 }
 async fn result_count(session: &Session) -> usize {
-    session
-        .history("main", None)
+    chain_events(session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -393,8 +392,7 @@ async fn decisions_are_consumed_in_order_on_both_transports_and_survive_disconne
         let probe = Arc::new(Probe::default());
         let (server, session, mut a, calls) = setup(ws, probe.clone()).await;
         let request_id = request(&mut a, &session).await;
-        let event = session
-            .history("main", None)
+        let event = chain_events(&session, "main", ..)
             .await
             .unwrap()
             .into_iter()
@@ -467,7 +465,7 @@ async fn decisions_are_consumed_in_order_on_both_transports_and_survive_disconne
         session.idle("main").await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(result_count(&session).await, 2);
-        let history = session.history("main", None).await.unwrap();
+        let history = chain_events(&session, "main", ..).await.unwrap();
         assert!(
             matches!(history.iter().rev().find(|e| matches!(e.kind, EventKind::ApprovalRespond(_))).unwrap().kind,
             EventKind::ApprovalRespond(ref data) if data.decision == ApprovalDecision::Allow)
@@ -628,7 +626,7 @@ async fn stop_before_request_and_after_allow_prevent_tool_start_on_both_transpor
             .await
             .unwrap();
         wait_events(&session, "approval/request", 1).await;
-        let snapshot = session.history("main", None).await.unwrap();
+        let snapshot = chain_events(&session, "main", ..).await.unwrap();
         let stop = snapshot
             .iter()
             .find(|e| matches!(e.kind, EventKind::StopInterrupt(_)))
@@ -811,12 +809,11 @@ async fn responses_and_interrupts_follow_the_owning_branch_on_both_transports() 
         );
         session.idle(&child).await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        let child_events = session.local(&child, ..).await.unwrap();
+        let child_events = branch_events(&session, &child, ..).await.unwrap();
         assert!(child_events.iter().any(|e| matches!(&e.kind, EventKind::ApprovalRequest(data) if data.approval_id == child_request.as_str().unwrap())));
         assert!(child_events.iter().any(|e| matches!(&e.kind, EventKind::ApprovalRespond(data) if data.approval_id == child_request.as_str().unwrap())));
         assert!(
-            !session
-                .local("main", ..)
+            !branch_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()
@@ -903,7 +900,7 @@ async fn tool_reload_cancels_a_pending_approval_fails_the_turn_and_the_session_c
         let cancelled = client.notice("approval.cancelled").await;
         assert_eq!(cancelled["params"]["requestId"], stale);
         wait_events(&session, "turn/end", 1).await;
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         assert_eq!(
             events
                 .iter()

@@ -44,7 +44,7 @@ test('packed plugin service types compile the author guide and enforce the publi
     .replace("'../../npm/plugin.js'", "'dimcode/plugin'"));
   const calls = path.join(directory, 'calls.mts');
   writeFileSync(calls, `
-import type { Settings, SettingsResult, Sessions, WorkflowFiles, WorkflowFileEntry, WorkflowFilesErrorThrown, SessionPermissions, PermissionState, PermissionPolicy, SessionsErrorThrown, SessionMetadata, SessionMetadataResult, AuxiliaryModel, AuxiliaryReply, FileScope, FileResult, ToolRegistry, ToolExecute, ToolResult, SessionMethods, SessionMethodHandler, ManagementMethods, MethodHandler, MethodDeclaration, SessionConfig, SessionBroadcast, BranchEvent, Delivery, Services, AgentErrorThrown, MethodReply } from 'dimcode/plugin';
+import type { Settings, SettingsResult, Sessions, WorkflowFiles, WorkflowFileEntry, WorkflowFilesErrorThrown, SessionPermissions, PermissionState, PermissionPolicy, SessionsErrorThrown, SessionMetadata, SessionMetadataResult, AuxiliaryModel, AuxiliaryReply, FileScope, FileResult, ToolRegistry, ToolExecute, ToolResult, SessionMethods, SessionMethodHandler, ManagementMethods, MethodHandler, MethodDeclaration, SessionConfig, SessionBroadcast, BranchEvent, Services, AgentErrorThrown, MethodReply } from 'dimcode/plugin';
 declare const settings: Settings;
 declare const sessions: Sessions;
 declare const permissions: SessionPermissions;
@@ -202,15 +202,14 @@ void branch.dispatcher.listen('counter', ['input/message'], async event => {
   const data: Record<string, unknown> = event.data;
   void sequence; void data;
 });
-await branch.dispatcher.consume('counter', ['input/message'], async (delivery: Delivery) => {
-  const events: BranchEvent[] = 'replay' in delivery ? delivery.replay : [delivery.live];
-  void events;
-});
-// @ts-expect-error the handler takes the replay or one live event, not a bare event.
-void branch.dispatcher.consume('counter', ['input/message'], (event: BranchEvent) => { void event; });
+void branch.dispatcher.consume('counter', ['input/message'],
+  async () => 1n,
+  async event => { void (event.sequence as number | bigint) });
 const cutoff: number | bigint = await branch.dispatcher.committed();
-const own: BranchEvent[] = await branch.dispatcher.local(0n, cutoff);
-void branch.dispatcher.history(cutoff);
+const own: Awaited<ReturnType<Services['timeline']['query']>> = await branch.timeline.query({
+  scope: 'branch', include_publishing: true, from_sequence: 1n, order_by: 'sequence',
+  direction: 'ascending', limit: 1n, offset: 0n,
+});
 void branch.treeCommands.input('main', { blocks: [{ type: 'raw', text: 'source marker' }], mode: 'queue' });
 void branch.treeCommands.create('main', cutoff, { prompt: 'child', source: { kind: 'host', operation_id: 'create-id' } }, cancelled);
 const info = await branch.treeCommands.info('main');

@@ -2,6 +2,7 @@
 use super::*;
 use dim_agent_capabilities::input_queue::InputQueue;
 use dim_agent_runtime::SessionIdentity;
+use dim_agent_runtime::testing::branch_events;
 use rutis::host::CtxHost;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -199,7 +200,7 @@ async fn tool(
             )
             .await,
     );
-    let events = session.local("main", ..).await.unwrap();
+    let events = branch_events(session, "main", ..).await.unwrap();
     events
         .iter()
         .rev()
@@ -214,8 +215,7 @@ async fn tool(
 }
 
 async fn reports(session: &dim_agent_runtime::Session, id: &str) -> usize {
-    session
-        .local("main", ..)
+    branch_events(session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -618,7 +618,7 @@ async fn node_scheduler_saves_live_authority_runs_noninteractive_and_reports_to_
         executing.config().permission_policy.preset,
         dim_agent_types::PermissionPreset::WorkspaceWrite
     );
-    let history = executing.local("main", ..).await.unwrap();
+    let history = branch_events(&executing, "main", ..).await.unwrap();
     assert!(
         history
             .iter()
@@ -830,7 +830,7 @@ async fn node_scheduler_installed_mid_session_carries_its_entry() {
     let submission = format!("scheduler-report:{}", run["run_id"].as_str().unwrap());
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let history = starter.local("main", ..).await.unwrap();
+            let history = branch_events(&starter, "main", ..).await.unwrap();
             let report = history.iter().find(|event| {
                 matches!(&event.kind,
                     EventKind::InputMessage(data) if data.submission_id.as_deref() == Some(&submission))
@@ -1053,8 +1053,7 @@ async fn node_scheduler_job_edits_cas_and_local_source_writes_preserve_accepted_
                         .get_session(run["session_id"].as_str().unwrap())
                         .unwrap();
                     assert!(
-                        !executing
-                            .local("main", ..)
+                        !branch_events(&executing, "main", ..)
                             .await
                             .unwrap()
                             .iter()
@@ -1075,7 +1074,7 @@ async fn node_scheduler_job_edits_cas_and_local_source_writes_preserve_accepted_
                 let executing = agent
                     .get_session(run["session_id"].as_str().unwrap())
                     .unwrap();
-                assert!(executing.local("main", ..).await.unwrap().iter().any(|event| matches!(&event.kind,
+                assert!(branch_events(&executing, "main", ..).await.unwrap().iter().any(|event| matches!(&event.kind,
                     EventKind::InputMessage(data) if data.user.as_ref().is_some_and(|user| matches!(user.content.as_slice(),
                         [dim_agent_types::ContentBlock::Text { text }] if text == "original snapshot prompt")))));
                 if let Some(next_saver) = next_saver {
@@ -1427,7 +1426,7 @@ async fn node_scheduler_not_held_rereads_native_deletion_completion_and_consumpt
             } else {
                 tokio::time::timeout(Duration::from_secs(10), async {
                     loop {
-                        let events = executing.local("main", ..).await.unwrap();
+                        let events = branch_events(&executing, "main", ..).await.unwrap();
                         if let Some(index) = events.iter().position(|event| matches!(&event.kind, EventKind::InputConsumed(data) if data.input_id == input))
                             && events[index + 1..].iter().any(|event| matches!(event.kind, EventKind::TurnEnd(_))) { break; }
                         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1450,7 +1449,7 @@ async fn node_scheduler_not_held_rereads_native_deletion_completion_and_consumpt
         if outcome == "deleted" {
             assert_eq!(ended["detail"], "withdrawn");
         }
-        let events = executing.local("main", ..).await.unwrap();
+        let events = branch_events(&executing, "main", ..).await.unwrap();
         assert_eq!(
             events
                 .iter()
@@ -1570,7 +1569,7 @@ async fn node_scheduler_applied_inputs_interrupted_before_consumption_expire_wit
         let ended = settled(&mut client, job, &accepted["result"]["run_id"]).await;
         assert_eq!(ended["state"], "timed_out", "{ended}");
         assert_eq!(ended["detail"], "interrupted_before_consumption");
-        let before = executing.local("main", ..).await.unwrap();
+        let before = branch_events(&executing, "main", ..).await.unwrap();
         assert!(before.iter().any(
             |event| matches!(&event.kind, EventKind::InputApplied(data) if data.input_id == input)
         ));
@@ -1613,7 +1612,7 @@ async fn node_scheduler_applied_inputs_interrupted_before_consumption_expire_wit
                     )
                     .await,
             );
-            let after = executing.local("main", ..).await.unwrap();
+            let after = branch_events(&executing, "main", ..).await.unwrap();
             assert!(after.iter().any(|event| matches!(&event.kind, EventKind::InputConsumed(data) if data.input_id == input)));
             let current = settled(&mut client, job, &ended["run_id"]).await;
             assert_eq!(
@@ -1957,7 +1956,7 @@ async fn node_scheduler_late_native_admission_and_policy_replies_preserve_identi
         let session = agent
             .get_session(run["session_id"].as_str().unwrap())
             .unwrap();
-        let events = session.local("main", ..).await.unwrap();
+        let events = branch_events(&session, "main", ..).await.unwrap();
         assert!(!events.iter().any(|event| matches!(
             event.kind,
             EventKind::InputMessage(_) | EventKind::InputWithdraw(_) | EventKind::StopInterrupt(_)
@@ -2122,7 +2121,7 @@ async fn node_scheduler_reports_only_selected_tool_outcomes_with_model_visible_i
                 })
                 .await
                 .unwrap();
-                let history = starter.local("main", ..).await.unwrap();
+                let history = branch_events(&starter, "main", ..).await.unwrap();
                 let submission = format!("scheduler-report:{}", id.as_str().unwrap());
                 let text = history
                     .iter()
@@ -2605,8 +2604,7 @@ async fn node_scheduler_retention_preserves_shared_receipts_forks_and_unreadable
     let expired = completed[1]["session_id"].clone();
     let original = agent.get_session(expired.as_str().unwrap()).unwrap();
     original.idle("main").await.unwrap();
-    let cutoff = original
-        .local("main", ..)
+    let cutoff = branch_events(&original, "main", ..)
         .await
         .unwrap()
         .last()
@@ -2896,14 +2894,15 @@ async fn node_scheduler_retention_preserves_shared_receipts_forks_and_unreadable
         assert!(sessions.iter().any(|item| item["sessionId"] == *id));
     }
     assert!(
-        agent
-            .get_session(fork.as_str().unwrap())
-            .unwrap()
-            .local("main", ..)
-            .await
-            .unwrap()
-            .iter()
-            .any(|event| matches!(event.kind, EventKind::InputMessage(_))),
+        branch_events(
+            &agent.get_session(fork.as_str().unwrap()).unwrap(),
+            "main",
+            ..
+        )
+        .await
+        .unwrap()
+        .iter()
+        .any(|event| matches!(event.kind, EventKind::InputMessage(_))),
         "retention preserves the user's fork and its conversation"
     );
     server.shutdown();
@@ -3310,7 +3309,7 @@ async fn node_scheduler_native_deadlines_withdraw_held_input_and_stop_only_consu
         }
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         let own_input = submitted["input_event_id"].as_str().unwrap();
-        let events = executing.local("main", ..).await.unwrap();
+        let events = branch_events(&executing, "main", ..).await.unwrap();
         assert_eq!(events.iter().any(|event| matches!(&event.kind, EventKind::InputConsumed(data) if data.input_id == own_input)), mode != "held");
         if mode == "user_stop" {
             assert_ok(
@@ -3343,7 +3342,7 @@ async fn node_scheduler_native_deadlines_withdraw_held_input_and_stop_only_consu
         );
         assert_eq!(ended["deadline_at"], submitted["deadline_at"]);
         assert!(ended.get("report_to").is_none());
-        let events = executing.local("main", ..).await.unwrap();
+        let events = branch_events(&executing, "main", ..).await.unwrap();
         assert_eq!(
             events
                 .iter()
@@ -3370,7 +3369,7 @@ async fn node_scheduler_native_deadlines_withdraw_held_input_and_stop_only_consu
                     .await,
             );
             assert_eq!(calls.load(Ordering::SeqCst), 1);
-            let events = executing.local("main", ..).await.unwrap();
+            let events = branch_events(&executing, "main", ..).await.unwrap();
             assert!(!events.iter().any(|event| matches!(&event.kind, EventKind::InputConsumed(data) if data.input_id == own_input)));
         }
         server.shutdown();
@@ -3691,7 +3690,7 @@ async fn node_scheduler_owner_reload_tracks_the_existing_native_run_without_repl
         .unwrap();
     let request = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let events = executing.local("main", ..).await.unwrap();
+            let events = branch_events(&executing, "main", ..).await.unwrap();
             if let Some(request) = events.iter().find_map(|event| match &event.kind {
                 EventKind::ApprovalRequest(request) => Some(request.approval_id.clone()),
                 _ => None,
@@ -3754,7 +3753,7 @@ async fn node_scheduler_owner_reload_tracks_the_existing_native_run_without_repl
         current["result"]["runs"][0]["input_event_id"],
         before["input_event_id"]
     );
-    let events = executing.local("main", ..).await.unwrap();
+    let events = branch_events(&executing, "main", ..).await.unwrap();
     assert_eq!(
         events
             .iter()
@@ -3909,7 +3908,7 @@ async fn node_scheduler_factory_texts_reach_the_declaration_and_the_report() {
         let saved: Value = serde_json::from_str(&content).unwrap();
 
         // The declaration the model request carries.
-        let history = starter.local("main", ..).await.unwrap();
+        let history = branch_events(&starter, "main", ..).await.unwrap();
         let description = history
             .iter()
             .rev()
@@ -3947,7 +3946,7 @@ async fn node_scheduler_factory_texts_reach_the_declaration_and_the_report() {
         let submission = format!("scheduler-report:{}", run["run_id"].as_str().unwrap());
         let text = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let history = starter.local("main", ..).await.unwrap();
+                let history = branch_events(&starter, "main", ..).await.unwrap();
                 if let Some(text) = history.iter().find_map(|event| match &event.kind {
                     EventKind::InputMessage(data)
                         if data.submission_id.as_deref() == Some(&submission) =>

@@ -9,6 +9,7 @@ use dim_agent_capabilities::{
     skills::{self, MemorySkillSettings, SkillsCatalog},
 };
 use dim_agent_runtime::PartRegistry;
+use dim_agent_runtime::testing::branch_events;
 use dim_agent_types::{ContentBlock, InputMessageData, InputMode, ModelRequest};
 use rutis::Ctx;
 use rutis::host::{BoxFuture, DynPlugin, Effect, Key, TypeKey};
@@ -224,8 +225,7 @@ async fn session(
 
 /// The operator inputs of `main`, oldest first.
 async fn operator_inputs(session: &dim_agent_runtime::Session) -> Vec<InputMessageData> {
-    session
-        .local("main", ..)
+    branch_events(&session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -332,8 +332,7 @@ async fn a_reference_loads_the_skill_with_the_submitted_input() {
         sent,
         "the first request carries the operator's text and the block"
     );
-    let results = session
-        .local("main", ..)
+    let results = branch_events(&session, "main", ..)
         .await
         .unwrap()
         .into_iter()
@@ -435,8 +434,7 @@ async fn a_branch_prompt_gets_no_block() {
         .as_str()
         .unwrap()
         .to_owned();
-    let first = session
-        .local(&child, ..)
+    let first = branch_events(&session, &child, ..)
         .await
         .unwrap()
         .into_iter()

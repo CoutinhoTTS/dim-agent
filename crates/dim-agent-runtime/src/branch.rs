@@ -111,82 +111,21 @@ impl Branch {
     pub fn sequence(&self) -> u64 {
         self.0.timeline().sequence()
     }
-    /// Outside the branch only published (durable) events are visible;
-    /// capabilities read the Timeline itself, through committed events.
-    fn published(&self, through: Option<u64>) -> Result<u64> {
-        let published = self.sequence();
-        match through {
-            Some(through) if through > published => Err(AgentError::InvalidInput(format!(
-                "future timeline sequence {through}"
-            ))),
-            Some(through) => Ok(through),
-            None => Ok(published),
+    /// Checks that `sequence` ends an atomic batch, so a cut there can start a
+    /// read (ADR 020 D4). See [`Timeline::batch_end`].
+    pub async fn batch_end(&self, sequence: u64) -> Result<()> {
+        self.0.timeline().batch_end(sequence).await
+    }
+    /// One bounded read of this branch's facts: the request selects them and
+    /// the reply carries each event's position. The read stops at what is
+    /// published: the branch's own committed tail belongs to the part that
+    /// folds it, through the branch's Timeline.
+    pub async fn query(&self, query: TimelineQuery) -> Result<TimelineQueryReply> {
+        if query.include_publishing {
+            return Err(AgentError::InvalidInput(
+                "a facade read stops at the published head".into(),
+            ));
         }
-    }
-    pub async fn history(&self, through: Option<u64>) -> Result<Vec<Arc<AgentEvent>>> {
-        let through = self.published(through)?;
-        self.0.timeline().history(Some(through)).await
-    }
-    /// The first page of a backward, kind-filtered read of the whole branch
-    /// chain, pinned at the published head.
-    pub fn page_cursor(&self) -> Result<BranchCursor> {
-        self.0.timeline().page_cursor(self.sequence())
-    }
-    /// One page of that read: up to `limit` stored rows of `kinds`, oldest
-    /// first, from the cursor's segment at the pinned head. `kinds` is the
-    /// caller's selection; the store skips every other row before decoding.
-    pub async fn page(
-        &self,
-        cursor: BranchCursor,
-        limit: usize,
-        kinds: &[&str],
-    ) -> Result<BranchPage> {
-        self.0.timeline().page(cursor, limit, kinds).await
-    }
-    pub async fn local<R: std::ops::RangeBounds<u64> + Send>(
-        &self,
-        range: R,
-    ) -> Result<Vec<Arc<AgentEvent>>> {
-        use std::ops::Bound;
-        let start = match range.start_bound() {
-            Bound::Included(n) => *n,
-            Bound::Excluded(n) => n.saturating_add(1),
-            Bound::Unbounded => 1,
-        };
-        let end = match range.end_bound() {
-            Bound::Included(n) => Some(*n),
-            Bound::Excluded(n) => Some(n.saturating_sub(1)),
-            Bound::Unbounded => None,
-        };
-        let end = self.published(end)?;
-        self.0.timeline().local(start..=end).await
-    }
-    pub async fn context(&self, through: u64) -> Result<ContextHistory> {
-        let through = self.published(Some(through))?;
-        self.0.timeline().context(through).await
-    }
-    /// The cut of the latest completed compaction at or below `through` on this
-    /// branch, when it is one of its own events.
-    pub async fn compaction_cut(&self, through: u64) -> Result<Option<u64>> {
-        let through = self.published(Some(through))?;
-        self.0.timeline().compaction_cut(through).await
-    }
-    /// One page of the rows the context projection consumes after `after`; the
-    /// cursor may fall inside an atomic batch and the event limit is a target.
-    pub async fn context_page(
-        &self,
-        after: u64,
-        limit: usize,
-        through: u64,
-    ) -> Result<Vec<Arc<AgentEvent>>> {
-        let through = self.published(Some(through))?;
-        self.0
-            .timeline()
-            .stored_context_page(after, limit, through)
-            .await
-    }
-    pub async fn trace(&self, sequence: u64) -> Result<Option<TimelineTrace>> {
-        self.published(Some(sequence))?;
-        self.0.timeline().trace(sequence).await
+        self.0.timeline().query(query).await
     }
 }

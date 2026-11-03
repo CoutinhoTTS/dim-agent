@@ -98,6 +98,7 @@ flowchart LR
   p33 -->|"dim_agent_runtime::config::BranchLifecycle@main"| p37
   p33 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p37
   p33 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p37
+  p33 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p37
   p42 -->|"dim_agent_capabilities::permission::Permission@main"| p36
   p33 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p36
   p33 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p36

@@ -15,6 +15,7 @@ use dim_agent_capabilities::model_provider::ModelProviderPlugin;
 use dim_agent_capabilities::prompt_suggestion;
 use dim_agent_capabilities::timeline_tree::BranchToolConfig;
 use dim_agent_capabilities::workspace_tools::WorkspaceToolsConfig;
+use dim_agent_runtime::testing::branch_events;
 use dim_agent_types::{EventKind, MessageContent, MessagePart, ModelRequest, Role};
 use std::sync::Mutex;
 
@@ -629,8 +630,7 @@ async fn respond(client: &mut Client, id: &str, turn: &str, action: &str) {
 /// The branch's event ids, in order.
 async fn timeline(fixture: &Fixture, id: &str) -> Vec<String> {
     let session = fixture.server.agent().unwrap().get_session(id).unwrap();
-    session
-        .local("main", ..)
+    branch_events(&session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -671,7 +671,7 @@ async fn a_suggestion_reuses_the_turn_request_and_changes_nothing() {
     configure(&mut client, json!({"enabled":true})).await;
 
     let session = fixture.server.agent().unwrap().get_session(&id).unwrap();
-    let events = session.local("main", ..).await.unwrap();
+    let events = branch_events(&session, "main", ..).await.unwrap();
     let call = events
         .iter()
         .rev()
@@ -760,7 +760,7 @@ async fn a_suggestion_reuses_the_turn_request_and_changes_nothing() {
 
     submit(&mut client, &id, "and the next one").await;
     let last = {
-        let events = session.local("main", ..).await.unwrap();
+        let events = branch_events(&session, "main", ..).await.unwrap();
         events
             .iter()
             .rev()

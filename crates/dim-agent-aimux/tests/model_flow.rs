@@ -8,6 +8,7 @@ use axum::{
 };
 use dim_agent_aimux::{AimuxModels, AimuxPlugin, ConfiguredModelsPlugin, config::ModelConfigFile};
 use dim_agent_capabilities::{adapters::MockTools, defaults, history::HistoryRenderer, host::*};
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::{testing::MinimalHost, *};
 use dim_agent_types::*;
 use futures_util::StreamExt;
@@ -258,7 +259,7 @@ async fn native_http_text_usage_tools_and_continuation_follow_agent_events() {
         let session = agent.create_session(session_config()).await.unwrap();
         session.submit("text".into(), InputMode::Queue, "main").await.unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(events.iter().any(|e| matches!(&e.kind, EventKind::Thinking(data) if data.delta == "thinking")));
         assert!(events.iter().any(|e| matches!(&e.kind, EventKind::Text(data) if data.delta == "hello")));
         assert!(events.iter().any(|e| matches!(&e.kind, EventKind::ModelUsage(data) if data.usage.prompt_tokens == 10. && data.usage.total_tokens == 13. && data.usage.cache_read_tokens == Some(2.))));
@@ -270,7 +271,7 @@ async fn native_http_text_usage_tools_and_continuation_follow_agent_events() {
         assert!(metadata.run_id.is_none());
         session.submit("tool".into(), InputMode::Queue, "main").await.unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(events.iter().any(|e| matches!(&e.kind, EventKind::ToolResult(data) if data.results[0].result.content == ToolContent::Text("result text".into()))));
         assert!(events.iter().any(|e| matches!(&e.kind, EventKind::Text(data) if data.delta == "tool completed")));
         assert!(matches!(events.last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })));
@@ -303,7 +304,7 @@ async fn native_http_text_usage_tools_and_continuation_follow_agent_events() {
         let selected = agent.create_session(explicit).await.unwrap();
         selected.submit("text".into(), InputMode::Queue, "main").await.unwrap();
         selected.idle("main").await.unwrap();
-        let events = selected.history("main", None).await.unwrap();
+        let events = chain_events(&selected, "main", ..).await.unwrap();
         let call = events.iter().find_map(|e| if let EventKind::ModelCall(call) = &e.kind { Some(call) } else { None }).unwrap();
         assert_eq!(call.request.config.as_ref().unwrap().temperature, Some(0.375));
         assert_eq!(call.request.config.as_ref().unwrap().max_tokens, None, "An explicit model configuration must not inherit catalog fields");
@@ -335,8 +336,8 @@ async fn interrupt_releases_native_request_and_keeps_other_branches_usable() {
         let branch = session.branch("main".into(), 0, BranchOptions { prompt: "text".into(), source: BranchSource::Host { operation_id: "branch".into() } }).await.unwrap();
         session.stop("main", "user stop".into()).await.unwrap();
         session.idle(&branch).await.unwrap();
-        assert!(session.history("main", None).await.unwrap().iter().any(|e| matches!(&e.kind, EventKind::ModelOutputEnd(data) if matches!(data.outcome, ModelOutputOutcome::Cancelled { .. }))));
-        assert!(session.history(&branch, None).await.unwrap().iter().any(|e| matches!(&e.kind, EventKind::Text(data) if data.delta == "hello")));
+        assert!(chain_events(&session, "main", ..).await.unwrap().iter().any(|e| matches!(&e.kind, EventKind::ModelOutputEnd(data) if matches!(data.outcome, ModelOutputOutcome::Cancelled { .. }))));
+        assert!(chain_events(&session, &branch, ..).await.unwrap().iter().any(|e| matches!(&e.kind, EventKind::Text(data) if data.delta == "hello")));
         session.submit("text".into(), InputMode::Queue, "main").await.unwrap();
         session.idle("main").await.unwrap();
         agent.close().await.unwrap(); server.close().await;
@@ -351,7 +352,7 @@ async fn failed_native_outputs_do_not_execute_tools_or_invent_usage() {
             let session = agent.create_session(session_config()).await.unwrap();
             session.submit(prompt.into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             assert!(events.iter().any(|e| matches!(&e.kind, EventKind::ModelOutputEnd(data) if matches!(data.outcome, ModelOutputOutcome::Failed { .. }))), "{prompt}: {events:?}");
             // Calls a failed output started are closed, never dispatched (agent-029).
             assert!(!events.iter().any(|e| matches!(&e.kind, EventKind::ToolCall(_) | EventKind::ModelUsage(_)) || matches!(&e.kind, EventKind::ToolResult(data) if data.call_event_id.is_some())), "{prompt}: {events:?}");
@@ -462,7 +463,7 @@ async fn before_committed_request_controls_model_settings_and_tool_admission() {
             let agent = model_agent(models.clone(), Some(builder)).await; let session = agent.create_session(session_config()).await.unwrap();
             session.submit("tool".into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             if remove_tools {
                 assert!(!events.iter().any(|event| matches!(event.kind, EventKind::ToolCall(_) | EventKind::ToolResult(_))));
                 assert!(events.iter().any(|event| matches!(&event.kind, EventKind::ModelOutputEnd(end) if matches!(end.outcome, ModelOutputOutcome::Failed { .. }))));
@@ -930,7 +931,7 @@ async fn a_same_origin_307_or_308_redirect_completes_the_turn_at_its_target() {
                 .await
                 .unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             assert_eq!(output_failure(&events), None, "{status}: the turn failed");
             assert!(
                 events.iter().any(

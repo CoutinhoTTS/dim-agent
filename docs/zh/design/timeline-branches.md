@@ -467,7 +467,7 @@ WorkspaceTools 不变。
 | TimelineTree | 对每种来源都在 `first_input` 里写身份块。新增 `TreeCommands.end(id, source)` 和 `TreeCommands.page(id, after, limit)`。`TimelineInfo.source`，依据父分支的 `branch/create` 填写（§5）。结束流程、线进入结束后拒绝输入、`branch/ended`、恢复规则、读已结束的线 | 它拥有线的生命周期和开启输入 |
 | TreeTimeline | 消费 `branch/end`，以及由工具调用发出的结束时这条线的下一次轮次结束，并转给 TimelineTree | 它现在就这样转 `branch/create` |
 | BranchTool | 按动作区分的工具，加上新的 BranchLine 分支部件 | 工具的各个动作，以及一条线对自己相关各线的视图 |
-| Session 门面 | `Session::end_branch(id, source)`。在固定的头部从存储读已结束线的历史（`local_page`、`sequence`） | §17 |
+| Session 门面 | `Session::end_branch(id, source)`。已结束线的头部由 `Session::sequence` 给出；其历史在固定的头部经 `TreeCommands.page` 读取 | §17 |
 | App Server | `session.branch_end`（v3，host 来源，带生成的 `operation_id`；`session_execution` 打开、且连接的入口不是裸入口或守护进程 profile 未受保护时，`hello.features` 把它和其他会话方法一起列出）。对已结束的线，`session.history` 立即返回，截到它存储的头部。`ProductEvent::new` 在 v3 里带上两种事件，v1、v2 里不带 | 一个入口和一条读取路径，没有业务逻辑 |
 | dim-agent-types | 在 `EventKind` 和 v1 排除列表里加入 `branch/end` 和 `branch/ended`，并在契约测试中登记。冻结样本不变 | 两种核心事实（§16） |
 | Goal（Pursuit 修订） | 从线的来源识别它的评审者，并结束它（[Pursuit §13](plugins/Pursuit.md#13-结束评审者随-427)） | 评审者的协议归 Goal |
@@ -517,7 +517,7 @@ BranchLine 的服务只由同一插件里的工具读取。
   - `branch/end` 提交后不再接受新输入；
   - 先结束后代；
   - 恢复时把已结束的线视为不活跃，并为没有 `branch/ended` 的 `branch/end` 补完结束；
-  - 已结束线已提交的历史在固定的头部仍可读取，经 `Session::local_page` 和 `TreeCommands.page`。
+  - 已结束线已提交的历史在固定的头部仍可读取，经 `TreeCommands.page`。
 - **对序号、批次、中断、重载的影响。**
   - 每个事件单独一个批次：线上的 `branch/end`，以及关闭之后父分支上的 `branch/ended`。
   - `host` 来源的结束，或因祖先而结束，经 `Branch::close()` 中断这条线。
