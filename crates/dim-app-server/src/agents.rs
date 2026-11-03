@@ -736,19 +736,6 @@ impl AgentIndex {
     pub(crate) fn has_session_store(&self) -> bool {
         self.session_store.is_some()
     }
-    /// The newest turn at `through` and the window's first sequence.
-    pub(crate) async fn turn_window(
-        &self,
-        id: &str,
-        branch: &str,
-        through: u64,
-    ) -> dim_agent_runtime::Result<crate::storage::TurnWindow> {
-        self.session_store
-            .as_ref()
-            .ok_or_else(Self::no_history_store)?
-            .turn_window(id, branch, through)
-            .await
-    }
     /// The newest events below `before` in `window_start..=through`, whole
     /// batches at both ends.
     pub(crate) async fn read_page_before(
