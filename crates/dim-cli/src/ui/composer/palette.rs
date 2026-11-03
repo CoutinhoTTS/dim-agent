@@ -22,7 +22,7 @@ const HINT: &str = "type filter · enter select · esc clear/close";
 /// a name containing it, a description word starting with it, then three
 /// or more of the query's letters in order through the name (`stg` for
 /// `settings`).
-/// Category and command name break ties alphabetically; a match inside a
+/// Registry task order breaks ties; a match inside a
 /// description word is noise and is left out.
 pub fn filter_commands(query: &str, context: Context) -> Vec<&'static Command> {
     let normalized = query.trim().to_lowercase();
@@ -35,7 +35,7 @@ pub fn filter_commands(query: &str, context: Context) -> Vec<&'static Command> {
     let mut ranked: Vec<(u8, &'static Command)> = listed
         .filter_map(|command| rank(command, &normalized).map(|r| (r, command)))
         .collect();
-    ranked.sort_by_key(|(rank, command)| (*rank, command.category, command.name));
+    ranked.sort_by_key(|(rank, _)| *rank);
     ranked.into_iter().map(|(_, command)| command).collect()
 }
 
@@ -427,12 +427,44 @@ mod tests {
     }
 
     #[test]
-    fn both_modes_list_only_visible_slash_commands_in_category_and_name_order() {
-        let all = names("/", FULLSCREEN);
-        assert_eq!(&all[..2], ["exit", "keys"]);
-        assert_eq!(all.len(), COMMANDS.len() - 5);
-        let scrollback = names("/", SCROLLBACK);
-        assert!(!scrollback.contains(&"scroll-top"));
+    fn both_modes_list_only_visible_slash_commands_in_task_order() {
+        let expected = [
+            "new",
+            "resume",
+            "timeline",
+            "goal",
+            "tasks",
+            "lines",
+            "branch",
+            "fork",
+            "compact",
+            "usage",
+            "rename",
+            "web",
+            "models",
+            "agent",
+            "effort",
+            "fast",
+            "permissions",
+            "connect",
+            "login",
+            "skills",
+            "mcp",
+            "plugins",
+            "hooks",
+            "scheduled",
+            "workflow",
+            "workflow:save",
+            "reload-skills",
+            "runtime",
+            "theme",
+            "language",
+            "tools",
+            "tui",
+            "settings",
+            "keys",
+            "exit",
+        ];
         for context in [
             SCROLLBACK,
             FULLSCREEN,
@@ -448,11 +480,14 @@ mod tests {
             },
         ] {
             let commands = filter_commands("/", context);
-            assert!(commands.windows(2).all(|pair| {
-                (pair[0].category, pair[0].name) < (pair[1].category, pair[1].name)
-            }));
             let listed = names("/", context);
-            assert!(listed.contains(&"permissions"));
+            assert_eq!(listed, expected);
+            let categories: Vec<_> = commands.iter().map(|c| c.category).collect();
+            assert_eq!(&categories[..12], ["session"; 12]);
+            assert_eq!(&categories[12..19], ["model"; 7]);
+            assert_eq!(&categories[19..28], ["extensions"; 9]);
+            assert_eq!(&categories[28..32], ["view"; 4]);
+            assert_eq!(&categories[32..], ["app"; 3]);
             assert!(commands.iter().all(|command| command.slash));
             for hidden in [
                 "interrupt",
@@ -474,17 +509,18 @@ mod tests {
         assert_eq!(
             names("/se", SCROLLBACK),
             [
-                "settings", "resume", "agent", "effort", "fast", "mcp", "models", "fork", "lines",
-                "new", "rename", "web"
+                "settings", "resume", "new", "lines", "fork", "rename", "web", "models", "agent",
+                "effort", "fast", "mcp"
             ]
         );
         assert_eq!(names("/stg", SCROLLBACK), ["settings"]);
         assert_eq!(
             &names("/re", SCROLLBACK)[..4],
-            ["reload-skills", "rename", "resume", "effort"]
+            ["resume", "rename", "reload-skills", "effort"]
         );
         assert!(names("/ss", SCROLLBACK).contains(&"resume"));
         assert!(names("/quit", SCROLLBACK).contains(&"exit"));
+        assert_eq!(names("/ex", SCROLLBACK)[0], "exit");
         assert_eq!(names("/tim", SCROLLBACK), ["timeline", "runtime"]);
     }
 
@@ -513,15 +549,19 @@ mod tests {
         let panel = render_overlay(&state, &rows, 72, rows.len() + 5, &theme.palette).rows;
         let plain: Vec<String> = panel.iter().map(|r| strip(r)).collect();
         assert!(
-            plain[4].starts_with("│       app  /exit "),
+            plain[4].starts_with("│      session  /new "),
             "{:?}",
             plain[4]
         );
         assert!(panel[4].contains("\x1b[30;43m"), "{:?}", panel[4]);
+        assert!(plain.iter().all(|r| display_width(r) == 72), "{plain:#?}");
+        state.selected = rows.len() - 1;
+        let panel = render_overlay(&state, &rows, 72, rows.len() + 5, &theme.palette).rows;
+        let plain: Vec<String> = panel.iter().map(|r| strip(r)).collect();
         assert!(
-            plain[4]
-                .trim_end_matches(['│', ' '])
-                .ends_with("Ctrl+C Ctrl+C")
+            plain
+                .iter()
+                .any(|row| row.trim_end_matches(['│', ' ']).ends_with("Ctrl+C Ctrl+C"))
         );
         assert!(plain.iter().all(|r| display_width(r) == 72), "{plain:#?}");
     }
@@ -548,7 +588,11 @@ mod tests {
         assert_eq!(panel.len(), PAGE_SIZE + CHROME_ROWS);
         let plain: Vec<String> = panel.iter().map(|r| strip(r)).collect();
         assert!(plain[1].contains("Commands") && plain[1].contains("esc close"));
-        assert!(plain[2].starts_with("│       app  /exit"), "{:?}", plain[2]);
+        assert!(
+            plain[2].starts_with("│      session  /new"),
+            "{:?}",
+            plain[2]
+        );
         assert!(
             plain[8].contains(&format!("1 / {}", rows.len())),
             "{:?}",

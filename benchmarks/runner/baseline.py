@@ -808,9 +808,19 @@ def _verifier_no_proxy_from_config(config: dict) -> str | None:
 
 
 def params_from_config(config: dict | None) -> dict:
-    if not config:
+    """The comparable-condition params a harbor job config records.
+
+    Defensive by design: this reads a JSON file another machine wrote, and a
+    shape this does not recognise must yield an empty (or partial) record, not
+    an exception — the caller runs after a completed run, where an exception
+    would cost the manifest and the ledger record of hours already spent.
+    """
+    if not isinstance(config, dict):
         return {}
-    agent = (config.get("agents") or [{}])[0]
+    agents = config.get("agents")
+    agent = agents[0] if isinstance(agents, list) and isinstance(agents[0], dict) else {}
+    env = agent.get("env") if isinstance(agent.get("env"), dict) else {}
+    model_config = env.get("DIM_EVAL_MODEL_CONFIG_JSON")
     return {
         "k": config.get("n_attempts"),
         "timeout_multiplier": config.get("timeout_multiplier"),
@@ -821,7 +831,7 @@ def params_from_config(config: dict | None) -> dict:
         "verifier_no_proxy": _verifier_no_proxy_from_config(config),
         "model_config_sha256": (
             hashlib.sha256(model_config.encode()).hexdigest()
-            if (model_config := (agent.get("env") or {}).get("DIM_EVAL_MODEL_CONFIG_JSON"))
+            if isinstance(model_config, str) and model_config
             else None
         ),
     }

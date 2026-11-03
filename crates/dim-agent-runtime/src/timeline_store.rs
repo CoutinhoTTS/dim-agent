@@ -1,4 +1,6 @@
-use crate::{BoxFuture, BranchRecord, Result, SessionConfig, TimelineTrace};
+use crate::{
+    BoxFuture, BranchRecord, Result, SessionConfig, TimelineQuery, TimelineQueryPage, TimelineTrace,
+};
 use dim_agent_types::{
     AgentEvent, ContextCompactionResult, EventKind, RecoverySnapshot, TimelinePosition,
 };
@@ -441,6 +443,30 @@ pub trait TimelineStore: Send + Sync + 'static {
     ) -> BoxFuture<'a, Result<Vec<StoredEvent>>> {
         self.read_page(key, after, limit, through)
     }
+    /// One per-branch read for [`TimelineQuery`] (ADR 019, plugin contract
+    /// §5.4): applies the read point, direction, kinds, flags, event id,
+    /// predicate, limit and offset to `key`'s branch and returns up to `limit`
+    /// matching facts, ordered by sequence in the query's direction, each with
+    /// its position.
+    ///
+    /// `query.scope` must be `TimelineQueryScope::Branch`. The Timeline
+    /// service composes the chain by reading each ancestor and then the
+    /// queried branch with this method, carrying the offset the earlier
+    /// segment did not use. Paging is skipping: `offset` matching facts are
+    /// passed over before the page, so a page shorter than the limit means the
+    /// selection is exhausted, and a page may end inside an atomic batch.
+    /// `skipped` is the number of matching facts the read passed over, at most
+    /// `offset`, so a caller can carry the rest into its next segment.
+    ///
+    /// A read point past the branch's published head and any other scope are
+    /// invalid input. A kind, flag, id or data path the store does not know
+    /// selects no rows; it is not an error.
+    fn query<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        query: &'a TimelineQuery,
+        through: u64,
+    ) -> BoxFuture<'a, Result<TimelineQueryPage>>;
     /// Decodes all segments in one read scope, sharing content across branches.
     fn read_segments<'a>(
         &'a self,

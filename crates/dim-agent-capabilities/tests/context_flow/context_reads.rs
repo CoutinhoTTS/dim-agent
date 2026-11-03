@@ -395,6 +395,14 @@ impl TimelineStore for CountContextReads {
             self.memory.latest_snapshot(key, through, interpreter).await
         })
     }
+    fn query<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        query: &'a dim_agent_runtime::TimelineQuery,
+        through: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<dim_agent_runtime::TimelineQueryPage>> {
+        self.memory.query(key, query, through)
+    }
 }
 
 #[tokio::test]

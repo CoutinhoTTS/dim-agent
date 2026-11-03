@@ -303,6 +303,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "run" => "exécution",
         "view" => "affichage",
         "model" => "modèle",
+        "extensions" => "extensions",
         "app" => "app",
         "skill" => "skill",
         // composer/commands.rs: descriptions

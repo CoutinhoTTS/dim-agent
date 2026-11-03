@@ -49,4 +49,4 @@ None.
 
 ## Appendix D. Acceptance
 
-`dim_oauth_flow` (device and browser login, identity, catalog projection, leases, usage, logout and revocation, recovery and compare-and-delete, rotation across two processes, TypeScript record compatibility, reset backup and unknown schema), `managed_provider_flow` (host binding and lease release) and `transport_flow::managed_provider` (RPC login and a model request recovered after a 401) run against a local account service, without Node.
+`dim_oauth_flow` (device and browser login, identity, catalog projection, leases, usage, logout and revocation, recovery and compare-and-delete, a fresh grant read without the account lease, rotation across two processes, TypeScript record compatibility, reset backup and unknown schema), `managed_provider_flow` (host binding and lease release) and `transport_flow::managed_provider` (RPC login and a model request recovered after a 401) run against a local account service, without Node.

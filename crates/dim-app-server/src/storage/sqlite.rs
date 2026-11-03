@@ -308,14 +308,20 @@ fn same_schema(actual: &[(String, String)], mut expected: Vec<(&str, String)>) -
                 name == expected_name && *sql == expected_sql
             })
 }
-/// The read indexes the daemon creates at open (session-history-window §5.1).
-/// They carry no data and no decode rule, so they are not part of the format:
-/// `schema` and the format gate ignore them, and every open recreates them
-/// ([native storage format](../../../../docs/design/appserver/native-storage-format.md#索引与实际查询)).
+/// The read indexes the daemon creates at open: the latest-turn window's
+/// ([session-history-window §5.1](../../../../docs/design/appserver/session-history-window.md#51-the-derived-index)),
+/// the policy window's turn starts, and the event query's by kind, which carries
+/// the event id so a kind read needs no table body for it (ADR 019 D4). They
+/// carry no data and no decode rule, so they are not part of the format: `schema`
+/// and the format gate ignore them, and every open recreates them.
 const DERIVED_INDEXES: &[(&str, &str)] = &[
     (
         "timeline_history_anchors",
         "CREATE INDEX IF NOT EXISTS timeline_history_anchors ON timeline_events(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'input/message')",
+    ),
+    (
+        "timeline_events_by_kind",
+        "CREATE INDEX IF NOT EXISTS timeline_events_by_kind ON timeline_events(session_id, branch_id, kind, sequence, event_id)",
     ),
     (
         "timeline_policy_turns",
@@ -325,11 +331,21 @@ const DERIVED_INDEXES: &[(&str, &str)] = &[
 /// The schema objects of `connection`'s database that belong to the format,
 /// sorted by name.
 fn schema(connection: &Connection) -> Result<Vec<(String, String)>> {
+    let derived = DERIVED_INDEXES
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>();
+    let placeholders = vec!["?"; derived.len()].join(",");
     let mut query = connection
-        .prepare("SELECT name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name")
+        .prepare(&format!(
+            "SELECT name, sql FROM sqlite_master \
+             WHERE name NOT LIKE 'sqlite_%' AND name NOT IN ({placeholders}) ORDER BY name"
+        ))
         .map_err(storage)?;
     let objects = query
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .query_map(rusqlite::params_from_iter(derived), |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
         .map_err(storage)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(storage)?;

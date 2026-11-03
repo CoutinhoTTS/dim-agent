@@ -1,7 +1,8 @@
 use super::keys::KeyFilter;
 use crate::{
     AgentError, BoxFuture, BranchCursor, BranchLifecycle, BranchPage, FaultReporter, PolicyFacts,
-    PolicyOrder, PolicyOrderEvent, PolicyWindow, Result, StoredEvent, TimelineKey, TimelineStore,
+    PolicyOrder, PolicyOrderEvent, PolicyWindow, Result, StoredEvent, TimelineKey, TimelineQuery,
+    TimelineQueryDirection, TimelineQueryReply, TimelineQueryScope, TimelineStore,
 };
 use dim_agent_types::{
     AgentEvent, EventDraft, EventKind, InputMessageData, ProjectionCheckpoint, RecoverySnapshot,
@@ -145,6 +146,8 @@ impl Data {
         !self.closing && self.failure.is_none() && self.allocated == self.published
     }
 }
+/// The reply from one reply per segment: facts in chain order and then
+/// sequence, each with its position in the same order.
 #[service]
 impl Timeline {
     /// A writable Timeline outside the branch tree, for tests that craft
@@ -738,6 +741,80 @@ impl Timeline {
             .into_iter()
             .flatten()
             .collect())
+    }
+    /// One bounded read over this branch or over its chain ([ADR 019](../../../../docs/adr/019-event-query.md),
+    /// [plugin contract §5.4](../../../../docs/design/plugin-contract.md#54-the-event-query)):
+    /// the direction, kinds, flags, event id, predicate, limit and offset
+    /// select the facts, and the reply is up to `limit` of them in chain order
+    /// and then sequence, in the query's direction, each with its position. A
+    /// chain read is each ancestor to its cut and then this branch, root first
+    /// ascending and this branch first descending; the offset the earlier
+    /// segment did not use moves to the next one, so paging is skipping and a
+    /// page shorter than the limit means the selection is exhausted. The read
+    /// never returns a fact above a branch's coverage: an ancestor to its cut,
+    /// this branch to its published head.
+    pub async fn query(&self, query: TimelineQuery) -> Result<TimelineQueryReply> {
+        use TimelineQueryDirection::Descending;
+
+        query.validate()?;
+        let published = self.sequence();
+        let clips: Vec<(String, u64)> = match query.scope {
+            TimelineQueryScope::Branch => vec![(self.0.key.branch_id.clone(), published)],
+            TimelineQueryScope::Chain => self
+                .0
+                .ancestors
+                .iter()
+                .filter(|(_, cut)| *cut > 0)
+                .cloned()
+                .chain(std::iter::once((self.0.key.branch_id.clone(), published)))
+                .collect(),
+        };
+        let order: Vec<usize> = match query.direction {
+            TimelineQueryDirection::Ascending => (0..clips.len()).collect(),
+            Descending => (0..clips.len()).rev().collect(),
+        };
+        let limit = usize::try_from(query.limit.get()).unwrap_or(usize::MAX);
+        let mut skip = query.offset;
+        let mut events = Vec::new();
+        let mut positions = Vec::new();
+        for index in order {
+            if events.len() >= limit {
+                break;
+            }
+            let (branch, clip) = &clips[index];
+            let key = TimelineKey {
+                session_id: self.0.key.session_id.clone(),
+                branch_id: branch.clone(),
+            };
+            let page = self
+                .0
+                .store
+                .query(
+                    &key,
+                    &TimelineQuery {
+                        scope: TimelineQueryScope::Branch,
+                        direction: query.direction,
+                        kinds: query.kinds.clone(),
+                        flags: query.flags.clone(),
+                        event_id: query.event_id.clone(),
+                        predicate: query.predicate.clone(),
+                        limit: std::num::NonZeroU64::new(
+                            u64::try_from(limit - events.len())
+                                .unwrap_or(u64::MAX)
+                                .max(1),
+                        )
+                        .expect("a read keeps one event of its limit"),
+                        offset: skip,
+                    },
+                    *clip,
+                )
+                .await?;
+            let reached = page.skipped + page.events.len() as u64;
+            skip = skip.saturating_sub(reached);
+            events.extend(page.events);
+            positions.extend(page.positions);
+        }
+        Ok(TimelineQueryReply { events, positions })
     }
     /// The first page of a backward, kind-filtered read of the branch chain
     /// at a published `through`.

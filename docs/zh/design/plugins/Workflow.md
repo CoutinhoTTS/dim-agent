@@ -63,7 +63,7 @@ flowchart LR
 | 工具 / 进程包 | C4 支持经 `partRegistry` 注册为定义的 Session 部分；工具接入与提供者代际遵循当前功能绑定（§1.1）。ServerConfig.session_typescript.rows 中的一行装载进程 owner，由它注册 Session 工具的定义；每个 Session 在同一运行时挂载一份副本。Session 工具在 definePlugin.inject 声明 workflowRuns（§1.1）；可选包已提供该行。 |
 | 管理 | 进程行注入 managementMethods，在 apply 中注册 workflow，注册使用原生按调用准入及 report/drain；包已实现这五个具体方法。 |
 | 定义 / Settings | Settings owner 读写/CAS/事件与生成的 workflowFiles 已交付。来源、文件授权、包身份沿用已接受原生接入合同，§1.3 指定包内位置；包提供业务 schema 和 A.1 语义诊断。不直接访问文件系统。 |
-| 存储 | [公开绑定](../../../design/process-typescript.md#52-public-pluginfiles-binding)在宿主授权 product root 提供 pluginFiles。宿主在启用行前创建 `workflow/`；父目录缺失时在事务回调前返回 `io`。内部 v2、拒绝 v1 并保留原字节、延后迁移仍遵循 A.4。 |
+| 存储 | [公开绑定](../../../design/process-typescript.md#52-public-pluginfiles-binding)在宿主授权 product root 提供 pluginFiles。宿主在启用行前创建 `workflow/`；父目录缺失时在事务回调前返回 `io`。运行存储及其变更标记、拒绝 v1 并保留原字节、延后迁移仍遵循 A.4。 |
 | Sessions | 使用既有 {ok:true,value} / {ok:false,error:{code,message,retryable}}；launch 返回 {sessionId,policy}，input 返回 {inputId,sequence}；分支对每个 submissionId 只接受一次；lookup 查已提交输入，不写入。 |
 | 权限 | S2 在真正准入阶段时收窄权限，§3.3 按已确认 A17 复用返回的 policy 约束后续阶段，不增加权限查询服务，不把创建配置当作实时 Permission。 |
 | 生命周期 | S2 每次调用的租约结束不等于关闭 Session。反复创建阶段 Session 发布前仍须 [#126](https://github.com/arcships/dim/issues/126)；确认保留期所有权后使用既有 sessions.delete。 |
@@ -139,6 +139,7 @@ classDiagram
   }
   class ProcessStorage {
     workflow/runs.json, inner version 2
+    workflow/runs.version, 变更标记
   }
   class StageSessionTimeline {
     stage input, input/consumed, input/deleted
@@ -155,7 +156,7 @@ classDiagram
   Run ..> StarterTimeline : 报告只写一次
 ```
 
-定义在每次调用时从其来源读取（A1）；运行存于进程存储，并在每次状态转换时、在其所守护的副作用之前持久化。阶段进度由每个阶段 Session 中的已有事实推导；只复制有界的结果文本。不从 Timeline 重建任何内容；Workflow 不拥有 `StateCell`，Session 部分不持有状态。
+定义在每次调用时从其来源读取（A1）；运行存于进程存储，并在每次状态转换时、在其所守护的副作用之前持久化。阶段进度由每个阶段 Session 中的已有事实推导；只复制有界的结果文本。不从 Timeline 重建任何内容；Workflow 不拥有 `StateCell`，Session 部分不持有状态。阶段等待运行状态时读取变更标记（A.4），不读取存储。
 
 ## 3. 流程
 
@@ -484,19 +485,21 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
         session_id?, agent_id?, submission_id?, input_event_id?, result_text?, reason? }
 ```
 
-进程 owner 经自持 `pluginFiles` scope 在 `workflow/runs.json` 保存一个 JSON 文本 `{ "version": 2, "runs": [Run] }`。内部 v2 要求 pending 报告带 attempt_open 标记（§3.4）；v1、pending 报告缺失标记或其他版本均返回 invalid_data，保留原字节，不隐式转换成已关闭尝试。维护者已确认此兼容策略；迁移留待后续统一处理，读取或恢复时不执行迁移。Scheduler 独立的内部 v1 文档不变。
+进程 owner 经自持 `pluginFiles` scope 在 `workflow/runs.json` 保存一个 JSON 文本 `{ "version": 2, "runs": [Run] }`，并在 `workflow/runs.version` 保存变更标记。内部 v2 要求 pending 报告带 attempt_open 标记（§3.4）；v1、pending 报告缺失标记或其他版本均返回 invalid_data，保留原字节，不隐式转换成已关闭尝试。维护者已确认此兼容策略；迁移留待后续统一处理，读取或恢复时不执行迁移。Scheduler 独立的内部 v1 文档不变。
+
+`workflow/runs.version` 是派生状态，不是第二份运行存储：它保存对 `workflow/runs.json` 最后一次提交写入的标记，启动恢复和每次存储写入都直接读取存储本身。读取方在标记与自己快照的标记相同时直接使用 owner 的快照，标记不同才重新读取并解码存储；因此运行中阶段每秒的等待只承载该标记，不承载存储，其每秒成本不随存储大小或保留运行数增长。标记在存储替换之后用其自有的、嵌套于存储租约下的事务写入，因此崩溃或标记写入失败时标记会落后于文本；恢复会直接读取存储，不受影响。本次改动前写入的存储或缺失的标记只是让下一次读取解码存储。标记读取或写入失败与存储读取/替换失败同属存储故障：新的副作用停止、已提交字节保留；存储访问失败会丢弃快照，使已提交替换在标记写入失败后仍对下一次读取可见。
 
 `created_at` 和终态的 `ended_at` 使用 UTC `YYYY-MM-DDTHH:mm:ss.sssZ`，固定三位小数，使时间顺序与字典序一致。宿主 S10 的 `{version:1,text}` 是独立的外层封装，仍由宿主负责。定义留在其已声明来源；运行中的定义快照是已接受的执行输入，不作为来源配置编辑。
 
-一次桥接帧承载存储文本、其替换请求及状态回复。尺寸按跨越边界时的字节计算：保存字符串的已提交 JSON 形式（引号和反斜杠转义、控制字符展开），以及文件服务承载存储文本时的 JSON 字符串（其中的转义可能再次加倍）。单个运行保存的阶段结果文本按已提交 JSON 合计最多 512 KiB；更后的结果按 UTF-8 边界截断到剩余载荷。每条保存的日志消息和阶段原因按已提交 JSON 最多 512 字节，日志仍在 A9 的 500 条内；运行保存的定义即准入的那份（A.1）。start 按文件服务承载的 JSON 字符串——而非原始文本——估算存储，计入每个活动运行的记录、其后续可能获得的阶段身份/结果/日志/`agent_id` 副本，以及新运行自己的记录；后续字段按其序列化形式的可能最大值计费。超过 8 MiB 载荷时先让最早的已结算终态运行过期（A.4），仍超出则返回 `limit_exceeded` 且不保存该运行。按这些限制准入的运行因此让每次存储读取、写入和回复都在一帧内；限制之前提交的记录仍按其原大小解码。
+一次桥接帧承载存储文本、其替换请求及状态回复。尺寸按跨越边界时的字节计算：保存字符串的已提交 JSON 形式（引号和反斜杠转义、控制字符展开），以及文件服务承载存储文本时的 JSON 字符串（其中的转义可能再次加倍）。单个运行保存的阶段结果文本按已提交 JSON 合计最多 512 KiB；更后的结果按 UTF-8 边界截断到剩余载荷。每条保存的日志消息和阶段原因按已提交 JSON 最多 512 字节，日志仍在 A9 的 500 条内；运行保存的定义即准入的那份（A.1）。start 按文件服务承载的 JSON 字符串——而非原始文本——估算存储，计入每个活动运行的记录、其后续可能获得的阶段身份/结果/日志/`agent_id` 副本，以及新运行自己的记录；后续字段按其序列化形式的可能最大值计费。超过 8 MiB 载荷时先让最早的已结算终态运行过期（A.4），仍超出则返回 `limit_exceeded` 且不保存该运行。按这些限制准入的运行因此让每次存储读取、写入和回复都在一帧内；限制之前提交的记录仍按其原大小解码。变更标记在同一帧限制下是独立的小载荷，从不承载存储，因此轮询不会带着存储触到帧边界。
 
 文件缺失表示没有运行。只在此持久化边界解析、校验：损坏 JSON、缺失/未知版本、非法记录字段、重复 `run_id` 或单个运行内重复阶段身份，均失败并保留原字节。不自动重置、备份或迁移。此后直接使用类型化记录；不兼容的已提交格式必须采用新的内部版本并明确兼容策略。
 
-使用现有 `scope.withLock` 的读/修改/`file.replace` 持久化每个必要转换，释放事务后才调用 `sessions`。启动、输入和报告都先记录意图，再发起副作用；保存回复后才继续推进。不增互斥锁、日志、存储或公开服务。读/替换失败即停止新的运行副作用并报告存储错误。卸载先停止准入，结算自持调用和记录写入，再关闭文件 scope；A13 不限制已接受写入的结算时间。
+使用现有 `scope.withLock` 的读/修改/`file.replace` 持久化每个必要转换，释放事务后才调用 `sessions`。启动、输入和报告都先记录意图，再发起副作用；保存回复后才继续推进。不增互斥锁、日志、第二份运行存储或公开服务：标记只命名最后一次提交的写入。读/替换/标记失败即停止新的运行副作用并报告存储错误。卸载先停止准入，结算自持调用和记录写入，再关闭文件 scope；A13 不限制已接受写入的结算时间。
 
 保留策略遵循 [S2 §8.7](../appserver/sessions-service.md#87-删除运行用的-session)：保留所有 running/stopping 运行、每条 pending 报告，以及其他终态中按 `ended_at` 最近的 100 条记录，同时间以 `run_id` 排序。日志最多 500 条（A9）。只有报告为 none/delivered/undeliverable 且所有自持阶段操作均已结算的运行才可移除。start 的帧估算超过载荷时，在准入前也可让最近 100 条内最早且已结算的终态运行过期：最近 100 条是存储在容量内时的保留目标，不是 start 为空间可过期记录的下限。pending 报告和未结算所有权不会为了空间而过期。对于从 Workflow 自己成功 launch 回复中记录的 Session，先计算活动和保留运行的引用；没有引用时，先调用现有 sessions.delete，再移除过期运行的最后一条所有权记录。删除失败或不确定时保留记录并报告错误，供下一次保留期清理使用，不增清理队列。fork 和外部提供的 Session 身份不归 Workflow。报告或清理未结算时可暂时超过 100 条。没有持久化 launch 身份的 Session 仍适用附录 F 的已知限制。
 
-启动恢复后、每次终态转换后及报告结算后执行保留期清理。失败清理仍留下过期记录时，经 owner 的定时器每分钟重试一次，即使没有活动运行。运行存储读取失败即跳过删除与裁剪，保留记录并报告错误。所有权引用来自运行存储；定义来源被删除或无法读取，不会使活动运行或 pending 报告过期。读取失败而跳过的清理也按同一分钟节奏重试。
+启动恢复后、每次终态转换后及报告结算后执行保留期清理。失败清理仍留下过期记录时，经 owner 的定时器每分钟重试一次，即使没有活动运行。运行存储或变更标记读取失败即跳过删除与裁剪，保留记录并报告错误。所有权引用来自运行存储；定义来源被删除或无法读取，不会使活动运行或 pending 报告过期。读取失败而跳过的清理也按同一分钟节奏重试。
 
 ### A.5 依赖的契约
 
@@ -580,9 +583,9 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 9. 每个阶段（包括并行阶段）都在自己启动的非交互 Session 中运行；未声明 `agent` 的阶段使用 Agents 的默认 profile。
 10. 非交互阶段 Session 只在 profile 挂载 `workflow` 时（profile 没有挂载列表，或列表列出它）声明该工具，调用它返回错误结果。挂载列表未列出该工具的 profile 不因安装包而获得它。
 11. A17：首 launch 返回后，在输入/同组启动前保存实际 policy；后续权限不超过它，起始方关闭或宿主策略变化亦然；首准入前启动方缺失则失败关闭。
-12. 保留活动运行和 pending 报告；其他终态历史上限为 100 条，但 start 的帧估算会先让更早的已结算记录过期。仅经 sessions.delete 删除没有引用的自持阶段 Session，之后才移除最后一条所有权记录。失败/不确定删除保留记录；Session 已删除但记录未移除时重启可复核。覆盖启动/终态/报告结算触发的清理，以及无活动运行时的重试。在存储边界检查固定精度时间戳与内部版本；非法原字节不变。#126 在发布前约束已加载空闲 Session。来源读取、owner CAS、项目默认禁用使用实际绑定，不绕过文件服务。
+12. 保留活动运行和 pending 报告；其他终态历史上限为 100 条，但 start 的帧估算会先让更早的已结算记录过期。仅经 sessions.delete 删除没有引用的自持阶段 Session，之后才移除最后一条所有权记录。失败/不确定删除保留记录；Session 已删除但记录未移除时重启可复核。覆盖启动/终态/报告结算触发的清理，以及无活动运行时的重试。在存储边界检查固定精度时间戳与内部版本；非法原字节不变。运行中阶段每秒等待读取变更标记，存储在未变时不新增读取；写入后（包括替换代际的写入）标记变化，下一次读取即看到新记录。存储替换后标记写入失败时，已提交记录在同一代际内仍可读取。#126 在发布前约束已加载空闲 Session。来源读取、owner CAS、项目默认禁用使用实际绑定，不绕过文件服务。标记变化后存储读取失败则跳过删除并保留原字节。
 13. 经选定包绑定让报告运行在后台运行任务中，验证清理先 join 该任务及其记录写入，再关闭存储；仅有前台 drain 方法不证明此项。持有已准入的原生追加，然后使 Node 崩溃或仅重载固定行：替换行在写入被持有时重新提交，释放后得到该输入的回答；恢复和再次重载均不新增输入。标记开放后、input 前崩溃时，恢复写入一份报告。输入前和发布后的完整宿主重启都只写入一份报告。覆盖发布后 delivered 尚未保存和回复记录替换失败时的恢复，保持只有一份报告。已持有该报告的目标收到重新提交时不新增输入。真实包拒绝内部 v1、未知版本及 pending 缺标记并保留原字节。rejected 转 undeliverable，ambiguous 转 delivered 并记录违约，failed 在下次装载恢复。检查起始方历史中的实际输入数量；显式停止和目标缺失按 §3.4。
-14. 帧限制（A.18）：紧凑 JSON 超过 1 MiB 的定义在 save/list/start 以现有诊断拒绝；会使 `workflow` 文档超过 8 MiB 的用户保存返回 `invalid_definition` 且不改文档；单个运行保存的阶段结果按已提交 JSON 合计最多 512 KiB，超出部分按 UTF-8 边界截断；活动运行准入的存储文本按文件服务序列化后超过 8 MiB 时先让最早的已结算终态运行过期，仍超出则返回 `limit_exceeded` 且不保存运行；引号/反斜杠密集及控制字符结果和日志仍让存储保持在该上限内；`agent_id` 副本计入；列表只发送一次，到 8 MiB 时停止并置 `truncated`；完整 `workflow.status` 回复保持在 8 MiB 内。既有 inner-v2 记录仍可解码。
+14. 帧限制（A.18）：紧凑 JSON 超过 1 MiB 的定义在 save/list/start 以现有诊断拒绝；会使 `workflow` 文档超过 8 MiB 的用户保存返回 `invalid_definition` 且不改文档；单个运行保存的阶段结果按已提交 JSON 合计最多 512 KiB，超出部分按 UTF-8 边界截断；活动运行准入的存储文本按文件服务序列化后超过 8 MiB 时先让最早的已结算终态运行过期，仍超出则返回 `limit_exceeded` 且不保存运行；引号/反斜杠密集及控制字符结果和日志仍让存储保持在该上限内；`agent_id` 副本计入；列表只发送一次，到 8 MiB 时停止并置 `truncated`；完整 `workflow.status` 回复保持在 8 MiB 内。运行中阶段的轮询只承载变更标记，从不承载存储；标记的读取和替换是各自独立的小载荷。既有 inner-v2 记录仍可解码。
 
 ## 附录 E. 假设
 
@@ -612,7 +615,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 
 | 项目 | 状态 |
 | --- | --- |
-| 公开运行存储 | process-typescript §5.2 已提供 pluginFiles，§3.4 的持久化标记、替换失败与宿主重启探针直接采用该绑定；不借用私有 managed 插件入口、不绕过文件服务。 |
+| 公开运行存储 | process-typescript §5.2 已提供 pluginFiles，§3.4 的持久化标记、替换失败与宿主重启探针直接采用该绑定；运行存储和变更标记使用同一 scope，各自读取都是独立的小事务；不借用私有 managed 插件入口、不绕过文件服务。 |
 | 由 Collaboration 成员运行阶段（可能的后续功能） | 未设计。阶段可以在起始方的某个 Collaboration 成员中运行，以便跨阶段复用该成员的上下文。这需要 Collaboration 接受从分支外发出的成员请求。目前每个阶段都在启动的 Session 中运行。 |
 | 包绑定 | §1.3 指定进程行及其 Session 定义、来源归属、包安装选项和管理准入；可选包和业务验收流程已提供。 |
 | 定义来源 | #265 已交付文件授权，来源合同包含定义、受保护启用及两个 A11 并发字段。SDK 与真实包流程覆盖解析、来源身份/优先级、受保护启用、来源默认值、保存定义保留并发字段和后续 start 读取修改后的上限。 |
@@ -631,5 +634,5 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 | 注册到 `managementMethods` 的命名空间 `workflow` | 由 Rpc 按调用查找，不是 Rpc 的依赖（[方法附录 F](../contracts/session-boundary.md#附录-f-rust-绑定)） |
 | sessions | 公开命名 host 服务；原生请求模块、AgentIndex::acquire 为私有实现，不是外部 crate API |
 | workflowRuns | 包实现的业务进程服务；依赖绑定见 §1.1 |
-| 进程存储 | 既有 pluginFiles.open scope，立即登记 effect 清理；A.4 内部 v2 及拒绝 v1、保留原字节已确认，迁移后续统一处理 |
+| 进程存储 | 既有 pluginFiles.open scope，立即登记 effect 清理；A.4 内部 v2、变更标记及拒绝 v1、保留原字节已确认，迁移后续统一处理 |
 | 运行任务 | TypeScript 进程所有者在 `ctx.effect` 中等待已准入调用、并行任务和记录写入结束，再关闭文件作用域 |
