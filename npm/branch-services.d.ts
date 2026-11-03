@@ -361,11 +361,13 @@ export interface Timeline {
    * sequence, ascending, with each event's position and the cursor after
    * them. A chain read is each ancestor to its cut and then this branch to
    * its published head, root first; a range applies to each branch's own
-   * sequence space, and a position without an end means each branch to its
-   * own coverage, so pages compose to the read. A descending page is taken
-   * from the newest end, and the reply is ordered ascending all the same.
-   * The read never returns a fact above a branch's published head, and a
-   * cursor that names a branch the scope does not cover is invalid input.
+   * sequence space and is bounded by the chain's coverage, not this
+   * branch's head alone, and a position without an end means each branch to
+   * its own coverage, so pages compose to the read. A descending page is
+   * taken from the newest end, and the reply is ordered ascending all the
+   * same. The read never returns a fact above a branch's published head,
+   * and a cursor that names a branch the scope does not cover is invalid
+   * input.
    * @throws {AgentErrorThrown}
    */
   query(query: TimelineQuery): Promise<TimelineQueryReply>

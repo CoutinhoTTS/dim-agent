@@ -8335,24 +8335,148 @@ async fn a_range_start_above_the_published_head_is_invalid_input_in_sqlite() {
     let store = SqliteTimelineStore::new(db.clone());
     let (_, child) = tall_chain_histories(store.clone(), 2).await;
 
-    for scope in [Branch, Chain] {
-        assert!(
-            matches!(
-                child
-                    .query(query(
-                        scope,
-                        Range {
-                            start: 3,
-                            end: None
-                        },
-                        16
-                    ))
-                    .await,
-                Err(AgentError::InvalidInput(_))
-            ),
-            "{scope:?}: a start past the queried branch's head is invalid input"
-        );
-    }
+    assert!(
+        matches!(
+            child
+                .query(query(
+                    Branch,
+                    Range {
+                        start: 3,
+                        end: None
+                    },
+                    16
+                ))
+                .await,
+            Err(AgentError::InvalidInput(_))
+        ),
+        "a branch-scoped start past the branch's head is invalid input"
+    );
+    assert!(
+        matches!(
+            child
+                .query(query(
+                    Chain,
+                    Range {
+                        start: 6,
+                        end: None
+                    },
+                    16
+                ))
+                .await,
+            Err(AgentError::InvalidInput(_))
+        ),
+        "a chain-scoped start past the chain's coverage is invalid input"
+    );
+    assert!(
+        matches!(
+            child
+                .query(query(
+                    Chain,
+                    Range {
+                        start: 1,
+                        end: Some(6)
+                    },
+                    16
+                ))
+                .await,
+            Err(AgentError::InvalidInput(_))
+        ),
+        "a chain-scoped end past the chain's coverage is invalid input"
+    );
+
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_chain_read_on_an_empty_branch_returns_its_ancestor_facts_from_sqlite() {
+    use dim_agent_runtime::TimelineQueryPosition::Range;
+    use dim_agent_runtime::TimelineQueryScope::Chain;
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let (_, child) = tall_chain_histories(store.clone(), 0).await;
+
+    let reply = child
+        .query(query(
+            Chain,
+            Range {
+                start: 1,
+                end: None,
+            },
+            16,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        position_pairs(&reply),
+        [
+            ("main".into(), 1),
+            ("main".into(), 2),
+            ("main".into(), 3),
+            ("main".into(), 4),
+            ("main".into(), 5)
+        ],
+        "a read branch with no facts still reaches its ancestors"
+    );
+    assert_eq!(reply.next, None);
+
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_chain_range_start_above_the_read_branch_returns_ancestor_facts_from_sqlite() {
+    use dim_agent_runtime::TimelineQueryPosition::Range;
+    use dim_agent_runtime::TimelineQueryScope::Chain;
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let (_, child) = tall_chain_histories(store.clone(), 2).await;
+
+    let above = child
+        .query(query(
+            Chain,
+            Range {
+                start: 3,
+                end: None,
+            },
+            16,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        position_pairs(&above),
+        [("main".into(), 3), ("main".into(), 4), ("main".into(), 5)],
+        "a start above the read branch's head reads the ancestor's facts above it"
+    );
+
+    let covered = child
+        .query(query(
+            Chain,
+            Range {
+                start: 1,
+                end: Some(5),
+            },
+            16,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        position_pairs(&covered),
+        [
+            ("main".into(), 1),
+            ("main".into(), 2),
+            ("main".into(), 3),
+            ("main".into(), 4),
+            ("main".into(), 5),
+            ("child".into(), 1),
+            ("child".into(), 2)
+        ],
+        "the ancestor reads to the end and the read branch to the lower of it and its head"
+    );
 
     store.close().await.unwrap();
     db.close().await.unwrap();

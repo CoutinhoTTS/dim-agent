@@ -776,6 +776,14 @@ fn queried(events: &[Arc<AgentEvent>]) -> Vec<String> {
     events.iter().map(|event| event.id.clone()).collect()
 }
 
+fn query_pairs(reply: &dim_agent_runtime::TimelineQueryReply) -> Vec<(&str, u64)> {
+    reply
+        .positions
+        .iter()
+        .map(|position| (position.branch_id.as_str(), position.sequence))
+        .collect()
+}
+
 fn branch_create(branch: &str, at: u64) -> EventDraft {
     EventKind::BranchCreate(BranchCreateData {
         at: BranchCreateAt::Sequence { sequence: at },
@@ -1839,23 +1847,151 @@ async fn a_range_start_above_the_published_head_is_invalid_input() {
     use dim_agent_runtime::TimelineQueryScope::{Branch, Chain};
 
     let (_, child) = chain_with_a_tall_ancestor(5, 2).await;
-    for scope in [Branch, Chain] {
-        assert!(
-            matches!(
-                child
-                    .query(branch_query(
-                        scope,
-                        Range {
-                            start: 3,
-                            end: None
-                        }
-                    ))
-                    .await,
-                Err(AgentError::InvalidInput(_))
-            ),
-            "{scope:?}: a start past the queried branch's head is invalid input"
-        );
-    }
+    assert!(
+        matches!(
+            child
+                .query(branch_query(
+                    Branch,
+                    Range {
+                        start: 3,
+                        end: None
+                    }
+                ))
+                .await,
+            Err(AgentError::InvalidInput(_))
+        ),
+        "a branch-scoped start past the branch's head is invalid input"
+    );
+    assert!(
+        matches!(
+            child
+                .query(branch_query(
+                    Chain,
+                    Range {
+                        start: 6,
+                        end: None
+                    }
+                ))
+                .await,
+            Err(AgentError::InvalidInput(_))
+        ),
+        "a chain-scoped start past the chain's coverage is invalid input"
+    );
+    assert!(
+        matches!(
+            child
+                .query(branch_query(
+                    Chain,
+                    Range {
+                        start: 1,
+                        end: Some(6)
+                    }
+                ))
+                .await,
+            Err(AgentError::InvalidInput(_))
+        ),
+        "a chain-scoped end past the chain's coverage is invalid input"
+    );
+}
+
+#[tokio::test]
+async fn a_chain_read_on_an_empty_branch_returns_its_ancestor_facts() {
+    use dim_agent_runtime::TimelineQueryPosition::Range;
+    use dim_agent_runtime::TimelineQueryScope::Chain;
+
+    let (_, child) = chain_with_a_tall_ancestor(5, 0).await;
+    let reply = child
+        .query(branch_query(
+            Chain,
+            Range {
+                start: 1,
+                end: None,
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        query_pairs(&reply),
+        [
+            ("main", 1),
+            ("main", 2),
+            ("main", 3),
+            ("main", 4),
+            ("main", 5)
+        ],
+        "a read branch with no facts still reaches its ancestors"
+    );
+    assert_eq!(reply.next, None);
+
+    let above = child
+        .query(branch_query(
+            Chain,
+            Range {
+                start: 1,
+                end: Some(5),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        query_pairs(&above),
+        [
+            ("main", 1),
+            ("main", 2),
+            ("main", 3),
+            ("main", 4),
+            ("main", 5)
+        ],
+        "a chain range end inside the ancestor's coverage is valid"
+    );
+}
+
+#[tokio::test]
+async fn a_chain_range_start_above_the_read_branch_returns_ancestor_facts() {
+    use dim_agent_runtime::TimelineQueryPosition::Range;
+    use dim_agent_runtime::TimelineQueryScope::Chain;
+
+    let (_, child) = chain_with_a_tall_ancestor(5, 2).await;
+    let reply = child
+        .query(branch_query(
+            Chain,
+            Range {
+                start: 3,
+                end: None,
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        query_pairs(&reply),
+        [("main", 3), ("main", 4), ("main", 5)],
+        "a start above the read branch's head reads the ancestor's facts above it"
+    );
+    assert_eq!(reply.next, None);
+
+    let covered = child
+        .query(branch_query(
+            Chain,
+            Range {
+                start: 1,
+                end: Some(5),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        query_pairs(&covered),
+        [
+            ("main", 1),
+            ("main", 2),
+            ("main", 3),
+            ("main", 4),
+            ("main", 5),
+            ("child", 1),
+            ("child", 2)
+        ],
+        "the ancestor reads to the end and the read branch to the lower of it and its head"
+    );
 }
 
 #[test]
