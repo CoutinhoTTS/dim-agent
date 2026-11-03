@@ -371,7 +371,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
 
         // sessions_panel.rs
         "Sessions" => "セッション",
-        "Enter open · Ctrl+R refresh · Esc close" => "Enter 開く · Ctrl+R 更新 · Esc 閉じる",
+        "Sessions · This workspace" => "セッション · このワークスペース",
+        "Sessions · This repository" => "セッション · このリポジトリ",
+        "Sessions · All workspaces" => "セッション · すべてのワークスペース",
+        "No saved sessions in this workspace. Ctrl+S shows more." => {
+            "このワークスペースに保存済みセッションはありません。Ctrl+S で他のワークスペースを表示します。"
+        }
+        "Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close" => {
+            "Enter 開く · Ctrl+S 範囲 · Ctrl+R 更新 · Esc 閉じる"
+        }
         "Loading sessions..." => "セッションを読込中…",
         "No saved sessions yet." => "保存済みセッションなし。",
         "No matching sessions." => "一致するセッションなし。",

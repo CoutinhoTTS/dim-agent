@@ -209,7 +209,7 @@ fn without_switch_columns(database: &Path) {
         .prepare(
             "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='timeline_events' \
              AND name NOT IN ('timeline_events_render', 'timeline_events_state', \
-             'timeline_events_positions') AND sql IS NOT NULL",
+             'timeline_events_context', 'timeline_events_positions') AND sql IS NOT NULL",
         )
         .unwrap()
         .query_map([], |row| row.get(0))
@@ -405,6 +405,7 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             (29, "", false),
             (30, "", false),
             (31, "", false),
+            (32, "", false),
         ] {
             let older = directory.join(format!("copies/v{version}.sqlite"));
             let catalog = if version < 23 {
@@ -436,6 +437,12 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
                 INSERT INTO agent_store_format VALUES ({version});"));
             if version < 31 {
                 without_switch_columns(&older);
+            } else if version == 31 {
+                rusqlite::Connection::open(&older).unwrap().execute_batch(
+                    "DROP INDEX timeline_events_context;
+                     CREATE INDEX timeline_events_render ON timeline_events(session_id, branch_id, sequence) WHERE context_render = 1;
+                     CREATE INDEX timeline_events_state ON timeline_events(session_id, branch_id, sequence) WHERE context_state = 1;"
+                ).unwrap();
             }
             if version < 30 {
                 without_origin_column(&older);
@@ -453,8 +460,8 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
 
         for (name, sql) in [
             ("newer.sqlite", "DROP TABLE agent_store_format;
-                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 33));
-                INSERT INTO agent_store_format VALUES (33);"),
+                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 34));
+                INSERT INTO agent_store_format VALUES (34);"),
             ("changed.sqlite", "CREATE TABLE extra (id TEXT)"),
         ] {
             let path = directory.join("copies").join(name);

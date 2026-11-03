@@ -754,7 +754,7 @@ directories with no associations. Results describe usage only; callers must reve
 using them for recognition or a separately authorized cleanup. Session close preserves the records. A fork
 copies neither associations nor recognition state; its first use must establish its own relationship.
 These operations produce no Timeline event and no client notification. They add no plugin.
-The native format decision belongs to [storage v32](native-storage-format.md#911-v32-格式决定).
+The native format decision belongs to [storage v33](native-storage-format.md#911-v33-格式决定).
 
 ## Appendix A. Rust binding
 

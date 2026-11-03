@@ -151,6 +151,11 @@ impl ListPanel {
         self.title = Title::Set(title.into());
     }
 
+    /// A list whose empty text follows the view it shows replaces it here.
+    pub fn set_empty_text(&mut self, empty_text: &'static str) {
+        self.empty_text = empty_text;
+    }
+
     /// Explanatory paragraphs below the choices, separate from keyboard hints.
     pub fn with_notes(mut self, notes: Vec<String>) -> Self {
         self.notes = notes;

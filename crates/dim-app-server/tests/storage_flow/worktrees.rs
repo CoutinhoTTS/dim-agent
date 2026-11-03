@@ -279,33 +279,33 @@ async fn worktree_association_cannot_outlive_delete_or_creation_rollback() {
 }
 
 #[tokio::test]
-async fn a_v31_store_upgrades_without_inventing_worktree_usage() {
+async fn a_v32_store_upgrades_without_inventing_worktree_usage() {
     let database = Database::new();
     let connection = Connection::open(&database.0).unwrap();
-    let mut statements = schema_of(31);
+    let mut statements = schema_of(32);
     statements.sort_by_key(|sql| sql.starts_with("CREATE INDEX"));
     for sql in statements {
         connection.execute_batch(&sql).unwrap();
     }
     connection
-        .execute("INSERT INTO agent_store_format VALUES (31)", [])
+        .execute("INSERT INTO agent_store_format VALUES (32)", [])
         .unwrap();
     insert_documented_records(
         &connection,
         &BUSINESS_TABLES
             .iter()
             .copied()
-            .filter(|table| !V32_TABLES.contains(table))
+            .filter(|table| !V33_TABLES.contains(table))
             .collect::<Vec<_>>(),
     );
     let before: Vec<_> = BUSINESS_TABLES
         .iter()
-        .filter(|table| !V32_TABLES.contains(table))
+        .filter(|table| !V33_TABLES.contains(table))
         .map(|table| rows(&connection, table))
         .collect();
     drop(connection);
     let db = SqliteStorage::open(database.0.clone()).unwrap();
-    assert_eq!(db.upgraded_from(), Some(31));
+    assert_eq!(db.upgraded_from(), Some(32));
     let sessions = SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
     assert!(sessions.worktree_directories().await.unwrap().is_empty());
     let store = SqliteTimelineStore::new(db.clone());
@@ -317,7 +317,7 @@ async fn a_v31_store_upgrades_without_inventing_worktree_usage() {
     assert_eq!(marker(&connection), [i64::from(STORE_FORMAT)]);
     let after: Vec<_> = BUSINESS_TABLES
         .iter()
-        .filter(|table| !V32_TABLES.contains(table))
+        .filter(|table| !V33_TABLES.contains(table))
         .map(|table| rows(&connection, table))
         .collect();
     assert_eq!(after, before);
@@ -326,4 +326,24 @@ async fn a_v31_store_upgrades_without_inventing_worktree_usage() {
     let db = SqliteStorage::open(database.0.clone()).unwrap();
     assert_eq!(db.upgraded_from(), None);
     db.close().await.unwrap();
+    let incompatible = Database::new();
+    let connection = Connection::open(&incompatible.0).unwrap();
+    let mut statements = schema_of(31);
+    statements.sort_by_key(|sql| sql.starts_with("CREATE INDEX"));
+    for sql in statements {
+        connection
+            .execute_batch(&sql.replace("(version = 31)", "(version = 32)"))
+            .unwrap();
+    }
+    for sql in V33_ADDITIONS {
+        connection.execute_batch(sql).unwrap();
+    }
+    connection
+        .execute("INSERT INTO agent_store_format VALUES (32)", [])
+        .unwrap();
+    drop(connection);
+    let before = std::fs::read(&incompatible.0).unwrap();
+    assert!(SqliteStorage::open_read_only(incompatible.0.clone()).is_err());
+    assert!(SqliteStorage::open(incompatible.0.clone()).is_err());
+    assert_eq!(std::fs::read(&incompatible.0).unwrap(), before);
 }

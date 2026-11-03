@@ -227,7 +227,7 @@ const V15_TABLES: [&str; 2] = ["session_files", "session_file_owners"];
 const V16_TABLES: [&str; 1] = ["session_metadata"];
 const V28_TABLES: [&str; 1] = ["session_grants"];
 const V29_TABLES: [&str; 1] = ["session_output_owners"];
-const V32_TABLES: [&str; 2] = ["worktree_directories", "session_worktrees"];
+const V33_TABLES: [&str; 2] = ["worktree_directories", "session_worktrees"];
 /// The columns `table` has, so a record example written for a later format
 /// contributes only the cells an older table can hold.
 fn table_columns(connection: &Connection, table: &str) -> Vec<String> {
@@ -341,11 +341,17 @@ const V29_ADDITIONS: &[&str] = &[
     "CREATE INDEX session_output_owners_by_path ON session_output_owners(path)",
 ];
 const V31_ADDITIONS: &[&str] = &[
-    "CREATE INDEX timeline_events_render ON timeline_events(session_id, branch_id, sequence) WHERE context_render = 1",
-    "CREATE INDEX timeline_events_state ON timeline_events(session_id, branch_id, sequence) WHERE context_state = 1",
     "CREATE INDEX timeline_events_positions ON timeline_events(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'context/compaction-start', 'context/compaction')",
 ];
+/// The two indexes v31 added and v32 replaces with one.
+const V31_REPLACED: &[&str] = &[
+    "CREATE INDEX timeline_events_render ON timeline_events(session_id, branch_id, sequence) WHERE context_render = 1",
+    "CREATE INDEX timeline_events_state ON timeline_events(session_id, branch_id, sequence) WHERE context_state = 1",
+];
 const V32_ADDITIONS: &[&str] = &[
+    "CREATE INDEX timeline_events_context ON timeline_events(session_id, branch_id, sequence) WHERE context_render = 1 OR context_state = 1",
+];
+const V33_ADDITIONS: &[&str] = &[
     "CREATE TABLE worktree_directories (repository TEXT NOT NULL, root TEXT NOT NULL, PRIMARY KEY (repository, root))",
     "CREATE TABLE session_worktrees (session_id TEXT NOT NULL REFERENCES agent_sessions(session_id), repository TEXT NOT NULL, root TEXT NOT NULL, subtree TEXT NOT NULL, PRIMARY KEY (session_id, repository, root), FOREIGN KEY (repository, root) REFERENCES worktree_directories(repository, root))",
     "CREATE INDEX session_worktrees_by_directory ON session_worktrees(repository, root, session_id)",
@@ -364,8 +370,10 @@ fn schema_of(version: u32) -> Vec<String> {
         .chain(V27_ADDITIONS.iter().filter(|_| version >= 27))
         .chain(V28_ADDITIONS.iter().filter(|_| version >= 28))
         .chain(V29_ADDITIONS.iter().filter(|_| version >= 29))
+        .chain(V31_REPLACED.iter().filter(|_| version == 31))
         .chain(V31_ADDITIONS.iter().filter(|_| version >= 31))
         .chain(V32_ADDITIONS.iter().filter(|_| version >= 32))
+        .chain(V33_ADDITIONS.iter().filter(|_| version >= 33))
         .filter(|sql| version <= 24 || !sql.starts_with("CREATE INDEX timeline_events_by_end "))
         .map(|sql| sql.replace("(version = 13)", &format!("(version = {version})")))
         .map(|sql| {
@@ -3667,8 +3675,8 @@ fn a_newer_store_leaves_an_actionable_startup_note() {
     Connection::open(&database.0)
         .unwrap()
         .execute_batch(
-            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 33));
-             INSERT INTO agent_store_format VALUES (33);",
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 34));
+             INSERT INTO agent_store_format VALUES (34);",
         )
         .unwrap();
     let original = std::fs::read(&database.0).unwrap();
@@ -3678,10 +3686,10 @@ fn a_newer_store_leaves_an_actionable_startup_note() {
     assert!(message.contains("unsupported SQLite schema"), "{message}");
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
-    assert!(note.contains("Store format: v33"), "{note}");
-    assert!(note.contains("Daemon format: v32"), "{note}");
+    assert!(note.contains("Store format: v34"), "{note}");
+    assert!(note.contains("Daemon format: v33"), "{note}");
     assert!(note.contains("Existing data was preserved"), "{note}");
-    assert!(note.contains("Run a build supporting v33"), "{note}");
+    assert!(note.contains("Run a build supporting v34"), "{note}");
     assert!(note.contains("--home PATH"), "{note}");
 }
 
@@ -3699,7 +3707,7 @@ fn a_mismatched_store_note_does_not_claim_a_downgrade() {
     assert!(SqliteStorage::open(database.0.clone()).is_err());
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
-    assert!(note.contains("Store format: v29 (schema is v32)"), "{note}");
+    assert!(note.contains("Store format: v29 (schema is v33)"), "{note}");
     assert!(note.contains("marker and schema disagree"), "{note}");
     assert!(
         note.contains("Use the build that wrote this store"),
@@ -3714,7 +3722,7 @@ fn an_older_known_schema_with_a_newer_marker_is_a_mismatch() {
     let connection = v13_store(&database.0);
     connection
         .execute_batch(
-            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=31",
+            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=32",
         )
         .unwrap();
     drop(connection);
@@ -3722,7 +3730,7 @@ fn an_older_known_schema_with_a_newer_marker_is_a_mismatch() {
     assert!(SqliteStorage::open(database.0.clone()).is_err());
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
-    assert!(note.contains("Store format: v31 (schema is v13)"), "{note}");
+    assert!(note.contains("Store format: v32 (schema is v13)"), "{note}");
     assert!(
         note.contains("Use the build that wrote this store"),
         "{note}"
@@ -3743,7 +3751,7 @@ fn an_empty_marker_table_is_reported_as_missing_or_ambiguous() {
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
     assert!(
-        note.contains("Store format: v32 (format marker is missing or ambiguous)"),
+        note.contains("Store format: v33 (format marker is missing or ambiguous)"),
         "{note}"
     );
     assert!(!note.contains("Run a build supporting"), "{note}");
@@ -3836,20 +3844,20 @@ fn a_failed_open_replaces_the_previous_startup_note() {
     Connection::open(&database.0)
         .unwrap()
         .execute_batch(
-            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 33));
-             INSERT INTO agent_store_format VALUES (33);",
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 34));
+             INSERT INTO agent_store_format VALUES (34);",
         )
         .unwrap();
     std::fs::write(
         startup_note(&database.0),
-        "dimcode-startup-failure v1 pid=1\nCannot open native store /previous.\n  Store format: v34\n",
+        "dimcode-startup-failure v1 pid=1\nCannot open native store /previous.\n  Store format: v35\n",
     )
     .unwrap();
     assert!(SqliteStorage::open(database.0.clone()).is_err());
     let note = read_startup_note(&database.0);
-    assert!(note.contains("Store format: v33"), "{note}");
+    assert!(note.contains("Store format: v34"), "{note}");
     assert!(!note.contains("/previous"), "{note}");
-    assert!(!note.contains("v34"), "{note}");
+    assert!(!note.contains("v35"), "{note}");
 }
 
 #[test]
@@ -3895,7 +3903,7 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
         .chain(["session_catalog"].iter().filter(|_| from < 23))
         .chain(V28_TABLES.iter().filter(|_| from < 28))
         .chain(V29_TABLES.iter().filter(|_| from < 29))
-        .chain(V32_TABLES.iter().filter(|_| from < 32))
+        .chain(V33_TABLES.iter().filter(|_| from < 33))
         .copied()
         .collect();
     let kept: Vec<&str> = BUSINESS_TABLES
@@ -3904,11 +3912,39 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
         .copied()
         .collect();
     insert_documented_records(&connection, &kept);
+    if from >= 31 {
+        let keys = |list: &[&str]| {
+            list.iter()
+                .map(|key| format!("'{key}'"))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        connection
+            .execute_batch(&format!(
+                "UPDATE timeline_events SET context_render=1 WHERE kind IN ({});",
+                keys(dim_agent_types::CONTEXT_RENDER_KEYS)
+            ))
+            .unwrap();
+        connection
+            .execute_batch(&format!(
+                "UPDATE timeline_events SET context_state=1 WHERE kind IN ({});",
+                keys(dim_agent_types::CONTEXT_STATE_KEYS)
+            ))
+            .unwrap();
+    }
     if from >= 27 {
         connection
             .execute(
                 "INSERT INTO agent_sessions (session_id, config, created_at_ms, leader_session_id) \
                  SELECT 'member', config, created_at_ms, 's1' FROM agent_sessions WHERE session_id='s1'",
+                [],
+            )
+            .unwrap();
+    }
+    if from >= 30 {
+        connection
+            .execute(
+                "UPDATE agent_sessions SET origin='internal' WHERE session_id='member'",
                 [],
             )
             .unwrap();
@@ -3963,7 +3999,7 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
                     |row| row.get::<_, String>(0)
                 )
                 .unwrap(),
-            "unknown"
+            if from >= 30 { "client" } else { "unknown" }
         );
     }
     for table in added {
@@ -7212,6 +7248,24 @@ async fn a_v29_store_upgrades_in_place_once() {
     upgrades_in_place_once(&database, connection, 29).await;
 }
 
+/// #605: the two reading-switch indexes become one, and the switch values and
+/// every row stay.
+#[tokio::test]
+async fn a_v31_store_upgrades_in_place_once() {
+    let database = Database::new();
+    let connection = Connection::open(&database.0).unwrap();
+    let mut statements = schema_of(31);
+    statements.sort_by_key(|sql| !sql.starts_with("CREATE TABLE"));
+    for sql in statements {
+        connection.execute_batch(&sql).unwrap();
+    }
+    connection
+        .execute("INSERT INTO agent_store_format VALUES (31)", [])
+        .unwrap();
+    assert_eq!(schema(&connection), schema_of(31));
+    upgrades_in_place_once(&database, connection, 31).await;
+}
+
 /// Grants upsert without downgrading write, survive a restart, are absent
 /// from a fork, and remove takes the same path it added.
 #[tokio::test]
@@ -7423,6 +7477,110 @@ async fn the_history_window_index_is_created_at_open_without_a_format_step() {
     let (read, format) = SqliteStorage::open_read_only(database.0.clone()).unwrap();
     assert_eq!(format, STORE_FORMAT);
     read.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_kind_page_walks_a_fixed_head_backwards_by_stored_row() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let sessions =
+        dim_app_server::storage::SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
+    let store = sessions.timeline_store();
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let mut records = vec![
+        record(
+            1,
+            EventKind::TurnStart(TurnStartData {
+                turn_id: "turn".into(),
+            }),
+        ),
+        record(
+            2,
+            EventKind::InputMessage(InputMessageData::text("go", Some(InputMode::Queue))),
+        ),
+    ];
+    records.extend((3..=6).map(|sequence| {
+        let mut event = text(sequence, "delta");
+        event.batch_end = 6;
+        event
+    }));
+    records.push(record(
+        7,
+        EventKind::Thinking(ThinkingData {
+            turn_id: "turn".into(),
+            request_id: "request".into(),
+            delta: "thinking".into(),
+        }),
+    ));
+    records.push(record(
+        8,
+        EventKind::TurnEnd(TurnEndData {
+            turn_id: "turn".into(),
+            outcome: TurnOutcome::Completed {
+                reason: "end_turn".into(),
+            },
+        }),
+    ));
+    let (published, receiver) = tokio::sync::oneshot::channel();
+    store
+        .append(
+            key("session", "main"),
+            records,
+            Box::new(move |result| {
+                let _ = published.send(result);
+            }),
+        )
+        .unwrap();
+    tokio::time::timeout(PUBLISHED, receiver)
+        .await
+        .expect("the writer did not publish the write")
+        .unwrap()
+        .unwrap();
+
+    let kinds = ["turn/start", "input/message", "step/text", "turn/end"];
+    let first = store
+        .read_kind_page(&key("session", "main"), &kinds, 8, 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        first
+            .iter()
+            .map(|record| record.event.sequence)
+            .collect::<Vec<_>>(),
+        vec![3, 4, 5, 6, 8],
+        "the newest two matching rows, the streamed row whole, oldest first"
+    );
+    let next = store
+        .read_kind_page(&key("session", "main"), &kinds, 2, 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        next.iter()
+            .map(|record| record.event.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert!(
+        store
+            .read_kind_page(&key("session", "main"), &kinds, 0, 2)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .read_kind_page(&key("session", "main"), &[], 8, 2)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    drop(store);
+    drop(sessions);
+    db.close().await.unwrap();
 }
 
 /// A window's fixed watermark must end a batch: two events committed as one
