@@ -10,7 +10,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "↑↓ move · 1-9 select · Enter apply · Esc cancel" => {
             "↑↓ déplacer · 1-9 choisir · Enter appliquer · Esc annuler"
         }
-        "Esc cancel" => "Esc annuler",
         "Model changed; reopen /effort to choose its reasoning effort." => {
             "Le modèle a changé ; rouvrez /effort pour choisir son effort de raisonnement."
         }

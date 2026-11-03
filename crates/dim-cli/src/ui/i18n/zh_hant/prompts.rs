@@ -8,7 +8,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "↑↓ move · 1-9 select · Enter apply · Esc cancel" => {
             "↑↓ 移動 · 1-9 選擇 · Enter 套用 · Esc 取消"
         }
-        "Esc cancel" => "Esc 取消",
         "Model changed; reopen /effort to choose its reasoning effort." => {
             "模型已切換，請重新開啟 /effort 選擇推理強度。"
         }
