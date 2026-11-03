@@ -347,10 +347,11 @@ pub trait TimelineStore: Send + Sync + 'static {
     /// crosses an atomic batch: an ascending page ends at a batch end, so its
     /// cursor must end one, and a descending page starts at a batch end, so
     /// its cursor must start one (or name no sequence to read). A range end,
-    /// or a cursor's named through, must end a batch in both directions; an
-    /// absent cursor through reads to the branch head. The limit is a target:
-    /// a reply ends at an atomic batch boundary, so its last batch may take it
-    /// above the limit.
+    /// or a cursor's named through when it bounds the read from above, must
+    /// end a batch; in a descending read the through is the lower bound and
+    /// may fall inside one, and an absent through reads down to sequence 1.
+    /// The limit is a target: a reply ends at an atomic batch boundary, so its
+    /// last batch may take it above the limit.
     ///
     /// `next` is present whenever the read stopped before the end of its
     /// position, so a caller never mistakes a short page for the end of its

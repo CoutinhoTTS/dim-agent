@@ -63,8 +63,10 @@ impl TimelineQueryFlag {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum TimelineQueryPosition {
-    /// Sequences `start..=end`, both included. `end` defaults to the queried
-    /// branch's published head and may not exceed it; in a chain read it
+    /// Sequences `start..=end`, both included. `end` defaults to each
+    /// branch's own coverage; when it is named it is bounded by the scope's
+    /// coverage: the branch's published head for a branch scope, the largest
+    /// ancestor cut or head for a chain scope. In a chain read the range
     /// applies to each branch's own sequence space, to that branch's cut or
     /// the end, whichever is lower.
     Range {

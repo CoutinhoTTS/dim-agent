@@ -8203,6 +8203,83 @@ async fn a_paged_chain_read_returns_every_ancestor_fact_once_from_sqlite() {
 }
 
 #[tokio::test]
+async fn a_paged_descending_chain_read_returns_every_fact_once_from_sqlite() {
+    use dim_agent_runtime::TimelineQueryDirection::Descending;
+    use dim_agent_runtime::TimelineQueryPosition::{Cursor, Range};
+    use dim_agent_runtime::TimelineQueryScope::Chain;
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let (_, child) = tall_chain_histories(store.clone(), 3).await;
+
+    let whole = child
+        .query(query(
+            Chain,
+            Range {
+                start: 1,
+                end: None,
+            },
+            16,
+        ))
+        .await
+        .unwrap();
+    let mut position = Range {
+        start: 1,
+        end: None,
+    };
+    let mut paged = Vec::new();
+    for page in 0..8 {
+        let reply = child
+            .query(dim_agent_runtime::TimelineQuery {
+                position,
+                direction: Descending,
+                limit: std::num::NonZeroU64::new(2).unwrap(),
+                ..query(
+                    Chain,
+                    Range {
+                        start: 1,
+                        end: None,
+                    },
+                    16,
+                )
+            })
+            .await
+            .unwrap();
+        if page == 0 {
+            assert_eq!(
+                position_pairs(&reply),
+                [("child".into(), 2), ("child".into(), 3)],
+                "the first descending page takes the newest facts and replies ascending"
+            );
+        }
+        paged.extend(position_pairs(&reply));
+        match reply.next {
+            Some(next) => {
+                position = Cursor {
+                    cursor: next,
+                    through: None,
+                }
+            }
+            None => {
+                assert_eq!(page, 3, "four pages cover the whole chain");
+                break;
+            }
+        }
+    }
+    paged.sort();
+    let mut expected = position_pairs(&whole);
+    expected.sort();
+    assert_eq!(
+        paged, expected,
+        "the descending pages compose to the single-page read, every fact exactly once"
+    );
+
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_cursor_on_an_ancestor_is_checked_against_that_ancestor_in_sqlite() {
     use dim_agent_runtime::TimelineQueryPosition::{Cursor, Range};
     use dim_agent_runtime::TimelineQueryScope::Chain;

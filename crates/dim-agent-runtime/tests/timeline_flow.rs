@@ -1717,6 +1717,88 @@ async fn a_paged_chain_read_returns_every_ancestor_fact_once() {
 }
 
 #[tokio::test]
+async fn a_paged_descending_chain_read_returns_every_fact_once() {
+    use dim_agent_runtime::TimelineQueryDirection::Descending;
+    use dim_agent_runtime::TimelineQueryPosition::{Cursor, Range};
+    use dim_agent_runtime::TimelineQueryScope::Chain;
+
+    let (_, child) = chain_with_a_tall_ancestor(5, 3).await;
+    let whole = child
+        .query(branch_query(
+            Chain,
+            Range {
+                start: 1,
+                end: None,
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(whole.positions.len(), 8);
+
+    let mut position = Range {
+        start: 1,
+        end: None,
+    };
+    let mut paged: Vec<TimelinePosition> = Vec::new();
+    for page in 0..8 {
+        let reply = child
+            .query(dim_agent_runtime::TimelineQuery {
+                position,
+                direction: Descending,
+                limit: std::num::NonZeroU64::new(2).unwrap(),
+                ..branch_query(
+                    Chain,
+                    Range {
+                        start: 1,
+                        end: None,
+                    },
+                )
+            })
+            .await
+            .unwrap();
+        if page == 0 {
+            assert_eq!(
+                reply
+                    .positions
+                    .iter()
+                    .map(|position| (position.branch_id.as_str(), position.sequence))
+                    .collect::<Vec<_>>(),
+                [("child", 2), ("child", 3)],
+                "the first descending page takes the newest facts and replies ascending"
+            );
+        }
+        paged.extend(reply.positions.iter().cloned());
+        match reply.next {
+            Some(next) => {
+                position = Cursor {
+                    cursor: next,
+                    through: None,
+                }
+            }
+            None => {
+                assert_eq!(page, 3, "four pages cover the whole chain");
+                break;
+            }
+        }
+    }
+    let mut paged: Vec<(String, u64)> = paged
+        .into_iter()
+        .map(|position| (position.branch_id, position.sequence))
+        .collect();
+    paged.sort();
+    let mut expected: Vec<(String, u64)> = whole
+        .positions
+        .iter()
+        .map(|position| (position.branch_id.clone(), position.sequence))
+        .collect();
+    expected.sort();
+    assert_eq!(
+        paged, expected,
+        "the descending pages compose to the single-page read, every fact exactly once"
+    );
+}
+
+#[tokio::test]
 async fn a_cursor_on_an_ancestor_is_checked_against_that_ancestor() {
     use dim_agent_runtime::TimelineQueryPosition::{Cursor, Range};
     use dim_agent_runtime::TimelineQueryScope::Chain;

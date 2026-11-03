@@ -246,7 +246,7 @@ export interface TimelineCursor {
 
 /** Where a query starts. */
 export type TimelineQueryPosition =
-  | /** Sequences `start..=end`, both included. `end` defaults to the queried branch's published head and may not exceed it; in a chain read it applies to each branch's own sequence space, to that branch's cut or the end, whichever is lower. */ { kind: "range"; start: number | bigint; end?: number | bigint | null }
+  | /** Sequences `start..=end`, both included. `end` defaults to each branch's own coverage; when it is named it is bounded by the scope's coverage: the branch's published head for a branch scope, the largest ancestor cut or head for a chain scope. In a chain read the range applies to each branch's own sequence space, to that branch's cut or the end, whichever is lower. */ { kind: "range"; start: number | bigint; end?: number | bigint | null }
   | /** Continues from `cursor` in the query's direction, through `through` when it is named: ascending reads above the cursor through it, and descending reads below the cursor down through it. Without it, every branch is read to its own coverage, an ancestor to its cut and the queried branch to its published head, so pages compose to the read `Range { end: None }` makes. */ { kind: "cursor"; cursor: TimelineCursor; through?: number | bigint | null }
 
 /**
