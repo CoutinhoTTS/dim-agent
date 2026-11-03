@@ -1175,7 +1175,7 @@ impl ContextPolicy {
             None => {
                 let facts = self
                     .timeline
-                    .policy_facts(self.timeline.committed(), "")
+                    .policy_facts(self.timeline.sequence(), "")
                     .await
                     .map_err(|error| HostError::failed(error.to_string()))?;
                 self.estimate(&request, model.as_ref(), &facts.arcs())?

@@ -545,7 +545,7 @@ impl ContextPreparation {
         let policy = self.policy.as_ref().ok_or_else(|| {
             ContextOpError::Model(HostError::failed("Context compaction is not available"))
         })?;
-        let through = self.timeline.committed();
+        let through = self.timeline.sequence();
         let facts = self
             .timeline
             .policy_facts(through, "")

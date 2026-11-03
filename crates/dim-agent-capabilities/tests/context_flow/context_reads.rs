@@ -419,6 +419,71 @@ impl TimelineStore for CountContextReads {
     }
 }
 
+/// `/usage` reads what the branch has published: a fact that holds its
+/// sequence but is not published yet is not a read point the policy refuses,
+/// and the usage is answered while it is in flight.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usage_reads_the_published_head_while_a_fact_is_in_flight() {
+    let (publication, mut publications) =
+        tokio::sync::mpsc::unbounded_channel::<DeferredPublication>();
+    let hold = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let in_flight = Arc::new(tokio::sync::Notify::new());
+    let held_publication = {
+        let (hold, in_flight) = (hold.clone(), in_flight.clone());
+        tokio::spawn(async move {
+            while let Some((_, publish, result)) = publications.recv().await {
+                while hold.load(Ordering::SeqCst) {
+                    in_flight.notify_one();
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                publish(result);
+            }
+        })
+    };
+    let store = Arc::new(CountContextReads {
+        publication: Some(publication),
+        ..CountContextReads::default()
+    });
+    let mut builder = builder_with_context(
+        Arc::new(EchoModel),
+        HistoryRenderer::default(),
+        Context {
+            threshold: Some(900.),
+            ..Context::default()
+        },
+    );
+    builder.timeline_store(store.clone());
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    session
+        .submit("first".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    hold.store(true, Ordering::SeqCst);
+    session.interrupt("main", "usage read".into()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), in_flight.notified())
+        .await
+        .expect("a fact is in flight");
+    let preparation = session
+        .service::<dim_agent_capabilities::context_preparation::ContextPreparation>("main")
+        .unwrap();
+    let usage = preparation.usage(CancellationToken::new()).await;
+    hold.store(false, Ordering::SeqCst);
+    assert!(
+        !matches!(
+            usage,
+            Err(dim_agent_capabilities::context_preparation::ContextOpError::Read(_))
+        ),
+        "an in-flight fact made the usage a refused read: {usage:?}"
+    );
+    agent.close().await.unwrap();
+    held_publication.abort();
+}
+
 #[tokio::test]
 async fn recovery_reads_a_fixed_committed_prefix_before_publication() {
     for fail in [false, true] {
