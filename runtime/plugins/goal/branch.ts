@@ -12,8 +12,22 @@ type TurnEnd = { turn_id: string; status: string }
 type Dispatcher = {
   consume(name: string, keys: string[], handler: (delivery: Delivery) => void | Promise<void>): Promise<void>
   local(start: number | bigint, through: number | bigint): Promise<AgentEvent[]>
-  history(through: number | bigint): Promise<AgentEvent[]>
   committed(): Promise<number | bigint>
+}
+type Timeline = {
+  query(query: {
+    scope: 'branch' | 'chain'
+    from_event?: string
+    from_sequence?: number | bigint
+    order_by?: 'sequence'
+    direction?: 'ascending' | 'descending'
+    kinds?: string[]
+    flags?: ('render' | 'state')[]
+    event_id?: string
+    predicate?: { path: string; value: unknown }
+    limit: number | bigint
+    offset?: number | bigint
+  }): Promise<{ events: AgentEvent[]; positions: { branch_id: string; sequence: number | bigint }[] }>
 }
 type BranchOptions = { prompt: string; source: { kind: 'host'; operation_id: string } }
 type TimelineInfo = {
@@ -33,6 +47,9 @@ type Settings = {
 
 const KEYS = ['branch/start', 'session/forked', 'branch/create', 'branch/create-failed', 'branch/ended', 'input/message', 'input/consumed', 'input/deleted', 'turn/start', 'turn/end', 'stop/interrupt']
 
+/** Inherited `input/message` facts one page of the new-branch check keeps. */
+const INHERITED_PAGE = 64n
+
 const codeOf = (error: unknown): string =>
   typeof error === 'object' && error !== null && 'code' in error
     ? String((error as { code: unknown }).code)
@@ -45,9 +62,10 @@ const codeOf = (error: unknown): string =>
 export default definePlugin({
   name: 'GoalBranch',
   provides: {},
-  inject: ['dispatcher', 'timelineIdentity', 'treeCommands', 'settings', 'branchLifecycle', 'sessionLifecycle'],
+  inject: ['dispatcher', 'timeline', 'timelineIdentity', 'treeCommands', 'settings', 'branchLifecycle', 'sessionLifecycle'],
   async apply(ctx, texts: Texts) {
     const dispatcher = ctx.use<Dispatcher>('dispatcher')
+    const timeline = ctx.use<Timeline>('timeline')
     const tree = ctx.use<TreeCommands>('treeCommands')
     const settings = ctx.use<Settings>('settings')
     const { branchId } = await ctx.use<{ get(): Promise<{ branchId: string }> }>('timelineIdentity').get()
@@ -201,16 +219,32 @@ export default definePlugin({
           await report('continue', truncate(text))
         }
       })
+    // The inherited prefix carries the parent's goal blocks; the branch's own
+    // events are the fold's, not the prefix's. Newest first, so the first
+    // event with a keyed block decides and the rest is not read.
     const inheritedLive = async (at: bigint) => {
-      const local = new Set((await dispatcher.local(at, at)).map(event => event.id))
-      let live = false
-      for (const event of await dispatcher.history(at)) {
-        if (local.has(event.id) || event.type !== 'input' || event.name !== 'message') continue
-        for (const raw of event.data.blocks ?? []) {
-          if (marker(raw.text) && (raw.key === OBJECTIVE_KEY || raw.key === STATUS_KEY)) live = !raw.retire
+      let offset = 0n
+      for (;;) {
+        const page = await timeline.query({
+          scope: 'chain',
+          from_sequence: at,
+          order_by: 'sequence',
+          direction: 'descending',
+          kinds: ['input/message'],
+          limit: INHERITED_PAGE,
+          offset,
+        })
+        for (const [index, event] of page.events.entries()) {
+          if (page.positions[index].branch_id === branchId) continue
+          let live: boolean | undefined
+          for (const raw of event.data.blocks ?? []) {
+            if (marker(raw.text) && (raw.key === OBJECTIVE_KEY || raw.key === STATUS_KEY)) live = !raw.retire
+          }
+          if (live !== undefined) return live
         }
+        if (page.events.length < Number(INHERITED_PAGE)) return false
+        offset += BigInt(page.events.length)
       }
-      return live
     }
     const decideStart = (at: bigint) => {
       if (fold.isDecided(at) || fold.localBlocks > 0) return

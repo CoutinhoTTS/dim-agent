@@ -112,8 +112,33 @@ async function loadGoalBranch(read, options = {}) {
     dispatcher: counted({
       consume: async (_name, _keys, handler) => { listener = handler },
       local: async (start, through) => branch.events.filter(event => event.sequence >= BigInt(start) && event.sequence <= BigInt(through)),
-      history: async through => branch.events.filter(event => event.sequence <= BigInt(through)),
       committed: async () => branch.sequence,
+    }),
+    // The inherited prefix is `options.inherited`, the parent's facts, in
+    // chain order before this branch's own; the query keeps the position of
+    // each fact, which is how the part tells the two apart.
+    timeline: counted({
+      query: async query => {
+        const chain = [
+          ...(options.inherited ?? []).map(event => ({ event, branch: B })),
+          ...branch.events.map(event => ({ event, branch: branchId })),
+        ]
+        let selected = query.scope === 'branch' ? chain.filter(entry => entry.branch === branchId) : chain
+        if (query.from_sequence !== undefined) {
+          const at = BigInt(query.from_sequence)
+          selected = query.direction === 'descending' && query.scope === 'chain'
+            ? selected.filter(entry => entry.branch !== branchId || entry.event.sequence <= at)
+            : selected.filter(entry => entry.event.sequence >= at)
+        }
+        if (query.kinds?.length) selected = selected.filter(entry => query.kinds.includes(`${entry.event.type}/${entry.event.name}`))
+        if (query.direction === 'descending') selected.reverse()
+        const offset = Number(query.offset ?? 0)
+        const page = selected.slice(offset, offset + Number(query.limit))
+        return {
+          events: page.map(entry => entry.event),
+          positions: page.map(entry => ({ branch_id: entry.branch, sequence: entry.event.sequence })),
+        }
+      },
     }),
     settings: counted({ read }),
     treeCommands: counted({
@@ -1170,4 +1195,35 @@ test('Pursuit 6/7/10: a reload creates no second evaluator, and foreign or stale
   await flush()
   assert.equal(restored.writes.length, 0)
   assert.equal(restored.branch.fold.status.status, 'paused')
+})
+
+test('A.6 Load: a new branch clears the goal its inherited prefix still carries', async t => {
+  const parent = new Branch()
+  parent.input(changes.set(B, 'ship it', TEXTS))
+  const goal = await loadGoalBranch(async () => settingsDocument(20), {
+    branchId: 'L',
+    info: { id: 'L', parent: B },
+    inherited: parent.events,
+    before: branch => branch.commit('branch', 'start', { parent: B }),
+  })
+  t.after(() => goal.unload())
+  await flush()
+  assert.equal(goal.writes.length, 1, 'the inherited objective is retired once')
+  assert.match(goal.writes[0].data.blocks[0].text, /^<dim-goal kind="goal" op="clear" reason="new_branch"/)
+})
+
+test('A.6 Load: a cleared inherited goal is not cleared again', async t => {
+  const parent = new Branch()
+  const set = parent.input(changes.set(B, 'ship it', TEXTS))
+  parent.input(changes.clear(B))
+  const goal = await loadGoalBranch(async () => settingsDocument(20), {
+    branchId: 'L',
+    info: { id: 'L', parent: B },
+    inherited: parent.events,
+    before: branch => branch.commit('branch', 'start', { parent: B }),
+  })
+  t.after(() => goal.unload())
+  await flush()
+  assert.equal(set.type, 'input')
+  assert.equal(goal.writes.length, 0, 'the newest inherited key retires both')
 })
