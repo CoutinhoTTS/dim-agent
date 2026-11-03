@@ -1,6 +1,6 @@
 # Timeline read entries
 
-Status: Proposed. Scope: every way a part, the App Server or a TypeScript plugin reads events from a Timeline, which of them the event query ([ADR 019](../adr/019-event-query.md), [plugin contract §5.4](plugin-contract.md#54-the-event-query)) replaces, and what is left. This document holds an audit, not a decision; the questions in §4 need an owner's answer. Language: English.
+Status: Proposed. Scope: every way a part, the App Server or a TypeScript plugin reads events from a Timeline, which of them the event query ([ADR 019](../adr/019-event-query.md), [plugin contract §5.4](plugin-contract.md#54-the-event-query)) replaces, and what is left. This document holds an audit and the decisions proposed in [ADR 020](../adr/020-timeline-read-convergence.md); a decision here takes effect when that ADR is accepted. Language: English.
 
 Base: `origin/main` at `514225777`. Call sites exclude tests and examples. Every row below was read from source, not carried over from an earlier plan.
 
@@ -32,7 +32,8 @@ Base: `origin/main` at `514225777`. Call sites exclude tests and examples. Every
 ### 1.2 Same reads on other objects
 
 `Branch` (`branch.rs`): `history` :126, `page_cursor` :132, `page` :138, `local` :146, `context` :164, `compaction_cut` :170, `context_page` :176, `trace` :188.
-`Agent` (`agent.rs`): `context` :524, `compaction_cut` :528, `context_page` :532, `history` :543, `local` :550, `local_page` :562, `trace` :659.
+`Session` (`agent.rs`): `context` :524, `compaction_cut` :528, `context_page` :532, `history` :543, `local` :550, `local_page` :562, `trace` :659.
+Submission lookup: `Branch::lookup` (`branch.rs:73`) to `Session::lookup` (`agent.rs:490`) to `TimelineContext::lookup` (`timeline_context.rs:392`) to a point read at :411; callers `connection/tree.rs:99` and `agents/sessions.rs:569`.
 Deleting a `Timeline` method alone leaves these reachable.
 
 ### 1.3 Dispatcher reads exported to TypeScript (`core/dispatcher.rs`)
@@ -43,10 +44,10 @@ Deleting a `Timeline` method alone leaves these reachable.
 
 | Read | Defined | Callers |
 | --- | --- | --- |
-| `SessionStore::read_page` | `storage/timeline.rs:1258` | `collaboration.rs:1106`, `:2232`, `agents.rs:634` |
+| `SessionStore::read_page` | `storage/timeline.rs:1258` | `collaboration.rs:1106`, `:2232` |
 | `TimelineStore::read_page`, called by the TimelineTree part itself | `timeline_store.rs:229` | `timeline_tree.rs:425`, `:668` (also behind `TreeTimeline::page` :180) |
-| `Agent::local_page` reads the store port directly | `agent.rs:562-585` | `agents.rs:677`, `:1007`, `connection/tree.rs:227`, `agents/sessions.rs:616` |
-| `read_page_without_request_bodies` | :1271 | `agents.rs:634` |
+| `Session::local_page` reads the store port directly | `agent.rs:562-585` | `agents.rs:677`, `:1007`, `connection/tree.rs:227`, `agents/sessions.rs:616` |
+| `read_page_without_request_bodies` | :1271 | `agents.rs:634`, through `Agents::read_page` |
 | `read_page_before` | :1409 | `agents.rs:763`, `connection/tree.rs:209` |
 | `read_events` | :1539 | `agents.rs:688`, `collaboration.rs:1151` |
 | `turn_window` | :1304 | `agents.rs:746`, `connection/tree.rs:197` |
@@ -86,7 +87,7 @@ flowchart LR
     collab[collaboration.rs]
   end
   subgraph RT[dim-agent-runtime]
-    Agent[Agent and Session facade]
+    Agent[Session facade]
     Branch[Branch facade]
     Disp[Dispatcher]
     TL[Timeline service]
@@ -125,7 +126,7 @@ flowchart LR
   SS -.-> Sql
 ```
 
-Two things the graph shows. The `Agent` facade reaches the store port without the Timeline service (`local_page`), and the TimelineTree part and the App Server reach a store without it as well, so deleting reads from `Timeline` alone leaves these routes into the same rows: the `Branch` and `Agent` facades (§1.2), the Dispatcher exports (§1.3), `Agent::local_page`, the TimelineTree part's own `TimelineStore::read_page`, and the `SessionStore` reads of the App Server (§1.4).
+Two things the graph shows. The `Session` facade reaches the store port without the Timeline service (`local_page`), and the TimelineTree part and the App Server reach a store without it as well, so deleting reads from `Timeline` alone leaves these routes into the same rows: the `Branch` and `Session` facades (§1.2), the Dispatcher exports (§1.3), `Session::local_page`, the TimelineTree part's own `TimelineStore::read_page`, and the `SessionStore` reads of the App Server (§1.4).
 
 ## 2. What each consumer needs
 
@@ -154,6 +155,7 @@ Each row was read from the consumer's source: what it takes from the Timeline, h
 | Fork check and prefix (`agents.rs:1446`) | Whether the cut is legal, and the context before it | `validate_context_boundary_in` and `context` | Folding the prefix is the projection's job; the batch check is as above |
 | History window (`connection/tree.rs:197`) | The newest turn's start and a descending page inside the window | `turn_window` and `read_page_before` | Descending paging, plus the newest `turn/start` |
 | History page (`connection/tree.rs:227`) | A page from `after` for a client | `local_page` | Paging; that the page ends on a batch is a protocol rule |
+| Submission lookup (`branch.rs:73`) | The input event of a submission id | `lookup`, then a point read `local(seq..=seq)` | A by-id read: `event_id`, limit 1 |
 
 ### 2.1 Five kinds of need
 
@@ -192,7 +194,7 @@ What this shows:
 - No part rebuilt from replay folds step/text or step/thinking, so a replay rebuild never meets a merged row. The context projection does fold them (history.rs replay), so a checkpoint resume read does meet merged rows.
 - Two parts need only the last event (Permission, Wait). Six fold unclosed pairs. Three accumulate.
 - A part folds kinds it does not subscribe to (Approval, ToolExecutor, ModelProvider, ContextPreparation, Loop), so its read selection must be written from its rebuild, not copied from its follow keys.
-- Replay hands every part the whole branch prefix to the committed position, unfiltered. The decode of that prefix is shared during Loading (restore-shared-read.md), which lowers its cost but not its size.
+- Replay hands every part the whole branch prefix to the committed position, unfiltered. The decode of that prefix is shared during Loading ([restore-shared-read](appserver/restore-shared-read.md)), which lowers its cost but not its size.
 - The hot window holds events until they are dispatched, not only until they are published. The tail a rebuild must add to a stored read is the events not yet dispatched.
 
 Not verified: whether each unclosed pair can cross a turn, so whether reading from the latest turn/start is enough; the second half of the Loop rebuild; how long the undispatched tail is during an opening.
@@ -206,14 +208,14 @@ Not verified: whether each unclosed pair can cross a turn, so whether reading fr
 | A chain start by branch and sequence | policy reads at an ancestor's cut, a checkpoint `resume` on an ancestor | `from_sequence` names the queried branch only |
 | More than one equality | two reads in `agents.rs` | the predicate is one equality |
 
-## 4. Questions for the owners
+## 4. Decision record (proposed in ADR 020)
 
-1. Decided: replay is removed. A part that needs facts still in flight (written, not yet dispatched) reads them through a Timeline read that returns the query result plus the undispatched tail. A part with no such need folds from its subscription alone. Section 7.7 gives the handover.
-2. Decided: the check that a position ends an atomic batch stays, and lives on the store port. It is not a field of the query.
-3. Decided: the checkpoint stores the resume event id and the caller continues with from_event, which names its branch. Section 7.6 shows the resume event is never step/text on the normal path. Known risk: when no entry is kept, resume falls back to the last event of the context, whose kind is not restricted; from_event is then slower but still resolves.
-4. Decided: reads of loaded sessions that bypass the service (`Agent::local_page`, the TimelineTree part's own `TimelineStore::read_page`) move to the query in the bypass step of section 5. Reads of unloaded sessions stay on one `SessionStore` page read with the page shape of the query (section 7.3).
-5. Decided: `Branch` and `Session` keep one `query` that only forwards, with no `history`, `local`, `context` or `page`; the Dispatcher has no reads; the App Server keeps one store read for sessions that are not loaded, with the page shape of the query. Goal takes the Timeline service; whether the binding resolves `timeline` for a branch part is confirmed in the goal migration (section 6.6).
-6. Decided rule: a consumer that needs facts still in flight reads them through the Timeline read that adds the undispatched tail; a consumer with no such need folds from the query and its subscription. Which consumer is which (goal, file reads, collaboration rebuild) is settled in its own migration (section 6.6).
+1. Proposed (ADR 020): replay is removed. A part that needs facts still in flight (written, not yet dispatched) reads them through a Timeline read that returns the query result plus the undispatched tail. A part with no such need folds from its subscription alone. Section 7.7 gives the handover.
+2. Proposed (ADR 020): the check that a position ends an atomic batch stays, and lives on the store port. It is not a field of the query.
+3. Proposed (ADR 020): the checkpoint stores the resume event id and the caller continues with from_event, which names its branch. Section 7.6 shows the resume event is never step/text on the normal path. This changes a persisted structure, so it needs its own format decision with a version and a migration (ADR 020 D5). Known risk: when no entry is kept, resume falls back to the last event of the context, whose kind is not restricted; from_event is then slower but still resolves.
+4. Proposed (ADR 020): reads of loaded sessions that bypass the service (`Session::local_page`, the TimelineTree part's own `TimelineStore::read_page`) move to the query in the bypass step of section 5. Reads of unloaded sessions stay on one `SessionStore` page read with the page shape of the query (section 7.3).
+5. Proposed (ADR 020): `Branch` and `Session` keep one `query` that only forwards, with no `history`, `local`, `context` or `page`; the Dispatcher has no reads; the App Server keeps one store read for sessions that are not loaded, with the page shape of the query. Goal takes the Timeline service; whether the binding resolves `timeline` for a branch part is confirmed in the goal migration (section 6.6).
+6. Proposed rule (ADR 020): a consumer that needs facts still in flight reads them through the Timeline read that adds the undispatched tail; a consumer with no such need folds from the query and its subscription. Which consumer is which (goal, file reads, collaboration rebuild) is settled in its own migration (section 6.6).
 
 ## 5. Order of work
 
@@ -224,7 +226,7 @@ The order follows dependency. Steps 3 to 6 wait on the answers in section 4.
 3. Consumers of one or two events: permission, manual compaction wait, collaboration result, committed input, budget lookup, session summary.
 4. Consumers that fold a few kinds: branch resume, submission index, recall, compaction policy reuse, context folding. Folding from a checkpoint depends on question 3.
 5. Rebuild without replay, one part at a time: Permission and Wait first (the last event only), then the parts that fold unclosed pairs, then the three that accumulate. It needs the handover from the query to live delivery (question 1) and a test showing that the old and new rebuild give the same part state.
-6. Collaboration rebuild, file reads, goal, the bypass reads, and finally the `Branch`, `Agent` and Dispatcher reads (questions 2 to 4).
+6. Collaboration rebuild, file reads, goal, the bypass reads, and finally the `Branch`, `Session` and Dispatcher reads (questions 2 to 4).
 
 ## 6. Target design
 
@@ -312,9 +314,9 @@ None of these changes the design. Each is confirmed in the step named, by the me
 
 Verified in this revision: `steer.apply` reads only `step/model-start` and `input/applied`; the session summary needs the first operator input and one point read; goal injects `dispatcher` and reads to the committed position.
 
-## 7. Confirmed integration
+## 7. Proposed integration
 
-This section holds only what is decided. What is not decided stays in section 4.
+This section holds what ADR 020 proposes. The query shape follows #996 and #975, which replace the cursor and range of ADR 019 D1/D2 and plugin contract §5.4 once accepted. Replay is removed in plugin contract §5.2 with the first rebuild that stops using it.
 
 ### 7.1 Decisions
 
@@ -344,15 +346,16 @@ This section holds only what is decided. What is not decided stays in section 4.
 | History window and page (connection/tree.rs:197, :227) | descending page plus the newest turn/start; the batch edge of a page is the caller protocol rule |
 | Goal inheritance (goal/branch.ts:205) | chain, input/message, descending; the marker sits inside blocks, so the caller checks each page and stops at the first match |
 | Branch tool default start (timeline_tree.rs:2291) | request_id equality; turn_id is filtered by the caller |
+| Submission lookup (branch.rs:73) | event_id, limit 1 |
 
 ### 7.3 Routes that bypass the service
 
-- Loaded sessions: Agent::local_page and the TimelineTree part own TimelineStore::read_page move to the query.
+- Loaded sessions: Session::local_page and the TimelineTree part own TimelineStore::read_page move to the query.
 - Unloaded sessions: no Timeline service exists, so the App Server keeps one SessionStore page read with the page shape of the query.
 
 ### 7.4 Reads removed after the moves
 
-On Timeline, Branch, Agent and Dispatcher: history, local, page, page_cursor, context, context_with_checkpoint, event_by_id, event_position, compaction_cut, ancestor_events_of_kind, stored_page, stored_local, stored_context_page and its _in form, and the policy reads once their own migration lands. Then xtask types and xtask graph regenerate the generated files, and nothing else in them may change.
+On Timeline, Branch, Session and Dispatcher: history, local, page, page_cursor, context, context_with_checkpoint, event_by_id, event_position, compaction_cut, ancestor_events_of_kind, stored_page, stored_local, trace, stored_context_page and its _in form, and the policy reads once their own migration lands. Then xtask types and xtask graph regenerate the generated files, and nothing else in them may change.
 
 ### 7.5 Not decided
 
@@ -366,7 +369,7 @@ Still open: the handover details (section 7.7), which of goal, file reads and th
 - So storing the resume event id and reading with from_event works: these kinds are one event per row and their id is in the event_id column.
 - The hot window is the undispatched queue. Dispatcher::run reads it through Timeline::read and pops with dispatched(); idle and close wait for dispatcher.sequence() to reach the tail. It stays. Parts see it only through Timeline reads, as the tail after a query. Its length during an opening was not measured.
 
-### 7.7 Decided: rebuild, in-flight facts, cut validation
+### 7.7 Proposed: rebuild, in-flight facts, cut validation
 
 - Replay is removed. Dispatcher delivers live events only; it no longer reads history.
 - History for a rebuild is read with the query, limited to the kinds the part folds (section 2.3).
@@ -375,4 +378,4 @@ Still open: the handover details (section 7.7), which of goal, file reads and th
 - Handover, as designed so far: subscribe and hold live events, take the cutoff, read history and tail up to it, then release held events above it. Not yet checked against the current subscription mechanism.
 - The batch-end check lives on the store port.
 - Per consumer, whether it needs in-flight facts is still to be settled: goal, file reads, collaboration rebuild. Each is decided when its own migration starts.
-- The checkpoint stores the resume event id and the caller continues with from_event (decided; section 4, question 3).
+- The checkpoint stores the resume event id and the caller continues with from_event (proposed; needs a format decision, ADR 020 D5).
