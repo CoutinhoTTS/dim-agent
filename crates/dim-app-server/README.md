@@ -129,11 +129,14 @@ not the user source.
   write, the patch semantics and the values they redact.
 - `mcp.inspect({source,id,cwd?})` returns `{enabled,configuration,connections}`. Configuration
   is the effective entry a Session runs, with a project or plugin entry's stdio `cwd` resolved.
-  Each connection contains `state: {status,expired?}` and
+  Each connection contains `state: {status,expired?}`, `failure: string | null` and
   `tools: [{name,description,inputSchema}] | null`: its last complete successful discovery,
   or null before discovery. Status is `disconnected`, `connecting`, `connected`, `failed`,
-  `closed` or `auth_required` (with `expired`). These are existing connection generations,
-  not a host-global connection state. Inspection does not connect or contact the server.
+  `closed` or `auth_required` (with `expired`). `failure` is the last start or transport
+  failure, such as a stdio server's exit status and bounded stderr tail or a remote server's
+  HTTP status; it is status only and never enters a model request. These are existing
+  connection generations, not a host-global connection state. Inspection does not connect or
+  contact the server.
 - `mcp.test` probes one configuration without attaching a Session; the
   [MCP configuration management](../../docs/design/appserver/mcp-management.md#45-probe-mcptest)
   contract defines its outcome, latency, tools and auth report.

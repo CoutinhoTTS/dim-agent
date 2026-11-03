@@ -161,6 +161,9 @@ pub enum McpServerState {
 #[derive(serde::Serialize)]
 pub(super) struct McpRuntime {
     state: McpServerState,
+    /// The last start or transport failure. It is status only: no model
+    /// request ever carries it (it can quote a server's stderr).
+    failure: Option<String>,
     tools: Option<Vec<McpTool>>,
 }
 
@@ -394,6 +397,7 @@ struct OwnedTransport<T: Transport<RoleClient> + 'static> {
     inner: Option<T>,
     closed: Option<oneshot::Sender<Result<()>>>,
     state: StateCell<McpServerState>,
+    failure: Arc<Mutex<Option<String>>>,
 }
 impl<T: Transport<RoleClient> + 'static> Transport<RoleClient> for OwnedTransport<T> {
     type Error = T::Error;
@@ -406,6 +410,11 @@ impl<T: Transport<RoleClient> + 'static> Transport<RoleClient> for OwnedTranspor
     async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleClient>> {
         let message = self.inner.as_mut().expect("live transport").receive().await;
         if message.is_none() {
+            let mut failure = self.failure.lock().unwrap();
+            if failure.is_none() {
+                *failure = Some("MCP transport closed".into());
+            }
+            drop(failure);
             self.state.update(|state| {
                 if !matches!(state, McpServerState::AuthRequired { .. }) {
                     *state = McpServerState::Failed;
@@ -474,6 +483,7 @@ pub struct McpServer {
     discovered_tools: Mutex<Option<Vec<McpTool>>>,
     connection: AsyncMutex<Option<Connection>>,
     generations: AtomicU64,
+    failure: Arc<Mutex<Option<String>>>,
     stopping: CancellationToken,
     gate: Mutex<()>,
     tasks: TaskTracker,
@@ -482,12 +492,28 @@ impl McpServer {
     pub(super) fn snapshot(&self) -> McpRuntime {
         McpRuntime {
             state: self.state(),
+            failure: self.failure(),
             tools: self.discovered_tools.lock().unwrap().clone(),
         }
     }
 
     pub fn state(&self) -> McpServerState {
         self.state.get()
+    }
+
+    /// The last start or transport failure. Status only, never a model request.
+    pub fn failure(&self) -> Option<String> {
+        self.failure.lock().unwrap().clone()
+    }
+
+    /// A new failure replaces the previous one, even when no connection
+    /// follows it.
+    fn set_failure(&self, message: impl Into<String>) {
+        *self.failure.lock().unwrap() = Some(message.into());
+    }
+
+    fn clear_failure(&self) {
+        *self.failure.lock().unwrap() = None;
     }
     /// The generation of the connection this server holds: a new one starts
     /// whenever a connection is established, and the Session's entry version
@@ -796,8 +822,13 @@ impl McpServer {
                     .await
             }
             TransportConfig::Stdio(config) => {
-                self.initialize(config.spawn()?, cancel, handshake_cancel, deadline)
-                    .await
+                self.initialize(
+                    config.spawn(self.failure.clone())?,
+                    cancel,
+                    handshake_cancel,
+                    deadline,
+                )
+                .await
             }
         }
     }
@@ -809,11 +840,13 @@ impl McpServer {
         handshake_cancel: CancellationToken,
         deadline: tokio::time::Instant,
     ) -> Result<Connection> {
+        let previous = self.failure();
         let (tx, closed) = oneshot::channel();
         let transport = OwnedTransport {
             inner: Some(transport),
             closed: Some(tx),
             state: self.state.clone(),
+            failure: self.failure.clone(),
         };
         let lifetime = CancellationToken::new();
         let initialize =
@@ -824,10 +857,14 @@ impl McpServer {
             result = &mut initialize => {
                 match result {
                     Ok(running) => {
+                        self.clear_failure();
                         return Ok(Connection { running, closed });
                     },
-                    Err(_) => {
+                    Err(error) => {
                         handshake_cancel.cancel();
+                        if self.failure() == previous {
+                            self.set_failure(error.to_string());
+                        }
                         closed.await.map_err(|_| McpServerError::Cleanup)??;
                         return Err(McpServerError::RequestFailed);
                     }
@@ -879,7 +916,7 @@ impl McpServer {
                 return match response {
                     Err(_) => Err(ViewFailure::Unanswered(McpServerError::RequestFailed)),
                     Ok(response) => response
-                        .map_err(|error| ViewFailure::Unanswered(self.failure(&error))),
+                        .map_err(|error| ViewFailure::Unanswered(self.request_failure(&error))),
                 };
             }
         };
@@ -892,7 +929,7 @@ impl McpServer {
     }
 
     /// Authorization outcomes of a request, from the transport's own error.
-    fn failure(&self, error: &ServiceError) -> McpServerError {
+    fn request_failure(&self, error: &ServiceError) -> McpServerError {
         let ServiceError::TransportSend(error) = error else {
             return McpServerError::RequestFailed;
         };
@@ -1097,6 +1134,7 @@ impl Plugin for McpServerPlugin {
             discovered_tools: Mutex::new(None),
             connection: AsyncMutex::new(None),
             generations: AtomicU64::new(0),
+            failure: Arc::new(Mutex::new(None)),
             stopping: ctx.cancellation_token(),
             gate: Mutex::new(()),
             tasks: TaskTracker::new(),

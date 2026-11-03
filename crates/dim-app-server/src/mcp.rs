@@ -250,6 +250,10 @@ impl McpConnection {
     pub fn state(&self) -> server::McpServerState {
         self.service.state()
     }
+    /// The last start or transport failure; status only, never a model request.
+    pub fn failure(&self) -> Option<String> {
+        self.service.failure()
+    }
     /// The connection generation this lease names; a new one starts whenever
     /// the server establishes a connection.
     pub fn generation(&self) -> u64 {

@@ -178,7 +178,8 @@ that failed.
 ### D9. The probe and the run view answer different questions
 
 - `mcp.inspect` is the run view: it reports the connection generations the Sessions hold now,
-  their state and their last complete discovery, and it contacts nothing.
+  their state, their last start or transport failure and their last complete discovery, and it
+  contacts nothing.
 - `mcp.test` is a one-shot diagnostic: it contacts the server for a saved entry or a draft and
   reports one terminal outcome. It attaches no Session, publishes no tool, registers no
   connection and writes no configuration, so it says nothing about what runs.

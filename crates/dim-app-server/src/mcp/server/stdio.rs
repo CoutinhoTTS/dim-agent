@@ -6,8 +6,14 @@ use rmcp::{
     service::{RxJsonRpcMessage, TxJsonRpcMessage},
     transport::{Transport, async_rw::JsonRpcMessageCodec},
 };
-use std::{collections::BTreeMap, process::Stdio, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    process::Stdio,
+    sync::{Arc, Mutex as StdMutex},
+    time::Duration,
+};
 use tokio::{
+    io::{AsyncReadExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
     sync::Mutex,
 };
@@ -15,6 +21,78 @@ use tokio_util::{
     codec::{FramedRead, FramedWrite},
     sync::CancellationToken,
 };
+
+/// The last lines a server wrote to stderr, bounded so a chatty server cannot
+/// grow it without limit. It is shown in server status only, never in a model
+/// request.
+#[derive(Default)]
+struct StderrTail {
+    lines: VecDeque<String>,
+    bytes: usize,
+}
+const TAIL_LINES: usize = 20;
+const TAIL_BYTES: usize = 4 * 1024;
+impl StderrTail {
+    fn push(&mut self, line: &[u8]) {
+        let line = String::from_utf8_lossy(line);
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            return;
+        }
+        let mut line = line.to_owned();
+        if line.len() > TAIL_BYTES {
+            let mut cut = line.len() - TAIL_BYTES;
+            while !line.is_char_boundary(cut) {
+                cut += 1;
+            }
+            line.drain(..cut);
+        }
+        self.bytes += line.len() + 1;
+        self.lines.push_back(line);
+        while self.lines.len() > TAIL_LINES || self.bytes > TAIL_BYTES {
+            let Some(front) = self.lines.pop_front() else {
+                break;
+            };
+            self.bytes = self.bytes.saturating_sub(front.len() + 1);
+        }
+    }
+
+    fn render(&self) -> String {
+        self.lines.iter().cloned().collect::<Vec<_>>().join("\n")
+    }
+}
+
+/// Drains stderr for the life of the pipe. It ends when the process closes
+/// stderr or exits, so it never keeps the process alive by itself.
+async fn drain_stderr(
+    stderr: tokio::process::ChildStderr,
+    tail: Arc<Mutex<StderrTail>>,
+    drained: tokio::sync::oneshot::Sender<()>,
+) {
+    let mut reader = BufReader::new(stderr);
+    let mut chunk = [0u8; 1024];
+    let mut partial = Vec::new();
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                partial.extend_from_slice(&chunk[..read]);
+                while let Some(end) = partial.iter().position(|byte| *byte == b'\n') {
+                    let line: Vec<u8> = partial.drain(..=end).collect();
+                    tail.lock().await.push(&line[..line.len() - 1]);
+                }
+                if partial.len() > TAIL_BYTES {
+                    let cut = partial.len() - TAIL_BYTES;
+                    partial.drain(..cut);
+                }
+            }
+        }
+    }
+    if !partial.is_empty() {
+        tail.lock().await.push(&partial);
+    }
+    let _ = drained.send(());
+}
 
 #[derive(Clone)]
 pub(super) struct Config {
@@ -52,14 +130,14 @@ impl Config {
         })
     }
 
-    pub fn spawn(&self) -> Result<StdioTransport> {
+    pub fn spawn(&self, failure: Arc<StdMutex<Option<String>>>) -> Result<StdioTransport> {
         let mut command = Command::new(&self.command);
         command
             .args(&self.args)
             .envs(&self.env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
         if let Some(cwd) = &self.cwd {
             command.current_dir(cwd);
@@ -73,11 +151,19 @@ impl Config {
             child.stdin.take().expect("piped stdin"),
             JsonRpcMessageCodec::new(),
         );
+        let tail = Arc::new(Mutex::new(StderrTail::default()));
+        let stderr = child.stderr.take().expect("piped stderr");
+        let drained = tail.clone();
+        let (done, drained_done) = tokio::sync::oneshot::channel();
+        tokio::spawn(drain_stderr(stderr, drained, done));
         Ok(StdioTransport {
             child,
             read,
             write: Arc::new(Mutex::new(Some(write))),
             stopping: CancellationToken::new(),
+            failure,
+            tail,
+            drained: Some(drained_done),
         })
     }
 }
@@ -88,6 +174,9 @@ pub(super) struct StdioTransport {
     read: FramedRead<ChildStdout, JsonRpcMessageCodec<RxJsonRpcMessage<RoleClient>>>,
     write: Arc<Mutex<Option<Writer>>>,
     stopping: CancellationToken,
+    failure: Arc<StdMutex<Option<String>>>,
+    tail: Arc<Mutex<StderrTail>>,
+    drained: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 impl Transport<RoleClient> for StdioTransport {
     type Error = McpServerError;
@@ -109,7 +198,30 @@ impl Transport<RoleClient> for StdioTransport {
         }
     }
     async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleClient>> {
-        self.read.next().await?.ok()
+        match self.read.next().await {
+            Some(Ok(message)) => Some(message),
+            Some(Err(_)) | None => {
+                let status =
+                    match tokio::time::timeout(Duration::from_millis(500), self.child.wait()).await
+                    {
+                        Ok(Ok(status)) => format!("MCP server exited ({status})"),
+                        Ok(Err(_)) => "MCP server exited; status unavailable".into(),
+                        Err(_) => "MCP server output closed while it is still running".into(),
+                    };
+                if let Some(drained) = self.drained.as_mut() {
+                    let _ = tokio::time::timeout(Duration::from_millis(500), drained).await;
+                    self.drained = None;
+                }
+                let tail = self.tail.lock().await.render();
+                let message = if tail.is_empty() {
+                    status
+                } else {
+                    format!("{status}\n{tail}")
+                };
+                *self.failure.lock().unwrap() = Some(message);
+                None
+            }
+        }
     }
     async fn close(&mut self) -> Result<()> {
         self.stopping.cancel();

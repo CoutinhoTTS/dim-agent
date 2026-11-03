@@ -2091,6 +2091,7 @@
       "parent": "dim_app_server::mcp::server",
       "file": "crates/dim-app-server/src/mcp/server/stdio.rs",
       "unexpandedMacros": [
+        "format",
         "tokio::select"
       ]
     },

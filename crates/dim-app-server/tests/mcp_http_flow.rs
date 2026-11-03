@@ -861,6 +861,124 @@ async fn stdio_fixture(mode: &str) -> Fixture {
     fixture
 }
 
+fn reconnect_script() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp-reconnect.cjs")
+}
+
+async fn reconnect_fixture(mode: &str) -> Fixture {
+    let fixture = Fixture::configured(json!({"command":"node"})).await;
+    fs::write(
+        fixture.home.join("mcp.json"),
+        serde_json::to_vec(&json!({"mcpServers":{"docs":{
+            "command":"node", "args":[reconnect_script(), mode],
+            "cwd":fixture.home, "env":{"MCP_STATE_FILE":fixture.home.join("starts")}
+        }}}))
+        .unwrap(),
+    )
+    .unwrap();
+    fixture
+}
+
+async fn wait_not_connected(connection: &dim_app_server::mcp::McpConnection) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while connection.state() == McpServerState::Connected {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_transport_failure_carries_its_exit_status_and_stderr_tail() {
+    let fixture = reconnect_fixture("exit-after-call").await;
+    let cancel = CancellationToken::new();
+    let connection = fixture
+        .mcp
+        .server(None, "docs".into(), &cancel)
+        .await
+        .unwrap();
+    assert!(
+        connection
+            .call(
+                "echo".into(),
+                json!({}).as_object().unwrap().clone(),
+                &cancel
+            )
+            .await
+            .is_ok()
+    );
+    wait_not_connected(&connection).await;
+    let failure = connection
+        .failure()
+        .expect("a transport failure is reported");
+    assert!(failure.contains("exit status: 7"), "{failure}");
+    let lines: Vec<&str> = failure.lines().collect();
+    assert!(
+        lines.len() <= 21,
+        "the tail keeps at most 20 lines: {failure}"
+    );
+    assert!(lines.contains(&"stderr-line-30"), "{failure}");
+    assert!(lines.contains(&"stderr-line-11"), "{failure}");
+    assert!(
+        !lines.contains(&"stderr-line-10"),
+        "the oldest line is evicted: {failure}"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_stderr_tail_is_bounded_and_decoded_lossily() {
+    let fixture = reconnect_fixture("big-stderr").await;
+    let cancel = CancellationToken::new();
+    let connection = fixture
+        .mcp
+        .server(None, "docs".into(), &cancel)
+        .await
+        .unwrap();
+    assert!(connection.tools(&cancel).await.is_err());
+    let failure = connection.failure().expect("a start failure is reported");
+    assert!(failure.contains("exit status: 6"), "{failure}");
+    assert!(failure.contains('\u{fffd}'), "invalid UTF-8 is lossy");
+    let tail = failure.split_once('\n').map(|(_, tail)| tail).unwrap_or("");
+    assert!(tail.len() <= 4 * 1024, "the tail stays within 4 KiB");
+    assert!(tail.contains("big-4-"), "{tail}");
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_chatty_stderr_is_drained_while_the_server_works() {
+    let fixture = reconnect_fixture("chatty").await;
+    let cancel = CancellationToken::new();
+    let connection = fixture
+        .mcp
+        .server(None, "docs".into(), &cancel)
+        .await
+        .unwrap();
+    let tools = tokio::time::timeout(Duration::from_secs(10), connection.tools(&cancel))
+        .await
+        .expect("the server answers while its stderr fills")
+        .unwrap();
+    assert!(tools.iter().any(|tool| tool.name == "echo"));
+    assert!(
+        connection
+            .call(
+                "echo".into(),
+                json!({}).as_object().unwrap().clone(),
+                &cancel
+            )
+            .await
+            .is_ok()
+    );
+    wait_not_connected(&connection).await;
+    let failure = connection
+        .failure()
+        .expect("a transport failure is reported");
+    assert!(failure.contains("exit status: 8"), "{failure}");
+    assert!(failure.contains("chatty-final"), "{failure}");
+    fixture.close().await;
+}
+
 async fn wait_file(path: &std::path::Path) {
     tokio::time::timeout(Duration::from_secs(10), async {
         while !path.exists() {
