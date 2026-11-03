@@ -35,6 +35,29 @@ fn accept_native(listener: &UnixListener) -> Wire {
     stream.set_read_timeout(Some(PATIENCE)).unwrap();
     Wire(BufReader::new(stream))
 }
+
+/// A title request carries no tools, only the system text and the input
+/// (`docs/design/plugins/SessionTitle.md`); any other request is a prompt.
+fn title_request_input(request: &Value) -> Option<String> {
+    if request["tools"].as_array().map_or(0, Vec::len) != 0 {
+        return None;
+    }
+    let messages = request["messages"].as_array().unwrap();
+    assert_eq!(
+        messages.len(),
+        2,
+        "a title request carries only its system text and the input: {request}"
+    );
+    assert_eq!(messages[0]["role"], "system", "{request}");
+    assert_eq!(messages[1]["role"], "user", "{request}");
+    Some(
+        messages[1]["content"]
+            .as_str()
+            .expect("the title request's user message is the input text")
+            .to_owned(),
+    )
+}
+
 fn recovery_hello(wire: &mut Wire, instance: &str) {
     let hello = wire.read("hello");
     assert_eq!(hello["params"]["clientName"], "AcpGateway");
@@ -1620,7 +1643,10 @@ fn acp_stdio_temporary_mcp_calls_tools_and_settles_the_child_on_eof() {
     let address = listener.local_addr().unwrap();
     listener.set_nonblocking(true).unwrap();
     let model = thread::spawn(move || {
-        for index in 0..3 {
+        let first_inputs = ["Call inspect"];
+        let mut next = 0;
+        let mut titles = Vec::new();
+        while next < 3 || titles.len() < first_inputs.len() {
             let deadline = Instant::now() + PATIENCE;
             let stream = loop {
                 match listener.accept() {
@@ -1628,7 +1654,12 @@ fn acp_stdio_temporary_mcp_calls_tools_and_settles_the_child_on_eof() {
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         assert!(
                             Instant::now() < deadline,
-                            "The model request did not arrive"
+                            "{}",
+                            if next == 3 {
+                                "every new Session's first input must be titled"
+                            } else {
+                                "The model request did not arrive"
+                            }
                         );
                         thread::sleep(Duration::from_millis(10));
                     }
@@ -1656,31 +1687,38 @@ fn acp_stdio_temporary_mcp_calls_tools_and_settles_the_child_on_eof() {
             let mut body = vec![0; length];
             wire.read_exact(&mut body).unwrap();
             let request: Value = serde_json::from_slice(&body).unwrap();
-            let (delta, finish) = if index == 1 {
-                let messages = request["messages"].to_string();
-                assert!(
-                    messages.contains("1709") && messages.contains("fixture-env"),
-                    "The actual MCP result must reach the model"
-                );
-                (json!({"role":"assistant","content":"ACP_MCP_OK"}), "stop")
+            let (delta, finish) = if let Some(input) = title_request_input(&request) {
+                titles.push(input);
+                (json!({"role":"assistant","content":"ACP_TITLE"}), "stop")
             } else {
-                let tool = request["tools"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|tool| {
-                        let function = &tool["function"];
-                        function["name"]
-                            .as_str()
-                            .is_some_and(|name| name.starts_with("mcp_temporary_"))
-                            && function["parameters"]["properties"].get("a").is_some()
-                                == (index == 0)
-                    })
-                    .expect("Temporary MCP tools must be present in the first model request");
-                (
-                    json!({"role":"assistant","tool_calls":[{"index":0,"id":format!("call-{index}"),"type":"function","function":{"name":tool["function"]["name"],"arguments":if index==0 {"{\"a\":17,\"b\":9}"}else{"{}"}}}]}),
-                    "tool_calls",
-                )
+                let index = next;
+                next += 1;
+                if index == 1 {
+                    let messages = request["messages"].to_string();
+                    assert!(
+                        messages.contains("1709") && messages.contains("fixture-env"),
+                        "The actual MCP result must reach the model"
+                    );
+                    (json!({"role":"assistant","content":"ACP_MCP_OK"}), "stop")
+                } else {
+                    let tool = request["tools"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|tool| {
+                            let function = &tool["function"];
+                            function["name"]
+                                .as_str()
+                                .is_some_and(|name| name.starts_with("mcp_temporary_"))
+                                && function["parameters"]["properties"].get("a").is_some()
+                                    == (index == 0)
+                        })
+                        .expect("Temporary MCP tools must be present in the first model request");
+                    (
+                        json!({"role":"assistant","tool_calls":[{"index":0,"id":format!("call-{index}"),"type":"function","function":{"name":tool["function"]["name"],"arguments":if index==0 {"{\"a\":17,\"b\":9}"}else{"{}"}}}]}),
+                        "tool_calls",
+                    )
+                }
             };
             let chunk = |delta: Value, finish: Value| {
                 json!({"id":"mcp-model","object":"chat.completion.chunk","model":"fixture-model","choices":[{"index":0,"delta":delta,"finish_reason":finish}]}).to_string()
@@ -1693,6 +1731,11 @@ fn acp_stdio_temporary_mcp_calls_tools_and_settles_the_child_on_eof() {
             write!(wire.get_mut(),"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{data}",data.len()).unwrap();
             wire.get_mut().flush().unwrap();
         }
+        titles.sort();
+        assert_eq!(
+            titles, first_inputs,
+            "each new Session's first input is titled with the configured model"
+        );
     });
     let config = home.0.join("model.json");
     fs::write(&config,json!({"defaultModel":{"providerId":"local","modelId":"fixture-model"},"providers":[{"id":"local","kind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"models":[{"id":"fixture-model","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":256}}]}]}).to_string()).unwrap();
@@ -1812,22 +1855,9 @@ fn acp_stdio_runs_against_the_production_daemon_and_a_local_model() {
             stream.read_exact(&mut bytes).unwrap();
             let request: Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(request["model"], "fixture-model");
-            let tools = request["tools"].as_array().map_or(0, Vec::len);
             let messages = request["messages"].as_array().unwrap();
-            let (response, finish) = if tools == 0 {
-                assert_eq!(
-                    messages.len(),
-                    2,
-                    "a title request carries only its system text and the input: {request}"
-                );
-                assert_eq!(messages[0]["role"], "system", "{request}");
-                assert_eq!(messages[1]["role"], "user", "{request}");
-                titles.push(
-                    messages[1]["content"]
-                        .as_str()
-                        .expect("the title request's user message is the input text")
-                        .to_owned(),
-                );
+            let (response, finish) = if let Some(input) = title_request_input(&request) {
+                titles.push(input);
                 ("ACP_TITLE", "stop")
             } else {
                 let (prompt, response) = expected[next];
