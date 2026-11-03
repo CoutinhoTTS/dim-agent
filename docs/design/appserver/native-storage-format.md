@@ -778,9 +778,9 @@ ProjectionCheckpoint = {
 | v28 主键 `session_grants` | `(session_id, path)` | 一个 Session 的 grant 读取、add 的 upsert、remove 与 delete 按 Session 定点删除 |
 | v29 主键 `session_output_owners` | `(session_id, path)` | 注册的 upsert、`owns` 的精确查找、fork 复制与 delete 按 Session 定点删除 |
 | v29 `session_output_owners_by_path` | `(path)` | 删除一个目录前判断本库是否还有别的 Session 在该目录下有行 |
-| v32 主键 `worktree_directories` | `(repository, root)` | 目录去重和候选列表；无 Session 关联也保留 |
-| v32 主键 `session_worktrees` | `(session_id, repository, root)` | Session 内目录去重、删除与创建回滚 |
-| v32 `session_worktrees_by_directory` | `(repository, root, session_id)` | 某目录的所有 Session 及继承子树 |
+| v33 主键 `worktree_directories` | `(repository, root)` | 目录去重和候选列表；无 Session 关联也保留 |
+| v33 主键 `session_worktrees` | `(session_id, repository, root)` | Session 内目录去重、删除与创建回滚 |
+| v33 `session_worktrees_by_directory` | `(repository, root, session_id)` | 某目录的所有 Session 及继承子树 |
 
 ## 分页查询
 
