@@ -185,10 +185,6 @@
   },
   {
     "from": "dim-migration",
-    "to": "dim-agent-runtime"
-  },
-  {
-    "from": "dim-migration",
     "to": "dim-app-server"
   },
   {
@@ -241,7 +237,7 @@
   },
   {
     "from": "dim-session-title",
-    "to": "dim-agent-runtime"
+    "to": "dim-agent-aimux"
   },
   {
     "from": "dim-session-title",

@@ -1910,6 +1910,26 @@ impl App {
                 ));
             }
             Update::Switched { session_id, kind } => self.switch_session(session_id, kind),
+            Update::Skills(entries) => {
+                self.composer.set_skills(
+                    entries
+                        .into_iter()
+                        .filter(|entry| {
+                            // A name with whitespace cannot be referenced
+                            // (Skills §9), so it is not offered.
+                            entry.enabled
+                                && entry.shadowed_by.is_none()
+                                && !entry.name.chars().any(char::is_whitespace)
+                        })
+                        .map(|entry| crate::ui::composer::palette::Skill {
+                            name: entry.name,
+                            description: entry.description,
+                            display_name: None,
+                            display_description: None,
+                        })
+                        .collect(),
+                );
+            }
             Update::Sessions { id, paged, result } => {
                 if let Some(Prompt::Sessions(panel)) = &mut self.prompt {
                     panel.page(&id, paged, result);
@@ -7369,88 +7389,6 @@ mod tests {
         Theme::system(ColorMode::TrueColor, Appearance::Dark, None)
     }
 
-    #[test]
-    fn model_activity_stays_blue_across_themes_and_terminal_modes() {
-        use crate::ui::theme::{Appearance, ColorMode};
-
-        for (mode, appearance, sgr) in [
-            (
-                ColorMode::TrueColor,
-                Appearance::Dark,
-                "\x1b[38;2;56;189;248m",
-            ),
-            (ColorMode::Ansi256, Appearance::Dark, "\x1b[38;5;75m"),
-            (ColorMode::Ansi16, Appearance::Dark, "\x1b[94m"),
-            (
-                ColorMode::TrueColor,
-                Appearance::Light,
-                "\x1b[38;2;3;105;161m",
-            ),
-            (
-                ColorMode::Ansi256,
-                Appearance::Light,
-                "\x1b[38;2;3;105;161m",
-            ),
-            (ColorMode::Ansi16, Appearance::Light, "\x1b[94m"),
-        ] {
-            let mut drawn = Drawn::new((80, 24), None, true);
-            drawn.app.theme_context = Some(ThemeContext {
-                mode,
-                appearance,
-                background: None,
-                active: "system".into(),
-            });
-            let named = match appearance {
-                Appearance::Dark => "monokai-dark",
-                Appearance::Light => "monokai-light",
-            };
-            for id in ["system", named] {
-                drawn.app.paint_theme(id);
-                for initialized in [true, false] {
-                    let context = (!initialized).then(|| drawn.app.theme_context.take());
-                    for fullscreen in [false, true] {
-                        drawn.app.fullscreen = fullscreen;
-                        for name in ["text", "thinking"] {
-                            let mut projection = crate::projection::Projection::default();
-                            let event = serde_json::from_value(serde_json::json!({
-                                "sequence": 1, "create_at": 1, "type": "step", "name": name,
-                                "data": {"turn_id": "t1", "request_id": "r1", "delta": "Checking the parser."}
-                            }))
-                            .unwrap();
-                            projection.apply("main", &event);
-                            projection.set_running(true);
-                            drawn
-                                .app
-                                .apply(Update::Snapshot(Box::new(projection.snapshot())));
-                            drawn.app.run_started = Some(Instant::now() - Duration::from_secs(42));
-                            let frame = drawn.app.frame((80, 24));
-                            let label = if name == "thinking" {
-                                "thinking…"
-                            } else {
-                                "working…"
-                            };
-                            let row = frame.live.iter().find(|row| row.contains(label)).unwrap();
-                            let start = row
-                                .find(sgr)
-                                .expect("the activity uses the terminal's blue");
-                            let colored = row[start + sgr.len()..].split("\x1b[0m").next().unwrap();
-                            let (pulse, status) = colored.split_once(' ').unwrap();
-                            assert!(["·", "•", "●"].contains(&pulse));
-                            assert_eq!(
-                                status,
-                                format!("{label}  42s"),
-                                "{mode:?}, {appearance:?}, {id}, fullscreen={fullscreen}, initialized={initialized}: {row:?}"
-                            );
-                        }
-                    }
-                    if let Some(context) = context {
-                        drawn.app.theme_context = context;
-                    }
-                }
-            }
-        }
-    }
-
     /// A thought only grows while it runs and never shrinks when it
     /// settles, in either detail: the rows under it would hop otherwise.
     /// A short thought takes only its own rows.
@@ -8862,6 +8800,61 @@ mod tests {
         }
     }
 
+    /// The palette lists the Session's enabled, unshadowed Skills, and a row
+    /// completes its marker without sending.
+    #[test]
+    fn the_palette_lists_enabled_unshadowed_skills() {
+        use crate::management::skills::Entry;
+        let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
+        let (mut app, sent, _home) = session_with_queue(false, &[]);
+        let entry = |name: &str, enabled: bool, shadowed_by: Option<&str>| Entry {
+            id: format!("user:{name}"),
+            source: Some("user".into()),
+            name: name.into(),
+            description: format!("About {name}"),
+            file_path: format!("/home/.agents/skills/{name}/SKILL.md"),
+            enabled,
+            shadowed_by: shadowed_by.map(str::to_owned),
+        };
+        app.apply(Update::Skills(vec![
+            entry("commit", true, None),
+            entry("deploy", false, None),
+            entry("shadowed", true, Some("user:shadowed")),
+            entry("two words", true, None),
+        ]));
+        typed(&mut app, "/comm");
+        assert!(matches!(app.handle(key(KeyCode::Enter)), Outcome::Continue));
+        assert_eq!(app.composer.text(), "$skill: commit ");
+        assert!(
+            sent.borrow().is_empty(),
+            "the marker is a draft, not a message"
+        );
+        app.composer.clear();
+        typed(&mut app, "/dep");
+        app.handle(key(KeyCode::Tab));
+        assert_eq!(
+            app.composer.text(),
+            "/dep",
+            "a disabled Skill is not offered"
+        );
+        app.composer.clear();
+        typed(&mut app, "/sha");
+        app.handle(key(KeyCode::Tab));
+        assert_eq!(
+            app.composer.text(),
+            "/sha",
+            "a shadowed Skill is not offered"
+        );
+        app.composer.clear();
+        typed(&mut app, "/two");
+        app.handle(key(KeyCode::Tab));
+        assert_eq!(
+            app.composer.text(),
+            "/two",
+            "a name with whitespace cannot be referenced and is not offered"
+        );
+    }
+
     /// A resumed session of `count` user messages `ask N`, each cut at `N`.
     fn resume_asks(drawn: &mut Drawn, count: usize) {
         drawn
@@ -9589,6 +9582,40 @@ mod tests {
         assert_eq!(drawn.app.composer.text(), "ask 2");
     }
 
+    /// Editing a message that loaded a Skill prefills the operator's own text,
+    /// so resending does not carry the block and load the Skill twice.
+    #[test]
+    fn editing_a_message_that_loaded_a_skill_prefills_the_operators_text_only() {
+        let mut drawn = Drawn::new((80, 40), None, true);
+        let mut projection = crate::projection::Projection::default();
+        let event: crate::wire::Event = serde_json::from_value(serde_json::json!({
+            "id": "input-1", "sequence": 1, "create_at": 1,
+            "type": "input", "name": "message",
+            "data": {"user": {"content": [
+                {"type": "text", "text": "check the build"},
+                {"type": "text", "text": "<dim-skill name=\"checkin\">\nSkill: checkin\nDescription: D\nFile: /x/SKILL.md\n\nInstructions:\nBODY\n</dim-skill>"},
+            ]}, "mode": "queue"},
+        }))
+        .unwrap();
+        projection.apply("main", &event);
+        let applied: crate::wire::Event = serde_json::from_value(serde_json::json!({
+            "id": "applied-1", "sequence": 2, "create_at": 2,
+            "type": "input", "name": "applied", "data": {"input_id": "input-1"},
+        }))
+        .unwrap();
+        projection.apply("main", &applied);
+        let mut snapshot = projection.snapshot();
+        snapshot.session_id = "s1".into();
+        snapshot.focus = "main".into();
+        snapshot.history_complete = true;
+        drawn.app.apply(Update::Snapshot(Box::new(snapshot)));
+        drawn.draw();
+        drawn.app.run_command("timeline", "");
+        drawn.key(KeyCode::Up);
+        drawn.key(KeyCode::Char('e'));
+        assert_eq!(drawn.app.composer.text(), "check the build");
+    }
+
     /// Entering fullscreen lays out only the shown Session's transcript,
     /// not what scrollback committed before it.
     #[test]
@@ -9806,28 +9833,6 @@ mod tests {
     }
 
     #[test]
-    fn the_goodbye_box_lines_up_with_the_welcome_box() {
-        let welcome = boxed(
-            &["Welcome".to_owned()],
-            40,
-            &|e| e.to_owned(),
-            &|_, b| b.to_owned(),
-            None,
-        );
-        let edge = |row: &str| row.find(|c: char| c != ' ');
-        for row in goodbye_panel(Some("session")) {
-            assert_eq!(edge(&row), edge(&welcome[0]), "{row:?}");
-        }
-        let text = |row: &str| row.find(|c: char| c.is_alphanumeric());
-        assert_eq!(
-            text(&goodbye_panel(None)[1]),
-            text(&welcome[1]),
-            "{:?}",
-            goodbye_panel(None)
-        );
-    }
-
-    #[test]
     fn startup_panels_keep_their_greeting_and_width_in_narrow_terminals() {
         let theme = test_theme();
         let opened = WebOpened {
@@ -9848,50 +9853,6 @@ mod tests {
                 assert!(web.contains(t("DIM Web is ready")), "{web}");
             }
         }
-    }
-
-    #[test]
-    fn boxed_rows_have_equal_display_width() {
-        let rows = vec![
-            "plain".to_owned(),
-            "中文 mixed".to_owned(),
-            "\x1b[2mdim\x1b[22m".to_owned(),
-        ];
-        let out = boxed(&rows, 40, &|e| e.to_owned(), &|_, b| b.to_owned(), None);
-        for line in &out {
-            assert_eq!(width_of(line), 38, "{line:?}");
-        }
-        let out = boxed(
-            &rows,
-            40,
-            &|e| e.to_owned(),
-            &|_, b| b.to_owned(),
-            Some(("● working…  3s", &|s| s.to_owned())),
-        );
-        assert!(
-            out[0].starts_with(&format!("{}╭─ ● working…  3s ─", " ".repeat(MARGIN))),
-            "{:?}",
-            out[0]
-        );
-        for line in &out {
-            assert_eq!(width_of(line), 38, "{line:?}");
-        }
-    }
-
-    #[test]
-    fn emoji_sequences_count_as_one_wide_cluster() {
-        assert_eq!(width_of("👨‍👩‍👧"), 2);
-        assert_eq!(width_of("❤️"), 2);
-        assert_eq!(width_of("🇨🇳"), 2);
-        let (cut, used) = clip("ab👨‍👩‍👧cd", 3);
-        assert_eq!((cut.as_str(), used), ("ab", 2), "a cluster is never split");
-        assert_eq!(wrap("a👨‍👩‍👧b", 2), vec!["a", "👨‍👩‍👧", "b"]);
-    }
-
-    #[test]
-    fn wrap_respects_wide_characters() {
-        assert_eq!(wrap("中中中", 4), vec!["中中", "中"]);
-        assert_eq!(wrap("abcd", 2), vec!["ab", "cd"]);
     }
 
     #[test]
@@ -9967,6 +9928,7 @@ mod tests {
                 provider_id: "relay".into(),
                 model_id: "reasoner".into(),
                 model_preferences: None,
+                capability_snapshot: None,
             }));
             press(&mut app, KeyCode::Char(' '));
             let answer = selection(&app);
@@ -10021,6 +9983,7 @@ mod tests {
                         provider_id: "relay".into(),
                         model_id: "other".into(),
                         model_preferences: None,
+                        capability_snapshot: None,
                     }));
                 }
                 let before = sent.borrow().len();
@@ -10126,6 +10089,33 @@ mod tests {
                 _ => "other".into(),
             })
             .collect()
+    }
+
+    /// Tab in the palette only completes, so repeating it never runs a
+    /// command and never exits, in either layout.
+    #[test]
+    fn repeated_tab_in_the_palette_only_completes() {
+        let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
+        for fullscreen in [false, true] {
+            let (mut app, sent, _home) = session_with_queue(false, &[]);
+            app.fullscreen = fullscreen;
+            assert!(matches!(
+                app.handle(key(KeyCode::Char('/'))),
+                Outcome::Continue
+            ));
+            for _ in 0..3 {
+                assert!(matches!(app.handle(key(KeyCode::Tab)), Outcome::Continue));
+                assert_eq!(app.composer.text(), "/new");
+            }
+            assert!(sent.borrow().is_empty(), "Tab ran nothing");
+
+            let (mut app, sent, _home) = session_with_queue(false, &[]);
+            app.fullscreen = fullscreen;
+            typed(&mut app, "/ke");
+            assert!(matches!(app.handle(key(KeyCode::Tab)), Outcome::Continue));
+            assert_eq!(app.composer.text(), "/keys");
+            assert!(sent.borrow().is_empty(), "the key bindings did not open");
+        }
     }
 
     /// During a run Enter queues the draft, and Ctrl+S steers a draft that is

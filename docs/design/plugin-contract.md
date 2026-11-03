@@ -109,7 +109,7 @@ R4). This table says what each name Dim defines is for.
 | `sessionPermissions` | process | Agents | yes | Marked `#[rutis::service]` |
 | `sessionMetadata` | process | SessionStore | yes | SessionTitle is the title's one writer |
 | `settings` | process | Settings | yes | Business configuration |
-| `auxiliaryModel` | process | App Server | yes | Auxiliary model requests |
+| `auxiliaryModel` | process | the profile's model-selection owner | yes | Auxiliary model requests |
 | `pluginFiles` | process | host | yes, when the host supplies a root | A process part's own files |
 | `workflowFiles` | process | App Server | yes | Marked `#[rutis::service]` |
 | `collaborationMembers:<kind>` | process | the member provider | designed, not implemented | [ExternalAgent](plugins/ExternalAgent.md); registers with Collaboration when built (rutis usage R6) |
@@ -205,7 +205,7 @@ Public bus events:
 | `settings/{source}` | Settings | `{source, scope, revision}` | A business source changed |
 | `settings/projects` | App Server Settings | `{root, cwd}` | A project root was authorized |
 | `skills/catalog` | SkillsCatalog | catalog version | The Skill catalog advanced |
-| `agent/session-restored`, `agent/unloaded-session-deleted` | Agents | ids | Host-internal, consumed by Collaboration |
+| `agent/session-restored`, `agent/unloaded-session-deleted` | Agents | ids | Host-internal, consumed by Collaboration and Provider; [Session loading](appserver/session-deletion-and-fork.md#65-opening-the-fork) |
 
 *Today:* the events are implemented as listed, and TypeScript rows listen to them directly.
 
