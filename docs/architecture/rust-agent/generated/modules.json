@@ -1457,6 +1457,16 @@
       ]
     },
     {
+      "id": "dim_agent_runtime::timeline_query",
+      "crate": "dim_agent_runtime",
+      "parent": "dim_agent_runtime",
+      "file": "crates/dim-agent-runtime/src/timeline_query.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches"
+      ]
+    },
+    {
       "id": "dim_agent_runtime::timeline_store",
       "crate": "dim_agent_runtime",
       "parent": "dim_agent_runtime",
@@ -2665,7 +2675,8 @@
         "eprintln",
         "format",
         "tokio::pin",
-        "tracing::error"
+        "tracing::error",
+        "vec"
       ]
     },
     {
@@ -14087,6 +14098,13 @@
     },
     {
       "from": "dim_agent_runtime",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "mod timeline_query"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
         "mod timeline_store",
@@ -14689,6 +14707,21 @@
     },
     {
       "from": "dim_agent_runtime::core::timeline",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQuery",
+        "path TimelineQueryDirection::Ascending",
+        "path TimelineQueryReply",
+        "path TimelineQueryScope::Branch",
+        "path TimelineQueryScope::Chain",
+        "use crate::TimelineQuery",
+        "use crate::TimelineQueryDirection",
+        "use crate::TimelineQueryReply",
+        "use crate::TimelineQueryScope"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::core::timeline",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
         "path BranchCursor",
@@ -14785,6 +14818,20 @@
     },
     {
       "from": "dim_agent_runtime::memory_timeline_store",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQuery",
+        "path TimelineQueryDirection::Descending",
+        "path TimelineQueryPage",
+        "path TimelineQueryScope::Branch",
+        "use crate::TimelineQuery",
+        "use crate::TimelineQueryDirection",
+        "use crate::TimelineQueryPage",
+        "use crate::TimelineQueryScope"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::memory_timeline_store",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
         "path PublishCallback",
@@ -14804,7 +14851,9 @@
       "to": "dim_agent_types::checkpoint",
       "references": [
         "path RecoverySnapshot",
-        "use dim_agent_types::RecoverySnapshot"
+        "path TimelinePosition",
+        "use dim_agent_types::RecoverySnapshot",
+        "use dim_agent_types::TimelinePosition"
       ]
     },
     {
@@ -15152,6 +15201,32 @@
       ]
     },
     {
+      "from": "dim_agent_runtime::timeline_query",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path AgentError::InvalidInput",
+        "path Result",
+        "use crate::AgentError",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::timeline_query",
+      "to": "dim_agent_types::checkpoint",
+      "references": [
+        "path TimelinePosition",
+        "use dim_agent_types::TimelinePosition"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::timeline_query",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path AgentEvent",
+        "use dim_agent_types::AgentEvent"
+      ]
+    },
+    {
       "from": "dim_agent_runtime::timeline_store",
       "to": "dim_agent_runtime::config",
       "references": [
@@ -15183,6 +15258,16 @@
         "path Result",
         "path crate::AgentError::InvalidInput",
         "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::timeline_store",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQuery",
+        "path TimelineQueryPage",
+        "use crate::TimelineQuery",
+        "use crate::TimelineQueryPage"
       ]
     },
     {
@@ -16731,6 +16816,14 @@
       "to": "dim_agent_runtime::memory_timeline_store",
       "references": [
         "path dim_agent_runtime::MemoryTimelineStore"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions::tests::deferred_inputs",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path dim_agent_runtime::TimelineQuery",
+        "path dim_agent_runtime::TimelineQueryPage"
       ]
     },
     {
@@ -23974,6 +24067,24 @@
       "references": [
         "path Names",
         "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::timeline",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQuery",
+        "path TimelineQueryDirection::Descending",
+        "path TimelineQueryFlag",
+        "path TimelineQueryFlag::Render",
+        "path TimelineQueryFlag::State",
+        "path TimelineQueryPage",
+        "path TimelineQueryScope::Branch",
+        "use dim_agent_runtime::TimelineQuery",
+        "use dim_agent_runtime::TimelineQueryDirection",
+        "use dim_agent_runtime::TimelineQueryFlag",
+        "use dim_agent_runtime::TimelineQueryPage",
+        "use dim_agent_runtime::TimelineQueryScope"
       ]
     },
     {
@@ -36244,6 +36355,13 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::composer::palette",
+      "references": [
+        "path crate::ui::composer::palette::filter_commands"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::i18n",
       "references": [
         "path i18n::LOCALES",
@@ -38454,6 +38572,22 @@
     {
       "module": "dim_app_server::storage::timeline",
       "path": "Timeline::new"
+    },
+    {
+      "module": "dim_app_server::storage::timeline",
+      "path": "Value::Integer"
+    },
+    {
+      "module": "dim_app_server::storage::timeline",
+      "path": "Value::Null"
+    },
+    {
+      "module": "dim_app_server::storage::timeline",
+      "path": "Value::Real"
+    },
+    {
+      "module": "dim_app_server::storage::timeline",
+      "path": "Value::Text"
     },
     {
       "module": "dim_app_server::transport",

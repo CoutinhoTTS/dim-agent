@@ -1,5 +1,6 @@
+import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import type { FileScope, PermissionPolicy } from '../../../npm/plugin.js'
+import type { FileLease, FileScope, PermissionPolicy } from '../../../npm/plugin.js'
 import { definitionSchema, issues, logEntries, logMessageBytes, resultBytes, stageReasonBytes, stages, WorkflowError } from './definition.ts'
 
 const id = z.string().min(1)
@@ -139,19 +140,62 @@ export function projectedBytes(runs: Run[]): number {
   return total
 }
 
-/** The only decoder for the committed inner-v2 run document. */
+/** The only decoder for the committed inner-v2 run document.
+ *
+ * A poll reads `workflow/runs.version` instead of the store: it holds the
+ * token of the last committed store write, and the owner re-reads and decodes
+ * the store only when that token differs from the snapshot's. The token is
+ * derived state; startup and every write read the store itself, and a failed
+ * access drops the snapshot, so a committed replace whose token write failed
+ * stays visible to the next read. */
 export class RunStore {
   readonly scope: FileScope
+  private snapshot: { token: string | null; runs: Run[] } | undefined
+
   constructor(scope: FileScope) { this.scope = scope }
 
-  async read(): Promise<Run[]> { return this.access(runs => runs, false) }
+  async read(): Promise<Run[]> {
+    const token = await this.signal()
+    if (this.snapshot?.token === token) return this.snapshot.runs
+    const runs = await this.access(runs => runs, false)
+    this.snapshot = { token, runs }
+    return runs
+  }
+
   async update<T>(change: (runs: Run[]) => T): Promise<T> { return this.access(change, true) }
 
-  private async access<T>(change: (runs: Run[]) => T, write: boolean): Promise<T> {
+  private signal(): Promise<string | null> {
+    return this.locked('workflow/runs.version', async file => {
+      const reply = await file.read()
+      if (!reply.ok) throw new WorkflowError(reply.error)
+      return reply.value
+    })
+  }
+
+  private commit(): Promise<string> {
+    const token = randomUUID()
+    return this.locked('workflow/runs.version', async file => {
+      const reply = await file.replace(token)
+      if (!reply.ok) throw new WorkflowError(reply.error)
+      return token
+    })
+  }
+
+  private async locked<T>(path: string, work: (file: FileLease) => Promise<T>): Promise<T> {
     let value!: T
     let problem: unknown
-    const outcome = await this.scope.withLock('workflow/runs.json', async file => {
-      try {
+    const outcome = await this.scope.withLock(path, async file => {
+      try { value = await work(file) } catch (error) { problem = error }
+    })
+    if (!outcome.ok) throw new WorkflowError(outcome.error)
+    if (problem !== undefined) throw problem
+    return value
+  }
+
+  private async access<T>(change: (runs: Run[]) => T, write: boolean): Promise<T> {
+    let committed: { token: string; runs: Run[] } | undefined
+    try {
+      const value = await this.locked('workflow/runs.json', async file => {
         const text = await file.read()
         if (!text.ok) throw new WorkflowError(text.error)
         let runs: Run[]
@@ -160,18 +204,19 @@ export class RunStore {
           try { runs = storedSchema.parse(JSON.parse(text.value)).runs }
           catch { throw new WorkflowError('invalid_data') }
         }
-        value = change(runs)
+        const changed = change(runs)
         if (write) {
           const reply = await file.replace(JSON.stringify({ version: 2, runs }))
           if (!reply.ok) throw new WorkflowError(reply.error)
+          committed = { token: await this.commit(), runs }
         }
-      } catch (error) {
-        problem = error
-      }
-      return null
-    })
-    if (!outcome.ok) throw new WorkflowError(outcome.error)
-    if (problem !== undefined) throw problem
-    return value
+        return changed
+      })
+      if (committed) this.snapshot = committed
+      return value
+    } catch (error) {
+      this.snapshot = undefined
+      throw error
+    }
   }
 }

@@ -5,7 +5,7 @@ import { z } from 'zod'
 import workflow from '@dimcode/workflow'
 import type { FileError, FileLease, ManagementMethods, PluginFiles, Sessions } from '../../npm/plugin.js'
 
-const control = z.object({ phase: z.enum(['before_input', 'reply_write', 'before_launch', 'stage_input', 'stage_history', 'delete_reply']), host: z.string(), port: z.number().int(), count: z.number().int().min(1).optional() })
+const control = z.object({ phase: z.enum(['before_input', 'reply_write', 'before_launch', 'stage_input', 'stage_history', 'delete_reply']).optional(), host: z.string().optional(), port: z.number().int().optional(), count: z.number().int().min(1).optional(), failReplace: z.literal('workflow/runs.version').optional() })
 
 export default definePlugin({
   name: 'WorkflowPackageProbe',
@@ -20,7 +20,7 @@ export default definePlugin({
     let readError: FileError | null = null
     const pause = async (point: z.infer<typeof control>['phase']) => {
       const gate = selected
-      if (gate?.phase !== point) return
+      if (gate?.phase !== point || gate.host === undefined || gate.port === undefined) return
       const remaining = (gate.count ?? 1) - 1
       selected = remaining > 0 ? { ...gate, count: remaining } : undefined
       phase = point
@@ -64,6 +64,11 @@ export default definePlugin({
               },
               backup: suffix => file.backup(suffix),
               async replace(text) {
+                if (selected?.failReplace === path) {
+                  selected = undefined
+                  replacementError = 'io'
+                  return { ok: false as const, error: 'io' as const }
+                }
                 const reply = await file.replace(text)
                 if (!reply.ok) replacementError = reply.error
                 return reply

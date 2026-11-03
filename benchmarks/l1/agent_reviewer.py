@@ -14,13 +14,15 @@ Usage (as a ReviewerConfig.command):
     python3 -m l1.agent_reviewer
 
 Reads DIM_EVAL_BASE_URL, DIM_EVAL_JUDGE_MODEL and the key named by
-DIM_EVAL_API_KEY_ENV. Writes one JSON object per changed file, then a summary.
+DIM_EVAL_API_VAR (legacy fallback: DIM_EVAL_API_KEY_ENV). Writes one JSON
+object per changed file, then a summary.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -33,6 +35,10 @@ import urllib.request
 DEFAULT_BASE_URL = "https://api.deepseek.com/v1"
 DEFAULT_MODEL = "deepseek-flash"
 DEFAULT_KEY_ENV = "DEEPSEEK_API_KEY"
+
+#: What a usable key-variable name looks like; see main() for why anything
+#: outside this shape is refused rather than looked up.
+_KEY_VAR_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 #: Judging traces data flow through a diff it has in full; `low` did that as well
 #: as glm did, and `high` spent up to twice the reasoning on the same merges.
@@ -146,7 +152,22 @@ def main() -> int:
 
     base_url = os.environ.get("DIM_EVAL_BASE_URL", DEFAULT_BASE_URL)
     model = os.environ.get("DIM_EVAL_JUDGE_MODEL", DEFAULT_MODEL)
-    key_var = os.environ.get("DIM_EVAL_API_KEY_ENV", DEFAULT_KEY_ENV)
+    # `or` for both carriers: a legacy name present but empty must fall through
+    # to the default, not select an empty name and report *it* as empty.
+    key_var = (os.environ.get("DIM_EVAL_API_VAR")
+               or os.environ.get("DIM_EVAL_API_KEY_ENV")
+               or DEFAULT_KEY_ENV)
+    # A variable name, not a secret. The judge's live path is ssh and never
+    # passes through harbor, but if this environment is ever built the way
+    # harbor builds the agent's, the corrupted shapes are "DEEP****KEY" and the
+    # "${DIM_EVAL_API_KEY_ENV}" template; both would look up a variable that
+    # cannot exist and report it as merely empty.
+    if not _KEY_VAR_NAME.fullmatch(key_var):
+        shown = key_var if len(key_var) <= 40 else key_var[:40] + "…"
+        sys.stderr.write(
+            f"no usable key-variable name {shown!r}: DIM_EVAL_API_VAR must "
+            "carry the provider key variable's name\n")
+        return 2
     api_key = os.environ.get(key_var, "")
     if not api_key:
         sys.stderr.write(f"{key_var} is empty\n")
