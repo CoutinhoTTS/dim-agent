@@ -480,25 +480,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     } else {
         None
     };
-    let plugin_root = match &config.plugin_files {
-        Some(root) => {
-            create_private_directory(root)?;
-            let root = std::fs::canonicalize(root)?;
-            let index = match config
-                .file_roots
-                .iter()
-                .position(|candidate| candidate == &root)
-            {
-                Some(index) => index,
-                None => {
-                    config.file_roots.push(root);
-                    config.file_roots.len() - 1
-                }
-            };
-            Some(index)
-        }
-        None => product_root,
-    };
     let execution_root = if config.local_execution() {
         let cwd = std::env::current_dir()?;
         let home = config
@@ -534,6 +515,42 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             );
         }
     }
+    // The plugin files root and PluginManager's home follow one rule
+    // (PluginManager §2.1, process TypeScript §5.2): an embedding host names
+    // the root with `plugin_files`; otherwise it is the product home, else
+    // the execution home the host was started with (`--home`). A host started
+    // with only a database file has neither, so it registers no `pluginFiles`
+    // provider and runs no PluginManager; the root never comes from
+    // `--database` or the working directory.
+    let plugin_home = config
+        .product_home
+        .clone()
+        .or_else(|| config.target_home.clone());
+    let plugin_root = match &config.plugin_files {
+        Some(root) => {
+            create_private_directory(root)?;
+            let root = std::fs::canonicalize(root)?;
+            let index = match config
+                .file_roots
+                .iter()
+                .position(|candidate| candidate == &root)
+            {
+                Some(index) => index,
+                None => {
+                    config.file_roots.push(root);
+                    config.file_roots.len() - 1
+                }
+            };
+            Some(index)
+        }
+        None => plugin_home.as_ref().and_then(|home| {
+            config
+                .file_roots
+                .iter()
+                .position(|candidate| candidate == home)
+        }),
+    };
+    let plugin_files = plugin_root.map(|index| config.file_roots[index].clone());
     // SessionStore keeps Session files next to the native database, below
     // the database directory as a FileStorage root (session-files §3.1).
     let session_files_root = match &config.database_path {
@@ -800,20 +817,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             ))
         })?);
     }
-    let plugin_home = config
-        .product_home
-        .clone()
-        .or_else(|| config.target_home.clone());
     let plugins = match &plugin_home {
         Some(home) => Some(
             plugin_manager::State::read(
                 home,
-                plugin_root.and(
-                    config
-                        .plugin_files
-                        .as_deref()
-                        .or(config.product_home.as_deref()),
-                ),
+                plugin_files.as_deref(),
                 config.plugin_defaults.as_deref(),
                 &config.plugin_configs,
                 builder.catalog_mut(),
