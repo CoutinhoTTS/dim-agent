@@ -3778,8 +3778,7 @@ async fn a_prompt_submit_hook_precedes_a_referenced_skill() {
     .unwrap();
     assert_eq!(reply["status"], "notHeld", "{reply}");
     let steer = reply["steer"]["inputId"].as_str().unwrap();
-    let event = session
-        .local("main", ..)
+    let event = branch_events(&session, "main", ..)
         .await
         .unwrap()
         .into_iter()

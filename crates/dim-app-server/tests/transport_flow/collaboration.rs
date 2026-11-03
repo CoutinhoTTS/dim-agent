@@ -381,7 +381,7 @@ async fn product_collaboration_adopts_profile_and_default_capabilities() {
             lead_session.submit(tool(request), dim_agent_types::InputMode::Queue, branch).await.unwrap();
             lead_session.idle(branch).await.unwrap();
             poll("startup member delivered", async || {
-                lead_session.local(branch, ..).await.unwrap().iter().any(|event|
+                branch_events(&lead_session, branch, ..).await.unwrap().iter().any(|event|
                     event.sequence > through && matches!(&event.kind,
                         EventKind::CollaborationDelivered(data) if matches!(&data.delivery, CollaborationDelivery::Ok { .. })))
                     .then_some(())
