@@ -1535,6 +1535,8 @@ const MODELED_CHUNK_TYPES: &[&str] = &[
     "response.reasoning_summary_part.added",
     "response.reasoning_summary_part.done",
     "response.reasoning_summary_text.delta",
+    "response.refusal.delta",
+    "response.refusal.done",
 ];
 
 /// How long to keep looking for an error frame once `response.in_progress`
@@ -2033,6 +2035,8 @@ struct OpenAIResponsesStream {
     response_id: Option<String>,
     stream_errored: bool,
     text_states: HashMap<String, Value>,
+    /// Refusal parts that already received a delta, keyed by item and part.
+    refusal_deltas: HashSet<(String, u64)>,
     output_ids: HashMap<usize, String>,
     text_annotations: HashMap<String, Vec<Value>>,
     logprobs: Vec<Value>,
@@ -2078,6 +2082,7 @@ impl Transformer for OpenAIResponsesStream {
             ref mut response_id,
             ref mut stream_errored,
             ref mut text_states,
+            ref mut refusal_deltas,
             ref mut output_ids,
             ref mut text_annotations,
             ref mut logprobs,
@@ -2376,6 +2381,54 @@ impl Transformer for OpenAIResponsesStream {
                             .unwrap_or("")
                             .to_string();
                         controller.text_delta(id, delta);
+                    }
+
+                    // ── response.refusal.delta → TextDelta ───────────────────
+                    "response.refusal.delta" => {
+                        let mut id = parsed
+                            .get("item_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if let Some(index) = parsed.get("output_index").and_then(Value::as_u64)
+                            && let Some(original_id) = output_ids.get(&(index as usize))
+                        {
+                            id = original_id.clone();
+                        }
+                        let content_index = parsed
+                            .get("content_index")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0);
+                        let delta = parsed.get("delta").and_then(|v| v.as_str()).unwrap_or("");
+                        if !delta.is_empty() {
+                            refusal_deltas.insert((id.clone(), content_index));
+                            controller.text_delta(id, delta.to_string());
+                        }
+                    }
+
+                    // ── response.refusal.done → TextDelta only without deltas ─
+                    "response.refusal.done" => {
+                        let mut id = parsed
+                            .get("item_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if let Some(index) = parsed.get("output_index").and_then(Value::as_u64)
+                            && let Some(original_id) = output_ids.get(&(index as usize))
+                        {
+                            id = original_id.clone();
+                        }
+                        let content_index = parsed
+                            .get("content_index")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0);
+                        if !refusal_deltas.contains(&(id.clone(), content_index)) {
+                            let refusal =
+                                parsed.get("refusal").and_then(|v| v.as_str()).unwrap_or("");
+                            if !refusal.is_empty() {
+                                controller.text_delta(id, refusal.to_string());
+                            }
+                        }
                     }
 
                     // ── function_call_arguments.delta → ToolInputDelta ────────

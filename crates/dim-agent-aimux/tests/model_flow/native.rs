@@ -1472,18 +1472,18 @@ async fn respond_native(
             if refusal {
                 events.extend([
                     json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"refusal-1","role":"assistant","phase":"final_answer","content":[]}}),
-                    json!({"type":"response.content_part.added","item_id":"refusal-1","content_index":0,"part":{"type":"refusal","refusal":""}}),
+                    json!({"type":"response.content_part.added","item_id":"refusal-1","output_index":0,"content_index":0,"part":{"type":"refusal","refusal":""}}),
                 ]);
                 if request.to_string().contains("native-refusal-empty") {
-                    events.push(json!({"type":"response.refusal.delta","item_id":"refusal-1","content_index":0,"delta":""}));
+                    events.push(json!({"type":"response.refusal.delta","item_id":"refusal-1","output_index":0,"content_index":0,"delta":""}));
                 } else if !request.to_string().contains("native-refusal-done") {
                     events.extend([
-                        json!({"type":"response.refusal.delta","item_id":"refusal-1","content_index":0,"delta":"Cannot "}),
-                        json!({"type":"response.refusal.delta","item_id":"refusal-1","content_index":0,"delta":"comply."}),
+                        json!({"type":"response.refusal.delta","item_id":"refusal-1","output_index":0,"content_index":0,"delta":"Cannot "}),
+                        json!({"type":"response.refusal.delta","item_id":"refusal-1","output_index":0,"content_index":0,"delta":"comply."}),
                     ]);
                 }
                 events.extend([
-                    json!({"type":"response.refusal.done","item_id":"refusal-1","content_index":0,"refusal":"Cannot comply."}),
+                    json!({"type":"response.refusal.done","item_id":"refusal-1","output_index":0,"content_index":0,"refusal":"Cannot comply."}),
                     json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"refusal-1","role":"assistant","phase":"final_answer","content":[{"type":"refusal","refusal":"Cannot comply."}]}}),
                 ]);
             } else {
@@ -2926,5 +2926,64 @@ async fn chat_refusal_delta_is_visible_text() {
     }
     assert_eq!(text, "I cannot help with that.");
     assert_eq!(stop, Some(ModelStopReason::EndTurn));
+    root.shutdown().await.unwrap();
+}
+
+/// A Responses refusal reaches the reply as visible text (vendored patch for
+/// arcships/aimux#466).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_refusal_deltas_are_visible_text() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    let body = sse(vec![
+        json!({"type":"response.created","response":{"id":"resp-1","created_at":1,"model":"test-model"}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"refusal-1","role":"assistant","phase":"final_answer","content":[]}}),
+        json!({"type":"response.content_part.added","item_id":"refusal-1","output_index":0,"content_index":0,"part":{"type":"refusal","refusal":""}}),
+        json!({"type":"response.refusal.delta","item_id":"refusal-1","output_index":0,"content_index":0,"delta":"Cannot "}),
+        json!({"type":"response.refusal.delta","item_id":"refusal-1","output_index":0,"content_index":0,"delta":"comply."}),
+        json!({"type":"response.refusal.done","item_id":"refusal-1","output_index":0,"content_index":0,"refusal":"Cannot comply."}),
+        json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"refusal-1","role":"assistant","phase":"final_answer","content":[{"type":"refusal","refusal":"Cannot comply."}]}}),
+        json!({"type":"response.completed","response":{"id":"resp-1","created_at":1,"model":"test-model","usage":{"input_tokens":1,"output_tokens":2}}}),
+    ]);
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let mut stream = host
+        .0
+        .invoke(
+            Arc::new(ModelRequest::new(
+                "local",
+                "test-model",
+                vec![Message::text(Role::User, "question")],
+            )),
+            ModelConnection::Http(HttpModelConnection {
+                protocol: ModelProtocol::OpenaiResponses,
+                base_url: server.uri(),
+                network: Default::default(),
+                headers: Default::default(),
+                bearer: None,
+                api_key: None,
+                preset: None,
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let mut text = String::new();
+    while let Some(chunk) = stream.next().await {
+        if let ModelChunk::Text(delta) = chunk.unwrap() {
+            text.push_str(&delta);
+        }
+    }
+    assert_eq!(text, "Cannot comply.");
     root.shutdown().await.unwrap();
 }
