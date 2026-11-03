@@ -375,38 +375,64 @@ impl SqliteTimelineStore {
     /// applies the kinds, flags and predicate; a predicate that matches a
     /// record inside a merged output row is re-checked on the decoded events,
     /// because that row holds several of them.
-    async fn query_range(
+    /// One page of a query: the SQL selects the rows (kinds, flags, event id,
+    /// predicate, order) and takes at most `rows` of them; the decoded events
+    /// are checked against the event id and the predicate again, because a
+    /// merged output row holds several events. Returns the events in read
+    /// order and the highest sequence the read reached, which is the input of
+    /// the next page.
+    async fn query_page(
         &self,
         key: &TimelineKey,
         query: &TimelineQuery,
         range: RangeInclusive<u64>,
-    ) -> Result<Vec<StoredEvent>> {
+        rows: u64,
+    ) -> Result<(Vec<StoredEvent>, Option<u64>)> {
         let session = key.session_id.clone();
         let branch = key.branch_id.clone();
         let selection = query.clone();
         let fetch = range.clone();
+        let descending = query.direction == TimelineQueryDirection::Descending;
         let mut reader = self.reader(RequestBodies::Rebuild);
-        let rows = holds(
+        let fetched = holds(
             &self.db,
             &mut reader,
             None,
-            move |connection, reader, rows: &mut Option<Rows>| {
-                let rows = match rows {
-                    Some(rows) => rows,
-                    None => rows.insert(Rows {
-                        fetched: query_rows(connection, &session, &branch, &selection, &fetch)?,
-                        decoded: vec![],
-                    }),
+            move |connection, reader, state: &mut Option<(Rows, Option<u64>)>| {
+                let (rows, _) = match state {
+                    Some(state) => state,
+                    None => {
+                        let fetched = query_rows(
+                            connection,
+                            &session,
+                            &branch,
+                            &selection,
+                            &fetch,
+                            Some(rows),
+                            descending,
+                        )?;
+                        let edge = if descending {
+                            fetched.back().map(|row| row.first)
+                        } else {
+                            fetched.back().map(|row| row.last)
+                        };
+                        state.insert((
+                            Rows {
+                                fetched,
+                                decoded: vec![],
+                            },
+                            edge,
+                        ))
+                    }
                 };
                 rows.advance(connection, &session, reader)
             },
         )
         .await?;
         self.finish(reader);
-        let records = rows
-            .expect("a finished read fetched its rows")
-            .records(&range, false)?;
-        Ok(records
+        let (mut rows, edge) = fetched.expect("a finished read fetched its rows");
+        let records = rows.records(&range, false)?;
+        let records = records
             .into_iter()
             .filter(|record| {
                 query
@@ -418,7 +444,8 @@ impl SqliteTimelineStore {
                         .as_ref()
                         .is_none_or(|predicate| predicate.matches(&record.event))
             })
-            .collect())
+            .collect();
+        Ok((records, edge))
     }
     /// The atomic batch end of the fact at `sequence` on `key`'s branch. The
     /// stored row's `last_sequence` is its own last event, not the batch's, so
@@ -2199,6 +2226,8 @@ fn query_rows(
     branch: &str,
     query: &TimelineQuery,
     range: &RangeInclusive<u64>,
+    rows: Option<u64>,
+    descending: bool,
 ) -> Result<VecDeque<Fetched>> {
     let start = sql_sequence(*range.start())?;
     let end = sql_sequence(*range.end())?;
@@ -2264,7 +2293,15 @@ fn query_rows(
             value,
         ]);
     }
-    sql.push_str(" ORDER BY sequence");
+    sql.push_str(if descending {
+        " ORDER BY sequence DESC"
+    } else {
+        " ORDER BY sequence"
+    });
+    if let Some(rows) = rows {
+        sql.push_str(" LIMIT ?");
+        parameters.push(rusqlite::types::Value::Integer(rows as i64));
+    }
     let mut statement = connection.prepare(&sql).map_err(error)?;
     statement
         .query_map(params_from_iter(parameters), |row| {
@@ -3474,54 +3511,62 @@ impl TimelineStore for SqliteTimelineStore {
             let mut target = None;
             match direction {
                 Ascending => {
-                    let mut window = low;
-                    while window <= high {
-                        if target.is_some_and(|target| window > target) {
+                    let mut from = low;
+                    while from <= high && records.len() < limit {
+                        let rows = u64::try_from(limit - records.len()).unwrap_or(u64::MAX);
+                        let (page, edge) = self.query_page(key, query, from..=high, rows).await?;
+                        let Some(edge) = edge else { break };
+                        records.extend(page);
+                        if edge < from {
                             break;
                         }
-                        let end = window
-                            .saturating_add(255)
-                            .min(target.unwrap_or(high))
-                            .min(high);
-                        records.extend(self.query_range(key, query, window..=end).await?);
-                        window = end + 1;
-                        if target.is_none() && records.len() >= limit {
-                            let end = records[limit - 1].batch_end;
-                            records.retain(|record| record.event.sequence <= end);
-                            if end < high {
-                                target = Some(end);
-                            }
+                        from = edge.saturating_add(1);
+                    }
+                    if records.len() >= limit {
+                        let end = records[limit - 1].batch_end;
+                        let read_to = records.last().map_or(0, |record| record.event.sequence);
+                        if end > read_to {
+                            let (page, _) = self
+                                .query_page(key, query, read_to + 1..=end, u64::MAX)
+                                .await?;
+                            records.extend(page);
+                        }
+                        records.retain(|record| record.event.sequence <= end);
+                        if end < high {
+                            target = Some(end);
                         }
                     }
                 }
                 Descending => {
-                    let mut window = high;
-                    let mut newest_first: Vec<StoredEvent> = Vec::new();
-                    while window >= low && window > 0 {
-                        if target.is_some_and(|target| window < target) {
+                    let mut from = high;
+                    while from >= low && from > 0 {
+                        let rows = u64::try_from(
+                            limit
+                                .max(records.len())
+                                .saturating_sub(records.len())
+                                .max(1),
+                        )
+                        .unwrap_or(u64::MAX);
+                        let (page, edge) = self.query_page(key, query, low..=from, rows).await?;
+                        let Some(edge) = edge else { break };
+                        records.extend(page);
+                        records.sort_by_key(|record| record.event.sequence);
+                        if records.len() >= limit || edge > from {
                             break;
                         }
-                        let start = window
-                            .saturating_sub(255)
-                            .max(target.unwrap_or(low))
-                            .max(low);
-                        let mut page = self.query_range(key, query, start..=window).await?;
-                        page.reverse();
-                        newest_first.append(&mut page);
-                        window = start.saturating_sub(1);
-                        if target.is_none() && newest_first.len() >= limit {
-                            let limitth = &newest_first[limit - 1];
-                            let bottom = self
-                                .batch_start(key, limitth.event.sequence, limitth.batch_end, low)
-                                .await?;
-                            newest_first.retain(|record| record.event.sequence >= bottom);
-                            if bottom > low {
-                                target = Some(bottom);
-                            }
+                        from = edge.saturating_sub(1);
+                    }
+                    records.sort_by_key(|record| record.event.sequence);
+                    if records.len() >= limit {
+                        let oldest = &records[records.len() - limit];
+                        let bottom = self
+                            .batch_start(key, oldest.event.sequence, oldest.batch_end, low)
+                            .await?;
+                        records.retain(|record| record.event.sequence >= bottom);
+                        if bottom > low {
+                            target = Some(bottom);
                         }
                     }
-                    newest_first.reverse();
-                    records = newest_first;
                 }
             }
             Ok(TimelineQueryReply {

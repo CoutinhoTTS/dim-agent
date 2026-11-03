@@ -24024,6 +24024,7 @@
       "references": [
         "path TimelineCursor",
         "path TimelineQuery",
+        "path TimelineQueryDirection::Descending",
         "path TimelineQueryFlag",
         "path TimelineQueryFlag::Render",
         "path TimelineQueryFlag::State",

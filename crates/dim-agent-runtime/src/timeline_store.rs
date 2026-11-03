@@ -445,7 +445,9 @@ pub trait TimelineStore: Send + Sync + 'static {
     /// end a batch; in a descending read the through is the lower bound and
     /// may fall inside one, and an absent through reads down to sequence 1.
     /// The limit is a target: a reply ends at an atomic batch boundary, so its
-    /// last batch may take it above the limit.
+    /// last batch may take it above the limit. The page bounds the work: the
+    /// selection is applied by the store, so a read costs the page plus the
+    /// batch it ends in, not the range it selects from.
     ///
     /// `next` is present whenever the read stopped before the end of its
     /// position, so a caller never mistakes a short page for the end of its
