@@ -23,6 +23,18 @@ use std::{
 use tokio::sync::{OnceCell, watch};
 use uuid::Uuid;
 
+/// Which turn starts a policy order read keeps.
+#[derive(Debug, Clone, Copy)]
+pub enum PolicyTurns<'a> {
+    /// Only each segment's last turn start, next to its last compaction
+    /// start: the anchors a streamed context resolves cut ids against.
+    Anchors,
+    /// Every turn start of every segment.
+    All,
+    /// Every turn start after this chain position.
+    After(&'a TimelinePosition),
+}
+
 /// One draft offered to the branch's `before` middleware. Each wrapper records
 /// the step it applied, so steps follow the order the transforms took effect.
 /// The steps stay local: the event is dispatched only by its own branch's
@@ -1044,9 +1056,11 @@ impl Timeline {
         self.0.store.last_event(key, cut).await
     }
 
-    /// The event order for legal compaction cuts.
+    /// The event order for legal compaction cuts: each segment's boundary, its
+    /// last turn start and its last compaction start at its cut, and the turn
+    /// starts `turns` keeps.
     #[service(skip)]
-    pub async fn policy_order(&self, through: u64) -> Result<PolicyOrder> {
+    pub async fn policy_order(&self, through: u64, turns: PolicyTurns<'_>) -> Result<PolicyOrder> {
         let through = self.through(Some(through))?;
         let segments: Vec<_> = self
             .0
@@ -1055,9 +1069,15 @@ impl Timeline {
             .cloned()
             .chain(std::iter::once((self.0.key.branch_id.clone(), through)))
             .collect();
+        let rank = |branch: &str| segments.iter().position(|(name, _)| name == branch);
+        let window = match turns {
+            PolicyTurns::Anchors => None,
+            PolicyTurns::All => Some(None),
+            PolicyTurns::After(at) => Some(rank(&at.branch_id).map(|index| (index, at.sequence))),
+        };
         let mut events = Vec::new();
         let mut branches = Vec::new();
-        for (branch, cut) in segments {
+        for (index, (branch, cut)) in segments.into_iter().enumerate() {
             if cut == 0 {
                 continue;
             }
@@ -1066,7 +1086,14 @@ impl Timeline {
                 branch_id: branch.clone(),
             };
             branches.push(branch.clone());
-            events.extend(self.0.store.policy_order(&key, cut).await?.events);
+            let turns = match window {
+                None => cut.saturating_add(1)..=cut,
+                Some(None) => 1..=cut,
+                Some(Some((rank, _))) if index > rank => 1..=cut,
+                Some(Some((rank, sequence))) if index == rank => sequence.saturating_add(1)..=cut,
+                Some(Some(_)) => cut.saturating_add(1)..=cut,
+            };
+            events.extend(self.0.store.policy_order(&key, turns, cut).await?.events);
             if let Some(boundary) = self.boundary_event(&key, cut).await? {
                 events.push(PolicyOrderEvent {
                     id: boundary.id.clone(),
@@ -1102,7 +1129,6 @@ impl Timeline {
             .policy_window(&self.0.key, through, turn_id, cut)
             .await?;
         let current = std::mem::take(&mut window.tool_results);
-        let mut cut_sequence = window.cut_sequence;
         for (branch, segment_through) in &self.0.ancestors {
             if *segment_through == 0 {
                 continue;
@@ -1116,8 +1142,8 @@ impl Timeline {
                 .store
                 .policy_window(&key, *segment_through, turn_id, cut)
                 .await?;
-            if cut_sequence == 0 {
-                cut_sequence = ancestor.cut_sequence;
+            if window.cut_position.is_none() {
+                window.cut_position = ancestor.cut_position;
             }
             if !window.events.iter().any(|event| event.id == cut) {
                 window.events.extend(
@@ -1128,18 +1154,25 @@ impl Timeline {
                         .cloned(),
                 );
             }
-            for event in ancestor.tool_results {
-                if !window.tool_results.iter().any(|seen| seen.id == event.id) {
-                    window.tool_results.push(event);
+            for result in ancestor.tool_results {
+                if !window
+                    .tool_results
+                    .iter()
+                    .any(|seen| seen.event.id == result.event.id)
+                {
+                    window.tool_results.push(result);
                 }
             }
         }
-        for event in current {
-            if !window.tool_results.iter().any(|seen| seen.id == event.id) {
-                window.tool_results.push(event);
+        for result in current {
+            if !window
+                .tool_results
+                .iter()
+                .any(|seen| seen.event.id == result.event.id)
+            {
+                window.tool_results.push(result);
             }
         }
-        window.cut_sequence = cut_sequence;
         Ok(window)
     }
     /// The latest interpreter-compatible checkpoint at `through`, if one is

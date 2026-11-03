@@ -370,6 +370,7 @@ impl AgentLoop {
                 facts,
                 Vec::new(),
             )
+            .await
             .map_err(|error| AgentError::fault("Loop", error.to_string()))?;
         let model = match policy
             .resolver

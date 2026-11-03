@@ -446,7 +446,10 @@ fn v15_store(path: &std::path::Path) -> Connection {
 /// The schema statements of a store, sorted.
 fn schema(connection: &Connection) -> Vec<String> {
     let mut statements: Vec<String> = connection
-        .prepare("SELECT sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name != 'timeline_history_anchors'")
+        .prepare(
+            "SELECT sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' \
+             AND name NOT IN ('timeline_history_anchors', 'timeline_policy_turns')",
+        )
         .unwrap()
         .query_map([], |row| row.get(0))
         .unwrap()
@@ -7064,6 +7067,111 @@ async fn policy_facts_selects_latest_completed_compaction_in_both_stores() {
 }
 
 #[tokio::test]
+async fn policy_order_reads_the_last_anchors_and_the_turn_window_in_both_stores() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let sqlite = SqliteTimelineStore::new(db.clone());
+    let memory = MemoryTimelineStore::default();
+    sqlite
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    memory
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let turn = |sequence: u64, turn_id: &str, id: &str| {
+        let mut entry = record(
+            sequence,
+            EventKind::TurnStart(TurnStartData {
+                turn_id: turn_id.into(),
+            }),
+        );
+        Arc::make_mut(&mut entry.event).id = id.into();
+        entry
+    };
+    let start = |sequence: u64, through: u64| {
+        record(
+            sequence,
+            EventKind::ContextCompactionStart(ContextCompactionStartData {
+                turn_id: Some("one".into()),
+                request_id: None,
+                command: None,
+                through,
+                trigger: CompactionTrigger::Threshold,
+                strategy: "summary".into(),
+            }),
+        )
+    };
+    let events = vec![
+        turn(1, "one", "turn-one"),
+        text(2, "a"),
+        start(3, 1),
+        turn(4, "two", "turn-two"),
+        text(5, "b"),
+        turn(6, "three", "turn-three"),
+        text(7, "c"),
+        turn(8, "four", "turn-four"),
+        text(9, "d"),
+    ];
+    append(&sqlite, key("session", "main"), events.clone())
+        .await
+        .unwrap();
+    memory
+        .append(
+            key("session", "main"),
+            events,
+            Box::new(|result| assert!(result.is_ok())),
+        )
+        .unwrap();
+    let read = |order: &dim_agent_runtime::PolicyOrder| -> Vec<(String, bool, Option<u64>)> {
+        order
+            .events
+            .iter()
+            .map(|event| (event.id.clone(), event.turn_start, event.compaction_start))
+            .collect()
+    };
+    let windowed = sqlite
+        .policy_order(&key("session", "main"), 5..=9, 9)
+        .await
+        .unwrap();
+    let memory_windowed = memory
+        .policy_order(&key("session", "main"), 5..=9, 9)
+        .await
+        .unwrap();
+    assert_eq!(read(&windowed), read(&memory_windowed));
+    assert_eq!(
+        read(&windowed),
+        [
+            ("event-3".to_owned(), false, Some(1)),
+            ("turn-three".to_owned(), true, None),
+            ("turn-four".to_owned(), true, None),
+        ],
+        "the window, the last compaction start and its through"
+    );
+
+    // An empty window still reads the last turn start: the manual limit's
+    // candidate, and the position a cut id resolves through.
+    let empty = sqlite
+        .policy_order(&key("session", "main"), 9..=9, 9)
+        .await
+        .unwrap();
+    let memory_empty = memory
+        .policy_order(&key("session", "main"), 9..=9, 9)
+        .await
+        .unwrap();
+    assert_eq!(read(&empty), read(&memory_empty));
+    assert_eq!(
+        read(&empty),
+        [
+            ("event-3".to_owned(), false, Some(1)),
+            ("turn-four".to_owned(), true, None),
+        ]
+    );
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn streamed_context_reads_complete_batches_across_the_window() {
     let database = Database::new();
     let db = SqliteStorage::open(database.0.clone()).unwrap();
@@ -7423,38 +7531,73 @@ async fn output_ownership_survives_a_fork_and_a_source_delete() {
 }
 
 #[tokio::test]
-async fn the_history_window_index_is_created_at_open_without_a_format_step() {
+async fn the_derived_indexes_are_created_at_open_without_a_format_step() {
     let database = Database::new();
     let db = SqliteStorage::open(database.0.clone()).unwrap();
     assert_eq!(db.upgraded_from(), None);
     db.close().await.unwrap();
     let connection = Connection::open(&database.0).unwrap();
-    let indexed: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='timeline_history_anchors')",
-            [],
-            |row| row.get(0),
-        )
+    let indexed = |connection: &Connection, name: &str| -> bool {
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name=?1)",
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert!(indexed(&connection, "timeline_history_anchors"));
+    assert!(indexed(&connection, "timeline_policy_turns"));
+    let columns: Vec<String> = connection
+        .prepare("SELECT name FROM pragma_index_info('timeline_policy_turns')")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
         .unwrap();
-    assert!(indexed);
+    assert_eq!(
+        columns,
+        ["session_id", "branch_id", "kind", "sequence", "event_id"],
+        "the policy read takes event_id from the index"
+    );
+    let plan: Vec<String> = connection
+        .prepare(
+            "EXPLAIN QUERY PLAN SELECT event_id, sequence FROM timeline_events \
+             WHERE session_id=?1 AND branch_id=?2 AND kind='turn/start' \
+             AND sequence BETWEEN ?3 AND ?4 AND event_id IS NOT NULL ORDER BY sequence",
+        )
+        .unwrap()
+        .query_map(params!["session", "main", 1, 2], |row| row.get(3))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(
+        plan.iter()
+            .any(|step| step.contains("COVERING INDEX timeline_policy_turns")),
+        "the policy read does not touch the table: {plan:?}"
+    );
     assert_eq!(marker(&connection), [i64::from(STORE_FORMAT)]);
     connection
-        .execute_batch("DROP INDEX timeline_history_anchors")
+        .execute_batch("DROP INDEX timeline_history_anchors; DROP INDEX timeline_policy_turns")
         .unwrap();
     drop(connection);
 
     let db = SqliteStorage::open(database.0.clone()).unwrap();
-    assert_eq!(db.upgraded_from(), None, "the index is not a format step");
+    assert_eq!(
+        db.upgraded_from(),
+        None,
+        "the indexes are not a format step"
+    );
     db.close().await.unwrap();
     let connection = Connection::open(&database.0).unwrap();
-    let indexed: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='timeline_history_anchors')",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(indexed, "a later open recreates the index");
+    assert!(
+        indexed(&connection, "timeline_history_anchors"),
+        "a later open recreates the index"
+    );
+    assert!(
+        indexed(&connection, "timeline_policy_turns"),
+        "a later open recreates the index"
+    );
     assert_eq!(marker(&connection), [i64::from(STORE_FORMAT)]);
     drop(connection);
 
