@@ -116,7 +116,6 @@ Version 1 therefore does not publish the permission preset. It also does not pub
 | --- | --- |
 | `P:ExecutionSettingsHost` | Read the effective sandbox and network |
 | `S:PromptRegistry` | Register `dim/settings/execution` |
-| `S:SessionIdentity` | The Session the source belongs to (not needed by the body today, kept for diagnostics) |
 | `B:Dispatcher` | Follow `turn/start` |
 | `B:BranchLifecycle` | Activation and closing gates |
 | `B:dyn ConfigureControl` | Adopt the source |
