@@ -2179,7 +2179,9 @@ async fn native_retention(fault: &str) {
             .await,
     );
     let before = std::fs::read(&path).unwrap();
-    std::fs::set_permissions(&output, permissions).unwrap();
+    if fault != "read" {
+        std::fs::set_permissions(&output, permissions.clone()).unwrap();
+    }
 
     if fault == "record" {
         let gate = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2265,6 +2267,26 @@ async fn native_retention(fault: &str) {
         })
         .await
         .unwrap();
+        std::fs::set_permissions(&output, permissions).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                assert_ok(
+                    &client
+                        .rpc("workflowprobe.configure", json!({"tick":60_000}))
+                        .await,
+                );
+                let probe = client.rpc("workflowprobe.status", json!({})).await;
+                assert_ok(&probe);
+                if probe["result"]["readFailures"].as_u64().unwrap()
+                    > observed["result"]["readFailures"].as_u64().unwrap()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("a new maintenance pass observes the unreadable store before deleting");
         let outputs_preserved = output.join("exec.log").exists();
         std::fs::set_permissions(&path, mode).unwrap();
         assert_eq!(observed["result"]["readError"], "io");

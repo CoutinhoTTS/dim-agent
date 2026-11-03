@@ -21,6 +21,7 @@ export default definePlugin({
     let phase: string | null = null
     let replacementError: FileError | null = null
     let readError: FileError | null = null
+    let readFailures = 0
     const pause = async (point: z.infer<typeof control>['phase']) => {
       const gate = selected
       if (gate?.phase !== point || gate.host === undefined || gate.port === undefined) return
@@ -62,7 +63,7 @@ export default definePlugin({
             const execute = (file: FileLease) => work({
               async read() {
                 const reply = await file.read()
-                if (!reply.ok) readError = reply.error
+                if (!reply.ok) { readError = reply.error; readFailures += 1 }
                 return reply
               },
               backup: suffix => file.backup(suffix),
@@ -94,7 +95,7 @@ export default definePlugin({
           selected = control.parse(call.params)
           if (selected.tick !== undefined) mock.timers.tick(selected.tick)
         }
-        return { kind: 'value', value: { pid: process.pid, phase, replacementError, readError } }
+        return { kind: 'value', value: { pid: process.pid, phase, replacementError, readError, readFailures } }
       },
     )
     const context: Context = {
