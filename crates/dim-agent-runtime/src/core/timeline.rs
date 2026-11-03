@@ -1,9 +1,8 @@
 use super::keys::KeyFilter;
 use crate::{
-    AgentError, BoxFuture, BranchLifecycle, FaultReporter, PolicyFacts, PolicyOrder,
-    PolicyOrderEvent, PolicyWindow, Result, StoredEvent, TimelineKey, TimelineQuery,
-    TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryPage, TimelineQueryReply,
-    TimelineQueryScope, TimelineStore, TimelineTailReply,
+    AgentError, BoxFuture, BranchLifecycle, FaultReporter, Result, StoredEvent, TimelineKey,
+    TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryPage,
+    TimelineQueryReply, TimelineQueryScope, TimelineStore, TimelineTailReply,
 };
 use dim_agent_types::{
     AgentEvent, EventDraft, EventKind, InputMessageData, ProjectionCheckpoint, RecoverySnapshot,
@@ -28,18 +27,6 @@ use uuid::Uuid;
 
 /// Inputs one page of the restored submission index keeps.
 const SUBMISSION_PAGE: u64 = 256;
-
-/// Which turn starts a policy order read keeps.
-#[derive(Debug, Clone, Copy)]
-pub enum PolicyTurns<'a> {
-    /// Only each segment's last turn start, next to its last compaction
-    /// start: the anchors a streamed context resolves cut ids against.
-    Anchors,
-    /// Every turn start of every segment.
-    All,
-    /// Every turn start after this chain position.
-    After(&'a TimelinePosition),
-}
 
 /// One draft offered to the branch's `before` middleware. Each wrapper records
 /// the step it applied, so steps follow the order the transforms took effect.
@@ -1119,159 +1106,6 @@ impl Timeline {
             .collect())
     }
 
-    /// The policy-relevant events at `through`, filtered by the store.
-    #[service(skip)]
-    pub async fn policy_facts(&self, through: u64, turn_id: &str) -> Result<PolicyFacts> {
-        let published = self.sequence();
-        if through > published {
-            return Err(AgentError::InvalidInput(format!(
-                "future timeline sequence {through}"
-            )));
-        }
-        let mut events = Vec::new();
-        for (branch, cut) in self
-            .0
-            .ancestors
-            .iter()
-            .cloned()
-            .chain(std::iter::once((self.0.key.branch_id.clone(), through)))
-        {
-            if cut == 0 {
-                continue;
-            }
-            let key = TimelineKey {
-                session_id: self.0.key.session_id.clone(),
-                branch_id: branch,
-            };
-            events.extend(self.0.store.policy_facts(&key, cut, turn_id).await?.events);
-        }
-        Ok(PolicyFacts { through, events })
-    }
-    /// The last event at or before a fixed cut, even inside its atomic batch.
-    #[service(skip)]
-    async fn boundary_event(&self, key: &TimelineKey, cut: u64) -> Result<Option<Arc<AgentEvent>>> {
-        self.0.store.last_event(key, cut).await
-    }
-
-    /// The event order for legal compaction cuts: each segment's boundary, its
-    /// last turn start and its last compaction start at its cut, and the turn
-    /// starts `turns` keeps.
-    #[service(skip)]
-    pub async fn policy_order(&self, through: u64, turns: PolicyTurns<'_>) -> Result<PolicyOrder> {
-        let through = self.through(Some(through))?;
-        let segments: Vec<_> = self
-            .0
-            .ancestors
-            .iter()
-            .cloned()
-            .chain(std::iter::once((self.0.key.branch_id.clone(), through)))
-            .collect();
-        let rank = |branch: &str| segments.iter().position(|(name, _)| name == branch);
-        let window = match turns {
-            PolicyTurns::Anchors => None,
-            PolicyTurns::All => Some(None),
-            PolicyTurns::After(at) => Some(rank(&at.branch_id).map(|index| (index, at.sequence))),
-        };
-        let mut events = Vec::new();
-        let mut branches = Vec::new();
-        for (index, (branch, cut)) in segments.into_iter().enumerate() {
-            if cut == 0 {
-                continue;
-            }
-            let key = TimelineKey {
-                session_id: self.0.key.session_id.clone(),
-                branch_id: branch.clone(),
-            };
-            branches.push(branch.clone());
-            let turns = match window {
-                None => cut.saturating_add(1)..=cut,
-                Some(None) => 1..=cut,
-                Some(Some((rank, _))) if index > rank => 1..=cut,
-                Some(Some((rank, sequence))) if index == rank => sequence.saturating_add(1)..=cut,
-                Some(Some(_)) => cut.saturating_add(1)..=cut,
-            };
-            events.extend(self.0.store.policy_order(&key, turns, cut).await?.events);
-            if let Some(boundary) = self.boundary_event(&key, cut).await? {
-                events.push(PolicyOrderEvent {
-                    id: boundary.id.clone(),
-                    branch_id: branch,
-                    sequence: boundary.sequence,
-                    turn_start: matches!(boundary.kind, EventKind::TurnStart(_)),
-                    compaction_start: None,
-                    boundary: true,
-                });
-            }
-        }
-        let rank = |branch: &str| branches.iter().position(|name| name == branch);
-        events.sort_by_key(|event| (rank(&event.branch_id), event.sequence));
-        Ok(PolicyOrder {
-            through,
-            branches,
-            events,
-        })
-    }
-
-    /// The anchor and turn window for a known compaction cut.
-    #[service(skip)]
-    pub async fn policy_window(
-        &self,
-        through: u64,
-        turn_id: &str,
-        cut: &str,
-    ) -> Result<PolicyWindow> {
-        let through = self.through(Some(through))?;
-        let mut window = self
-            .0
-            .store
-            .policy_window(&self.0.key, through, turn_id, cut)
-            .await?;
-        let current = std::mem::take(&mut window.tool_results);
-        for (branch, segment_through) in &self.0.ancestors {
-            if *segment_through == 0 {
-                continue;
-            }
-            let key = TimelineKey {
-                session_id: self.0.key.session_id.clone(),
-                branch_id: branch.clone(),
-            };
-            let ancestor = self
-                .0
-                .store
-                .policy_window(&key, *segment_through, turn_id, cut)
-                .await?;
-            if window.cut_position.is_none() {
-                window.cut_position = ancestor.cut_position;
-            }
-            if !window.events.iter().any(|event| event.id == cut) {
-                window.events.extend(
-                    ancestor
-                        .events
-                        .iter()
-                        .filter(|event| event.id == cut)
-                        .cloned(),
-                );
-            }
-            for result in ancestor.tool_results {
-                if !window
-                    .tool_results
-                    .iter()
-                    .any(|seen| seen.event.id == result.event.id)
-                {
-                    window.tool_results.push(result);
-                }
-            }
-        }
-        for result in current {
-            if !window
-                .tool_results
-                .iter()
-                .any(|seen| seen.event.id == result.event.id)
-            {
-                window.tool_results.push(result);
-            }
-        }
-        Ok(window)
-    }
     /// The latest interpreter-compatible checkpoint at `through`, if one is
     /// valid for this branch and its fixed ancestor chain. The resume it names
     /// is read with `from_event` and returned at the position that event

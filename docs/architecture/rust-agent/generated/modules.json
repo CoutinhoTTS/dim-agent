@@ -1093,7 +1093,6 @@
       "unexpandedMacros": [
         "format",
         "json",
-        "matches",
         "tokio::pin",
         "tokio::select",
         "unreachable",
@@ -1498,7 +1497,6 @@
       "parent": "dim_agent_runtime",
       "file": "crates/dim-agent-runtime/src/timeline_store.rs",
       "unexpandedMacros": [
-        "matches",
         "vec"
       ]
     },
@@ -7364,6 +7362,7 @@
         "path configured_request",
         "path crate::context_policy::PolicyContext::from_context",
         "path crate::context_policy::PolicyContext::from_stream",
+        "path crate::context_policy::estimate_events_in",
         "use crate::context_policy::CompactionStep",
         "use crate::context_policy::ContextPolicy",
         "use crate::context_policy::configured_request"
@@ -7449,7 +7448,10 @@
       "from": "dim_agent_capabilities::agent_loop",
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
+        "path Delivery::Live",
+        "path Delivery::Replay",
         "path Dispatcher",
+        "use dim_agent_runtime::Delivery",
         "use dim_agent_runtime::Dispatcher"
       ]
     },
@@ -7497,22 +7499,6 @@
         "path StateCell",
         "path StateCell::new",
         "use dim_agent_runtime::StateCell"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::agent_loop",
-      "to": "dim_agent_runtime::timeline_query",
-      "references": [
-        "path rebuild_facts",
-        "use dim_agent_runtime::rebuild_facts"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::agent_loop",
-      "to": "dim_agent_runtime::timeline_store",
-      "references": [
-        "path PolicyFacts::from_context",
-        "use dim_agent_runtime::PolicyFacts"
       ]
     },
     {
@@ -7630,7 +7616,10 @@
       "from": "dim_agent_capabilities::approval",
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
+        "path Delivery::Live",
+        "path Delivery::Replay",
         "path Dispatcher",
+        "use dim_agent_runtime::Delivery",
         "use dim_agent_runtime::Dispatcher"
       ]
     },
@@ -7666,14 +7655,6 @@
       "references": [
         "path Names",
         "use dim_agent_runtime::Names"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::approval",
-      "to": "dim_agent_runtime::timeline_query",
-      "references": [
-        "path rebuild_facts",
-        "use dim_agent_runtime::rebuild_facts"
       ]
     },
     {
@@ -7872,6 +7853,8 @@
         "path crate::history::projected_messages",
         "path crate::history::projected_messages_len",
         "path digest_message",
+        "path newest_chain",
+        "path rising_chain",
         "path truncate_middle",
         "path user_message",
         "use crate::history::HistoryEntry",
@@ -7880,6 +7863,8 @@
         "use crate::history::context_compaction",
         "use crate::history::context_configuration",
         "use crate::history::digest_message",
+        "use crate::history::newest_chain",
+        "use crate::history::rising_chain",
         "use crate::history::truncate_middle",
         "use crate::history::user_message"
       ]
@@ -7913,13 +7898,16 @@
       "to": "dim_agent_runtime::core::timeline",
       "references": [
         "path ContextHistory",
-        "path PolicyTurns::After",
-        "path PolicyTurns::All",
-        "path PolicyTurns::Anchors",
         "path Timeline",
         "use dim_agent_runtime::ContextHistory",
-        "use dim_agent_runtime::PolicyTurns",
         "use dim_agent_runtime::Timeline"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_policy",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path dim_agent_runtime::Result"
       ]
     },
     {
@@ -7936,20 +7924,6 @@
         "use dim_agent_runtime::TimelineQueryOrderBy",
         "use dim_agent_runtime::TimelineQueryPredicate",
         "use dim_agent_runtime::TimelineQueryScope"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::context_policy",
-      "to": "dim_agent_runtime::timeline_store",
-      "references": [
-        "path PolicyFacts",
-        "path PolicyOrder",
-        "path PolicyOrderEvent",
-        "path PolicyWindow",
-        "use dim_agent_runtime::PolicyFacts",
-        "use dim_agent_runtime::PolicyOrder",
-        "use dim_agent_runtime::PolicyOrderEvent",
-        "use dim_agent_runtime::PolicyWindow"
       ]
     },
     {
@@ -8054,9 +8028,11 @@
         "path PolicyContext::from_stream",
         "path configured_request",
         "path crate::context_policy::check_cancel",
+        "path estimate_events",
         "use crate::context_policy::ContextPolicy",
         "use crate::context_policy::PolicyContext",
-        "use crate::context_policy::configured_request"
+        "use crate::context_policy::configured_request",
+        "use crate::context_policy::estimate_events"
       ]
     },
     {
@@ -8064,11 +8040,13 @@
       "to": "dim_agent_capabilities::history",
       "references": [
         "path HistoryRenderer",
+        "path chain_by_id",
         "path context_configuration",
         "path crate::history::FoldRead::timeline",
         "path crate::history::project_batch",
         "path crate::history::read_context",
         "use crate::history::HistoryRenderer",
+        "use crate::history::chain_by_id",
         "use crate::history::context_configuration"
       ]
     },
@@ -8138,7 +8116,10 @@
       "from": "dim_agent_capabilities::context_preparation",
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
+        "path Delivery::Live",
+        "path Delivery::Replay",
         "path Dispatcher",
+        "use dim_agent_runtime::Delivery",
         "use dim_agent_runtime::Dispatcher"
       ]
     },
@@ -8183,27 +8164,9 @@
     },
     {
       "from": "dim_agent_capabilities::context_preparation",
-      "to": "dim_agent_runtime::timeline_query",
+      "to": "dim_agent_types::checkpoint",
       "references": [
-        "path TimelineQuery",
-        "path TimelineQueryDirection::Ascending",
-        "path TimelineQueryOrderBy::Sequence",
-        "path TimelineQueryScope::Branch",
-        "path rebuild_facts",
-        "use dim_agent_runtime::TimelineQuery",
-        "use dim_agent_runtime::TimelineQueryDirection",
-        "use dim_agent_runtime::TimelineQueryOrderBy",
-        "use dim_agent_runtime::TimelineQueryScope",
-        "use dim_agent_runtime::rebuild_facts"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::context_preparation",
-      "to": "dim_agent_runtime::timeline_store",
-      "references": [
-        "path PolicyFacts",
-        "path dim_agent_runtime::PolicyEvent",
-        "use dim_agent_runtime::PolicyFacts"
+        "path dim_agent_types::TimelinePosition"
       ]
     },
     {
@@ -8855,7 +8818,6 @@
       "references": [
         "path ContextHistory",
         "path Timeline",
-        "path dim_agent_runtime::PolicyTurns::Anchors",
         "use dim_agent_runtime::ContextHistory",
         "use dim_agent_runtime::Timeline"
       ]
@@ -8890,13 +8852,6 @@
         "use dim_agent_runtime::TimelineQueryPredicate",
         "use dim_agent_runtime::TimelineQueryReply",
         "use dim_agent_runtime::TimelineQueryScope"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::history",
-      "to": "dim_agent_runtime::timeline_store",
-      "references": [
-        "path dim_agent_runtime::PolicyOrderEvent"
       ]
     },
     {
@@ -9217,7 +9172,10 @@
       "from": "dim_agent_capabilities::hooks::runner",
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
+        "path Delivery::Live",
+        "path Delivery::Replay",
         "path Dispatcher",
+        "use dim_agent_runtime::Delivery",
         "use dim_agent_runtime::Dispatcher"
       ]
     },
@@ -9235,14 +9193,6 @@
       "references": [
         "path Names",
         "use dim_agent_runtime::Names"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::hooks::runner",
-      "to": "dim_agent_runtime::timeline_query",
-      "references": [
-        "path rebuild_facts",
-        "use dim_agent_runtime::rebuild_facts"
       ]
     },
     {
@@ -9829,7 +9779,10 @@
       "from": "dim_agent_capabilities::input_queue",
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
+        "path Delivery::Live",
+        "path Delivery::Replay",
         "path Dispatcher",
+        "use dim_agent_runtime::Delivery",
         "use dim_agent_runtime::Dispatcher"
       ]
     },
@@ -9874,14 +9827,6 @@
         "path StateCell",
         "path StateCell::new",
         "use dim_agent_runtime::StateCell"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::input_queue",
-      "to": "dim_agent_runtime::timeline_query",
-      "references": [
-        "path rebuild_facts",
-        "use dim_agent_runtime::rebuild_facts"
       ]
     },
     {
@@ -10080,7 +10025,10 @@
       "from": "dim_agent_capabilities::model_provider",
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
+        "path Delivery::Live",
+        "path Delivery::Replay",
         "path Dispatcher",
+        "use dim_agent_runtime::Delivery",
         "use dim_agent_runtime::Dispatcher"
       ]
     },
@@ -10128,14 +10076,6 @@
         "path StateCell",
         "path StateCell::new",
         "use dim_agent_runtime::StateCell"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::model_provider",
-      "to": "dim_agent_runtime::timeline_query",
-      "references": [
-        "path rebuild_facts",
-        "use dim_agent_runtime::rebuild_facts"
       ]
     },
     {
@@ -10390,7 +10330,10 @@
       "from": "dim_agent_capabilities::permission",
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
+        "path Delivery::Live",
+        "path Delivery::Replay",
         "path Dispatcher",
+        "use dim_agent_runtime::Delivery",
         "use dim_agent_runtime::Dispatcher"
       ]
     },
@@ -12575,7 +12518,10 @@
       "from": "dim_agent_capabilities::timeline_tree",
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
+        "path Delivery::Live",
+        "path Delivery::Replay",
         "path Dispatcher",
+        "use dim_agent_runtime::Delivery",
         "use dim_agent_runtime::Dispatcher"
       ]
     },
@@ -12633,13 +12579,11 @@
         "path TimelineQueryOrderBy::Sequence",
         "path TimelineQueryPredicate",
         "path TimelineQueryScope::Branch",
-        "path rebuild_facts",
         "use dim_agent_runtime::TimelineQuery",
         "use dim_agent_runtime::TimelineQueryDirection",
         "use dim_agent_runtime::TimelineQueryOrderBy",
         "use dim_agent_runtime::TimelineQueryPredicate",
-        "use dim_agent_runtime::TimelineQueryScope",
-        "use dim_agent_runtime::rebuild_facts"
+        "use dim_agent_runtime::TimelineQueryScope"
       ]
     },
     {
@@ -12918,7 +12862,10 @@
       "from": "dim_agent_capabilities::tool_executor",
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
+        "path Delivery::Live",
+        "path Delivery::Replay",
         "path Dispatcher",
+        "use dim_agent_runtime::Delivery",
         "use dim_agent_runtime::Dispatcher"
       ]
     },
@@ -12957,14 +12904,6 @@
       "references": [
         "path Names",
         "use dim_agent_runtime::Names"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::tool_executor",
-      "to": "dim_agent_runtime::timeline_query",
-      "references": [
-        "path rebuild_facts",
-        "use dim_agent_runtime::rebuild_facts"
       ]
     },
     {
@@ -13130,16 +13069,11 @@
       "from": "dim_agent_capabilities::wait",
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
+        "path Delivery::Live",
+        "path Delivery::Replay",
         "path Dispatcher",
+        "use dim_agent_runtime::Delivery",
         "use dim_agent_runtime::Dispatcher"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::wait",
-      "to": "dim_agent_runtime::core::timeline",
-      "references": [
-        "path Timeline",
-        "use dim_agent_runtime::Timeline"
       ]
     },
     {
@@ -13147,7 +13081,6 @@
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError::Reloading",
-        "path dim_agent_runtime::Result",
         "use dim_agent_runtime::AgentError"
       ]
     },
@@ -13177,20 +13110,6 @@
     },
     {
       "from": "dim_agent_capabilities::wait",
-      "to": "dim_agent_runtime::timeline_query",
-      "references": [
-        "path TimelineQuery",
-        "path TimelineQueryDirection::Descending",
-        "path TimelineQueryOrderBy::Sequence",
-        "path TimelineQueryScope::Branch",
-        "use dim_agent_runtime::TimelineQuery",
-        "use dim_agent_runtime::TimelineQueryDirection",
-        "use dim_agent_runtime::TimelineQueryOrderBy",
-        "use dim_agent_runtime::TimelineQueryScope"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::wait",
       "to": "dim_agent_types::content",
       "references": [
         "path content"
@@ -13204,7 +13123,8 @@
         "path EventKind::InputMessage",
         "path EventKind::TurnEnd",
         "path EventKind::TurnStart",
-        "path InputMode::Steer"
+        "path InputMode::Steer",
+        "path events"
       ]
     },
     {
@@ -13456,7 +13376,10 @@
       "from": "dim_agent_capabilities::workspace_tools::background",
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
+        "path Delivery::Live",
+        "path Delivery::Replay",
         "path Dispatcher",
+        "use dim_agent_runtime::Delivery",
         "use dim_agent_runtime::Dispatcher"
       ]
     },
@@ -13484,14 +13407,6 @@
       "references": [
         "path Names",
         "use dim_agent_runtime::Names"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::workspace_tools::background",
-      "to": "dim_agent_runtime::timeline_query",
-      "references": [
-        "path rebuild_facts",
-        "use dim_agent_runtime::rebuild_facts"
       ]
     },
     {
@@ -14407,6 +14322,7 @@
       "from": "dim_agent_runtime",
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
+        "use core::Delivery",
         "use core::Dispatcher"
       ]
     },
@@ -14415,7 +14331,6 @@
       "to": "dim_agent_runtime::core::timeline",
       "references": [
         "use core::ContextHistory",
-        "use core::PolicyTurns",
         "use core::Timeline",
         "use core::TimelineTrace",
         "use core::TraceStep"
@@ -14517,12 +14432,7 @@
       "from": "dim_agent_runtime",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
-        "mod timeline_store",
-        "use timeline_store::PolicyEvent",
-        "use timeline_store::PolicyFacts",
-        "use timeline_store::PolicyOrder",
-        "use timeline_store::PolicyOrderEvent",
-        "use timeline_store::PolicyWindow"
+        "mod timeline_store"
       ]
     },
     {
@@ -15145,17 +15055,9 @@
       "from": "dim_agent_runtime::core::timeline",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
-        "path PolicyFacts",
-        "path PolicyOrder",
-        "path PolicyOrderEvent",
-        "path PolicyWindow",
         "path StoredEvent",
         "path TimelineKey",
         "path TimelineStore",
-        "use crate::PolicyFacts",
-        "use crate::PolicyOrder",
-        "use crate::PolicyOrderEvent",
-        "use crate::PolicyWindow",
         "use crate::StoredEvent",
         "use crate::TimelineKey",
         "use crate::TimelineStore"
@@ -15631,14 +15533,6 @@
     },
     {
       "from": "dim_agent_runtime::timeline_query",
-      "to": "dim_agent_runtime::core::timeline",
-      "references": [
-        "path Timeline",
-        "use crate::Timeline"
-      ]
-    },
-    {
-      "from": "dim_agent_runtime::timeline_query",
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError::InvalidInput",
@@ -15684,7 +15578,6 @@
       "to": "dim_agent_runtime::core::timeline",
       "references": [
         "path TimelineTrace",
-        "path crate::ContextHistory",
         "use crate::TimelineTrace"
       ]
     },
@@ -15712,9 +15605,7 @@
       "to": "dim_agent_types::checkpoint",
       "references": [
         "path RecoverySnapshot",
-        "path TimelinePosition",
-        "use dim_agent_types::RecoverySnapshot",
-        "use dim_agent_types::TimelinePosition"
+        "use dim_agent_types::RecoverySnapshot"
       ]
     },
     {
@@ -15722,17 +15613,7 @@
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
-        "path ContextCompactionResult::Completed",
-        "path EventKind",
-        "path EventKind::ContextCompaction",
-        "path EventKind::ContextCompactionStart",
-        "path EventKind::InputConsumed",
-        "path EventKind::ModelCall",
-        "path EventKind::ModelUsage",
-        "path EventKind::TurnStart",
-        "use dim_agent_types::AgentEvent",
-        "use dim_agent_types::ContextCompactionResult",
-        "use dim_agent_types::EventKind"
+        "use dim_agent_types::AgentEvent"
       ]
     },
     {
@@ -24653,21 +24534,11 @@
       "from": "dim_app_server::storage::timeline",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
-        "path PolicyEvent",
-        "path PolicyFacts",
-        "path PolicyOrder",
-        "path PolicyOrderEvent",
-        "path PolicyWindow",
         "path PublishCallback",
         "path StoredBranch",
         "path StoredEvent",
         "path TimelineKey",
         "path TimelineStore",
-        "use dim_agent_runtime::PolicyEvent",
-        "use dim_agent_runtime::PolicyFacts",
-        "use dim_agent_runtime::PolicyOrder",
-        "use dim_agent_runtime::PolicyOrderEvent",
-        "use dim_agent_runtime::PolicyWindow",
         "use dim_agent_runtime::PublishCallback",
         "use dim_agent_runtime::StoredBranch",
         "use dim_agent_runtime::StoredEvent",

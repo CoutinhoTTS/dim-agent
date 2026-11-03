@@ -31,7 +31,7 @@ valid in v33, and v16 request rows stay readable as written.
 （`(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'input/message')`，
 [latest-turn 窗口 §5.1](session-history-window.md#51-the-derived-index)）、
 `timeline_policy_turns`（`(session_id, branch_id, kind, sequence, event_id) WHERE kind = 'turn/start'`，
-[上下文读取开关与裁剪点 §5](context-read-and-compaction.md#5-策略的位置)）与事件查询的
+已无读者，删除它要作为格式步骤）与事件查询的
 `timeline_events_by_kind`（`(session_id, branch_id, kind, sequence, event_id)`，按 kind
 读取事件而不碰事件体，[ADR 019](../../adr/019-event-query.md) D4）：读写打开在启动事务内用
 `CREATE INDEX IF NOT EXISTS` 创建或补建，只读导出只接受它们。它们不含数据，可从
@@ -780,7 +780,7 @@ ProjectionCheckpoint = {
 | v27 `agents_by_owner` | `(owner_session_id)` | 删除 owner 时定位它拥有的 Agent；启动时找出无成员或失去 owner 的私有 Agent |
 | v27 `agent_sessions_by_leader` | `(leader_session_id)` | 装载时重建 Team 关系 |
 | 派生（不占格式号）`timeline_history_anchors` | `(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'input/message')` | 最新回合边界与回合提示输入的查找（[latest-turn 窗口](session-history-window.md)） |
-| 派生（不占格式号）`timeline_policy_turns` | `(session_id, branch_id, kind, sequence, event_id) WHERE kind = 'turn/start'` | 压缩裁剪点的轮次开始查找：`event_id` 在索引内，读轮次开始不访问表行（[上下文读取开关与裁剪点 §5](context-read-and-compaction.md#5-策略的位置)） |
+| 派生（不占格式号）`timeline_policy_turns` | `(session_id, branch_id, kind, sequence, event_id) WHERE kind = 'turn/start'` | 无读者：它只服务已删除的 `policy_order`。删除派生索引要作为格式步骤，所以保留它的创建与启动门禁的豁免 |
 | 派生（不占格式号）`timeline_events_by_kind` | `(session_id, branch_id, kind, sequence, event_id)` | 按 kind 的事件查询与它的事件 id（[ADR 019](../../adr/019-event-query.md) D4） |
 | v12 主键 `timeline_snapshots` | `(session_id, branch_id, interpreter, sequence)` | 兼容 interpreter，`sequence<=through ORDER BY sequence DESC LIMIT 1`；连接事件锚点 |
 | v15 主键 `session_files` | `(file_id)` | put 的两次事务与放弃、清扫按文件定点更新和删除 |

@@ -24,9 +24,6 @@
 | `context` | :1099 | `history.rs:246`、`:267`、`:440`、`branch.rs:166`、`agent.rs:525`、`agents.rs:1446` |
 | `context_with_checkpoint` | :1322 | `history.rs:243`、`:262` |
 | `checkpoint` | :1258 | `history.rs:178`、`:292`、`timeline.rs:1328` |
-| `policy_facts` | :1104 | `context_policy.rs:1145`、`context_preparation.rs:550`、`:782` |
-| `policy_order` | :1140 | `context_policy.rs:511`、`:584`、`history.rs:289` |
-| `policy_window` | :1196 | `context_policy.rs:1062` |
 | `trace(sequence)` | :1401 | 无；只有门面 `branch.rs:190` 和 `agent.rs:660` 能到达它 |
 
 ### 1.2 其他对象上的同名读
@@ -60,7 +57,7 @@
 
 ### 1.6 存储端口（`timeline_store.rs`）
 
-`head` :207、`read` :215、`read_page` :229、`event_by_id` :283、`read_context` :319、`read_kind_page` :373、`read_page_without_request_bodies` :437、`query` :464、`read_segments` :471、`policy_facts` :478、`policy_order` :591、`policy_window` :634、`trace` :694、`latest_snapshot` :710。SQLite 实现在 `storage/timeline.rs:3507-4119`。
+`head` :207、`read` :215、`read_page` :229、`event_by_id` :283、`read_context` :319、`read_kind_page` :373、`read_page_without_request_bodies` :437、`query` :464、`read_segments` :471、`trace` :694、`latest_snapshot` :710。SQLite 实现在 `storage/timeline.rs:3507-4119`。
 
 ### 1.7 依赖图
 
@@ -102,10 +99,10 @@ flowchart LR
   Disp -->|local, history, follow replay| TL
   recall -->|page_cursor, page| Branch
   ctxm -->|local| Branch
-  hist -->|context, checkpoint, stored_context_page_in, policy_order, event_position| TL
+  hist -->|context, checkpoint, stored_context_page_in, event_position| TL
   hist -->|context_page, compaction_cut, local| Agent
-  prep -->|stored_context_page_in, policy_facts, event_by_id| TL
-  pol -->|local, policy_order, policy_window, policy_facts| TL
+  prep -->|stored_context_page_in, event_by_id| TL
+  pol -->|local| TL
   perm -->|ancestor_events_of_kind| TL
   reads -->|local| TL
   tree -->|local| TL
@@ -355,7 +352,7 @@ flowchart LR
 
 ### 7.4 迁移之后删除的读
 
-在 Timeline、Branch、Agent 和 Dispatcher 上：history、local、page、page_cursor、context、context_with_checkpoint、event_by_id、event_position、compaction_cut、ancestor_events_of_kind、stored_page、stored_local、trace、stored_context_page 及其 _in 形式，以及各自迁移落地之后的 policy 读。然后 xtask types 和 xtask graph 重新生成生成文件，其中其余内容不得变化。
+在 Timeline、Branch、Agent 和 Dispatcher 上：history、local、page、page_cursor、context、context_with_checkpoint、event_by_id、event_position、compaction_cut、ancestor_events_of_kind、stored_page、stored_local、trace、stored_context_page 及其 _in 形式，。然后 xtask types 和 xtask graph 重新生成生成文件，其中其余内容不得变化。
 
 ### 7.5 未决定
 

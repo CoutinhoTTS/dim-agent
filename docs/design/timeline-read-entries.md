@@ -24,9 +24,6 @@ Base: `origin/main` at `514225777`. Call sites exclude tests and examples. Every
 | `context` | :1099 | `history.rs:246`, `:267`, `:440`, `branch.rs:166`, `agent.rs:525`, `agents.rs:1446` |
 | `context_with_checkpoint` | :1322 | `history.rs:243`, `:262` |
 | `checkpoint` | :1258 | `history.rs:178`, `:292`, `timeline.rs:1328` |
-| `policy_facts` | :1104 | `context_policy.rs:1145`, `context_preparation.rs:550`, `:782` |
-| `policy_order` | :1140 | `context_policy.rs:511`, `:584`, `history.rs:289` |
-| `policy_window` | :1196 | `context_policy.rs:1062` |
 | `trace(sequence)` | :1401 | none; only the facades `branch.rs:190` and `agent.rs:660` reach it |
 
 ### 1.2 Same reads on other objects
@@ -60,7 +57,7 @@ These contradict §5.4's "a part reads facts through its branch's `timeline` ser
 
 ### 1.6 Store port (`timeline_store.rs`)
 
-`head` :207, `read` :215, `read_page` :229, `event_by_id` :283, `read_context` :319, `read_kind_page` :373, `read_page_without_request_bodies` :437, `query` :464, `read_segments` :471, `policy_facts` :478, `policy_order` :591, `policy_window` :634, `trace` :694, `latest_snapshot` :710. The SQLite implementations are at `storage/timeline.rs:3507-4119`.
+`head` :207, `read` :215, `read_page` :229, `event_by_id` :283, `read_context` :319, `read_kind_page` :373, `read_page_without_request_bodies` :437, `query` :464, `read_segments` :471, `trace` :694, `latest_snapshot` :710. The SQLite implementations are at `storage/timeline.rs:3507-4119`.
 
 ### 1.7 Dependency graph
 
@@ -102,10 +99,10 @@ flowchart LR
   Disp -->|local, history, follow replay| TL
   recall -->|page_cursor, page| Branch
   ctxm -->|local| Branch
-  hist -->|context, checkpoint, stored_context_page_in, policy_order, event_position| TL
+  hist -->|context, checkpoint, stored_context_page_in, event_position| TL
   hist -->|context_page, compaction_cut, local| Agent
-  prep -->|stored_context_page_in, policy_facts, event_by_id| TL
-  pol -->|local, policy_order, policy_window, policy_facts| TL
+  prep -->|stored_context_page_in, event_by_id| TL
+  pol -->|local| TL
   perm -->|ancestor_events_of_kind| TL
   reads -->|local| TL
   tree -->|local| TL
@@ -355,7 +352,7 @@ This section holds what ADR 020 proposes. The query shape follows #996 and #975,
 
 ### 7.4 Reads removed after the moves
 
-On Timeline, Branch, Session and Dispatcher: history, local, page, page_cursor, context, context_with_checkpoint, event_by_id, event_position, compaction_cut, ancestor_events_of_kind, stored_page, stored_local, trace, stored_context_page and its _in form, and the policy reads once their own migration lands. Then xtask types and xtask graph regenerate the generated files, and nothing else in them may change.
+On Timeline, Branch, Session and Dispatcher: history, local, page, page_cursor, context, context_with_checkpoint, event_by_id, event_position, compaction_cut, ancestor_events_of_kind, stored_page, stored_local, trace, stored_context_page and its _in form. Then xtask types and xtask graph regenerate the generated files, and nothing else in them may change.
 
 ### 7.5 Not decided
 
