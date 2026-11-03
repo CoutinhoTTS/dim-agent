@@ -709,6 +709,9 @@ impl TimelineStore for HoldingStore {
     fn head<'a>(&'a self, key: &'a TimelineKey) -> BoxFuture<'a, Result<u64>> {
         self.memory.head(key)
     }
+    fn batch_end<'a>(&'a self, key: &'a TimelineKey, sequence: u64) -> BoxFuture<'a, Result<()>> {
+        self.memory.batch_end(key, sequence)
+    }
     fn append(
         &self,
         key: TimelineKey,

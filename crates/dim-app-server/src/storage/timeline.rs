@@ -3539,6 +3539,46 @@ impl TimelineStore for SqliteTimelineStore {
                 .await
         })
     }
+    fn batch_end<'a>(&'a self, key: &'a TimelineKey, sequence: u64) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            if sequence == 0 {
+                return Ok(());
+            }
+            let (session, branch) = (key.session_id.clone(), key.branch_id.clone());
+            let row = self
+                .db
+                .run_read(move |connection| {
+                    connection
+                        .prepare_cached(
+                            "SELECT last_sequence, COALESCE(CASE json_extract(body, '$.encoding') \
+                               WHEN 'event' THEN json_extract(body, '$.record.batch_end') \
+                               ELSE (SELECT json_extract(value, '$.batch_end') \
+                                     FROM json_each(body, '$.records') \
+                                     WHERE json_extract(value, '$.event.sequence') = ?3) \
+                             END, last_sequence) \
+                             FROM timeline_events \
+                             WHERE session_id = ?1 AND branch_id = ?2 AND sequence <= ?3 \
+                             ORDER BY sequence DESC LIMIT 1",
+                        )
+                        .map_err(error)?
+                        .query_row(params![session, branch, sql_sequence(sequence)?], |row| {
+                            Ok((read_sequence(row, 0)?, row.get::<_, i64>(1)?))
+                        })
+                        .optional()
+                        .map_err(error)
+                })
+                .await?;
+            let Some((_, end)) = row.filter(|(last, _)| *last >= sequence) else {
+                return Err(error(format!("Timeline has no sequence {sequence}")));
+            };
+            if sequence_value(end)? > sequence {
+                return Err(AgentError::InvalidInput(format!(
+                    "sequence {sequence} is inside an atomic batch"
+                )));
+            }
+            Ok(())
+        })
+    }
     fn append(
         &self,
         key: TimelineKey,

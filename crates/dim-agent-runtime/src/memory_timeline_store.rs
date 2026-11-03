@@ -108,6 +108,30 @@ impl TimelineStore for MemoryTimelineStore {
             Ok(branch.events.len() as u64)
         })
     }
+    fn batch_end<'a>(&'a self, key: &'a TimelineKey, sequence: u64) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            if sequence == 0 {
+                return Ok(());
+            }
+            let sessions = self.0.lock().unwrap();
+            let session = sessions.get(&key.session_id).ok_or_else(|| {
+                AgentError::Storage(format!("unknown session {}", key.session_id))
+            })?;
+            let branch = session
+                .branches
+                .get(&key.branch_id)
+                .ok_or_else(|| AgentError::Storage(format!("unknown branch {}", key.branch_id)))?;
+            let record = branch.events.get((sequence - 1) as usize).ok_or_else(|| {
+                AgentError::Storage(format!("Timeline has no sequence {sequence}"))
+            })?;
+            if record.batch_end > sequence {
+                return Err(AgentError::InvalidInput(format!(
+                    "sequence {sequence} is inside an atomic batch"
+                )));
+            }
+            Ok(())
+        })
+    }
     fn append(
         &self,
         key: TimelineKey,

@@ -181,6 +181,12 @@ pub trait TimelineStore: Send + Sync + 'static {
         events: Vec<StoredEvent>,
         publish: PublishCallback,
     ) -> Result<()>;
+    /// Checks that `sequence` ends an atomic batch, without reading the event:
+    /// whether a sequence closes a batch is the stored row's structure, not
+    /// event content (ADR 020 D4). Zero, before the branch's first event, ends
+    /// a batch. An interior sequence is invalid input; a sequence the branch
+    /// does not store is a storage error.
+    fn batch_end<'a>(&'a self, key: &'a TimelineKey, sequence: u64) -> BoxFuture<'a, Result<()>>;
     /// Range starts may be inside a batch; the end must be a batch boundary.
     fn read<'a>(
         &'a self,
