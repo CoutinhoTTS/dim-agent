@@ -513,6 +513,89 @@ async fn a_user_stop_of_the_run_turn_settles_cancelled() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_user_withdrawal_of_a_held_scheduled_input_settles_cancelled_and_releases_the_slot() {
+    let home = home();
+    let model = Arc::new(Script::default());
+    model.hold("blocker");
+    let server = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+
+    let saved: Value = client
+        .typed(
+            "schedule.save",
+            json!({"job": {"name": "inbox", "schedule": {"at": "2030-01-01T00:00:00Z"},
+                "prompt": "Check the inbox.", "cwd": home.path(), "mode": "reuse"}}),
+        )
+        .await
+        .unwrap();
+    let job_id = saved["job"]["id"].as_str().unwrap().to_owned();
+    let first: Value = client
+        .typed("schedule.run_now", json!({"job_id": job_id}))
+        .await
+        .unwrap();
+    let first = settled(&mut client, &job_id, first["run_id"].as_str().unwrap()).await;
+    let bound = first["session_id"].as_str().unwrap().to_owned();
+
+    // A held turn keeps the reuse Session busy, so the scheduled input is held.
+    client
+        .rpc(
+            "session.submit",
+            json!({"sessionId": bound, "branchId": "main", "text": "blocker"}),
+        )
+        .await
+        .unwrap();
+    let second: Value = client
+        .typed("schedule.run_now", json!({"job_id": job_id}))
+        .await
+        .unwrap();
+    let run_id = second["run_id"].as_str().unwrap().to_owned();
+    let held = run_where(&mut client, &job_id, &run_id, |run| {
+        run["state"] == "submitted"
+    })
+    .await;
+    let input_id = held["input_event_id"].as_str().unwrap().to_owned();
+    let session_id = held["session_id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        session_id, bound,
+        "the reuse job holds its input in the bound Session"
+    );
+
+    // Withdraw by input id through the public `session.input.withdraw` RPC.
+    let withdrawn: Value = client
+        .rpc(
+            "session.input.withdraw",
+            json!({"sessionId": session_id, "branchId": "main", "inputId": input_id,
+                "reason": "superseded"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(withdrawn["status"], "deleted", "{withdrawn}");
+
+    let cancelled = settled(&mut client, &job_id, &run_id).await;
+    assert_eq!(cancelled["state"], "cancelled", "{cancelled}");
+    assert_eq!(cancelled["detail"], "withdrawn", "{cancelled}");
+
+    // The withdrawn run released the job's overlap slot: a new run is accepted.
+    let third: Value = client
+        .typed("schedule.run_now", json!({"job_id": job_id}))
+        .await
+        .unwrap();
+    let third = run_where(
+        &mut client,
+        &job_id,
+        third["run_id"].as_str().unwrap(),
+        |run| run["state"] == "submitted",
+    )
+    .await;
+    assert_eq!(third["state"], "submitted", "the slot is released: {third}");
+
+    model.release();
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_document_written_by_the_typescript_scheduler_loads() {
     let home = home();
     let server = start(home.path(), Arc::new(Script::default())).await;

@@ -61,7 +61,7 @@ The shared declaration gate still permits a hung top-level module load to time
 out host startup; process modules follow the binding's author-guide rule.
 
 The [accepted feature dependency binding](../process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
-uses `definePlugin.inject: ["scheduleJobs", "toolRegistry"]` in this optional Session tool module.
+declares `scheduleJobs` and `toolRegistry` as this optional Session tool module's dependencies.
 Provider activation, retirement, retry and recovery follow that binding's current
 rules; Scheduler does not define another attachment policy or copy its error
 text. The stable process dependency boundary still applies. This settles the
@@ -70,7 +70,7 @@ text. The stable process dependency boundary still applies. This settles the
 | Surface | Current implementation and consequence |
 | --- | --- |
 | Session tool | A C4 Session definition, registered by the process row with `partRegistry`, injects `toolRegistry` and registers `schedule` from its apply with its declaration and asynchronous `execute`. Registration does no I/O. Registration and provider-generation changes follow the current C4 binding (§1.1). |
-| Process package / `scheduleJobs` | One row in `ServerConfig.session_typescript.rows` installs the package's ordinary process owner in the shared runtime; each Session mounts a copy of its Session definition there. The Session tool declares `scheduleJobs` in `definePlugin.inject` (§1.1). |
+| Process package / `scheduleJobs` | One optional process row, `Scheduler`, registered with `AgentBuilder::optional_plugin`, installs the process owner; its `apply` registers the `SchedulerSession` part with `partRegistry`. The Session part reads `scheduleJobs` through `names.key()` (§1.1). |
 | Management namespace | The process row restores its run store before registering `schedule` with `managementMethods` and publishing `scheduleJobs`. A failed restore retains the fault and still registers the namespace before failing the row, so subsequent calls report that row's failed status. Native per-call admission and `report`/`drain` follow the registering row's lifetime and status. |
 | Settings | Owner `settings.read/update` and `settings/schedule` are implemented (#175/#177). The process row alone declares source `schedule`, user file `schedule.json`, no `projectFile` and user-only `/max_concurrent_runs` (§7.1). Read the validated/defaulted document at use, and CAS with `expectedRevision`. Full-document local writes use Settings' existing trust boundary (§7); they do not authenticate a Scheduler save. |
 | Storage | The [public binding](../process-typescript.md#52-public-pluginfiles-binding) supplies pluginFiles at the authorized product root. The embedding host provisions `scheduler/` before enabling the row; a missing parent returns `io` before the transaction callback. Scheduler inner v1 (A.7) and host outer v1 are unchanged. |
@@ -79,23 +79,22 @@ text. The stable process dependency boundary still applies. This settles the
 
 ### 1.2 Impact
 
-No runtime, facade, loader, event format or rutis change is proposed. All new business behavior belongs to the Scheduler package. The source, tool and management namespace above have concrete consumers (Settings, ToolRegistry and operators); `scheduleJobs` exists only for the feature's two scopes. There is no additional registry, readiness service, notification bus or App Server business module.
+No facade, loader, event-format or rutis change is proposed; all new business behavior belongs to the Scheduler package. The runtime assembly gains one entry, `AgentBuilder::optional_plugin`, so the process row is optional (the host does not wait for it), and `plugin_rows` returns `PluginRows`, which carries the optional row ids; no core readiness path or mechanism is altered. The source, tool and management namespace above have concrete consumers (Settings, ToolRegistry and operators); `scheduleJobs` exists only for the feature's two scopes. There is no additional registry, readiness service, notification bus or App Server business module.
 
 ### 1.3 Concrete package row
 
-The row fields below are the dependency, method-kind and Settings contract that the native binding keeps. Their TypeScript spelling (manifest `code` fields, `definePlugin`, `ctx.use`) is replaced by [Appendix G](#appendix-g-rust-binding). The process part is a row registered by the product entry point, and the Session part is a Feature installed in the profile.
+The row fields below are the dependency, method-kind and Settings contract that the native binding keeps. Their TypeScript spelling (manifest `code` fields, `definePlugin`, `ctx.use`) is replaced by [Appendix G](#appendix-g-rust-binding). The process part is an optional row registered by the product entry point with `AgentBuilder::optional_plugin`, and the Session part is registered through `partRegistry` from that row's `apply`.
 
 | Row field | Process row |
 | --- | --- |
-| `id` | `scheduler` |
-| `name` | `@dimcode/scheduler` |
+| `id` | `Scheduler` |
+| `name` | `Scheduler` |
 | `config` | `{}` |
-| `inject` | `sessions`, `sessionPermissions`, `settings`, `pluginFiles`, `managementMethods`, `partRegistry` |
-| `provides` | `scheduleJobs: {call:"async"}`; apply registers `schedule` with `managementMethods` and the Session definition with `partRegistry` |
+| `inject` | `settings`, `pluginFiles`, `managementMethods`, `sessionPermissions`, `partRegistry`; `sessions` by host-dispatch name (§1.1) |
+| `provides` | `scheduleJobs`; apply registers `schedule` with `managementMethods` and the `SchedulerSession` part with `partRegistry` |
 | `settings` | The complete `schedule` source in §7.1, including its schema |
 
-The Session definition injects `scheduleJobs` and `toolRegistry`, provides nothing,
-and registers `schedule` with `toolRegistry` from its apply.
+The `SchedulerSession` part injects `scheduleJobs`, `toolRegistry`, the guide entries, `SessionConfig` and `SessionIdentity`, provides nothing, and registers `schedule` with `toolRegistry` and the §5.2 guide entry from its apply.
 
 **Failed-owner reporting.** The coordinated [rutis 0.16 upgrade](../rutis-0.16-upgrade.md)
 supplies the loader failure reporting required by Appendix C and Appendix D
@@ -104,8 +103,8 @@ items 8, 12 and 13. An unreadable or invalid run store fails the process row;
 Keep the row-level dependencies and failure assertions unchanged. Scheduler uses
 the same SDK version as the host and adds no loader workaround.
 
-The module's `definePlugin` and its supplied row agree on dependencies and
-method kinds. The two rows are one feature with two owners of work, not separate
+The optional process row and its registered Session part agree on dependencies and
+method kinds; they are one feature with two owners of work, not separate
 runtimes. The process row provides `scheduleJobs` and registers its namespace on the original context;
 there is no methods adapter or Session forwarding plugin. Structural config
 contains no jobs, policy defaults, credentials, timer settings or run state.
@@ -474,7 +473,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 
 ## 9. Requirements raised to mechanism owners
 
-None. Existing C3/C4, S2, Settings and pluginFiles mechanisms are the baseline. Appendix F distinguishes the specified bindings from package acceptance; implementation adds no optional-service API, notification protocol, runtime event or infrastructure requirement.
+The only mechanism additions are the runtime assembly entries the binding uses: `AgentBuilder::optional_plugin` (an optional process row), `PluginRows` returned by `plugin_rows`, and `PartRegistry::register` for the Session part. Existing C3/C4, S2, Settings and pluginFiles mechanisms remain the baseline. Appendix F distinguishes the specified bindings from package acceptance; implementation adds no optional-service API, notification protocol, runtime event or infrastructure requirement beyond those assembly entries.
 
 ## Appendix A. Interface details
 
@@ -853,10 +852,10 @@ Placement: a dedicated business crate, `crates/dim-agent-scheduler`, not App
 Server code (principles §1). The product entry point installs it through the App
 Server's native-profile installer (`process_entry(args, provider, install)`), so
 the App Server crate does not depend on it; a host that does not install it has
-no `schedule.*` methods or `schedule` tool. Its Session part is a Feature
-installed in the profile, as `dim-agent-questions` is. Both parts use the Rust
-names that exist today: `Names::key`, `Key<T>`, `require_at`, `provide_as`,
-`Feature::session` and `AgentBuilder::require_feature`.
+no `schedule.*` methods or `schedule` tool. The process part is added with
+`AgentBuilder::optional_plugin` and registers its `SchedulerSession` part through
+`partRegistry` from its `apply`. Both parts use the Rust names that exist today:
+`Names::key`, `Key<T>`, `require_at`, `provide_as` and `PartRegistry::register`.
 
 | Neutral | Rust |
 | --- | --- |

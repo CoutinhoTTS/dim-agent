@@ -56,14 +56,14 @@ flowchart LR
 共享声明加载仍有限制：模块顶层加载卡住会使宿主启动超时；进程模块不在顶层执行业务 I/O。
 
 [已确认的功能依赖绑定](../../../design/process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
-在可选 Session 工具模块声明 `definePlugin.inject: ["scheduleJobs", "toolRegistry"]`。
+声明 `scheduleJobs` 与 `toolRegistry` 为这个可选 Session 工具模块的依赖。
 提供者激活、退役、重试和恢复采用该绑定的当前规则，Scheduler 不另定接入策略或复制错误文本。
 进程依赖稳定边界仍适用；#35 访问选择已确定，包须实施绑定的生命周期合同。
 
 | 入口 | 当前实现与约束 |
 | --- | --- |
 | Session 工具 | 由进程行经 partRegistry 注册的 C4 Session 定义注入 toolRegistry，在 apply 中以其声明和异步 execute 注册 schedule，注册不做 I/O；注册和提供者代际变化遵循当前 C4 绑定（§1.1）。 |
-| 进程包 / scheduleJobs | ServerConfig.session_typescript.rows 中的一行在共享运行时装载包的普通进程 owner；每个 Session 在该运行时挂载其 Session 定义的一份副本。Session 工具在 definePlugin.inject 声明 scheduleJobs（§1.1）。 |
+| 进程包 / `scheduleJobs` | 经 `AgentBuilder::optional_plugin` 注册的可选进程行 `Scheduler` 装载进程 owner；其 `apply` 经 `partRegistry` 注册 `SchedulerSession` 部分。Session 部分经 `names.key()` 读取 `scheduleJobs`（§1.1）。 |
 | 管理命名空间 | 进程行先恢复运行存储，再把 schedule 注册到 managementMethods 并发布 scheduleJobs。恢复失败时保留 fault，仍注册命名空间后使行失败，让后续调用返回该行的失败状态。原生按调用准入及 report/drain 跟随注册行的生命周期和状态。 |
 | Settings | owner settings.read/update、settings/schedule 已实现（#175/#177）。仅进程 row 登记来源 schedule、用户文件 schedule.json、无 projectFile，以及 userOnly /max_concurrent_runs（§7.1）。使用时读取已校验/默认化文档，以 expectedRevision 做 CAS。整份文档的本地写入沿用 Settings 信任边界（§7），不证明经过 Scheduler 保存。 |
 | 存储 | [公开绑定](../../../design/process-typescript.md#52-public-pluginfiles-binding)在宿主授权 product root 提供 pluginFiles。宿主在启用行前创建 `scheduler/`；父目录缺失时在事务回调前返回 `io`。Scheduler 内部 v1（A.7）与宿主外层 v1 不变。 |
@@ -72,30 +72,29 @@ flowchart LR
 
 ### 1.2 影响面
 
-不提运行时、门面、loader、事件格式或 rutis 改动，新业务归 Scheduler 包。来源、工具与管理命名空间分别由 Settings、ToolRegistry、运维方消费；scheduleJobs 只连接功能的两个真实作用域。不增加注册表、就绪服务、通知总线或 App Server 业务模块。
+不提门面、loader、事件格式或 rutis 改动，新业务归 Scheduler 包。运行时装配新增一个入口 `AgentBuilder::optional_plugin`，使进程行为可选（宿主不等待它），`plugin_rows` 返回带可选行 id 的 `PluginRows`；不改变核心就绪路径或机制。来源、工具与管理命名空间分别由 Settings、ToolRegistry、运维方消费；scheduleJobs 只连接功能的两个真实作用域。不增加注册表、就绪服务、通知总线或 App Server 业务模块。
 
 ### 1.3 具体包行
 
-原生实现位于 `crates/dim-agent-scheduler`。`install` 注册进程插件 `Scheduler` 与 Session 功能 `SchedulerTool`（Session 定义 `SchedulerSession`，即 Session 工具）。`dimcode` 通过 `dim_app_server::cli` 的 `ProductInstall` 安装它，它不在默认插件清单中。
-嵌入宿主仍可从清单的 `code` 字段构造下面这一行。
+原生实现位于 `crates/dim-agent-scheduler`。进程部分是经 `AgentBuilder::optional_plugin` 注册的可选行，Session 部分由该行在 `apply` 中经 `partRegistry` 注册。`dimcode` 通过 `dim_app_server::cli` 的 `ProductInstall` 安装它，它不在默认插件清单中。
 
 | row 字段 | 进程行 |
 | --- | --- |
-| `id` | `scheduler` |
-| `name` | `@dimcode/scheduler` |
+| `id` | `Scheduler` |
+| `name` | `Scheduler` |
 | `config` | `{}` |
-| `inject` | `sessions`、`sessionPermissions`、`settings`、`pluginFiles`、`managementMethods`、`partRegistry` |
-| `provides` | `scheduleJobs: {call:"async"}`；apply 把 `schedule` 注册到 `managementMethods`，把 Session 定义注册到 `partRegistry` |
+| `inject` | `settings`、`pluginFiles`、`managementMethods`、`sessionPermissions`、`partRegistry`；`sessions` 经宿主分派名称调用（§1.1） |
+| `provides` | `scheduleJobs`；apply 把 `schedule` 注册到 `managementMethods`，把 `SchedulerSession` 部分注册到 `partRegistry` |
 | `settings` | §7.1 完整的 schedule 来源及 schema |
 
-Session 定义注入 `scheduleJobs` 与 `toolRegistry`，不提供服务，在 apply 中把 `schedule` 注册到 `toolRegistry`。
+`SchedulerSession` 部分注入 `scheduleJobs`、`toolRegistry`、guide 条目、`SessionConfig` 与 `SessionIdentity`，不提供服务，在 apply 中把 `schedule` 注册到 `toolRegistry` 并注册 §5.2 guide 条目。
 
 **失败 owner 报告。** 统一的 [rutis 0.16 升级](../rutis-0.16-upgrade.md)
 提供附录 C 与附录 D 第 8、12、13 项要求的加载失败报告。运行存储不可读或无效时，
 进程行失败，`schedule.*` 返回 `service_unavailable`，原始字节保持不变。
 行级依赖与失败断言保持原样。Scheduler 与宿主使用同一 SDK 版本，不增加加载器绕过逻辑。
 
-模块的 definePlugin 与包行声明相同依赖和方法种类；两个行属于同一功能，
+可选进程行与其注册的 Session 部分声明相同依赖和方法种类；它们属于同一功能，
 不是两个运行时。进程原行提供 scheduleJobs 并注册管理命名空间，不增加方法适配器或 Session 转发插件。
 结构 config 不含任务、权限默认值、凭据、定时配置或运行状态。
 
@@ -432,7 +431,7 @@ Settings 在外部边界统一应用默认值并校验文档。非法文档返�
 
 ## 9. 向机制所有者提出的需求
 
-无。以现有 C3/C4、S2、Settings、pluginFiles 为前提；附录 F 区分已明确的绑定和包验收，实现不增加可选服务 API、通知协议、运行时事件或基础设施需求。
+唯一新增机制是绑定用到的运行时装配入口：`AgentBuilder::optional_plugin`（可选进程行）、`plugin_rows` 返回的 `PluginRows`，以及用于 Session 部分的 `PartRegistry::register`。以现有 C3/C4、S2、Settings、pluginFiles 为前提；附录 F 区分已明确的绑定和包验收，实现除这些装配入口外不增加可选服务 API、通知协议、运行时事件或基础设施需求。
 
 ## 附录 A. 接口细节
 
@@ -768,7 +767,7 @@ launch 一个 Session。不增加立即删除策略，也不从旧运行推断�
 
 Scheduler 以原生 Rust 实现，没有 TypeScript 包、Node 进程或回退路径。上文合同不变，只更换绑定。
 
-位置：独立业务 crate `crates/dim-agent-scheduler`，不属于 App Server 代码（principles §1）。产品入口经 App Server 的原生 profile 安装函数（`process_entry(args, provider, install)`）安装它，App Server crate 不依赖它；未安装它的宿主没有 `schedule.*` 方法和 `schedule` 工具。Session 部分是 profile 中安装的 Feature，与 `dim-agent-questions` 相同。两部分都使用现有 Rust 名称：`Names::key`、`Key<T>`、`require_at`、`provide_as`、`Feature::session` 与 `AgentBuilder::require_feature`。
+位置：独立业务 crate `crates/dim-agent-scheduler`，不属于 App Server 代码（principles §1）。产品入口经 App Server 的原生 profile 安装函数（`process_entry(args, provider, install)`）安装它，App Server crate 不依赖它；未安装它的宿主没有 `schedule.*` 方法和 `schedule` 工具。进程部分经 `AgentBuilder::optional_plugin` 添加，并在其 `apply` 中经 `partRegistry` 注册 `SchedulerSession` 部分。两部分都使用现有 Rust 名称：`Names::key`、`Key<T>`、`require_at`、`provide_as` 与 `PartRegistry::register`。
 
 | 中立 | Rust |
 | --- | --- |
