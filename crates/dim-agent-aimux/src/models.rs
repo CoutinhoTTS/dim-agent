@@ -156,6 +156,16 @@ impl AimuxModels {
         &self.default_model
     }
 
+    /// The environment variable names this catalog reads provider credentials
+    /// from, sorted and deduplicated across every model.
+    pub fn api_key_envs(&self) -> std::collections::BTreeSet<String> {
+        self.providers
+            .values()
+            .flat_map(|models| models.values())
+            .filter_map(|model| model.api_key_env.clone())
+            .collect()
+    }
+
     pub(crate) fn get(&self, provider: &str, model: &str) -> Result<&Model, HostError> {
         self.providers
             .get(provider)
@@ -182,5 +192,49 @@ impl ResolveContextModel for AimuxModels {
                 &request,
             ))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn api_key_envs_are_the_sorted_unique_names_the_catalog_reads() {
+        let config: ModelConfigFile = serde_json::from_value(json!({
+            "defaultModel": {"providerId": "local", "modelId": "one"},
+            "providers": [
+                {
+                    "id": "local",
+                    "kind": "openai-compatible",
+                    "apiKeyEnv": "LOCAL_KEY",
+                    "baseUrl": "https://example.test/v1",
+                    "models": [
+                        {"id": "one", "contextWindow": 128000, "maxOutputTokens": 4096,
+                         "config": {"maxTokens": 4096}},
+                        {"id": "two", "contextWindow": 128000, "maxOutputTokens": 4096,
+                         "config": {"maxTokens": 4096}}
+                    ]
+                },
+                {
+                    "id": "other",
+                    "kind": "openai-compatible",
+                    "apiKeyEnv": "OTHER_KEY",
+                    "baseUrl": "https://example.test/v1",
+                    "models": [
+                        {"id": "two", "contextWindow": 128000, "maxOutputTokens": 4096,
+                         "config": {"maxTokens": 4096}}
+                    ]
+                }
+            ]
+        }))
+        .unwrap();
+        let models = AimuxModels::from_config(config).unwrap();
+        assert_eq!(
+            models.api_key_envs(),
+            BTreeSet::from(["LOCAL_KEY".to_owned(), "OTHER_KEY".to_owned()])
+        );
     }
 }

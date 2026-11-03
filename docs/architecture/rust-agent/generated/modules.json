@@ -200,6 +200,16 @@
       ]
     },
     {
+      "id": "dim_agent_aimux::models::tests",
+      "crate": "dim_agent_aimux",
+      "parent": "dim_agent_aimux::models",
+      "file": "crates/dim-agent-aimux/src/models.rs",
+      "unexpandedMacros": [
+        "assert_eq",
+        "json"
+      ]
+    },
+    {
       "id": "dim_agent_aimux::plugin",
       "crate": "dim_agent_aimux",
       "parent": "dim_agent_aimux",
@@ -6384,6 +6394,13 @@
     },
     {
       "from": "dim_agent_aimux::models",
+      "to": "dim_agent_aimux::models::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::models",
       "to": "dim_agent_aimux::request",
       "references": [
         "path crate::request::convert"
@@ -6432,6 +6449,20 @@
       "references": [
         "path ModelId",
         "use dim_agent_runtime::ModelId"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::models::tests",
+      "to": "dim_agent_aimux::config",
+      "references": [
+        "path ModelConfigFile"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::models::tests",
+      "to": "dim_agent_aimux::models",
+      "references": [
+        "path AimuxModels::from_config"
       ]
     },
     {
@@ -7140,6 +7171,7 @@
         "mod host",
         "path host::CompactionStrategyHost",
         "path host::ContextModelHost",
+        "path host::CredentialVariablesHost",
         "path host::ModelHost",
         "path host::ModelSelectionHost",
         "path host::PrepareContextHost",
@@ -16274,6 +16306,14 @@
       "to": "dim_agent_capabilities::file_storage",
       "references": [
         "path dim_agent_capabilities::file_storage::FileStoragePlugin::new"
+      ]
+    },
+    {
+      "from": "dim_app_server",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path dim_agent_capabilities::host::CredentialVariables",
+        "path dim_agent_capabilities::host::CredentialVariablesHost"
       ]
     },
     {

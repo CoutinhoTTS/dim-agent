@@ -54,7 +54,7 @@ use rutis::host::{CtxHost, FiberView, Key};
 use rutis_loader::runtime::SessionRows;
 use serde_json::Value;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -385,6 +385,15 @@ impl Drop for Startup {
     }
 }
 
+/// The credential variable names the assembly root publishes for this
+/// process. The model catalog is immutable after startup.
+struct CredentialVariableNames(BTreeSet<String>);
+impl dim_agent_capabilities::host::CredentialVariables for CredentialVariableNames {
+    fn credential_variables(&self) -> BTreeSet<String> {
+        self.0.clone()
+    }
+}
+
 /// Builds the process tree, opens admission once required host rows are Active
 /// and the runtimes have released their rows, and returns the listener addresses.
 pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Result<RunningServer> {
@@ -599,6 +608,15 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     builder.process_value(Arc::new(dim_agent_capabilities::methods::ReservedMethods(
         methods::reserved_for_sessions(),
     )));
+    builder.process_value(Arc::new(
+        dim_agent_capabilities::host::CredentialVariablesHost(Arc::new(CredentialVariableNames(
+            config
+                .model_catalog
+                .as_ref()
+                .map(|models| models.api_key_envs())
+                .unwrap_or_default(),
+        ))),
+    ));
     let mut rows = vec![register_part(
         &mut builtins,
         builder.catalog(),
