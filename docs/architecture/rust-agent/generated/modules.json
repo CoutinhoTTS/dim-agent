@@ -36238,6 +36238,14 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::goal",
+      "references": [
+        "path crate::goal::Request::Objective",
+        "path crate::goal::Request::Show"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::management::editor",
       "references": [
         "path editor::Draft",

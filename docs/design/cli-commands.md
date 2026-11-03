@@ -61,6 +61,8 @@ The order is independent of the interface language. Opening `/` selects `/new`;
 Exit requires its exact name or alias before dispatch: choosing an
 incomplete match fills the command name and keeps the composer open. Exact typed
 commands, including hidden commands, retain their own dispatch behavior.
+Menu selection can still complete rather than dispatch an exact name: commands
+with inline arguments and `/goal` fill the composer for a separate submission.
 The command menu lists `/permissions` as the permission entry. `/approvals` and `/approval`
 remain compatibility aliases when typed directly. Run, queue and steer keys are
 omitted from the menu. The menu only lists slash commands: the view actions for
@@ -222,9 +224,24 @@ registers. The methods, the marker blocks and the rule that reads the goal belon
 this section owns what the native clients do with them. The command is listed in the palette as a
 `session` command, like `/compact`.
 
+In both TUI modes, selecting `/goal` with Enter or Tab only fills `/goal ` in the
+composer and closes the palette. It does not dispatch until the user submits the
+draft. Submitting without arguments prints usage for Dim's supported forms,
+followed by the current goal and status, or that the shown line has no goal.
+The line-mode prompt prints the same help and state for bare `/goal`.
+
+```text
+palette: goal + Enter -> /goal |          (completion only)
+/goal fix build + Enter -> set/edit goal
+/goal + Space + Enter   -> usage + current goal
+
+Usage: /goal [OBJECTIVE | set OBJECTIVE | edit OBJECTIVE | pause | resume | clear]
+No goal on main.
+```
+
 | Form | Call |
 | --- | --- |
-| `/goal` | none: the goal in force on the shown line, or that it has none |
+| `/goal` | none: usage, then the goal in force on the shown line, or that it has none |
 | `/goal OBJECTIVE` | `session.goal.edit` while the goal is active or paused, `session.goal.set` otherwise |
 | `/goal set OBJECTIVE` | `session.goal.set` |
 | `/goal edit OBJECTIVE` | `session.goal.edit` |
@@ -252,7 +269,7 @@ A `/pursue` form is Pursuit's later option (§10) and is not part of this contra
 A.3's rule: the latest live `goal:objective` block is the objective, the latest live `goal:status`
 block is the status, `clear` retires both, `edit` keeps the judge, and an input the InputQueue
 deleted leaves the fold. It adds no query method and asks Goal no question. `/goal` with no
-arguments prints that fold. Before it picks between `set` and `edit` the client reads the line up
+arguments prints usage before that fold. Before it picks between `set` and `edit` the client reads the line up
 to its published head, and after a write it reads again before printing: the state shown and the
 method chosen come from the events, never from a guess taken from the reply. The fold starts over
 at the line's own opening — its
@@ -270,6 +287,7 @@ a `/goal` that writes sends Goal's own change input, and Goal decides what follo
 
 ```text
 > /goal
+Usage: /goal [OBJECTIVE | set OBJECTIVE | edit OBJECTIVE | pause | resume | clear]
 No goal on main.
 
 > /goal Make the CLI tests pass
@@ -285,6 +303,7 @@ Goal paused on main · paused (user)
   Keep the CLI tests green
 
 > /goal
+Usage: /goal [OBJECTIVE | set OBJECTIVE | edit OBJECTIVE | pause | resume | clear]
 Goal on main · paused (user)
   Keep the CLI tests green
 
@@ -296,11 +315,13 @@ Goal resumed on main · active
 Goal cleared on main.
 ```
 
-The first line names the call that ran, the line the goal belongs to and the status in force;
+Bare `/goal` starts with usage; its state report follows. A writing form starts with
+the state report, naming the call that ran, the line the goal belongs to and the status in force;
 `edited` is the form that found a goal and changed only its objective. `evaluator judge` follows
 the status when Pursuit's judge is on the goal. A paused status names its reason: `user`,
 `interrupted`, `limit`, `turn failed` or `evaluation failed`. The objective follows, one line per
-line of it. A cleared goal and a line without one print one line.
+line of it. Clearing a goal prints one confirmation line. Bare `/goal` on a line without a goal
+prints two lines: usage, then the no-goal notice.
 
 The line client and both terminal UI modes print these lines; in the terminal UI they are one
 report in the transcript, so earlier reports stay readable above later ones. The status area
