@@ -863,12 +863,13 @@ async fn node_default_plugins_load_and_their_settings_follow_them() {
     config.session_typescript = Some(parts);
     let (server, _requests, _) = start(config).await;
     let mut client = Client::new_version(&server, false, 3).await;
-    let defaults = ["goal", "session-title", "workflow", "scheduler"];
+    let defaults = ["goal", "workflow", "scheduler"];
     let list = running(&mut client, &defaults).await;
     for name in defaults {
         assert_eq!(item(&list, name)["use"], "default", "{list}");
     }
     assert_eq!(item(&list, "web")["use"], "builtin", "{list}");
+    assert_eq!(item(&list, "session-title")["use"], "builtin", "{list}");
     assert_eq!(item(&list, "Agents")["use"], "builtin", "{list}");
 
     let read = json!({"source": "session-title", "scope": "user"});
@@ -970,6 +971,97 @@ async fn node_default_plugins_load_and_their_settings_follow_them() {
     }
     let stored = call(&mut client, "settings.read", read).await;
     assert_eq!(stored["result"]["document"], document, "{stored}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_former_default_plugin_uses_its_builtin_and_preserves_source_choices() {
+    let home = home();
+    let config = config(&home);
+    let path = home.join("plugins.json");
+    let original =
+        json!({"version":1,"installed":[],"names":{"session-title":{"use":"default"}}}).to_string();
+    std::fs::write(&path, &original).unwrap();
+    let (server, _, _) = start(config.clone()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let list = running(&mut client, &["session-title"]).await;
+    assert_eq!(item(&list, "session-title")["use"], "builtin", "{list}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.disable",
+            json!({"name":"session-title"}),
+        )
+        .await,
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(item(&list, "session-title")["status"], "off", "{list}");
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.enable",
+            json!({"name":"session-title"}),
+        )
+        .await,
+    );
+    running(&mut client, &["session-title"]).await;
+    let source = plugin_dir(&home.join("src"), "session-title");
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.install",
+            json!({"id":"title-replacement","source":{"path":source}}),
+        )
+        .await,
+    );
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.enable",
+            json!({"name":"session-title","use":"title-replacement"}),
+        )
+        .await,
+    );
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(
+        item(&list, "session-title")["use"],
+        "title-replacement",
+        "{list}"
+    );
+    let absent = call(
+        &mut client,
+        "settings.read",
+        json!({"source":"session-title","scope":"user"}),
+    )
+    .await;
+    assert_eq!(app_error(&absent), "settings_unknown_source", "{absent}");
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.enable",
+            json!({"name":"session-title","use":"builtin"}),
+        )
+        .await,
+    );
+    running(&mut client, &["session-title"]).await;
+    assert_ok(
+        &call(
+            &mut client,
+            "settings.read",
+            json!({"source":"session-title","scope":"user"}),
+        )
+        .await,
+    );
     drop(client);
     server.shutdown();
     server.join().await.unwrap();

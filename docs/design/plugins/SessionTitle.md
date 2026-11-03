@@ -17,13 +17,11 @@ PluginManager's source selection owns the transition from the former default pac
 built-in implementation, preserving explicit disablement and installed replacement selections.
 Only the selected implementation may register the Settings source or `session.rename`.
 
-Verification uses the actual plugin over its declared SDK ports and the real Node/App Server flow
-[`session_title.rs`](../../../crates/dim-app-server/tests/transport_flow/session_title.rs).
-The SDK flows cover fixed-prefix paging, input exclusions, Unicode bounds, overlapping adoptions,
-failure limits, rename conflict retries, cancellation and timeout settlement. The Node flow covers
-Settings defaults/validation, RPC, HTTP auxiliary execution, a controlled live turn, title notices,
-manual-over-auto conflict through store admission, idle restore, fork and caller close. Diagnostics
-contain only outcome and duration on runtime stderr, which the host writes to its process log.
+Verification uses the native App Server flow
+[`session_title.rs`](../../../crates/dim-app-server/tests/transport_flow/session_title.rs) without
+language runtimes. It exercises fixed-prefix history, settings validation, RPC, HTTP auxiliary
+execution, Unicode bounds, concurrent adoption, title notices, manual-over-auto conflicts,
+restore, fork and closing settlement. Diagnostics contain only outcome and duration.
 
 | Boundary | Current contract and Ready decision |
 | --- | --- |
@@ -48,13 +46,13 @@ call, so index reload does not reload this consumer.
 
 Use the [plugin binding contract](../rutis-usage.md): the plugin's one row injects `partRegistry`
 and registers the Session part; each Session mounts a copy. The part injects
-`sessionMethods` and registers `session.rename` with it from `apply`; its provides dictionary is empty.
+`sessionMethods` and registers `session.rename` with it from `apply`; it provides no service.
 `apply` reads the Session identity and creation configuration and registers observation/cleanup;
 it does not start an asynchronous initialization job. Its creation configuration is immutable.
-The same part declares all its dependencies in `inject`: the process services `sessions`,
+The part declares all its dependencies: the process services `sessions`,
 `settings`, `sessionMetadata` and `auxiliaryModel`, and the Session services `sessionIdentity`,
 `sessionConfig`, `sessionLifecycle` and `sessionMethods`. The product assembly installs the native
-plugin independently of foreign plugin rows. Missing optional providers affect SessionTitle's
+plugin independently of foreign plugin rows. Missing required service providers affect only SessionTitle's
 availability under the existing dependency rules, not the Session's execution capabilities.
 
 The fixed snapshot ends at returned T, not necessarily at N. Its first adopted operator input
@@ -99,9 +97,10 @@ flowchart LR
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `SessionTitle` | Session | Session services `sessionIdentity`, `sessionConfig`, `sessionLifecycle` and `sessionMethods`; process sessions history, Settings, title metadata `sessionMetadata` (S5b) and required `auxiliaryModel` (absent providers keep the row Pending) | Registers session.rename with sessionMethods; Settings source session-title |
+| `session-title` | Process | Settings and part registry | Registers the Settings source and Session part |
+| `SessionTitle` | Session | Session services `sessionIdentity`, `sessionConfig`, `sessionLifecycle` and `sessionMethods`; process sessions history, Settings, title metadata `sessionMetadata` (S5b) and required `auxiliaryModel` (absent providers keep the row Pending) | Registers session.rename with sessionMethods |
 
-Dependencies stay in the Session or enclosing process. C4/S2/Settings supply existing observation, prefix reads and configuration; S5b supplies title metadata and C6 the notices; Provider supplies the named auxiliary operation. The package's row registers its source in its `apply`. Real provider reloads cancel the row's work (ADR 002 D3); S2 index reload does not. Business data changes never reload the package (D4).
+Dependencies stay in the Session or enclosing process. C4/S2/Settings supply existing observation, prefix reads and configuration; S5b supplies title metadata and C6 the notices; Provider supplies the named auxiliary operation. The plugin's row registers its source in its `apply`. Real provider reloads cancel the row's work (ADR 002 D3); S2 index reload does not. Business data changes never reload the plugin (D4).
 
 ## 2. Data and state
 
@@ -236,13 +235,13 @@ The first input's text is sent to the model in the `session-title` source; unset
 | Principles §4 rule 5 (batch) | The trigger acts on `input/applied` when it is consumed, in sequence order. |
 | Principles §4 rule 6 (context from handed-over events) | SessionTitle adds nothing to model context; the auxiliary request contains only adopted input text. |
 | Principles §4 rule 7 (public events and services only) | It uses the Session broadcast, fixed-prefix read, SessionStore `setTitle`, `AuxiliaryModel` and Settings, all public. |
-| Principles §4 rule 8 (requirements to mechanism owners) | C6 and S5b deliver the notice and metadata contracts in §9. None for #4: SessionTitle uses the Session services, the Session channel and named process services, without a runtime typed-service dependency. Requirements to other plugins (SessionStore title metadata and notice emission, Rpc forwarding of notices) are listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins). |
+| Principles §4 rule 8 (requirements to mechanism owners) | C6 and S5b deliver the notice and metadata contracts in §9. None for #4: SessionTitle uses the Session services, the Session channel and named process services through existing owner contracts. Requirements to other plugins (SessionStore title metadata and notice emission, Rpc forwarding of notices) are listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins). |
 | Principles §4 rule 9 (only facts later decisions use) | The title is process-level SessionStore state: it never enters the Timeline, changes through `setTitle` and reaches UIs as a Session broadcast notice. |
-| Principles §1 (Capability and App Server boundary) | SessionTitle is a Session Capability in its own plugin package; Rpc only dispatches `session.rename` and reads title fields from SessionStore. |
+| Principles §1 (Capability and App Server boundary) | SessionTitle is a Session part, not a Capability: it injects neither Dispatcher nor Timeline; Rpc only dispatches `session.rename` and reads title fields from SessionStore. |
 | ADR 002 D1 (scope follows state) | Session scope: the title belongs to the Session; the stored title is SessionStore's. |
 | ADR 002 D2 (no wiring modules) | No wiring module; all dependencies are declared services. |
 | ADR 002 D3 (dependencies follow scope) | Dependencies are in the Session or enclosing process scope; their reload cancels a generation, which is accepted. |
-| ADR 002 D4 (structural vs business configuration) | Package installation/enabling is structural; the user-only `session-title` source in A.3 owns business configuration, read at use without reloading the row. |
+| ADR 002 D4 (structural vs business configuration) | Plugin enablement and source selection are structural; the user-only `session-title` source in A.3 owns business configuration, read at use without reloading the row. |
 | ADR 002 D5 (language-neutral contracts) | Contracts are neutral; the Rust form is Appendix G. |
 
 ## 9. Requirements raised to mechanism owners
@@ -396,7 +395,10 @@ auxiliary binding use the owner contracts in §0. No shared contract or Core cha
 
 | Neutral | Rust |
 | --- | --- |
-| Namespace `session.rename` registered with `sessionMethods` | The TypeScript Session part calls `ctx.use('sessionMethods').register('session.rename', declarations, call)`, and the registration belongs to that copy; a Rust provider calls `methods.register(ctx, "session.rename", Vec<MethodDecl>, handler)` on a `Keyed<SessionMethods>` dependency |
+| Namespace `session.rename` registered with `sessionMethods` | The Session part calls `methods.register(ctx, "session.rename", Vec<MethodDecl>, handler)` on a `Key<SessionMethods>` dependency |
+| Published history | `SessionsService::history(HistoryRequest)` through the stable directory binding |
+| Title metadata | `SessionStore::metadata` and `SessionStore::set_title` |
+| Auxiliary call | `AuxiliaryModelHost.0.complete` with its cancellation token |
 | Session broadcast listener | Listener on `session_channel(session_id)` for `Event` records, removed by `ctx.effect` |
 | Generation task | Spawned under `ctx.effect` |
 

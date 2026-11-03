@@ -200,7 +200,7 @@
 - 它把策略文本放在自己的工厂配置里，好让候选走 shipped 装配（§8.1）。install 调用注册该配置的名字并提供其值；profile 不调用它而放置的 part 既不声明也不读取，内置文本生效。
 - 协议改随行为、流程测试、以及旧形式恢复历史的兼容一起交付（§4）。
 
-SessionTitle 不在范围内：它的 `SYSTEM`（`runtime/plugins/session-title/index.ts`）是辅助标题调用的 system 文本，不进入 Session 的模型上下文——标题请求不是 Session 请求（§3 的通道）。
+SessionTitle 不在范围内：它的 `SYSTEM`（`crates/dim-app-server/src/session_title.rs`）是辅助标题调用的 system 文本，不进入 Session 的模型上下文——标题请求不是 Session 请求（§3 的通道）。
 
 ### 9.3 ToolRegistry 与 ToolBinding
 

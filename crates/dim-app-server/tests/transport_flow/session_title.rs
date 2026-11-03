@@ -1,8 +1,6 @@
-//! Optional SessionTitle through C4, Settings, Provider, S2 and SessionStore.
 use super::session_typescript::when_served;
 use super::*;
 use axum::{Json, Router, body::Body, extract::State, routing::post};
-use dim_app_server::session_typescript::SessionTypeScriptConfig;
 use std::path::PathBuf;
 use tokio::sync::{mpsc, oneshot};
 
@@ -25,12 +23,6 @@ pub(super) async fn complete(
             ))
         })))
         .unwrap()
-}
-
-pub(super) fn rows() -> SessionTypeScriptConfig {
-    let mut config = session_typescript::fixture();
-    config.rows = vec![session_typescript::manifest_row("session-title")];
-    config
 }
 
 pub(super) async fn entry(client: &mut Client, id: &str) -> Value {
@@ -92,7 +84,7 @@ async fn create(client: &mut Client, home: &std::path::Path, interactive: bool) 
         }
     })
     .await
-    .expect("the configured optional SessionTitle row activates");
+    .expect("the built-in SessionTitle part activates");
     id
 }
 
@@ -135,8 +127,7 @@ pub(super) async fn configure(client: &mut Client, document: Value) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_session_title_generation_rename_settings_restore_fork_and_close() {
+async fn native_session_title_generation_rename_settings_restore_fork_and_close() {
     use std::os::unix::fs::PermissionsExt;
     let store = super::deletion::Store::new();
     std::fs::set_permissions(&store.0, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -173,7 +164,6 @@ async fn node_session_title_generation_rename_settings_restore_fork_and_close() 
                     .join(format!("dim-title-{}/server.sock", uuid::Uuid::new_v4())),
             ),
             product_home: Some(store.0.clone()),
-            session_typescript: Some(rows()),
             ..store.config()
         },
     )
@@ -435,6 +425,78 @@ async fn node_session_title_generation_rename_settings_restore_fork_and_close() 
         .await
         .unwrap();
     assert_eq!(entry(&mut client, &closing).await["title"], Value::Null);
+
+    let overlapping = create(&mut client, &store.0, true).await;
+    let excerpt = "😀".repeat(2001);
+    submit(&mut client, &overlapping, &excerpt).await;
+    let (request, release) = tokio::time::timeout(Duration::from_secs(10), requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(request["messages"][1]["content"], "😀".repeat(2000));
+    submit(
+        &mut client,
+        &overlapping,
+        "second input while generation is active",
+    )
+    .await;
+    idle(&mut client, &overlapping).await;
+    assert!(
+        requests.try_recv().is_err(),
+        "overlapping inputs share one title attempt"
+    );
+    release.send("\"Bounded. \nprivate\"".into()).unwrap();
+    titled(&mut client, &overlapping, "Bounded", "auto").await;
+    for title in [
+        json!(0),
+        json!(""),
+        json!("   "),
+        json!("line\nbreak"),
+        json!("\u{0001}text"),
+        json!("😀".repeat(11)),
+    ] {
+        let rejected = client
+            .rpc(
+                "session.rename",
+                json!({"sessionId":overlapping,"title":title}),
+            )
+            .await;
+        assert_eq!(
+            rejected["error"]["data"]["appError"], "invalid_params",
+            "{rejected}"
+        );
+    }
+
+    configure(&mut client, json!({"enabled":false})).await;
+    let disabled = create(&mut client, &store.0, true).await;
+    submit(&mut client, &disabled, "disabled first input").await;
+    idle(&mut client, &disabled).await;
+    configure(&mut client, json!({"enabled":true})).await;
+    submit(&mut client, &disabled, "enabled later input").await;
+    let (request, release) = tokio::time::timeout(Duration::from_secs(10), requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(request["messages"][1]["content"], "disabled first input");
+    release.send("Enabled".into()).unwrap();
+    titled(&mut client, &disabled, "Enabled", "auto").await;
+
+    let images = create(&mut client, &store.0, true).await;
+    assert_ok(&client.rpc("session.submit", json!({"sessionId":images,"branchId":"main","user":{"content":[
+        {"type":"image","source":{"type":"url","mediaType":"image/png","url":"https://example.com/image.png"}}
+    ]}})).await);
+    idle(&mut client, &images).await;
+    submit(
+        &mut client,
+        &images,
+        "text after the image-only first input",
+    )
+    .await;
+    idle(&mut client, &images).await;
+    assert!(
+        requests.try_recv().is_err(),
+        "an image-only first input has no automatic title"
+    );
     drop(client);
     server.shutdown();
     server.join().await.unwrap();

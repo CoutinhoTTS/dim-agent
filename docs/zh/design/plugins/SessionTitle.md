@@ -14,12 +14,10 @@ Node/Python 安装或语言运行时获取。辅助调用和标题元数据仍�
 负责原默认包向内置实现的过渡，保留显式禁用和已安装替代实现的选择。
 只有选中的实现可以注册 Settings 来源与 `session.rename`。
 
-验证沿实际插件声明的 SDK 端口，以及真实 Node/App Server 的
-[session_title.rs](../../../../crates/dim-app-server/tests/transport_flow/session_title.rs) 流程进行。
-SDK 流程覆盖固定前缀分页、输入排除、Unicode 上限、并发采纳、失败次数、重命名冲突重试、
-取消与超时结算。Node 流程覆盖 Settings 默认值/校验、RPC、HTTP 辅助调用、受控在途轮次、
-标题通知、经过存储准入的手工覆盖自动冲突、空闲恢复、fork 和调用方关闭。
-诊断仅向运行时 stderr 输出结果与时长，宿主把该流写入自己的进程日志。
+验证使用无需语言运行时的原生 App Server
+[session_title.rs](../../../../crates/dim-app-server/tests/transport_flow/session_title.rs) 流程，
+覆盖固定前缀历史、Settings 校验、RPC、HTTP 辅助调用、Unicode 上限、并发采纳、标题通知、
+手工与自动标题冲突、恢复、fork 和关闭结算。诊断仅记录结果与时长。
 
 | 边界 | 当前合同与 Ready 决策 |
 | --- | --- |
@@ -42,11 +40,11 @@ atLeast 与 through，直接使用原生 HistoryPage/AgentEvent。S2 稳定目�
 
 沿用[插件绑定合同](../rutis-usage.md)：插件的唯一一行注入 `partRegistry`，
 注册 Session 部分，每个 Session 挂载一份副本。该部分注入
-`sessionMethods`，并在 `apply` 中把 `session.rename` 注册到它；它的 provides 为空。`apply` 读取 Session 标识和创建配置，
-登记观察/清理，不启动异步初始化任务；创建配置不可变。同一部分在 `inject` 声明全部依赖：进程服务
+`sessionMethods`，并在 `apply` 中把 `session.rename` 注册到它；它不提供服务。`apply` 读取 Session 标识和创建配置，
+登记观察/清理，不启动异步初始化任务；创建配置不可变。同一部分声明全部依赖：进程服务
 `sessions`、`settings`、`sessionMetadata` 和 `auxiliaryModel`，以及 Session 服务 `sessionIdentity`、
 `sessionConfig`、`sessionLifecycle` 和 `sessionMethods`。产品装配独立于外语插件行安装原生插件。
-可选提供者缺失时，依照既有依赖规则仅影响 SessionTitle 的可用性，不影响 Session 的执行能力。
+必需服务的提供者缺失时，依照既有依赖规则仅影响 SessionTitle 的可用性，不影响 Session 的执行能力。
 
 固定快照止于返回的 T，不承诺恰好止于 N。第一条被采用的操作者输入提供文本；model=null
 时，从该快照最新 ContextConfiguredData.settings 读取 providerId/modelId。没有被采用的
@@ -87,9 +85,10 @@ flowchart LR
 
 | 部件 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `SessionTitle` | Session | Session 服务 `sessionIdentity`、`sessionConfig`、`sessionLifecycle` 和 `sessionMethods`；进程 sessions 历史、Settings、标题元数据 `sessionMetadata`（S5b）和必需的 `auxiliaryModel`（提供者缺失使整行 Pending） | 把 session.rename 注册到 sessionMethods；Settings 来源 session-title |
+| `session-title` | 进程 | Settings 和部件注册表 | 注册 Settings 来源及 Session 部分 |
+| `SessionTitle` | Session | Session 服务 `sessionIdentity`、`sessionConfig`、`sessionLifecycle` 和 `sessionMethods`；进程 sessions 历史、Settings、标题元数据 `sessionMetadata`（S5b）和必需的 `auxiliaryModel`（提供者缺失使整行 Pending） | 把 session.rename 注册到 sessionMethods |
 
-依赖位于 Session 或外层进程。C4/S2/Settings 已提供观察、前缀读取和配置；S5b 提供标题元数据，C6 提供通知；Provider 提供具名辅助模型操作。包的行在其 apply 中登记来源。真实提供者重载会取消该行工作（ADR 002 D3），S2 索引重载不会。业务数据更新不重载包（D4）。
+依赖位于 Session 或外层进程。C4/S2/Settings 已提供观察、前缀读取和配置；S5b 提供标题元数据，C6 提供通知；Provider 提供具名辅助模型操作。插件的行在其 apply 中登记来源。真实提供者重载会取消该行工作（ADR 002 D3），S2 索引重载不会。业务数据更新不重载插件（D4）。
 
 ## 2. 数据与状态
 
@@ -224,9 +223,9 @@ revision 检查就是复检：手动标题总是胜出。
 | 原则 §4 第 5 条（批次） | 触发在消费 `input/applied` 时按序处理它。 |
 | 原则 §4 第 6 条（上下文只含交接后的事件） | SessionTitle 不向模型上下文添加内容；辅助请求只含被采用的输入文本。 |
 | 原则 §4 第 7 条（只用公开事件和服务） | 使用 Session 广播、固定前缀读取、SessionStore `setTitle`、`AuxiliaryModel` 和 Settings，均为公开接口。 |
-| 原则 §4 第 8 条（向机制所有者提需求） | C6 和 S5b 已交付 §9 的通知与元数据合同。对 #4 无需求：SessionTitle 使用 Session 服务、Session 通道和具名进程服务，不依赖运行时类型化服务。对其他插件的需求（SessionStore 标题元数据和发出通知、Rpc 转发通知）列在[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)。 |
+| 原则 §4 第 8 条（向机制所有者提需求） | C6 和 S5b 已交付 §9 的通知与元数据合同。对 #4 无需求：SessionTitle 使用 Session 服务、Session 通道和具名进程服务，沿用既有所有者合同。对其他插件的需求（SessionStore 标题元数据和发出通知、Rpc 转发通知）列在[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)。 |
 | 原则 §4 第 9 条（只有后续决定要用的事实才进 Timeline） | 标题是 SessionStore 的进程级状态：不进 Timeline，通过 `setTitle` 修改，以 Session 广播通知送达 UI。 |
-| 原则 §1（Capability 与 App Server 边界） | SessionTitle 是放在自己插件包中的 Session Capability；Rpc 只分派 `session.rename`，并从 SessionStore 读取标题字段。 |
+| 原则 §1（Capability 与 App Server 边界） | SessionTitle 是 Session 部分，不注入 Dispatcher 或 Timeline，因此不属于 Capability；Rpc 只分派 `session.rename`，并从 SessionStore 读取标题字段。 |
 | ADR 002 D1（作用域跟随状态） | Session 作用域：标题属于 Session；存储的标题归 SessionStore。 |
 | ADR 002 D2（不设接线模块） | 没有接线模块；所有依赖都是声明的服务。 |
 | ADR 002 D3（依赖跟随作用域） | 依赖位于 Session 或外层进程作用域；它们重载会取消生成，这是可接受的。 |
@@ -338,7 +337,7 @@ Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`�
 
 ## 附录 D. 验收
 
-经配置的可选 C4 行、`session.create`/`session.submit`、`session.rename`、`session.summaries`、
+经无需语言运行时的默认原生产品装配、`session.create`/`session.submit`、`session.rename`、`session.summaries`、
 `settings.read/update` 与伪造辅助模型的流程测试：
 
 1. 用既有模型夹具保持 main turn 未结束。交互式 leader Session 的第一条 `session.submit` 在采用后启动生成，并在该受控 turn 仍运行时产生 `auto` 标题；请求只含系统文本和该输入文本，一条通知到达订阅客户端。标题完成早于 turn 结束不是生产时序保证。
@@ -381,7 +380,10 @@ A1–A12 是首版实现采用的策略。
 
 | 语言中立 | Rust |
 | --- | --- |
-| 注册到 `sessionMethods` 的命名空间 `session.rename` | TypeScript Session 部分调用 `ctx.use('sessionMethods').register('session.rename', declarations, call)`，注册属于该副本；Rust 提供者在 `Keyed<SessionMethods>` 依赖上调用 `methods.register(ctx, "session.rename", Vec<MethodDecl>, handler)` |
+| 注册到 `sessionMethods` 的命名空间 `session.rename` | Session 部分在 `Key<SessionMethods>` 依赖上调用 `methods.register(ctx, "session.rename", Vec<MethodDecl>, handler)` |
+| 已发布历史 | 稳定目录绑定上的 `SessionsService::history(HistoryRequest)` |
+| 标题元数据 | `SessionStore::metadata` 与 `SessionStore::set_title` |
+| 辅助调用 | 既有 `AuxiliaryModelHost.0.complete` 与取消 token |
 | Session 广播监听器 | `session_channel(session_id)` 上针对 `Event` 记录的监听器，由 `ctx.effect` 移除 |
 | 生成任务 | 在 `ctx.effect` 下派生 |
 

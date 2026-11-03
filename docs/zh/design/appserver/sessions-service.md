@@ -605,6 +605,10 @@ bridge 或 rutis 合同；Scheduler 与 Workflow 继续使用现有 S2 接口。
 
 ## 附录 A. Rust 绑定
 
+Agent 目录还把稳定的 `SessionsService` 作为 Rust `sessionsService` 绑定提供。
+其类型化 `history(HistoryRequest)` 与具名 `sessions.history` 一样逐次读取当前索引，
+消费方不保留索引代，也不依赖索引代的生命周期。
+
 类型放在 [agents/sessions.rs](../../../../crates/dim-app-server/src/agents/sessions.rs) 中 `AgentIndex` 旁边。其他 crate 中的 Rust 插件使用具名服务。
 
 ```rust

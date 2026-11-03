@@ -129,10 +129,9 @@ jobs:
           # packages are installed here, before the flows; the job's checkout
           # carries them into the Node binding checks as well.
           npm ci --prefix runtime/plugins/goal --ignore-scripts --registry=https://registry.npmjs.org
-          npm ci --prefix runtime/plugins/session-title --ignore-scripts --registry=https://registry.npmjs.org
           npm ci --prefix runtime/plugins/scheduler --ignore-scripts --registry=https://registry.npmjs.org
           npm ci --prefix runtime/plugins/workflow --ignore-scripts --registry=https://registry.npmjs.org
-          (cd runtime && npm install --no-save --ignore-scripts --install-links ./plugins/goal ./plugins/session-title ./plugins/scheduler ./plugins/workflow)
+          (cd runtime && npm install --no-save --ignore-scripts --install-links ./plugins/goal ./plugins/scheduler ./plugins/workflow)
           export DIM_TEST_APP_SERVER="$PWD/target/debug/dim-app-server"
           export DIM_TEST_NPM_WRAPPER="$PWD/npm/bin/dimcode.mjs"
           cargo test --locked -p dimcode --test cli_flow -- --ignored
@@ -146,13 +145,11 @@ jobs:
           export RUTIS_HOST="$PWD/runtime/node_modules/.bin/rutis-host"
           node --test runtime/plugin-sdk.test.mjs
           node --test runtime/plugins/goal/goal.test.mjs
-          node --test runtime/plugins/session-title/session-title.test.mjs
           # The scheduler and workflow plugin tests stay off: no double of a
           # test's can receive the plugin definition they register, because
           # 0.19.3's test tool does not take one (rutis-0.19-upgrade M10). The
           # Node-backed Rust flows below still load them for real, and `tsc`
           # checks them; goal has no tsconfig.
-          node runtime/node_modules/typescript/bin/tsc -p runtime/plugins/session-title/tsconfig.json
           node runtime/node_modules/typescript/bin/tsc -p runtime/plugins/scheduler/tsconfig.json
           node runtime/node_modules/typescript/bin/tsc -p runtime/plugins/workflow/tsconfig.json
           # The Python of `py:` rows: a relocatable CPython, pinned by hash, so the

@@ -737,13 +737,7 @@ async fn node_scheduler_reports_preserve_the_first_adopted_operator_title() {
         .route("/{*path}", post(session_title::complete))
         .with_state(sent);
     let http = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let mut config = config(&home);
-    config
-        .session_typescript
-        .as_mut()
-        .unwrap()
-        .rows
-        .extend(session_title::rows().rows);
+    let config = config(&home);
     let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
     let mut client = Client::new_version(&server, false, 3).await;
     process_typescript::select_model(&mut client).await;

@@ -281,6 +281,10 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
         let database = directory.join("state/dimcode.sqlite");
         let (mut daemon, socket) = launch_product(&directory).await;
         let mut client = connect(&socket).await;
+        let titles = client.rpc("settings.read", json!({"source":"session-title","scope":"user"})).await;
+        assert_ok(&titles);
+        assert_ok(&client.rpc("settings.update", json!({"source":"session-title","scope":"user",
+            "expectedRevision":titles["result"]["revision"],"document":{"enabled":false}})).await);
 
         let capabilities = dim_agent_types::CatalogCapabilities::with_limits(4_400, 200);
         assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000004","displayName":"Window","connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{endpoint}/v1"),"auth":{"type":"bearer"},"credential":{"action":"set","value":CREDENTIAL}},"models":[{"modelId":"small","displayName":"small","status":"active","capabilities":capabilities}],"enabled":true})).await);

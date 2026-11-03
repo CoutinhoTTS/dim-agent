@@ -607,7 +607,7 @@ existing `--node` and `--js-runtime` flags, and `--python PATH` for `py:` rows. 
 array of ordinary loader rows, one per plugin; it is also the anchor, so package names in the
 rows resolve from its location and `py:` modules are imported from its directory. Rows are
 validated as they are for an embedding host; nothing is installed by default. Optional packages such as
-[SessionTitle](../../runtime/plugins/session-title/README.md) and Goal are enabled this way:
+Goal is enabled this way. SessionTitle is a built-in Rust plugin and requires no foreign runtime:
 
 ```sh
 dim-app-server --product-home /absolute/product-home --home /absolute/product-home/rust \

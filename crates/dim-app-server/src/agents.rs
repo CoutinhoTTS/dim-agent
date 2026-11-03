@@ -36,6 +36,7 @@ pub(crate) const SESSION_NAMESPACE: &str = "session.agent";
 
 mod sessions;
 pub use sessions::SessionPermissions;
+pub(crate) use sessions::{HistoryRequest, SessionsService};
 
 /// The process default profile carries the process Session defaults.
 fn process_default(defaults: &SessionConfig) -> AgentProfile {
@@ -308,10 +309,9 @@ impl Plugin for AgentDirectoryPlugin {
             default_agent_id: OnceLock::new(),
             server_instance_id: uuid::Uuid::new_v4().to_string(),
         }))?;
-        ctx.provide_at::<dyn HostDispatch>(
-            host_key("sessions"),
-            Arc::new(sessions::SessionsService(ctx.clone())),
-        )?;
+        let sessions = Arc::new(SessionsService(ctx.clone()));
+        ctx.provide_as::<SessionsService>(sessions.clone())?;
+        ctx.provide_at::<dyn HostDispatch>(host_key("sessions"), sessions)?;
         ctx.provide_as::<SessionPermissions>(Arc::new(SessionPermissions(ctx.clone())))?;
         Ok(())
     }
