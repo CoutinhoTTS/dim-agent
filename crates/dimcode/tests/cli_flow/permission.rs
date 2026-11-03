@@ -223,7 +223,7 @@ fn tui_home_remembers_permissions_without_login_and_applies_them_to_the_first_me
             } else {
                 terminal.until("test / model");
                 terminal.write(b"/new\r");
-                terminal.until("new session");
+                terminal.until("─ new session ─");
             }
             let mark = terminal.transcript.len();
             terminal.write(b"/approvals\r");

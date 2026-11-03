@@ -1589,7 +1589,7 @@ fn tui_workflow_starts_without_a_session_and_reports_nowhere() {
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/new\r");
-    terminal.until("new session");
+    terminal.until("─ new session ─");
     terminal.write(b"/workflow\r");
     terminal.until("review-and-fix");
     terminal.raw(b"\x1b[B");

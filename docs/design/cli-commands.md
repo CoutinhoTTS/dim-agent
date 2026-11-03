@@ -404,10 +404,10 @@ daemon already reports it.
 
 ### Menu entry
 
-`/runtime` is a slash command in category `app`, so the menu lists it between `/keys` and
-`/settings`; it needs no Session (`Needs::Nothing`) and takes no inline argument, because the panel
-carries the actions. The typed subforms below are accepted when typed, not offered as menu
-completions.
+`/runtime` is a slash command in category `extensions`; its position follows the
+[command menu order](#command-menu). It needs no Session (`Needs::Nothing`) and takes no inline
+argument, because the panel carries the actions. The typed subforms below are accepted when typed,
+not offered as menu completions.
 
 ### Keys
 

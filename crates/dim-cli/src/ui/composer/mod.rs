@@ -1944,17 +1944,19 @@ mod tests {
 
     #[test]
     fn slash_opens_the_palette_and_enter_runs_the_selected_command() {
-        let mut c = Composer::new(Vec::new());
-        typed(&mut c, "/");
-        assert!(c.palette_open());
-        assert_eq!(
-            c.handle_key(key(KeyCode::Enter)),
-            Outcome::Command {
-                name: "new".into(),
-                args: String::new()
-            }
-        );
-        assert!(c.is_empty());
+        for (query, name) in [("/", "new"), ("/e", "effort")] {
+            let mut c = Composer::new(Vec::new());
+            typed(&mut c, query);
+            assert!(c.palette_open());
+            assert_eq!(
+                c.handle_key(key(KeyCode::Enter)),
+                Outcome::Command {
+                    name: name.into(),
+                    args: String::new()
+                }
+            );
+            assert!(c.is_empty());
+        }
     }
 
     #[test]
