@@ -531,7 +531,7 @@ runtime's Timeline and zero new public content.
 | ADR 002 D2 (no wiring modules) | No new module or plugin |
 | ADR 002 D3 (dependencies follow scope) | No new dependency |
 | ADR 002 D4 (configuration) | None |
-| ADR 002 D5 (language-neutral contracts) | No contract changes; a TypeScript part reading through `Dispatcher::local` is served the same way |
+| ADR 002 D5 (language-neutral contracts) | No contract changes; a TypeScript part reading through the Timeline query is served the same way |
 
 ## 11. Requirements raised to mechanism owners
 

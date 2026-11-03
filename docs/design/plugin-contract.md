@@ -360,10 +360,10 @@ design is merged. R4–R7 concern how Dim uses rutis and are in
 
 - **Blocked:** the subscribe-and-rebuild steps of the [capability reload protocol](../architecture/rust-agent/single-tree.md#能力重载协议). Every Capability repeats them by hand. Examples are
   `crates/dim-agent-capabilities/src/wait.rs:361-380` and `runtime/plugins/goal/branch.ts:120-128`.
-  A mistake (a cutoff read before subscribing, `history` instead of `local`) silently loses or
-  double-counts events.
-- **Existing mechanisms considered:** `subscribe`/`listen` plus `committed`/`local` are correct but
-  leave the protocol to every author. A separate SDK helper per language would replicate the
+  A mistake (a cutoff read before subscribing, reading the chain instead of the branch) silently
+  loses or double-counts events.
+- **Existing mechanisms considered:** `subscribe`/`listen` plus `committed` and a query are correct
+  but leave the protocol to every author. A separate SDK helper per language would replicate the
   protocol (ADR 006 D1); one registration that takes the rebuild and the handler as functions does
   not, since each language passes its own.
 - **Needed:** `consume`, one registration in every language, which subscribes and holds the matching

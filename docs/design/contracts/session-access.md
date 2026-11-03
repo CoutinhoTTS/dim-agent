@@ -197,7 +197,7 @@ Only plugins in the control node's process hold `sessions`, and it is never expo
 
 ### 9.2 Fixed-prefix read
 
-Withdrawn ([#50](https://github.com/arcships/dim/issues/50)): the existing Session facade composes it, so no runtime change is needed. `Session::sequence(branch)` returns the published head; if it is below `atLeast` the read fails `future_sequence`, otherwise `Session::history(branch, Some(head))` reads through that head. Both read only published events and the head only grows, so the prefix is fixed (A.5). Process callers page the same prefix with `Session::local_page` (A.5).
+Withdrawn ([#50](https://github.com/arcships/dim/issues/50)): the existing Session facade composes it, so no runtime change is needed. `Session::sequence(branch)` returns the published head; if it is below `atLeast` the read fails `future_sequence`, otherwise `Session::query(branch, query)` reads that head and below. Both read only published events and the head only grows, so the prefix is fixed (A.5). Process callers page the same prefix with `AgentIndex::history_page` (A.5).
 
 ### 9.3 Caller source fixed from plugin identity
 
@@ -327,7 +327,7 @@ Not in this contract: `createdBy` (the Session's origin) and the `client` parame
 
 ### A.5 Fixed-prefix read
 
-`sessions.history` with `atLeast` fixes `through` as the published head at call time. It fails with `future_sequence` if that head is below `atLeast`, and otherwise returns the branch's own events through that head, paged by `after` and `limit`. It is composed from the existing facade: read the head with `Session::sequence(branch)`, then page with `AgentIndex::history_page`, which pages a loaded line through the branch's query and one that has ended or is not loaded through the App Server's page read. Branch parts that need the ancestor prefix read `Session::history(branch, Some(head))` (§9.2). Every event delivered by the branch Dispatcher or the Session broadcast is published, so `atLeast = event.sequence` succeeds while the branch exists.
+`sessions.history` with `atLeast` fixes `through` as the published head at call time. It fails with `future_sequence` if that head is below `atLeast`, and otherwise returns the branch's own events through that head, paged by `after` and `limit`. It is composed from the existing facade: read the head with `Session::sequence(branch)`, then page with `AgentIndex::history_page`, which pages a loaded line through the branch's query and one that has ended or is not loaded through the App Server's page read. A branch part that needs the ancestor prefix reads the chain with the same query (§9.2). Every event delivered by the branch Dispatcher or the Session broadcast is published, so `atLeast = event.sequence` succeeds while the branch exists.
 
 ### A.6 Errors
 
