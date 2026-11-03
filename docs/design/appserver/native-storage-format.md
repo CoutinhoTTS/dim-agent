@@ -27,14 +27,16 @@ migrated, downgraded or interpreted as an admitted format.
 No migration API or startup option is provided. S5c (Session deletion and fork)
 kept v15 unchanged ([S5c decision](#s5c-格式决定)). v13 document bytes remain
 valid in v32, and v16 request rows stay readable as written.
-除格式自身的 SQL 外，每次打开都接受派生索引 `timeline_history_anchors`
+除格式自身的 SQL 外，每次打开都接受派生索引：`timeline_history_anchors`
 （`(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'input/message')`，
-[latest-turn 窗口 §5.1](session-history-window.md#51-the-derived-index)）与
+[latest-turn 窗口 §5.1](session-history-window.md#51-the-derived-index)）、
 `timeline_policy_turns`（`(session_id, branch_id, kind, sequence, event_id) WHERE kind = 'turn/start'`，
-[上下文读取开关与裁剪点 §5](context-read-and-compaction.md#5-策略的位置)）：读写打开在启动事务内用
+[上下文读取开关与裁剪点 §5](context-read-and-compaction.md#5-策略的位置)）与事件查询的
+`timeline_events_by_kind`（`(session_id, branch_id, kind, sequence, event_id)`，按 kind
+读取事件而不碰事件体，[ADR 019](../../adr/019-event-query.md) D4）：读写打开在启动事务内用
 `CREATE INDEX IF NOT EXISTS` 创建或补建，只读导出只接受它们。它们不含数据，可从
 `timeline_events` 重新推导，读同一份事件不因它们有无而不同，因此不属于格式：启动门禁的
-精确结构比较忽略这些名字，标记保持 32；其余任何多余对象仍按原规则拒绝。代价是早于
+精确结构比较忽略这些名字，格式标记不变（当前 v32）；其余任何多余对象仍按原规则拒绝。代价是早于
 该变更的二进制不认识这些名字，会以 "unsupported SQLite schema … preserved" 拒绝已有该
 索引的库（行不变，新二进制可再次打开）。
 Storage versions are independent of RPC versions. Private MCP/Skill business documents do not belong
@@ -746,6 +748,7 @@ ProjectionCheckpoint = {
 | v27 `agent_sessions_by_leader` | `(leader_session_id)` | 装载时重建 Team 关系 |
 | 派生（不占格式号）`timeline_history_anchors` | `(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'input/message')` | 最新回合边界与回合提示输入的查找（[latest-turn 窗口](session-history-window.md)） |
 | 派生（不占格式号）`timeline_policy_turns` | `(session_id, branch_id, kind, sequence, event_id) WHERE kind = 'turn/start'` | 压缩裁剪点的轮次开始查找：`event_id` 在索引内，读轮次开始不访问表行（[上下文读取开关与裁剪点 §5](context-read-and-compaction.md#5-策略的位置)） |
+| 派生（不占格式号）`timeline_events_by_kind` | `(session_id, branch_id, kind, sequence, event_id)` | 按 kind 的事件查询与它的事件 id（[ADR 019](../../adr/019-event-query.md) D4） |
 | v12 主键 `timeline_snapshots` | `(session_id, branch_id, interpreter, sequence)` | 兼容 interpreter，`sequence<=through ORDER BY sequence DESC LIMIT 1`；连接事件锚点 |
 | v15 主键 `session_files` | `(file_id)` | put 的两次事务与放弃、清扫按文件定点更新和删除 |
 | v15 主键 `session_file_owners` | `(session_id, file_id)` | put 写入 owner；fork 复制、删除和创建回滚按 Session 读取和删除 |
