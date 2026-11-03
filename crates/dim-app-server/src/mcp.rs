@@ -122,6 +122,20 @@ impl McpServerEntry {
     }
 }
 
+/// One source entry as a path that contacts the server sees it: the effective
+/// view, the user overlay that supplied its withheld members, and the
+/// configuration with environment references expanded.
+pub struct McpResolvedEntry {
+    pub entry: McpServerEntry,
+    pub secret: Option<McpSecretEntry>,
+    pub expanded: McpServerSettings,
+}
+
+/// The environment a connection expands its references from.
+pub(crate) fn daemon_environment(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
 /// One source's entry as that source declares it, for editing: the declared
 /// configuration, the source revision a write takes (absent for a plugin
 /// entry) and the enablement the entry runs with.
@@ -238,6 +252,9 @@ pub struct McpCatalog {
     pub servers: BTreeMap<String, McpServerEntry>,
     /// Entries that did not decode, in the source that declares them.
     pub invalid: Vec<McpInvalidEntry>,
+    /// The expanded credential key of each server that can use OAuth, so a
+    /// state lookup matches the key the connection uses.
+    pub(crate) credentials: BTreeMap<String, auth::CredentialKey>,
 }
 
 /// One entry the catalog could not decode, with the entry's own error.
@@ -528,6 +545,7 @@ impl McpService {
                 project_revision: None,
                 servers: BTreeMap::new(),
                 invalid: Vec::new(),
+                credentials: BTreeMap::new(),
             };
             let mut invalid: BTreeMap<(McpSource, String), McpEntryError> = BTreeMap::new();
             let enablement = match project {
@@ -553,6 +571,21 @@ impl McpService {
                         .read::<McpPluginServers>(SettingsScope::User, &cancel)
                         .await?;
                     for (id, configuration) in plugins.document.entries() {
+                        let expansion = config::connected(
+                            &settings,
+                            configuration.clone(),
+                            config::Connection {
+                                scope: None,
+                                id: &id,
+                                secret: None,
+                                enablement: &McpProjectEnablement::default(),
+                                environment: &daemon_environment,
+                            },
+                        )?;
+                        if let Some((key, _)) = auth::credential_key(&id, &expansion.configuration)
+                        {
+                            catalog.credentials.insert(id.clone(), key);
+                        }
                         catalog.servers.insert(
                             id,
                             McpServerEntry {
@@ -576,14 +609,32 @@ impl McpService {
                 }
                 let document = snapshot.document;
                 let (servers, invalid_entries) = document.into_parts();
-                for (id, mut configuration) in servers {
-                    if let Some(workspace) = &workspace
-                        && let Some(secret) = secrets.get(workspace, &id)
-                    {
-                        config::merge_secret(&mut configuration, secret)?;
+                for (id, configuration) in servers {
+                    let secret = workspace
+                        .as_ref()
+                        .and_then(|workspace| secrets.get(workspace, &id));
+                    let expansion = config::connected(
+                        &settings,
+                        configuration.clone(),
+                        config::Connection {
+                            scope: Some(scope),
+                            id: &id,
+                            secret,
+                            enablement: &enablement,
+                            environment: &daemon_environment,
+                        },
+                    )?;
+                    let configuration = config::viewed(
+                        &settings,
+                        Some(scope),
+                        &id,
+                        configuration,
+                        secret,
+                        &enablement,
+                    )?;
+                    if let Some((key, _)) = auth::credential_key(&id, &expansion.configuration) {
+                        catalog.credentials.insert(id.clone(), key);
                     }
-                    let configuration =
-                        config::effective(&settings, scope, &id, configuration, &enablement)?;
                     catalog.servers.insert(
                         id,
                         McpServerEntry {
@@ -613,6 +664,18 @@ impl McpService {
         id: String,
         cancel: &CancellationToken,
     ) -> Result<McpServerEntry> {
+        Ok(self.resolved(source, id, cancel).await?.entry)
+    }
+
+    /// One source's entry for a path that contacts the server: the effective
+    /// view, the overlay that supplied its withheld members, and the same
+    /// expanded configuration the publisher gives a connection.
+    pub async fn resolved(
+        &self,
+        source: McpSource,
+        id: String,
+        cancel: &CancellationToken,
+    ) -> Result<McpResolvedEntry> {
         self.run(cancel, move |settings, cancel| async move {
             let Some(scope) = source.scope() else {
                 let configuration = settings
@@ -623,9 +686,24 @@ impl McpService {
                     .find(|(entry, _)| *entry == id)
                     .map(|(_, configuration)| configuration)
                     .ok_or(McpError::UnknownServer)?;
-                return Ok(McpServerEntry {
-                    source,
-                    configuration,
+                let expansion = config::connected(
+                    &settings,
+                    configuration.clone(),
+                    config::Connection {
+                        scope: None,
+                        id: &id,
+                        secret: None,
+                        enablement: &McpProjectEnablement::default(),
+                        environment: &daemon_environment,
+                    },
+                )?;
+                return Ok(McpResolvedEntry {
+                    entry: McpServerEntry {
+                        source,
+                        configuration,
+                    },
+                    secret: None,
+                    expanded: expansion.configuration,
                 });
             };
             let source = scope;
@@ -637,17 +715,34 @@ impl McpService {
                     None => Err(McpError::UnknownServer),
                 };
             };
-            let configuration = declared(&settings, source, &id, configuration, &cancel).await?;
+            let secret = secret(&settings, source, &id, &cancel).await?;
             let enablement = enablement(&settings, source, &cancel).await;
-            Ok(McpServerEntry {
-                source: source.into(),
-                configuration: config::effective(
-                    &settings,
-                    source,
-                    &id,
+            let expansion = config::connected(
+                &settings,
+                configuration.clone(),
+                config::Connection {
+                    scope: Some(source),
+                    id: &id,
+                    secret: secret.as_ref(),
+                    enablement: &enablement,
+                    environment: &daemon_environment,
+                },
+            )?;
+            let configuration = config::viewed(
+                &settings,
+                Some(source),
+                &id,
+                configuration,
+                secret.as_ref(),
+                &enablement,
+            )?;
+            Ok(McpResolvedEntry {
+                entry: McpServerEntry {
+                    source: source.into(),
                     configuration,
-                    &enablement,
-                )?,
+                },
+                secret,
+                expanded: expansion.configuration,
             })
         })
         .await
@@ -746,24 +841,28 @@ impl McpService {
         .await
     }
 
-    /// The configuration a Session runs, from the declared one a client reads
-    /// and patches.
-    pub async fn effective(
+    /// The configuration a connection runs, from the declared one a client
+    /// reads and patches.
+    pub(crate) async fn connected(
         &self,
         scope: SettingsScope,
         id: String,
         configuration: McpServerSettings,
         cancel: &CancellationToken,
-    ) -> Result<McpServerSettings> {
+    ) -> Result<config::Expanded> {
         self.run(cancel, move |settings, cancel| async move {
-            let configuration = declared(&settings, scope, &id, configuration, &cancel).await?;
+            let secret = secret(&settings, scope, &id, &cancel).await?;
             let enablement = enablement(&settings, scope, &cancel).await;
-            Ok(config::effective(
+            Ok(config::connected(
                 &settings,
-                scope,
-                &id,
                 configuration,
-                &enablement,
+                config::Connection {
+                    scope: Some(scope),
+                    id: &id,
+                    secret: secret.as_ref(),
+                    enablement: &enablement,
+                    environment: &daemon_environment,
+                },
             )?)
         })
         .await
@@ -1049,21 +1148,6 @@ async fn secret(
         .read::<McpSecrets>(SettingsScope::User, cancel)
         .await?;
     Ok(snapshot.document.get(&workspace, id).cloned())
-}
-
-/// The declared project entry with its overlay merged.
-async fn declared(
-    settings: &SettingsService,
-    scope: SettingsScope,
-    id: &str,
-    configuration: McpServerSettings,
-    cancel: &CancellationToken,
-) -> Result<McpServerSettings> {
-    let mut configuration = configuration;
-    if let Some(secret) = secret(settings, scope, id, cancel).await? {
-        config::merge_secret(&mut configuration, &secret)?;
-    }
-    Ok(configuration)
 }
 
 /// A probe gives one disposable connection this long to initialize and list

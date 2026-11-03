@@ -20089,6 +20089,8 @@
         "path McpAuth::new",
         "path McpAuthError",
         "path auth",
+        "path auth::CredentialKey",
+        "path auth::credential_key",
         "use auth::McpAuth",
         "use auth::McpAuthError"
       ]
@@ -20119,9 +20121,13 @@
         "path McpSettings",
         "path McpSettings::default",
         "path McpSettings::from_value",
+        "path config::Connection",
+        "path config::Expanded",
+        "path config::connected",
         "path config::effective",
         "path config::merge_secret",
         "path config::split_entry",
+        "path config::viewed",
         "path config::workspace",
         "use config::McpEntryError",
         "use config::McpPluginDocument",
@@ -20455,6 +20461,7 @@
       "to": "dim_agent_capabilities::settings",
       "references": [
         "path SettingsScope",
+        "path SettingsScope::User",
         "use crate::settings::SettingsScope"
       ]
     },
@@ -20650,11 +20657,13 @@
         "path McpSource::Project",
         "path McpSource::User",
         "path Result",
+        "path daemon_environment",
         "path sources_in_precedence",
         "use super::McpConnection",
         "use super::McpError",
         "use super::McpSource",
         "use super::Result",
+        "use super::daemon_environment",
         "use super::sources_in_precedence"
       ]
     },
@@ -20680,9 +20689,8 @@
         "path McpServerSettings::Stdio",
         "path McpSettings",
         "path config",
-        "path config::effective",
-        "path config::expand",
-        "path config::merge_secret",
+        "path config::Connection",
+        "path config::connected",
         "path config::settings_changes",
         "path config::workspace",
         "use super::config",
@@ -21210,7 +21218,9 @@
       "to": "dim_app_server::mcp",
       "references": [
         "path McpConnection::temporary",
-        "use super::McpConnection"
+        "path daemon_environment",
+        "use super::McpConnection",
+        "use super::daemon_environment"
       ]
     },
     {
@@ -21219,6 +21229,9 @@
       "references": [
         "path McpServerSettings",
         "path McpServerSettings::Stdio",
+        "path config",
+        "path config::expand",
+        "use super::config",
         "use super::config::McpServerSettings"
       ]
     },

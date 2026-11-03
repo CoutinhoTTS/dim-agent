@@ -1,7 +1,8 @@
 //! Disposable Session bindings; configured MCP sources and their publisher are unchanged.
 use super::{
     McpConnection,
-    config::McpServerSettings,
+    config::{self, McpServerSettings},
+    daemon_environment,
     server::{McpServer, McpServerError, McpServerPlugin},
     session::contribution,
 };
@@ -164,7 +165,8 @@ impl DynPlugin for TemporaryMcp {
                         for (name, configuration) in &mut input.servers {
                             if name.trim().is_empty() { return Err(RpcError::invalid("Empty MCP server name")); }
                             if let McpServerSettings::Stdio { cwd: directory, .. } = configuration { *directory = Some(cwd.clone()); }
-                            McpServerPlugin::new(name, configuration.clone(), Key::of()).map_err(|_| RpcError::invalid("Invalid temporary MCP configuration"))?;
+                            let expanded = config::expand(configuration, &daemon_environment).configuration;
+                            McpServerPlugin::new(name, expanded, Key::of()).map_err(|_| RpcError::invalid("Invalid temporary MCP configuration"))?;
                         }
                         let guard = mutation.lock().await;
                         let stale = {
@@ -273,7 +275,8 @@ impl DynPlugin for BindingPlugin {
             for (name, configuration) in &self.servers {
                 let id = format!("temporary:{}:{name}", self.id);
                 let key = Key::<McpServer>::dynamic(id.clone()).instance(self.session);
-                let plugin = McpServerPlugin::new(&id, configuration.clone(), key.clone())
+                let expanded = config::expand(configuration, &daemon_environment).configuration;
+                let plugin = McpServerPlugin::new(&id, expanded, key.clone())
                     .map_err(|_| ErrorKind::PluginFailed("Invalid temporary MCP server".into()))?;
                 let view = ctx.plugin(plugin);
                 (&view).await.map_err(|_| {

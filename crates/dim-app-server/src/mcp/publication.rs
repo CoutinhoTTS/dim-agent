@@ -4,7 +4,7 @@ use super::config::{
     self, McpPluginServers, McpProjectEnablement, McpSecrets, McpServerSettings, McpSettings,
 };
 use super::{
-    McpAuth, McpConnection, McpError, McpSource, Result,
+    McpAuth, McpConnection, McpError, McpSource, Result, daemon_environment,
     server::{McpRuntime, McpServer, McpServerError, McpServerPlugin, McpServerState},
     sources_in_precedence,
 };
@@ -502,29 +502,30 @@ impl Projection {
             if project_unresolved {
                 error = Some("MCP configuration could not be resolved");
             }
-            for (id, mut config) in servers {
+            for (id, config) in servers {
                 if project_unresolved {
                     continue;
                 }
-                if let Some(workspace) = &workspace
-                    && let Some(secret) = secrets.get(workspace, &id)
-                    && config::merge_secret(&mut config, secret).is_err()
-                {
-                    error = Some("MCP configuration could not be resolved");
-                    continue;
-                }
-                let config =
-                    config::expand(&config, &|name| std::env::var(name).ok()).configuration;
-                let config = match source.scope() {
-                    Some(scope) => config::effective(settings, scope, &id, config, &enablement),
-                    None => Ok(config),
-                };
-                let Ok(config) = config else {
+                let secret = workspace
+                    .as_ref()
+                    .and_then(|workspace| secrets.get(workspace, &id));
+                let expansion = config::connected(
+                    settings,
+                    config,
+                    config::Connection {
+                        scope: source.scope(),
+                        id: &id,
+                        secret,
+                        enablement: &enablement,
+                        environment: &daemon_environment,
+                    },
+                );
+                let Ok(expansion) = expansion else {
                     error = Some("MCP configuration could not be resolved");
                     continue;
                 };
                 if !self.disconnected.contains_key(&(source, id.clone())) {
-                    current.insert(id, config);
+                    current.insert(id, expansion.configuration);
                 }
             }
             let degraded = (unreadable && matches!(source, McpSource::Project(_)))

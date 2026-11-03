@@ -1488,6 +1488,70 @@ pub(crate) fn workspace(settings: &SettingsService, scope: SettingsScope) -> Res
         .ok_or(SettingsError::Invalid("project cwd must be UTF-8"))
 }
 
+/// What a connection's configuration needs besides the declared entry: the
+/// source it belongs to, the overlay to merge, the user's project enablement,
+/// and the environment to expand from.
+pub(crate) struct Connection<'a> {
+    pub scope: Option<SettingsScope>,
+    pub id: &'a str,
+    pub secret: Option<&'a McpSecretEntry>,
+    pub enablement: &'a McpProjectEnablement,
+    pub environment: &'a dyn Fn(&str) -> Option<String>,
+}
+
+/// The configuration a connection runs: merge the overlay into the declared
+/// entry, expand environment references, then apply the project workspace
+/// `cwd` and enablement. Every caller uses this one order, so a probe and a
+/// published connection see the same values.
+pub(crate) fn connected(
+    settings: &SettingsService,
+    configuration: McpServerSettings,
+    connection: Connection<'_>,
+) -> Result<Expanded> {
+    let Connection {
+        scope,
+        id,
+        secret,
+        enablement,
+        environment,
+    } = connection;
+    let mut configuration = configuration;
+    if let Some(secret) = secret {
+        merge_secret(&mut configuration, secret)?;
+    }
+    let expansion = expand(&configuration, environment);
+    let configuration = match scope {
+        Some(scope) => effective(settings, scope, id, expansion.configuration, enablement)?,
+        None => expansion.configuration,
+    };
+    Ok(Expanded {
+        configuration,
+        referenced: expansion.referenced,
+        unset: expansion.unset,
+    })
+}
+
+/// The declared entry as a management read shows it: the overlay merged and
+/// the project workspace `cwd` joined, with references kept as written so a
+/// client can edit them.
+pub(crate) fn viewed(
+    settings: &SettingsService,
+    scope: Option<SettingsScope>,
+    id: &str,
+    configuration: McpServerSettings,
+    secret: Option<&McpSecretEntry>,
+    enablement: &McpProjectEnablement,
+) -> Result<McpServerSettings> {
+    let mut configuration = configuration;
+    if let Some(secret) = secret {
+        merge_secret(&mut configuration, secret)?;
+    }
+    match scope {
+        Some(scope) => effective(settings, scope, id, configuration, enablement),
+        None => Ok(configuration),
+    }
+}
+
 /// The configuration an entry runs with. A project entry resolves its stdio
 /// cwd against the workspace and takes its enablement only from the user's
 /// record; its own `enabled` field is ignored.

@@ -572,7 +572,18 @@ pub(super) fn provide(
                             if !matches!(source, McpSource::User) || p.patch.is_some() {
                                 return Err(RpcError::invalid("A new test configuration must be user-supplied and cannot include a patch"));
                             }
-                            config::decode_entry(&p.id, &configuration).map_err(|entry| error(McpError::InvalidEntry(entry)))?
+                            let configuration = config::decode_entry(&p.id, &configuration)
+                                .map_err(|entry| error(McpError::InvalidEntry(entry)))?;
+                            directory
+                                .connected(
+                                    SettingsScope::User,
+                                    p.id.clone(),
+                                    configuration,
+                                    &stopping,
+                                )
+                                .await
+                                .map_err(error)?
+                                .configuration
                         } else if let Some(patch) = p.patch {
                             let scope = writable(source)?;
                             let mut entry = directory.editable(source, p.id.clone(), &stopping).await.map_err(error)?;
@@ -584,13 +595,20 @@ pub(super) fn provide(
                                 .configuration
                                 .canonical(&p.id)
                                 .map_err(|entry| error(McpError::InvalidEntry(entry)))?;
-                            directory.effective(scope, p.id.clone(), configuration, &stopping).await.map_err(error)?
+                            let expansion = directory
+                                .connected(scope, p.id.clone(), configuration, &stopping)
+                                .await
+                                .map_err(error)?;
+                            expansion.configuration
                         } else {
-                            let entry = target(&directory, source, p.id.clone(), &stopping).await?;
-                            if !matches!(source, McpSource::User) && !entry.enabled() {
+                            let resolved = directory
+                                .resolved(source, p.id.clone(), &stopping)
+                                .await
+                                .map_err(error)?;
+                            if !matches!(source, McpSource::User) && !resolved.entry.enabled() {
                                 return Err(error(McpError::Disabled));
                             }
-                            entry.configuration
+                            resolved.expanded
                         };
                         let mut document = McpSettings::default();
                         document.insert(p.id.clone(), configuration);
@@ -631,6 +649,7 @@ pub(super) fn provide(
                         let p: SelectionScope = params(value)?;
                         let project = project(&settings, p.cwd, &stopping).await?;
                         let catalog = directory.catalog(project, &stopping).await.map_err(error)?;
+                        let credentials = catalog.credentials;
                         let states = auth.states(&stopping).await;
                         return reply(McpCatalogResult {
                             user_revision: catalog.user_revision,
@@ -643,8 +662,9 @@ pub(super) fn provide(
                                 .servers
                                 .into_iter()
                                 .map(|(id, entry)| McpCatalogEntry {
-                                    auth: credential_key(&id, &entry.configuration)
-                                        .and_then(|(key, _)| states.get(&key))
+                                    auth: credentials
+                                        .get(&id)
+                                        .and_then(|key| states.get(key))
                                         .map(|state| match state {
                                             AuthState::Required => McpAuthStatus {
                                                 status: "required",
@@ -860,15 +880,18 @@ pub(super) fn provide(
                     "mcp.auth.start" => {
                         let p: StartMcpAuth = params(value)?;
                         let source = source(p.source, project(&settings, p.cwd, &stopping).await?)?;
-                        let entry = target(&directory, source, p.id.clone(), &stopping).await?;
-                        let (key, server) = credential_key(&p.id, &entry.configuration)
+                        let resolved = directory
+                            .resolved(source, p.id.clone(), &stopping)
+                            .await
+                            .map_err(error)?;
+                        let (key, server) = credential_key(&p.id, &resolved.expanded)
                             .ok_or_else(|| error(McpAuthError::Unsupported.into()))?;
                         // Sign-in contacts the server: only for an entry the
                         // user enabled (ADR 003 D3).
-                        if !entry.enabled() {
+                        if !resolved.entry.enabled() {
                             return Err(error(McpError::Disabled));
                         }
-                        let McpServerSettings::Remote { oauth, .. } = &entry.configuration else {
+                        let McpServerSettings::Remote { oauth, .. } = &resolved.expanded else {
                             unreachable!("OAuth entries are remote");
                         };
                         if let Some(secret) = &p.client_secret
@@ -904,8 +927,11 @@ pub(super) fn provide(
                     "mcp.auth.logout" => {
                         let p: McpTarget = params(value)?;
                         let source = source(p.source, project(&settings, p.cwd, &stopping).await?)?;
-                        let entry = target(&directory, source, p.id.clone(), &stopping).await?;
-                        let key = stored_key(&p.id, &entry.configuration)
+                        let resolved = directory
+                            .resolved(source, p.id.clone(), &stopping)
+                            .await
+                            .map_err(error)?;
+                        let key = stored_key(&p.id, &resolved.expanded)
                             .ok_or_else(|| error(McpAuthError::Unsupported.into()))?;
                         let revoked = auth
                             .logout(&key, &stopping)

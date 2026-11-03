@@ -697,6 +697,25 @@ async fn temporary(
         .unwrap()
 }
 
+/// One management call on the host, as a local client would make it.
+async fn management(
+    agent: &MinimalHost,
+    method: &str,
+    params: Value,
+) -> std::result::Result<Value, dim_agent_capabilities::methods::RpcError> {
+    agent
+        .root()
+        .get::<dim_app_server::methods::ManagementMethods>()
+        .expect("management methods are installed")
+        .provider(method)
+        .expect("the method is registered")
+        .accept(method.into(), params, CancellationToken::new(), |_| {})
+        .expect("the method is accepted")
+        .reply
+        .await
+        .expect("the method replies")
+}
+
 #[tokio::test]
 async fn temporary_mcp_binds_calls_isolates_and_disposes_without_settings_writes() {
     let env = Env::new().await;
@@ -2613,4 +2632,143 @@ async fn an_expired_session_is_a_new_generation_with_a_new_tool_list() {
     assert!(grown.name.starts_with("mcp_docs_"));
     assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 2);
     env.close().await;
+}
+
+/// #952: a probe expands references from the daemon's environment before it
+/// contacts the server. A configuration supplied by the client is user text.
+#[tokio::test]
+async fn a_probe_expands_references_in_a_client_configuration() {
+    let env = Env::new().await;
+    unsafe {
+        std::env::set_var("MCP_TEST_952_PROBE_URL", &env.url);
+        std::env::set_var("MCP_TEST_952_PROBE_TOKEN", "made-up-probe-value");
+    }
+    let probe = management(
+        &env.agent,
+        "mcp.test",
+        json!({
+            "source": "user",
+            "id": "probe",
+            "configuration": {
+                "type": "http",
+                "url": "${MCP_TEST_952_PROBE_URL}",
+                "headers": {"X-Generation": "${MCP_TEST_952_PROBE_TOKEN}"}
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(probe["status"], "connected", "{probe}");
+    assert!(
+        env.remote
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(generation, _)| generation == "made-up-probe-value"),
+        "the probe did not carry the expanded header"
+    );
+    assert!(!probe.to_string().contains("made-up-probe-value"));
+    env.close().await;
+}
+
+/// #952: a temporary binding expands references from the daemon's environment.
+/// Its configuration is client text, so no field is guarded.
+#[tokio::test]
+async fn a_temporary_binding_expands_references_unguarded() {
+    let env = Env::new().await;
+    unsafe {
+        std::env::set_var("MCP_TEST_952_TEMP_URL", &env.url);
+        std::env::set_var("MCP_TEST_952_TEMP_TOKEN", "made-up-temp-value");
+    }
+    let session = env.session(false, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    let binding = uuid::Uuid::new_v4().to_string();
+    temporary(
+        &session,
+        "session.mcp_temporary.attach",
+        json!({
+            "bindingId": binding,
+            "servers": {"client": {
+                "type": "http",
+                "url": "${MCP_TEST_952_TEMP_URL}",
+                "headers": {"X-Generation": "${MCP_TEST_952_TEMP_TOKEN}"}
+            }}
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        env.remote
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(generation, _)| generation == "made-up-temp-value"),
+        "the temporary connection did not carry the expanded header"
+    );
+    temporary(
+        &session,
+        "session.mcp_temporary.detach",
+        json!({"bindingId": binding}),
+    )
+    .await
+    .unwrap();
+    env.close().await;
+}
+
+/// #952: a project entry's `cwd` is expanded before it is joined to the
+/// workspace, so the probe runs in the directory the published connection
+/// uses instead of a literal directory below the workspace.
+#[tokio::test]
+async fn a_probe_runs_a_project_cwd_where_the_published_connection_runs() {
+    let tools = std::env::temp_dir().join(format!("dim-mcp-cwd-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(tools.join("bin")).unwrap();
+    let tools = tools.canonicalize().unwrap();
+    unsafe {
+        std::env::set_var("DIMCODE_TEST_REVIEW_CWD", tools.to_str().unwrap());
+    }
+    let env = Env::new().await;
+    env.update(
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::Put(
+            serde_json::from_value(json!({
+                "command": "node",
+                "args": [
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("tests/fixtures/mcp-reconnect.cjs"),
+                    "normal"
+                ],
+                "cwd": "${DIMCODE_TEST_REVIEW_CWD}/bin",
+                "env": {
+                    "MCP_STATE_FILE": env.home.join("starts"),
+                    "MCP_PID_FILE": env.home.join("pids")
+                }
+            }))
+            .unwrap(),
+        ),
+    )
+    .await;
+    env.update(
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::SetEnabled(true),
+    )
+    .await;
+
+    let probe = management(
+        &env.agent,
+        "mcp.test",
+        json!({"source":"project","id":"docs","cwd":env.home.join("project")}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(probe["status"], "connected", "{probe}");
+
+    // The same entry publishes the same directory: the Session adopts its tools.
+    let session = env.session(true, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    env.close().await;
+    std::fs::remove_dir_all(tools).unwrap();
 }
