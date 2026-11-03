@@ -44,8 +44,8 @@ position, then sequence, in the requested direction.
 Paging is skipping, not a cursor: the caller repeats the query with a larger skip, and a page
 shorter than the count is what says the selection is exhausted. A page therefore does not align
 with an atomic batch — it may end inside one, and the next page carries the rest, which a
-consumer folding in order handles. A consumer that needs one consistent view reads at one read
-point: a published sequence is a batch end, so the view is fixed. 
+consumer folding in order handles. A read is taken at what is published when it runs, so a consumer
+that folds several pages drops what it has already folded.
 
 The existing reads do not share this convention: the context page accepts a cursor inside a batch
 and returns the row it names, and the history read has no page. A consumer that still uses its own
