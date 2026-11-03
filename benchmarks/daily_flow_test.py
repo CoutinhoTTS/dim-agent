@@ -210,7 +210,8 @@ class DailyFlowTest(unittest.TestCase):
              dirty: bool = False, no_model: bool = False,
              verifier_proxy: str | None = None,
              verifier_no_proxy: str | None = None,
-             with_sidecar: bool = False) -> int:
+             with_sidecar: bool = False,
+             sidecar_k: int | None = None) -> int:
         if dirty:
             (self.tooling / "benchmarks" / "scratch.py").write_text("edit\n")
         k = {"daily": 1, "checkpoint": 3, "baseline": 3}[run_type]
@@ -267,7 +268,7 @@ class DailyFlowTest(unittest.TestCase):
             if with_sidecar:
                 config_text = '{"model": "glm-5.3"}'
                 (Path(out) / f"{run_id}-job.json").write_text(json.dumps({
-                    "n_attempts": k,
+                    "n_attempts": k if sidecar_k is None else sidecar_k,
                     "timeout_multiplier": 1.0,
                     "agent_timeout_multiplier": 1.0,
                     "n_concurrent_trials": 5,
@@ -442,9 +443,21 @@ class DailyFlowTest(unittest.TestCase):
             (out / "harbor").mkdir()
             (out / "harbor" / "result.json").write_text("{}")
             partial = subprocess.CompletedProcess([], 23, stdout="Permission denied\n")
-            with mock.patch("subprocess.run", return_value=partial):
+            with mock.patch("subprocess.run", return_value=partial) as rsync:
                 self.assertIsNone(
                     daily_run.fetch_results("host", "/remote", "run", out))
+            # Three fetches leave the eval machine: the job directory, the
+            # model identity, and the job config the frozen params are read
+            # from. The last two travel individually because they sit beside
+            # the job, not inside it — a fetch that forgets one silently
+            # degrades what a baseline can record.
+            sources = []
+            for call in rsync.call_args_list:
+                remote = next(part for part in call.args[0]
+                              if part.startswith("host:"))
+                sources.append(remote.rstrip("/").rsplit("/", 1)[-1])
+            self.assertEqual(sources,
+                             ["run", "run-model.json", "run-job.json"])
 
     def test_fetch_fails_when_rsync_left_no_job(self) -> None:
         """Exit 23 without result.json is still a failed fetch: there is
@@ -1088,6 +1101,18 @@ class DailyFlowTest(unittest.TestCase):
         # The sidecar names no harbor version; the CLI-supplied one survives.
         self.assertEqual(params["harbor_version"], "0.18.0")
         self.assertEqual(params["n_concurrent_trials"], 5)
+
+    def test_a_sidecar_disagreeing_about_k_does_not_freeze_two_claims(self) -> None:
+        """The top-level k is what build and compare read, and it is the k the
+        run was driven with. A sidecar naming another count is not this run's
+        config; recording both would let a reader pick the convenient one."""
+        self.state.write_text(json.dumps({"last_l2_head": self.base}))
+        self.assertEqual(self._run(run_type="baseline", with_sidecar=True,
+                                   sidecar_k=2), 0)
+        params = json.loads(
+            (self.baselines / f"{self.pin}.json").read_text())["params"]
+        self.assertNotIn("k", params)
+        self.assertEqual(params["model_name"], "icecn/glm-5.3")
 
     def test_verifier_proxy_is_recorded_and_a_different_condition_is_invalid(self) -> None:
         """The proxy is a condition of the measurement, not an implementation detail.

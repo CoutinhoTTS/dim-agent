@@ -163,8 +163,9 @@ def main() -> int:
     # "${DIM_EVAL_API_KEY_ENV}" template; both would look up a variable that
     # cannot exist and report it as merely empty.
     if not _KEY_VAR_NAME.fullmatch(key_var):
+        shown = key_var if len(key_var) <= 40 else key_var[:40] + "…"
         sys.stderr.write(
-            f"no usable key-variable name {key_var!r}: DIM_EVAL_API_VAR must "
+            f"no usable key-variable name {shown!r}: DIM_EVAL_API_VAR must "
             "carry the provider key variable's name\n")
         return 2
     api_key = os.environ.get(key_var, "")

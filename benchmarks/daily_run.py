@@ -532,6 +532,17 @@ def fetch_results(host: str, remote_results: str, run_id: str, out: Path) -> str
         # reference that cannot say what produced it.
         print("[daily] no model identity alongside the results; a baseline run "
               "will refuse to freeze from this")
+    # The job config harbor executed, written beside the results by run_l2 for
+    # exactly this trip back: it is what turns the frozen params into a record
+    # of the run instead of an assertion by the caller. Absent on runs from
+    # before it was shipped, so its loss is reported, never fatal.
+    job_config = subprocess.run(
+        ["rsync", "-az", f"{host}:{remote_results}/{run_id}-job.json", f"{out}/"],
+        check=False, capture_output=True, text=True,
+    )
+    if job_config.returncode != 0:
+        print("[daily] no job config alongside the results; a frozen baseline "
+              "will carry only the CLI-supplied params")
     print(f"[daily] results -> {out / 'harbor'}")
     return None
 
@@ -1250,11 +1261,23 @@ def main() -> int:
         try:
             from_config = baselines.params_from_config(
                 json.loads(job_sidecar.read_text()))
-        except (OSError, json.JSONDecodeError) as error:
+        except Exception as error:  # noqa: BLE001 - same reasoning as settle:
+            # a shape this does not recognise must not cost a completed run
+            # its manifest and ledger record; it degrades to CLI-supplied
+            # params and says so.
             print(f"[daily] WARNING: unreadable job config {job_sidecar.name}: "
-                  f"{error}")
+                  f"{type(error).__name__}: {error}")
             from_config = {}
-        params.update({k: v for k, v in from_config.items() if v is not None})
+        if from_config.get("k") is not None and from_config["k"] != k:
+            # The top-level k is what build and compare read; the sidecar's is
+            # the same number as far as any real run is concerned. A mismatch
+            # means this file is not the config of this run — said out loud,
+            # and the CLI value recorded, rather than frozen in as two claims.
+            print(f"[daily] WARNING: job config says k={from_config['k']}, "
+                  f"this run is k={k}; recording k={k}")
+            from_config.pop("k")
+        params.update({key: value for key, value in from_config.items()
+                       if value is not None})
     if l2_exit == 0:
         if fetch_error is not None:
             # Nothing to score and nothing to score it from. Recorded the same

@@ -320,6 +320,24 @@ class BaselineFlowTest(unittest.TestCase):
         with self.assertRaises(baseline.BaselineError):
             baseline.load(path)
 
+    def test_a_malformed_job_config_degrades_the_record_not_the_run(self) -> None:
+        """The sidecar is read after a completed run, by a caller that used to
+        catch only OSError/JSONDecodeError — a valid-JSON dict with the wrong
+        shape inside escaped and killed the run after its hours were spent.
+        Every shape below must come back as an empty record instead."""
+        for shape in ({"agents": [None]},
+                      {"agents": [{"env": "nope"}]},
+                      {"agents": [{"env": {"DIM_EVAL_MODEL_CONFIG_JSON": 123}}]},
+                      {"agents": {"not": "a list"}},
+                      {"verifier": 5},
+                      "not a dict",
+                      None):
+            with self.subTest(shape=shape):
+                params = baseline.params_from_config(shape)
+                self.assertEqual(
+                    {key: value for key, value in params.items()
+                     if value is not None}, {})
+
     def test_a_baseline_the_committed_harness_did_not_produce_is_refused(self) -> None:
         """The reference has to name a committed harness.
 
@@ -878,6 +896,87 @@ class DimEventTotalsTest(unittest.TestCase):
 
     def test_no_stream_reads_as_nothing(self) -> None:
         self.assertIsNone(dim_events.read_totals(self.root / "absent.jsonl"))
+
+
+class DimAgentKeyVarTest(unittest.TestCase):
+    """The agent-side refusal, at the function that would have caught the
+    redacted name in the real agent.
+
+    dim_agent imports harbor, which is not installed here; the stub below is
+    the module surface the import touches and nothing more — the resolver under
+    test is stdlib-only.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import types
+
+        def with_prompt_template(func):
+            return func
+
+        base = types.ModuleType("harbor.agents.installed.base")
+
+        class BaseInstalledAgent:
+            #: The agent's own ERROR_PATTERNS list splats this.
+            ERROR_PATTERNS: list = []
+
+        class ErrorPattern:
+            def __init__(self, pattern, exception):
+                self.pattern, self.exception = pattern, exception
+
+        base.BaseInstalledAgent = BaseInstalledAgent
+        base.ErrorPattern = ErrorPattern
+        base.with_prompt_template = with_prompt_template
+        for name in ("ApiInternalServerError", "ApiOverloadedError",
+                     "ApiRateLimitError", "ApiUsageLimitError",
+                     "NetworkConnectionError", "UnknownApiError"):
+            setattr(base, name, type(name, (), {}))
+        environments = types.ModuleType("harbor.environments.base")
+        environments.BaseEnvironment = type("BaseEnvironment", (), {})
+        context = types.ModuleType("harbor.models.agent.context")
+        context.AgentContext = type("AgentContext", (), {})
+        stubs = {
+            "harbor": types.ModuleType("harbor"),
+            "harbor.agents": types.ModuleType("harbor.agents"),
+            "harbor.agents.installed": types.ModuleType("harbor.agents.installed"),
+            "harbor.agents.installed.base": base,
+            "harbor.environments": types.ModuleType("harbor.environments"),
+            "harbor.environments.base": environments,
+            "harbor.models": types.ModuleType("harbor.models"),
+            "harbor.models.agent": types.ModuleType("harbor.models.agent"),
+            "harbor.models.agent.context": context,
+        }
+        with mock.patch.dict(sys.modules, stubs):
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import dim_agent
+        cls.dim_agent = dim_agent
+
+    def test_the_new_carrier_wins_and_the_legacy_still_works(self) -> None:
+        resolve = self.dim_agent._resolve_key_var
+        self.assertEqual(resolve({"DIM_EVAL_API_VAR": "MODEL_API_KEY"}),
+                         "MODEL_API_KEY")
+        self.assertEqual(resolve({"DIM_EVAL_API_KEY_ENV": "MODEL_API_KEY"}),
+                         "MODEL_API_KEY")
+
+    def test_the_corrupt_shapes_are_refused_with_a_bounded_echo(self) -> None:
+        """`DEEP****KEY` and the `${VAR}` template name variables that cannot
+        exist; refusing beats failing later on "X is empty". The message bounds
+        what it echoes: by contract the value is a name, but if it is ever
+        mis-set to the key itself the refusal must not publish it whole."""
+        for env in ({"DIM_EVAL_API_VAR": "DEEP****KEY"},
+                    {"DIM_EVAL_API_VAR": "${MODEL_API_KEY}"},
+                    {"DIM_EVAL_API_KEY_ENV": "DEEP****KEY"},
+                    {}):
+            with self.subTest(env=env), \
+                    self.assertRaises(RuntimeError) as caught:
+                self.dim_agent._resolve_key_var(env)
+            self.assertNotIn("sk-", str(caught.exception))
+
+    def test_a_long_corrupt_value_is_truncated_in_the_message(self) -> None:
+        with self.assertRaises(RuntimeError) as caught:
+            self.dim_agent._resolve_key_var(
+                {"DIM_EVAL_API_VAR": "X" * 200 + "!"})
+        self.assertNotIn("X" * 41, str(caught.exception))
 
 
 class JobConfigKeyVarTest(unittest.TestCase):
