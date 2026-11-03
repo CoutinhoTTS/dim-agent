@@ -1077,6 +1077,7 @@
       "parent": "dim_agent_capabilities::timeline_tree",
       "file": "crates/dim-agent-capabilities/src/timeline_tree.rs",
       "unexpandedMacros": [
+        "assert",
         "assert_eq",
         "format",
         "json",
@@ -12888,6 +12889,8 @@
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolCall",
+        "path ToolResult::error",
+        "path ToolResult::text",
         "path kind"
       ]
     },

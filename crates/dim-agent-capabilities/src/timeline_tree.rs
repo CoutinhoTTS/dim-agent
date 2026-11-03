@@ -1692,6 +1692,10 @@ struct LineView {
     /// The turn that steered the parent, when one did.
     steered: Option<String>,
     steering: Option<(String, String)>,
+    /// The `nextCursor` of the latest successful read of each line, by line.
+    cursors: BTreeMap<String, u64>,
+    /// The line a pending `branch` read names, by its call id.
+    reads: BTreeMap<String, String>,
     /// Inputs committed and not consumed, with their modes.
     held: BTreeMap<String, InputMode>,
     /// The sequence of each input's `input/applied`.
@@ -1920,9 +1924,10 @@ impl BranchLine {
                         key: Some(key),
                         retire,
                     } = block
-                        && key == &line_key()
                     {
-                        view.roster = Some((text.clone(), *retire));
+                        if key == &line_key() {
+                            view.roster = Some((text.clone(), *retire));
+                        }
                     }
                 }
                 None
@@ -1953,6 +1958,9 @@ impl BranchLine {
                 {
                     view.steering = Some((data.turn_id.clone(), data.call.id.clone()));
                 }
+                if let Some(target) = read_target(&data.call) {
+                    view.reads.insert(data.call.id.clone(), target);
+                }
                 None
             }
             EventKind::ToolResult(data) => {
@@ -1963,6 +1971,23 @@ impl BranchLine {
                         view.steered = Some(turn);
                     }
                     view.steering = None;
+                }
+                for result in &data.results {
+                    let Some(target) = view.reads.remove(&result.call_id) else {
+                        continue;
+                    };
+                    if result.result.is_error == Some(true) {
+                        continue;
+                    }
+                    let next = result
+                        .result
+                        .structured_content
+                        .as_ref()
+                        .and_then(|page| page.get("nextCursor"))
+                        .and_then(serde_json::Value::as_u64);
+                    if let Some(next) = next {
+                        view.cursors.insert(target, next);
+                    }
                 }
                 None
             }
@@ -1986,6 +2011,10 @@ impl BranchLine {
     /// The line committed its own `branch/end`.
     fn ending(&self) -> bool {
         self.view.lock().unwrap().ending
+    }
+    /// The `nextCursor` of the line's latest successful read of `target`.
+    fn cursor(&self, target: &str) -> Option<u64> {
+        self.view.lock().unwrap().cursors.get(target).copied()
     }
     /// The line's role and parent, from its directory record.
     fn resolved(&self) -> Option<(LineRole, Option<String>)> {
@@ -2116,7 +2145,7 @@ impl BranchLine {
                 "dim-branch-lines",
                 &[("branch", &self.own)],
                 &format!(
-                    "Lines you opened that are still open. Each is you, working in parallel from the point you opened it; it does not see your work after that point unless you message it.\n{listed}\n{}",
+                    "Lines you opened that are still open. Each is you, working in parallel from the point you opened it; it can read your work after that point, and you can read its.\n{listed}\n{}",
                     self.roster_closing.as_deref().unwrap_or(ROSTER_CLOSING)
                 ),
             ),
@@ -2165,6 +2194,18 @@ fn steered_parent(call: &ToolCall, parent: &str) -> bool {
         && call.input.get("action").and_then(|value| value.as_str()) == Some("message")
         && call.input.get("mode").and_then(|value| value.as_str()) == Some("steer")
         && call.input.get("to").and_then(|value| value.as_str()) == Some(parent)
+}
+/// The line a `branch` read call names, when the call is a read.
+fn read_target(call: &ToolCall) -> Option<String> {
+    if call.name != "branch"
+        || call.input.get("action").and_then(|value| value.as_str()) != Some("read")
+    {
+        return None;
+    }
+    call.input
+        .get("branch")
+        .and_then(|value| value.as_str())
+        .map(str::to_owned)
 }
 /// The first line of a purpose, at most 120 characters (design §12.1).
 fn first_line(purpose: &str) -> String {
@@ -2253,7 +2294,7 @@ impl BranchTool {
         match input.action.as_str() {
             "create" => self.create(&own, input, &context, &call.id, cancel).await,
             "message" => self.message(&own, input).await,
-            "read" => self.read(&own, input).await,
+            "read" => self.read(&own, input, &line).await,
             "end" => tokio::select! {
                 result = self.end(&own, input, &context, &call.id) => result,
                 _ = cancel.cancelled() => Err(HostError::Cancelled("branch end cancelled".into())),
@@ -2378,11 +2419,12 @@ impl BranchTool {
             Err(error) => Err(HostError::failed(error.to_string())),
         }
     }
-    /// One page of a tool line's committed history, open or ended (design §6).
+    /// One page of a line's committed history, open or ended (design §6).
     async fn read(
         &self,
         own: &OwnLine,
         input: BranchInput,
+        line: &BranchLine,
     ) -> std::result::Result<ToolResult, HostError> {
         let id = input
             .branch
@@ -2391,10 +2433,14 @@ impl BranchTool {
         let Some(target) = self.line(&id) else {
             return Ok(self.not_kin());
         };
-        if own.role != LineRole::Main || !kin(own, &target) {
+        let permitted = match own.role {
+            LineRole::Main => kin(own, &target),
+            LineRole::Tool | LineRole::Host => own.parent.as_deref() == Some(target.id.as_str()),
+        };
+        if !permitted {
             return Ok(self.not_kin());
         }
-        if matches!(target.source, Some(BranchSource::Host { .. })) {
+        if own.role == LineRole::Main && matches!(target.source, Some(BranchSource::Host { .. })) {
             return Ok(self.not_tool_line(&target.id));
         }
         let limit = match input.limit.unwrap_or(READ_PAGE_LIMIT as u64) {
@@ -2405,7 +2451,23 @@ impl BranchTool {
                 )));
             }
         };
-        let after = input.after.unwrap_or(0);
+        // main reads from a line's start; a line reads from its cut. Without
+        // `after`, a read continues after the reader's last read of the
+        // target, and a parent read never goes below the cut (design §6).
+        let cut = if own.role == LineRole::Main {
+            0
+        } else {
+            self.tree
+                .info(own.id.clone())
+                .ok()
+                .and_then(|info| info.branch_point)
+                .unwrap_or(0)
+        };
+        let after = match input.after {
+            Some(after) if own.role == LineRole::Main => after,
+            Some(after) => after.max(cut),
+            None => line.cursor(&target.id).unwrap_or(cut),
+        };
         let events = self
             .tree
             .page(target.id.clone(), after, limit)
@@ -2473,7 +2535,8 @@ impl BranchTool {
     fn not_kin(&self) -> ToolResult {
         refusal(
             "branch_not_kin",
-            "You can message only the lines you opened and the line that opened you.".into(),
+            "You can message or read only the lines you opened and the line you were cut from."
+                .into(),
         )
     }
     fn not_tool_line(&self, id: &str) -> ToolResult {
@@ -2644,17 +2707,17 @@ fn first_input(parent: &str, data: &BranchCreateData) -> InputMessageData {
 fn tool_line_identity(line: &str, parent: &str, prompt: &str) -> InputBlock {
     let prompt = crate::context_block::text(prompt);
     let body = [
-        format!("You are line {line} of this session. Line {parent} opened you at this point of its history to work in parallel with it. You are the same agent as {parent}: everything above is your own history, and you continue from here on your own line. {parent} keeps working on its line; you do not see its work after this point, and it sees yours only through what you send it. Messages above that were addressed to {parent}, such as its list of open lines, are {parent}'s, not yours."),
+        format!("You are line {line} of this session. Line {parent} opened you at this point of its history to work in parallel with it. You are the same agent as {parent}: everything above is your own history, and you continue from here on your own line. {parent} keeps working on its line; you can read its work after this point, and it can read yours. Messages above that were addressed to {parent}, such as its list of open lines, are {parent}'s, not yours."),
         String::new(),
         format!("Your purpose, as {parent} wrote it:"),
         prompt,
         String::new(),
         format!("How you work with {parent}:"),
         format!("- Work on this purpose only. You cannot open lines; if more parallel work is needed, tell {parent}."),
-        format!("- Tell {parent} with the branch tool (message, to \"{parent}\"). Use mode \"steer\" for what {parent} must act on now: a finding that changes its work or another line's, a blocking question, a conflict. Use \"append\" for progress {parent} should see at its next step. Do not repeat what {parent} already knows: when several steps give the same result, send one message for the run of them, and say only what changes what {parent} does or what it cannot see for itself."),
+        format!("- Read {parent} with the branch tool (action read, branch \"{parent}\") when what {parent} did or decided since your cut changes your work; the parent block reports when {parent} has moved. Message {parent} only for what it must act on: a decision that changes its work, a blocker only the user can settle, a conflict with another line, or a change to your purpose. Use mode \"steer\" for what {parent} must act on now, \"append\" for what {parent} should see at its next step. Do not send {parent} a progress report it can read, and do not page through {parent}'s whole stream: read the page that answers your question, then act."),
         format!("- You share the workspace with {parent} and its other lines. Change only the files {parent} gave you; before changing any other file, tell {parent} which. If edit or write fails because the file was modified after it was last read, another line may have changed the file: read it again and tell {parent} before you continue."),
         "- The user can talk to you directly. Answer the user, and ask with ask_user when only the user can decide.".to_string(),
-        format!("- When your purpose is done, or cannot be done, call the branch tool with action \"end\" and content saying what you found, did, changed and left undone. If you already told {parent} that in a message, your end content carries only what is new. That is your last action; {parent} receives it."),
+        format!("- When your purpose is done, or cannot be done, call the branch tool with action \"end\" and content saying what you found, did, changed and left undone. If you already told {parent} that in a message, your end content carries only what is new. Read {parent} once more before you end if the parent block says {parent} has moved, so your last word still holds. That is your last action; {parent} receives it."),
     ]
     .join("\n");
     crate::context_block::raw(
@@ -2673,7 +2736,7 @@ fn host_line_identity(line: &str, parent: &str) -> InputBlock {
             "dim-branch-line",
             &[("branch", line), ("parent", parent), ("source", "host")],
             &format!(
-                "You are line {line} of this session, opened from line {parent} at this point of its history. You are the same agent as {parent}: everything above is your own history, and you continue from here on your own line, in parallel with {parent}. You do not see {parent}'s work after this point. Messages above that were addressed to {parent} are {parent}'s, not yours. The message after this one says what this line is for."
+                "You are line {line} of this session, opened from line {parent} at this point of its history. You are the same agent as {parent}: everything above is your own history, and you continue from here on your own line, in parallel with {parent}. You can read {parent}'s work after this point. Messages above that were addressed to {parent} are {parent}'s, not yours. The message after this one says what this line is for."
             ),
         ),
         Some(line_key()),
@@ -2683,7 +2746,7 @@ fn host_line_identity(line: &str, parent: &str) -> InputBlock {
 /// The `branch` tool's description: its policy sentences are the coordination
 /// text for `main` ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)),
 /// replaceable at [`BranchToolConfig`].
-const BRANCH_TOOL_DESCRIPTION: &str = "Work with the other lines of this session. A line is you: it starts from your history at the point it is opened, then works in parallel on its own line. It is not a helper with its own memory, and it owes you no result; you and it keep each other informed while you work. On main you coordinate: answer a line's steer and act on what it asks for; leave a line's part to that line instead of redoing it.\n- create (main only): open a line to work on prompt in parallel. Open one line per part that can go on at the same time as the rest — separate files, a separate question, or a second approach — instead of doing those parts one after another yourself; not for a single quick edit, nor when your next step needs its result. Write prompt as a brief to yourself: the purpose, what you already know that it needs, which files or area are its own, and when it should tell you or end. Returns the line's id.\n- message: send content to a line you opened, or to the line that opened you. Mode \"append\" (default) reaches the receiver at its next step without interrupting it and does not wake an idle line. Use \"steer\" when the receiver must act now or is idle.\n- read: show the recent activity of a line you opened, also after it ended. Pass nextCursor as after to continue.\n- end: on a line opened with create, end your own line. content is your final message to the line that opened you: what you found, did, changed and left undone. It is your last action.\nLines talk only with the line that opened them and the lines they opened.";
+const BRANCH_TOOL_DESCRIPTION: &str = "Work with the other lines of this session. A line is you: it starts from your history at the point it is opened, then works in parallel on its own line. It is not a helper with its own memory, and it owes you no result; you and it keep each other informed by reading each other's work and messaging what the other must act on. On main you coordinate: answer a line's steer and act on what it asks for; leave a line's part to that line instead of redoing it; read a line's work instead of waiting for a report.\n- create (main only): open a line to work on prompt in parallel. Open one line per part that can go on at the same time as the rest — separate files, a separate question, or a second approach — instead of doing those parts one after another yourself; not for a single quick edit, nor when your next step needs its result. Write prompt as a brief to yourself: the purpose, what you already know that it needs, which files or area are its own, and when it should tell you or end. Returns the line's id.\n- message: send content to a line you opened, or to the line that opened you. Send a decision, a blocker, or a conflict, not a progress report the receiver can read. Mode \"append\" (default) reaches the receiver at its next step without interrupting it and does not wake an idle line. Use \"steer\" when the receiver must act now or is idle.\n- read: show a page of the activity of the line you were cut from, or of a line you opened, also after it ended. With no after, a read continues after your last read of that line: from your cut for the line you were cut from, and from its first event for a line you opened. Pass after to read from another point. Do not page through a whole line.\n- end: on a line opened with create, end your own line. content is your final message to the line that opened you: what you found, did, changed and left undone. It is your last action.\nA line reads the line it was cut from; main reads the lines it opened. Messages pass only between main and the lines it opened.";
 
 /// Factory configuration of the branch tool ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)).
 /// The product sets none of it, so the built-in text is in force.
@@ -2790,5 +2853,78 @@ mod tests {
         BranchLine::fold(&mut delivered, &call(1, "call", "branch", steer));
         BranchLine::fold(&mut delivered, &result(2, "call", false));
         assert_eq!(delivered.steered.as_deref(), Some("turn"));
+    }
+
+    /// A read result carrying `nextCursor`, as the branch tool returns it.
+    fn page(sequence: u64, id: &str, next: Option<u64>, is_error: bool) -> Arc<AgentEvent> {
+        let mut result = if is_error {
+            ToolResult::error("refused")
+        } else {
+            ToolResult::text(format!(
+                r#"{{"items":[],"nextCursor":{next:?},"done":false}}"#
+            ))
+        };
+        if let Some(next) = next {
+            result.structured_content = json!({"items": [], "nextCursor": next, "done": false})
+                .as_object()
+                .cloned();
+        }
+        event(
+            sequence,
+            EventKind::ToolResult(ToolResultData {
+                turn_id: "turn".into(),
+                request_id: "request".into(),
+                call_event_id: Some("call-event".into()),
+                results: vec![ToolCallResult {
+                    call_id: id.into(),
+                    result,
+                }],
+            }),
+        )
+    }
+
+    #[test]
+    fn the_fold_keeps_the_next_cursor_of_each_successful_read() {
+        let mut view = line();
+        BranchLine::fold(
+            &mut view,
+            &call(
+                1,
+                "call",
+                "branch",
+                json!({"action":"read","branch":"main"}),
+            ),
+        );
+        assert_eq!(view.reads.get("call").map(String::as_str), Some("main"));
+        BranchLine::fold(&mut view, &page(2, "call", Some(42), false));
+        assert_eq!(view.cursors.get("main"), Some(&42));
+        assert!(view.reads.is_empty());
+        BranchLine::fold(
+            &mut view,
+            &call(
+                3,
+                "failed",
+                "branch",
+                json!({"action":"read","branch":"main"}),
+            ),
+        );
+        BranchLine::fold(&mut view, &page(4, "failed", Some(99), true));
+        assert_eq!(
+            view.cursors.get("main"),
+            Some(&42),
+            "a refused read moves no cursor"
+        );
+        BranchLine::fold(
+            &mut view,
+            &call(
+                5,
+                "elsewhere",
+                "branch",
+                json!({"action":"read","branch":"other"}),
+            ),
+        );
+        BranchLine::fold(&mut view, &page(6, "elsewhere", Some(7), false));
+        assert_eq!(view.cursors.get("other"), Some(&7));
+        assert_eq!(view.cursors.get("main"), Some(&42), "cursors are per line");
     }
 }

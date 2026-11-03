@@ -353,20 +353,23 @@ fn builder(probe: &Arc<Probe>) -> AgentBuilder {
     builder_with(probe, defaults::install)
 }
 
-/// [`builder`] with the branch texts at a candidate's factory configuration
-/// ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)):
-/// BranchLine reads the roster's closing sentence from its member.
-fn builder_with_branch_config(probe: &Arc<Probe>, config: BranchToolConfig) -> AgentBuilder {
-    builder_with(probe, move |builder| {
-        defaults::install_with_branch_config(builder, config)
-    })
-}
-
 fn builder_with(probe: &Arc<Probe>, install: impl FnOnce(&mut AgentBuilder)) -> AgentBuilder {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
     mock_hosts(&mut builder);
     install(&mut builder);
+    probe_features(&mut builder, probe);
+    builder
+}
+fn builder_with_store(probe: &Arc<Probe>, store: Arc<dyn TimelineStore>) -> AgentBuilder {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder.timeline_store(store);
+    mock_hosts(&mut builder);
+    defaults::install(&mut builder);
+    probe_features(&mut builder, probe);
+    builder
+}
+fn probe_features(builder: &mut AgentBuilder, probe: &Arc<Probe>) {
     let writer = probe.clone();
     builder.require_feature(
         Feature::new("test.cleanup-writer").branch("test.cleanup-writer", move |names| {
@@ -379,8 +382,17 @@ fn builder_with(probe: &Arc<Probe>, install: impl FnOnce(&mut AgentBuilder)) -> 
             Ok(Box::new(ProbePlugin::new(names, probe.clone())?))
         }),
     );
-    builder
 }
+
+/// [`builder`] with the branch texts at a candidate's factory configuration
+/// ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)):
+/// BranchLine reads the roster's closing sentence from its member.
+fn builder_with_branch_config(probe: &Arc<Probe>, config: BranchToolConfig) -> AgentBuilder {
+    builder_with(probe, move |builder| {
+        defaults::install_with_branch_config(builder, config)
+    })
+}
+
 fn options(prompt: &str) -> BranchOptions {
     BranchOptions {
         prompt: prompt.into(),
@@ -1917,7 +1929,7 @@ async fn a_host_line_opens_with_its_identity_block_and_the_creator_prompt() {
         text,
         &format!(
             "<dim-branch-line branch=\"{child}\" parent=\"main\" source=\"host\">\n\
-             You are line {child} of this session, opened from line main at this point of its history. You are the same agent as main: everything above is your own history, and you continue from here on your own line, in parallel with main. You do not see main's work after this point. Messages above that were addressed to main are main's, not yours. The message after this one says what this line is for.\n\
+             You are line {child} of this session, opened from line main at this point of its history. You are the same agent as main: everything above is your own history, and you continue from here on your own line, in parallel with main. You can read main's work after this point. Messages above that were addressed to main are main's, not yours. The message after this one says what this line is for.\n\
              </dim-branch-line>"
         )
     );
@@ -2727,7 +2739,34 @@ fn blocks_with(events: &[Arc<AgentEvent>], marker: &str) -> Vec<String> {
         })
         .collect()
 }
-
+/// The page a `branch` read returned.
+fn page_of(result: &ToolResult) -> serde_json::Value {
+    assert_eq!(result.is_error, None, "{:?}", result.content);
+    serde_json::Value::Object(
+        result
+            .structured_content
+            .clone()
+            .expect("a read page is structured"),
+    )
+}
+fn page_sequences(page: &serde_json::Value) -> Vec<u64> {
+    page["items"]
+        .as_array()
+        .expect("page items")
+        .iter()
+        .filter_map(|item| item.get("sequence").and_then(serde_json::Value::as_u64))
+        .collect()
+}
+/// Waits for a restored Session to publish one of its branches.
+async fn until_branch(session: &Session, branch: &str) {
+    for _ in 0..600 {
+        if session.sequence(branch).is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("branch {branch} was not restored");
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_refused_branch_call_writes_nothing() {
     let probe = Arc::new(Probe::default());
@@ -2774,7 +2813,6 @@ async fn a_refused_branch_call_writes_nothing() {
             .iter()
             .any(|info| info.parent.as_deref() == Some(tool_line.as_str()))
     );
-    let before = session.local(&host, ..).await.unwrap().len();
     assert_eq!(
         call(
             &session,
@@ -2799,31 +2837,46 @@ async fn a_refused_branch_call_writes_nothing() {
             format!("Line {host} was not opened with this tool; it follows its own protocol.")
         )
     );
-    assert_eq!(session.local(&host, ..).await.unwrap().len(), before);
-    let main_before = session.local("main", ..).await.unwrap().len();
     assert_eq!(
-        call(&session, &tool_line, r#"{"action":"read","branch":"main"}"#).await,
+        call(
+            &session,
+            &tool_line,
+            &format!(r#"{{"action":"read","branch":"{host}"}}"#)
+        )
+        .await,
         (
             "branch_not_kin".into(),
-            "You can message only the lines you opened and the line that opened you.".into()
+            "You can message or read only the lines you opened and the line you were cut from."
+                .into()
         )
     );
-    let notices = ["<dim-branch-idle", "<dim-branch-lines", "<dim-branch-ended"];
-    for event in session
-        .local("main", ..)
-        .await
-        .unwrap()
-        .iter()
-        .skip(main_before)
-    {
-        if matches!(event.kind, EventKind::InputMessage(_)) {
-            assert!(
-                notices
-                    .iter()
-                    .any(|prefix| !blocks_with(std::slice::from_ref(event), prefix).is_empty()),
-                "a refused read writes nothing to main: {:?}",
-                event.kind
-            );
+    assert_eq!(
+        call(
+            &session,
+            &host,
+            &format!(r#"{{"action":"read","branch":"{tool_line}"}}"#)
+        )
+        .await,
+        (
+            "branch_not_kin".into(),
+            "You can message or read only the lines you opened and the line you were cut from."
+                .into()
+        )
+    );
+    // A refused call writes no message to its target; the runtime may still
+    // write its own parent block on an open line.
+    for line in [&host, &tool_line] {
+        let events = session.local(line, ..).await.unwrap();
+        for event in &events {
+            if let EventKind::InputMessage(data) = &event.kind {
+                assert!(
+                    !data.blocks.iter().any(|block| matches!(
+                        block,
+                        InputBlock::Raw { text, .. } if text.starts_with("<dim-branch-message")
+                    )),
+                    "a refused call writes no message to {line}"
+                );
+            }
         }
     }
     assert_eq!(
@@ -2835,7 +2888,8 @@ async fn a_refused_branch_call_writes_nothing() {
         .await,
         (
             "branch_not_kin".into(),
-            "You can message only the lines you opened and the line that opened you.".into()
+            "You can message or read only the lines you opened and the line you were cut from."
+                .into()
         )
     );
     assert_eq!(
@@ -2958,7 +3012,7 @@ async fn main_lists_its_open_tool_lines_under_one_key() {
         facts,
         format!(
             "<dim-branch-line branch=\"{first}\" parent=\"main\" source=\"tool\">\n\
-             You are line {first} of this session. Line main opened you at this point of its history to work in parallel with it. You are the same agent as main: everything above is your own history, and you continue from here on your own line. main keeps working on its line; you do not see its work after this point, and it sees yours only through what you send it. Messages above that were addressed to main, such as its list of open lines, are main's, not yours.\n\n\
+             You are line {first} of this session. Line main opened you at this point of its history to work in parallel with it. You are the same agent as main: everything above is your own history, and you continue from here on your own line. main keeps working on its line; you can read its work after this point, and it can read yours. Messages above that were addressed to main, such as its list of open lines, are main's, not yours.\n\n\
              Your purpose, as main wrote it:\nfirst purpose"
         )
     );
@@ -3241,12 +3295,13 @@ async fn the_branch_tool_declares_its_actions_and_modes() {
         "- create (main only): open a line to work on prompt in parallel.",
         "- message: send content to a line you opened, or to the line that opened you.",
         "Mode \"append\" (default) reaches the receiver at its next step without interrupting it and does not wake an idle line.",
-        "- read: show the recent activity of a line you opened, also after it ended.",
-        "Pass nextCursor as after to continue.",
+        "- read: show a page of the activity of the line you were cut from, or of a line you opened, also after it ended.",
+        "With no after, a read continues after your last read of that line: from your cut for the line you were cut from, and from its first event for a line you opened.",
+        "Pass after to read from another point.",
         "- end: on a line opened with create, end your own line.",
         "Returns the line's id.",
         "It is your last action.",
-        "Lines talk only with the line that opened them and the lines they opened.",
+        "A line reads the line it was cut from; main reads the lines it opened. Messages pass only between main and the lines it opened.",
     ] {
         assert!(
             branch.description.contains(sentence),
@@ -3447,6 +3502,251 @@ async fn a_message_reaches_its_receiver_in_the_mode_it_asked_for() {
             .iter()
             .any(|event| matches!(event.kind, EventKind::TurnStart(_)) && event.sequence > steer.0),
         "a steer starts a turn on an idle main"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_first_parent_read_starts_after_the_cut() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    soon(session.submit("BEFORE-THE-CUT".into(), InputMode::Queue, "main"))
+        .await
+        .unwrap();
+    soon(session.idle("main")).await.unwrap();
+    let child = open_line(&session, "check the parser").await;
+    let info = session
+        .branches()
+        .into_iter()
+        .find(|info| info.id == child)
+        .unwrap();
+    let cut = info.branch_point.unwrap();
+    let result = tool_call(&session, &child, r#"{"action":"read","branch":"main"}"#).await;
+    let page = page_of(&result);
+    let sequences = page_sequences(&page);
+    assert!(!sequences.is_empty(), "{page}");
+    assert!(
+        sequences.iter().all(|sequence| *sequence > cut),
+        "the first parent read starts after the cut {cut}: {page}"
+    );
+    let text = page.to_string();
+    assert!(
+        !text.contains("BEFORE-THE-CUT"),
+        "the inherited events are not the parent's new activity: {page}"
+    );
+    assert!(
+        page["nextCursor"].as_u64().unwrap() >= *sequences.last().unwrap(),
+        "the cursor covers the page: {page}"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_after_below_the_cut_is_raised_to_it() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    soon(session.submit("BEFORE-THE-CUT".into(), InputMode::Queue, "main"))
+        .await
+        .unwrap();
+    soon(session.idle("main")).await.unwrap();
+    let child = open_line(&session, "check the parser").await;
+    let cut = session
+        .branches()
+        .into_iter()
+        .find(|info| info.id == child)
+        .unwrap()
+        .branch_point
+        .unwrap();
+    let page = page_of(
+        &tool_call(
+            &session,
+            &child,
+            r#"{"action":"read","branch":"main","after":0}"#,
+        )
+        .await,
+    );
+    let sequences = page_sequences(&page);
+    assert!(!sequences.is_empty(), "{page}");
+    assert!(
+        sequences.iter().all(|sequence| *sequence > cut),
+        "after 0 is raised to the cut {cut}: {page}"
+    );
+    assert!(!page.to_string().contains("BEFORE-THE-CUT"), "{page}");
+    soon(agent.close()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_read_without_after_continues_from_the_last_page_in_both_directions() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let child = open_line(&session, "check the parser").await;
+    // line to main: a partial page, then main moves, then a read with no after.
+    let first = page_of(
+        &tool_call(
+            &session,
+            &child,
+            r#"{"action":"read","branch":"main","limit":2}"#,
+        )
+        .await,
+    );
+    let cursor = first["nextCursor"].as_u64().unwrap();
+    soon(session.submit("AFTER-THE-FIRST-PAGE".into(), InputMode::Queue, "main"))
+        .await
+        .unwrap();
+    soon(session.idle("main")).await.unwrap();
+    let second =
+        page_of(&tool_call(&session, &child, r#"{"action":"read","branch":"main"}"#).await);
+    let sequences = page_sequences(&second);
+    assert!(!sequences.is_empty(), "{second}");
+    assert!(
+        sequences.iter().all(|sequence| *sequence > cursor),
+        "the second read continues after {cursor}: {second}"
+    );
+    assert!(
+        second.to_string().contains("AFTER-THE-FIRST-PAGE"),
+        "the second read covers the parent's new activity: {second}"
+    );
+    // main to line: the same rule.
+    let first = page_of(
+        &tool_call(
+            &session,
+            "main",
+            &format!(r#"{{"action":"read","branch":"{child}","limit":2}}"#),
+        )
+        .await,
+    );
+    let cursor = first["nextCursor"].as_u64().unwrap();
+    soon(session.submit("AFTER-THE-CHILD-PAGE".into(), InputMode::Queue, &child))
+        .await
+        .unwrap();
+    soon(session.idle(&child)).await.unwrap();
+    let second = page_of(
+        &tool_call(
+            &session,
+            "main",
+            &format!(r#"{{"action":"read","branch":"{child}"}}"#),
+        )
+        .await,
+    );
+    let sequences = page_sequences(&second);
+    assert!(!sequences.is_empty(), "{second}");
+    assert!(
+        sequences.iter().all(|sequence| *sequence > cursor),
+        "main's second read continues after {cursor}: {second}"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn main_re_reads_a_line_from_zero_and_the_cursor_follows_that_read() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let child = open_line(&session, "check the parser").await;
+    let zero = page_of(
+        &tool_call(
+            &session,
+            "main",
+            &format!(r#"{{"action":"read","branch":"{child}","after":0,"limit":2}}"#),
+        )
+        .await,
+    );
+    let sequences = page_sequences(&zero);
+    assert!(
+        zero.to_string().contains("check the parser"),
+        "after 0 starts at the line's first event: {zero}"
+    );
+    let cursor = zero["nextCursor"].as_u64().unwrap();
+    assert!(cursor >= *sequences.last().unwrap());
+    let next = page_of(
+        &tool_call(
+            &session,
+            "main",
+            &format!(r#"{{"action":"read","branch":"{child}"}}"#),
+        )
+        .await,
+    );
+    let sequences = page_sequences(&next);
+    assert!(
+        sequences.iter().all(|sequence| *sequence > cursor),
+        "the next read continues after {cursor}: {next}"
+    );
+    let again = page_of(
+        &tool_call(
+            &session,
+            "main",
+            &format!(r#"{{"action":"read","branch":"{child}","after":0,"limit":2}}"#),
+        )
+        .await,
+    );
+    assert!(
+        again.to_string().contains("check the parser"),
+        "after 0 re-reads a line from its start: {again}"
+    );
+    assert_eq!(page_sequences(&again), page_sequences(&zero));
+    let cursor = again["nextCursor"].as_u64().unwrap();
+    let next = page_of(
+        &tool_call(
+            &session,
+            "main",
+            &format!(r#"{{"action":"read","branch":"{child}"}}"#),
+        )
+        .await,
+    );
+    assert!(
+        page_sequences(&next)
+            .iter()
+            .all(|sequence| *sequence > cursor),
+        "the cursor follows the explicit read: {next}"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_read_cursor_survives_a_restore() {
+    let store = Arc::new(MemoryTimelineStore::default());
+    let probe = Arc::new(Probe::default());
+    let agent = MinimalHost::start(&builder_with_store(&probe, store.clone()))
+        .await
+        .unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let id = session.id().to_string();
+    let child = open_line(&session, "check the parser").await;
+    let page = page_of(
+        &tool_call(
+            &session,
+            &child,
+            r#"{"action":"read","branch":"main","limit":2}"#,
+        )
+        .await,
+    );
+    let cursor = page["nextCursor"].as_u64().unwrap();
+    soon(agent.close()).await.unwrap();
+    let agent = MinimalHost::start(&builder_with_store(&probe, store))
+        .await
+        .unwrap();
+    let session = soon(agent.restore_session(id)).await.unwrap();
+    until_branch(&session, &child).await;
+    soon(session.idle(&child)).await.unwrap();
+    let page = page_of(&tool_call(&session, &child, r#"{"action":"read","branch":"main"}"#).await);
+    let sequences = page_sequences(&page);
+    assert!(!sequences.is_empty(), "{page}");
+    assert!(
+        sequences.iter().all(|sequence| *sequence > cursor),
+        "the restored fold continues after {cursor}: {page}"
     );
     soon(agent.close()).await.unwrap();
 }
