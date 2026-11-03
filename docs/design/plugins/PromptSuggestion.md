@@ -180,6 +180,8 @@ The gates of `request`, in order. A refused request answers `{accepted: false, r
 | 7 | No request is in flight for this turn; if one is, it answers for both | `accepted: true` |
 | 8 | `main`'s committed head is not about to compact: `estimatedInputTokens` plus the instruction's tokens does not exceed `thresholdTokens` | `compaction_due` |
 
+Input that the running turn consumes, such as a steer, arrives before that turn's end and does not count as newer input: the turn that took it still offers.
+
 The unused counter: an offer shown and then cleared without an accept counts once; twenty in a row stop offering in that Session with `throttled`. The count resets on an accept and when the switch is turned on after being off, so turning suggestions off and on in `/settings` resumes them. The pause is Session-long on purpose: it stops spending requests on a user who does not use suggestions, and a user who ignores an offer is usually typing their own message.
 
 The context gate reads `main`'s usage through `ContextPreparation` exactly as `session.context.usage` reads it, before anything is built; the instruction's tokens are counted at four characters per token, since the part has no model counter. The suggestion never runs preparation and so never compacts: at a head where a real request would compact first, the suggestion is not sent, because it would be built on the prefix that request is about to replace. When the usage cannot be read (no compaction installed, no configuration yet), no compaction is imminent and the request proceeds as it is.
@@ -329,7 +331,7 @@ Transport flows (`crates/dim-app-server/tests/transport_flow/prompt_suggestion.r
 
 1. For each of `anthropic`, `openai-compatible` and `openai-responses`, a turn and a suggestion against a recording endpoint: the suggestion body's `system`, `tools` and every earlier message's text equal the turn's last request's, exactly the assistant message and the instruction follow, and `max_tokens`, reasoning, tool choice and service tier are equal. On `anthropic` the comparison ignores the automatic `cache_control` marker, which the converter places on the last user message and so moves to the instruction.
 2. The branch's events are the same before and after a suggestion, and the next real request is identical with and without one.
-3. One flow per gate: disabled, not the latest turn, no text in the last content, a non-root Session.
+3. One flow per gate: disabled, not the latest turn, no text in the last content, a non-root Session. A turn that took a steer still offers, and an input after a completed turn refuses that turn as `not_latest_turn`.
 4. One flow per cancellation: new input, a turn start, a newer request, dismissal, Session close. The deadline is not pinned by waiting 30 s.
 5. The validator: a multi-line reply, a leading `/`, `<none>`, a refusal and a repeat of the last user message each clear with `invalid`.
 6. The unused counter: 20 unused offers then `throttled`; an accept resets it, and so does turning the switch off and on.

@@ -31,6 +31,7 @@ struct Scripted {
     reply: Mutex<Reply>,
     main: Mutex<Reply>,
     hold: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    hold_main: Mutex<Option<Arc<tokio::sync::Notify>>>,
     cancellations: std::sync::atomic::AtomicUsize,
 }
 
@@ -41,6 +42,7 @@ impl Scripted {
             reply: Mutex::new(reply),
             main: Mutex::new(Reply::Text("done".into())),
             hold: Mutex::new(None),
+            hold_main: Mutex::new(None),
             cancellations: std::sync::atomic::AtomicUsize::new(0),
         })
     }
@@ -87,6 +89,33 @@ impl Scripted {
         *self.hold.lock().unwrap() = Some(gate.clone());
         gate
     }
+    /// Waits until the turn has made `count` model calls.
+    async fn wait_main_calls(&self, count: usize) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let calls = self
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|request| !is_suggestion(request))
+                    .count();
+                if calls >= count {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("the turn reaches the model");
+    }
+    /// Holds the next turn's model call, as [`Scripted::holds_next`] does for
+    /// a suggestion, until the gate is notified or the call is cancelled.
+    fn holds_next_main(&self) -> Arc<tokio::sync::Notify> {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        *self.hold_main.lock().unwrap() = Some(gate.clone());
+        gate
+    }
 }
 
 fn last_text(request: &ModelRequest) -> Option<String> {
@@ -120,7 +149,7 @@ impl ModelDriver for Scripted {
             let hold = if is_suggestion(&request) {
                 self.hold.lock().unwrap().take()
             } else {
-                None
+                self.hold_main.lock().unwrap().take()
             };
             if let Some(gate) = hold {
                 tokio::select! {
@@ -392,20 +421,26 @@ async fn create(fixture: &Fixture, interactive: bool) -> (Client, String) {
     (client, id)
 }
 
-async fn submit(client: &mut Client, id: &str, text: &str) {
-    assert_ok(
-        &client
-            .rpc(
-                "session.submit",
-                json!({"sessionId":id,"branchId":"main","text":text}),
-            )
-            .await,
-    );
+/// Sends `text` as input without waiting for the run it may start.
+async fn send(client: &mut Client, id: &str, text: &str, mode: Option<&str>) {
+    let mut params = json!({"sessionId":id,"branchId":"main","text":text});
+    if let Some(mode) = mode {
+        params["mode"] = json!(mode);
+    }
+    assert_ok(&client.rpc("session.submit", params).await);
+}
+
+async fn idle(client: &mut Client, id: &str) {
     assert_ok(
         &client
             .rpc("session.idle", json!({"sessionId":id,"branchId":"main"}))
             .await,
     );
+}
+
+async fn submit(client: &mut Client, id: &str, text: &str) {
+    send(client, id, text, None).await;
+    idle(client, id).await;
 }
 
 /// The `turnId` of the newest `turn/end` on `main`.
@@ -680,6 +715,46 @@ async fn the_gates_refuse_before_a_request_starts() {
         json!({"accepted": false, "reason": "not_root"})
     );
     assert!(fixture.model.suggestions().is_empty(), "no model call");
+    fixture.end().await;
+}
+
+/// A turn the user steered while it ran still offers, because a steer is the
+/// running turn's own input; input written after the turn's end refuses that
+/// completed turn as `not_latest_turn`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_steered_turn_offers_and_input_after_its_end_refuses() {
+    let fixture = serve_fixture(Reply::Text("run the tests".into())).await;
+    let (mut client, id) = create(&fixture, true).await;
+    configure(&mut client, json!({"enabled":true})).await;
+
+    fixture.model.holds_next_main();
+    send(&mut client, &id, "start the work", None).await;
+    fixture.model.wait_main_calls(1).await;
+    send(&mut client, &id, "and also this", Some("steer")).await;
+    // The steer replaces the held call: the turn asks the model again with
+    // the steer folded in, then completes.
+    fixture.model.wait_main_calls(2).await;
+    idle(&mut client, &id).await;
+    let turn = latest_turn(&mut client, &id).await;
+
+    assert_eq!(
+        suggest(&mut client, &id, &turn).await,
+        json!({"accepted": true}),
+        "the steer is the running turn's input"
+    );
+    let offer = suggestion_notice(&mut client, "offer").await;
+    assert_eq!(offer["params"]["data"]["text"], "run the tests");
+    respond(&mut client, &id, &turn, "accept").await;
+    suggestion_notice(&mut client, "cleared").await;
+
+    // An appended input starts no turn, so the completed turn stays the
+    // latest one; the input that followed its end refuses it.
+    send(&mut client, &id, "a note", Some("append")).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        suggest(&mut client, &id, &turn).await,
+        json!({"accepted": false, "reason": "not_latest_turn"})
+    );
     fixture.end().await;
 }
 

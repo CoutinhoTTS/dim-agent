@@ -180,6 +180,8 @@ session.notice {sessionId, source: "PromptSuggestion", kind: "cleared", data: {t
 | 7 | 该轮没有在途请求；若有，一个请求同时答复双方 | `accepted: true` |
 | 8 | `main` 已提交的头不会先压缩：`estimatedInputTokens` 加指令的 token 未超过 `thresholdTokens` | `compaction_due` |
 
+运行中的轮次消费的输入（例如 steer）在该轮结束之前到达，不算更新的输入：接受了它的轮次仍然提供建议。
+
 未采用计数：显示后被清除而未采用记一次；连续二十次后该 Session 停止提供并以 `throttled` 答复。计数在一次采用后清零，也在开关由关转为开时清零，因此在 `/settings` 中关闭再开启即可恢复。该暂停有意持续整个 Session：它阻止为不使用建议的用户继续花费请求，而忽略提示的用户通常是在自己输入消息。
 
 上下文门在任何构建之前，按 `session.context.usage` 的同一读法，通过 `ContextPreparation` 读取 `main` 的用量；指令的 token 按每 token 四字符估算，因为部件没有模型计数器。建议从不运行准备、因而从不压缩：在真实请求会先压缩的头上，建议不发送，因为它将建立在那个请求即将替换的前缀上。用量读不到时（没有装载压缩、尚无配置），不会有即将发生的压缩，请求照常进行。
@@ -329,7 +331,7 @@ metadata：turnId 与 extensions.requestId 加 "/suggestion"
 
 1. 对 `anthropic`、`openai-compatible`、`openai-responses` 三种协议各跑一轮与一次建议，记录端点收到：建议请求体的 `system`、`tools` 与每条更早消息的文本与该轮最后一次请求相等，其后恰好是助手消息与指令，且 `max_tokens`、推理、工具选择与 service tier 相等。`anthropic` 上比较忽略自动 `cache_control` 标记，因为转换器把它放在最后一条 user 消息上，因而会移到指令上。
 2. 分支的事件在建议前后相同，下一次真实请求有无建议都相同。
-3. 每个门一个流程：关闭、不是最新轮次、最后一次内容没有文本、非根 Session。
+3. 每个门一个流程：关闭、不是最新轮次、最后一次内容没有文本、非根 Session。接受了 steer 的轮次仍然提供；轮次结束后写入的输入会以 `not_latest_turn` 拒绝该轮。
 4. 每种取消一个流程：新输入、轮次开始、更新的请求、拒绝、Session 关闭。截止不用等待 30 秒来固定。
 5. 校验：多行回复、以 `/` 开头、`<none>`、拒绝语与重复上一条用户消息，各自以 `invalid` 清除。
 6. 未采用计数：连续 20 次未采用后 `throttled`；一次采用后重置，关闭再开启开关同样重置。

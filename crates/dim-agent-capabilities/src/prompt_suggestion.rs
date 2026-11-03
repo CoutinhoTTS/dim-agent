@@ -695,7 +695,10 @@ impl Part {
                     }
                 }
                 EventKind::InputMessage(_) | EventKind::InputApplied(_) => {
-                    if state.latest_turn.is_some() {
+                    // Input the running turn consumes, such as a steer,
+                    // arrives before the turn's end; only input after that
+                    // end means the user has moved on.
+                    if state.completed {
                         state.newer_input = true;
                     }
                     clear = state
