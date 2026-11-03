@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use crate::management::{self, editor};
 use crate::model::session::{
     Area, Command, CompactReply, ContextReading, DIM_OAUTH_ID, DraftPart, ManagementAction,
-    ManagementRefusal, ManagementRequest, ManagementResult, PromptSuggestionSetting, RenameReply,
-    SessionPort, SubmitMode, SwitchKind, Update,
+    ManagementRefusal, ManagementRequest, ManagementResult, RenameReply, SessionPort, SubmitMode,
+    SuggestionSetting, SwitchKind, Update,
 };
 #[cfg(test)]
 use crate::model::shell::Outcome as ShellOutcome;
@@ -994,7 +994,7 @@ struct App {
     suggestion: Option<Suggestion>,
     /// The `prompt-suggestion` switch as last read or written; none until a
     /// read answers.
-    suggestion_setting: Option<PromptSuggestionSetting>,
+    suggestion_setting: Option<SuggestionSetting>,
     /// A flip asked for before the switch was known: the read that answers
     /// it sends the flip.
     suggestion_flip: bool,
@@ -1485,8 +1485,8 @@ impl App {
         };
         self.host.send(Command::SaveSuggestionSetting {
             expected_revision: setting.revision,
-            enabled: !setting.enabled,
-            max_chars: setting.max_chars,
+            enabled: !setting.document.enabled,
+            max_chars: setting.document.max_chars,
         });
     }
 
@@ -2269,7 +2269,7 @@ impl App {
                 Ok(setting) => {
                     self.suggestion_setting = Some(setting.clone());
                     if let Some(Prompt::Settings(panel)) = &mut self.prompt {
-                        panel.set_prompt_suggestion(setting.enabled);
+                        panel.set_prompt_suggestion(setting.document.enabled);
                     }
                     if std::mem::take(&mut self.suggestion_flip) {
                         self.save_suggestion_flip();
@@ -2277,6 +2277,10 @@ impl App {
                 }
                 Err(error) => {
                     self.suggestion_flip = false;
+                    self.suggestion_setting = None;
+                    if let Some(Prompt::Settings(panel)) = &mut self.prompt {
+                        panel.set_prompt_suggestion_unavailable();
+                    }
                     self.set_notice(tf("Prompt suggestion: {error}", &[("error", &error)]));
                 }
             },
@@ -3484,7 +3488,7 @@ impl App {
             prompt_suggestion: self
                 .suggestion_setting
                 .as_ref()
-                .is_some_and(|setting| setting.enabled),
+                .map(|setting| setting.document.enabled),
             file_access: file_label(self.permission_policy.file_access()).to_owned(),
             approvals: tool_policy_label(&self.permission_policy).to_owned(),
         };
@@ -7659,10 +7663,12 @@ mod tests {
             sent.borrow().first(),
             Some(Command::ReadSuggestionSetting)
         ));
-        app.apply(Update::SuggestionSetting(Ok(PromptSuggestionSetting {
+        app.apply(Update::SuggestionSetting(Ok(SuggestionSetting {
             revision: "r1".into(),
-            enabled: false,
-            max_chars: 80,
+            document: dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettings {
+                enabled: false,
+                max_chars: 80,
+            },
         })));
         let row = |app: &mut App| {
             let live =
@@ -7691,12 +7697,43 @@ mod tests {
                 max_chars: 80,
             }) if expected_revision == "r1"
         ));
-        app.apply(Update::SuggestionSetting(Ok(PromptSuggestionSetting {
+        app.apply(Update::SuggestionSetting(Ok(SuggestionSetting {
             revision: "r2".into(),
-            enabled: true,
-            max_chars: 80,
+            document: dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettings {
+                enabled: true,
+                max_chars: 80,
+            },
         })));
         assert!(row(&mut app).starts_with("on"));
+    }
+
+    /// A read that fails shows that the source is unavailable rather than a
+    /// value the client invented.
+    #[test]
+    fn a_failed_suggestion_read_shows_no_value() {
+        let home = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent)),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        app.run_command("settings", "");
+        app.apply(Update::SuggestionSetting(Err(
+            "prompt suggestion settings: missing field `maxChars`".into(),
+        )));
+        let live = crate::ui::render::panel::strip_escapes(&app.frame((100, 40)).live.join("\n"));
+        let row = live
+            .lines()
+            .find(|line| line.contains("Prompt suggestion"))
+            .expect("the switch's row");
+        assert!(
+            row.contains(t("Not available")),
+            "the row shows a value: {row}"
+        );
     }
 
     #[test]

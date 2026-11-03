@@ -45,13 +45,13 @@ pub struct ExecutionSnapshot {
     pub network: bool,
 }
 
-/// The `prompt-suggestion` settings document: the switch and the length
-/// limit the Session's offers obey.
+/// The `prompt-suggestion` source as `settings.read` and `settings.update`
+/// answer it: the revision the next write expects, and the capability's own
+/// document, so the client keeps no second copy of the members.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PromptSuggestionSetting {
+pub struct SuggestionSetting {
     pub revision: String,
-    pub enabled: bool,
-    pub max_chars: u32,
+    pub document: dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettings,
 }
 
 /// The host's answer to `host.execution.backend`; the Execution panel shows
@@ -1101,7 +1101,7 @@ pub enum Update {
     /// switches usable.
     IsolationBackend(Result<SandboxBackend, String>),
     /// The `prompt-suggestion` switch, as last read or written.
-    SuggestionSetting(Result<PromptSuggestionSetting, String>),
+    SuggestionSetting(Result<SuggestionSetting, String>),
     /// A turn completed on `main`: the interface may ask for the next
     /// message when nothing else has its attention.
     TurnCompleted {

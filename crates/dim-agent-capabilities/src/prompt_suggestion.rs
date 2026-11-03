@@ -50,12 +50,13 @@ const UNUSED_LIMIT: u32 = 20;
 const REQUEST_ID: &str = "requestId";
 
 /// The `prompt-suggestion` document. The Settings boundary applies the
-/// defaults and the range before the part reads it.
+/// defaults and the range before the part reads it, so both members are
+/// present in every document either of them reads; a missing one is an error,
+/// never an invented value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PromptSuggestionSettings {
     pub enabled: bool,
-    #[serde(default = "default_max_chars")]
     pub max_chars: u32,
 }
 fn default_max_chars() -> u32 {

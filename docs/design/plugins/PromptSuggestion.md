@@ -264,7 +264,7 @@ The offer is muted text in the empty composer row in both layouts, truncated wit
 | Any edit | Hide the offer and send `respond dismiss` |
 | A new turn or input | The offer is cleared by the daemon's notice |
 
-`/settings` gains a `Prompt suggestion` switch backed by the daemon's `settings.read`/`settings.update` on the `prompt-suggestion` source; its state is the source's `enabled`. Every string the client adds exists in all ten locales. A request refused with `throttled` makes the client say once per Session that suggestions are paused and that turning the switch off and on resumes them; later refusals in the same Session stay quiet.
+`/settings` gains a `Prompt suggestion` switch backed by the daemon's `settings.read`/`settings.update` on the `prompt-suggestion` source; its state is the source's `enabled`. The client reads the document in the capability's own type: a missing or malformed document, or a missing member, is an error the row shows, never a default the client invents. Every string the client adds exists in all ten locales. A request refused with `throttled` makes the client say once per Session that suggestions are paused and that turning the switch off and on resumes them; later refusals in the same Session stay quiet.
 
 ## 12. Rule check
 

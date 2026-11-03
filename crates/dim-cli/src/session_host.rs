@@ -24,9 +24,9 @@ use crate::model::session::{
     ACCOUNT_NAMESPACE, Account, AccountDescriptor, Command, CompactReply, ContextReading,
     DIM_OAUTH_ID, DraftPart, EmptyProvider, EmptyReason, ExecutionSnapshot, ManagementReply,
     ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider, OauthEvent, OauthStart,
-    PluginItem, PluginReply, PromptSuggestionSetting, ProviderAction, ProviderEntry, RuntimeAction,
-    RuntimeItem, RuntimesError, SandboxBackend, SessionItem, SessionPort, SessionsScope,
-    SubagentModelPolicy, SwitchKind, Update, Usage, stored_title,
+    PluginItem, PluginReply, ProviderAction, ProviderEntry, RuntimeAction, RuntimeItem,
+    RuntimesError, SandboxBackend, SessionItem, SessionPort, SessionsScope, SubagentModelPolicy,
+    SuggestionSetting, SwitchKind, Update, Usage, stored_title,
 };
 use crate::model::view::{
     LineState, LineView, SideLine, TaskOutputState, TaskTarget, WorkflowInventory,
@@ -4472,27 +4472,22 @@ fn execution_snapshot(value: serde_json::Value) -> Result<ExecutionSnapshot, Str
     })
 }
 
-/// The `prompt-suggestion` document as `settings.read` and `settings.update`
-/// answer it; the Settings boundary fills the members it defaults.
-fn suggestion_setting(value: serde_json::Value) -> Result<PromptSuggestionSetting, String> {
+/// The `prompt-suggestion` source as `settings.read` and `settings.update`
+/// answer it, in the capability's own document type: a missing or malformed
+/// document, or a missing member, is an error rather than an invented value.
+fn suggestion_setting(value: serde_json::Value) -> Result<SuggestionSetting, String> {
     let revision = value
         .get("revision")
         .and_then(|value| value.as_str())
         .ok_or_else(|| "prompt suggestion settings response has no revision".to_string())?
         .to_owned();
-    let document = value.get("document").cloned().unwrap_or_else(|| json!({}));
-    Ok(PromptSuggestionSetting {
-        revision,
-        enabled: document
-            .get("enabled")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false),
-        max_chars: document
-            .get("maxChars")
-            .and_then(|value| value.as_u64())
-            .and_then(|value| u32::try_from(value).ok())
-            .unwrap_or(80),
-    })
+    let document = value
+        .get("document")
+        .cloned()
+        .ok_or_else(|| "prompt suggestion settings response has no document".to_string())?;
+    let document = serde_json::from_value(document)
+        .map_err(|error| format!("prompt suggestion settings: {error}"))?;
+    Ok(SuggestionSetting { revision, document })
 }
 
 /// The `runtime.*` calls a change makes, in order: the configuration write
@@ -4518,6 +4513,32 @@ fn runtime_calls(action: &RuntimeAction) -> Vec<(&'static str, serde_json::Value
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `prompt-suggestion` document is the capability's own type: a
+    /// missing or malformed document, or a missing member, is an error rather
+    /// than an invented value.
+    #[test]
+    fn a_malformed_suggestion_setting_is_an_error_not_a_default() {
+        for value in [
+            json!({"revision": "r1", "document": {"enabled": true}}),
+            json!({"revision": "r1", "document": {"maxChars": 80}}),
+            json!({"revision": "r1", "document": {"enabled": true, "maxChars": 80, "extra": 1}}),
+            json!({"revision": "r1", "document": "not an object"}),
+            json!({"revision": "r1"}),
+            json!({"document": {"enabled": true, "maxChars": 80}}),
+        ] {
+            assert!(
+                suggestion_setting(value.clone()).is_err(),
+                "{value} was accepted"
+            );
+        }
+        let setting =
+            suggestion_setting(json!({"revision":"r1","document":{"enabled":true,"maxChars":120}}))
+                .unwrap();
+        assert_eq!(setting.revision, "r1");
+        assert!(setting.document.enabled);
+        assert_eq!(setting.document.max_chars, 120);
+    }
 
     #[test]
     fn a_line_notice_reaches_its_own_transcript() {

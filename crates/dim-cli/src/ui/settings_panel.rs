@@ -42,7 +42,9 @@ pub struct Values {
     pub mouse: bool,
     pub notify: bool,
     pub acp_sessions: bool,
-    pub prompt_suggestion: bool,
+    /// `Some` is the switch as the daemon reported it; `None` is a read that
+    /// has not happened or failed, which the row shows rather than a value.
+    pub prompt_suggestion: Option<bool>,
     pub file_access: String,
     pub approvals: String,
 }
@@ -163,7 +165,10 @@ impl SettingsPanel {
             row(
                 Setting::PromptSuggestion,
                 "Prompt suggestion",
-                on_off(values.prompt_suggestion).to_owned(),
+                match values.prompt_suggestion {
+                    Some(on) => on_off(on).to_owned(),
+                    None => t("Not available").to_owned(),
+                },
             ),
             Item::heading(t("Permissions")),
             row(
@@ -196,6 +201,12 @@ impl SettingsPanel {
     pub fn set_prompt_suggestion(&mut self, enabled: bool) {
         let value = if enabled { t("on") } else { t("off") };
         self.list.set_detail(Setting::PromptSuggestion.id(), value);
+    }
+
+    /// Shows that the source could not be read, rather than a value.
+    pub fn set_prompt_suggestion_unavailable(&mut self) {
+        self.list
+            .set_detail(Setting::PromptSuggestion.id(), t("Not available"));
     }
 
     pub fn selected(&self) -> Setting {

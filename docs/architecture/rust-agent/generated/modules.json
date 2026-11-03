@@ -3590,6 +3590,7 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
+        "json",
         "vec"
       ]
     },
@@ -27607,6 +27608,13 @@
     },
     {
       "from": "dim_cli::model::session",
+      "to": "dim_agent_capabilities::prompt_suggestion",
+      "references": [
+        "path dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettings"
+      ]
+    },
+    {
+      "from": "dim_cli::model::session",
       "to": "dim_agent_types::content",
       "references": [
         "path dim_agent_types::ContentBlock"
@@ -29037,7 +29045,6 @@
         "path OauthStart",
         "path PluginItem",
         "path PluginReply",
-        "path PromptSuggestionSetting",
         "path ProviderAction",
         "path ProviderAction::Configure",
         "path ProviderAction::Create",
@@ -29058,6 +29065,7 @@
         "path SessionsScope::Repository",
         "path SessionsScope::Workspace",
         "path SubagentModelPolicy",
+        "path SuggestionSetting",
         "path SwitchKind",
         "path SwitchKind::Forked",
         "path SwitchKind::New",
@@ -29131,7 +29139,6 @@
         "use crate::model::session::OauthStart",
         "use crate::model::session::PluginItem",
         "use crate::model::session::PluginReply",
-        "use crate::model::session::PromptSuggestionSetting",
         "use crate::model::session::ProviderAction",
         "use crate::model::session::ProviderEntry",
         "use crate::model::session::RuntimeAction",
@@ -29142,6 +29149,7 @@
         "use crate::model::session::SessionPort",
         "use crate::model::session::SessionsScope",
         "use crate::model::session::SubagentModelPolicy",
+        "use crate::model::session::SuggestionSetting",
         "use crate::model::session::SwitchKind",
         "use crate::model::session::Update",
         "use crate::model::session::Usage",
@@ -29503,6 +29511,7 @@
       "to": "dim_cli::session_host",
       "references": [
         "path LineProjection::new",
+        "path suggestion_setting",
         "path transcript_mut"
       ]
     },
@@ -35788,7 +35797,6 @@
         "path ManagementResult::Detail",
         "path ManagementResult::Refused",
         "path ManagementResult::View",
-        "path PromptSuggestionSetting",
         "path RenameReply::Failed",
         "path RenameReply::Titled",
         "path RenameReply::Unsupported",
@@ -35796,6 +35804,7 @@
         "path SessionPort",
         "path SubmitMode::Queue",
         "path SubmitMode::Steer",
+        "path SuggestionSetting",
         "path SwitchKind",
         "path SwitchKind::Forked",
         "path SwitchKind::New",
@@ -35860,10 +35869,10 @@
         "use crate::model::session::ManagementRefusal",
         "use crate::model::session::ManagementRequest",
         "use crate::model::session::ManagementResult",
-        "use crate::model::session::PromptSuggestionSetting",
         "use crate::model::session::RenameReply",
         "use crate::model::session::SessionPort",
         "use crate::model::session::SubmitMode",
+        "use crate::model::session::SuggestionSetting",
         "use crate::model::session::SwitchKind",
         "use crate::model::session::Update"
       ]
@@ -36659,6 +36668,13 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_agent_capabilities::prompt_suggestion",
+      "references": [
+        "path dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettings"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::clipboard",
       "references": [
         "path crate::clipboard::Source::Text"
@@ -36719,8 +36735,8 @@
         "path ManagementResult::Applied",
         "path ManagementResult::Refused",
         "path ManagementResult::View",
-        "path PromptSuggestionSetting",
         "path SessionPort",
+        "path SuggestionSetting",
         "path SwitchKind::Forked",
         "path Update",
         "path Update::EffortChoices",
