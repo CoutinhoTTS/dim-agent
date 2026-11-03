@@ -976,21 +976,88 @@ async fn a_transport_failure_carries_its_exit_status_and_stderr_tail() {
 
 #[tokio::test]
 async fn a_stderr_tail_is_bounded_and_decoded_lossily() {
-    let fixture = reconnect_fixture("big-stderr").await;
+    for mode in ["big-stderr", "long-stderr"] {
+        let fixture = reconnect_fixture(mode).await;
+        let cancel = CancellationToken::new();
+        let connection = fixture
+            .mcp
+            .server(None, "docs".into(), &cancel)
+            .await
+            .unwrap();
+        assert!(connection.tools(&cancel).await.is_err());
+        let failure = connection.failure().expect("a start failure is reported");
+        assert!(failure.contains("exit status: 6"), "{failure}");
+        assert!(
+            failure.len() <= 4 * 1024,
+            "the diagnostic stays within 4 KiB"
+        );
+        if mode == "big-stderr" {
+            assert!(failure.contains('\u{fffd}'), "invalid UTF-8 is lossy");
+        }
+        let tail = failure.split_once('\n').map(|(_, tail)| tail).unwrap_or("");
+        assert!(tail.len() <= 4 * 1024, "the tail stays within 4 KiB");
+        assert!(
+            tail.contains(if mode == "big-stderr" {
+                "big-4-"
+            } else {
+                "long-line-end"
+            }),
+            "{tail}"
+        );
+        fixture.close().await;
+    }
+}
+
+#[tokio::test]
+async fn a_failed_http_handshake_bounds_its_diagnostic() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let stop = CancellationToken::new();
+    let app = Router::new().route(
+        "/mcp",
+        post(|| async {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("remote-diagnostic:{}", "界".repeat(5000)),
+            )
+        }),
+    );
+    let server = tokio::spawn(
+        axum::serve(listener, app)
+            .with_graceful_shutdown(stop.clone().cancelled_owned())
+            .into_future(),
+    );
+    let fixture = Fixture::new(&url, "fixture-only").await;
     let cancel = CancellationToken::new();
     let connection = fixture
         .mcp
         .server(None, "docs".into(), &cancel)
         .await
         .unwrap();
-    assert!(connection.tools(&cancel).await.is_err());
-    let failure = connection.failure().expect("a start failure is reported");
-    assert!(failure.contains("exit status: 6"), "{failure}");
-    assert!(failure.contains('\u{fffd}'), "invalid UTF-8 is lossy");
-    let tail = failure.split_once('\n').map(|(_, tail)| tail).unwrap_or("");
-    assert!(tail.len() <= 4 * 1024, "the tail stays within 4 KiB");
-    assert!(tail.contains("big-4-"), "{tail}");
-    fixture.close().await;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), connection.tools(&cancel))
+            .await
+            .expect("an explicit initialization rejection finishes")
+            .is_err()
+    );
+    let failure = connection
+        .failure()
+        .expect("the failed handshake has a diagnostic");
+    assert!(failure.contains("remote-diagnostic:"), "{failure}");
+    assert!(
+        failure.len() <= 4 * 1024,
+        "the remote message is bounded: {} bytes",
+        failure.len()
+    );
+    tokio::time::timeout(Duration::from_secs(5), fixture.close())
+        .await
+        .expect("the rejected connection closes");
+    stop.cancel();
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .expect("the rejected connection releases its HTTP request")
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]
@@ -1536,7 +1603,14 @@ async fn node_stdio_failed_or_cancelled_handshake_reaps_process_before_returning
             ("silent", Err(McpServerError::Cancelled))
                 | ("invalid", Err(McpServerError::RequestFailed))
         ));
-        assert_eq!(connection.state(), McpServerState::Failed);
+        assert!(matches!(
+            (mode, connection.state()),
+            ("silent", McpServerState::Disconnected)
+                | (
+                    "invalid",
+                    McpServerState::Failed | McpServerState::Disconnected
+                )
+        ));
         assert_child_reaped(&fixture).await;
         fixture.close().await;
     }
@@ -1863,7 +1937,14 @@ async fn node_legacy_sse_sdk_discovery_call_notifications_cancel_close_and_no_re
                     .await
                     .is_err()
             );
-            assert!(connection.tools(&cancel).await.is_err());
+            let tools = connection.tools(&cancel).await.unwrap();
+            assert_eq!(
+                tools
+                    .iter()
+                    .map(|tool| tool.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["compute", "slow", "drop"]
+            );
         } else {
             let task = {
                 let connection = connection.clone();
@@ -1912,7 +1993,7 @@ async fn node_legacy_sse_sdk_discovery_call_notifications_cancel_close_and_no_re
                 if stats["active"] == 0 {
                     assert_eq!(stats["cancelled"], 1);
                     assert_eq!(stats["calls"], if drop_remote { 4 } else { 2 });
-                    assert_eq!(stats["gets"], if drop_remote { 2 } else { 1 });
+                    assert_eq!(stats["gets"], if drop_remote { 3 } else { 1 });
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;

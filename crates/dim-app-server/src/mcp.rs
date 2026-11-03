@@ -192,7 +192,9 @@ impl McpProbe {
     ) -> Self {
         Self {
             reason: Some(reason),
-            message: Some(McpError::Server(error).to_string()),
+            message: Some(server::bounded_diagnostic(
+                McpError::Server(error).to_string(),
+            )),
             ..Self::base(ProbeStatus::Failed, latency)
         }
     }

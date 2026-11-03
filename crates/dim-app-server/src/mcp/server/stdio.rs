@@ -1,5 +1,5 @@
 //! Server-owned stdio only; client-local processes require a separate bridge.
-use super::{McpServerError, Result};
+use super::{DIAGNOSTIC_BYTES, McpServerError, Result};
 use futures_util::{SinkExt, StreamExt};
 use rmcp::{
     RoleClient,
@@ -31,7 +31,6 @@ struct StderrTail {
     bytes: usize,
 }
 const TAIL_LINES: usize = 20;
-const TAIL_BYTES: usize = 4 * 1024;
 impl StderrTail {
     fn push(&mut self, line: &[u8]) {
         let line = String::from_utf8_lossy(line);
@@ -40,8 +39,8 @@ impl StderrTail {
             return;
         }
         let mut line = line.to_owned();
-        if line.len() > TAIL_BYTES {
-            let mut cut = line.len() - TAIL_BYTES;
+        if line.len() >= DIAGNOSTIC_BYTES {
+            let mut cut = line.len() - (DIAGNOSTIC_BYTES - 1);
             while !line.is_char_boundary(cut) {
                 cut += 1;
             }
@@ -49,7 +48,7 @@ impl StderrTail {
         }
         self.bytes += line.len() + 1;
         self.lines.push_back(line);
-        while self.lines.len() > TAIL_LINES || self.bytes > TAIL_BYTES {
+        while self.lines.len() > TAIL_LINES || self.bytes > DIAGNOSTIC_BYTES {
             let Some(front) = self.lines.pop_front() else {
                 break;
             };
@@ -81,8 +80,8 @@ async fn drain_stderr(
                     let line: Vec<u8> = partial.drain(..=end).collect();
                     tail.lock().await.push(&line[..line.len() - 1]);
                 }
-                if partial.len() > TAIL_BYTES {
-                    let cut = partial.len() - TAIL_BYTES;
+                if partial.len() > DIAGNOSTIC_BYTES {
+                    let cut = partial.len() - DIAGNOSTIC_BYTES;
                     partial.drain(..cut);
                 }
             }
@@ -218,7 +217,9 @@ impl Transport<RoleClient> for StdioTransport {
                 let message = if tail.is_empty() {
                     status
                 } else {
-                    format!("{status}\n{tail}")
+                    let budget = DIAGNOSTIC_BYTES.saturating_sub(status.len() + 1);
+                    let start = tail.ceil_char_boundary(tail.len().saturating_sub(budget));
+                    format!("{status}\n{}", &tail[start..])
                 };
                 *self.failure.lock().unwrap() = Some(message);
                 None

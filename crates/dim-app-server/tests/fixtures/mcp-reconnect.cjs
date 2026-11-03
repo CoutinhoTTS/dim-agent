@@ -25,11 +25,15 @@ if (mode === 'always-exit') {
   process.exit(5);
 }
 
-if (mode === 'big-stderr') {
-  for (let index = 1; index <= 4; index += 1) {
-    stderr('big-' + index + '-' + 'x'.repeat(3000));
+if (mode === 'big-stderr' || mode === 'long-stderr') {
+  if (mode === 'long-stderr') {
+    stderr('界'.repeat(5000) + 'long-line-end');
+  } else {
+    for (let index = 1; index <= 4; index += 1) {
+      stderr('big-' + index + '-' + 'x'.repeat(3000));
+    }
+    process.stderr.write(Buffer.from([0xff, 0xfe, 0x0a]));
   }
-  process.stderr.write(Buffer.from([0xff, 0xfe, 0x0a]));
   setTimeout(() => process.exit(6), 100);
   setInterval(() => {}, 1000);
   return;

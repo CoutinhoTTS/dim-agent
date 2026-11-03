@@ -3003,6 +3003,14 @@ impl TimelineStore for PageReads {
     ) -> BoxFuture<'a, Result<Option<TimelineTrace>>> {
         self.memory.trace(key, sequence)
     }
+    fn query<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        query: &'a TimelineQuery,
+        through: u64,
+    ) -> BoxFuture<'a, Result<TimelineQueryPage>> {
+        self.memory.query(key, query, through)
+    }
     fn save_snapshot<'a>(
         &'a self,
         key: &'a TimelineKey,

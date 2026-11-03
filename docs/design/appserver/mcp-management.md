@@ -185,6 +185,9 @@ that failed.
   such a server as `disconnected`, with the reason as its `message`. A failed start is `failed`
   only while its cooldown holds; the cooldown moves it to `disconnected`, and discovery starts
   the server again after each cooldown. The reason stays until a connection succeeds.
+  Diagnostic text is bounded to 4 KiB on UTF-8 boundaries. A stdio failure may include
+  up to 20 recent stderr lines within that bound; server-emitted text may contain
+  secrets and is exposed only to management/status clients, never model requests or logs.
 - A remote server that answers HTTP 404 to a request carrying its session id ended that session
   without processing the request: the connection starts a new session and the request is
   replayed once. A second 404 in a row fails the call. The replacement is a new connection

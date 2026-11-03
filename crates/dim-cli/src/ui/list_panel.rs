@@ -221,11 +221,14 @@ impl ListPanel {
 
     /// The id of the selected row.
     pub fn selected_id(&self) -> Option<String> {
+        self.selected_item().map(|item| item.id.clone())
+    }
+
+    pub fn selected_item(&self) -> Option<&Item> {
         self.shown()
             .into_iter()
             .filter(|i| !i.heading)
             .nth(self.selected)
-            .map(|i| i.id.clone())
     }
 
     pub fn set_items(&mut self, items: Result<Vec<Item>, String>, preselect: Option<&str>) {

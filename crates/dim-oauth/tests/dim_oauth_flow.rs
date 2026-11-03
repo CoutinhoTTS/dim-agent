@@ -5,7 +5,10 @@
 #[path = "fixtures/dim_oauth.rs"]
 mod oauth;
 
-use dim_agent_capabilities::{file_storage::FileStoragePlugin, host::ModelProtocol};
+use dim_agent_capabilities::{
+    file_storage::{FileStorage, FileStoragePlugin},
+    host::ModelProtocol,
+};
 use dim_agent_runtime::Names;
 use dim_app_server::managed_provider::{
     AccountSnapshot, ManagedProviderBinding, ManagedProviders, ManagedProvidersPlugin,
@@ -21,7 +24,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::{Arc, OnceLock, atomic::Ordering},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -768,6 +771,96 @@ async fn browser_login_checks_the_callback_and_quiesce_stops_admission() {
     providers.quiesce().await;
     let stopped = providers.status(PROVIDER, &cancel()).await.err().unwrap();
     assert_eq!(stopped.code, "account_provider_unavailable");
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A fresh grant is read without the account lease: it answers while another
+/// holder owns `auth.json`, and leaves that holder's marker untouched. A
+/// grant inside the freshness window still takes the lease, so two processes
+/// rotate it once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fresh_grant_is_read_without_the_account_lease() {
+    let fixture = oauth::start().await;
+    let home = home();
+    let first = process(&home).await;
+    let second = process(&home).await;
+    let account = login(&first.providers, &fixture.base).await;
+    let files = second.root.get::<FileStorage>().unwrap();
+    let path = files.path(0, "auth.json").unwrap();
+    let held = files.lock(&path, &cancel()).await.unwrap();
+    let marker = home.join("auth.json.lock");
+    let holder = std::fs::read(&marker).unwrap();
+    assert!(!holder.is_empty());
+    for providers in [&first.providers, &second.providers] {
+        let lease = tokio::time::timeout(
+            Duration::from_secs(5),
+            providers.credential(PROVIDER, "fixture-model", &cancel()),
+        )
+        .await
+        .expect("a fresh grant does not wait for the account lease")
+        .unwrap();
+        assert_eq!(lease.bearer, "access-0");
+        assert_eq!(lease.account, account);
+    }
+    assert_eq!(std::fs::read(&marker).unwrap(), holder);
+    drop(held);
+    assert!(!marker.exists());
+
+    first.providers.logout(PROVIDER, &cancel()).await.unwrap();
+    *fixture.service.expires_in.lock().unwrap() = Some(json!(0));
+    login(&first.providers, &fixture.base).await;
+    let token = cancel();
+    let (a, b) = tokio::join!(
+        first
+            .providers
+            .credential(PROVIDER, "fixture-model", &token),
+        second
+            .providers
+            .credential(PROVIDER, "fixture-model", &token),
+    );
+    let (a, b) = (a.unwrap(), b.unwrap());
+    assert_eq!(fixture.service.refreshes.load(Ordering::SeqCst), 1);
+    assert_eq!(a.bearer, "access-2");
+    assert_eq!(b.bearer, "access-2");
+    assert_eq!(auth(&home)["nextApiOauth"]["refresh"], "refresh-2");
+    drop((a, b));
+    first.root.shutdown().await.unwrap();
+    second.root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// Timing harness for #604: a fresh-grant lookup must not wait for the
+/// account lease. Run with `cargo test -p dim-oauth --test dim_oauth_flow
+/// fresh_credential_lookup_benchmark -- --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "timing harness"]
+async fn fresh_credential_lookup_benchmark() {
+    const LOOKUPS: usize = 500;
+    let fixture = oauth::start().await;
+    let home = home();
+    let Process { root, providers } = process(&home).await;
+    login(&providers, &fixture.base).await;
+    for _ in 0..10 {
+        drop(
+            providers
+                .credential(PROVIDER, "fixture-model", &cancel())
+                .await
+                .unwrap(),
+        );
+    }
+    let started = Instant::now();
+    for _ in 0..LOOKUPS {
+        drop(
+            providers
+                .credential(PROVIDER, "fixture-model", &cancel())
+                .await
+                .unwrap(),
+        );
+    }
+    let per_lookup = started.elapsed().as_secs_f64() * 1e6 / LOOKUPS as f64;
+    eprintln!("fresh credential lookup: {per_lookup:.1} us over {LOOKUPS} lookups");
+    assert_eq!(fixture.service.refreshes.load(Ordering::SeqCst), 0);
     root.shutdown().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }

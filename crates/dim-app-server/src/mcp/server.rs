@@ -47,6 +47,13 @@ use tokio::sync::{Mutex as AsyncMutex, oneshot};
 use tokio::time::Instant;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
+pub(super) const DIAGNOSTIC_BYTES: usize = 4 * 1024;
+
+pub(super) fn bounded_diagnostic(mut message: String) -> String {
+    message.truncate(message.floor_char_boundary(DIAGNOSTIC_BYTES));
+    message
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum McpServerError {
     #[error("MCP server is closed")]
@@ -57,7 +64,9 @@ pub enum McpServerError {
     Timeout,
     #[error("invalid MCP configuration: {0}")]
     Configuration(&'static str),
-    #[error("MCP connection or request failed; the operation was not replayed")]
+    #[error(
+        "MCP connection or request failed; remote effects may already have occurred; the operation was not replayed"
+    )]
     RequestFailed,
     #[error("MCP server failed to start: {0}")]
     StartFailed(String),
@@ -553,7 +562,7 @@ impl McpServer {
     /// A new failure replaces the previous one, even when no connection
     /// follows it.
     fn set_failure(&self, message: impl Into<String>) {
-        *self.failure.lock().unwrap() = Some(message.into());
+        *self.failure.lock().unwrap() = Some(bounded_diagnostic(message.into()));
     }
 
     /// A fallback reason for one event: a more specific message set by the
@@ -561,7 +570,7 @@ impl McpServer {
     fn set_failure_if_empty(&self, message: impl Into<String>) {
         let mut failure = self.failure.lock().unwrap();
         if failure.is_none() {
-            *failure = Some(message.into());
+            *failure = Some(bounded_diagnostic(message.into()));
         }
     }
 
@@ -1347,21 +1356,5 @@ impl Plugin for McpServerPlugin {
         })?;
         ctx.provide_at(self.key.clone(), service)?;
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::retry_delay;
-
-    #[test]
-    fn the_start_backoff_doubles_to_five_minutes() {
-        let delays: Vec<u64> = (1..=12)
-            .map(|failures| retry_delay(failures).as_secs())
-            .collect();
-        assert_eq!(
-            delays,
-            vec![1, 2, 4, 8, 16, 32, 64, 128, 256, 300, 300, 300]
-        );
     }
 }

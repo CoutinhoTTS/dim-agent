@@ -876,12 +876,15 @@ fn tui_usage_includes_account_quota_only_for_dim_oauth_models() {
             });
             let mut terminal = Terminal::launch_tui(command);
             terminal.until(&format!("{provider} / model"));
-            terminal.write(b"/usage\r");
+            terminal.write(b"/usa");
+            terminal.until("show the context window usage");
+            terminal.write(b"ge\r");
             terminal.until(if scenario == "unlimited" {
                 "This daemon does not track context usage"
             } else {
                 "Context: 1,849 / 256,000 tokens"
             });
+            let report_start = terminal.consumed;
             if scenario == "quota" {
                 for expected in [
                     "DimAgent OAuth",
@@ -906,13 +909,14 @@ fn tui_usage_includes_account_quota_only_for_dim_oauth_models() {
                 !terminal.transcript.contains("injected-title"),
                 "{scenario}"
             );
+            let report = &terminal.transcript[report_start..];
             if scenario == "unlimited" {
-                assert!(!terminal.transcript.contains("window"));
-                assert!(!terminal.transcript.contains("Web search"));
+                assert!(!report.contains("window"), "{report}");
+                assert!(!report.contains("Web search"), "{report}");
             }
             if provider == "test" {
-                assert!(!terminal.transcript.contains("DimAgent OAuth"));
-                assert!(!terminal.transcript.contains("Credits"));
+                assert!(!report.contains("DimAgent OAuth"), "{report}");
+                assert!(!report.contains("Credits"), "{report}");
             }
         }
     }

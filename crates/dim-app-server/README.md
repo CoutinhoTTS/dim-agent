@@ -193,8 +193,11 @@ blindly. Use these methods rather than editing imported user files. `skills.set_
 persists in SQLite; legacy `skills.json` is only an import source. Private server configuration
 stays inside its owning service and is excluded from catalog replies, notifications and diagnostics.
 
-A stdio server's stderr is discarded: arbitrary server output may contain secrets, so it never
-reaches tracing or the daemon log.
+A stdio server's stderr is drained, retaining at most 20 lines within 4 KiB for
+connection diagnostics. Failure messages, including remote errors, are bounded
+to 4 KiB on UTF-8 boundaries. Status and inspection replies may expose text the
+server wrote, including secrets; it never enters model requests, tracing or the
+daemon log.
 
 ### MCP tool declarations
 

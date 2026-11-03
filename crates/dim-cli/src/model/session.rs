@@ -1062,6 +1062,7 @@ pub enum Update {
         result: Result<(), String>,
     },
     Models(Result<ModelList, String>),
+    EffortChoices(Result<crate::configure::EffortChoices, String>),
     /// A catalog `models()` asked `provider.refresh` to fill holds models
     /// now: a picker that is still open reads the list again.
     ModelsRefilled,

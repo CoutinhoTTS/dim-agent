@@ -150,6 +150,17 @@ impl dim_agent_runtime::TimelineStore for CountingTimelineStore {
     > {
         self.memory.latest_snapshot(key, through, interpreter)
     }
+    fn query<'a>(
+        &'a self,
+        key: &'a dim_agent_runtime::TimelineKey,
+        query: &'a dim_agent_runtime::TimelineQuery,
+        through: u64,
+    ) -> dim_agent_runtime::BoxFuture<
+        'a,
+        dim_agent_runtime::Result<dim_agent_runtime::TimelineQueryPage>,
+    > {
+        self.memory.query(key, query, through)
+    }
 }
 
 async fn launch_team() -> (RunningServer, Agent) {

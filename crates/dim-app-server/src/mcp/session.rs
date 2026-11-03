@@ -807,9 +807,7 @@ async fn wait_for_attempt(
                 if result.is_err() {
                     return Err(McpError::Unavailable);
                 }
-                if after_cooldown {
-                    return Ok(());
-                }
+                return Ok(());
             }
             result = changed.changed() => {
                 if result.is_err() {

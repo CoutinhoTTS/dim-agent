@@ -2344,6 +2344,18 @@ async fn a_cooldown_error_reaches_the_tool_result_without_stderr() {
         !messages.contains("restart-failure"),
         "no stderr tail enters a model request"
     );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while std::fs::read_to_string(env.home.join("starts"))
+            .unwrap()
+            .lines()
+            .count()
+            < 3
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("discovery retries a failed start made by a tool call after its cooldown");
     env.close().await;
 }
 

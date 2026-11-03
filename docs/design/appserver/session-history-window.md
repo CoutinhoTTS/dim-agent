@@ -280,8 +280,8 @@ It is not a format step because it carries no data and no decode rule. Every
 supported format's rows produce the same index, it is fully derivable from
 `timeline_events`, and a store with or without it decodes to the same events.
 The gate in `SqliteStorage::open` ([sqlite.rs:244](../../../crates/dim-app-server/src/storage/sqlite.rs#L244))
-still compares the exact schema, except for this one name: `schema()` omits it,
-so a store of the current format without the index is recognised, upgraded if
+still compares the exact schema, except for the derived names: `schema()` omits
+them, so a store of the current format without an index is recognised, upgraded if
 needed, and gets the index in the same transaction; a store with the index is
 recognised the same way. Any other unexpected object still rejects the store.
 
