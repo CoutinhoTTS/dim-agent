@@ -34,13 +34,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Timeline" => "Linimasa",
         "Enter actions · Esc close" => "Enter tindakan · Esc tutup",
         "Timeline actions" => "Tindakan linimasa",
-        "↑↓ select · Enter confirm · Esc back" => "↑↓ pilih · Enter konfirmasi · Esc kembali",
         "↑↓ select · Enter confirm · Esc cancel" => "↑↓ pilih · Enter konfirmasi · Esc batal",
         "Jump to message" => "Lompat ke pesan",
         "Edit as a new draft" => "Ubah sebagai draf baru",
         "Quote message" => "Kutip pesan",
         "Create branch from here" => "Buat cabang dari sini",
-        "Fork session from here" => "Fork sesi dari sini",
         "Before this message" => "Sebelum pesan ini",
         "Fork session" => "Fork sesi",
         "1. Create fork" => "1. Buat fork",
@@ -56,8 +54,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "follow, talk to and end this session's lines" => {
             "ikuti, ajak bicara, dan akhiri jalur sesi ini"
         }
-        "End line" => "Akhiri jalur",
-        "y/N" => "y/N",
+        "End line {id}?" => "Akhiri jalur {id}?",
+        "y end it" => "y akhiri",
+        "n cancel" => "n batal",
         "main is the session itself; a line ends, main does not" => {
             "main adalah sesi itu sendiri; jalur bisa berakhir, main tidak"
         }
@@ -402,7 +401,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
 
         // sessions_panel.rs
         "Sessions" => "Sesi",
-        "Enter open · Ctrl+R refresh · Esc close" => "Enter buka · Ctrl+R refresh · Esc tutup",
+        "Sessions · This workspace" => "Sesi · Workspace ini",
+        "Sessions · This repository" => "Sesi · Repositori ini",
+        "Sessions · All workspaces" => "Sesi · Semua workspace",
+        "No saved sessions in this workspace. Ctrl+S shows more." => {
+            "Belum ada sesi tersimpan di workspace ini. Ctrl+S menampilkan lebih banyak."
+        }
+        "Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close" => {
+            "Enter buka · Ctrl+S cakupan · Ctrl+R refresh · Esc tutup"
+        }
         "Loading sessions..." => "Memuat sesi…",
         "No saved sessions yet." => "Belum ada sesi tersimpan.",
         "No matching sessions." => "Tak ada sesi cocok.",

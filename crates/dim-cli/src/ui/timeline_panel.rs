@@ -171,7 +171,7 @@ impl TimelinePanel {
             Event::Pick(_) => {
                 let mut actions = ListPanel::new(
                     "Timeline actions",
-                    t("↑↓ select · Enter confirm · Esc back"),
+                    format!("↑↓/Enter · {}", t("Esc back")),
                     "",
                     "",
                     "",
@@ -184,7 +184,7 @@ impl TimelinePanel {
                         Item::new("edit", format!("2. {}", t("Edit as a new draft")), ""),
                         Item::new("quote", format!("3. {}", t("Quote message")), ""),
                         Item::new("branch", format!("4. {}", t("Create branch from here")), ""),
-                        Item::new("fork", format!("5. {}", t("Fork session from here")), ""),
+                        Item::new("fork", format!("5. {}", t("Fork session")), ""),
                     ]),
                     Some("jump"),
                 );

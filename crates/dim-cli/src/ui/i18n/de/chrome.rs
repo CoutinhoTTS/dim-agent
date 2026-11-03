@@ -34,7 +34,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Timeline" => "Zeitleiste",
         "Enter actions · Esc close" => "Enter Aktionen · Esc schließen",
         "Timeline actions" => "Zeitleistenaktionen",
-        "↑↓ select · Enter confirm · Esc back" => "↑↓ wählen · Enter bestätigen · Esc zurück",
         "↑↓ select · Enter confirm · Esc cancel" => {
             "↑↓ wählen · Enter bestätigen · Esc abbrechen"
         }
@@ -42,7 +41,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Edit as a new draft" => "Als neuen Entwurf bearbeiten",
         "Quote message" => "Nachricht zitieren",
         "Create branch from here" => "Zweig ab hier erstellen",
-        "Fork session from here" => "Sitzung ab hier forken",
         "Before this message" => "Vor dieser Nachricht",
         "Fork session" => "Sitzung forken",
         "1. Create fork" => "1. Fork erstellen",
@@ -58,8 +56,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "follow, talk to and end this session's lines" => {
             "Zweige dieser Sitzung verfolgen, ansprechen und beenden"
         }
-        "End line" => "Zweig beenden",
-        "y/N" => "y/N",
+        "End line {id}?" => "Zweig {id} beenden?",
+        "y end it" => "y beenden",
+        "n cancel" => "n abbrechen",
         "main is the session itself; a line ends, main does not" => {
             "main ist die Sitzung selbst; ein Zweig endet, main nicht"
         }
@@ -412,8 +411,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
 
         // sessions_panel.rs
         "Sessions" => "Sessions",
-        "Enter open · Ctrl+R refresh · Esc close" => {
-            "Enter öffnen · Ctrl+R aktualisieren · Esc schließen"
+        "Sessions · This workspace" => "Sessions · Dieser Arbeitsbereich",
+        "Sessions · This repository" => "Sessions · Dieses Repository",
+        "Sessions · All workspaces" => "Sessions · Alle Arbeitsbereiche",
+        "No saved sessions in this workspace. Ctrl+S shows more." => {
+            "Noch keine gespeicherten Sessions in diesem Arbeitsbereich. Ctrl+S zeigt mehr."
+        }
+        "Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close" => {
+            "Enter öffnen · Ctrl+S Bereich · Ctrl+R aktualisieren · Esc schließen"
         }
         "Loading sessions..." => "Lade Sessions…",
         "No saved sessions yet." => "Noch keine gespeicherten Sessions.",

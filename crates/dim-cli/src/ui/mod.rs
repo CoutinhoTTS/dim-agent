@@ -17,6 +17,24 @@ pub struct Env {
     pub fullscreen: bool,
 }
 
+/// A path with the user's home directory written `~`.
+pub(crate) fn tilde(path: &str) -> String {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
+    let Some(home) = home else {
+        return path.to_owned();
+    };
+    let home = home.to_string_lossy();
+    if home.is_empty() {
+        return path.to_owned();
+    }
+    match path.strip_prefix(home.as_ref()) {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') || rest.starts_with('\\') => {
+            format!("~{rest}")
+        }
+        _ => path.to_owned(),
+    }
+}
+
 pub mod approvals_panel;
 mod atomic;
 pub mod commands;

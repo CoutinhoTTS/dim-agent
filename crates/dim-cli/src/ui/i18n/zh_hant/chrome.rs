@@ -28,13 +28,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Timeline" => "時間線",
         "Enter actions · Esc close" => "Enter 操作 · Esc 關閉",
         "Timeline actions" => "時間線操作",
-        "↑↓ select · Enter confirm · Esc back" => "↑↓ 選擇 · Enter 確認 · Esc 返回",
         "↑↓ select · Enter confirm · Esc cancel" => "↑↓ 選擇 · Enter 確認 · Esc 取消",
         "Jump to message" => "跳轉到訊息",
         "Edit as a new draft" => "編輯為新草稿",
         "Quote message" => "引用訊息",
         "Create branch from here" => "從這裡建立分支",
-        "Fork session from here" => "從這裡派生會話",
         "Before this message" => "在這則訊息之前",
         "Fork session" => "派生會話",
         "1. Create fork" => "1. 建立派生會話",
@@ -48,8 +46,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "較早的 {count} 則訊息 · Enter 或點擊載入"
         }
         "follow, talk to and end this session's lines" => "查看、對話並結束此工作階段的線",
-        "End line" => "結束線",
-        "y/N" => "y/N",
+        "End line {id}?" => "結束線 {id}？",
+        "y end it" => "y 結束",
+        "n cancel" => "n 取消",
         "main is the session itself; a line ends, main does not" => {
             "main 就是工作階段本身；線可以結束，main 不能"
         }
@@ -356,7 +355,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
 
         // sessions_panel.rs
         "Sessions" => "工作階段",
-        "Enter open · Ctrl+R refresh · Esc close" => "Enter 開啟 · Ctrl+R 重新整理 · Esc 關閉",
+        "Sessions · This workspace" => "工作階段 · 目前工作區",
+        "Sessions · This repository" => "工作階段 · 目前儲存庫",
+        "Sessions · All workspaces" => "工作階段 · 所有工作區",
+        "No saved sessions in this workspace. Ctrl+S shows more." => {
+            "目前工作區沒有已儲存的工作階段。Ctrl+S 顯示更多。"
+        }
+        "Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close" => {
+            "Enter 開啟 · Ctrl+S 切換範圍 · Ctrl+R 重新整理 · Esc 關閉"
+        }
         "Loading sessions..." => "正在載入工作階段…",
         "No saved sessions yet." => "尚無已儲存的工作階段。",
         "No matching sessions." => "無相符工作階段。",

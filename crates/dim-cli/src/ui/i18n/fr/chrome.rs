@@ -34,7 +34,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Timeline" => "Chronologie",
         "Enter actions · Esc close" => "Enter actions · Esc fermer",
         "Timeline actions" => "Actions de chronologie",
-        "↑↓ select · Enter confirm · Esc back" => "↑↓ choisir · Enter confirmer · Esc retour",
         "↑↓ select · Enter confirm · Esc cancel" => {
             "↑↓ choisir · Enter confirmer · Esc annuler"
         }
@@ -42,7 +41,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Edit as a new draft" => "Modifier comme nouveau brouillon",
         "Quote message" => "Citer le message",
         "Create branch from here" => "Créer une branche ici",
-        "Fork session from here" => "Forker la session ici",
         "Before this message" => "Avant ce message",
         "Fork session" => "Forker la session",
         "1. Create fork" => "1. Créer le fork",
@@ -58,8 +56,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "follow, talk to and end this session's lines" => {
             "suivre, dialoguer et terminer les lignes de cette session"
         }
-        "End line" => "Terminer la ligne",
-        "y/N" => "y/N",
+        "End line {id}?" => "Terminer la ligne {id} ?",
+        "y end it" => "y terminer",
+        "n cancel" => "n annuler",
         "main is the session itself; a line ends, main does not" => {
             "main est la session elle-même ; une ligne se termine, pas main"
         }
@@ -406,8 +405,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
 
         // sessions_panel.rs
         "Sessions" => "Sessions",
-        "Enter open · Ctrl+R refresh · Esc close" => {
-            "Enter ouvrir · Ctrl+R actualiser · Esc fermer"
+        "Sessions · This workspace" => "Sessions · Cet espace de travail",
+        "Sessions · This repository" => "Sessions · Ce dépôt",
+        "Sessions · All workspaces" => "Sessions · Tous les espaces de travail",
+        "No saved sessions in this workspace. Ctrl+S shows more." => {
+            "Aucune session enregistrée dans cet espace de travail. Ctrl+S en affiche d'autres."
+        }
+        "Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close" => {
+            "Enter ouvrir · Ctrl+S portée · Ctrl+R actualiser · Esc fermer"
         }
         "Loading sessions..." => "Chargement…",
         "No saved sessions yet." => "Aucune session enregistrée.",

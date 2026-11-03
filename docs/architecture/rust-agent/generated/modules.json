@@ -3565,7 +3565,10 @@
       "crate": "dim_cli",
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/ui/mod.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "cfg",
+        "format"
+      ]
     },
     {
       "id": "dim_cli::ui::approvals_panel",
@@ -4669,7 +4672,8 @@
       "parent": "dim_cli::ui",
       "file": "crates/dim-cli/src/ui/sessions_panel.rs",
       "unexpandedMacros": [
-        "format"
+        "format",
+        "matches"
       ]
     },
     {
@@ -5167,6 +5171,7 @@
         "matches",
         "panic",
         "serde_json::json",
+        "unreachable",
         "vec"
       ]
     },
@@ -10896,6 +10901,14 @@
     },
     {
       "from": "dim_agent_capabilities::recall",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path BranchPage",
+        "use dim_agent_runtime::BranchPage"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::recall",
       "to": "dim_agent_types",
       "references": [
         "path JsonObject",
@@ -10926,6 +10939,7 @@
         "path CollaborationOutcome::Cancelled",
         "path CollaborationOutcome::Completed",
         "path CollaborationOutcome::Failed",
+        "path EventKind",
         "path EventKind::ApprovalCancelled",
         "path EventKind::ApprovalRequest",
         "path EventKind::ApprovalRespond",
@@ -10994,6 +11008,7 @@
         "path ToolResult::error",
         "path ToolResult::text",
         "path ToolSource::Extension",
+        "path kind",
         "path tool"
       ]
     },
@@ -11003,6 +11018,8 @@
       "references": [
         "path Fold",
         "path Fold::new",
+        "path super::Arguments::parse",
+        "path super::FOLDS",
         "use super::Narrative"
       ]
     },
@@ -11027,6 +11044,7 @@
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolResult",
+        "path ToolResult::error",
         "use dim_agent_types::ToolResult"
       ]
     },
@@ -14432,6 +14450,14 @@
     },
     {
       "from": "dim_agent_runtime::branch",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path BranchCursor",
+        "path BranchPage"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::branch",
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
@@ -14634,6 +14660,8 @@
       "from": "dim_agent_runtime::core::timeline",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
+        "path BranchCursor",
+        "path BranchPage",
         "path PolicyFacts",
         "path PolicyOrder",
         "path PolicyOrderEvent",
@@ -14641,6 +14669,8 @@
         "path StoredEvent",
         "path TimelineKey",
         "path TimelineStore",
+        "use crate::BranchCursor",
+        "use crate::BranchPage",
         "use crate::PolicyFacts",
         "use crate::PolicyOrder",
         "use crate::PolicyOrderEvent",
@@ -28424,6 +28454,7 @@
         "path Command::Compact",
         "path Command::Configure",
         "path Command::EndLine",
+        "path Command::FindRepository",
         "path Command::FocusLine",
         "path Command::Fork",
         "path Command::Goal",
@@ -28520,6 +28551,10 @@
         "path SandboxBackend",
         "path SessionItem",
         "path SessionPort",
+        "path SessionsScope",
+        "path SessionsScope::All",
+        "path SessionsScope::Repository",
+        "path SessionsScope::Workspace",
         "path SubagentModelPolicy",
         "path SwitchKind",
         "path SwitchKind::Forked",
@@ -28550,6 +28585,7 @@
         "path Update::Ready",
         "path Update::Renamed",
         "path Update::Report",
+        "path Update::RepositoryWorkspaces",
         "path Update::Runtimes",
         "path Update::Sessions",
         "path Update::ShellDone",
@@ -28595,6 +28631,7 @@
         "use crate::model::session::SandboxBackend",
         "use crate::model::session::SessionItem",
         "use crate::model::session::SessionPort",
+        "use crate::model::session::SessionsScope",
         "use crate::model::session::SubagentModelPolicy",
         "use crate::model::session::SwitchKind",
         "use crate::model::session::Update",
@@ -30999,14 +31036,6 @@
     },
     {
       "from": "dim_cli::ui::lines_panel",
-      "to": "dim_cli::ui::theme::ansi",
-      "references": [
-        "path fg",
-        "use crate::ui::theme::ansi::fg"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::lines_panel",
       "to": "dim_cli::ui::theme::palette",
       "references": [
         "path Palette",
@@ -31193,6 +31222,14 @@
     },
     {
       "from": "dim_cli::ui::list_panel::tests",
+      "to": "dim_cli::ui::render::panel",
+      "references": [
+        "path crate::ui::render::panel::strip_escapes",
+        "path visible_width"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::list_panel::tests",
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path KeyCode::Delete",
@@ -31200,6 +31237,13 @@
         "path KeyCode::Left",
         "path KeyEvent::new",
         "path Modifiers::NONE"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::list_panel::tests",
+      "to": "dim_cli::ui::theme::palette",
+      "references": [
+        "path Palette"
       ]
     },
     {
@@ -33297,10 +33341,22 @@
         "path Command",
         "path Command::ListSessions",
         "path SessionItem",
+        "path SessionsScope",
+        "path SessionsScope::All",
+        "path SessionsScope::Repository",
+        "path SessionsScope::Workspace",
         "path stored_title",
         "use crate::model::session::Command",
         "use crate::model::session::SessionItem",
+        "use crate::model::session::SessionsScope",
         "use crate::model::session::stored_title"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::sessions_panel",
+      "to": "dim_cli::ui",
+      "references": [
+        "use crate::ui::tilde"
       ]
     },
     {
@@ -33353,8 +33409,12 @@
       "from": "dim_cli::ui::sessions_panel",
       "to": "dim_cli::ui::terminal::input",
       "references": [
+        "path KeyCode::Char",
         "path KeyEvent",
-        "use crate::ui::terminal::KeyEvent"
+        "path Modifiers::CTRL",
+        "use crate::ui::terminal::KeyCode",
+        "use crate::ui::terminal::KeyEvent",
+        "use crate::ui::terminal::Modifiers"
       ]
     },
     {
@@ -35133,6 +35193,7 @@
         "path Command::Compact",
         "path Command::Configure",
         "path Command::EndLine",
+        "path Command::FindRepository",
         "path Command::FocusLine",
         "path Command::Fork",
         "path Command::Goal",
@@ -35235,6 +35296,7 @@
         "path Update::Ready",
         "path Update::Renamed",
         "path Update::Report",
+        "path Update::RepositoryWorkspaces",
         "path Update::Runtimes",
         "path Update::Sessions",
         "path Update::ShellDone",
@@ -36073,6 +36135,7 @@
         "path Area::Models",
         "path Area::Scheduled",
         "path Area::Skills",
+        "path Area::Workflow",
         "path Command",
         "path Command::AskAnswers",
         "path Command::InputControl",
@@ -36173,6 +36236,20 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::isolation_panel",
+      "references": [
+        "path crate::ui::isolation_panel::IsolationPanel::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::lines_panel",
+      "references": [
+        "path LinesPanel::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::management_panel",
       "references": [
         "path ManagementPanel::new"
@@ -36193,6 +36270,13 @@
         "path WriteTarget::Area",
         "path WriteTarget::Create",
         "path WriteTarget::Run"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::render",
+      "references": [
+        "path crate::ui::render::live_row_budget"
       ]
     },
     {
@@ -36223,7 +36307,9 @@
       "to": "dim_cli::ui::render::screen",
       "references": [
         "path Screen",
-        "path Screen::new"
+        "path Screen::new",
+        "path crate::ui::render::screen::Frame",
+        "path crate::ui::render::screen::MIN_HISTORY_ROWS"
       ]
     },
     {
@@ -36232,6 +36318,13 @@
       "references": [
         "path crate::ui::render::testterm::Emu",
         "path crate::ui::render::testterm::Emu::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::sessions_panel",
+      "references": [
+        "path SessionsPanel::new"
       ]
     },
     {
@@ -36266,7 +36359,8 @@
         "path Modifiers::CTRL",
         "path Modifiers::NONE",
         "path Modifiers::SHIFT",
-        "path crate::ui::terminal::KeyEvent::new"
+        "path crate::ui::terminal::KeyEvent::new",
+        "path crate::ui::terminal::Modifiers::NONE"
       ]
     },
     {
@@ -36324,10 +36418,14 @@
         "path ImageRead",
         "path LOAD_MORE",
         "path ManagementDraft",
+        "path Prompt",
         "path Prompt::Ask",
+        "path Prompt::Isolation",
+        "path Prompt::Lines",
         "path Prompt::Login",
         "path Prompt::Management",
         "path Prompt::Runtime",
+        "path Prompt::Sessions",
         "path QUEUE_HINT",
         "path QUEUE_HINT_MORE",
         "path ThemeContext",
@@ -36336,6 +36434,8 @@
         "path boxed",
         "path chunk",
         "path goodbye_panel",
+        "path live_panel_rows",
+        "path overlay_panel_rows",
         "path queue_strip",
         "path side_reply",
         "path web_panel"
@@ -38622,6 +38722,18 @@
     },
     {
       "module": "dim_cli::ui::lines_panel::tests",
+      "path": "Theme::system"
+    },
+    {
+      "module": "dim_cli::ui::list_panel::tests",
+      "path": "Appearance::Dark"
+    },
+    {
+      "module": "dim_cli::ui::list_panel::tests",
+      "path": "ColorMode::TrueColor"
+    },
+    {
+      "module": "dim_cli::ui::list_panel::tests",
       "path": "Theme::system"
     },
     {

@@ -28,13 +28,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Timeline" => "タイムライン",
         "Enter actions · Esc close" => "Enter 操作 · Esc 閉じる",
         "Timeline actions" => "タイムライン操作",
-        "↑↓ select · Enter confirm · Esc back" => "↑↓ 選択 · Enter 確認 · Esc 戻る",
         "↑↓ select · Enter confirm · Esc cancel" => "↑↓ 選択 · Enter 確認 · Esc キャンセル",
         "Jump to message" => "メッセージへ移動",
         "Edit as a new draft" => "新しい下書きとして編集",
         "Quote message" => "メッセージを引用",
         "Create branch from here" => "ここからブランチを作成",
-        "Fork session from here" => "ここからセッションをフォーク",
         "Before this message" => "このメッセージの前",
         "Fork session" => "セッションをフォーク",
         "1. Create fork" => "1. フォークを作成",
@@ -50,8 +48,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "follow, talk to and end this session's lines" => {
             "このセッションのラインを追い、話しかけ、終了"
         }
-        "End line" => "ラインを終了",
-        "y/N" => "y/N",
+        "End line {id}?" => "{id} のラインを終了しますか？",
+        "y end it" => "y 終了",
+        "n cancel" => "n キャンセル",
         "main is the session itself; a line ends, main does not" => {
             "main はセッション自体です。ラインは終了できますが main は終了しません"
         }
@@ -384,7 +383,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
 
         // sessions_panel.rs
         "Sessions" => "セッション",
-        "Enter open · Ctrl+R refresh · Esc close" => "Enter 開く · Ctrl+R 更新 · Esc 閉じる",
+        "Sessions · This workspace" => "セッション · このワークスペース",
+        "Sessions · This repository" => "セッション · このリポジトリ",
+        "Sessions · All workspaces" => "セッション · すべてのワークスペース",
+        "No saved sessions in this workspace. Ctrl+S shows more." => {
+            "このワークスペースに保存済みセッションはありません。Ctrl+S で他のワークスペースを表示します。"
+        }
+        "Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close" => {
+            "Enter 開く · Ctrl+S 範囲 · Ctrl+R 更新 · Esc 閉じる"
+        }
         "Loading sessions..." => "セッションを読込中…",
         "No saved sessions yet." => "保存済みセッションなし。",
         "No matching sessions." => "一致するセッションなし。",

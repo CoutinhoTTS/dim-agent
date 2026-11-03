@@ -27,13 +27,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Timeline" => "时间线",
         "Enter actions · Esc close" => "Enter 操作 · Esc 关闭",
         "Timeline actions" => "时间线操作",
-        "↑↓ select · Enter confirm · Esc back" => "↑↓ 选择 · Enter 确认 · Esc 返回",
         "↑↓ select · Enter confirm · Esc cancel" => "↑↓ 选择 · Enter 确认 · Esc 取消",
         "Jump to message" => "跳转到消息",
         "Edit as a new draft" => "编辑为新草稿",
         "Quote message" => "引用消息",
         "Create branch from here" => "从这里创建分支",
-        "Fork session from here" => "从这里派生会话",
         "Before this message" => "在这条消息之前",
         "Fork session" => "派生会话",
         "1. Create fork" => "1. 创建派生会话",
@@ -47,8 +45,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "更早的 {count} 条消息 · Enter 或点击加载"
         }
         "follow, talk to and end this session's lines" => "查看、对话并结束本会话的线",
-        "End line" => "结束线",
-        "y/N" => "y/N",
+        "End line {id}?" => "结束线 {id}？",
+        "y end it" => "y 结束",
+        "n cancel" => "n 取消",
         "main is the session itself; a line ends, main does not" => {
             "main 就是会话本身；线可以结束，main 不能"
         }
@@ -345,7 +344,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Could not save the theme: {error}" => "无法保存主题：{error}",
 
         "Sessions" => "会话",
-        "Enter open · Ctrl+R refresh · Esc close" => "Enter 打开 · Ctrl+R 刷新 · Esc 关闭",
+        "Sessions · This workspace" => "会话 · 当前工作区",
+        "Sessions · This repository" => "会话 · 当前仓库",
+        "Sessions · All workspaces" => "会话 · 所有工作区",
+        "No saved sessions in this workspace. Ctrl+S shows more." => {
+            "当前工作区没有已保存的会话。Ctrl+S 查看更多。"
+        }
+        "Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close" => {
+            "Enter 打开 · Ctrl+S 切换范围 · Ctrl+R 刷新 · Esc 关闭"
+        }
         "Loading sessions..." => "正在加载会话...",
         "No saved sessions yet." => "暂无已保存的会话。",
         "No matching sessions." => "无匹配的会话。",
