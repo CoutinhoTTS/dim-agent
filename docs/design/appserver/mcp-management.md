@@ -355,6 +355,65 @@ user's text and could hide a credential-bearing value the user meant to fix.
 Stored documents decode the same way. A read leaves bytes, version and revision unchanged; a
 write that changes one entry still writes every other entry as read.
 
+### D19. Environment references expand when a server is built, and stored text keeps the reference
+
+An entry may write `${NAME}` or `${NAME:-default}` in `command`, an argument, an `env` value,
+`cwd`, a remote `url`, a header value or the bearer token, and the daemon expands it from its own
+environment when it builds the effective configuration a connection runs. `NAME` matches
+`[A-Za-z_][A-Za-z0-9_]*`; any other `$` text is literal, a variable set to the empty string counts
+as set, and there is no escape or nesting, so a default ends at the first `}`. Header names,
+environment names, `extra` and `oauth` are not expanded. A reference the daemon environment does
+not set keeps its text: the entry decodes, loads and is listed with the name, and its connection
+fails with its usual transport error rather than a configuration error. The stored document always
+keeps the text the user wrote; only the expanded copy a connection runs is transient, so a read,
+save or move never writes a value back. The legacy import copies such an entry as written, so an
+imported reference starts working when the entry connects.
+
+The expansion is one pure function in the MCP configuration module. It runs in the publisher after
+the `mcp-secrets` overlay merge and before `config::effective` joins a project or plugin `cwd` to
+its workspace, and the expanded copy lives only in the publisher's current source. Every path that
+builds a connection outside publication calls the same function first: the `mcp.test` probe, both
+temporary-binding sites, and `mcp.auth.start`/`mcp.auth.logout` with the catalog's credential key.
+`ConnectionConfig` carries the expanded value only, so nothing expands twice. A `cwd` is expanded
+before it is joined. A plugin entry's `cwd` is not expanded: it is confined to the plugin directory
+at registration, a reference there has no use, and the existing refusal stays.
+
+A document shared with other users or the repository is not trusted to read the daemon's own
+credentials. A user entry expands every reference. A plugin entry is guarded in every guarded
+field. A workspace entry is guarded where its text is the file's, and not where the member came
+from the user-local overlay (`McpSecretEntry`'s `url`, the header keys in `headers` and `auth`),
+which is user text. A probe patch's members are user text too: they are what the user is typing.
+What is guarded is the remote `url`, each header value and the bearer token: a protected name there
+expands to the empty string whether it is set or not, and a default is ignored. Stdio fields are
+not guarded, because enabling a workspace stdio entry already runs its command with the user's
+authority; the guard covers what a remote entry sends.
+
+The protected names are a fixed list in `config.rs` plus the daemon's live credential variables.
+The fixed list covers the model provider, cloud, proxy, code hosting and package registry
+variables the daemon knows by name; its prefixes are `DIM_` and `DIMCODE_` plus the exact names
+`DIM` and `DIMCODE`, so an unrelated name such as `DIMENSION` is not caught, and matching ignores
+case. The live set arrives through the process port `CredentialVariables` in the capabilities host,
+whose `CredentialVariablesHost` is registered next to `ModelSelectionHost`, and whose owner is the
+assembly root in `serve`. The model-config profile serves `AimuxModels::api_key_envs()`; the product
+profile reads no credential from an environment variable (`secretRef` is opaque), so it and the mock
+profile serve an empty set. The port returns the current set on every call. MCP unions it with the
+fixed list and never reads Provider or the model catalogue itself.
+
+Clients see names, never values. `mcp.catalog`'s server rows and the configuration view of
+`mcp.configuration` and `mcp.inspect` carry `referencedVariables` and `unsetVariables`: always
+present, sorted, deduplicated, and computed from the merged effective configuration. A protected
+name used in a guarded field is listed as referenced and never as unset, because the daemon will
+not reveal whether it is set. There is no separate list of guarded names. Invalid entries and probe
+results carry neither list. `mcp.auth.start`'s authorization URL carries the expanded endpoint as
+`resource`, because the OAuth resource must match the endpoint the client connects to. The CLI
+list, the `/mcp` panel and the Web settings page show the names; a new client defaults to empty
+lists against a daemon that omits them, and an older client ignores them.
+
+`config::public_url` is reference-aware, so a redacted endpoint does not break a reference it
+contains: without a reference it keeps its behaviour; with a reference and a `://` it keeps the
+scheme and authority as written, in the reference's own case, and drops userinfo, path, query and
+fragment; and with a reference and no `://` it keeps the text before any `?` or `#`.
+
 ## 4. Contract
 
 Namespace `mcp`, process scope, served on local connections
@@ -383,7 +442,8 @@ revision every write takes.
 
 `mcp.catalog` returns `invalid: [{id, source, error}]` beside `servers` (D18). `mcp.configuration`,
 `mcp.inspect`, `mcp.test` and `mcp.set_enabled` answer a broken entry with its error and
-`mcp_invalid_config`; `mcp.save` replaces it, and `mcp.remove` deletes it.
+`mcp_invalid_config`; `mcp.save` replaces it, and `mcp.remove` deletes it. Each server row also
+carries the entry's `referencedVariables` and `unsetVariables` (D19).
 
 ### 4.1 Entry read (`mcp.configuration`)
 
@@ -433,6 +493,14 @@ A remote entry:
 | `authConfigured` | boolean | A static bearer token is stored |
 | `oauthConfigured` | boolean | An `oauth` object is stored |
 | `oauth` | object, present when `oauthConfigured` | `clientId?` string, `callbackPort?` integer 1 to 65535, `scopes?` space-separated string, `metadataConfigured` boolean; the metadata URL itself is withheld |
+
+Every configuration projection carries `referencedVariables` and `unsetVariables` (D19): the
+sorted, deduplicated names the merged effective configuration references and the ones the daemon
+environment does not set. Both are always present; `mcp.catalog` server rows carry the same two
+fields, while an invalid entry and a probe result carry neither. A protected name used in a guarded
+field is referenced and never unset. Values are never listed. For a declared URL that carries a
+reference, `endpoint` keeps the scheme and authority as written, including a reference there, and
+still withholds the rest.
 
 Withheld from every reply and error message: environment and header values, the bearer token,
 URL userinfo, path, query and fragment, the authorization server metadata URL, argument values,
@@ -486,13 +554,17 @@ skeleton only; the overlay-held fields stay in `mcp-secrets` and are never copie
 | `local_transport_required` | The connection is not local |
 | `service_reloading` / `service_unavailable` | Mcp or its row is not serving; from [management methods](management-methods.md#dispatch-and-lifecycle) |
 
-A read serves a disabled entry: enablement is a field, not a condition for reading.
+A read serves a disabled entry: enablement is a field, not a condition for reading. An unset
+environment reference is not a configuration error (D19): the entry loads and its connection
+reports the transport's usual failure.
 
 ### 4.5 Probe (`mcp.test`)
 
 `mcp.test` exercises one configuration: it opens one disposable connection, initializes it, lists
 every tool page, closes it, and reports what happened. It attaches no Session, publishes no tool,
-registers no connection and writes no configuration (D9).
+registers no connection and writes no configuration (D9). It expands environment references
+exactly as a connection does, with a complete configuration's and a patch's members treated as
+user text (D19); its reply carries no variable lists.
 
 The request is unchanged, and a complete `configuration` is a user-supplied draft without
 `patch`. Otherwise the probe uses that source's declared entry with an optional unsaved `patch`,
@@ -637,7 +709,8 @@ canonical workspace and id. Its record is the withheld part of one project entry
 Only the members that exist on the source entry are present. When the withheld part is empty,
 the move writes no overlay record and `secretsInUserScope` stays false. The project `.mcp.json`
 skeleton contains the safe members: `type`, `command`, declared `cwd`, `url` reduced to
-`scheme://host[:port]` when the full URL carries userinfo, path, query or fragment, and
+`scheme://host[:port]` when the full URL carries userinfo, path, query or fragment, or to its
+scheme and authority as written when it carries an environment reference (D19), and
 `oauth.clientId`/`callbackPort`/`scopes`. The owner merges the overlay into the declared
 configuration before `config::effective`; the merge replaces `args` and `url`, merges `env`,
 `headers`, `auth`, `extra` and the hidden `oauth` members, and is validated as a whole. A record
@@ -743,6 +816,18 @@ name or adds a version rather than silently reusing this one.
   them apart from the servers with their error, offers removal, and offers replacement through
   the add flow; it does not offer toggle, edit, test or inspect for them. A client that ignores
   the list still reads every valid `servers` row.
+- `mcp.catalog` server rows and the configuration projections of `mcp.configuration` and
+  `mcp.inspect` gain `referencedVariables` and `unsetVariables`: sorted, deduplicated names from
+  the merged effective configuration (D19). A client shows them as names and never as values, and
+  points at an unset name when a connection fails. A daemon that predates them omits both, so a
+  new client defaults to empty lists; an older client ignores them. Invalid entries and probe
+  replies carry neither.
+- An entry's `command`, arguments, environment values, `cwd`, `url`, header values and bearer
+  token may carry `${NAME}` or `${NAME:-default}`, which the daemon expands when it connects; the
+  stored document keeps the reference text (D19). A client edits and saves that text as written,
+  and a move keeps it, so a client that reads a name list must not substitute a value.
+- `mcp.auth.start`'s `resource` is the entry's expanded endpoint, so a client does not compute it
+  from the possibly referenced URL.
 - A client renders `command`, `cwd` and `endpoint`, the name lists and the counts, and offers
   replace-or-keep for `args`, environment values, header values, the bearer token, the URL and
   the metadata URL. It shows `argsCount`, `envNames` and `headerNames` as the fields that a
@@ -834,6 +919,18 @@ Flow level, reusing the existing MCP flows:
 | `crates/dim-app-server/src/mcp/config.rs` (unit) | An entry that does not decode is held out of `mcp_servers` and reported with its field and expected kind while the rest load; an error never repeats a token-like value; an untouched entry, including `streamable-http` and unknown members, is written back in the order it was read, and only an edited entry is serialised from its typed value; only a non-JSON file or a non-object `mcpServers` fails the document |
 | `crates/dim-migration/tests/migration_flow.rs` | Legacy `mcpServers` import entry by entry: decodable entries are written as the legacy file had them, a broken entry is recorded `Unsupported` as `mcpServers.<id>` with its error and never reaches the native store, and a fully valid file imports exactly as before |
 
+Environment expansion (D19) has its own coverage. The `config.rs` unit tests pin the syntax, every
+walked field, the guard rules by origin, the protected list including `DIMENSION_X` and `DIM_X`,
+the reference-aware `public_url`, and the rule that a stored document keeps its text. The session
+flow covers a daemon variable at connect, the probe with a complete configuration and with a
+patch, a temporary binding, the guard of a configured credential variable, the overlay's unguarded
+members, and an unset reference the catalog names while the entry still loads. The transport flow
+asserts the catalog and configuration fields on the wire, including their absence on invalid
+entries and probe results. `mcp_flow.rs` keeps a reference through reads, writes and moves and
+proves a write never stores an expanded value; `mcp_oauth_flow.rs` discovers from the expanded URL;
+the CLI flow prints the names in `mcp list` and the detail view; the Web settings test renders
+them; and the migration flow pins an imported reference as written.
+
 The redaction assertions of
 `mcp_editor_preserves_redacts_and_removes_credentials_with_source_cas` extend to the new reply
 shape rather than moving to a new test: the same fixture writes argument, environment, header,
@@ -903,3 +1000,10 @@ contract.
 | Attach a Session to measure what runs | A diagnostic must not create, publish to or replace a Session, and `mcp.inspect` already reports the connections Sessions hold (D9) |
 | Record nothing from the probe's connection | It would need a flag on the credential path, and the catalog would ignore a challenge the server just sent. A probe already refreshes a credential as any connection does, so recording the challenge with it is the same rule |
 | One `mcp.probe` method beside `mcp.test` | Two methods that open a disposable connection and list tools; the Desktop client's name maps onto the existing method |
+| Expand references where each connection is built | The catalog and the configuration views would keep raw text while a connection ran another value, and publication, the probe, a temporary binding and sign-in would each expand separately. One expansion in the publisher gives every path the same copy and the same name lists |
+| Expand at decode time and store the values | A stored document would then hold expanded secrets and lose the text the user wrote; the expansion depends on the daemon environment, so a copied or moved entry would freeze one machine's values |
+| Return expanded values to local clients | A value would travel to every local UI and be written back by an editor, the same reason the read redacts it. The name lists give a client what it can show without the value |
+| A `guardedVariables` field beside the two lists | A guarded name is a referenced name whose value the source may not read; it is not a third kind of reference, and a client shows the same name either way |
+| Expand a plugin entry's `cwd` | It is confined to the plugin directory at registration by refusing an absolute path, `..` or a symlink escape. Expanding it would let the plugin's document name a directory outside that confinement |
+| A `$NAME` form without braces, or nesting | An ordinary `$` already occurs in command lines and defaults, so the braced form is the one users of npm and systemd expect; refusing nesting keeps one pass enough and makes a default end at the first `}` |
+| Guard every field, including stdio | Enabling a workspace stdio entry already runs its command with the user's authority, so a stdio reference adds no exposure; guarding it would change commands that legitimately read a protected name. The guard covers what a remote entry sends |
