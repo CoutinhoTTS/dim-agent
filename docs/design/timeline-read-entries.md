@@ -37,18 +37,19 @@ Deleting a `Timeline` method alone leaves these reachable.
 
 ### 1.3 Dispatcher reads exported to TypeScript (`core/dispatcher.rs`)
 
-`local(start, through)` :257 and `history(through)` :265 read to the *committed* position (`.d.ts` says "committed events"). Replay `follow` :171 reads `local(..=through)` at :194. The one TypeScript caller is `runtime/plugins/goal/branch.ts:205-207`. `npm/branch-services.d.ts` declares the old reads and `query` side by side.
+`local(start, through)` :257 and `history(through)` :265 read to the *committed* position (`.d.ts` says "committed events"). Replay `follow` :171 reads `local(..=through)` at :194. The one TypeScript part that calls them is `runtime/plugins/goal/branch.ts`: `committed()` :104, `local` :105, :176 and :205, `history` :207. It injects `dispatcher`, not the Timeline service. `npm/branch-services.d.ts` declares the old reads and `query` side by side.
 
 ### 1.4 Reads that bypass the service
 
 | Read | Defined | Callers |
 | --- | --- | --- |
-| `SessionStore::read_page` | `storage/timeline.rs:1258` | `timeline_tree.rs:425`, `:668`, `collaboration.rs:1106`, `:2232`, `agents.rs:634` |
+| `SessionStore::read_page` | `storage/timeline.rs:1258` | `collaboration.rs:1106`, `:2232`, `agents.rs:634` |
+| `TimelineStore::read_page`, called by the TimelineTree part itself | `timeline_store.rs:229` | `timeline_tree.rs:425`, `:668` (also behind `TreeTimeline::page` :180) |
+| `Agent::local_page` reads the store port directly | `agent.rs:562-585` | `agents.rs:677`, `:1007`, `connection/tree.rs:227`, `agents/sessions.rs:616` |
 | `read_page_without_request_bodies` | :1271 | `agents.rs:634` |
 | `read_page_before` | :1409 | `agents.rs:763`, `connection/tree.rs:209` |
 | `read_events` | :1539 | `agents.rs:688`, `collaboration.rs:1151` |
 | `turn_window` | :1304 | `agents.rs:746`, `connection/tree.rs:197` |
-| `Agent::local_page` | `agent.rs:562` | `agents.rs:677`, `:1007`, `connection/tree.rs:227`, `agents/sessions.rs:616` |
 
 These contradict §5.4's "a part reads facts through its branch's `timeline` service".
 
@@ -59,6 +60,72 @@ These contradict §5.4's "a part reads facts through its branch's `timeline` ser
 ### 1.6 Store port (`timeline_store.rs`)
 
 `head` :207, `read` :215, `read_page` :229, `event_by_id` :283, `read_context` :319, `read_kind_page` :373, `read_page_without_request_bodies` :437, `query` :464, `read_segments` :471, `policy_facts` :478, `policy_order` :591, `policy_window` :634, `trace` :694, `latest_snapshot` :710. The SQLite implementations are at `storage/timeline.rs:3507-4119`.
+
+### 1.7 Dependency graph
+
+Every edge was read from a call site in this audit. An edge label lists the reads that cross it; the arrow into the store port is summarised because the calls inside `timeline.rs` were only partly enumerated. The dashed edge is the shared storage code, not a call.
+
+```mermaid
+flowchart LR
+  subgraph TS[TypeScript]
+    goal[goal/branch.ts]
+  end
+  subgraph CAP[dim-agent-capabilities]
+    recall[recall.rs]
+    hist[history.rs]
+    prep[context_preparation.rs]
+    pol[context_policy.rs]
+    perm[permission.rs]
+    tree[timeline_tree.rs]
+    ctxm[context_methods.rs]
+    reads[file_reads.rs]
+  end
+  subgraph APP[dim-app-server]
+    conn[connection/tree.rs]
+    agents[agents.rs]
+    collab[collaboration.rs]
+  end
+  subgraph RT[dim-agent-runtime]
+    Agent[Agent and Session facade]
+    Branch[Branch facade]
+    Disp[Dispatcher]
+    TL[Timeline service]
+  end
+  subgraph ST[stores]
+    Port[TimelineStore port]
+    SS[SessionStore]
+    Sql[SqliteTimelineStore]
+    Mem[MemoryTimelineStore]
+  end
+  goal -->|committed, local, history| Disp
+  Disp -->|local, history, follow replay| TL
+  recall -->|page_cursor, page| Branch
+  ctxm -->|local| Branch
+  hist -->|context, checkpoint, stored_context_page_in, policy_order, event_position| TL
+  hist -->|context_page, compaction_cut, local| Agent
+  prep -->|stored_context_page_in, policy_facts, event_by_id| TL
+  pol -->|local, policy_order, policy_window, policy_facts| TL
+  perm -->|ancestor_events_of_kind| TL
+  reads -->|local| TL
+  tree -->|local| TL
+  tree -->|local| Branch
+  tree -->|read_page| Port
+  conn -->|local_page| Agent
+  conn -->|turn_window, read_page_before| SS
+  agents -->|history, local, local_page, context| Agent
+  agents -->|read_page, read_events, read_page_before, turn_window| SS
+  collab -->|local| TL
+  collab -->|read_page, read_events| SS
+  Agent -->|published branch| Branch
+  Agent -->|local_page| Port
+  Branch -->|history, local, context, page, trace, compaction_cut, context_page| TL
+  TL -->|reads and policy reads| Port
+  Port --> Sql
+  Port --> Mem
+  SS -.-> Sql
+```
+
+Two things the graph shows. The `Agent` facade reaches the store port without the Timeline service (`local_page`), and the TimelineTree part and the App Server reach a store without it as well, so deleting reads from `Timeline` alone leaves five other routes into the same rows.
 
 ## 2. What the query expresses
 
