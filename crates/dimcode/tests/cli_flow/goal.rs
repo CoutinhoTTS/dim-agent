@@ -606,7 +606,7 @@ fn tui_goal_acts_on_the_shown_line_and_a_new_line_has_none() {
     terminal.write(b"/goal Ship it\r");
     terminal.until("Goal set on main · active");
 
-    terminal.until("line-1");
+    terminal.until_anywhere("line-1");
     terminal.write(b"/lines\r");
     terminal.until("the session itself");
     terminal.write(b"\x1b[B");
