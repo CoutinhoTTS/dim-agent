@@ -3452,6 +3452,72 @@ impl TimelineStore for SqliteTimelineStore {
                 .collect())
         })
     }
+    fn read_kind_page<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        kinds: &'a [&'a str],
+        before: u64,
+        limit: usize,
+    ) -> BoxFuture<'a, Result<Vec<StoredEvent>>> {
+        Box::pin(async move {
+            if before == 0 || limit == 0 || kinds.is_empty() {
+                return Ok(Vec::new());
+            }
+            let session = key.session_id.clone();
+            let branch = key.branch_id.clone();
+            let end = sql_sequence(before)?;
+            let sql = format!(
+                "SELECT sequence, last_sequence, kind, body, event_id \
+                 FROM timeline_events \
+                 WHERE session_id=? AND branch_id=? AND sequence<=? AND kind IN ({}) \
+                 ORDER BY sequence DESC LIMIT ?",
+                vec!["?"; kinds.len()].join(",")
+            );
+            let mut values = vec![
+                rusqlite::types::Value::Text(session.clone()),
+                rusqlite::types::Value::Text(branch.clone()),
+                rusqlite::types::Value::Integer(end),
+            ];
+            values.extend(
+                kinds
+                    .iter()
+                    .map(|kind| rusqlite::types::Value::Text((*kind).into())),
+            );
+            values.push(rusqlite::types::Value::Integer(
+                i64::try_from(limit).map_err(error)?,
+            ));
+            let mut reader = self.reader(RequestBodies::Rebuild);
+            let rows = holds(
+                &self.db,
+                &mut reader,
+                None,
+                move |connection, reader, rows: &mut Option<Rows>| {
+                    let rows = match rows {
+                        Some(rows) => rows,
+                        None => {
+                            let mut query = connection.prepare(&sql).map_err(error)?;
+                            let fetched = query_fetched(
+                                &mut query,
+                                rusqlite::params_from_iter(values.iter()),
+                            )?;
+                            rows.insert(Rows {
+                                fetched: fetched.into(),
+                                decoded: vec![],
+                            })
+                        }
+                    };
+                    rows.advance(connection, &session, reader)
+                },
+            )
+            .await?;
+            self.finish(reader);
+            let mut records = rows
+                .expect("a finished read fetched its rows")
+                .records(&(1..=before), false)?;
+            records.sort_by_key(|record| record.event.sequence);
+            Ok(records)
+        })
+    }
     fn event_by_id<'a>(
         &'a self,
         key: &'a TimelineKey,

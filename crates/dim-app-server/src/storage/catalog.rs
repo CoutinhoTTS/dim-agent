@@ -188,7 +188,7 @@ impl SessionStore {
             if !request.with_internal { sql.push_str(" AND s.origin != 'internal'"); }
             if !request.with_acp_sessions { sql.push_str(" AND s.origin != 'acp'"); }
             if let Some(agent) = agent { values.push(agent.into()); sql.push_str(&format!(" AND o.agent_id=?{}", values.len())); }
-            if let Some(cwd) = request.cwd { values.push(cwd.into()); sql.push_str(&format!(" AND c.cwd=?{}", values.len())); }
+            if let Some(cwd) = request.cwd { values.push(serde_json::to_string(&cwd).map_err(error)?.into()); sql.push_str(&format!(" AND c.cwd IN (SELECT value FROM json_each(?{}))", values.len())); }
             if let Some(query) = request.query {
                 values.push(query.to_lowercase().into()); let p = values.len();
                 sql.push_str(&format!(" AND (instr(catalog_fold(c.session_id),?{p})>0 OR instr(catalog_fold(c.cwd),?{p})>0 OR instr(catalog_fold(c.preview),?{p})>0 OR instr(catalog_fold(m.title),?{p})>0 OR instr(catalog_fold(CASE WHEN json_valid(s.config) THEN json_extract(s.config,'$.model.providerId') END),?{p})>0 OR instr(catalog_fold(CASE WHEN json_valid(s.config) THEN json_extract(s.config,'$.model.modelId') END),?{p})>0)"));

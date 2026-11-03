@@ -192,6 +192,39 @@ impl TimelineStore for MemoryTimelineStore {
                 .collect()
         })
     }
+    fn read_kind_page<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        kinds: &'a [&'a str],
+        before: u64,
+        limit: usize,
+    ) -> BoxFuture<'a, Result<Vec<StoredEvent>>> {
+        Box::pin(async move {
+            if before == 0 || limit == 0 {
+                return Ok(Vec::new());
+            }
+            let sessions = self.0.lock().unwrap();
+            let events = &sessions
+                .get(&key.session_id)
+                .ok_or_else(|| AgentError::Storage(format!("unknown session {}", key.session_id)))?
+                .branches
+                .get(&key.branch_id)
+                .ok_or_else(|| AgentError::Storage(format!("unknown branch {}", key.branch_id)))?
+                .events;
+            let mut page: Vec<_> = events
+                .iter()
+                .rev()
+                .filter(|record| {
+                    record.event.sequence <= before
+                        && kinds.iter().any(|kind| record.event.kind.key() == *kind)
+                })
+                .take(limit)
+                .cloned()
+                .collect();
+            page.reverse();
+            Ok(page)
+        })
+    }
     fn trace<'a>(
         &'a self,
         key: &'a TimelineKey,

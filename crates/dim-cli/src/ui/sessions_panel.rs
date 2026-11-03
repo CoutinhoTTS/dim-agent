@@ -1,15 +1,20 @@
 //! The `/resume` picker: a filterable list of stored sessions (port of
 //! `sessionsPanelItems` / `SessionsPanel`).
 
-use crate::model::session::{Command, SessionItem, stored_title};
+use crate::model::session::{Command, SessionItem, SessionsScope, stored_title};
 use crate::ui::i18n::{t, tf};
 use crate::ui::list_panel::{Event, Item, ListPanel};
 use crate::ui::prompts::Effect;
-use crate::ui::terminal::KeyEvent;
+use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
 use crate::ui::theme::Palette;
+use crate::ui::tilde;
 use std::time::{Duration, Instant};
 
-const HINT: &str = "Enter open · Ctrl+R refresh · Esc close";
+const HINT: &str = "Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close";
+const TITLE_WORKSPACE: &str = "Sessions · This workspace";
+const TITLE_REPOSITORY: &str = "Sessions · This repository";
+const TITLE_ALL: &str = "Sessions · All workspaces";
+const EMPTY_WORKSPACE: &str = "No saved sessions in this workspace. Ctrl+S shows more.";
 
 pub struct SessionsPanel {
     list: ListPanel,
@@ -19,6 +24,10 @@ pub struct SessionsPanel {
     append: bool,
     next_cursor: Option<String>,
     show_acp: bool,
+    scope: SessionsScope,
+    /// The launch workspace's repository workspaces, when the daemon can read
+    /// a set and it holds more than one; the scope is offered while it does.
+    repository: Option<Vec<String>>,
 }
 
 impl SessionsPanel {
@@ -30,11 +39,13 @@ impl SessionsPanel {
             append: false,
             next_cursor: None,
             show_acp,
+            scope: SessionsScope::Workspace,
+            repository: None,
             list: ListPanel::new(
-                "Sessions",
+                TITLE_WORKSPACE,
                 HINT,
                 "Loading sessions...",
-                "No saved sessions yet.",
+                EMPTY_WORKSPACE,
                 "No matching sessions.",
                 true,
             ),
@@ -45,7 +56,9 @@ impl SessionsPanel {
         if self.paged.is_none() {
             self.paged = Some(false);
         }
-        self.list.set_items(items.map(session_rows), None);
+        let workspaces = self.names_workspaces();
+        self.list
+            .set_items(items.map(|items| session_rows(items, workspaces)), None);
     }
 
     pub fn page(
@@ -64,7 +77,8 @@ impl SessionsPanel {
             Ok((items, next_cursor)) => {
                 self.next_cursor = next_cursor;
                 if self.append {
-                    self.list.append_items(session_rows(items));
+                    self.list
+                        .append_items(session_rows(items, self.names_workspaces()));
                 } else {
                     self.set_items(Ok(items));
                 }
@@ -92,7 +106,14 @@ impl SessionsPanel {
             query: self.list.query().trim().to_owned(),
             cursor: if reset { None } else { self.next_cursor.take() },
             show_acp: self.show_acp,
+            scope: self.scope.clone(),
         })
+    }
+
+    /// The launch workspace's repository set arrived: the scope joins the
+    /// cycle, without touching the read already under way.
+    pub fn repository(&mut self, workspaces: Vec<String>) {
+        self.repository = Some(workspaces);
     }
 
     pub fn refresh(&mut self) {
@@ -115,7 +136,39 @@ impl SessionsPanel {
         self.filter_changed();
     }
 
+    fn names_workspaces(&self) -> bool {
+        !matches!(self.scope, SessionsScope::Workspace)
+    }
+
+    fn next_scope(&self) -> SessionsScope {
+        match &self.scope {
+            SessionsScope::Workspace => match &self.repository {
+                Some(workspaces) => SessionsScope::Repository(workspaces.clone()),
+                None => SessionsScope::All,
+            },
+            SessionsScope::Repository(_) => SessionsScope::All,
+            SessionsScope::All => SessionsScope::Workspace,
+        }
+    }
+
+    /// Ctrl+S widens and narrows the list like a new query: the scope
+    /// changes and the first page is read again.
+    fn cycle_scope(&mut self) {
+        self.scope = self.next_scope();
+        let (title, empty) = match &self.scope {
+            SessionsScope::Workspace => (TITLE_WORKSPACE, EMPTY_WORKSPACE),
+            SessionsScope::Repository(_) => (TITLE_REPOSITORY, "No saved sessions yet."),
+            SessionsScope::All => (TITLE_ALL, "No saved sessions yet."),
+        };
+        self.list.set_title(t(title));
+        self.list.set_empty_text(empty);
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
+        if key.code == KeyCode::Char('s') && key.mods.contains(Modifiers::CTRL) {
+            self.cycle_scope();
+            return Effect::Refresh;
+        }
         let before = self.list.query().to_owned();
         let event = self.list.handle_key(key);
         if before != self.list.query() {
@@ -138,17 +191,27 @@ impl SessionsPanel {
     }
 }
 
-fn session_rows(items: Vec<SessionItem>) -> Vec<Item> {
+fn session_rows(items: Vec<SessionItem>, workspaces: bool) -> Vec<Item> {
+    let now = now_ms();
     items
         .iter()
         .map(|item| {
+            let detail = if workspaces {
+                format!(
+                    "{} · {}",
+                    relative_time(item.updated_at, now),
+                    tilde(&item.cwd)
+                )
+            } else {
+                relative_time(item.updated_at, now)
+            };
             let mut row = Item::new(
                 item.id.clone(),
                 match tag(item.origin.as_deref()) {
                     Some(tag) => format!("{tag} {}", label(item)),
                     None => label(item),
                 },
-                relative_time(item.updated_at, now_ms()),
+                detail,
             );
             row.search = search_text(item);
             row

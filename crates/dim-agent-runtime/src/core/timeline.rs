@@ -1,7 +1,7 @@
 use super::keys::KeyFilter;
 use crate::{
-    AgentError, BoxFuture, BranchLifecycle, FaultReporter, PolicyFacts, PolicyOrder,
-    PolicyOrderEvent, PolicyWindow, Result, StoredEvent, TimelineKey, TimelineStore,
+    AgentError, BoxFuture, BranchCursor, BranchLifecycle, BranchPage, FaultReporter, PolicyFacts,
+    PolicyOrder, PolicyOrderEvent, PolicyWindow, Result, StoredEvent, TimelineKey, TimelineStore,
 };
 use dim_agent_types::{
     AgentEvent, EventDraft, EventKind, InputMessageData, ProjectionCheckpoint, RecoverySnapshot,
@@ -738,6 +738,84 @@ impl Timeline {
             .into_iter()
             .flatten()
             .collect())
+    }
+    /// The first page of a backward, kind-filtered read of the branch chain
+    /// at a published `through`.
+    #[service(skip)]
+    pub fn page_cursor(&self, through: u64) -> Result<BranchCursor> {
+        let segments = self.segments(through)?;
+        let segment = segments.len().checked_sub(1);
+        Ok(BranchCursor {
+            through,
+            segment,
+            before: segment.map_or(0, |index| segments[index].1),
+        })
+    }
+    /// One page of that read: the newest `limit` stored rows of `kinds` at or
+    /// below the cursor's sequence, oldest first. The next page continues the
+    /// same segment or moves to the ancestor before it.
+    #[service(skip)]
+    pub async fn page(
+        &self,
+        cursor: BranchCursor,
+        limit: usize,
+        kinds: &[&str],
+    ) -> Result<BranchPage> {
+        let segments = self.segments(cursor.through)?;
+        let exhausted = BranchPage {
+            events: vec![],
+            next: None,
+            own: false,
+        };
+        if limit == 0 || kinds.is_empty() {
+            return Ok(exhausted);
+        }
+        let (mut segment, mut before) = (cursor.segment, cursor.before);
+        loop {
+            let Some(index) = segment else {
+                return Ok(exhausted);
+            };
+            let Some((branch, _)) = segments.get(index) else {
+                return Ok(exhausted);
+            };
+            if before == 0 {
+                segment = index.checked_sub(1);
+                before = segment.map_or(0, |prev| segments[prev].1);
+                continue;
+            }
+            let key = TimelineKey {
+                session_id: self.0.key.session_id.clone(),
+                branch_id: branch.clone(),
+            };
+            let records = self
+                .0
+                .store
+                .read_kind_page(&key, kinds, before, limit)
+                .await?;
+            let Some(first) = records.first().map(|record| record.event.sequence) else {
+                segment = index.checked_sub(1);
+                before = segment.map_or(0, |prev| segments[prev].1);
+                continue;
+            };
+            let next = if first > 1 {
+                Some(BranchCursor {
+                    through: cursor.through,
+                    segment: Some(index),
+                    before: first - 1,
+                })
+            } else {
+                index.checked_sub(1).map(|prev| BranchCursor {
+                    through: cursor.through,
+                    segment: Some(prev),
+                    before: segments[prev].1,
+                })
+            };
+            return Ok(BranchPage {
+                events: records.into_iter().map(|record| record.event).collect(),
+                next,
+                own: cursor.through > 0 && Some(index) == segments.len().checked_sub(1),
+            });
+        }
     }
     #[service(skip)]
     pub async fn local<R: RangeBounds<u64> + Send>(
