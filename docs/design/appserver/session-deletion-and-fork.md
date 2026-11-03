@@ -753,7 +753,7 @@ Typed queries list recorded directories and the Session/subtree associations of 
 directories with no associations. Results describe usage only; callers must reverify external state before
 using them for recognition or a separately authorized cleanup. Session close preserves the records. A fork
 copies neither associations nor recognition state; its first use must establish its own relationship.
-These operations produce no Timeline event and no client notification. They add no service or plugin.
+These operations produce no Timeline event and no client notification. They add no plugin.
 The native format decision belongs to [storage v32](native-storage-format.md#911-v32-格式决定).
 
 ## Appendix A. Rust binding
@@ -805,3 +805,10 @@ pub const COMMAND_OUTPUT_DIRECTORY: &str = "command-output";
 under that root, the directory the daemon gives WorkspaceTools as its output root
 ([main.rs](../../../crates/dim-app-server/src/main.rs)); `COMMAND_OUTPUT_DIRECTORY` is the one definition of its name. The creation rollback
 path (`TimelineStore::rollback_session`) calls the same row removal as `delete_session`.
+
+### Worktree association port
+
+SessionStore provides the process service `worktreeAssociations` to the Session file-facts owner.
+Its typed `associate(session, directory, subtree)` operation has the same atomicity and errors as
+§17. `directory` has one shared definition in the file-access contract, containing repository common
+directory and worktree root. The port writes usage only and performs no Git discovery or authorization.

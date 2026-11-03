@@ -54,6 +54,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `sqliteStorage` | process | SqliteStorage | Rust-only | — |
 | `uiHost` | process | UiHost | Rust-only | — |
 | `workflowFiles` | process | Settings | yes | `createDirectory` async, `list` async, `read` async, `replace` async |
+| `worktreeAssociations` | process | SessionStore | Rust-only | — |
 | `agentConfig` | session | SessionScope | Rust-only | — |
 | `collaborationConfig` | session | SessionScope | Rust-only | — |
 | `collaborationSession` | session | CollaborationSession | Rust-only | — |

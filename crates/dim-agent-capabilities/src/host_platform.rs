@@ -443,7 +443,7 @@ impl HostPlatform {
     pub(crate) async fn prepare_isolated_process(
         &self,
         spec: ProcessSpec,
-        _workspace: &Path,
+        _workspaces: &[PathBuf],
         _output_dir: Option<&Path>,
     ) -> Result<(ProcessSpec, Option<TemporaryDirectory>, Option<Isolation>), ProcessSpecError>
     {

@@ -76,10 +76,13 @@ as `platform_roots` when the platform mounts; the sandbox builder filters it to 
 installed on this host, and the `FileAccessFacts` service reads the same list, so the system fact
 is non-empty with the sandbox off. The effective developer directory and git's global
 configuration are added by the builder per process and are not facts.
-`prepare_isolated_process(spec, workspace, output_dir)` reads
+`prepare_isolated_process(spec, workspaces, output_dir)` reads
 the switches through the port at every call, selects the existing environment values and wraps
 the argv in Seatbelt or bubblewrap. The immutable Session workspace, not the command cwd,
-supplies default writes; ShellSession also supplies its owned output directory, WorkspaceTools
+supplies default writes, together with the Session file-facts service's confirmed roots
+([worktree access R3](../../../design/worktree-access.md#r3-新进程的工作目录与隔离范围)).
+ShellSession looks up that optional service only when starting its shell.
+It also supplies its owned output directory; WorkspaceTools
 supplies none. On macOS, default writes also include a fresh `dim-isolated-<uuid>` directory
 (mode 0700) under the service's system temporary directory, which becomes TMPDIR. Preparation
 returns it as a `TemporaryDirectory`; the consumer passes it to `ProcessTree::hold` or
