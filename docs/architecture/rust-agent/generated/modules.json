@@ -2128,6 +2128,15 @@
       ]
     },
     {
+      "id": "dim_app_server::mcp::management::tests",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::mcp::management",
+      "file": "crates/dim-app-server/src/mcp/management.rs",
+      "unexpandedMacros": [
+        "assert_eq"
+      ]
+    },
+    {
       "id": "dim_app_server::mcp::publication",
       "crate": "dim_app_server",
       "parent": "dim_app_server::mcp",
@@ -20588,6 +20597,7 @@
         "path RemoteTransport::Http",
         "path RemoteTransport::Sse",
         "path config::decode_entry",
+        "path config::public_endpoint",
         "path config::strip_secret",
         "use super::config",
         "use super::config::BearerAuth",
@@ -20595,6 +20605,13 @@
         "use super::config::McpServerSettings",
         "use super::config::McpSettings",
         "use super::config::RemoteTransport"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::management",
+      "to": "dim_app_server::mcp::management::tests",
+      "references": [
+        "mod tests"
       ]
     },
     {
@@ -20637,6 +20654,22 @@
         "use crate::settings::BusinessDocument",
         "use crate::settings::SettingsError",
         "use crate::settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::management::tests",
+      "to": "dim_app_server::mcp::config",
+      "references": [
+        "path McpServerSettings",
+        "path McpServerSettings::Remote",
+        "path RemoteTransport::Http"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::management::tests",
+      "to": "dim_app_server::mcp::management",
+      "references": [
+        "path configuration_view"
       ]
     },
     {

@@ -202,18 +202,20 @@ fn configuration_view(configuration: McpServerSettings) -> Result<serde_json::Va
             auth,
             oauth,
             ..
-        } => serde_json::json!({
-            "type": kind, "endpoint": url::Url::parse(&url)
-                .map_err(|_| RpcError::invalid("Invalid MCP endpoint"))?
-                .origin().ascii_serialization(),
-            "headerNames": headers.keys().collect::<Vec<_>>(),
-            "authConfigured": auth.is_some(), "oauthConfigured": oauth.is_some(),
-            "oauth": oauth.map(|oauth| serde_json::json!({
-                "clientId": oauth.client_id, "callbackPort": oauth.callback_port,
-                "scopes": oauth.scopes,
-                "metadataConfigured": oauth.auth_server_metadata_url.is_some()
-            }))
-        }),
+        } => {
+            let endpoint = config::public_endpoint(&url)
+                .map_err(|_| RpcError::invalid("Invalid MCP endpoint"))?;
+            serde_json::json!({
+                "type": kind, "endpoint": endpoint,
+                "headerNames": headers.keys().collect::<Vec<_>>(),
+                "authConfigured": auth.is_some(), "oauthConfigured": oauth.is_some(),
+                "oauth": oauth.map(|oauth| serde_json::json!({
+                    "clientId": oauth.client_id, "callbackPort": oauth.callback_port,
+                    "scopes": oauth.scopes,
+                    "metadataConfigured": oauth.auth_server_metadata_url.is_some()
+                }))
+            })
+        }
     })
 }
 
@@ -972,4 +974,36 @@ pub(super) fn provide(
         }),
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn remote(url: &str) -> McpServerSettings {
+        McpServerSettings::Remote {
+            kind: RemoteTransport::Http,
+            url: url.into(),
+            headers: Default::default(),
+            auth: None,
+            oauth: None,
+            enabled: None,
+            extra: Default::default(),
+        }
+    }
+
+    /// #952: a malformed endpoint without a reference keeps the view's error
+    /// and never reaches the client whole; a reference stays as written and a
+    /// parseable URL is reduced to its origin.
+    #[test]
+    fn a_configuration_view_errs_on_a_malformed_endpoint() {
+        let error = configuration_view(remote("host/mcp?token=made-up-secret")).unwrap_err();
+        assert_eq!(error.message, "Invalid MCP endpoint");
+
+        let view = configuration_view(remote("https://user:made-up-credential@host/mcp")).unwrap();
+        assert_eq!(view["endpoint"], "https://host");
+
+        let view = configuration_view(remote("https://${MCP_HOST}/mcp")).unwrap();
+        assert_eq!(view["endpoint"], "https://${MCP_HOST}");
+    }
 }

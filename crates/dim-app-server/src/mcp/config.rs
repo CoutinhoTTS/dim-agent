@@ -941,7 +941,18 @@ impl McpSecretOAuth {
 }
 
 /// The safe part of a project entry, without the overlay-held members.
+///
+/// A reference is not a URL, so parsing and serializing it would change its
+/// spelling or reject the entry. With a reference, the scheme and authority
+/// are kept as written, in the reference's own case, and everything the
+/// reference could hide (userinfo, path, query and fragment) is dropped. A
+/// reference without an authority keeps the text before any `?` or `#`.
+/// Without a reference the previous rule applies: a URL reduces to its
+/// origin, and unparseable text is returned as written.
 pub(crate) fn public_url(value: &str) -> String {
+    if has_reference(value) {
+        return reference_public_url(value);
+    }
     let Ok(url) = url::Url::parse(value) else {
         return value.to_owned();
     };
@@ -955,6 +966,40 @@ pub(crate) fn public_url(value: &str) -> String {
     } else {
         value.to_owned()
     }
+}
+
+/// The endpoint a configuration view shows: a reference is kept as written;
+/// otherwise the URL is parsed and reduced to its origin, and a value that
+/// does not parse stays an error for the view.
+pub(crate) fn public_endpoint(value: &str) -> std::result::Result<String, url::ParseError> {
+    if has_reference(value) {
+        return Ok(reference_public_url(value));
+    }
+    Ok(url::Url::parse(value)?.origin().ascii_serialization())
+}
+
+fn has_reference(value: &str) -> bool {
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        if reference(&rest[start + 2..]).is_some() {
+            return true;
+        }
+        rest = &rest[start + 1..];
+    }
+    false
+}
+
+fn reference_public_url(value: &str) -> String {
+    let Some((scheme, rest)) = value.split_once("://") else {
+        let end = value.find(['?', '#']).unwrap_or(value.len());
+        return value[..end].to_owned();
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..end];
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    format!("{scheme}://{authority}")
 }
 
 fn public_oauth(oauth: &McpOAuthSettings) -> Option<McpOAuthSettings> {
@@ -2311,6 +2356,34 @@ mod tests {
         assert_eq!(args, &["--key=value".to_owned()]);
         assert_eq!(env["KEY"].as_str(), "value");
         assert_eq!(cwd.as_deref(), Some("${GITHUB_TOKEN}"));
+    }
+
+    #[test]
+    fn public_url_keeps_a_reference_as_written() {
+        // The authority keeps the reference's case; path, query and userinfo go.
+        assert_eq!(public_url("https://${MCP_HOST}/mcp"), "https://${MCP_HOST}");
+        assert_eq!(
+            public_url("https://${MCP_HOST}:8443/mcp?x=1#f"),
+            "https://${MCP_HOST}:8443"
+        );
+        assert_eq!(
+            public_url("https://user:made-cz-qvjbfw-9k2@${MCP_HOST}/mcp"),
+            "https://${MCP_HOST}"
+        );
+        // No authority: the text before any query or fragment stays.
+        assert_eq!(public_url("${MCP_URL}/mcp"), "${MCP_URL}/mcp");
+        assert_eq!(public_url("${MCP_URL}/mcp?x#y"), "${MCP_URL}/mcp");
+
+        // Without a reference the previous rule is unchanged.
+        assert_eq!(
+            public_url("https://example.test/mcp"),
+            "https://example.test"
+        );
+        assert_eq!(
+            public_url("https://user:made-cz-qvjbfw-9k2@example.test/mcp?x=1"),
+            "https://example.test"
+        );
+        assert_eq!(public_url("not a url"), "not a url");
     }
 
     #[test]

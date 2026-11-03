@@ -2112,3 +2112,78 @@ async fn a_broken_project_entry_does_not_hide_the_user_entry_with_the_same_id() 
 
     fixture.close().await;
 }
+
+/// #952: a reference keeps its spelling in the project file when an entry
+/// moves into a workspace; the full text and the credentials stay in the
+/// user's overlay.
+#[tokio::test]
+async fn a_moved_entry_keeps_a_reference_name_in_the_project_file() {
+    let fixture = Fixture::new().await;
+    let cancel = CancellationToken::new();
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    fixture
+        .mcp
+        .update(
+            SettingsScope::User,
+            catalog.user_revision,
+            "reference".into(),
+            McpChange::Put(
+                serde_json::from_value(json!({
+                    "type": "http",
+                    "url": "https://${MCP_HOST}/mcp",
+                    "headers": {"Authorization": "Bearer ${MCP_TOKEN}"}
+                }))
+                .unwrap(),
+            ),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    fixture
+        .mcp
+        .move_entry(
+            McpSource::User,
+            McpSource::Project(1),
+            "reference".into(),
+            catalog.user_revision,
+            catalog.project_revision.unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+    let project: Value =
+        serde_json::from_slice(&fs::read(fixture.home.join("project/.mcp.json")).unwrap()).unwrap();
+    assert_eq!(
+        project["mcpServers"]["reference"]["url"],
+        "https://${MCP_HOST}"
+    );
+    assert!(project["mcpServers"]["reference"].get("headers").is_none());
+
+    let secrets = fixture
+        .settings
+        .read::<McpSecrets>(SettingsScope::User, &cancel)
+        .await
+        .unwrap()
+        .document;
+    let workspace = fs::canonicalize(fixture.home.join("project"))
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let secret = &secrets.entries[&workspace]["reference"];
+    assert_eq!(
+        secret.url.as_deref(),
+        Some("https://${MCP_HOST}/mcp"),
+        "the full text is withheld"
+    );
+    assert!(
+        secret
+            .headers
+            .as_ref()
+            .is_some_and(|headers| headers.contains_key("Authorization"))
+    );
+
+    fixture.close().await;
+}
