@@ -316,16 +316,23 @@ overlay or project document fails the save instead of passing the guard.
 A `mcpServers` document is decoded entry by entry. An entry that does not decode is not a server:
 it stays in the document exactly as written, every other entry loads, and the catalog reports it
 in an `invalid` list beside `servers`, so a client that predates the list still reads every valid
-row and shows nothing about the broken ones. The entry's error names its id and field and states
-the expected kind; it never repeats a value, because a wrongly typed header or argument can hold
-a credential. `ws` and an entry with a `url` but no `type` say the transport must be `http` or
-`sse`; `streamable-http` decodes as `http`. A non-JSON file and a non-object `mcpServers` still
-fail the whole document, with the decoder's line and column and no value.
+row and shows nothing about the broken ones. A broken entry shadows nothing: when a
+lower-precedence source holds a valid entry for the same id, the catalog lists that entry as the
+server with its own source, beside the broken row. The entry's error names its id and field and
+states the expected kind; it never repeats a value, because a wrongly typed header or argument can
+hold a credential. `ws` and an entry with a `url` but no `type` say the transport must be `http` or
+`sse`; `streamable-http` decodes as `http`. An optional member set to `null` is absent, as it was
+before this rule; the required `command` and `url` are not optional and reject `null`. A non-JSON
+file and a non-object `mcpServers` still fail the whole document, with the decoder's line and
+column and no value. An entry id that is empty or only whitespace fails the whole document too,
+because no management call can name it; the error says an entry id is empty and quotes no value.
+Every broken entry is its own row in its own source; two sources that hold a broken entry for one
+id list two rows and no server.
 
 The write rule follows from the same value: each entry is held as read beside the entry decoded
 from it, and a write serialises from typed values only the entry it changed. Every other entry,
-decoded or broken, goes back with its unknown fields and values, while ids and member order are
-normalized to `serde_json`'s sorted map order.
+decoded or broken, goes back as the file wrote it, including member order and unknown fields.
+The file keeps the order of its ids: a new id is appended, and a removed id leaves its place.
 Only the edited entry may change its spelling, so an untouched `streamable-http` entry keeps that
 name and a saved one is written as `http`.
 
@@ -824,7 +831,7 @@ Flow level, reusing the existing MCP flows:
 | `crates/dim-app-server/tests/transport_flow/web_entry.rs` | The authenticated Web entry advertises and reaches the MCP namespace including `mcp.move`, and a bare connection is refused |
 | `crates/dim-app-server/tests/mcp_flow.rs` | The service level: a source's read returns its declared entry with the source revision, and a project entry's enablement comes from the user's record, while the effective entry a Session runs resolves the workspace `cwd` (`editing_reads_the_declared_entry_while_running_resolves_it`); `scope_move_partial_is_recoverable_and_remove_cleans_the_overlay` and `scope_move_back_to_user_keeps_the_merged_entry_and_its_enablement` cover a move in each direction, the withheld part, the destination's enablement, the overlay deletion and the cleared record; `scope_move_checks_the_destination_id_and_both_revisions` covers `mcp_move_conflict` and a stale revision on either side; `a_conflicting_remove_keeps_the_project_entry_and_its_overlay` covers the same-revision race and the removal order; `remove_keeps_a_replacement_moves_overlay` captures a removal's record, commits the removal, lets a replacement move with the same id and identical withheld values write a new generation, and proves the earlier cleanup keeps the replacement's record while a later removal deletes it; `a_save_racing_a_move_keeps_the_moves_overlay` walks the reads a racing save makes — the id absent with no record, a move into the project, the record read returning the move's record, and the entry read returning the entry with `secretsInUserScope`, the state D17 requires `mcp_credentials_are_user_scoped` for rather than the stale refusal — and asserts the move's overlay and credential survive and the racing save's revision-checked write loses; the handler's re-read itself has no injection point in a flow test, and the scoped answer is asserted through `mcp.save` on an overlay entry in `mcp_scope_move_preserves_withheld_values_and_enablement`; `an_into_project_partial_is_finished_after_a_restart` restarts on the same home after an injected overlay write failure and finishes the move by the documented recovery without credential loss |
 | `crates/dim-app-server/tests/mcp_oauth_flow.rs` | `scope_moves_keep_the_oauth_record_and_the_sign_in_state` moves a signed-in OAuth entry in each direction: the `mcp-oauth.json` record and the `authorized` state survive, no token appears in `.mcp.json`, and `mcp.configuration`, `mcp.inspect` and `mcp.update` keep their replies for the moved entry; a probe of an unauthorized entry reports `authRequired`, with `expired` where Dim's stored credential was rejected and `missingScopes` where the server answered `403 insufficient_scope` |
-| `crates/dim-app-server/src/mcp/config.rs` (unit) | An entry that does not decode is held out of `mcp_servers` and reported with its field and expected kind while the rest load; an error never repeats a token-like value; an untouched entry, including `streamable-http` and unknown members, is written back with its unknown members while ids and member order are normalized (sorted), and only an edited entry is serialised from its typed value; only a non-JSON file or a non-object `mcpServers` fails the document |
+| `crates/dim-app-server/src/mcp/config.rs` (unit) | An entry that does not decode is held out of `mcp_servers` and reported with its field and expected kind while the rest load; an error never repeats a token-like value; an untouched entry, including `streamable-http` and unknown members, is written back in the order it was read, and only an edited entry is serialised from its typed value; only a non-JSON file or a non-object `mcpServers` fails the document |
 | `crates/dim-migration/tests/migration_flow.rs` | Legacy `mcpServers` import entry by entry: decodable entries are written as the legacy file had them, a broken entry is recorded `Unsupported` as `mcpServers.<id>` with its error and never reaches the native store, and a fully valid file imports exactly as before |
 
 The redaction assertions of

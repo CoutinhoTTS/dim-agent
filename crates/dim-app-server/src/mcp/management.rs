@@ -69,7 +69,7 @@ pub struct SaveMcp {
     pub id: String,
     pub source: McpScope,
     pub expected_version: String,
-    pub configuration: McpServerSettings,
+    pub configuration: serde_json::Value,
 }
 impl std::fmt::Debug for SaveMcp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -96,7 +96,7 @@ struct TestMcp {
     id: String,
     source: McpScope,
     #[serde(default, deserialize_with = "optional_non_null")]
-    configuration: Option<McpServerSettings>,
+    configuration: Option<serde_json::Value>,
     #[serde(default, deserialize_with = "optional_non_null")]
     patch: Option<ConfigurationPatch>,
 }
@@ -572,7 +572,7 @@ pub(super) fn provide(
                             if !matches!(source, McpSource::User) || p.patch.is_some() {
                                 return Err(RpcError::invalid("A new test configuration must be user-supplied and cannot include a patch"));
                             }
-                            configuration
+                            config::decode_entry(&p.id, &configuration).map_err(|entry| error(McpError::InvalidEntry(entry)))?
                         } else if let Some(patch) = p.patch {
                             let scope = writable(source)?;
                             let mut entry = directory.editable(source, p.id.clone(), &stopping).await.map_err(error)?;
@@ -580,7 +580,11 @@ pub(super) fn provide(
                                 return Err(error(McpError::Disabled));
                             }
                             patch_configuration(&mut entry.configuration, patch)?;
-                            directory.effective(scope, p.id.clone(), entry.configuration, &stopping).await.map_err(error)?
+                            let configuration = entry
+                                .configuration
+                                .canonical(&p.id)
+                                .map_err(|entry| error(McpError::InvalidEntry(entry)))?;
+                            directory.effective(scope, p.id.clone(), configuration, &stopping).await.map_err(error)?
                         } else {
                             let entry = target(&directory, source, p.id.clone(), &stopping).await?;
                             if !matches!(source, McpSource::User) && !entry.enabled() {
@@ -692,6 +696,8 @@ pub(super) fn provide(
                             project(&settings, p.cwd, &stopping).await?,
                         )?;
                         let source = writable(mcp_source)?;
+                        let configuration = config::decode_entry(&p.id, &p.configuration)
+                            .map_err(|entry| error(McpError::InvalidEntry(entry)))?;
                         // A broken project entry's record cannot apply to the
                         // replacement, so a successful save deletes it at the
                         // generation read here. A record that changed after
@@ -757,7 +763,7 @@ pub(super) fn provide(
                                 source,
                                 p.expected_version,
                                 p.id,
-                                McpChange::Put(p.configuration),
+                                McpChange::Put(configuration),
                                 &stopping,
                             )
                             .await

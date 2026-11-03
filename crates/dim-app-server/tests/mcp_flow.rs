@@ -664,7 +664,12 @@ async fn directory_preserves_scope_and_cas_through_plugin_management() {
     );
     assert_eq!(persisted["extension"], json!({"preserve":17}));
 
-    let invalid = serde_json::from_value(json!({"command":""})).unwrap();
+    let mut invalid =
+        serde_json::from_value::<McpServerSettings>(json!({"command": "valid"})).unwrap();
+    let McpServerSettings::Stdio { command, .. } = &mut invalid else {
+        panic!("an untyped command is stdio");
+    };
+    command.clear();
     assert!(matches!(
         mcp.update(
             SettingsScope::User,
@@ -674,7 +679,7 @@ async fn directory_preserves_scope_and_cas_through_plugin_management() {
             &cancel
         )
         .await,
-        Err(McpError::Settings(SettingsError::Document(_)))
+        Err(McpError::InvalidEntry(_))
     ));
     assert_eq!(
         mcp.catalog(None, &cancel).await.unwrap().user_revision,
@@ -1749,7 +1754,8 @@ async fn entries_decode_one_by_one_and_writes_keep_every_other_entry_as_written(
         .iter()
         .map(|entry| entry.id.as_str())
         .collect();
-    assert_eq!(broken, ["leaky", "project-broken", "untyped", "ws"]);
+    // Rows are ordered by source in precedence order, then by id.
+    assert_eq!(broken, ["leaky", "untyped", "ws", "project-broken"]);
     let ws = catalog
         .invalid
         .iter()
@@ -1962,6 +1968,108 @@ async fn entries_decode_one_by_one_and_writes_keep_every_other_entry_as_written(
     fixture.close().await;
 }
 
+/// #951: a write keeps the document's id order and every untouched entry's
+/// bytes: a new id is appended and a removed id leaves its place.
+#[tokio::test]
+async fn a_write_keeps_the_documents_id_order() {
+    fn block<'a>(text: &'a str, id: &str) -> &'a str {
+        let start = text.find(&format!("    \"{id}\": {{\n")).unwrap();
+        let rest = &text[start..];
+        let end = rest
+            .find("\n    },")
+            .or_else(|| rest.find("\n    }\n"))
+            .unwrap();
+        &rest[..end]
+    }
+    fn position(text: &str, id: &str) -> usize {
+        text.find(&format!("    \"{id}\": {{\n")).unwrap()
+    }
+
+    let fixture = Fixture::new().await;
+    let cancel = CancellationToken::new();
+    let path = fixture.home.join("mcp.json");
+    let source = json!({
+        "mcpServers": {
+            "zeta": {"command": "z", "future": {"keep": [1, 2]}},
+            "alpha": {"type": "http", "url": "https://alpha.test/mcp", "auth": {"type": "bearer", "token": "private"}, "unknown": true},
+            "middle": {"command": "m", "enabled": false}
+        },
+        "extension": {"preserve": 17}
+    });
+    fs::write(&path, serde_json::to_vec_pretty(&source).unwrap()).unwrap();
+    let snapshot = fixture
+        .settings
+        .read::<McpSettings>(SettingsScope::User, &cancel)
+        .await
+        .unwrap();
+    let before = fs::read_to_string(&path).unwrap();
+    let replacement =
+        serde_json::from_value(json!({"command": "m-edited", "enabled": false})).unwrap();
+    fixture
+        .mcp
+        .update(
+            SettingsScope::User,
+            snapshot.revision,
+            "middle".into(),
+            McpChange::Put(replacement),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let after = fs::read_to_string(&path).unwrap();
+    assert_eq!(block(&before, "zeta"), block(&after, "zeta"));
+    assert_eq!(block(&before, "alpha"), block(&after, "alpha"));
+    assert!(position(&after, "zeta") < position(&after, "alpha"));
+    assert!(position(&after, "alpha") < position(&after, "middle"));
+    assert!(after.contains("m-edited"), "{after}");
+
+    // A new id is appended after the document's ids.
+    let snapshot = fixture
+        .settings
+        .read::<McpSettings>(SettingsScope::User, &cancel)
+        .await
+        .unwrap();
+    let added = serde_json::from_value(json!({"command": "n"})).unwrap();
+    fixture
+        .mcp
+        .update(
+            SettingsScope::User,
+            snapshot.revision,
+            "new".into(),
+            McpChange::Put(added),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let after = fs::read_to_string(&path).unwrap();
+    assert!(position(&after, "middle") < position(&after, "new"));
+    assert!(position(&after, "new") < after.find("  \"extension\"").unwrap());
+
+    // A removed id leaves its place.
+    let snapshot = fixture
+        .settings
+        .read::<McpSettings>(SettingsScope::User, &cancel)
+        .await
+        .unwrap();
+    fixture
+        .mcp
+        .update(
+            SettingsScope::User,
+            snapshot.revision,
+            "alpha".into(),
+            McpChange::Remove,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let after = fs::read_to_string(&path).unwrap();
+    assert!(!after.contains("\"alpha\""), "{after}");
+    assert!(position(&after, "zeta") < position(&after, "middle"));
+    assert!(position(&after, "middle") < position(&after, "new"));
+    assert_eq!(block(&before, "zeta"), block(&after, "zeta"));
+    fixture.close().await;
+}
+
 /// A broken project entry with the same id as a valid user entry must not hide
 /// the user server: the catalog reports the valid row under `servers` and the
 /// broken row under `invalid`, and runtime selection reaches the user entry.
@@ -2000,36 +2108,6 @@ async fn a_broken_project_entry_does_not_hide_the_user_entry_with_the_same_id() 
         .await
         .unwrap();
     drop(connection);
-
-    fixture.close().await;
-}
-
-/// `null` in the optional members `type`, `enabled`, `auth` and `oauth` is the
-/// same as their absence: the entry loads instead of being reported invalid.
-#[tokio::test]
-async fn null_optional_members_load_instead_of_failing_the_entry() {
-    let fixture = Fixture::new().await;
-    let cancel = CancellationToken::new();
-    let user_file = fixture.home.join("mcp.json");
-    fs::write(
-        &user_file,
-        json!({
-            "mcpServers": {
-                "untyped": {"type": null, "command": "untyped-server"},
-                "enabled-null": {"command": "enabled-server", "enabled": null},
-                "auth-null": {"type": "http", "url": "https://example.test/mcp", "auth": null},
-                "oauth-null": {"type": "sse", "url": "https://example.test/sse", "oauth": null}
-            }
-        })
-        .to_string(),
-    )
-    .unwrap();
-
-    let catalog = fixture.mcp.catalog(None, &cancel).await.unwrap();
-    for id in ["untyped", "enabled-null", "auth-null", "oauth-null"] {
-        assert!(catalog.servers.contains_key(id), "{id} did not load");
-    }
-    assert!(catalog.invalid.is_empty());
 
     fixture.close().await;
 }

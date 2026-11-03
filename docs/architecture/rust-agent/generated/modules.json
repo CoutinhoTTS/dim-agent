@@ -2101,7 +2101,8 @@
         "assert",
         "assert_eq",
         "format",
-        "json"
+        "json",
+        "panic"
       ]
     },
     {
@@ -5495,6 +5496,16 @@
         "matches",
         "params",
         "vec"
+      ]
+    },
+    {
+      "id": "dim_migration::native::tests",
+      "crate": "dim_migration",
+      "parent": "dim_migration::native",
+      "file": "crates/dim-migration/src/native.rs",
+      "unexpandedMacros": [
+        "assert",
+        "json"
       ]
     },
     {
@@ -20094,6 +20105,7 @@
         "path McpServerSettings::Stdio",
         "path McpSettings",
         "path McpSettings::default",
+        "path McpSettings::from_value",
         "path config::effective",
         "path config::merge_secret",
         "path config::split_entry",
@@ -20393,6 +20405,8 @@
       "to": "dim_app_server::mcp::config",
       "references": [
         "path McpSecretEntry",
+        "path McpServerSettings::Remote",
+        "path McpServerSettings::Stdio",
         "path McpSettings",
         "path McpSettings::from_file",
         "path decode_entry"
@@ -20489,6 +20503,7 @@
         "path McpSettings::default",
         "path RemoteTransport::Http",
         "path RemoteTransport::Sse",
+        "path config::decode_entry",
         "path config::strip_secret",
         "use super::config",
         "use super::config::BearerAuth",
@@ -20616,10 +20631,12 @@
         "path McpSource::Project",
         "path McpSource::User",
         "path Result",
+        "path sources_in_precedence",
         "use super::McpConnection",
         "use super::McpError",
         "use super::McpSource",
-        "use super::Result"
+        "use super::Result",
+        "use super::sources_in_precedence"
       ]
     },
     {
@@ -38225,11 +38242,25 @@
     },
     {
       "from": "dim_migration::native",
+      "to": "dim_migration::native::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_migration::native",
       "to": "dim_migration::source",
       "references": [
         "path SessionData",
         "use crate::source::SessionData",
         "use crate::source::fingerprint"
+      ]
+    },
+    {
+      "from": "dim_migration::native::tests",
+      "to": "dim_migration::native",
+      "references": [
+        "path validate_settings"
       ]
     },
     {
@@ -39236,6 +39267,10 @@
     {
       "module": "dim_app_server::mcp::config",
       "path": "D::Error"
+    },
+    {
+      "module": "dim_app_server::mcp::config",
+      "path": "D::Error::custom"
     },
     {
       "module": "dim_app_server::mcp::config",

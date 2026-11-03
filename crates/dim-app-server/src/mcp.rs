@@ -99,6 +99,15 @@ impl From<SettingsScope> for McpSource {
     }
 }
 
+/// The sources in ascending precedence. The last source that holds a decoded
+/// entry for an id is that id's server; a broken entry holds none, so it
+/// shadows nothing.
+pub(crate) fn sources_in_precedence(project: Option<usize>) -> impl Iterator<Item = McpSource> {
+    [McpSource::User, McpSource::Plugins]
+        .into_iter()
+        .chain(project.map(McpSource::Project))
+}
+
 /// Server-side configuration, including secrets. Not a wire or logging type.
 /// For a project entry, the configuration is effective: its enablement comes
 /// from the user's record (`config::effective`).
@@ -389,28 +398,26 @@ impl McpService {
         document: serde_json::Value,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        let valid = serde_json::from_value::<McpSettings>(document)
-            .map_err(|_| SettingsError::Invalid("invalid MCP configuration"))
-            .and_then(|document| {
-                // A plugin registers its MCP content as one unit, and dim does
-                // not manage a plugin entry on its own. Refuse the document
-                // with the first broken entry's error rather than drop it.
-                let (servers, invalid) = document.into_parts();
-                if let Some(entry) = invalid.into_values().next() {
-                    return Err(SettingsError::Document(entry.error.to_string()));
-                }
-                let registration = McpPluginDocument {
-                    dir,
-                    mcp_servers: servers,
-                };
-                McpPluginServers {
-                    plugins: BTreeMap::from([(plugin.clone(), registration.clone())]),
-                    extra: BTreeMap::new(),
-                }
-                .validate()
-                .and_then(|()| registration.confine())
-                .map(|()| registration)
-            });
+        let valid = McpSettings::from_value(document).and_then(|document| {
+            // A plugin registers its MCP content as one unit, and dim does
+            // not manage a plugin entry on its own. Refuse the document
+            // with the first broken entry's error rather than drop it.
+            let (servers, invalid) = document.into_parts();
+            if let Some(error) = invalid.into_values().next() {
+                return Err(SettingsError::Document(error.to_string()));
+            }
+            let registration = McpPluginDocument {
+                dir,
+                mcp_servers: servers,
+            };
+            McpPluginServers {
+                plugins: BTreeMap::from([(plugin.clone(), registration.clone())]),
+                extra: BTreeMap::new(),
+            }
+            .validate()
+            .and_then(|()| registration.confine())
+            .map(|()| registration)
+        });
         let result = match valid {
             Ok(registration) => {
                 self.set_plugin(plugin.clone(), Some(registration), cancel)
@@ -522,7 +529,7 @@ impl McpService {
                 servers: BTreeMap::new(),
                 invalid: Vec::new(),
             };
-            let mut invalid = BTreeMap::new();
+            let mut invalid: BTreeMap<(McpSource, String), McpEntryError> = BTreeMap::new();
             let enablement = match project {
                 Some(_) => settings
                     .read::<McpProjectEnablement>(SettingsScope::User, &cancel)
@@ -540,16 +547,12 @@ impl McpService {
                 }
                 None => McpSecrets::default(),
             };
-            for source in [McpSource::User, McpSource::Plugins]
-                .into_iter()
-                .chain(project.map(McpSource::Project))
-            {
+            for source in sources_in_precedence(project) {
                 let Some(scope) = source.scope() else {
                     let plugins = settings
                         .read::<McpPluginServers>(SettingsScope::User, &cancel)
                         .await?;
                     for (id, configuration) in plugins.document.entries() {
-                        invalid.remove(&id);
                         catalog.servers.insert(
                             id,
                             McpServerEntry {
@@ -574,7 +577,6 @@ impl McpService {
                 let document = snapshot.document;
                 let (servers, invalid_entries) = document.into_parts();
                 for (id, mut configuration) in servers {
-                    invalid.remove(&id);
                     if let Some(workspace) = &workspace
                         && let Some(secret) = secrets.get(workspace, &id)
                     {
@@ -590,18 +592,14 @@ impl McpService {
                         },
                     );
                 }
-                for (id, entry) in invalid_entries {
-                    invalid.insert(
-                        id.clone(),
-                        McpInvalidEntry {
-                            id,
-                            source,
-                            error: entry.error,
-                        },
-                    );
+                for (id, error) in invalid_entries {
+                    invalid.insert((source, id.clone()), error);
                 }
             }
-            catalog.invalid = invalid.into_values().collect();
+            catalog.invalid = invalid
+                .into_iter()
+                .map(|((source, id), error)| McpInvalidEntry { id, source, error })
+                .collect();
             Ok(catalog)
         })
         .await
@@ -1130,6 +1128,9 @@ async fn write(
     }
     let removed = match change {
         McpChange::Put(configuration) => {
+            let configuration = configuration
+                .canonical(&id)
+                .map_err(McpError::InvalidEntry)?;
             document.insert(id.clone(), configuration);
             None
         }

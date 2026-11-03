@@ -2123,6 +2123,56 @@ async fn plugin_hooks_follow_the_hooks_owner() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// #951: a plugin's MCP document is one unit; one broken entry refuses the
+/// whole document, so its valid sibling registers nothing either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugin_mcp_document_with_one_broken_entry_registers_nothing() {
+    let home = home();
+    let mut config = config(&home);
+    config.unix_path = Some(home.join("ipc/server.sock"));
+    let server = serve(product_builder(), config).await.unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    select_fixture_model(&mut client).await;
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let absent = json!({"command": "dim-test-absent-mcp-server"});
+    let source = home.join("src/mixed");
+    write_content_plugin(&source, "mixed", &["mixed"], json!({"good": absent}));
+    let installed = call(
+        &mut client,
+        "plugin.install",
+        json!({"source":{"path":source}}),
+    )
+    .await;
+    assert!(installed["result"].get("refused").is_none(), "{installed}");
+    assert_eq!(mcp_ids(&mut client).await, ["mixed:good"]);
+
+    write_content_plugin(
+        &source,
+        "mixed",
+        &["mixed"],
+        json!({"good": absent, "bad": {"command": ""}}),
+    );
+    let reloaded = call(&mut client, "plugin.reload", json!({"name":"mixed"})).await;
+    let refused = reloaded["result"]["refused"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{reloaded}"));
+    assert!(
+        refused.iter().any(|item| item["kind"] == "mcp"),
+        "{reloaded}"
+    );
+    assert!(
+        mcp_ids(&mut client).await.is_empty(),
+        "a refused plugin document registered an entry"
+    );
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(item(&list, "mixed")["refused"][0]["kind"], "mcp", "{list}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 /// §3.7: a content file PluginManager cannot read — not JSON, or a directory
 /// in its place — is its own refusal, not only the reply's: `plugin.list`
 /// shows it right after the install and after a restart, while a reload of
