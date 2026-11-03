@@ -4,8 +4,8 @@ use crate::{
     timeline_tree::TreeCommands,
 };
 use dim_agent_runtime::{
-    AgentError, Delivery, Dispatcher, InputSnapshot, Names, Registrations, Result, StateCell,
-    Timeline,
+    AgentError, Dispatcher, InputSnapshot, Names, Registrations, Result, StateCell, Timeline,
+    rebuild_facts,
 };
 use dim_agent_types::*;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -308,6 +308,8 @@ impl DynPlugin for InputQueuePlugin {
                 lifecycle: ctx.cancellation_token(),
             });
             let owner = queue.clone();
+            let read = queue.clone();
+            let read_timeline = queue.timeline.clone();
             dispatcher
                 .follow(
                     ctx,
@@ -320,12 +322,31 @@ impl DynPlugin for InputQueuePlugin {
                         "turn/end",
                         "stop/interrupt",
                     ],
-                    move |delivery| {
-                        let result = match delivery {
-                            Delivery::Replay(events) => owner.rebuild(&events),
-                            Delivery::Live(event) => owner.on_event(event),
-                        };
-                        Box::pin(async { result })
+                    move || {
+                        let read = read.clone();
+                        let timeline = read_timeline.clone();
+                        Box::pin(async move {
+                            let reply = rebuild_facts(
+                                &timeline,
+                                &[
+                                    "input/message",
+                                    "input/consumed",
+                                    "input/withdraw",
+                                    "input/applied",
+                                    "input/deleted",
+                                    "turn/start",
+                                    "turn/end",
+                                    "stop/interrupt",
+                                ],
+                            )
+                            .await?;
+                            read.rebuild(&reply.events)?;
+                            Ok(reply.through)
+                        })
+                    },
+                    move |event| {
+                        let owner = owner.clone();
+                        Box::pin(async move { owner.on_event(event) })
                     },
                 )
                 .await?;

@@ -351,6 +351,10 @@ fn input(text: &str) -> EventDraft {
     EventKind::InputMessage(InputMessageData::text(text, None)).into()
 }
 
+fn draft(kind: EventKind, id: &str) -> EventDraft {
+    EventDraft::from(kind).with_id(id)
+}
+
 fn page(offset: u64) -> TimelineQuery {
     TimelineQuery {
         scope: TimelineQueryScope::Branch,
@@ -457,4 +461,204 @@ async fn a_tail_page_continues_the_published_page_and_marks_the_end_short() {
         ["5"],
         "an event id the published head does not hold is found in the tail"
     );
+}
+
+/// The kinds each rebuilding part folds ([audit §2.3](../../../docs/design/timeline-read-entries.md#23-what-the-eleven-rebuilds-fold)):
+/// what its opening reads, which is not always the keys it consumes live.
+const REBUILDS: &[&[&str]] = &[
+    &["permission/changed"],
+    &["turn/start", "turn/end"],
+    &["approval/request", "approval/respond", "approval/cancelled"],
+    &[
+        "step/tool-call",
+        "step/tool-result",
+        "stop/interrupt",
+        "turn/start",
+        "turn/end",
+    ],
+    &[
+        "model/call",
+        "step/tool-use-start",
+        "step/tool-use",
+        "step/model-output-end",
+        "step/model-start",
+        "input/applied",
+        "stop/interrupt",
+        "turn/start",
+        "turn/end",
+    ],
+    &[
+        "context/prepare",
+        "model/call",
+        "step/model-output-end",
+        "context/compaction-start",
+        "context/compaction",
+        "stop/interrupt",
+        "step/model-start",
+        "input/applied",
+        "turn/start",
+        "turn/end",
+    ],
+    &[
+        "exec/started",
+        "exec/ended",
+        "stop/interrupt",
+        "input/message",
+    ],
+    &[
+        "input/message",
+        "input/consumed",
+        "input/withdraw",
+        "input/applied",
+        "input/deleted",
+        "turn/start",
+        "turn/end",
+        "stop/interrupt",
+    ],
+    &[
+        "branch/create",
+        "branch/create-failed",
+        "branch/ended",
+        "branch/end",
+        "input/message",
+        "input/applied",
+        "input/consumed",
+        "input/deleted",
+        "stop/interrupt",
+        "turn/end",
+        "step/tool-use",
+        "step/tool-result",
+    ],
+    &[
+        "stop/interrupt",
+        "input/message",
+        "input/consumed",
+        "input/deleted",
+        "turn/start",
+        "turn/end",
+        "step/tool-call",
+        "step/tool-result",
+        "context/configured",
+        "approval/request",
+        "approval/respond",
+        "approval/cancelled",
+    ],
+    &[
+        "input/applied",
+        "input/consumed",
+        "context/compact",
+        "context/compaction-start",
+        "context/compaction",
+        "stop/interrupt",
+        "turn/start",
+        "turn/end",
+        "step/model-start",
+        "context/prepare",
+        "step/tool-use-start",
+        "step/tool-use",
+        "step/model-output-end",
+        "step/tool-call",
+        "step/tool-result",
+    ],
+];
+
+/// The old replay read the branch through the committed head and folded every
+/// event; the new read selects the kinds a part folds and adds the unpublished
+/// tail. Both must hand a rebuild the same facts of those kinds, in order.
+#[tokio::test]
+async fn every_rebuild_selection_folds_what_the_replay_folded() {
+    let store = Arc::new(Held::default());
+    store
+        .create_session("fold", &SessionConfig::default())
+        .await
+        .unwrap();
+    let timeline = Timeline::new(
+        Ctx::root().unwrap(),
+        TimelineKey {
+            session_id: "fold".into(),
+            branch_id: "main".into(),
+        },
+        vec![],
+        store.clone(),
+    );
+    let drafts: Vec<EventDraft> = vec![
+        input("one").with_id("1"),
+        draft(
+            EventKind::TurnStart(TurnStartData {
+                turn_id: "t1".into(),
+            }),
+            "2",
+        ),
+        draft(
+            EventKind::InputConsumed(InputConsumedData {
+                input_id: "1".into(),
+            }),
+            "3",
+        ),
+        draft(
+            EventKind::TurnEnd(TurnEndData {
+                turn_id: "t1".into(),
+                outcome: TurnOutcome::Completed {
+                    reason: "end_turn".into(),
+                },
+            }),
+            "4",
+        ),
+    ];
+    for draft in drafts {
+        timeline.append(draft).unwrap();
+    }
+    store.hold();
+    let tail: Vec<EventDraft> = vec![
+        input("two").with_id("5"),
+        draft(
+            EventKind::TurnStart(TurnStartData {
+                turn_id: "t2".into(),
+            }),
+            "6",
+        ),
+        draft(
+            EventKind::StopInterrupt(StopInterruptData {
+                reason: "stop".into(),
+                scope: InterruptScope::Turn,
+            }),
+            "7",
+        ),
+    ];
+    for draft in tail {
+        timeline.append(draft).unwrap();
+    }
+    let published = timeline.sequence();
+    let through = timeline.committed();
+    assert!(
+        published < through,
+        "the tail is written and not published: {published} < {through}"
+    );
+    let replay = timeline.local(..=timeline.committed()).await.unwrap();
+    assert_eq!(replay.len(), 7, "the old replay read the whole branch");
+    for kinds in REBUILDS {
+        let expected: Vec<_> = replay
+            .iter()
+            .filter(|event| kinds.contains(&event.kind.key()))
+            .map(|event| event.id.clone())
+            .collect();
+        let reply = rebuild_facts(&timeline, kinds).await.unwrap();
+        let folded: Vec<_> = reply.events.iter().map(|event| event.id.clone()).collect();
+        assert_eq!(folded, expected, "{kinds:?}");
+        assert_eq!(reply.through, through, "{kinds:?}");
+        for unpublished in ["5", "6", "7"] {
+            let kind = replay
+                .iter()
+                .find(|event| event.id == unpublished)
+                .map(|event| event.kind.key().to_owned())
+                .expect("the tail event");
+            if kinds.contains(&kind.as_str()) {
+                assert!(
+                    folded.iter().any(|id| id == unpublished),
+                    "{kinds:?}: the read adds the unpublished tail"
+                );
+            }
+        }
+    }
+    store.release();
 }

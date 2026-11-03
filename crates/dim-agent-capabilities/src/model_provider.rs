@@ -9,8 +9,8 @@ use crate::{
     steer::{REPLACED_BY_STEER, SteerMark},
 };
 use dim_agent_runtime::{
-    AgentError, CAPABILITY_RELOADING, Delivery, Dispatcher, ModelProgress, Names, StateCell,
-    Timeline, TimelineIdentity,
+    AgentError, CAPABILITY_RELOADING, Dispatcher, ModelProgress, Names, StateCell, Timeline,
+    TimelineIdentity, rebuild_facts,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
@@ -354,6 +354,8 @@ impl DynPlugin for ModelProviderPlugin {
             let owner = service.clone();
             let failures = dispatcher.clone();
             let lifecycle = ctx.cancellation_token();
+            let read = owner.clone();
+            let read_timeline = owner.timeline.clone();
             dispatcher
                 .follow(
                     ctx,
@@ -366,18 +368,34 @@ impl DynPlugin for ModelProviderPlugin {
                         "turn/start",
                         "turn/end",
                     ],
-                    move |delivery| {
+                    move || {
+                        let read = read.clone();
+                        let timeline = read_timeline.clone();
+                        Box::pin(async move {
+                            let reply = rebuild_facts(
+                                &timeline,
+                                &[
+                                    "model/call",
+                                    "step/tool-use-start",
+                                    "step/tool-use",
+                                    "step/model-output-end",
+                                    "step/model-start",
+                                    "input/applied",
+                                    "stop/interrupt",
+                                    "turn/start",
+                                    "turn/end",
+                                ],
+                            )
+                            .await?;
+                            read.rebuild(&mut read.state.lock().unwrap(), &reply.events)?;
+                            Ok(reply.through)
+                        })
+                    },
+                    move |event| {
                         let owner = owner.clone();
                         let failures = failures.clone();
                         let lifecycle = lifecycle.clone();
                         Box::pin(async move {
-                            let event = match delivery {
-                                Delivery::Replay(events) => {
-                                    return owner
-                                        .rebuild(&mut owner.state.lock().unwrap(), &events);
-                                }
-                                Delivery::Live(event) => event,
-                            };
                             if let EventKind::StopInterrupt(data) = &event.kind {
                                 let mut state = owner.state.lock().unwrap();
                                 state.interrupted = Some(data.reason.clone());

@@ -96,7 +96,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `configurationPublisher` | branch | ContextPreparation | Rust-only | — |
 | `configureControl` | branch | Prompt | Rust-only | — |
 | `contextPreparation` | branch | ContextPreparation | Rust-only | — |
-| `dispatcher` | branch | BranchScope | yes | `changed` async, `committed` async, `consume` async, `history` async, `listen` async, `local` async, `notify` async, `sequence` async |
+| `dispatcher` | branch | BranchScope | yes | `changed` async, `committed` async, `history` async, `listen` async, `local` async, `notify` async, `sequence` async |
 | `fileReads` | branch | FileReads | Rust-only | — |
 | `inputQueue` | branch | InputQueue | Rust-only | — |
 | `loopState` | branch | Loop | Rust-only | — |
@@ -118,7 +118,7 @@ The parts that inject `dispatcher` or `timeline` ([plugin contract §6](../../..
 | --- | --- | --- |
 | Approval | branch | `dispatcher`, `timeline` |
 | BackgroundExec | branch | `dispatcher`, `timeline` |
-| BranchLine | branch | `dispatcher` |
+| BranchLine | branch | `dispatcher`, `timeline` |
 | CollaborationTimeline | branch | `dispatcher`, `timeline` |
 | ContextPreparation | branch | `dispatcher`, `timeline` |
 | FileReads | branch | `timeline` |
@@ -131,4 +131,4 @@ The parts that inject `dispatcher` or `timeline` ([plugin contract §6](../../..
 | ToolBinding | branch | `dispatcher`, `timeline` |
 | ToolExecutor | branch | `dispatcher`, `timeline` |
 | TreeTimeline | branch | `dispatcher`, `timeline` |
-| WaitBranch | branch | `dispatcher` |
+| WaitBranch | branch | `dispatcher`, `timeline` |

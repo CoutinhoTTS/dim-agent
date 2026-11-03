@@ -7,9 +7,9 @@ use crate::{
     steer::{REPLACED_BY_STEER, SteerMark},
 };
 use dim_agent_runtime::{
-    AgentError, BranchLifecycle, BranchPhase, CAPABILITY_RELOADING, Delivery, Dispatcher, Names,
-    PolicyFacts, Timeline, TimelineIdentity, TimelineQuery, TimelineQueryDirection,
-    TimelineQueryOrderBy, TimelineQueryScope,
+    AgentError, BranchLifecycle, BranchPhase, CAPABILITY_RELOADING, Dispatcher, Names, PolicyFacts,
+    Timeline, TimelineIdentity, TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
+    TimelineQueryScope, rebuild_facts,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
@@ -926,6 +926,8 @@ impl DynPlugin for ContextPreparationPlugin {
             let owner = service.clone();
             let failures = dispatcher.clone();
             let lifecycle = ctx.cancellation_token();
+            let read = owner.clone();
+            let read_timeline = owner.timeline.clone();
             dispatcher
                 .follow(
                     ctx,
@@ -940,18 +942,35 @@ impl DynPlugin for ContextPreparationPlugin {
                         "turn/start",
                         "turn/end",
                     ],
-                    move |delivery| {
+                    move || {
+                        let read = read.clone();
+                        let timeline = read_timeline.clone();
+                        Box::pin(async move {
+                            let reply = rebuild_facts(
+                                &timeline,
+                                &[
+                                    "context/prepare",
+                                    "model/call",
+                                    "step/model-output-end",
+                                    "context/compaction-start",
+                                    "context/compaction",
+                                    "stop/interrupt",
+                                    "step/model-start",
+                                    "input/applied",
+                                    "turn/start",
+                                    "turn/end",
+                                ],
+                            )
+                            .await?;
+                            read.rebuild(&mut read.state.lock().unwrap(), &reply.events)?;
+                            Ok(reply.through)
+                        })
+                    },
+                    move |event| {
                         let owner = owner.clone();
                         let failures = failures.clone();
                         let lifecycle = lifecycle.clone();
                         Box::pin(async move {
-                            let event = match delivery {
-                                Delivery::Replay(events) => {
-                                    return owner
-                                        .rebuild(&mut owner.state.lock().unwrap(), &events);
-                                }
-                                Delivery::Live(event) => event,
-                            };
                             if matches!(event.kind, EventKind::ContextCompactionStart(_)) {
                                 owner.state.lock().unwrap().compaction = Some(event.sequence);
                                 return Ok(());

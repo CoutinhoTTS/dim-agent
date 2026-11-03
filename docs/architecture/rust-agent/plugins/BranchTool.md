@@ -68,7 +68,8 @@ creation and at restore.
 
 | Service | Purpose |
 | --- | --- |
-| `B:Dispatcher` | Replay the line's own facts, then live events. |
+| `B:Dispatcher` | Consume the line's own facts in order after the rebuild. |
+| `B:Timeline` | Read the line's facts of the kinds its fold uses, with the unpublished tail, for the rebuild. |
 | `B:TimelineIdentity` | The line's own id. |
 | `B:BranchLifecycle` | Wait for the branch to be Active before resolving its role and writing. |
 | `S:TreeCommands` | `info` for the role and its lines; `input` for every write. |
@@ -91,8 +92,9 @@ Consumes `branch/create`, `branch/create-failed`, `branch/ended`, `branch/end`,
 - **Ended notice.** On `main`, the roster update and `<dim-branch-ended>` in one
   Steer, for any end of a tool line other than the line's own `end`.
 
-The replay rebuilds the fold and writes nothing; each write follows a live
-event, except one heal of a load that writes a roster a crash left missing. A
+The rebuild reads the line's facts of the kinds its fold uses and writes
+nothing; each write follows a live event, except one heal of a load that writes
+a roster a crash left missing. A
 restart can lose an idle notice: the notice is decided on live events only
 (design [§6.2](../../../design/timeline-branches.md#62-known-costs)). It
 registers with `Dispatcher::follow` and writes from one owned task, which
@@ -112,7 +114,7 @@ rechecks the fold before writing.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | 分支 |
-| 注入 | `B:BranchLifecycle`、`B:Dispatcher`、`B:TimelineIdentity`、`S:GuideEntries`、`S:TreeCommands` |
+| 注入 | `B:BranchLifecycle`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:GuideEntries`、`S:TreeCommands` |
 | 提供 | `B:BranchLine` |
 | 被注入于 | — |
 <!-- /generated -->

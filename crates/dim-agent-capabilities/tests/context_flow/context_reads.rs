@@ -18,6 +18,9 @@ pub(super) struct CountContextReads {
     attempts: AtomicUsize,
     /// Each segment of every `read` and `read_segments`, in call order.
     pub(super) ranges: std::sync::Mutex<Vec<(String, RangeInclusive<u64>)>>,
+    /// The branch and bounds of every query read, in call order, beside
+    /// `ranges` because a rebuild reads through the query.
+    pub(super) queries: std::sync::Mutex<Vec<(String, RangeInclusive<u64>)>>,
     /// The branch, cursor and number of events of every `read_page`, in
     /// call order.
     pub(super) pages: std::sync::Mutex<Vec<(String, u64, usize)>>,
@@ -405,6 +408,10 @@ impl TimelineStore for CountContextReads {
             if query.event_id.is_some() {
                 self.positions.fetch_add(1, Ordering::SeqCst);
             }
+            self.queries
+                .lock()
+                .unwrap()
+                .push((key.branch_id.clone(), from..=through));
             let page = self.memory.query(key, query, from, through).await?;
             if query.flags.len() == 2 {
                 self.context_pages.lock().unwrap().push(ContextPageRead {

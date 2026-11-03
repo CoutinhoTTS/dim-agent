@@ -13,7 +13,8 @@ use crate::{
     workspace_tools::background::{WAKE_TASK_TAG, tagged},
 };
 use dim_agent_runtime::{
-    AgentBuilder, AgentError, CAPABILITY_RELOADING, Delivery, Dispatcher, Names,
+    AgentBuilder, AgentError, CAPABILITY_RELOADING, Dispatcher, Names, Timeline, TimelineQuery,
+    TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryScope,
 };
 use dim_agent_types::*;
 use rutis::Ctx;
@@ -21,6 +22,7 @@ use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
+    num::NonZeroU64,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -85,16 +87,30 @@ pub struct Wait {
 }
 
 impl Wait {
-    fn rebuild(&self, events: &[Arc<AgentEvent>]) {
-        self.state.lock().unwrap().open = events
-            .iter()
-            .rev()
-            .find_map(|event| match event.kind {
-                EventKind::TurnStart(_) => Some(true),
-                EventKind::TurnEnd(_) => Some(false),
-                _ => None,
+    /// The last `turn/start` or `turn/end` of this branch decides whether a
+    /// turn is open.
+    async fn rebuild(&self, timeline: &Timeline) -> dim_agent_runtime::Result<u64> {
+        let reply = timeline
+            .query_with_tail(TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                from_event: None,
+                from_sequence: None,
+                order_by: TimelineQueryOrderBy::Sequence,
+                direction: TimelineQueryDirection::Descending,
+                kinds: vec!["turn/start".into(), "turn/end".into()],
+                flags: Vec::new(),
+                event_id: None,
+                predicate: None,
+                limit: NonZeroU64::MIN,
+                offset: 0,
             })
-            .unwrap_or(false);
+            .await?;
+        let open = matches!(
+            reply.events.first().map(|event| &event.kind),
+            Some(EventKind::TurnStart(_))
+        );
+        self.state.lock().unwrap().open = open;
+        Ok(reply.through)
     }
     fn consume(&self, event: &AgentEvent) {
         let mut state = self.state.lock().unwrap();
@@ -347,12 +363,14 @@ impl DynPlugin for WaitPlugin {
     }
 }
 pub struct WaitBranchPlugin {
+    timeline: Key<Timeline>,
     dispatcher: Key<Dispatcher>,
     wait: Key<Wait>,
 }
 impl WaitBranchPlugin {
     pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
+            timeline: names.key()?,
             dispatcher: names.key()?,
             wait: names.key()?,
         })
@@ -363,26 +381,30 @@ impl DynPlugin for WaitBranchPlugin {
         "WaitBranch"
     }
     fn injects(&self) -> Vec<TypeKey> {
-        vec![self.dispatcher.erase()]
+        vec![self.timeline.erase(), self.dispatcher.erase()]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
             let dispatcher = ctx.require_at(&self.dispatcher)?;
             let wait = Arc::new(Wait {
                 state: Mutex::new(State::default()),
                 arrived: Notify::new(),
             });
+            let rebuild = wait.clone();
             let consumer = wait.clone();
             dispatcher
                 .follow(
                     ctx,
                     "Wait",
                     &["input/message", "turn/start", "turn/end"],
-                    move |delivery| {
-                        match delivery {
-                            Delivery::Replay(events) => consumer.rebuild(&events),
-                            Delivery::Live(event) => consumer.consume(&event),
-                        }
+                    move || {
+                        let rebuild = rebuild.clone();
+                        let timeline = timeline.clone();
+                        Box::pin(async move { rebuild.rebuild(&timeline).await })
+                    },
+                    move |event| {
+                        consumer.consume(&event);
                         Box::pin(async { Ok(()) })
                     },
                 )
