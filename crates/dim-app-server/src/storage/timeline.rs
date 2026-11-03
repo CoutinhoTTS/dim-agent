@@ -3509,36 +3509,53 @@ impl TimelineStore for SqliteTimelineStore {
             let limit = usize::try_from(query.limit.get()).unwrap_or(usize::MAX);
             let rows = u64::try_from(limit).unwrap_or(u64::MAX);
             let (mut records, _) = self.query_page(key, query, low..=high, rows).await?;
+            if direction == Descending {
+                records.sort_by_key(|record| record.event.sequence);
+            }
             let mut target = None;
-            match direction {
-                Ascending => {
-                    if records.len() >= limit {
-                        let end = records[limit - 1].batch_end;
-                        let read_to = records.last().map_or(0, |record| record.event.sequence);
-                        if end > read_to {
-                            let (tail, _) = self
-                                .query_page(key, query, read_to + 1..=end, u64::MAX)
-                                .await?;
-                            records.extend(tail);
-                        }
-                        records.retain(|record| record.event.sequence <= end);
-                        if end < high {
-                            target = Some(end);
-                        }
+            if records.len() >= limit {
+                let anchor = match direction {
+                    Ascending => &records[limit - 1],
+                    Descending => &records[records.len() - limit],
+                };
+                let boundary = match direction {
+                    Ascending => anchor.batch_end,
+                    Descending => {
+                        self.batch_start(key, anchor.event.sequence, anchor.batch_end, low)
+                            .await?
                     }
+                };
+                let (missing, missing_end) = match direction {
+                    Ascending => (
+                        records.last().map_or(0, |record| record.event.sequence),
+                        boundary,
+                    ),
+                    Descending => (
+                        boundary,
+                        records.first().map_or(0, |record| record.event.sequence),
+                    ),
+                };
+                let (from, to) = match direction {
+                    Ascending => (missing + 1, missing_end),
+                    Descending => (missing, missing_end.saturating_sub(1)),
+                };
+                if from <= to {
+                    let (rest, _) = self.query_page(key, query, from..=to, u64::MAX).await?;
+                    records.extend(rest);
                 }
-                Descending => {
+                records.retain(|record| match direction {
+                    Ascending => record.event.sequence <= boundary,
+                    Descending => record.event.sequence >= boundary,
+                });
+                if direction == Descending {
                     records.sort_by_key(|record| record.event.sequence);
-                    if records.len() >= limit {
-                        let oldest = &records[records.len() - limit];
-                        let bottom = self
-                            .batch_start(key, oldest.event.sequence, oldest.batch_end, low)
-                            .await?;
-                        records.retain(|record| record.event.sequence >= bottom);
-                        if bottom > low {
-                            target = Some(bottom);
-                        }
-                    }
+                }
+                let truncated = match direction {
+                    Ascending => boundary < high,
+                    Descending => boundary > low,
+                };
+                if truncated {
+                    target = Some(boundary);
                 }
             }
             Ok(TimelineQueryReply {

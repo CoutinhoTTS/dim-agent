@@ -7927,6 +7927,70 @@ async fn interleaved_histories(store: Arc<dyn TimelineStore>) -> Timeline {
         .unwrap()
 }
 
+/// A descending page that stops inside a batch spans the whole batch, even
+/// when the batch's other events are stored in earlier rows.
+#[tokio::test]
+async fn a_descending_query_extends_to_the_batch_it_stops_in() {
+    use dim_agent_runtime::TimelineQueryDirection::Descending;
+    use dim_agent_runtime::TimelineQueryPosition::Range;
+    use dim_agent_runtime::TimelineQueryScope::Branch;
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store: Arc<dyn TimelineStore> = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("query", &SessionConfig::default())
+        .await
+        .unwrap();
+    publish_records(
+        &store,
+        key("query", "main"),
+        vec![
+            query_record(
+                1,
+                2,
+                "one",
+                EventKind::InputMessage(InputMessageData::text("one", None)),
+            ),
+            query_record(
+                2,
+                2,
+                "two",
+                EventKind::TurnStart(TurnStartData {
+                    turn_id: "turn".into(),
+                }),
+            ),
+        ],
+    )
+    .await;
+    let timeline = Timeline::restore(
+        rutis::Ctx::root().unwrap(),
+        key("query", "main"),
+        vec![],
+        store.clone(),
+    )
+    .await
+    .unwrap();
+    let mut request = query(
+        Branch,
+        Range {
+            start: 1,
+            end: None,
+        },
+        1,
+    );
+    request.direction = Descending;
+    let page = timeline.query(request).await.unwrap();
+    assert_eq!(
+        page.events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(page.next, None);
+}
+
 #[tokio::test]
 async fn a_query_selects_and_pages_facts_from_sqlite() {
     use dim_agent_runtime::TimelineQueryPosition::{Cursor, Range};
