@@ -294,6 +294,47 @@ async fn a_fork_copies_main_through_a_rest_point_and_starts_nothing() {
     server.join().await.unwrap();
 }
 
+/// A branch's cut is at most its parent's published head: `session.branch_create`
+/// checks it before any read and creates nothing when the cut is a future one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_branch_create_at_a_future_sequence_is_refused() {
+    let store = Store::new();
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let mut params = create(json!(["wait", "branch"]));
+    params["interactive"] = json!(false);
+    let sid = forked(&client.rpc("session.create", params).await);
+    turn(&mut client, &sid, "hello").await;
+    let head = agent.get_session(&sid).unwrap().sequence("main").unwrap();
+    let branches = |store: &Store| -> i64 {
+        store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM timeline_branches WHERE session_id=?1",
+                [&sid],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let before = branches(&store);
+    let refused = client
+        .rpc(
+            "session.branch_create",
+            json!({"sessionId":sid,"parentBranchId":"main","at":head+1,"prompt":"child"}),
+        )
+        .await;
+    let (code, message) = error(&refused);
+    assert_eq!(code, "session_invalid_input", "{message}");
+    assert!(message.contains("future"), "{message}");
+    assert_eq!(
+        branches(&store),
+        before,
+        "a refused creation adds no branch"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 /// Acceptance 6: cuts that are beyond the head, inside a batch, outside a
 /// context boundary or not a rest point, unknown sources and other
 /// protocols are refused and create nothing. The inputs D1 lets rest at a

@@ -1,7 +1,8 @@
 use crate::prompt_state::PromptSnapshot;
 use dim_agent_runtime::{
     AgentError, ContextHistory, Session, Timeline, TimelineQuery, TimelineQueryDirection,
-    TimelineQueryOrderBy, TimelineQueryPredicate, TimelineQueryReply, TimelineQueryScope,
+    TimelineQueryFlag, TimelineQueryOrderBy, TimelineQueryPredicate, TimelineQueryReply,
+    TimelineQueryScope,
 };
 use dim_agent_types::*;
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,148 @@ pub(crate) fn chain_by_id(id: &str) -> TimelineQuery {
         limit: NonZeroU64::MIN,
         offset: 0,
     }
+}
+
+/// The chain read a projection folds: the events carrying either context flag,
+/// ascending from the event `from_event` names or from the chain's start.
+fn context_chain(from_event: Option<&str>, offset: u64, limit: u64) -> TimelineQuery {
+    context_read(
+        TimelineQueryScope::Chain,
+        from_event.map(str::to_owned),
+        None,
+        offset,
+        limit,
+    )
+}
+
+/// The same read on one branch, from the event at `from`.
+fn context_branch(from: u64, limit: u64) -> TimelineQuery {
+    context_read(TimelineQueryScope::Branch, None, Some(from), 0, limit)
+}
+
+fn context_read(
+    scope: TimelineQueryScope,
+    from_event: Option<String>,
+    from_sequence: Option<u64>,
+    offset: u64,
+    limit: u64,
+) -> TimelineQuery {
+    TimelineQuery {
+        scope,
+        from_event,
+        from_sequence,
+        order_by: TimelineQueryOrderBy::Sequence,
+        direction: TimelineQueryDirection::Ascending,
+        kinds: Vec::new(),
+        flags: vec![TimelineQueryFlag::Render, TimelineQueryFlag::State],
+        event_id: None,
+        predicate: None,
+        limit: NonZeroU64::new(limit).expect("a page keeps at least one event"),
+        offset,
+    }
+}
+
+/// One page of the events a projection folds, each with its chain position.
+pub(crate) struct ContextPage {
+    pub events: Vec<Arc<AgentEvent>>,
+    pub positions: Vec<TimelinePosition>,
+}
+
+/// The read a projection folds, page by page: the chain from where the fold
+/// begins, then this branch by sequence.
+///
+/// A fold starts at the event a checkpoint names, which may sit in an ancestor,
+/// and only a chain read begins there; a chain read pages by skipping, so while
+/// it reads the ancestor prefix a page re-selects what the last one folded. A
+/// checkpoint resumes past that prefix, and the fold switches to this branch as
+/// soon as a page reaches it, so a page then costs what it returns.
+pub(crate) struct FoldRead<'a> {
+    timeline: &'a Timeline,
+    /// The event the chain read begins at; `None` at the chain's start.
+    begin: Option<String>,
+    own: String,
+    /// The facts the chain read skips.
+    skip: u64,
+    /// The sequence this branch continues at; `None` while the fold reads the
+    /// chain.
+    sequence: Option<u64>,
+    /// The last position the fold may read.
+    through: u64,
+}
+
+impl<'a> FoldRead<'a> {
+    pub(crate) fn new(timeline: &'a Timeline, begin: Option<String>, through: u64) -> Self {
+        Self {
+            own: timeline.branch_id(),
+            timeline,
+            begin,
+            skip: 0,
+            sequence: None,
+            through,
+        }
+    }
+
+    /// The next page of up to `limit` facts, or `None` when the fold has read
+    /// everything at or below `through`. A page shorter than `limit` ends the
+    /// fold after it.
+    pub(crate) async fn next(
+        &mut self,
+        limit: u64,
+    ) -> dim_agent_runtime::Result<Option<ContextPage>> {
+        let query = match self.sequence {
+            Some(sequence) => context_branch(sequence, limit),
+            None => context_chain(self.begin.as_deref(), self.skip, limit),
+        };
+        let Some(page) = bounded(self.timeline.query(query).await?, &self.own, self.through) else {
+            return Ok(None);
+        };
+        let Some(last) = page.positions.last() else {
+            return Ok(None);
+        };
+        if last.branch_id == self.own {
+            self.sequence = Some(last.sequence + 1);
+        } else {
+            self.skip += page.events.len() as u64;
+        }
+        Ok(Some(page))
+    }
+}
+
+/// The facts a fold keeps from a reply: no fact above `through` on the read's
+/// own branch.
+fn bounded(reply: TimelineQueryReply, branch: &str, through: u64) -> Option<ContextPage> {
+    let mut events = Vec::with_capacity(reply.events.len());
+    let mut positions = Vec::with_capacity(reply.positions.len());
+    for (event, position) in reply.events.into_iter().zip(reply.positions) {
+        if position.branch_id == branch && position.sequence > through {
+            break;
+        }
+        events.push(event);
+        positions.push(position);
+    }
+    (!events.is_empty()).then_some(ContextPage { events, positions })
+}
+
+/// One page split where its branch changes, in read order: a chain page may
+/// hold the end of one branch and the start of the next.
+fn runs<'a>(
+    events: &'a [Arc<AgentEvent>],
+    positions: &'a [TimelinePosition],
+) -> impl Iterator<Item = (&'a [Arc<AgentEvent>], &'a [TimelinePosition])> {
+    let mut start = 0;
+    std::iter::from_fn(move || {
+        let branch = &positions.get(start)?.branch_id;
+        let length = positions[start..]
+            .iter()
+            .position(|position| &position.branch_id != branch)
+            .unwrap_or(positions.len() - start);
+        let run = (
+            &events[start..start + length],
+            &positions[start..start + length],
+        );
+        start += length;
+        Some(run)
+    })
 }
 
 /// An ephemeral view of a fixed timeline prefix, never a second history store.
@@ -166,7 +309,8 @@ impl HistoryRenderer {
     }
 
     /// Builds the checkpoint for `retain_from` by folding the fixed prefix up
-    /// to that event. Used once per completed compaction to save its snapshot.
+    /// to that event, beginning where a usable checkpoint resumes. Used once per
+    /// completed compaction to save its snapshot.
     pub async fn stream_checkpoint(
         &self,
         timeline: &Timeline,
@@ -203,7 +347,7 @@ impl HistoryRenderer {
         let checkpoint = timeline
             .checkpoint(through, self.checkpoint_interpreter, self.decode_checkpoint)
             .await?;
-        let (first, start, mut state) = match &checkpoint {
+        let (begin, mut state) = match &checkpoint {
             Some(checkpoint) => {
                 let index = segments
                     .iter()
@@ -212,50 +356,52 @@ impl HistoryRenderer {
                     index < boundary
                         || (index == boundary && checkpoint.resume.sequence < cut.sequence)
                 });
-                match index {
-                    Some(index) if before => (
-                        index,
-                        checkpoint.resume.sequence,
+                if before {
+                    (
+                        Some(checkpoint.resume.event_id.clone()),
                         Some(checkpoint.state.clone()),
-                    ),
-                    _ => (0, 1, None),
+                    )
+                } else {
+                    (None, None)
                 }
             }
-            None => (0, 1, None),
+            None => (None, None),
         };
-        for (index, (branch, end)) in segments.iter().enumerate().skip(first) {
-            let mut cursor = if index == first { start } else { 1 };
-            while cursor <= *end {
-                let events = timeline
-                    .stored_context_page_in(branch, cursor.saturating_sub(1), batch as usize, *end)
-                    .await?;
-                if events.is_empty() {
-                    break;
-                }
-                let fold = events
-                    .iter()
-                    .position(|event| branch == &cut.branch_id && event.sequence >= cut.sequence)
-                    .unwrap_or(events.len());
-                let positions = planned(&events[..fold], branch);
-                state = Some(
-                    replay(&events[..fold], state.as_ref(), &positions)
-                        .map_err(|error| AgentError::fault("History", error))?
-                        .state,
-                );
-                if fold < events.len() {
-                    let mut state = state.unwrap_or_default();
-                    state.retain_from = retain_from.to_owned();
-                    return Ok(ProjectionCheckpoint {
-                        resume: ResumePoint {
-                            branch_id: cut.branch_id,
-                            sequence: cut.sequence,
-                            event_id: retain_from.to_owned(),
-                        },
-                        state,
-                    });
-                }
-                let last = events.last().map_or(cursor, |event| event.sequence);
-                cursor = last + 1;
+        let mut read = FoldRead::new(timeline, begin, through);
+        loop {
+            let Some(page) = read.next(batch).await? else {
+                break;
+            };
+            let fold = page
+                .positions
+                .iter()
+                .position(|position| {
+                    position.branch_id == cut.branch_id && position.sequence >= cut.sequence
+                })
+                .unwrap_or(page.events.len());
+            state = Some(
+                project_page(
+                    &page.events[..fold],
+                    &page.positions[..fold],
+                    state.as_ref(),
+                )
+                .map_err(|error| AgentError::fault("History", error))?
+                .1,
+            );
+            if fold < page.events.len() {
+                let mut state = state.unwrap_or_default();
+                state.retain_from = retain_from.to_owned();
+                return Ok(ProjectionCheckpoint {
+                    resume: ResumePoint {
+                        branch_id: cut.branch_id,
+                        sequence: cut.sequence,
+                        event_id: retain_from.to_owned(),
+                    },
+                    state,
+                });
+            }
+            if (page.events.len() as u64) < batch {
+                break;
             }
         }
         Err(AgentError::InvalidInput(
@@ -306,7 +452,8 @@ impl HistoryRenderer {
         }
     }
 
-    /// Streams the branch chain in batches and returns only the projection.
+    /// Streams the branch chain in pages and returns only the projection. A
+    /// checkpoint's resume event is where the fold begins.
     pub async fn rendered_stream(
         &self,
         timeline: &Timeline,
@@ -325,105 +472,98 @@ impl HistoryRenderer {
             .checkpoint(through, self.checkpoint_interpreter, self.decode_checkpoint)
             .await?;
         let segments = timeline.segments(through)?;
-        let (first, resume) = match &checkpoint {
-            Some(checkpoint) => segments
+        let mut state = None;
+        let mut begin = None;
+        if let Some(checkpoint) = &checkpoint {
+            if !segments
                 .iter()
-                .position(|(branch, _)| *branch == checkpoint.resume.branch_id)
-                .map(|index| (index, checkpoint.resume.sequence))
-                .ok_or_else(|| {
-                    AgentError::fault(
-                        "History",
-                        "Checkpoint resume is outside the branch chain".to_owned(),
-                    )
-                })?,
-            None => (0, 1),
-        };
-        let mut state = checkpoint
-            .as_ref()
-            .map(|checkpoint| checkpoint.state.clone());
+                .any(|(branch, _)| *branch == checkpoint.resume.branch_id)
+            {
+                return Err(AgentError::fault(
+                    "History",
+                    "Checkpoint resume is outside the branch chain".to_owned(),
+                ));
+            }
+            begin = Some(checkpoint.resume.event_id.clone());
+            state = Some(checkpoint.state.clone());
+        }
+        let rank = |branch: &str| segments.iter().position(|(name, _)| name == branch);
         let mut history = Vec::new();
         let mut compaction = None;
         let mut cut_in_effect: Option<(Option<usize>, u64)> = None;
         let mut compaction_cut: Option<dim_agent_types::TimelinePosition> = None;
         let mut cuts: Vec<(String, dim_agent_types::TimelinePosition)> = Vec::new();
-        for (index, (branch, cut)) in segments.iter().enumerate().skip(first) {
-            let mut cursor = if index == first { resume } else { 1 };
-            while cursor <= *cut {
-                let events = timeline
-                    .stored_context_page_in(branch, cursor.saturating_sub(1), batch as usize, *cut)
-                    .await?;
-                if events.is_empty() {
-                    break;
-                }
-                let end = events.last().map_or(cursor, |event| event.sequence);
-                let projected = project_batch(&events, state.as_ref(), branch)
-                    .map_err(|error| AgentError::fault("History", error))?;
-                history.extend(projected.history);
-                let rank = |branch: &str| segments.iter().position(|(name, _)| name == branch);
-                for event in events.iter() {
-                    let EventKind::ContextCompaction(data) = &event.kind else {
-                        continue;
-                    };
-                    let ContextCompactionResult::Completed { retain_from, .. } = &data.outcome
-                    else {
-                        continue;
-                    };
-                    let cut = timeline
-                        .query(chain_by_id(retain_from))
-                        .await?
-                        .positions
-                        .into_iter()
-                        .next()
-                        .ok_or_else(|| {
-                            AgentError::fault(
-                                "History",
-                                "Compaction cut is outside the stream".to_owned(),
-                            )
-                        })?;
-                    let Some(end) = segments
-                        .iter()
-                        .find(|(name, _)| name == &cut.branch_id)
-                        .map(|(_, end)| *end)
-                    else {
-                        return Err(AgentError::fault(
+        let mut read = FoldRead::new(timeline, begin, through);
+        loop {
+            let Some(page) = read.next(batch).await? else {
+                break;
+            };
+            let projected = project_page(&page.events, &page.positions, state.as_ref())
+                .map_err(|error| AgentError::fault("History", error))?;
+            history.extend(projected.0);
+            state = Some(projected.1);
+            for event in page.events.iter() {
+                let EventKind::ContextCompaction(data) = &event.kind else {
+                    continue;
+                };
+                let ContextCompactionResult::Completed { retain_from, .. } = &data.outcome else {
+                    continue;
+                };
+                let cut = timeline
+                    .query(chain_by_id(retain_from))
+                    .await?
+                    .positions
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| {
+                        AgentError::fault(
                             "History",
                             "Compaction cut is outside the stream".to_owned(),
-                        ));
-                    };
-                    if cut.sequence > end {
-                        return Err(AgentError::fault(
-                            "History",
-                            "Compaction cut is outside the stream".to_owned(),
-                        ));
-                    }
-                    let at = (rank(&cut.branch_id), cut.sequence);
-                    if cut_in_effect.is_some_and(|previous| at < previous) {
-                        return Err(AgentError::fault(
-                            "History",
-                            "Compaction cut precedes the cut in effect".to_owned(),
-                        ));
-                    }
-                    cut_in_effect = Some(at);
-                    compaction_cut = Some(cut.clone());
-                    if !cuts.iter().any(|(id, _)| id == retain_from) {
-                        cuts.push((retain_from.clone(), cut.clone()));
-                    }
-                    let kept = history
-                        .iter()
-                        .position(|entry| {
-                            (rank(&entry.position.branch_id), entry.position.sequence) >= at
-                        })
-                        .unwrap_or(history.len());
-                    history.drain(..kept);
+                        )
+                    })?;
+                let Some(end) = segments
+                    .iter()
+                    .find(|(name, _)| name == &cut.branch_id)
+                    .map(|(_, end)| *end)
+                else {
+                    return Err(AgentError::fault(
+                        "History",
+                        "Compaction cut is outside the stream".to_owned(),
+                    ));
+                };
+                if cut.sequence > end {
+                    return Err(AgentError::fault(
+                        "History",
+                        "Compaction cut is outside the stream".to_owned(),
+                    ));
                 }
-                compaction = projected.compaction.or(compaction);
-                state = Some(projected.state);
-                cursor = end + 1;
+                let at = (rank(&cut.branch_id), cut.sequence);
+                if cut_in_effect.is_some_and(|previous| at < previous) {
+                    return Err(AgentError::fault(
+                        "History",
+                        "Compaction cut precedes the cut in effect".to_owned(),
+                    ));
+                }
+                cut_in_effect = Some(at);
+                compaction_cut = Some(cut.clone());
+                if !cuts.iter().any(|(id, _)| id == retain_from) {
+                    cuts.push((retain_from.clone(), cut.clone()));
+                }
+                let kept = history
+                    .iter()
+                    .position(|entry| {
+                        (rank(&entry.position.branch_id), entry.position.sequence) >= at
+                    })
+                    .unwrap_or(history.len());
+                history.drain(..kept);
+            }
+            compaction = completed_compaction(&page.events).or(compaction);
+            if (page.events.len() as u64) < batch {
+                break;
             }
         }
         let state = state.unwrap_or_default();
         let mut order = policy_order.events;
-        let rank = |branch: &str| segments.iter().position(|(name, _)| name == branch);
         for (id, position) in cuts {
             if !order.iter().any(|event| event.id == id) {
                 order.push(dim_agent_runtime::PolicyOrderEvent {
@@ -605,7 +745,6 @@ struct Projection {
 pub struct ProjectedBatch {
     pub history: Vec<HistoryEntry>,
     pub state: ProjectionCheckpointState,
-    pub compacted: bool,
     pub compaction: Option<Arc<AgentEvent>>,
 }
 
@@ -617,21 +756,44 @@ pub fn project_batch(
     initial: Option<&ProjectionCheckpointState>,
     branch: &str,
 ) -> Result<ProjectedBatch, String> {
-    let positions = planned(events, branch);
-    let projection = replay(events, initial, &positions)?;
-    let compaction = events.iter().rev().find(|event| {
-        matches!(
-            &event.kind,
-            EventKind::ContextCompaction(data)
-                if matches!(data.outcome, ContextCompactionResult::Completed { .. })
-        )
-    });
+    let (history, state) = project_page(events, &planned(events, branch), initial)?;
     Ok(ProjectedBatch {
-        history: projection.history,
-        state: projection.state,
-        compacted: compaction.is_some(),
-        compaction: compaction.cloned(),
+        history,
+        state,
+        compaction: completed_compaction(events),
     })
+}
+
+/// Projects one page of a fold, one branch run at a time: the entries it
+/// places and the state after them.
+fn project_page(
+    events: &[Arc<AgentEvent>],
+    positions: &[TimelinePosition],
+    initial: Option<&ProjectionCheckpointState>,
+) -> Result<(Vec<HistoryEntry>, ProjectionCheckpointState), String> {
+    let mut history = Vec::new();
+    let mut state = initial.cloned();
+    for (run, run_positions) in runs(events, positions) {
+        let projection = replay(run, state.as_ref(), run_positions)?;
+        history.extend(projection.history);
+        state = Some(projection.state);
+    }
+    Ok((history, state.unwrap_or_default()))
+}
+
+/// The last completed compaction in `events`.
+fn completed_compaction(events: &[Arc<AgentEvent>]) -> Option<Arc<AgentEvent>> {
+    events
+        .iter()
+        .rev()
+        .find(|event| {
+            matches!(
+                &event.kind,
+                EventKind::ContextCompaction(data)
+                    if matches!(data.outcome, ContextCompactionResult::Completed { .. })
+            )
+        })
+        .cloned()
 }
 
 fn replay(
@@ -1031,7 +1193,7 @@ pub fn fold_output_parts(parts: &mut Vec<MessagePart>, kind: &EventKind) -> Resu
 }
 
 /// The event limit one page of a cut check asks for.
-const BOUNDARY_PAGE: usize = 256;
+const BOUNDARY_PAGE: u64 = 256;
 
 /// The paged read a cut check folds: one branch's Timeline, or that branch
 /// through the Session facade.
@@ -1111,23 +1273,21 @@ impl CutReads<'_> {
                 .then_some(cut.sequence),
         )
     }
+    /// The line's published head, which a cut may not pass.
+    fn head(&self) -> dim_agent_runtime::Result<u64> {
+        match self {
+            Self::Timeline(timeline) => Ok(timeline.sequence()),
+            Self::Session(session, branch) => session.sequence(branch),
+        }
+    }
+    /// One page of the branch's context events from `from`.
     async fn page(
         &self,
-        after: u64,
+        from: u64,
         through: u64,
-    ) -> dim_agent_runtime::Result<Vec<Arc<AgentEvent>>> {
-        match self {
-            Self::Timeline(timeline) => {
-                timeline
-                    .stored_context_page(after, BOUNDARY_PAGE, through)
-                    .await
-            }
-            Self::Session(session, branch) => {
-                session
-                    .context_page(branch, after, BOUNDARY_PAGE, through)
-                    .await
-            }
-        }
+    ) -> dim_agent_runtime::Result<Option<ContextPage>> {
+        let reply = self.query(context_branch(from, BOUNDARY_PAGE)).await?;
+        Ok(bounded(reply, &self.branch(), through))
     }
     fn branch(&self) -> String {
         match self {
@@ -1141,23 +1301,23 @@ impl CutReads<'_> {
 /// is the projection's: the pages alone cannot be folded from that start.
 async fn folded(
     reads: &CutReads<'_>,
-    branch: &str,
     start: u64,
     through: u64,
 ) -> dim_agent_runtime::Result<Result<ProjectionCheckpointState, String>> {
     let mut state = None;
-    let mut cursor = start.max(1);
-    while cursor <= through {
-        let events = reads.page(cursor - 1, through).await?;
-        if events.is_empty() {
+    let mut from = start.max(1);
+    loop {
+        let Some(page) = reads.page(from, through).await? else {
             break;
-        }
-        let end = events.last().map_or(cursor, |event| event.sequence);
-        match project_batch(&events, state.as_ref(), branch) {
-            Ok(projected) => state = Some(projected.state),
+        };
+        match project_page(&page.events, &page.positions, state.as_ref()) {
+            Ok((_, folded)) => state = Some(folded),
             Err(error) => return Ok(Err(error)),
         }
-        cursor = end + 1;
+        if (page.events.len() as u64) < BOUNDARY_PAGE {
+            break;
+        }
+        from = page.positions.last().map_or(from, |last| last.sequence + 1);
     }
     Ok(Ok(state.unwrap_or_default()))
 }
@@ -1166,14 +1326,18 @@ async fn boundary_at(
     reads: CutReads<'_>,
     through: u64,
 ) -> dim_agent_runtime::Result<Result<(), String>> {
+    if through > reads.head()? {
+        return Err(AgentError::InvalidInput(format!(
+            "future timeline sequence {through}"
+        )));
+    }
     reads.batch_end(through).await?;
-    let branch = reads.branch();
     let projection = match reads.cut(through).await? {
-        Some(cut) => match folded(&reads, &branch, cut, through).await? {
+        Some(cut) => match folded(&reads, cut, through).await? {
             Ok(state) => Ok(state),
-            Err(_) => folded(&reads, &branch, 1, through).await?,
+            Err(_) => folded(&reads, 1, through).await?,
         },
-        None => folded(&reads, &branch, 1, through).await?,
+        None => folded(&reads, 1, through).await?,
     };
     Ok(projection.and_then(|state| boundary(&state)))
 }
@@ -1181,8 +1345,8 @@ async fn boundary_at(
 /// Verifies that the cut at `through` splits no tool call from its result and
 /// leaves no model output open, folding pages from the branch's last completed
 /// compaction instead of materializing the whole prefix. The outer error is the
-/// read's (an unknown branch, a cut past the head or inside an atomic batch);
-/// the inner one is the verdict [`validate_context_boundary`] returns.
+/// cut's (an unknown branch, a cut past the line's head or inside an atomic
+/// batch); the inner one is the verdict [`validate_context_boundary`] returns.
 ///
 /// A completed compaction replaces the entries before its `retain_from` from a
 /// validated boundary, so the projection's open calls and output are empty at

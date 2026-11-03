@@ -635,29 +635,25 @@ impl ContextPreparation {
         }) {
             return Ok(None);
         }
-        let mut tail = Vec::new();
-        for (index, (branch, cut)) in segments.iter().enumerate().skip(call_rank) {
-            let mut cursor = if index == call_rank {
-                call.position.sequence + 1
-            } else {
-                1
+        let mut tail: Vec<(String, Vec<Arc<dim_agent_types::AgentEvent>>)> = Vec::new();
+        let mut read =
+            crate::history::FoldRead::new(&self.timeline, Some(call.event.id.clone()), through);
+        loop {
+            let Some(page) = read.next(256).await.map_err(ContextOpError::Read)? else {
+                break;
             };
-            let mut events = Vec::new();
-            while cursor <= *cut {
-                let page = self
-                    .timeline
-                    .stored_context_page_in(branch, cursor - 1, 256, *cut)
-                    .await
-                    .map_err(ContextOpError::Read)?;
-                if page.is_empty() {
-                    break;
+            let read = page.events.len() as u64;
+            for (event, position) in page.events.into_iter().zip(page.positions) {
+                let same = tail
+                    .last()
+                    .is_some_and(|(branch, _)| *branch == position.branch_id);
+                match tail.last_mut() {
+                    Some((_, events)) if same => events.push(event),
+                    _ => tail.push((position.branch_id, vec![event])),
                 }
-                let end = page.last().map_or(cursor, |event| event.sequence);
-                events.extend(page);
-                cursor = end + 1;
             }
-            if !events.is_empty() {
-                tail.push((branch.clone(), events));
+            if read < 256 {
+                break;
             }
         }
         let mut history = Vec::new();

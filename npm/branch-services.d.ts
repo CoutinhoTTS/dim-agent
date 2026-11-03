@@ -384,13 +384,6 @@ export interface Timeline {
    * @throws {AgentErrorThrown}
    */
   queryWithTail(query: TimelineQuery): Promise<TimelineTailReply>
-  /**
-   * Reads the rows this projection consumes after an event cursor; a cursor
-   * inside an atomic batch reads that row and filters by sequence. The event
-   * limit is a target: the final batch may exceed it.
-   * @throws {AgentErrorThrown}
-   */
-  storedContextPage(after: number | bigint, limit: number | bigint, through: number | bigint): Promise<import('./plugin.js').BranchEvent[]>
 }
 
 /** The scope a part is registered for. */

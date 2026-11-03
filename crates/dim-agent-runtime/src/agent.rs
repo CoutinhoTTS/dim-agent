@@ -528,18 +528,6 @@ impl Session {
     pub async fn query(&self, branch: &str, query: TimelineQuery) -> Result<TimelineQueryReply> {
         self.published(branch)?.query(query).await
     }
-    /// See [`Branch::context_page`].
-    pub async fn context_page(
-        &self,
-        branch: &str,
-        after: u64,
-        limit: usize,
-        through: u64,
-    ) -> Result<Vec<Arc<AgentEvent>>> {
-        self.published(branch)?
-            .context_page(after, limit, through)
-            .await
-    }
     pub async fn history(
         &self,
         branch: &str,

@@ -1107,51 +1107,6 @@ impl Timeline {
             .collect())
     }
 
-    /// One filtered page of `branch`, which may be an ancestor.
-    #[service(skip)]
-    pub async fn stored_context_page_in(
-        &self,
-        branch: &str,
-        after: u64,
-        limit: usize,
-        through: u64,
-    ) -> Result<Vec<Arc<AgentEvent>>> {
-        let key = TimelineKey {
-            session_id: self.0.key.session_id.clone(),
-            branch_id: branch.to_owned(),
-        };
-        Ok(self
-            .0
-            .store
-            .read_context_page(&key, after, limit, through)
-            .await?
-            .into_iter()
-            .map(|record| record.event)
-            .collect())
-    }
-
-    /// Reads the rows this projection consumes after an event cursor; a cursor
-    /// inside an atomic batch reads that row and filters by sequence. The event
-    /// limit is a target: the final batch may exceed it.
-    pub async fn stored_context_page(
-        &self,
-        after: u64,
-        limit: usize,
-        through: u64,
-    ) -> Result<Vec<Arc<AgentEvent>>> {
-        let through = self.through(Some(through))?;
-        if after > through {
-            return Err(AgentError::InvalidInput("future Timeline cursor".into()));
-        }
-        Ok(self
-            .0
-            .store
-            .read_context_page(&self.0.key, after, limit, through)
-            .await?
-            .into_iter()
-            .map(|record| record.event)
-            .collect())
-    }
     /// Full fact replay; no interpreter or snapshot is required.
     #[service(skip)]
     pub async fn context(&self, through: u64) -> Result<ContextHistory> {

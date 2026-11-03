@@ -253,55 +253,6 @@ pub trait TimelineStore: Send + Sync + 'static {
                 .rfind(|event| event.sequence <= sequence))
         })
     }
-    /// Reads the rows this projection consumes: rows whose render or state
-    /// switch is set. Stores may filter before decoding; the default reads the
-    /// prefix and keeps the flagged kinds.
-    fn read_context<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        from: u64,
-        through: u64,
-    ) -> BoxFuture<'a, Result<Vec<StoredEvent>>> {
-        Box::pin(async move {
-            if from == 0 || from > through {
-                return Ok(Vec::new());
-            }
-            let records = self.read(key, from..=through).await?;
-            Ok(records
-                .into_iter()
-                .filter(|record| {
-                    let (render, state) = record.event.kind.context_flags();
-                    render || state
-                })
-                .collect())
-        })
-    }
-    /// Reads one page of the rows this projection consumes: at most `limit`
-    /// events after `after`, extended to the batch boundary of the last one.
-    /// The default reads the tail and trims in memory.
-    fn read_context_page<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        after: u64,
-        limit: usize,
-        through: u64,
-    ) -> BoxFuture<'a, Result<Vec<StoredEvent>>> {
-        Box::pin(async move {
-            if after > through || limit == 0 {
-                return Ok(Vec::new());
-            }
-            let records = self.read_context(key, after.max(1), through).await?;
-            let mut records: Vec<_> = records
-                .into_iter()
-                .filter(|record| record.event.sequence > after)
-                .collect();
-            if let Some(record) = records.get(limit - 1) {
-                let end = record.batch_end;
-                records.retain(|record| record.event.sequence <= end);
-            }
-            Ok(records)
-        })
-    }
     /// Reads complete batches after a batch-boundary cursor at a fixed head
     /// for a caller that does not use stored requests: a `context/prepare`
     /// or `model/call` record holds its request without its messages,

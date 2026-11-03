@@ -2728,7 +2728,6 @@
         "matches",
         "panic",
         "params",
-        "rusqlite::params",
         "tracing::error",
         "vec"
       ]
@@ -8055,6 +8054,7 @@
       "references": [
         "path HistoryRenderer",
         "path context_configuration",
+        "path crate::history::FoldRead::new",
         "path crate::history::project_batch",
         "path crate::history::read_context",
         "use crate::history::HistoryRenderer",
@@ -8870,10 +8870,12 @@
         "path TimelineQueryOrderBy::Sequence",
         "path TimelineQueryPredicate",
         "path TimelineQueryReply",
+        "path TimelineQueryScope",
         "path TimelineQueryScope::Branch",
         "path TimelineQueryScope::Chain",
         "use dim_agent_runtime::TimelineQuery",
         "use dim_agent_runtime::TimelineQueryDirection",
+        "use dim_agent_runtime::TimelineQueryFlag",
         "use dim_agent_runtime::TimelineQueryOrderBy",
         "use dim_agent_runtime::TimelineQueryPredicate",
         "use dim_agent_runtime::TimelineQueryReply",

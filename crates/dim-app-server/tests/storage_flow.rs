@@ -1566,12 +1566,33 @@ async fn extension_events_store_the_switches_their_producer_sets() {
     .await
     .unwrap();
     let read = store
-        .read_context(&key("session", "main"), 1, 2)
+        .query(
+            &key("session", "main"),
+            &dim_agent_runtime::TimelineQuery {
+                scope: dim_agent_runtime::TimelineQueryScope::Branch,
+                from_event: None,
+                from_sequence: None,
+                order_by: dim_agent_runtime::TimelineQueryOrderBy::Sequence,
+                direction: dim_agent_runtime::TimelineQueryDirection::Ascending,
+                kinds: Vec::new(),
+                flags: vec![
+                    dim_agent_runtime::TimelineQueryFlag::Render,
+                    dim_agent_runtime::TimelineQueryFlag::State,
+                ],
+                event_id: None,
+                predicate: None,
+                limit: std::num::NonZeroU64::MIN,
+                offset: 0,
+            },
+            1,
+            2,
+        )
         .await
         .unwrap();
     assert_eq!(
-        read.iter()
-            .map(|record| record.event.sequence)
+        read.events
+            .iter()
+            .map(|event| event.sequence)
             .collect::<Vec<_>>(),
         vec![1],
         "only the event the producer marked is read for the context"
@@ -7384,8 +7405,11 @@ async fn policy_order_reads_the_last_anchors_in_both_stores() {
     db.close().await.unwrap();
 }
 
+/// A streamed context folds pages of events, not atomic batches: the page that
+/// ends inside the batch at 255..=257 carries part of it, and the projection of
+/// the pages still equals the whole render.
 #[tokio::test]
-async fn streamed_context_reads_complete_batches_across_the_window() {
+async fn a_streamed_context_folds_a_page_that_ends_inside_an_atomic_batch() {
     let database = Database::new();
     let db = SqliteStorage::open(database.0.clone()).unwrap();
     let store = SqliteTimelineStore::new(db.clone());
@@ -7412,6 +7436,31 @@ async fn streamed_context_reads_complete_batches_across_the_window() {
     .unwrap();
     let renderer = HistoryRenderer::default();
     let streamed = renderer.rendered_stream(&timeline, 257, 256).await.unwrap();
+    let (_, full) = renderer.rendered_context(&timeline, 257).await.unwrap();
+    assert_eq!(streamed.history, full);
+    db.close().await.unwrap();
+}
+
+/// A history page's limit is a target, not an edge: a page that would end inside
+/// an atomic batch reads the batch whole.
+#[tokio::test]
+async fn a_history_page_that_would_end_inside_a_batch_reads_it_whole() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let singles: Vec<_> = (1..=254).map(|sequence| text(sequence, "line")).collect();
+    append(&store, key("session", "main"), singles)
+        .await
+        .unwrap();
+    let mut batch = vec![text(255, "a"), text(256, "b"), text(257, "c")];
+    for record in &mut batch {
+        record.batch_end = 257;
+    }
+    append(&store, key("session", "main"), batch).await.unwrap();
     for limit in 1..=3 {
         let page = store
             .read_page_without_request_bodies(&key("session", "main"), 254, limit, 257)
@@ -7425,8 +7474,6 @@ async fn streamed_context_reads_complete_batches_across_the_window() {
             "a page whose limit would end inside the atomic batch reads it whole: {limit}"
         );
     }
-    let (_, full) = renderer.rendered_context(&timeline, 257).await.unwrap();
-    assert_eq!(streamed.history, full);
     db.close().await.unwrap();
 }
 

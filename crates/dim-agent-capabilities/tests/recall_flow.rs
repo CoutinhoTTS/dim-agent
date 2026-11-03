@@ -2923,6 +2923,9 @@ fn the_arguments_and_the_paginations_say_how_to_fix_the_call() {
 #[derive(Default)]
 struct PageReads {
     memory: MemoryTimelineStore,
+    /// The events and pages the backwards, kind-filtered reads decoded, which
+    /// are the recall call's own; the preparation folds through the same read
+    /// but is not what these assert.
     events: std::sync::atomic::AtomicUsize,
     pages: std::sync::atomic::AtomicUsize,
     /// The Session and branch a first page writes to, armed by the test
@@ -2993,13 +2996,15 @@ impl TimelineStore for PageReads {
     ) -> BoxFuture<'a, Result<TimelineQueryPage>> {
         Box::pin(async move {
             let page = self.memory.query(key, query, from, through).await?;
-            self.events
-                .fetch_add(page.events.len(), std::sync::atomic::Ordering::SeqCst);
-            self.pages.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let first_page = query.direction == TimelineQueryDirection::Descending
+            let backwards = query.direction == TimelineQueryDirection::Descending
                 && query.event_id.is_none()
-                && !query.kinds.is_empty()
-                && query.offset == 0;
+                && !query.kinds.is_empty();
+            if backwards {
+                self.events
+                    .fetch_add(page.events.len(), std::sync::atomic::Ordering::SeqCst);
+                self.pages.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            let first_page = backwards && query.offset == 0;
             let pinned = if first_page {
                 let mut inject = self.inject.lock().unwrap();
                 match inject.as_ref() {
