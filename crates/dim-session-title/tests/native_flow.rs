@@ -1,10 +1,18 @@
-use super::session_typescript::when_served;
-use super::*;
-use axum::{Json, Router, body::Body, extract::State, routing::post};
+#![cfg(unix)]
+mod support;
+use axum::{Router, routing::post};
+use dim_agent_capabilities::{adapters::MockTools, defaults};
+use dim_agent_runtime::{AgentBuilder, AgentConfig};
+use dim_agent_types::EventKind;
+use dim_app_server::{ServerConfig, serve};
+use dim_client::{Client, Message};
+use rutis::host::CtxHost;
+use serde_json::{Value, json};
 use std::path::PathBuf;
+use std::{sync::Arc, time::Duration};
+use support::*;
 use tokio::sync::{mpsc, oneshot};
 
-type Request = (Value, oneshot::Sender<String>);
 type Generation = (
     dim_session_title::GenerateTitleRequest,
     oneshot::Sender<Value>,
@@ -53,29 +61,10 @@ impl rutis::Plugin for GeneratorPlugin {
     }
 }
 
-pub(super) async fn complete(
-    State(sent): State<mpsc::UnboundedSender<Request>>,
-    Json(request): Json<Value>,
-) -> axum::response::Response {
-    let (release, reply) = oneshot::channel();
-    sent.send((request, release)).unwrap();
-    axum::response::Response::builder()
-        .header("content-type", "text/event-stream")
-        .body(Body::from_stream(futures_util::stream::once(async move {
-            let text = reply.await?;
-            Ok::<_, oneshot::error::RecvError>(format!(
-                "data: {}\n\ndata: [DONE]\n\n",
-                json!({"id":"title", "choices":[{"index":0,
-                    "delta":{"content":text}, "finish_reason":"stop"}]})
-            ))
-        })))
-        .unwrap()
-}
+async fn entry(client: &mut Client, id: &str) -> Value {
+    let listed = client.rpc("session.summaries", json!({})).await.unwrap();
 
-pub(super) async fn entry(client: &mut Client, id: &str) -> Value {
-    let listed = client.rpc("session.summaries", json!({})).await;
-    assert_ok(&listed);
-    listed["result"]
+    listed
         .as_array()
         .unwrap()
         .iter()
@@ -84,17 +73,18 @@ pub(super) async fn entry(client: &mut Client, id: &str) -> Value {
         .clone()
 }
 
-pub(super) async fn titled(client: &mut Client, id: &str, text: &str, source: &str) {
+async fn titled(client: &mut Client, id: &str, text: &str, source: &str) {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let current = entry(client, id).await;
             if current["title"] == text
                 && current["titleSource"] == source
                 && client.notices.iter().any(|notice| {
-                    notice["method"] == "session.notice"
-                        && notice["params"]["sessionId"] == id
-                        && notice["params"]["kind"] == "title"
-                        && notice["params"]["data"]["titleRevision"] == current["titleRevision"]
+                    matches!(notice,
+                    Message::Notice { method, params }
+                    if method == "session.notice" && params["sessionId"] == id
+                        && params["kind"] == "title"
+                        && params["data"]["titleRevision"] == current["titleRevision"])
                 })
             {
                 break;
@@ -114,19 +104,24 @@ async fn create(client: &mut Client, home: &std::path::Path, interactive: bool) 
         "tools":["wait"],"interactive":interactive,
         "permissionPolicy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}),
         )
-        .await;
-    assert_ok(&created);
-    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
-    assert_ok(&client.rpc("session.attach", json!({"sessionId":id})).await);
+        .await
+        .unwrap();
+
+    let id = created["sessionId"].as_str().unwrap().to_owned();
+    client
+        .rpc("session.attach", json!({"sessionId":id}))
+        .await
+        .unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let reply = client
                 .rpc("session.rename", json!({"sessionId":id,"title":0}))
-                .await;
-            if reply["error"]["data"]["appError"] == "invalid_params" {
+                .await
+                .unwrap_err();
+            if dim_client::app_error(&reply) == Some("invalid_params") {
                 break;
             }
-            assert!(super::session_typescript::waiting(&reply), "{reply}");
+            assert!(waiting(&reply), "{reply}");
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
@@ -136,41 +131,20 @@ async fn create(client: &mut Client, home: &std::path::Path, interactive: bool) 
 }
 
 async fn submit(client: &mut Client, id: &str, text: &str) {
-    assert_ok(
-        &client
-            .rpc(
-                "session.submit",
-                json!({"sessionId":id,"branchId":"main","text":text}),
-            )
-            .await,
-    );
+    client
+        .rpc(
+            "session.submit",
+            json!({"sessionId":id,"branchId":"main","text":text}),
+        )
+        .await
+        .unwrap();
 }
 
 async fn idle(client: &mut Client, id: &str) {
-    assert_ok(
-        &client
-            .rpc("session.idle", json!({"sessionId":id,"branchId":"main"}))
-            .await,
-    );
-}
-
-pub(super) async fn configure(client: &mut Client, document: Value) {
-    let read = client
-        .rpc(
-            "settings.read",
-            json!({"source":"session-title","scope":"user"}),
-        )
-        .await;
-    assert_ok(&read);
-    assert_ok(
-        &client
-            .rpc(
-                "settings.update",
-                json!({"source":"session-title","scope":"user",
-        "expectedRevision":read["result"]["revision"],"document":document}),
-            )
-            .await,
-    );
+    client
+        .rpc("session.idle", json!({"sessionId":id,"branchId":"main"}))
+        .await
+        .unwrap();
 }
 
 fn title_builder(provider: &str) -> AgentBuilder {
@@ -198,9 +172,10 @@ fn title_builder(provider: &str) -> AgentBuilder {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_session_title_generation_rename_settings_restore_fork_and_close() {
-    use std::os::unix::fs::PermissionsExt;
-    let store = super::deletion::Store::new();
-    std::fs::set_permissions(&store.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let store = Store::new();
+    let choice =
+        json!({"version":1,"installed":[],"names":{"session-title":{"use":"default"}}}).to_string();
+    std::fs::write(store.0.join("plugins.json"), &choice).unwrap();
     let (sent, mut requests) = mpsc::unbounded_channel::<Request>();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -223,28 +198,42 @@ async fn native_session_title_generation_rename_settings_restore_fork_and_close(
     .await
     .unwrap();
     let agent = server.agent().unwrap();
-    let mut client = Client::new_version(&server, false, 3).await;
-    assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000008","displayName":"Title fixture","connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"auth":{"type":"anonymous"}},"models":[{"modelId":"main","displayName":"Main","status":"active",
+    let mut client = client(&server).await;
+    let plugins = client.rpc("plugin.list", json!({})).await.unwrap();
+    assert_eq!(
+        plugins
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "session-title")
+            .unwrap()["use"],
+        "builtin"
+    );
+    assert_eq!(
+        std::fs::read_to_string(store.0.join("plugins.json")).unwrap(),
+        choice
+    );
+    client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000008","displayName":"Title fixture","connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"auth":{"type":"anonymous"}},"models":[{"modelId":"main","displayName":"Main","status":"active",
             "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)},
             {"modelId":"explicit","displayName":"Explicit","status":"active",
-            "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}],"enabled":true})).await);
-    assert_ok(
-        &client
-            .rpc(
-                "provider.select",
-                json!({"providerId":"018ec73f-0000-7000-8000-000000000008","modelId":"main"}),
-            )
-            .await,
-    );
+            "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}],"enabled":true})).await.unwrap();
+    client
+        .rpc(
+            "provider.select",
+            json!({"providerId":"018ec73f-0000-7000-8000-000000000008","modelId":"main"}),
+        )
+        .await
+        .unwrap();
     let defaults = client
         .rpc(
             "settings.read",
             json!({"source":"session-title","scope":"user"}),
         )
-        .await;
-    assert_ok(&defaults);
+        .await
+        .unwrap();
+
     assert_eq!(
-        defaults["result"]["document"],
+        defaults["document"],
         json!({"enabled":true,"maxLength":80,"model":null})
     );
     for document in [
@@ -256,11 +245,13 @@ async fn native_session_title_generation_rename_settings_restore_fork_and_close(
             .rpc(
                 "settings.update",
                 json!({"source":"session-title","scope":"user",
-            "expectedRevision":defaults["result"]["revision"],"document":document}),
+            "expectedRevision":defaults["revision"],"document":document}),
             )
-            .await;
+            .await
+            .unwrap_err();
         assert_eq!(
-            rejected["error"]["data"]["appError"], "invalid_params",
+            dim_client::app_error(&rejected),
+            Some("invalid_params"),
             "{rejected}"
         );
     }
@@ -269,15 +260,16 @@ async fn native_session_title_generation_rename_settings_restore_fork_and_close(
             "settings.read",
             json!({"source":"session-title","scope":"user"}),
         )
-        .await;
-    assert_eq!(unchanged["result"], defaults["result"]);
+        .await
+        .unwrap();
+    assert_eq!(unchanged, defaults);
     let project = client
         .rpc(
             "settings.read",
             json!({"source":"session-title","scope":{"project":0}}),
         )
         .await;
-    assert!(project.get("error").is_some(), "{project}");
+    assert!(project.is_err(), "{project:?}");
 
     let id = create(&mut client, &store.0, true).await;
     let first = r#"tool:wait {"millis":60000}"#;
@@ -310,11 +302,10 @@ async fn native_session_title_generation_rename_settings_restore_fork_and_close(
             .any(|event| matches!(event.kind, EventKind::TurnEnd(_))),
         "title generation does not wait for the controlled main turn"
     );
-    assert_ok(
-        &client
-            .rpc("session.stop", json!({"sessionId":id,"branchId":"main"}))
-            .await,
-    );
+    client
+        .rpc("session.stop", json!({"sessionId":id,"branchId":"main"}))
+        .await
+        .unwrap();
     idle(&mut client, &id).await;
     let before_rename = session.local("main", ..).await.unwrap();
     let renamed = when_served(
@@ -323,8 +314,8 @@ async fn native_session_title_generation_rename_settings_restore_fork_and_close(
         json!({"sessionId":id,"title":"  Manual 😀  "}),
     )
     .await;
-    assert_ok(&renamed);
-    assert_eq!(renamed["result"]["title"], "Manual 😀");
+
+    assert_eq!(renamed["title"], "Manual 😀");
     titled(&mut client, &id, "Manual 😀", "manual").await;
     assert_eq!(
         before_rename
@@ -343,27 +334,23 @@ async fn native_session_title_generation_rename_settings_restore_fork_and_close(
     idle(&mut client, &id).await;
     assert!(requests.try_recv().is_err());
 
-    assert_ok(
-        &when_served(
-            &mut client,
-            "session.rename",
-            json!({"sessionId":id,"title":null}),
-        )
-        .await,
-    );
+    when_served(
+        &mut client,
+        "session.rename",
+        json!({"sessionId":id,"title":null}),
+    )
+    .await;
     submit(&mut client, &id, "manual rename during generation").await;
     let (_, release) = tokio::time::timeout(Duration::from_secs(10), requests.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_ok(
-        &when_served(
-            &mut client,
-            "session.rename",
-            json!({"sessionId":id,"title":"Winner"}),
-        )
-        .await,
-    );
+    when_served(
+        &mut client,
+        "session.rename",
+        json!({"sessionId":id,"title":"Winner"}),
+    )
+    .await;
     let mut held = dim_app_server::storage::testing::hold_title_write(&id);
     release.send("Stale automatic title".into()).unwrap();
     tokio::time::timeout(Duration::from_secs(10), held.arrived())
@@ -377,24 +364,20 @@ async fn native_session_title_generation_rename_settings_restore_fork_and_close(
     drop(held);
     assert!(unloading.await.unwrap().unwrap());
     assert_eq!(entry(&mut client, &id).await["title"], "Winner");
-    assert_ok(
-        &when_served(
-            &mut client,
-            "session.rename",
-            json!({"sessionId":id,"title":"Restored"}),
-        )
-        .await,
-    );
+    when_served(
+        &mut client,
+        "session.rename",
+        json!({"sessionId":id,"title":"Restored"}),
+    )
+    .await;
     titled(&mut client, &id, "Restored", "manual").await;
     let session = agent.get_session(&id).unwrap();
-    assert_ok(
-        &when_served(
-            &mut client,
-            "session.rename",
-            json!({"sessionId":id,"title":null}),
-        )
-        .await,
-    );
+    when_served(
+        &mut client,
+        "session.rename",
+        json!({"sessionId":id,"title":null}),
+    )
+    .await;
     configure(
         &mut client,
         json!({"enabled":true,"maxLength":10,
@@ -417,15 +400,15 @@ async fn native_session_title_generation_rename_settings_restore_fork_and_close(
             "session.fork",
             json!({"sessionId":id,"at":session.sequence("main").unwrap()}),
         )
-        .await;
-    assert_ok(&fork);
-    let fork_id = fork["result"]["sessionId"].as_str().unwrap().to_owned();
+        .await
+        .unwrap();
+
+    let fork_id = fork["sessionId"].as_str().unwrap().to_owned();
     assert_eq!(entry(&mut client, &fork_id).await["title"], Value::Null);
-    assert_ok(
-        &client
-            .rpc("session.attach", json!({"sessionId":fork_id}))
-            .await,
-    );
+    client
+        .rpc("session.attach", json!({"sessionId":fork_id}))
+        .await
+        .unwrap();
     submit(&mut client, &fork_id, "fork's new input").await;
     let (request, release) = tokio::time::timeout(Duration::from_secs(10), requests.recv())
         .await
@@ -438,14 +421,12 @@ async fn native_session_title_generation_rename_settings_restore_fork_and_close(
     let background = create(&mut client, &store.0, false).await;
     submit(&mut client, &background, "no automatic background title").await;
     idle(&mut client, &background).await;
-    assert_ok(
-        &when_served(
-            &mut client,
-            "session.rename",
-            json!({"sessionId":background,"title":"Manual bg"}),
-        )
-        .await,
-    );
+    when_served(
+        &mut client,
+        "session.rename",
+        json!({"sessionId":background,"title":"Manual bg"}),
+    )
+    .await;
     titled(&mut client, &background, "Manual bg", "manual").await;
     assert!(requests.try_recv().is_err());
 
@@ -455,14 +436,13 @@ async fn native_session_title_generation_rename_settings_restore_fork_and_close(
         .await
         .unwrap()
         .unwrap();
-    assert_ok(
-        &client
-            .rpc(
-                "session.stop",
-                json!({"sessionId":interrupted,"branchId":"main"}),
-            )
-            .await,
-    );
+    client
+        .rpc(
+            "session.stop",
+            json!({"sessionId":interrupted,"branchId":"main"}),
+        )
+        .await
+        .unwrap();
     idle(&mut client, &interrupted).await;
     release.send("Stopped".into()).unwrap();
     titled(&mut client, &interrupted, "Stopped", "auto").await;
@@ -513,9 +493,11 @@ async fn native_session_title_generation_rename_settings_restore_fork_and_close(
                 "session.rename",
                 json!({"sessionId":overlapping,"title":title}),
             )
-            .await;
+            .await
+            .unwrap_err();
         assert_eq!(
-            rejected["error"]["data"]["appError"], "invalid_params",
+            dim_client::app_error(&rejected),
+            Some("invalid_params"),
             "{rejected}"
         );
     }
@@ -535,9 +517,9 @@ async fn native_session_title_generation_rename_settings_restore_fork_and_close(
     titled(&mut client, &disabled, "Enabled", "auto").await;
 
     let images = create(&mut client, &store.0, true).await;
-    assert_ok(&client.rpc("session.submit", json!({"sessionId":images,"branchId":"main","user":{"content":[
+    client.rpc("session.submit", json!({"sessionId":images,"branchId":"main","user":{"content":[
         {"type":"image","source":{"type":"url","mediaType":"image/png","url":"https://example.com/image.png"}}
-    ]}})).await);
+    ]}})).await.unwrap();
     idle(&mut client, &images).await;
     submit(
         &mut client,
@@ -550,6 +532,56 @@ async fn native_session_title_generation_rename_settings_restore_fork_and_close(
         requests.try_recv().is_err(),
         "an image-only first input has no automatic title"
     );
+    client
+        .rpc("plugin.disable", json!({"name":"session-title"}))
+        .await
+        .unwrap();
+    let error = client
+        .rpc(
+            "settings.read",
+            json!({"source":"session-title","scope":"user"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        dim_client::app_error(&error),
+        Some("settings_unknown_source")
+    );
+    client
+        .rpc("plugin.enable", json!({"name":"session-title"}))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let listed = client.rpc("plugin.list", json!({})).await.unwrap();
+            if listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["name"] == "session-title" && p["status"] == "running")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let document = client
+        .rpc(
+            "settings.read",
+            json!({"source":"session-title","scope":"user"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(document["document"]["enabled"], true);
+    let renamed = when_served(
+        &mut client,
+        "session.rename",
+        json!({"sessionId":images,"title":"Reactivated"}),
+    )
+    .await;
+    assert_eq!(renamed["title"], "Reactivated");
     drop(client);
     server.shutdown();
     server.join().await.unwrap();
@@ -558,7 +590,7 @@ async fn native_session_title_generation_rename_settings_restore_fork_and_close(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn optional_title_generation_routes_falls_back_and_cancels_without_gating_the_session() {
-    let store = super::deletion::Store::new();
+    let store = Store::new();
     let (sent, mut requests) = mpsc::unbounded_channel::<Request>();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -591,19 +623,18 @@ async fn optional_title_generation_routes_falls_back_and_cancels_without_gating_
     .await
     .unwrap();
     let agent = server.agent().unwrap();
-    let mut client = Client::new_version(&server, false, 3).await;
-    assert_ok(&client.rpc("provider.create", json!({"providerId":provider,"displayName":"Routing fixture",
+    let mut client = client(&server).await;
+    client.rpc("provider.create", json!({"providerId":provider,"displayName":"Routing fixture",
         "connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"auth":{"type":"anonymous"}},
         "models":[{"modelId":"main","displayName":"Main","status":"active",
-            "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000,16_384)}],"enabled":true})).await);
-    assert_ok(
-        &client
-            .rpc(
-                "provider.select",
-                json!({"providerId":provider,"modelId":"main"}),
-            )
-            .await,
-    );
+            "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000,16_384)}],"enabled":true})).await.unwrap();
+    client
+        .rpc(
+            "provider.select",
+            json!({"providerId":provider,"modelId":"main"}),
+        )
+        .await
+        .unwrap();
 
     let id = create(&mut client, &store.0, true).await;
     submit(&mut client, &id, "a dedicated title request").await;
@@ -729,14 +760,12 @@ async fn optional_title_generation_routes_falls_back_and_cancels_without_gating_
         .await
         .unwrap()
         .unwrap();
-    assert_ok(
-        &when_served(
-            &mut client,
-            "session.rename",
-            json!({"sessionId":manual,"title":"Manual winner"}),
-        )
-        .await,
-    );
+    when_served(
+        &mut client,
+        "session.rename",
+        json!({"sessionId":manual,"title":"Manual winner"}),
+    )
+    .await;
     release
         .send(json!({"kind":"generated","title":"Stale service title"}))
         .unwrap();
@@ -758,11 +787,10 @@ async fn optional_title_generation_routes_falls_back_and_cancels_without_gating_
         "closing never starts a fallback model call"
     );
 
-    assert_ok(
-        &client
-            .rpc("plugin.disable", json!({"name":"TitleGeneratorFixture"}))
-            .await,
-    );
+    client
+        .rpc("plugin.disable", json!({"name":"TitleGeneratorFixture"}))
+        .await
+        .unwrap();
     let withdrawn = create(&mut client, &store.0, true).await;
     submit(
         &mut client,

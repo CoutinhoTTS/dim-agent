@@ -1230,7 +1230,6 @@ dependencies = [
  "dim-agent-runtime",
  "dim-agent-types",
  "dim-app-server",
- "dim-session-title",
  "encoding_rs",
  "flate2",
  "foldhash 0.2.0",
@@ -1384,10 +1383,13 @@ dependencies = [
 name = "dim-session-title"
 version = "0.1.0-alpha.8"
 dependencies = [
+ "axum",
  "dim-agent-capabilities",
  "dim-agent-runtime",
  "dim-agent-types",
  "dim-app-server",
+ "dim-client",
+ "futures-util",
  "regex",
  "rutis",
  "rutis-bridge",
@@ -1396,6 +1398,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

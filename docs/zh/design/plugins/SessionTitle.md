@@ -16,10 +16,13 @@ Node/Python 安装或语言运行时获取。辅助调用和标题元数据仍�
 负责原默认包向内置实现的过渡，保留显式禁用和已安装替代实现的选择。
 只有选中的实现可以注册 Settings 来源与 `session.rename`。
 
-验证使用无需语言运行时的原生 App Server
-[session_title.rs](../../../../crates/dim-app-server/tests/transport_flow/session_title.rs) 流程，
+公开行为测试归插件 crate，通过 `dim-client` 和 App Server 的公开 API 驱动，测试显式安装插件。
+App Server 测试不依赖 SessionTitle，仅覆盖通用宿主行为。验证使用无需语言运行时的原生
+[native_flow.rs](../../../../crates/dim-session-title/tests/native_flow.rs) 流程，
 覆盖固定前缀历史、Settings 校验、RPC、HTTP 辅助调用、Unicode 上限、并发采纳、标题通知、
-手工与自动标题冲突、恢复、fork 和关闭结算。诊断仅记录结果与时长。
+手工与自动标题冲突、恢复、fork 和关闭结算。依赖 Node 的
+[scheduler_flow.rs](../../../../crates/dim-session-title/tests/scheduler_flow.rs)
+覆盖调度报告的输入来源，确保报告不会提供标题文本。诊断仅记录结果与时长。
 
 | 边界 | 当前合同与 Ready 决策 |
 | --- | --- |
@@ -43,7 +46,7 @@ atLeast 与 through，直接使用原生 HistoryPage/AgentEvent。S2 稳定目�
 沿用[插件绑定合同](../rutis-usage.md)：插件的唯一一行注入 `partRegistry`，
 注册 Session 部分，每个 Session 挂载一份副本。该部分注入
 `sessionMethods`，并在 `apply` 中把 `session.rename` 注册到它；它不提供服务。
-插件仅依赖 Settings 与 SessionStore 的既有公开 Rust 绑定；历史回复在本插件的命名服务边界解析一次。App Server 只有用于公开流程夹具的开发依赖，没有对该插件的生产依赖。`apply` 读取 Session 标识和创建配置，
+插件仅依赖 Settings 与 SessionStore 的既有公开 Rust 绑定；历史回复在本插件的命名服务边界解析一次。插件行为与跨插件标题流程位于插件 crate 的 tests，使用公开客户端与宿主 API；App Server 测试不依赖该 crate，也不隐式安装标题插件。`apply` 读取 Session 标识和创建配置，
 登记观察/清理，不启动异步初始化任务；创建配置不可变。同一部分声明全部依赖：进程服务
 `sessions`、`settings`、`sessionMetadata` 和 `auxiliaryModel`，以及 Session 服务 `sessionIdentity`、
 `sessionConfig`、`sessionLifecycle` 和 `sessionMethods`。产品装配独立于外语插件行安装原生插件。

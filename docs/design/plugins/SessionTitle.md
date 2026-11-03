@@ -20,11 +20,16 @@ PluginManager's source selection owns the transition from the former default pac
 built-in implementation, preserving explicit disablement and installed replacement selections.
 Only the selected implementation may register the Settings source or `session.rename`.
 
-Verification uses the native App Server flow
-[`session_title.rs`](../../../crates/dim-app-server/tests/transport_flow/session_title.rs) without
+Public behavior tests belong to this plugin crate and use `dim-client` and the App Server
+public APIs; fixtures install the plugin explicitly. App Server tests have no dependency on
+SessionTitle and cover generic host behavior. Verification uses the native flow
+[`native_flow.rs`](../../../crates/dim-session-title/tests/native_flow.rs) without
 language runtimes. It exercises fixed-prefix history, settings validation, RPC, HTTP auxiliary
 execution, Unicode bounds, concurrent adoption, title notices, manual-over-auto conflicts,
-restore, fork and closing settlement. Diagnostics contain only outcome and duration.
+restore, fork and closing settlement. The Node-backed
+[`scheduler_flow.rs`](../../../crates/dim-session-title/tests/scheduler_flow.rs) exercises
+scheduled report provenance without letting reports supply title text. Diagnostics contain
+only outcome and duration.
 
 | Boundary | Current contract and Ready decision |
 | --- | --- |
@@ -51,7 +56,7 @@ and registers the Session part; each Session mounts a copy. The part injects
 `sessionMethods` and registers `session.rename` with it from `apply`; it provides no service.
 `apply` reads the Session identity and creation configuration and registers observation/cleanup;
 it does not start an asynchronous initialization job. Its creation configuration is immutable.
-The plugin depends on the existing public Rust Settings and SessionStore bindings; it does not expose or alter their implementations. Named history replies are decoded once at this plugin boundary. The App Server has only a development dependency for the public-flow fixtures, not a production dependency on this crate.
+The plugin depends on the existing public Rust Settings and SessionStore bindings; it does not expose or alter their implementations. Named history replies are decoded once at this plugin boundary. Plugin behavior and cross-plugin title flows live in this crate's tests and use the public client and host APIs. App Server tests have no dependency on this crate and install no title plugin implicitly.
 
 The part declares all its dependencies: the process services `sessions`,
 `settings`, `sessionMetadata` and `auxiliaryModel`, and the Session services `sessionIdentity`,

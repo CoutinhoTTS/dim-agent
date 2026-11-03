@@ -1,6 +1,6 @@
 //! `dimcode session rename|delete|cleanup` and `/rename`, over the scripted
-//! daemon and, for the server guarantees they rely on, the App Server's own
-//! flow tests (`crates/dim-app-server/tests/transport_flow/session_title.rs`).
+//! daemon, with title behavior covered by the SessionTitle plugin's public
+//! flows (`crates/dim-session-title/tests/native_flow.rs`).
 use super::*;
 use std::sync::mpsc;
 

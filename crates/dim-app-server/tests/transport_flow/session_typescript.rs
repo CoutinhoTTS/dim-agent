@@ -1203,10 +1203,7 @@ pub(super) async fn start_recording(
         "dm-ts-{}/server.sock",
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     )));
-    let (mut builder, requests, release, tools) = setup_recording();
-    if config.product_home.is_some() {
-        dim_session_title::install(&mut builder);
-    }
+    let (builder, requests, release, tools) = setup_recording();
     let server = serve(builder, config).await.unwrap();
     (server, requests, release, tools)
 }

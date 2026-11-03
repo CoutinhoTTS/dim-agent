@@ -155,8 +155,6 @@ mod ui_host;
 #[path = "transport_flow/web_entry.rs"]
 mod web_entry;
 
-#[path = "transport_flow/session_title.rs"]
-mod session_title;
 #[path = "transport_flow/workflow.rs"]
 mod workflow;
 
@@ -355,9 +353,6 @@ async fn launch_inner(
         uuid::Uuid::new_v4()
     )));
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    if config.product_home.is_some() {
-        dim_session_title::install(&mut builder);
-    }
     builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);

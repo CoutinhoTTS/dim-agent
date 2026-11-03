@@ -14,6 +14,6 @@ the optional `sessionTitleGenerator` contract belong here; DimOAuth implements t
 without providing a fallback or writing Session state.
 
 Inputs, outputs, errors, configuration, lifecycle and the rule check are defined in the
-[SessionTitle design](../../docs/design/plugins/SessionTitle.md). Public flows live in
-`dim-app-server/tests/transport_flow/session_title.rs`; their product fixture explicitly installs
-this crate, while the App Server's production dependency graph contains no SessionTitle edge.
+[SessionTitle design](../../docs/design/plugins/SessionTitle.md). Public flows live in `tests/`,
+using the public `dim-client` and App Server APIs. Each fixture installs this crate explicitly. App Server has neither a production nor a test dependency on
+SessionTitle; its tests cover its own interfaces and generic plugin policy.
