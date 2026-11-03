@@ -2209,6 +2209,17 @@ const BY_ID_SEQUENCE: &str = "SELECT sequence FROM timeline_events \
 
 /// The row-header path of a data field `write_batch` moves out of an output
 /// row's records; a predicate on that field reads the header instead.
+/// A number's JSON text, so an integer above `i64` compares exactly instead of
+/// through the real SQLite extracts. Other scalars compare by type and value.
+fn json_text(value: &serde_json::Value) -> Option<rusqlite::types::Value> {
+    match value {
+        serde_json::Value::Number(_) => Some(rusqlite::types::Value::Text(
+            serde_json::to_string(value).expect("a number has a JSON text"),
+        )),
+        _ => None,
+    }
+}
+
 /// The JSON type SQLite reports for a scalar, so a predicate compares like with
 /// like: `1`, `1.0` and `true` are three different values.
 fn json_type_name(value: &serde_json::Value) -> &'static str {
@@ -2279,32 +2290,68 @@ fn query_rows(
     if let Some(event_id) = &query.event_id {
         sql.push_str(
             " AND (event_id=? OR EXISTS (SELECT 1 FROM json_each(json_extract(body, '$.records')) AS r \
-               WHERE json_extract(r.value, '$.event.id')=?))",
+               WHERE json_extract(r.value, '$.event.id')=? \
+               AND json_extract(r.value, '$.event.sequence') <= ?))",
         );
-        parameters.extend([text(event_id), text(event_id)]);
+        parameters.extend([
+            text(event_id),
+            text(event_id),
+            rusqlite::types::Value::Integer(sql_sequence(*range.end())?),
+        ]);
     }
     if let Some(predicate) = &query.predicate {
         if predicate.json_path().is_none() {
             return Err(error("query path is not field names joined by dots"));
         }
-        let value = json_value(&predicate.value)?;
-        let kind = json_type_name(&predicate.value);
+        let bound = rusqlite::types::Value::Integer(sql_sequence(*range.end())?);
         let mut paths = vec![format!("$.record.event.data.{}", predicate.path)];
         if let Some(header) = output_header_path(&predicate.path) {
             paths.push(header);
         }
         let mut clauses = Vec::new();
         for path in paths {
-            clauses.push("(json_type(body, ?) = ? AND json_extract(body, ?) IS ?)");
             let path = text(&path);
-            parameters.extend([path.clone(), text(kind), path, value.clone()]);
+            match json_text(&predicate.value) {
+                Some(literal) => {
+                    clauses.push("(body -> ?) = ?");
+                    parameters.extend([path, literal]);
+                }
+                None => {
+                    clauses.push("(json_type(body, ?) = ? AND json_extract(body, ?) IS ?)");
+                    parameters.extend([
+                        path.clone(),
+                        text(json_type_name(&predicate.value)),
+                        path,
+                        json_value(&predicate.value)?,
+                    ]);
+                }
+            }
         }
-        clauses.push(
-            "(EXISTS (SELECT 1 FROM json_each(json_extract(body, '$.records')) AS r \
-               WHERE json_type(r.value, ?) = ? AND json_extract(r.value, ?) IS ?))",
-        );
         let record_path = text(&format!("$.event.data.{}", predicate.path));
-        parameters.extend([record_path.clone(), text(kind), record_path, value]);
+        match json_text(&predicate.value) {
+            Some(literal) => {
+                clauses.push(
+                    "(EXISTS (SELECT 1 FROM json_each(json_extract(body, '$.records')) AS r \
+                       WHERE (r.value -> ?) = ? \
+                       AND json_extract(r.value, '$.event.sequence') <= ?))",
+                );
+                parameters.extend([record_path, literal, bound]);
+            }
+            None => {
+                clauses.push(
+                    "(EXISTS (SELECT 1 FROM json_each(json_extract(body, '$.records')) AS r \
+                       WHERE json_type(r.value, ?) = ? AND json_extract(r.value, ?) IS ? \
+                       AND json_extract(r.value, '$.event.sequence') <= ?))",
+                );
+                parameters.extend([
+                    record_path.clone(),
+                    text(json_type_name(&predicate.value)),
+                    record_path,
+                    json_value(&predicate.value)?,
+                    bound,
+                ]);
+            }
+        }
         sql.push_str(&format!(" AND ({})", clauses.join(" OR ")));
     }
     sql.push_str(if descending {

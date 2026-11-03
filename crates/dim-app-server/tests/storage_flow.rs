@@ -8267,6 +8267,131 @@ async fn a_query_compares_a_json_scalar_by_its_type() {
     db.close().await.unwrap();
 }
 
+/// An integer above `i64` is a value SQLite's extraction rounds, so a page of
+/// one must not be spent on the neighbouring integer.
+#[tokio::test]
+async fn a_query_compares_a_large_integer_exactly() {
+    use dim_agent_runtime::TimelineQueryScope::Branch;
+
+    let small = serde_json::json!(18_446_744_073_709_551_614u64);
+    let large = serde_json::json!(18_446_744_073_709_551_615u64);
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store: std::sync::Arc<dyn TimelineStore> = SqliteTimelineStore::new(db.clone());
+    let memory_store: std::sync::Arc<dyn TimelineStore> =
+        std::sync::Arc::new(dim_agent_runtime::MemoryTimelineStore::default());
+    for target in [store.clone(), memory_store.clone()] {
+        target
+            .create_session("query", &SessionConfig::default())
+            .await
+            .unwrap();
+        for (sequence, value) in [(1u64, small.clone()), (2, large.clone())] {
+            publish_records(
+                &target,
+                key("query", "main"),
+                vec![query_record(
+                    sequence,
+                    sequence,
+                    &format!("value-{sequence}"),
+                    marked(serde_json::json!({"value": value})),
+                )],
+            )
+            .await;
+        }
+    }
+    let sqlite = Timeline::restore(
+        rutis::Ctx::root().unwrap(),
+        key("query", "main"),
+        vec![],
+        store.clone(),
+    )
+    .await
+    .unwrap();
+    let memory = Timeline::restore(
+        rutis::Ctx::root().unwrap(),
+        key("query", "main"),
+        vec![],
+        memory_store,
+    )
+    .await
+    .unwrap();
+
+    let mut request = query(Branch, 1);
+    request.predicate = Some(predicate("value", large));
+    let from_sqlite = sqlite.query(request.clone()).await.unwrap();
+    let from_memory = memory.query(request).await.unwrap();
+    assert_eq!(query_ids(&from_sqlite), ["value-2"], "sqlite");
+    assert_eq!(query_ids(&from_memory), ["value-2"], "memory agrees");
+    db.close().await.unwrap();
+}
+
+/// A merged output row may hold records past the read point. Only the covered
+/// records count as matches, or the page is spent on facts the read then drops.
+#[tokio::test]
+async fn a_query_ignores_records_beyond_the_read_bound() {
+    use dim_agent_runtime::TimelineQueryDirection::Descending;
+    use dim_agent_runtime::TimelineQueryScope::Branch;
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store: std::sync::Arc<dyn TimelineStore> = SqliteTimelineStore::new(db.clone());
+    let memory_store: std::sync::Arc<dyn TimelineStore> =
+        std::sync::Arc::new(dim_agent_runtime::MemoryTimelineStore::default());
+    for target in [store.clone(), memory_store.clone()] {
+        target
+            .create_session("query", &SessionConfig::default())
+            .await
+            .unwrap();
+        for (sequence, kind) in [
+            (1u64, delta("hit")),
+            (2, marked(serde_json::json!({"marker": true}))),
+            (3, delta("miss")),
+            (4, delta("hit")),
+        ] {
+            publish_records(
+                &target,
+                key("query", "main"),
+                vec![query_record(
+                    sequence,
+                    sequence,
+                    &format!("fact-{sequence}"),
+                    kind,
+                )],
+            )
+            .await;
+        }
+    }
+    let mut request = query(Branch, 1);
+    request.direction = Descending;
+    request.predicate = Some(predicate("delta", serde_json::json!("hit")));
+    let sqlite_page = store
+        .query(&key("query", "main"), &request, 3)
+        .await
+        .unwrap();
+    let memory_page = memory_store
+        .query(&key("query", "main"), &request, 3)
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlite_page
+            .events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        [1],
+        "a record past the read point does not spend the page"
+    );
+    assert_eq!(
+        memory_page
+            .events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        [1]
+    );
+    db.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn a_query_selects_an_output_rows_turn_id_and_request_id() {
     use dim_agent_runtime::TimelineQueryScope::Branch;
