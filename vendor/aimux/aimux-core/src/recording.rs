@@ -839,6 +839,9 @@ pub fn is_sensitive_key(name: &str) -> bool {
             || squashed == b"xprodiakey"
             || squashed.ends_with(b"subscriptionkey")
             || squashed.ends_with(b"token")
+            || squashed.ends_with(b"key")
+            || squashed.ends_with(b"auth")
+            || contains_subslice(squashed, b"secret")
             || contains_subslice(n, b"authorization")
             || contains_subslice(squashed, b"apikey");
     }
@@ -850,6 +853,9 @@ pub fn is_sensitive_key(name: &str) -> bool {
         || squashed == "xprodiakey"
         || squashed.ends_with("subscriptionkey")
         || squashed.ends_with("token")
+        || squashed.ends_with("key")
+        || squashed.ends_with("auth")
+        || squashed.contains("secret")
         || n.contains("authorization")
         || squashed.contains("apikey")
 }
