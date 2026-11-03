@@ -55,7 +55,7 @@ adopts.
 
 ### D3. The query addresses the event contract, not the storage
 
-Addressable: the session, the branch, the kind, the event id, the two context
+Addressable: the session, the branch, the sequence (only as where a read begins), the kind, the event id, the two context
 flags, and paths inside the event's data. Not addressable: table names, column names, index
 names, the content table, batch metadata, and any other storage layout. SQL text is not a
 capability interface.
@@ -111,13 +111,13 @@ ADR.
 | §4 rule 5 | Unchanged: appends and their batch contract. |
 | §4 rule 6 | Unchanged: context enters only through adopted inputs and tool results. |
 | §4 rule 7 | Callers keep reading through the Session and branch facades; the query is a public service and speaks only public event data. |
-| §4 rule 8 | Requirement raised to the Timeline's owner: one bounded query, its cursor and ordering semantics, and the derived-index rule. |
+| §4 rule 8 | Requirement raised to the Timeline's owner: one bounded query, its paging (skip and count) and ordering semantics, and the derived-index rule. |
 | §4 rule 9 | No new fact. |
 | ADR 002 D2, D3, D5 | No wiring part, no dependency crossing, and the query is language-neutral data. |
 
 ## Requirements raised to mechanism owners
 
-The Timeline service owner (runtime) provides the query, its scope, cursor and ordering
+The Timeline service owner (runtime) provides the query, its scope, paging (skip and count) and ordering
 semantics, and the derived-index rule. The storage owners (SQLite and the in-memory store)
 implement the same semantics. The plugin contract describes the query as a public service, and
 the owner of each consumer-shaped read replaces it with the query.
