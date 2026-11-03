@@ -383,7 +383,8 @@ FrontierHarness 自身的结论是：pass rate 相近（50–66.7%）而成本�
 |---|---|
 | 命中依赖升级路径规则 | 进入 L2，不询问 agent |
 | agent 任一文件判为 visible | 进入 L2 |
-| 全部判为 invisible | 跳过 L2 |
+| 账本对窗口内任一 merge 记录为 visible（即使本次重判翻转成 invisible） | 进入 L2——触发看**记录在案的** verdict，否则换一次模型/改一次 prompt 就能把已经看见过的窗口说成没看见 |
+| 全部判为 invisible 且账本无 visible 记录 | 跳过 L2 |
 
 L1 不产生 Fail，只产生"跑"或"不跑"。三种结果都写入 ledger。
 
@@ -623,10 +624,11 @@ k=1 给的是每任务一次伯努利抽样，**观测对期望是标准的比�
 任何东西的运行扩充判定记录的类型，不如让它的溯源留在它自己的产物里——`profiles/` 记下
 每一轮的 run id，这与 baseline 产物里已有的 `sources` 字段是同一个做法。
 
-> **相邻的一处待决。** `baseline` 运行目前**会**写 ledger run 记录，且 outcome 为
-> `pass`——它同样没有做过任何比较。今天无害（它的 `covers` 为空，进不了 `cleared`），
-> 但这与[刚修掉的 k 不匹配记 `pass`](#l2-门禁) 是同一个形状。`profile` 不沿用这个做法，
-> 而 `baseline` 该不该继续这样记，列入 [Open items](#open-items)。
+> **相邻的一处已决。** `baseline` 运行曾把 ledger run 记录写成 `pass`——它同样没有做
+> 过任何比较，与[刚修掉的 k 不匹配记 `pass`](#l2-门禁) 是同一个形状。现在二者都归入
+> 新的 `observed`：conclusive 但门禁未武装（或根本没有比较对象）的运行一律记
+> `observed`，`pass` 只在「有 armed criterion 且未破」时可构造，`metrics` 的
+> `cleared` 也只认后者。`profile` 沿用 `observed` 的语义，但不写 ledger（见上）。
 
 `profile` 产物在观测数达到阈值（每任务 ≥ 14）前标记为未完成，screen 不得使用它。达标时
 做[同质性检查](#四个阶段)，通过则封存为只读，`p_i = 通过次数 / 观测次数`。
@@ -901,7 +903,7 @@ invisible merge 的代码，只要同窗口里有任何一个 merge 触发了运
 | `current_date` 冻结：`prompt_sources::install_with_clock` 已能注入时钟，`dimcode` 尚无入口传入冻结日期 | 未开始 |
 | [日常 screen 的判定](#日常-screen-的判定)：累积统计量、`profile` 运行模式、报警动作契约 | 设计已定，**实现未开始**。观测那一半已在跑：日常 k=1 每晚留 `run.json` 并写一条 run 记录（`screen`，打不出分则 `invalid`）。缺的是把多晚的 screen 累积成「该不该跑 k=3」的判断 |
 | `settle` 的异常未捕获：异常发生在写 manifest 之前，烧掉的 2–7 小时连 `run.json` 都不留 | **已完成**。异常记入 `run.json` 的 `settle_error`，窗口保持，退出码 6；「baseline 已存在」改为构建前拒绝 |
-| `baseline` 运行写的 ledger 记录 outcome 为 `pass`，而它没有做过任何比较（今天无害：`covers` 为空）。与刚修掉的 k 不匹配记 `pass` 是同一形状，需决定是改记录方式还是不记 | 未开始 |
+| `baseline` 运行写的 ledger 记录 outcome 为 `pass`，而它没有做过任何比较（今天无害：`covers` 为空）。与刚修掉的 k 不匹配记 `pass` 是同一形状，需决定是改记录方式还是不记 | **已完成**。新增 `observed` outcome：baseline 运行与未武装门禁下的 conclusive 运行一律记 `observed`，`pass` 仅在 armed criterion 未破时可构造，`metrics.health` 的 `cleared` 只认 `pass` 且 `gate_armed=true`（旧的无武装 `pass` 记录不再进 cleared，历史口径如实回落） |
 | `harbor_version` 只进 `params`，而 `params` 仅用于冻结 baseline——`run.json` 里没有这个字段，`freeze` CLI 产出的 baseline 里也没有。[三重 pin](#实现约束) 的第③项从未落盘 | 未开始 |
 | 单次运行成本预算上限（batch 模式下按批计，不按 MR） | 待定 |
 | [OfficeQA Pro](#l2--officeqa-pro)：生成任务树、推送语料镜像、oracle 自检、冻 k=3 baseline、加 `nightly.sh officeqa-pro daily` 的 cron | 任务已生成并通过容器内 oracle 自检（133/133）；待在评测机上跑 harbor oracle、冻 baseline、加 cron，见 [officeqa/README.md](../../benchmarks/officeqa/README.md) |

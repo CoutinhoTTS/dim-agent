@@ -164,7 +164,8 @@ def _require_clean_harness(harness: dict | None) -> None:
 def build(reports: JobReport | Sequence[tuple[str, JobReport]], *,
           corpus_pin: str, run_id: str, k: int, model: dict | None,
           subject: dict | None, harness: dict | None, params: dict,
-          notes: str | None = None) -> dict:
+          notes: str | None = None,
+          allow_zero_pass: bool = False) -> dict:
     """Freeze one or more runs as a baseline.
 
     More than one run is accepted because a corpus does not always change whole.
@@ -212,6 +213,23 @@ def build(reports: JobReport | Sequence[tuple[str, JobReport]], *,
         raise BaselineError(
             "refusing to freeze an unscoreable run as a baseline: "
             + "; ".join(problems)
+        )
+
+    # The verifier ran and scored every trial, and not one passed. On this
+    # corpus that has happened exactly once, and it was the measurement that was
+    # broken: the Terminal-Bench config shipped `allow_internet = false`, the
+    # verifiers could not install themselves, and 60 of 90 trials never reached
+    # a verdict (runner/assemble_tasks.py). A reference like that reads every
+    # later run as an improvement. Refused, with an explicit way out for the day
+    # the model genuinely scores zero.
+    total_passes = sum(task.passes for _, task in merged.values())
+    total_trials = sum(task.k for _, task in merged.values())
+    if total_trials and total_passes == 0 and not allow_zero_pass:
+        raise BaselineError(
+            f"all {total_trials} trial(s) across {len(merged)} task(s) scored 0; "
+            "that is the shape of a broken build or verifier, not a reference. "
+            "Fix the run, or freeze it deliberately with --allow-zero-pass "
+            "(freeze) / DIM_EVAL_ALLOW_ZERO_BASELINE=1 (daily)."
         )
 
     report = reports[-1][1]
@@ -362,6 +380,18 @@ class Comparison:
     @property
     def net_degraded(self) -> int:
         return len(self.degraded) - len(self.improved)
+
+    @property
+    def gate_armed(self) -> bool:
+        """Whether this comparison carries an armed (blocking) criterion.
+
+        This, not "the run was scored", is what makes `pass` a verdict. Every
+        criterion is currently disarmed pending recalibration (see `criteria`),
+        so every honest conclusive run is `observed` until one is re-armed —
+        which is the point: a clearance nobody can lose is a clearance nobody
+        can trust.
+        """
+        return self.comparable and any(c.blocking for c in self.criteria())
 
     @property
     def verifier_proxy_comparable(self) -> bool:
@@ -747,7 +777,7 @@ def render(comparison: Comparison) -> str:
     for criterion in comparison.criteria():
         mark = "ok  " if criterion.ok else ("FAIL" if criterion.blocking else "warn")
         lines.append(f"  [{mark}] {criterion.name}: {criterion.detail}")
-    if comparison.comparable and not any(c.blocking for c in comparison.criteria()):
+    if comparison.comparable and not comparison.gate_armed:
         # Said outright, because the alternative reading of an all-`warn` report
         # is "the gate looked and was satisfied". It did not look: every
         # threshold here is awaiting re-calibration, so this run cannot be
@@ -839,7 +869,7 @@ def params_from_config(config: dict | None) -> dict:
 
 def freeze(job_dirs: list[Path], *, pin: str, k: int, out: Path,
            notes: str | None, subject: dict | None,
-           harness: dict | None) -> dict:
+           harness: dict | None, allow_zero_pass: bool = False) -> dict:
     """Assemble a baseline from one or more job directories, last wins per task."""
     from results import read_job
 
@@ -862,6 +892,7 @@ def freeze(job_dirs: list[Path], *, pin: str, k: int, out: Path,
     baseline = build(
         reports, corpus_pin=pin, run_id=job_dirs[-1].name, k=k, model=model,
         subject=subject, harness=harness, params=params, notes=notes,
+        allow_zero_pass=allow_zero_pass,
     )
     write(out, baseline)
     return baseline
@@ -880,6 +911,10 @@ def _freeze_cli(argv: list[str]) -> int:
     parser.add_argument("--manifest", type=Path, required=True,
                         help="the daily_run run.json of the run, for the subject it "
                              "built and the harness that measured it")
+    parser.add_argument("--allow-zero-pass", action="store_true",
+                        help="freeze even when every trial scored 0. That shape is "
+                             "almost always a broken build or verifier; this flag "
+                             "says a genuinely zero-scoring reference was wanted")
     args = parser.parse_args(argv)
 
     benchmarks = HERE.parent
@@ -892,7 +927,8 @@ def _freeze_cli(argv: list[str]) -> int:
 
     out = args.out or (benchmarks / "baselines" / f"{pin}.json")
     frozen = freeze(args.jobs, pin=pin, k=args.k, out=out, notes=args.notes,
-                    subject=subject, harness=harness)
+                    subject=subject, harness=harness,
+                    allow_zero_pass=args.allow_zero_pass)
     print(f"baseline -> {out}")
     print(f"  corpus pin {pin[:12]}  k={frozen['k']}  {len(frozen['tasks'])} task(s)")
     for source in frozen["sources"]:

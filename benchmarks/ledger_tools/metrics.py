@@ -75,7 +75,11 @@ def health(
         # supposedly waved through untested.
         if run.measured:
             covered.update(run.covers)
-        if run.conclusive and run.outcome == "pass":
+        # `pass` has meant two things over this ledger's life: before gate_armed
+        # it also covered runs compared against a gate wired to nothing. Only the
+        # armed ones clear — an unarmed run measured, and its merges stay in the
+        # escape denominator until something actually gated them.
+        if run.conclusive and run.outcome == "pass" and run.gate_armed:
             cleared.update(run.covers)
 
     # A merge L1 judged invisible is not thereby untested: L2 runs against the

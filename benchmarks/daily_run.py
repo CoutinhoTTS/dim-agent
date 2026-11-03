@@ -196,6 +196,19 @@ DEFAULT_LEDGER = HERE / "ledger"
 DEFAULT_PROJECT = "arcships/dim"
 
 
+def corpus_tasks(tasks_dir: Path) -> tuple[str, ...]:
+    """The task names the corpus's manifest pins.
+
+    `corpus_pin` has already verified the tree against this manifest by the time
+    this runs, so the names are read without re-verifying: this exists so the
+    run's job can be held to the corpus it claimed — a job that came back with a
+    subset of the tasks (a harbor hiccup, a container that never started) must
+    not settle a window as if it had measured all of them.
+    """
+    manifest = json.loads((tasks_dir / "MANIFEST.json").read_text())
+    return tuple(sorted(manifest["tasks"]))
+
+
 def baseline_for(pin: str, directory: Path) -> Path | None:
     """The baseline taken on this exact corpus, if one exists yet."""
     path = directory / f"{pin}.json"
@@ -591,8 +604,10 @@ def _disagreements(existing: ledger_tools.MergeRecord,
 
 
 def record_merges(ledger: ledger_tools.Ledger, records: list[daily_batch.MergeRecord],
-                  project_id: str) -> tuple[list[str], list[str]]:
-    """Write one L1 record per merge. Returns (shas the ledger holds, disputed).
+                  project_id: str) -> tuple[list[str], list[str], set[str]]:
+    """Write one L1 record per merge.
+
+    Returns (shas the ledger holds, disputed, merges the ledger holds `visible`).
 
     The window is re-judged every run, so most merges are already recorded. A
     repeat is skipped rather than refused — but a repeat that *disagrees* is
@@ -610,9 +625,16 @@ def record_merges(ledger: ledger_tools.Ledger, records: list[daily_batch.MergeRe
     A `fail_open` record is the exception. It holds no verdict, so there is
     nothing to disagree with: the first real verdict replaces it, and another
     fail_open leaves it as it is (trigger-policy.md, Merge records).
+
+    The kept-visible set exists because the recorded verdict wins a dispute, and
+    the trigger decision must read the verdict of record, not the latest one:
+    a merge the ledger holds `visible` still triggers L2 when a re-judge comes
+    back `invisible` — otherwise a model or prompt update could talk a window
+    that was seen into closing as if nothing had been seen at all.
     """
     written: list[str] = []
     disputed: list[str] = []
+    kept_visible: set[str] = set()
     for record in records:
         entry = ledger_tools.MergeRecord(
             merge_sha=record.sha,
@@ -634,6 +656,8 @@ def record_merges(ledger: ledger_tools.Ledger, records: list[daily_batch.MergeRe
                 print(f"[daily] {record.sha[:9]} was recorded fail_open; replacing "
                       f"it with this run's verdict ({record.verdict}, {record.trigger})")
         else:
+            if existing.l1_verdict == "visible":
+                kept_visible.add(record.sha)
             differences = _disagreements(existing, record)
             if differences:
                 disputed.append(record.sha)
@@ -641,7 +665,7 @@ def record_merges(ledger: ledger_tools.Ledger, records: list[daily_batch.MergeRe
                       f"this time ({'; '.join(differences)}); keeping the "
                       "recorded verdict, and noting the disagreement on this run")
         written.append(record.sha)
-    return written, disputed
+    return written, disputed, kept_visible
 
 
 def record_run(ledger: ledger_tools.Ledger, *, run_id: str, run_type: RunType,
@@ -674,6 +698,15 @@ def record_run(ledger: ledger_tools.Ledger, *, run_id: str, run_type: RunType,
     # measurement with nothing to read it against, which for a k=1 screen is not
     # news: it never compares. That is why it sits below the k check and files as
     # `screen` there; a conclusive run has no such excuse.
+    #
+    # The tail is the one this file exists to keep honest. `fail` needs a breach,
+    # and a breach needs an armed criterion. `pass` needs an armed criterion that
+    # did not breach — a gate wired to nothing does not affirmatively clear
+    # anything, and calling that `pass` moved every merge in the window into the
+    # escape-rate denominator as one L2 had looked and approved. A disarmed gate
+    # that found nothing to breach records `observed`: measured, conclusive in
+    # form, and a verdict for no one. Baseline runs have no comparison at all and
+    # land there too — a reference is a measurement, not a gate result.
     reason: ledger_tools.InvalidReason | None = None
     if l2_exit != 0:
         outcome, breaches, reason = "invalid", (), "l2_failed"
@@ -687,8 +720,10 @@ def record_run(ledger: ledger_tools.Ledger, *, run_id: str, run_type: RunType,
         outcome, breaches, reason = "invalid", (), "no_reference"
     elif comparison and comparison["blocking_breaches"]:
         outcome, breaches = "fail", tuple(comparison["blocking_breaches"])
-    else:
+    elif comparison and comparison.get("gate_armed"):
         outcome, breaches = "pass", ()
+    else:
+        outcome, breaches = "observed", ()
 
     ledger.append_run(ledger_tools.RunRecord(
         run_id=run_id,
@@ -708,6 +743,8 @@ def record_run(ledger: ledger_tools.Ledger, *, run_id: str, run_type: RunType,
         l2_exit_code=l2_exit or None,
         settle_error=settle_error,
         runner_dirty=runner_dirty,
+        gate_armed=bool(((summary or {}).get("comparison") or {}).get(
+            "gate_armed", False)),
         disputed=tuple(disputed),
         infra_rate=float((summary or {}).get("infra_rate", 0.0)),
     ))
@@ -718,7 +755,8 @@ def record_run(ledger: ledger_tools.Ledger, *, run_id: str, run_type: RunType,
 
 def settle(out: Path, run_id: str, run_type: RunType, k: int, pin: str,
            existing: Path | None, subject: dict | None, runner_sha: str,
-           params: dict, baselines_dir: Path) -> dict:
+           params: dict, baselines_dir: Path,
+           expected_tasks: tuple[str, ...] = ()) -> dict:
     """Turn the fetched job into scores, and into a baseline or a comparison.
 
     Returns what the manifest records. A run that cannot be scored still returns
@@ -753,11 +791,34 @@ def settle(out: Path, run_id: str, run_type: RunType, k: int, pin: str,
         "comparison": None,
     }
 
+    # The job is held to the corpus it claimed. harbor's own problems() checks
+    # each task it ran; nothing in it notices the tasks it never ran. A job that
+    # came back with a subset — a container that never started, a fetch that
+    # lost a directory — must not settle a window, or freeze a reference, on a
+    # fraction of the measurement. Unlike "no baseline" this is fixed by running
+    # again, so it lands in `unscoreable` and holds the window.
+    if expected_tasks:
+        covered = {task.task_name for task in report.tasks}
+        missing_tasks = sorted(set(expected_tasks) - covered)
+        extra_tasks = sorted(covered - set(expected_tasks))
+        if missing_tasks:
+            problem = (f"job covered {len(covered)}/{len(expected_tasks)} corpus "
+                       f"task(s); missing: {', '.join(missing_tasks[:5])}")
+            summary["problems"].append(problem)
+            summary["unscoreable"].append(problem)
+            print(f"[daily]   not scoreable: {problem}")
+        if extra_tasks:
+            problem = ("job ran task(s) outside the corpus: "
+                       f"{', '.join(extra_tasks[:5])}")
+            summary["problems"].append(problem)
+            summary["unscoreable"].append(problem)
+            print(f"[daily]   not scoreable: {problem}")
+
     model_path = out / f"{run_id}-model.json"
     model = json.loads(model_path.read_text()) if model_path.exists() else None
 
     if not run_type.judges_window:
-        if problems:
+        if problems or summary["unscoreable"]:
             print("[daily] not freezing a baseline from an unscoreable run")
             return summary
         path = baselines_dir / f"{pin}.json"
@@ -769,6 +830,7 @@ def settle(out: Path, run_id: str, run_type: RunType, k: int, pin: str,
             report, corpus_pin=pin, run_id=run_id, k=k, model=model,
             subject=subject, harness={"runner_sha": runner_sha, "dirty": False},
             params=params,
+            allow_zero_pass=os.environ.get("DIM_EVAL_ALLOW_ZERO_BASELINE") == "1",
         ))
         print(f"[daily] baseline -> {path}")
         summary["baseline_written"] = str(path)
@@ -806,6 +868,7 @@ def settle(out: Path, run_id: str, run_type: RunType, k: int, pin: str,
         "turns_change": comparison.turns_change,
         "end_reason_deltas": comparison.end_reasons,
         "comparable": comparison.comparable,
+        "gate_armed": comparison.gate_armed,
         "baseline_verifier_proxy": comparison.baseline_verifier_proxy,
         "candidate_verifier_proxy": comparison.candidate_verifier_proxy,
         "baseline_verifier_no_proxy": comparison.baseline_verifier_no_proxy,
@@ -1023,6 +1086,7 @@ def main() -> int:
         run(["git", "-C", str(repo), "fetch", "--quiet", "origin"])
 
     pin = corpus_pin(args.tasks_dir)
+    expected_tasks = corpus_tasks(args.tasks_dir)
     baseline = baseline_for(pin, args.baselines_dir)
 
     if not run_type.judges_window and baseline is not None:
@@ -1138,13 +1202,21 @@ def main() -> int:
             for sha, subject in direct:
                 print(f"  {sha[:9]}  UNJUDGED  {subject[:60]}")
 
+        kept_visible: set[str] = set()
         if not args.no_ledger:
             # Written before the build and the run, because the L1 verdict is
             # already final here: a build that fails must not cost the ledger
             # the judgements this run paid a judge to produce.
-            recorded, disputed = record_merges(ledger, records, args.project_id)
+            recorded, disputed, kept_visible = record_merges(
+                ledger, records, args.project_id)
 
-        triggering = [r for r in records if r.triggers_l2]
+        # The verdict of record triggers L2, not the latest one. A held window is
+        # re-judged whole, and a judge that has since changed its mind — new
+        # model, edited prompt — flips old `visible` merges to `invisible` while
+        # record_merges keeps the recorded verdict. Keying the trigger on this
+        # run's records alone would let such a window close as "nothing
+        # model-visible" exactly because it had once been seen.
+        triggering = [r for r in records if r.triggers_l2 or r.sha in kept_visible]
         undetermined = [r for r in records if r.undetermined]
         print(f"\n[daily] {len(records)} merge(s), {len(triggering)} triggering L2"
               + (f", {len(undetermined)} undetermined" if undetermined else "")
@@ -1291,6 +1363,7 @@ def main() -> int:
                     out, run_id, run_type, k, pin, baseline, identity, runner_sha,
                     params=params,
                     baselines_dir=args.baselines_dir,
+                    expected_tasks=expected_tasks,
                 )
             except Exception as error:  # noqa: BLE001 - see below
                 # Deliberately every exception. Scoring reads files a remote
