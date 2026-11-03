@@ -232,10 +232,12 @@ The reply is the events, each with its chain position — its branch and sequenc
 cursor; the next cursor is absent once the scope is exhausted, so absence means no more, not start
 over.
 
-A page bounds the work, not the range it selects from. The storage applies the selection — kinds,
-flags, event id, data predicate, order and limit — so a page costs one read plus the batch it ends
-in, and a descending page the same from the other end. Scanning the scoped range to find a page is
-not allowed: the range says what a page may cover, not what the read may walk.
+The selection is what the query is for. Its elements — scope, position, direction, kinds, flags,
+event id, one data equality and the limit — describe events, not a slice of the store, so the store
+executes them where the events are kept and returns the page those events form. A selection the
+store can execute directly costs the page; one it cannot, an equality on a field it holds no index
+for, is evaluated as the store reads and proves the end of the scope the same way. A chain page
+reaches one segment after another, so it costs what it reaches.
 
 The query returns facts; it does not fold, project or aggregate them. What a part folds from facts
 is its own state and stays with it ([ADR 002](../adr/002-plugin-scope.md) D1). A part that needs a

@@ -73,8 +73,9 @@ is derived state — and keep typed reads of their own.
 
 - A new capability read adds no service method, and the runtime stops defining context pages,
   policy windows and recall pages.
-- Every read has a bound, so an unbounded read has no interface. A consumer that folds a whole
-  prefix folds it from bounded pages.
+- A read names a selection, not a slice of the store, so a store executes the selection where the
+  events are kept and a read costs what its page covers. A consumer that folds a whole prefix
+  folds it from pages; an unbounded read has no interface.
 - Rust and other languages see the same query; the generated declarations describe it once.
 - A selection the query cannot express is a decision to extend the query here, not a method to
   add. No consumer keeps a private read past its migration.
