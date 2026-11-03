@@ -393,6 +393,7 @@
       "file": "crates/dim-agent-capabilities/src/context_policy.rs",
       "unexpandedMacros": [
         "format",
+        "json",
         "matches",
         "tracing::warn",
         "unreachable",
@@ -1021,6 +1022,7 @@
       "file": "crates/dim-agent-capabilities/src/timeline_tree.rs",
       "unexpandedMacros": [
         "format",
+        "json",
         "matches",
         "serde_json::json",
         "tokio::pin",
@@ -1879,6 +1881,7 @@
         "format",
         "tokio::select",
         "tracing::warn",
+        "unreachable",
         "vec"
       ]
     },
@@ -7911,6 +7914,22 @@
     },
     {
       "from": "dim_agent_capabilities::context_policy",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQuery",
+        "path TimelineQueryDirection::Ascending",
+        "path TimelineQueryOrderBy::Sequence",
+        "path TimelineQueryPredicate",
+        "path TimelineQueryScope::Branch",
+        "use dim_agent_runtime::TimelineQuery",
+        "use dim_agent_runtime::TimelineQueryDirection",
+        "use dim_agent_runtime::TimelineQueryOrderBy",
+        "use dim_agent_runtime::TimelineQueryPredicate",
+        "use dim_agent_runtime::TimelineQueryScope"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_policy",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
         "path PolicyFacts",
@@ -12578,6 +12597,22 @@
     },
     {
       "from": "dim_agent_capabilities::timeline_tree",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQuery",
+        "path TimelineQueryDirection::Ascending",
+        "path TimelineQueryOrderBy::Sequence",
+        "path TimelineQueryPredicate",
+        "path TimelineQueryScope::Branch",
+        "use dim_agent_runtime::TimelineQuery",
+        "use dim_agent_runtime::TimelineQueryDirection",
+        "use dim_agent_runtime::TimelineQueryOrderBy",
+        "use dim_agent_runtime::TimelineQueryPredicate",
+        "use dim_agent_runtime::TimelineQueryScope"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::timeline_tree",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
         "path StoredBranch",
@@ -16860,7 +16895,6 @@
       "to": "dim_app_server::storage::timeline",
       "references": [
         "path SessionStore",
-        "path crate::storage::TurnWindow",
         "use crate::storage::SessionStore"
       ]
     },
@@ -18563,6 +18597,16 @@
     },
     {
       "from": "dim_app_server::connection",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "use dim_agent_runtime::TimelineQuery",
+        "use dim_agent_runtime::TimelineQueryDirection",
+        "use dim_agent_runtime::TimelineQueryOrderBy",
+        "use dim_agent_runtime::TimelineQueryScope"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection",
       "to": "dim_agent_types::content",
       "references": [
         "use dim_agent_types::ContentBlock"
@@ -19177,6 +19221,18 @@
     },
     {
       "from": "dim_app_server::connection::tree",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQuery",
+        "path TimelineQueryDirection",
+        "path TimelineQueryDirection::Ascending",
+        "path TimelineQueryDirection::Descending",
+        "path TimelineQueryOrderBy::Sequence",
+        "path TimelineQueryScope::Branch"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection::tree",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
         "path dim_agent_runtime::StoredEvent"
@@ -19187,11 +19243,13 @@
       "to": "dim_agent_types::events",
       "references": [
         "path BranchSource::Host",
+        "path EventKind::InputConsumed",
         "path InputMessageData",
         "path InputMessageData::default",
         "path InputMode::Queue",
         "path UserInput",
         "use dim_agent_types::BranchSource",
+        "use dim_agent_types::EventKind",
         "use dim_agent_types::InputMode"
       ]
     },
