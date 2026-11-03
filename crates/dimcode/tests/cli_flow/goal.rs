@@ -179,6 +179,11 @@ fn line_goal_forms_write_the_machine_they_name_and_show_the_events() {
         assert_eq!(history["params"]["after"], 8);
         wire.reply(&history, page(9, vec![set(9, "Make the tests pass")]));
 
+        let read = wire.read("session.methods");
+        wire.reply(&read, methods(true));
+        let history = wire.read("session.history");
+        wire.reply(&history, page(9, vec![]));
+
         // A goal is in force: the same form changes only its objective.
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
@@ -235,11 +240,18 @@ fn line_goal_forms_write_the_machine_they_name_and_show_the_events() {
     terminal.until("\n> ");
 
     terminal.write(b"/goal\n");
+    terminal.until(USAGE);
     terminal.until("No goal on main.");
     terminal.until("\n> ");
 
     terminal.write(b"/goal Make the tests pass\n");
     terminal.until("Goal set on main · active");
+    terminal.until("  Make the tests pass");
+    terminal.until("\n> ");
+
+    terminal.write(b"/goal\n");
+    terminal.until(USAGE);
+    terminal.until("Goal on main · active");
     terminal.until("  Make the tests pass");
     terminal.until("\n> ");
 
@@ -515,7 +527,8 @@ fn tui_goal_shows_the_state_and_marks_the_status_area() {
     terminal.write(b"/goal clear\r");
     terminal.until("Goal cleared on main.");
 
-    terminal.write(b"/goal\r");
+    terminal.write(b"/goal\r\r");
+    terminal.until(USAGE);
     terminal.until("No goal on main.");
 
     terminal.write(b"/goal edit\r");
@@ -613,7 +626,8 @@ fn tui_goal_acts_on_the_shown_line_and_a_new_line_has_none() {
     terminal.write(b"\r");
     terminal.until("⑂ main ▸ child work");
 
-    terminal.write(b"/goal\r");
+    terminal.write(b"/goal\r\r");
+    terminal.until(USAGE);
     terminal.until("No goal on line-1.");
 
     terminal.write(b"/goal Child goal\r");

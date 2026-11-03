@@ -313,9 +313,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "先頭へスクロール",
         "scroll to the bottom" => "末尾へスクロール",
         "pick an earlier message to edit or quote" => "過去のメッセージを編集・引用",
-        "collapse or expand tool details and compaction summaries" => {
-            "ツール詳細と圧縮サマリーの開閉"
-        }
+        "cycle tool details and compaction summaries" => "ツール詳細と圧縮サマリーの表示を順に切替",
         "switch between fullscreen and scrollback" => "全画面/スクロールバック切替",
         "switch theme" => "テーマを切替",
         "switch language" => "言語を切替",

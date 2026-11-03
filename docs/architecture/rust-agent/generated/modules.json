@@ -27263,6 +27263,13 @@
     },
     {
       "from": "dim_cli::model::session",
+      "to": "dim_cli::configure",
+      "references": [
+        "path crate::configure::EffortChoices"
+      ]
+    },
+    {
+      "from": "dim_cli::model::session",
       "to": "dim_cli::goal",
       "references": [
         "path crate::goal::Request"
@@ -28682,6 +28689,7 @@
         "path Update::ApprovalPending",
         "path Update::Compacted",
         "path Update::Context",
+        "path Update::EffortChoices",
         "path Update::Failed",
         "path Update::Isolation",
         "path Update::IsolationBackend",
@@ -32352,6 +32360,13 @@
     },
     {
       "from": "dim_cli::ui::prompts",
+      "to": "dim_cli::configure",
+      "references": [
+        "path crate::configure::EffortChoices"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::prompts",
       "to": "dim_cli::member_approval",
       "references": [
         "path crate::member_approval::DetailError",
@@ -33639,6 +33654,14 @@
       ]
     },
     {
+      "from": "dim_cli::ui::settings_panel",
+      "to": "dim_cli::ui::transcript::tool_group",
+      "references": [
+        "path Detail",
+        "use crate::ui::transcript::tool_group::Detail"
+      ]
+    },
+    {
       "from": "dim_cli::ui::shell",
       "to": "dim_cli::model::shell",
       "references": [
@@ -34867,6 +34890,7 @@
         "path Detail",
         "path Detail::Collapsed",
         "path Detail::Expanded",
+        "path Detail::Summary",
         "path render_group",
         "use crate::ui::transcript::tool_group::State",
         "use crate::ui::transcript::tool_group::render_group"
@@ -35391,6 +35415,7 @@
         "path Update::ApprovalPending",
         "path Update::Compacted",
         "path Update::Context",
+        "path Update::EffortChoices",
         "path Update::Failed",
         "path Update::FilesChanged",
         "path Update::Isolation",
@@ -35744,6 +35769,7 @@
         "path Effect::Runtime",
         "path Effect::SaveIsolation",
         "path Effect::SelectModel",
+        "path Effect::SetEffort",
         "path Effect::SetModelPolicy",
         "path Effect::SetPermission",
         "path Effect::Setting",
@@ -35757,6 +35783,8 @@
         "path Effect::Timeline",
         "path Effect::UpgradeInstall",
         "path Effect::UpgradeSkip",
+        "path EffortPrompt",
+        "path EffortPrompt::new",
         "path ExitConfirm",
         "path ExitConfirm::new",
         "path ExitConfirm::restart",
@@ -35773,6 +35801,7 @@
         "path WriteTarget::Run",
         "use crate::ui::prompts::AskUserPrompt",
         "use crate::ui::prompts::Effect",
+        "use crate::ui::prompts::EffortPrompt",
         "use crate::ui::prompts::ExitConfirm",
         "use crate::ui::prompts::ExitReason",
         "use crate::ui::prompts::PermissionPrompt",
@@ -36161,6 +36190,7 @@
         "path Detail",
         "path Detail::Collapsed",
         "path Detail::Expanded",
+        "path Detail::Summary",
         "path action_at",
         "path card_actions",
         "path card_rows",
@@ -36239,6 +36269,21 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::configure",
+      "references": [
+        "path crate::configure::EffortChoices"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::goal",
+      "references": [
+        "path crate::goal::Request::Objective",
+        "path crate::goal::Request::Show"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::management::editor",
       "references": [
         "path editor::Draft",
@@ -36280,6 +36325,7 @@
         "path SessionPort",
         "path SwitchKind::Forked",
         "path Update",
+        "path Update::EffortChoices",
         "path Update::Isolation",
         "path Update::Management",
         "path Update::Oauth",
@@ -36287,6 +36333,7 @@
         "path Update::Permissions",
         "path Update::PluginResult",
         "path Update::Plugins",
+        "path Update::Ready",
         "path Update::Runtimes",
         "path Update::Snapshot",
         "path Update::Switched",
@@ -36585,6 +36632,7 @@
       "from": "dim_cli::ui::tui::tests",
       "to": "dim_client::wire",
       "references": [
+        "path Configuration",
         "path crate::wire::Event"
       ]
     },

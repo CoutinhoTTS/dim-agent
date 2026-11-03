@@ -33,7 +33,7 @@ use crate::ui::oauth_view::OauthView;
 use crate::ui::plugins_panel::PluginsPanel;
 use crate::ui::progress::ProgressBar;
 use crate::ui::prompts::{
-    AskUserPrompt, Effect, ExitConfirm, ExitReason, PermissionPrompt, WriteTarget,
+    AskUserPrompt, Effect, EffortPrompt, ExitConfirm, ExitReason, PermissionPrompt, WriteTarget,
 };
 use crate::ui::providers_panel::ProvidersPanel;
 use crate::ui::render::fullscreen::Document;
@@ -74,8 +74,9 @@ use crate::wire::Configuration;
 
 const COMPOSER_PLACEHOLDER: &str = "Ask anything...";
 const SHELL_PLACEHOLDER: &str = "Run a shell command · Esc to exit";
-/// `config.json` key of the tool detail toggle, shared with the TS CLI.
-const TOOL_DETAILS_KEY: &str = "tuiToolDetailsExpanded";
+/// `config.json` key of the three tool display forms.
+const TOOL_DETAILS_KEY: &str = "tuiToolDetails";
+const LEGACY_TOOL_DETAILS_KEY: &str = "tuiToolDetailsExpanded";
 const THINKING_DETAILS_KEY: &str = "tuiThinkingDetailsExpanded";
 /// Share of the compaction threshold the context reading warns at. Set by
 /// the interface; the threshold itself is the one `session.context.usage`
@@ -1172,6 +1173,7 @@ enum Prompt {
     Upgrade(UpgradeDialog),
     Permission(PermissionPrompt),
     Ask(AskUserPrompt),
+    Effort(EffortPrompt),
 }
 
 impl App {
@@ -1194,7 +1196,7 @@ impl App {
             host,
             composer,
             cwd_key,
-            tool_detail: saved_detail(&home, TOOL_DETAILS_KEY),
+            tool_detail: saved_tool_detail(&home),
             thinking_detail: saved_detail(&home, THINKING_DETAILS_KEY),
             group_details: HashMap::new(),
             tail_groups: Vec::new(),
@@ -2156,6 +2158,11 @@ impl App {
                     panel.set_models(models);
                 }
             }
+            Update::EffortChoices(result) => {
+                if let Some(Prompt::Effort(prompt)) = &mut self.prompt {
+                    prompt.set_choices(result);
+                }
+            }
             Update::ModelsRefilled => {
                 if matches!(self.prompt, Some(Prompt::Models(_))) {
                     self.host.send(Command::ListModels);
@@ -2356,6 +2363,7 @@ impl App {
                 Prompt::Upgrade(p) => p.handle_key(key),
                 Prompt::Permission(p) => p.handle_key(key),
                 Prompt::Ask(p) => p.handle_key(key),
+                Prompt::Effort(p) => p.handle_key(key),
             };
             let outcome = self.apply_effect(effect);
             self.sync_task_details();
@@ -3136,6 +3144,21 @@ impl App {
                     reasoning_effort,
                 });
             }
+            Effect::SetEffort { model, value } => {
+                self.prompt = None;
+                if self
+                    .label
+                    .as_ref()
+                    .is_some_and(|label| label.model == model)
+                {
+                    self.host
+                        .send(Command::Configure(format!("/effort {value}")));
+                } else {
+                    self.set_notice(t(
+                        "Model changed; reopen /effort to choose its reasoning effort.",
+                    ));
+                }
+            }
             Effect::ReadIsolation => self.host.send(Command::ReadIsolation),
             Effect::SaveIsolation {
                 expected_revision,
@@ -3303,7 +3326,7 @@ impl App {
             theme: theme.to_owned(),
             language,
             fullscreen_default: crate::ui::config::saved_fullscreen(&self.home),
-            tools_expanded: self.tool_detail == Detail::Expanded,
+            tool_detail: self.tool_detail,
             thinking_expanded: self.thinking_detail == Detail::Expanded,
             mouse: self.mouse,
             notify: self.notify,
@@ -3407,7 +3430,7 @@ impl App {
     }
 
     fn toggle_tool_details(&mut self) {
-        let detail = self.tool_detail.flipped();
+        let detail = self.tool_detail.next();
         self.tool_detail = detail;
         self.group_details.clear();
         for block in &mut self.history {
@@ -3418,11 +3441,9 @@ impl App {
             }
         }
         self.request_reflow();
-        if let Some(error) = crate::ui::config::write(
-            &self.home,
-            TOOL_DETAILS_KEY,
-            (detail == Detail::Expanded).into(),
-        ) {
+        if let Some(error) =
+            crate::ui::config::write(&self.home, TOOL_DETAILS_KEY, detail.label().into())
+        {
             self.set_notice(tf("Tool details not saved: {error}", &[("error", &error)]));
         }
     }
@@ -3829,6 +3850,9 @@ impl App {
                 Outcome::Continue
             }
             "effort" | "fast" | "agent" => {
+                if name == "effort" && args.trim().is_empty() {
+                    self.open_prompt(Prompt::Effort(EffortPrompt::new()));
+                }
                 let text = format!("/{name} {args}");
                 self.host
                     .send(Command::Configure(text.trim_end().to_owned()));
@@ -4436,6 +4460,7 @@ impl App {
                 Some(
                     Prompt::Permission(_)
                         | Prompt::Ask(_)
+                        | Prompt::Effort(_)
                         | Prompt::Exit(_)
                         | Prompt::Upgrade(_)
                         | Prompt::Fork(_)
@@ -4566,6 +4591,7 @@ impl App {
             Some(Prompt::Upgrade(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Permission(prompt)) => Some(prompt.render_sized(outer, panel_rows, p)),
             Some(Prompt::Ask(prompt)) => Some(prompt.render(outer, panel_rows, p)),
+            Some(Prompt::Effort(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             None => self
                 .composer
                 .palette_panel(outer, panel_rows, p)
@@ -5118,7 +5144,7 @@ impl App {
                     .get(first)
                     .copied()
                     .unwrap_or(self.tool_detail);
-                self.group_details.insert(first.clone(), current.flipped());
+                self.group_details.insert(first.clone(), current.next());
                 return true;
             }
             return false;
@@ -5128,7 +5154,7 @@ impl App {
         }
         let index = id.checked_sub(self.dropped);
         match index.and_then(|index| self.history.get_mut(index)) {
-            Some(Block::ToolGroup(group)) => group.detail = group.detail.flipped(),
+            Some(Block::ToolGroup(group)) => group.detail = group.detail.next(),
             Some(Block::Thinking { expanded, .. } | Block::Compaction { expanded, .. }) => {
                 *expanded = !*expanded
             }
@@ -6153,6 +6179,18 @@ fn saved_detail(home: &std::path::Path, key: &str) -> Detail {
     }
 }
 
+fn saved_tool_detail(home: &std::path::Path) -> Detail {
+    match crate::ui::config::read(home, TOOL_DETAILS_KEY)
+        .as_ref()
+        .and_then(|v| v.as_str())
+    {
+        Some("collapsed") => Detail::Collapsed,
+        Some("summary") => Detail::Summary,
+        Some("expanded") => Detail::Expanded,
+        _ => saved_detail(home, LEGACY_TOOL_DETAILS_KEY),
+    }
+}
+
 /// A Termux resize that changes only the height comes from the on-screen
 /// keyboard; it uses the ordinary frame path instead of rewriting scrollback.
 fn termux_height_only(previous_columns: u16, size: (u16, u16), termux: bool) -> bool {
@@ -7098,28 +7136,47 @@ mod tests {
     }
 
     #[test]
-    fn tool_details_start_collapsed_until_expanded_is_saved() {
-        let home = tempfile::tempdir().unwrap();
-        assert_eq!(
-            saved_detail(home.path(), TOOL_DETAILS_KEY),
-            Detail::Collapsed
-        );
-        assert_eq!(
-            crate::ui::config::write(home.path(), TOOL_DETAILS_KEY, false.into()),
-            None
-        );
-        assert_eq!(
-            saved_detail(home.path(), TOOL_DETAILS_KEY),
-            Detail::Collapsed
-        );
-        assert_eq!(
-            crate::ui::config::write(home.path(), TOOL_DETAILS_KEY, true.into()),
-            None
-        );
-        assert_eq!(
-            saved_detail(home.path(), TOOL_DETAILS_KEY),
-            Detail::Expanded
-        );
+    fn legacy_tool_preferences_survive_until_the_three_state_setting_is_saved() {
+        for (legacy, initial, changed) in [
+            (false, "collapsed", "summary"),
+            (true, "expanded", "collapsed"),
+        ] {
+            let mut drawn = Drawn::new((100, 40), None, true);
+            assert_eq!(
+                crate::ui::config::write(
+                    drawn._home.path(),
+                    LEGACY_TOOL_DETAILS_KEY,
+                    legacy.into()
+                ),
+                None
+            );
+            for expected in [initial, changed] {
+                let theme = test_theme();
+                drawn.app = App::new(
+                    Box::new(Idle),
+                    MarkdownRenderer::new(&theme),
+                    theme.palette,
+                    drawn._home.path().to_path_buf(),
+                    "/work".into(),
+                );
+                drawn.app.open_settings(Setting::ToolDetails);
+                let frame = drawn.app.frame(drawn.size);
+                let settings = crate::ui::render::panel::strip_escapes(&frame.live.join("\n"));
+                assert!(
+                    settings
+                        .lines()
+                        .any(|line| line.contains("Tool details") && line.contains(expected)),
+                    "{settings}"
+                );
+                if expected == initial {
+                    press(&mut drawn.app, KeyCode::Right);
+                    assert_eq!(
+                        crate::ui::config::read(drawn._home.path(), TOOL_DETAILS_KEY),
+                        Some(changed.into())
+                    );
+                }
+            }
+        }
     }
 
     fn test_theme() -> Theme {
@@ -8847,10 +8904,20 @@ mod tests {
                 assert!(
                     settings
                         .lines()
-                        .any(|line| line.contains("Tool details") && line.contains("expanded")),
+                        .any(|line| line.contains("Tool details") && line.contains("summary")),
                     "{settings}"
                 );
                 assert!(settings.lines().any(|line| line.contains("Thinking details") && line.contains("collapsed")), "{settings}");
+                press(&mut reopened, KeyCode::Enter);
+                press(&mut reopened, KeyCode::Esc);
+                let full = strip_escapes(&reopened.reflow_history(100).join("\n"))
+                    + &strip_escapes(&reopened.frame(drawn.size).live.join("\n"));
+                assert_eq!(full.contains("Build succeeded"), !streaming, "{full}");
+                reopened.run_command("tools", "");
+                let folded = strip_escapes(&reopened.reflow_history(100).join("\n"))
+                    + &strip_escapes(&reopened.frame(drawn.size).live.join("\n"));
+                assert!(!folded.contains("cargo check"), "{folded}");
+                assert!(!folded.contains("Inspect the lock lifetime."), "{folded}");
             }
         }
     }
@@ -9706,6 +9773,93 @@ mod tests {
         }
     }
 
+    #[test]
+    fn effort_picker_preserves_pending_questions_and_rejects_stale_model_choices() {
+        for fullscreen in [false, true] {
+            let (mut app, sent, _home) = asked();
+            app.fullscreen = fullscreen;
+            app.apply(Update::Ready(Configuration {
+                provider_id: "relay".into(),
+                model_id: "reasoner".into(),
+                model_preferences: None,
+            }));
+            press(&mut app, KeyCode::Char(' '));
+            let answer = selection(&app);
+            for (result, message) in [
+                (
+                    Err("Reasoning not supported".into()),
+                    "Reasoning not supported",
+                ),
+                (
+                    Ok(crate::configure::EffortChoices {
+                        model: "relay / reasoner".into(),
+                        current: None,
+                        choices: Vec::new(),
+                    }),
+                    "does not advertise",
+                ),
+            ] {
+                let before = sent.borrow().len();
+                typed(&mut app, "/effort");
+                press(&mut app, KeyCode::Enter);
+                assert!(
+                    app.frame((36, 16))
+                        .live
+                        .join("\n")
+                        .contains(t("Loading reasoning efforts…"))
+                );
+                app.apply(Update::EffortChoices(result));
+                press(&mut app, KeyCode::Enter);
+                assert!(app.frame((36, 16)).live.join("\n").contains(message));
+                assert_eq!(sent.borrow().len(), before + 1);
+                press(&mut app, KeyCode::Esc);
+                assert_eq!(selection(&app), answer);
+            }
+
+            for stale in [false, true] {
+                typed(&mut app, "/effort");
+                press(&mut app, KeyCode::Enter);
+                app.apply(Update::EffortChoices(Ok(crate::configure::EffortChoices {
+                    model: "relay / reasoner".into(),
+                    current: Some("high".into()),
+                    choices: vec!["low".into(), "high".into(), "none".into()],
+                })));
+                let frame = app.frame((36, 16));
+                assert!(
+                    frame.overlay.is_none(),
+                    "effort uses the inline AskUser location"
+                );
+                assert!(frame.live.join("\n").contains("› 2 (•) high"));
+                assert!(frame.live.iter().all(|row| width_of(row) <= 36));
+                if stale {
+                    app.apply(Update::Ready(Configuration {
+                        provider_id: "relay".into(),
+                        model_id: "other".into(),
+                        model_preferences: None,
+                    }));
+                }
+                let before = sent.borrow().len();
+                press(&mut app, KeyCode::Down);
+                press(&mut app, KeyCode::Enter);
+                assert_eq!(selection(&app), answer);
+                if stale {
+                    assert_eq!(sent.borrow().len(), before);
+                    assert!(app.notice.as_ref().unwrap().0.contains("/effort"));
+                } else {
+                    assert!(
+                        matches!(sent.borrow().last(), Some(Command::Configure(text)) if text == "/effort none")
+                    );
+                }
+            }
+            assert!(!sent.borrow().iter().any(|command| matches!(
+                command,
+                Command::AskAnswers { .. }
+                    | Command::AskCancel { .. }
+                    | Command::SelectModel { .. }
+            )));
+        }
+    }
+
     /// A session with `queued` messages waiting, while a run is in progress
     /// when `running` is set.
     fn session_with_queue(
@@ -9743,6 +9897,38 @@ mod tests {
             ..ViewSnapshot::default()
         })));
         (app, sent, home)
+    }
+
+    #[test]
+    fn choosing_goal_completes_before_dispatch_in_both_modes() {
+        for fullscreen in [false, true] {
+            for query in ["/go", "/goal"] {
+                for selection in [KeyCode::Enter, KeyCode::Tab] {
+                    for (objective, expected) in [
+                        ("", crate::goal::Request::Show),
+                        (
+                            "fix the failing build",
+                            crate::goal::Request::Objective("fix the failing build".into()),
+                        ),
+                    ] {
+                        let (mut app, sent, _home) = session_with_queue(false, &[]);
+                        app.fullscreen = fullscreen;
+                        typed(&mut app, query);
+                        press(&mut app, selection);
+                        assert!(sent.borrow().is_empty(), "selection must not dispatch");
+                        assert_eq!(app.composer.text(), "/goal ");
+                        assert!(!app.composer.palette_open());
+                        typed(&mut app, objective);
+                        press(&mut app, KeyCode::Enter);
+                        assert!(matches!(
+                            sent.borrow().as_slice(),
+                            [Command::Goal(request)] if *request == expected
+                        ));
+                        assert!(app.composer.is_empty());
+                    }
+                }
+            }
+        }
     }
 
     fn describe(commands: &[Command]) -> Vec<String> {

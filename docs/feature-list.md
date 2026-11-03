@@ -73,7 +73,7 @@ The CLI owns terminal and command interactions; the App Server owns host configu
 - Clipboard compatibility: copy text through the system clipboard and OSC 52 for local and SSH use. Over SSH, terminals with the kitty clipboard protocol (OSC 5522, e.g. kitty, Ghostty 1.4+) also serve `Ctrl+V` image (PNG, JPEG, WebP, GIF) and text reads from the local clipboard; other terminals keep the native readers. Image/file reads and remote copying depend on platform components and terminal support.
 - History browsing and navigation: use `/timeline` to locate messages. Fullscreen TUI loads earlier records from a row at the top of the transcript; in scrollback a `/timeline` jump to an earlier message draws history from it, and the terminal's own scrollback does the rest.
 - Open links: click web and local-file links in fullscreen TUI output to open them with the system's default browser or application.
-- Tool groups: each group of tool calls is collapsed by default (`▸`); click its header in fullscreen TUI to expand or collapse that group. `/tools` expands or collapses every group.
+- Tool groups: each group of tool calls is collapsed by default (`▸`); click its header in fullscreen TUI to cycle that group through collapsed, one-row-per-call summary, and expanded forms. `/tools` cycles every group through the same forms; compaction bodies show only in expanded. See [transcript detail settings](design/cli-commands.md#transcript-detail-settings).
 
 ### Run feedback and confirmation
 

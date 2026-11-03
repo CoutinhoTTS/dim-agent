@@ -386,7 +386,9 @@ impl Composer {
                         self.area.insert_str(&filled);
                         Some(Outcome::Handled)
                     }
-                    crate::ui::rows::Kind::Command(command) if command.argument.is_some() => {
+                    crate::ui::rows::Kind::Command(command)
+                        if command.argument.is_some() || command.name == "goal" =>
+                    {
                         let filled = format!("/{} ", command.name);
                         self.clear();
                         self.area.insert_str(&filled);
