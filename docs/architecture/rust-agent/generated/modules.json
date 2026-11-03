@@ -31191,6 +31191,14 @@
     },
     {
       "from": "dim_cli::ui::list_panel::tests",
+      "to": "dim_cli::ui::render::panel",
+      "references": [
+        "path crate::ui::render::panel::strip_escapes",
+        "path visible_width"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::list_panel::tests",
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path KeyCode::Delete",

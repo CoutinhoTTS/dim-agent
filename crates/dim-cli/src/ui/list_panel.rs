@@ -71,6 +71,9 @@ pub struct ListPanel {
     /// shows at once; a set title is drawn as it was given.
     title: Title,
     hint: String,
+    /// A question with the key that answers it and the key that cancels it,
+    /// drawn in the hint's place until the next [`ListPanel::set_hint`].
+    confirmation: Option<(String, String, String)>,
     loading_text: &'static str,
     empty_text: &'static str,
     no_match_text: &'static str,
@@ -110,6 +113,7 @@ impl ListPanel {
         Self {
             title: Title::Fixed(title),
             hint: hint.into(),
+            confirmation: None,
             loading_text,
             empty_text,
             no_match_text,
@@ -145,9 +149,21 @@ impl ListPanel {
     }
 
     /// The hint names the keys the selection offers; a panel that redraws it
-    /// when the selection moves sets it here.
+    /// when the selection moves sets it here. It replaces a confirmation.
     pub fn set_hint(&mut self, hint: String) {
         self.hint = hint;
+        self.confirmation = None;
+    }
+
+    /// A question with the key that answers it and the key that cancels it,
+    /// drawn in the hint's place until the next [`ListPanel::set_hint`].
+    pub fn set_confirmation(
+        &mut self,
+        question: impl Into<String>,
+        confirm: impl Into<String>,
+        cancel: impl Into<String>,
+    ) {
+        self.confirmation = Some((question.into(), confirm.into(), cancel.into()));
     }
 
     /// The title a caller draws in place of the panel's own.
@@ -334,7 +350,8 @@ impl ListPanel {
     /// order: the rest of the notes, the filter's padding (the row below the
     /// query first), the footer's first line first, the hint's rows above
     /// the border, the query row, and the list's last row. The selected
-    /// entry and the hint's closing key stay the longest.
+    /// entry and the hint's closing key stay the longest; a confirmation
+    /// keeps its confirm key the longest instead.
     pub fn render_with_footer(
         &self,
         width: usize,
@@ -349,7 +366,8 @@ impl ListPanel {
         }
         let inner = width.saturating_sub(4).max(1);
         let shown = self.shown();
-        let hint_above = hint_rows(&self.hint, width);
+        let hint = self.hint_text();
+        let hint_above = hint_rows(&hint, width);
         let mut notes = Vec::new();
         for note in &self.notes {
             for line in wrap_words(note, inner.saturating_sub(6).max(1)) {
@@ -475,7 +493,7 @@ impl ListPanel {
         let bottom_hint = if fitted.hint_above {
             None
         } else {
-            Some(key_hints(&shorten_hint(&self.hint, width), p))
+            Some(key_hints(&self.short_hint(&hint, width), p))
         };
         let title = match &self.title {
             Title::Fixed(text) => t(text),
@@ -489,6 +507,26 @@ impl ListPanel {
             Some(&title_plain(title, inner, p)),
             bottom_hint.as_deref(),
         )
+    }
+
+    /// The text the hint draws: a confirmation reads as its question, its
+    /// confirm key and its cancel key.
+    fn hint_text(&self) -> String {
+        match &self.confirmation {
+            Some((question, confirm, cancel)) => format!("{question} {confirm} · {cancel}"),
+            None => self.hint.clone(),
+        }
+    }
+
+    /// The hint shortened to the bottom border: a key hint keeps its closing
+    /// key, a confirmation its confirm key.
+    fn short_hint(&self, hint: &str, width: usize) -> String {
+        match &self.confirmation {
+            Some((question, confirm, cancel)) => {
+                shorten_confirmation(question, confirm, cancel, width)
+            }
+            None => shorten_hint(hint, width),
+        }
     }
 
     /// The parts that fit `rows`. The list takes the space the other parts
@@ -661,6 +699,33 @@ fn shorten_hint(hint: &str, width: usize) -> String {
     truncate_cells(closing, room)
 }
 
+/// A confirmation shortened to fit the bottom border, keeping its confirm
+/// key the longest: the full text, then the question cut with `…` before the
+/// two keys, then the two keys, then the confirm key alone, and a confirm key
+/// too wide on its own truncated with `…`.
+fn shorten_confirmation(question: &str, confirm: &str, cancel: &str, width: usize) -> String {
+    // `bordered` puts a hint on the bottom border only while a dash still
+    // fits on either side of it.
+    let room = width.saturating_sub(6).max(1);
+    let keys = format!("{confirm} · {cancel}");
+    let full = format!("{question} {keys}");
+    if visible_width(&full) <= room {
+        return full;
+    }
+    let keyed = visible_width(&keys) + 1;
+    if room > keyed {
+        let question = truncate_cells(question, room - keyed);
+        return format!("{question} {keys}");
+    }
+    if visible_width(&keys) <= room {
+        return keys;
+    }
+    if visible_width(confirm) <= room {
+        return confirm.to_owned();
+    }
+    truncate_cells(confirm, room)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -684,9 +749,19 @@ mod tests {
     }
 
     /// A panel draws no more rows than it is given, and nothing under two
-    /// rows: the two borders alone would take that budget.
+    /// rows: the two borders alone would take that budget. A confirmation
+    /// keeps its confirm key at every budget that draws, and its question
+    /// whole while the full text fits.
     #[test]
     fn a_list_panel_draws_within_its_row_budget() {
+        let question = "Remove a job whose name is a long one?";
+        let confirm = "Enter confirm";
+        let cancel = "Esc cancel";
+        let confirming = || {
+            let mut panel = three_rows();
+            panel.set_confirmation(question, confirm, cancel);
+            panel
+        };
         let mut hinted = three_rows();
         hinted.set_hint("Enter open · Ctrl+R refresh · Ctrl+F filter · Esc close".to_owned());
         let configurations = [
@@ -708,6 +783,7 @@ mod tests {
                     "second footer line".to_owned(),
                 ],
             ),
+            ("confirmation", confirming(), Vec::new()),
         ];
         for (name, panel, footer) in configurations {
             for width in [20, 40, 80] {
@@ -722,6 +798,24 @@ mod tests {
                         rows.is_empty(),
                         budget < 2,
                         "{name} at {width}x{budget}: {rows:#?}"
+                    );
+                }
+            }
+        }
+        let full = format!("{question} {confirm} · {cancel}");
+        let panel = confirming();
+        for width in 20..=80 {
+            for budget in 2..=30 {
+                let rows = panel.render(width, budget, &palette());
+                let text = crate::ui::render::panel::strip_escapes(&rows.join("\n"));
+                assert!(
+                    text.contains(confirm),
+                    "confirmation at {width}x{budget}: the confirm key: {text}"
+                );
+                if visible_width(&full) + 6 <= width {
+                    assert!(
+                        text.contains(question),
+                        "confirmation at {width}x{budget}: the whole question: {text}"
                     );
                 }
             }

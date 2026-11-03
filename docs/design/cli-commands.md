@@ -71,7 +71,10 @@ panel gives up the rest of the notes, the filter's padding (the row below the
 query first), its footer lines (the first first), the hint's rows above the
 border, the query row and the list's last row, in that order. The selected entry
 and the hint's closing key stay the longest. A hint too wide for the bottom
-border drops whole parts and keeps its first and closing keys.
+border drops whole parts and keeps its first and closing keys. A confirmation is
+shortened by its own rule: the full question and its two keys first, then the
+question cut with `…`, then the two keys, then the confirm key alone, and last
+that key cut with `…`; the confirm key stays the longest.
 
 ```text
 Natural height                                      Short budget, 5 rows
