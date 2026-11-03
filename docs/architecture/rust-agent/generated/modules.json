@@ -2664,7 +2664,6 @@
       "unexpandedMacros": [
         "eprintln",
         "format",
-        "rusqlite::params",
         "tokio::pin",
         "tracing::error"
       ]
@@ -5172,6 +5171,7 @@
         "matches",
         "panic",
         "serde_json::json",
+        "unreachable",
         "vec"
       ]
     },
@@ -7801,8 +7801,12 @@
       "to": "dim_agent_runtime::core::timeline",
       "references": [
         "path ContextHistory",
+        "path PolicyTurns::After",
+        "path PolicyTurns::All",
+        "path PolicyTurns::Anchors",
         "path Timeline",
         "use dim_agent_runtime::ContextHistory",
+        "use dim_agent_runtime::PolicyTurns",
         "use dim_agent_runtime::Timeline"
       ]
     },
@@ -8709,6 +8713,7 @@
       "references": [
         "path ContextHistory",
         "path Timeline",
+        "path dim_agent_runtime::PolicyTurns::Anchors",
         "use dim_agent_runtime::ContextHistory",
         "use dim_agent_runtime::Timeline"
       ]
@@ -13989,6 +13994,7 @@
       "to": "dim_agent_runtime::core::timeline",
       "references": [
         "use core::ContextHistory",
+        "use core::PolicyTurns",
         "use core::Timeline",
         "use core::TimelineTrace",
         "use core::TraceStep"
@@ -19218,11 +19224,13 @@
       "to": "dim_agent_capabilities::file_storage",
       "references": [
         "path FileLease",
+        "path FilePath",
         "path FileStorage",
         "path FileStorageError",
         "path FileStorageError::Io",
         "path FileStorageError::Locked",
         "use dim_agent_capabilities::file_storage::FileLease",
+        "use dim_agent_capabilities::file_storage::FilePath",
         "use dim_agent_capabilities::file_storage::FileStorage",
         "use dim_agent_capabilities::file_storage::FileStorageError"
       ]
@@ -31085,14 +31093,6 @@
     },
     {
       "from": "dim_cli::ui::lines_panel",
-      "to": "dim_cli::ui::theme::ansi",
-      "references": [
-        "path fg",
-        "use crate::ui::theme::ansi::fg"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::lines_panel",
       "to": "dim_cli::ui::theme::palette",
       "references": [
         "path Palette",
@@ -31279,6 +31279,14 @@
     },
     {
       "from": "dim_cli::ui::list_panel::tests",
+      "to": "dim_cli::ui::render::panel",
+      "references": [
+        "path crate::ui::render::panel::strip_escapes",
+        "path visible_width"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::list_panel::tests",
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path KeyCode::Delete",
@@ -31286,6 +31294,13 @@
         "path KeyCode::Left",
         "path KeyEvent::new",
         "path Modifiers::NONE"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::list_panel::tests",
+      "to": "dim_cli::ui::theme::palette",
+      "references": [
+        "path Palette"
       ]
     },
     {
@@ -36141,6 +36156,7 @@
         "path Area::Models",
         "path Area::Scheduled",
         "path Area::Skills",
+        "path Area::Workflow",
         "path Command",
         "path Command::AskAnswers",
         "path Command::InputControl",
@@ -36240,6 +36256,20 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::isolation_panel",
+      "references": [
+        "path crate::ui::isolation_panel::IsolationPanel::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::lines_panel",
+      "references": [
+        "path LinesPanel::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::management_panel",
       "references": [
         "path ManagementPanel::new"
@@ -36260,6 +36290,13 @@
         "path WriteTarget::Area",
         "path WriteTarget::Create",
         "path WriteTarget::Run"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::render",
+      "references": [
+        "path crate::ui::render::live_row_budget"
       ]
     },
     {
@@ -36290,7 +36327,9 @@
       "to": "dim_cli::ui::render::screen",
       "references": [
         "path Screen",
-        "path Screen::new"
+        "path Screen::new",
+        "path crate::ui::render::screen::Frame",
+        "path crate::ui::render::screen::MIN_HISTORY_ROWS"
       ]
     },
     {
@@ -36299,6 +36338,13 @@
       "references": [
         "path crate::ui::render::testterm::Emu",
         "path crate::ui::render::testterm::Emu::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::sessions_panel",
+      "references": [
+        "path SessionsPanel::new"
       ]
     },
     {
@@ -36332,7 +36378,8 @@
         "path Modifiers::CTRL",
         "path Modifiers::NONE",
         "path Modifiers::SHIFT",
-        "path crate::ui::terminal::KeyEvent::new"
+        "path crate::ui::terminal::KeyEvent::new",
+        "path crate::ui::terminal::Modifiers::NONE"
       ]
     },
     {
@@ -36390,10 +36437,14 @@
         "path ImageRead",
         "path LOAD_MORE",
         "path ManagementDraft",
+        "path Prompt",
         "path Prompt::Ask",
+        "path Prompt::Isolation",
+        "path Prompt::Lines",
         "path Prompt::Login",
         "path Prompt::Management",
         "path Prompt::Runtime",
+        "path Prompt::Sessions",
         "path QUEUE_HINT",
         "path QUEUE_HINT_MORE",
         "path ThemeContext",
@@ -36402,6 +36453,8 @@
         "path boxed",
         "path chunk",
         "path goodbye_panel",
+        "path live_panel_rows",
+        "path overlay_panel_rows",
         "path queue_strip",
         "path side_reply",
         "path web_panel"
@@ -38688,6 +38741,18 @@
     },
     {
       "module": "dim_cli::ui::lines_panel::tests",
+      "path": "Theme::system"
+    },
+    {
+      "module": "dim_cli::ui::list_panel::tests",
+      "path": "Appearance::Dark"
+    },
+    {
+      "module": "dim_cli::ui::list_panel::tests",
+      "path": "ColorMode::TrueColor"
+    },
+    {
+      "module": "dim_cli::ui::list_panel::tests",
       "path": "Theme::system"
     },
     {

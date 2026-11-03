@@ -45,8 +45,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "follow, talk to and end this session's lines" => {
             "seguir, falar e terminar as linhas desta sessão"
         }
-        "End line" => "Terminar linha",
-        "y/N" => "y/N",
+        "End line {id}?" => "Terminar a linha {id}?",
+        "y end it" => "y terminar",
+        "n cancel" => "n cancelar",
         "main is the session itself; a line ends, main does not" => {
             "main é a própria sessão; uma linha termina, main não"
         }
