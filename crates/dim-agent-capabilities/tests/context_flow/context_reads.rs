@@ -25,7 +25,7 @@ pub(super) struct CountContextReads {
     /// call order.
     pub(super) pages: std::sync::Mutex<Vec<(String, u64, usize)>>,
     /// The kinds of every query, in call order.
-    pub(super) queries: std::sync::Mutex<Vec<Vec<String>>>,
+    pub(super) query_kinds: std::sync::Mutex<Vec<Vec<String>>>,
     /// Fails the given occurrence of a read of this branch and range with a
     /// storage error, counted from when it is set.
     pub(super) fail_range: std::sync::Mutex<Option<ReadOccurrence>>,
@@ -392,7 +392,7 @@ impl TimelineStore for CountContextReads {
                 .lock()
                 .unwrap()
                 .push((key.branch_id.clone(), from..=through));
-            self.queries.lock().unwrap().push(query.kinds.clone());
+            self.query_kinds.lock().unwrap().push(query.kinds.clone());
             let page = self.memory.query(key, query, from, through).await?;
             if query.flags.len() == 2 {
                 self.context_pages.lock().unwrap().push(ContextPageRead {
@@ -1718,13 +1718,13 @@ async fn a_below_threshold_preparation_reads_no_growing_turn_order() {
         .unwrap();
     let mut per_turn: Vec<Vec<Vec<String>>> = Vec::new();
     for index in 0..12 {
-        let before = store.queries.lock().unwrap().len();
+        let before = store.query_kinds.lock().unwrap().len();
         session
             .submit(format!("turn {index}"), InputMode::Queue, "main")
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let calls = store.queries.lock().unwrap()[before..].to_vec();
+        let calls = store.query_kinds.lock().unwrap()[before..].to_vec();
         per_turn.push(calls);
     }
     for calls in &per_turn {
