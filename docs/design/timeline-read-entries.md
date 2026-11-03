@@ -269,3 +269,45 @@ The request carries no read point. The service passes each segment its bound: an
 - Compaction policy reuse (`context_policy.rs:531`): whether those facts are published when read.
 - The goal plugin binding to the Timeline service.
 - The Mermaid diagrams in this document have not been rendered.
+
+## 7. Confirmed integration
+
+This section holds only what is decided. What is not decided stays in section 4.
+
+### 7.1 Decisions
+
+| Topic | Decision |
+| --- | --- |
+| Request | scope, from_event or from_sequence (at most one, the named event is included), kinds, flags, event_id, one predicate, order_by (sequence only), direction, limit, offset. No read point, no cursor |
+| Reply | events and one position per event |
+| Predicate | One equality is pushed to the store. Any further condition is filtered by the caller. A sparse match costs extra pages; a short page still means the selection is exhausted |
+| Event granularity | Unchanged. No step_id, no change to step/text or step/thinking |
+| Merged rows | Stay inside the store. The store page unit is the event: offset, limit, start, bound and predicate are applied to events after a merged row is expanded, and every row the SQL selects must hold at least one event that passes the filter |
+| Position of one event | Read it with event_id, not with from_event |
+| Chain read with from_sequence | Applies to the queried branch only |
+
+### 7.2 Consumers that move to the query
+
+| Consumer | Request |
+| --- | --- |
+| Permission rebuild (permission.rs:522) | chain, permission/changed, descending, limit 1 |
+| Manual compaction wait (context_methods.rs:81) | branch, context/compaction, command equality, from_sequence, limit 1 |
+| Collaboration result fetch (collaboration.rs:1080) | event_id; the results table is removed |
+| Committed input (timeline_context.rs:411) | from_sequence, limit 1 |
+| Budget input lookup (context_preparation.rs:682) | event_id |
+| Compaction cut position (history.rs:163) | chain, event_id; the position comes from the reply |
+| Branch resume (timeline_tree.rs:566) | branch/create-failed, branch/create, branch/ended |
+| Submission index (timeline.rs:309) | input/message |
+| Recall (recall.rs:184) | chain, descending, its kinds, offset paging. Merged rows carry no event id, so it uses sequences, not from_event |
+| History window and page (connection/tree.rs:197, :227) | descending page plus the newest turn/start; the batch edge of a page is the caller protocol rule |
+| Goal inheritance (goal/branch.ts:205) | chain, input/message, descending; the marker sits inside blocks, so the caller checks each page and stops at the first match |
+| Branch tool default start (timeline_tree.rs:2291) | request_id equality; turn_id is filtered by the caller |
+
+### 7.3 Routes that bypass the service
+
+- Loaded sessions: Agent::local_page and the TimelineTree part own TimelineStore::read_page move to the query.
+- Unloaded sessions: no Timeline service exists, so the App Server keeps one SessionStore page read with the page shape of the query.
+
+### 7.4 Reads removed after the moves
+
+On Timeline, Branch, Agent and Dispatcher: history, local, page, page_cursor, context, context_with_checkpoint, event_by_id, event_position, compaction_cut, ancestor_events_of_kind, stored_page, stored_local, stored_context_page and its _in form, and the policy reads once their own migration lands. Then xtask types and xtask graph regenerate the generated files, and nothing else in them may change.
