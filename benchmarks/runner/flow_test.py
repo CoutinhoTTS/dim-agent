@@ -605,7 +605,10 @@ class BaselineFlowTest(unittest.TestCase):
             self.assertNotIn("DIM_EVAL_VERIFIER_PROXY", env)
         with mock.patch.dict(os.environ, {"DIM_EVAL_VERIFIER_PROXY": ""}):
             self.assertFalse(run_l2.verifier_proxy_enabled())
-            self.assertEqual(run_l2.verifier_env(), {})
+            env = run_l2.verifier_env()
+            self.assertNotIn("HTTP_PROXY", env)
+            self.assertNotIn("HTTPS_PROXY", env)
+            self.assertEqual(env["UV_PYTHON_INSTALL_DIR"], "/opt/eval-cache/python")
 
     def test_verifier_no_proxy_can_add_container_service_names(self) -> None:
         proxy = "http://proxy.invalid:3128"

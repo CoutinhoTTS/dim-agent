@@ -35,6 +35,14 @@ BENCHMARKS = HERE.parent
 #: that copy, not the manifest-only directory in this repository.
 TASKS_DIR = BENCHMARKS / "tasks"
 
+#: Shared cache mounted into the task environment as /opt/eval-cache. Verifiers
+#: install uv and, through uvx, CPython at scoring time; without a cache every
+#: trial repeats those downloads and a flaky route turns a good agent run into a
+#: zero. The directory is prepared once on the eval machine (see
+#: benchmarks/host/README.md).
+EVAL_CACHE = Path(os.environ.get(
+    "DIM_EVAL_EVAL_CACHE", str(Path.home() / "dim-eval" / "eval-cache")))
+
 @dataclass(frozen=True)
 class ProviderSettings:
     """Where the model lives, read from the eval machine's dimcode model config.
@@ -197,26 +205,43 @@ def verifier_proxy_enabled() -> bool:
 
 
 def verifier_env() -> dict[str, str]:
-    """Proxy settings for the verifier phase only, from ``DIM_EVAL_VERIFIER_PROXY``.
+    """Environment for the verifier phase.
 
-    Most Terminal-Bench verifiers download uv from GitHub at scoring time. When
-    the eval machine cannot reach GitHub directly, they fail before testing
-    anything and score 0 whatever the agent did. The agent phase is untouched:
-    it reaches only the model host, and dimcode would otherwise route the model
-    through the proxy too. Local addresses bypass it, because verifiers also
-    connect to servers the agent started inside the container.
+    The verifier runs inside the task environment. Most Terminal-Bench verifiers
+    install uv from astral.sh and then run ``uvx -p 3.13``, which downloads
+    CPython. Both are cached under ``EVAL_CACHE`` and mounted at
+    ``/opt/eval-cache`` so a flaky route cannot turn a good agent run into a
+    zero. ``CURL_HOME`` pins HTTP/1.1 because the eval machine's proxy has
+    produced broken HTTP/2 streams on GitHub downloads.
+
+    Proxy settings still come from ``DIM_EVAL_VERIFIER_PROXY``. The agent phase
+    is untouched: it reaches only the model host, and dimcode would otherwise
+    route the model through the proxy too. Local addresses bypass it, because
+    verifiers also connect to servers the agent started inside the container.
     """
+    cache = "/opt/eval-cache"
+    env = {
+        "CURL_HOME": f"{cache}/curl-home",
+        "UV_INSTALL_DIR": f"{cache}/uv",
+        "UV_PYTHON_INSTALL_DIR": f"{cache}/python",
+        "UV_CACHE_DIR": f"{cache}/uv-cache",
+        "UV_HTTP_TIMEOUT": "300",
+        "UV_CONCURRENT_DOWNLOADS": "1",
+        "PATH": f"{cache}/uv:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    }
     proxy = verifier_proxy_url()
-    if proxy is None:
-        return {}
-    bypass = verifier_no_proxy()
-    assert bypass is not None
-    return {"HTTP_PROXY": proxy, "HTTPS_PROXY": proxy, "http_proxy": proxy,
-            "https_proxy": proxy, "NO_PROXY": bypass, "no_proxy": bypass}
+    if proxy is not None:
+        bypass = verifier_no_proxy()
+        assert bypass is not None
+        env.update({"HTTP_PROXY": proxy, "HTTPS_PROXY": proxy,
+                    "http_proxy": proxy, "https_proxy": proxy,
+                    "NO_PROXY": bypass, "no_proxy": bypass})
+    return env
 
 
 def build_job_config(settings: ProviderSettings) -> dict:
     cli_image = _env("DIM_EVAL_CLI_IMAGE")
+    EVAL_CACHE.mkdir(parents=True, exist_ok=True)
     run_id = os.environ.get(
         "DIM_EVAL_RUN_ID",
         datetime.now(timezone.utc).strftime("%Y-%m-%d__%H-%M-%S"),
@@ -254,7 +279,13 @@ def build_job_config(settings: ProviderSettings) -> dict:
                     "source": cli_image,
                     "target": "/opt/dim-agent",
                     "read_only": True,
-                }
+                },
+                {
+                    "type": "bind",
+                    "source": str(EVAL_CACHE),
+                    "target": "/opt/eval-cache",
+                    "read_only": False,
+                },
             ],
         },
         "agents": [
