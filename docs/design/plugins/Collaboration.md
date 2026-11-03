@@ -85,7 +85,7 @@ The producer keeps these invariants:
 - An owned Agent's owner is the leader Session whose `request` created it, and it never changes. Re-homing an Agent to another owner or to the public directory is not a supported operation.
 - An owned Agent has at least one member Session. One with none is an incomplete delegation, not a reusable Agent.
 - A member Session's leader is the leader that created it, and it equals its Agent's owner whenever that Agent is owned.
-- A Team is one leader Session and the member Sessions whose leader it is. Only a leader delegates: the `agent` tool refuses `request`, `cancel`, `close`, `inspect`, `result` and `models` to a member, so a Team has one level.
+- A Team is one leader Session and the member Sessions whose leader it is. Only a leader acts on the Team: the `agent` tool refuses `request`, `cancel`, `close`, `inspect`, `result` and `models` to a member, so a Team has one level.
 
 ### 6.2 Who may address what
 
@@ -132,7 +132,7 @@ The producer keeps these invariants:
 ## 7. The models a member can run
 
 A leader names a model for a new member in the profile's `model` field, and the user's
-[subagent model policy](subagent-model-policy.md) may override it. The `models` action answers
+[subagent model policy](../subagent-model-policy.md) may override it. The `models` action answers
 the first half of that: which `{providerId, modelId}` pairs this Session can start a member with
 right now.
 
@@ -165,10 +165,9 @@ reloads.
 
 Each entry is the pair a profile names and the declared capabilities that help choose between
 them; no display name is read. The reply does not state the subagent model policy or a member's
-effective model: [subagent model policy](subagent-model-policy.md) keeps the override out of
+effective model: [subagent model policy](../subagent-model-policy.md) keeps the override out of
 request and inspect replies, and this action does not reopen that decision. A call with no
 selectable models answers `{"models":[]}`. A cancelled call returns `Cancelled`; a failed read
 answers with an error result, `Models are unavailable: <owner's message>`.
 
-**Ordering.** Entries keep Provider's selectable-model order, so the leader reads the same order
-the model picker shows.
+**Ordering.** Entries keep the order Provider's read reports them in.
