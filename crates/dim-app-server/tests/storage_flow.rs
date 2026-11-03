@@ -7830,112 +7830,6 @@ async fn the_derived_indexes_are_created_at_open_without_a_format_step() {
 }
 
 #[tokio::test]
-async fn a_kind_page_walks_a_fixed_head_backwards_by_stored_row() {
-    let database = Database::new();
-    let db = SqliteStorage::open(database.0.clone()).unwrap();
-    let sessions =
-        dim_app_server::storage::SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
-    let store = sessions.timeline_store();
-    store
-        .create_session("session", &SessionConfig::default())
-        .await
-        .unwrap();
-    let mut records = vec![
-        record(
-            1,
-            EventKind::TurnStart(TurnStartData {
-                turn_id: "turn".into(),
-            }),
-        ),
-        record(
-            2,
-            EventKind::InputMessage(InputMessageData::text("go", Some(InputMode::Queue))),
-        ),
-    ];
-    records.extend((3..=6).map(|sequence| {
-        let mut event = text(sequence, "delta");
-        event.batch_end = 6;
-        event
-    }));
-    records.push(record(
-        7,
-        EventKind::Thinking(ThinkingData {
-            turn_id: "turn".into(),
-            request_id: "request".into(),
-            delta: "thinking".into(),
-        }),
-    ));
-    records.push(record(
-        8,
-        EventKind::TurnEnd(TurnEndData {
-            turn_id: "turn".into(),
-            outcome: TurnOutcome::Completed {
-                reason: "end_turn".into(),
-            },
-        }),
-    ));
-    let (published, receiver) = tokio::sync::oneshot::channel();
-    store
-        .append(
-            key("session", "main"),
-            records,
-            Box::new(move |result| {
-                let _ = published.send(result);
-            }),
-        )
-        .unwrap();
-    tokio::time::timeout(PUBLISHED, receiver)
-        .await
-        .expect("the writer did not publish the write")
-        .unwrap()
-        .unwrap();
-
-    let kinds = ["turn/start", "input/message", "step/text", "turn/end"];
-    let first = store
-        .read_kind_page(&key("session", "main"), &kinds, 8, 2)
-        .await
-        .unwrap();
-    assert_eq!(
-        first
-            .iter()
-            .map(|record| record.event.sequence)
-            .collect::<Vec<_>>(),
-        vec![3, 4, 5, 6, 8],
-        "the newest two matching rows, the streamed row whole, oldest first"
-    );
-    let next = store
-        .read_kind_page(&key("session", "main"), &kinds, 2, 2)
-        .await
-        .unwrap();
-    assert_eq!(
-        next.iter()
-            .map(|record| record.event.sequence)
-            .collect::<Vec<_>>(),
-        vec![1, 2]
-    );
-    assert!(
-        store
-            .read_kind_page(&key("session", "main"), &kinds, 0, 2)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        store
-            .read_kind_page(&key("session", "main"), &[], 8, 2)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-
-    drop(store);
-    drop(sessions);
-    db.close().await.unwrap();
-}
-
-/// A window's fixed watermark must end a batch: two events committed as one
-/// batch make `through` 1 a storage error, not an empty page.
-#[tokio::test]
 async fn a_history_window_read_rejects_a_through_inside_a_batch() {
     let database = Database::new();
     let db = SqliteStorage::open(database.0.clone()).unwrap();
@@ -8405,6 +8299,29 @@ async fn a_query_selects_kinds_flags_and_a_predicate_from_sqlite() {
             "{path}: a path or value that matches no fact selects no rows"
         );
     }
+
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// A kind no event has is a selection that matches nothing: a misspelled kind
+/// answers an empty page rather than an error.
+#[tokio::test]
+async fn a_query_with_a_misspelled_kind_returns_an_empty_page() {
+    use dim_agent_runtime::TimelineQueryScope::Branch;
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let (main, _) = query_histories(store.clone()).await;
+
+    let mut misspelled = query(Branch, 16);
+    misspelled.kinds = vec!["step/tex".into()];
+    let reply = main.query(misspelled).await.unwrap();
+    assert!(
+        reply.events.is_empty() && reply.positions.is_empty(),
+        "a kind no event has selects no fact"
+    );
 
     store.close().await.unwrap();
     db.close().await.unwrap();

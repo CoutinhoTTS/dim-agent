@@ -11268,10 +11268,18 @@
     },
     {
       "from": "dim_agent_capabilities::recall",
-      "to": "dim_agent_runtime::timeline_store",
+      "to": "dim_agent_runtime::timeline_query",
       "references": [
-        "path BranchPage",
-        "use dim_agent_runtime::BranchPage"
+        "path TimelineQuery",
+        "path TimelineQueryDirection::Descending",
+        "path TimelineQueryOrderBy::Sequence",
+        "path TimelineQueryReply",
+        "path TimelineQueryScope::Chain",
+        "use dim_agent_runtime::TimelineQuery",
+        "use dim_agent_runtime::TimelineQueryDirection",
+        "use dim_agent_runtime::TimelineQueryOrderBy",
+        "use dim_agent_runtime::TimelineQueryReply",
+        "use dim_agent_runtime::TimelineQueryScope"
       ]
     },
     {
@@ -14864,14 +14872,6 @@
     },
     {
       "from": "dim_agent_runtime::branch",
-      "to": "dim_agent_runtime::timeline_store",
-      "references": [
-        "path BranchCursor",
-        "path BranchPage"
-      ]
-    },
-    {
-      "from": "dim_agent_runtime::branch",
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
@@ -15096,8 +15096,6 @@
       "from": "dim_agent_runtime::core::timeline",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
-        "path BranchCursor",
-        "path BranchPage",
         "path PolicyFacts",
         "path PolicyOrder",
         "path PolicyOrderEvent",
@@ -15105,8 +15103,6 @@
         "path StoredEvent",
         "path TimelineKey",
         "path TimelineStore",
-        "use crate::BranchCursor",
-        "use crate::BranchPage",
         "use crate::PolicyFacts",
         "use crate::PolicyOrder",
         "use crate::PolicyOrderEvent",
