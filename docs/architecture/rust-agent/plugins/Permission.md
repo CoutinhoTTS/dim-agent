@@ -113,10 +113,13 @@ decided differently.
 
 [ADR 014](../../../adr/014-file-access-facts.md) fixes what a file operation is
 decided from. The `FileAccessFacts` Session part registers `fileAccessFacts`
-with `facts(session_id, fileAccess, path, mode) -> FileFacts`: `workspace` from
-`SessionConfig`, `system` from HostPlatform's platform roots, `owned` from
-`SessionFiles.owns`, and `grant` from the Session's grants. The part holds no
-state; it reads at use time and imports no SessionStore. A query failure denies.
+with `facts(session_id, fileAccess, path, mode, cancel) -> FileFacts`: `workspace` from
+`SessionConfig` and the Session's confirmed worktree roots, `system` from HostPlatform's platform roots, `owned` from `SessionFiles.owns`, and `grant` from the Session's grants.
+The facts part requires SessionConfig, SessionIdentity, SessionLifecycle, HostPlatform,
+SessionFilesHost and SessionGrantsHost. Only external directory membership is cached;
+permission decisions are read at use time.
+The facts part consumes the association port and imports no SessionStore. Ownership or grant
+query failure denies; discovery unavailability preserves approval with its reason.
 
 For a file call, Permission resolves the call's path to the same canonical target
 the tool owner admitted and calls the service with the effective file access and the
@@ -144,6 +147,23 @@ For policies with no file override, retain the exact legacy file behavior, inclu
 tool-list interactions; do not reinterpret old history as an explicit Read only selection.
 Without the facts service a read has the legacy unrestricted read-scope fallback, then the tool
 gate applies; workspace writes use the fallback below.
+
+### On-demand worktree membership
+
+[Worktree access](../../../design/worktree-access.md) extends the workspace fact with Session-local,
+Git-verified roots. FileAccessFacts owns discovery, shared in-flight probes and root identities;
+its optional process dependency `worktreeAssociations` persists a repository/root and Session subtree
+atomically before publication. Without this port it keeps the original workspace boundary.
+The service reports discovery unavailability separately from failed ownership/grant reads: the former
+keeps the existing approval path with a reason, while the latter still denies. Cancellation is not denial.
+Permission samples its dispatched policy again after file facts finish, so tightening during discovery
+applies to the waiting call. Explicit denies and already decisive facts do not trigger discovery.
+
+The Session service supplies the original workspace and confirmed roots for process preparation, recognizing the
+resolved explicit cwd first. It verifies cached directory identities and fixed subtree prefixes before
+returning roots. Closing cancels and joins probes; reload and restore start empty. Concurrent callers
+share one probe for an existing directory, while cancellation only ends that caller's wait. No negative
+candidate result or permission decision is cached. The worktree design owns Git and subtree semantics.
 
 ### Write targets without the facts
 

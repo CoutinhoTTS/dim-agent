@@ -30,8 +30,19 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "line {id}" => "라인 {id}",
         "jump to a message of the shown line" => "표시 중인 라인의 메시지로 이동",
         "Timeline" => "타임라인",
-        "Enter jump · e edit · q quote · b branch · f fork · Esc close" => {
-            "Enter 이동 · e 편집 · q 인용 · b 브랜치 · f 포크 · Esc 닫기"
+        "Enter actions · Esc close" => "Enter 작업 · Esc 닫기",
+        "Timeline actions" => "타임라인 작업",
+        "↑↓ select · Enter confirm · Esc cancel" => "↑↓ 선택 · Enter 확인 · Esc 취소",
+        "Jump to message" => "메시지로 이동",
+        "Edit as a new draft" => "새 초안으로 편집",
+        "Quote message" => "메시지 인용",
+        "Create branch from here" => "여기서 브랜치 생성",
+        "Before this message" => "이 메시지 이전",
+        "Fork session" => "세션 포크",
+        "1. Create fork" => "1. 포크 생성",
+        "2. Cancel" => "2. 취소",
+        "Creates a new session; the current session stays unchanged." => {
+            "새 세션을 만듭니다. 현재 세션은 변경되지 않습니다."
         }
         "No messages yet." => "아직 메시지가 없습니다.",
         "Already on screen above; /tui jumps to it" => "이미 위에 있음. /tui 에서 바로 이동",
@@ -53,12 +64,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "e edit · b branch · f fork" => "e 편집 · b 브랜치 · f 포크",
         "e edit" => "e 편집",
-        "Fork the session before “{message}”? (y/N)" => {
-            "“{message}” 앞에서 세션을 포크할까요? (y/N)"
-        }
-        "Fork the session after the last turn? (y/N)" => {
-            "마지막 턴 뒤에서 세션을 포크할까요? (y/N)"
-        }
+        "Fork the session before “{message}”?" => "“{message}” 앞에서 세션을 포크할까요?",
+        "Fork the session after the last turn?" => "마지막 턴 뒤에서 세션을 포크할까요?",
         "⑂ new line from {id} · Esc cancel" => "⑂ {id}에서 새 라인 · Esc 취소",
         "A fork copies main; b opens a line here" => {
             "포크는 main만 복사합니다. b로 여기서 라인을 여세요"
@@ -273,6 +280,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "run" => "실행",
         "view" => "보기",
         "model" => "모델",
+        "extensions" => "확장",
         "app" => "앱",
         "skill" => "스킬",
         // composer/commands.rs: descriptions
@@ -291,9 +299,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "맨 위로 스크롤",
         "scroll to the bottom" => "맨 아래로 스크롤",
         "pick an earlier message to edit or quote" => "편집/인용할 이전 메시지 선택",
-        "collapse or expand tool details and compaction summaries" => {
-            "도구 상세 및 압축 요약 접기/펼치기"
-        }
+        "cycle tool details and compaction summaries" => "도구 상세와 압축 요약 순환 전환",
         "switch between fullscreen and scrollback" => "전체 화면/스크롤백 전환",
         "switch theme" => "테마 전환",
         "switch language" => "언어 전환",

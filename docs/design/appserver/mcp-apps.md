@@ -254,6 +254,11 @@ A host decides what to do next from what the daemon can guarantee, so the three 
 - **Ran.** The reply is the tool's result, including one with `isError: true`, which is the server's
   answer and not a failure of the call.
 
+An HTTP 404 for a request carrying an expired MCP session id proves that request
+was not processed. The connection may open a new session and retry it once,
+allowing the handed-over call to complete. This exception does not permit replay
+of a request whose outcome is unknown.
+
 `mcp_app_refused` and `mcp_app_unknown` replace `operation_interrupted` for these methods, because the
 client's next step depends on which side of the hand-off the request was on; a single code that warns
 "may already have committed" would make every retry an unbounded risk. The hand-off is the moment the

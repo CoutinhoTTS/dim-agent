@@ -386,7 +386,9 @@ impl Composer {
                         self.area.insert_str(&filled);
                         Some(Outcome::Handled)
                     }
-                    crate::ui::rows::Kind::Command(command) if command.argument.is_some() => {
+                    crate::ui::rows::Kind::Command(command)
+                        if command.argument.is_some() || command.name == "goal" =>
+                    {
                         let filled = format!("/{} ", command.name);
                         self.clear();
                         self.area.insert_str(&filled);
@@ -1944,23 +1946,24 @@ mod tests {
 
     #[test]
     fn slash_opens_the_palette_and_enter_runs_the_selected_command() {
-        let mut c = Composer::new(Vec::new());
-        typed(&mut c, "/");
-        assert!(c.palette_open());
-        typed(&mut c, "exit");
-        assert_eq!(
-            c.handle_key(key(KeyCode::Enter)),
-            Outcome::Command {
-                name: "exit".into(),
-                args: String::new()
-            }
-        );
-        assert!(c.is_empty());
+        for (query, name) in [("/", "new"), ("/e", "effort")] {
+            let mut c = Composer::new(Vec::new());
+            typed(&mut c, query);
+            assert!(c.palette_open());
+            assert_eq!(
+                c.handle_key(key(KeyCode::Enter)),
+                Outcome::Command {
+                    name: name.into(),
+                    args: String::new()
+                }
+            );
+            assert!(c.is_empty());
+        }
     }
 
     #[test]
     fn palette_requires_an_exact_exit_before_dispatch() {
-        for query in ["/", "/e", "/ex"] {
+        for query in ["/ex", "/qui"] {
             let mut c = Composer::new(Vec::new());
             typed(&mut c, query);
             assert_eq!(c.handle_key(key(KeyCode::Enter)), Outcome::Handled);
@@ -1969,10 +1972,13 @@ mod tests {
         for query in ["/exit", "/quit"] {
             let mut c = Composer::new(Vec::new());
             typed(&mut c, query);
-            assert!(matches!(
+            assert_eq!(
                 c.handle_key(key(KeyCode::Enter)),
-                Outcome::Command { .. }
-            ));
+                Outcome::Command {
+                    name: "exit".into(),
+                    args: String::new()
+                }
+            );
         }
     }
 

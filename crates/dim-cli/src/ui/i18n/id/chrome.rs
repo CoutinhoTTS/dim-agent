@@ -32,8 +32,19 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "line {id}" => "jalur {id}",
         "jump to a message of the shown line" => "lompat ke pesan di jalur yang tampil",
         "Timeline" => "Linimasa",
-        "Enter jump · e edit · q quote · b branch · f fork · Esc close" => {
-            "Enter lompat · e ubah · q kutip · b cabang · f fork · Esc tutup"
+        "Enter actions · Esc close" => "Enter tindakan · Esc tutup",
+        "Timeline actions" => "Tindakan linimasa",
+        "↑↓ select · Enter confirm · Esc cancel" => "↑↓ pilih · Enter konfirmasi · Esc batal",
+        "Jump to message" => "Lompat ke pesan",
+        "Edit as a new draft" => "Ubah sebagai draf baru",
+        "Quote message" => "Kutip pesan",
+        "Create branch from here" => "Buat cabang dari sini",
+        "Before this message" => "Sebelum pesan ini",
+        "Fork session" => "Fork sesi",
+        "1. Create fork" => "1. Buat fork",
+        "2. Cancel" => "2. Batal",
+        "Creates a new session; the current session stays unchanged." => {
+            "Membuat sesi baru; sesi saat ini tidak berubah."
         }
         "No messages yet." => "Belum ada pesan.",
         "Already on screen above; /tui jumps to it" => "Sudah ada di atas; /tui langsung lompat",
@@ -57,10 +68,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "e edit · b branch · f fork" => "e ubah · b cabang · f fork",
         "e edit" => "e ubah",
-        "Fork the session before “{message}”? (y/N)" => "Fork sesi sebelum “{message}”? (y/N)",
-        "Fork the session after the last turn? (y/N)" => {
-            "Fork sesi setelah giliran terakhir? (y/N)"
-        }
+        "Fork the session before “{message}”?" => "Fork sesi sebelum “{message}”?",
+        "Fork the session after the last turn?" => "Fork sesi setelah giliran terakhir?",
         "⑂ new line from {id} · Esc cancel" => "⑂ jalur baru dari {id} · Esc batal",
         "A fork copies main; b opens a line here" => {
             "Fork hanya menyalin main; b membuka jalur di sini"
@@ -299,6 +308,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "run" => "run",
         "view" => "tampilan",
         "model" => "model",
+        "extensions" => "ekstensi",
         "app" => "aplikasi",
         "skill" => "skill",
         // composer/commands.rs: descriptions
@@ -319,8 +329,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "gulir ke atas",
         "scroll to the bottom" => "gulir ke bawah",
         "pick an earlier message to edit or quote" => "pilih pesan lama untuk diedit/dikutip",
-        "collapse or expand tool details and compaction summaries" => {
-            "lipat/buka detail tool dan ringkasan kompresi"
+        "cycle tool details and compaction summaries" => {
+            "ganti tampilan detail tool dan ringkasan pemadatan"
         }
         "switch between fullscreen and scrollback" => "ganti layar penuh/scrollback",
         "switch theme" => "ganti tema",

@@ -192,7 +192,9 @@ impl McpProbe {
     ) -> Self {
         Self {
             reason: Some(reason),
-            message: Some(McpError::Server(error).to_string()),
+            message: Some(server::bounded_diagnostic(
+                McpError::Server(error).to_string(),
+            )),
             ..Self::base(ProbeStatus::Failed, latency)
         }
     }
@@ -249,6 +251,10 @@ impl McpConnection {
     }
     pub fn state(&self) -> server::McpServerState {
         self.service.state()
+    }
+    /// The last start or transport failure; status only, never a model request.
+    pub fn failure(&self) -> Option<String> {
+        self.service.failure()
     }
     /// The connection generation this lease names; a new one starts whenever
     /// the server establishes a connection.
