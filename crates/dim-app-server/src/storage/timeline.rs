@@ -1270,11 +1270,12 @@ impl SessionStore {
     pub async fn read_page(
         &self,
         id: &str,
+        branch: &str,
         after: u64,
         limit: usize,
         through: u64,
     ) -> Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
-        self.main_page(id, after, limit, through, RequestBodies::Rebuild)
+        self.page(id, branch, after, limit, through, RequestBodies::Rebuild)
             .await
     }
     /// A page for readers that discard `context/prepare` and `model/call`
@@ -1283,16 +1284,18 @@ impl SessionStore {
     pub async fn read_page_without_request_bodies(
         &self,
         id: &str,
+        branch: &str,
         after: u64,
         limit: usize,
         through: u64,
     ) -> Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
-        self.main_page(id, after, limit, through, RequestBodies::Unused)
+        self.page(id, branch, after, limit, through, RequestBodies::Unused)
             .await
     }
-    async fn main_page(
+    async fn page(
         &self,
         id: &str,
+        branch: &str,
         after: u64,
         limit: usize,
         through: u64,
@@ -1300,7 +1303,7 @@ impl SessionStore {
     ) -> Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
         let key = TimelineKey {
             session_id: id.into(),
-            branch_id: "main".into(),
+            branch_id: branch.into(),
         };
         Ok(self
             .timeline

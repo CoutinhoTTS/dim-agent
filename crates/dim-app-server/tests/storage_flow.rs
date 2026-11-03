@@ -5968,7 +5968,10 @@ async fn directory_history_pages_keep_a_fixed_head_and_resolve_prior_tool_calls(
         .unwrap();
     wait.await.unwrap().unwrap();
     let through = store.head(&key("paged", "main")).await.unwrap();
-    let first = sessions.read_page("paged", 0, 200, through).await.unwrap();
+    let first = sessions
+        .read_page("paged", "main", 0, 200, through)
+        .await
+        .unwrap();
     assert_eq!(first.len(), 200);
     let (done, wait) = tokio::sync::oneshot::channel();
     store
@@ -5982,11 +5985,11 @@ async fn directory_history_pages_keep_a_fixed_head_and_resolve_prior_tool_calls(
         .unwrap();
     wait.await.unwrap().unwrap();
     let second = sessions
-        .read_page("paged", 200, 200, through)
+        .read_page("paged", "main", 200, 200, through)
         .await
         .unwrap();
     let third = sessions
-        .read_page("paged", 400, 200, through)
+        .read_page("paged", "main", 400, 200, through)
         .await
         .unwrap();
     let sequences: Vec<_> = first
@@ -6011,7 +6014,7 @@ async fn directory_history_pages_keep_a_fixed_head_and_resolve_prior_tool_calls(
     }
     assert!(
         sessions
-            .read_page("paged", 600, 200, through)
+            .read_page("paged", "main", 600, 200, through)
             .await
             .unwrap()
             .is_empty()

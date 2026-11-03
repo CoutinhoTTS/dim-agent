@@ -12,7 +12,7 @@
 | 策略以启动方为上限的 `launch` | Agents | Scheduler、Workflow |
 | `SessionConfig` 字段 `interactive` | Agents | 从所属 Session 的 `SessionConfig` 读取它的插件（Questions、SessionTitle） |
 | 带来源 raw 块的输入（标记、key、`submissionId`） | InputQueue 数据合同、运行时门面 | Scheduler、Workflow；Goal 分支部分写入相同形式，Hooks 分支部分（待设计）也会如此 |
-| 固定前缀读取 | 运行时门面（现有的 `sequence`、`local_page` 与 `history`，A.5） | 进程调用方，以及依据 Timeline 事实做决定的分支部分 |
+| 固定前缀读取 | 运行时门面（`sequence` 与 `history`）与分页读 `AgentIndex::history_page`（A.5） | 进程调用方，以及依据 Timeline 事实做决定的分支部分 |
 | 撤回（带可选 `reason` 的指令 `input/withdraw`，`reason` 在[总览附录 B.1](../overview.md#b1-session-与分支-capability) 中提议；结果 `input/deleted`、经 InputQueue 的 `sessionMethods` 提供的 `session.input.withdraw`） | InputQueue | 客户端、AcpGateway、Scheduler、Workflow |
 
 Session 级与分支级插件不使用此接口访问自己的 Session。它们直接使用所属 Session 与分支的服务、分支 Dispatcher 和 Session 广播。
@@ -327,7 +327,7 @@ fork 复制源 Session 的整个 `SessionConfig`；权限预设随复制过来�
 
 ### A.5 固定前缀读取
 
-带 `atLeast` 的 `sessions.history` 把 `through` 固定为调用时的已发布 head。若该 head 低于 `atLeast`，则以 `future_sequence` 失败，否则返回该分支自己截至该 head 的事件，按 `after` 与 `limit` 分页。它由现有门面组合实现：先用 `Session::sequence(branch)` 读 head，再用 `Session::local_page(branch, after, limit, head)` 分页读取。需要祖先前缀的分支部分读 `Session::history(branch, Some(head))`（§9.2）。分支 Dispatcher 或 Session 广播投递的每个事件都已发布，因此只要分支存在，`atLeast = event.sequence` 就会成功。
+带 `atLeast` 的 `sessions.history` 把 `through` 固定为调用时的已发布 head。若该 head 低于 `atLeast`，则以 `future_sequence` 失败，否则返回该分支自己截至该 head 的事件，按 `after` 与 `limit` 分页。它由现有门面组合实现：先用 `Session::sequence(branch)` 读 head，再用 `AgentIndex::history_page` 分页读取；已装载的线经该分支的 query 分页，已结束或本进程未装载的线经 App Server 自己的页读取。需要祖先前缀的分支部分读 `Session::history(branch, Some(head))`（§9.2）。分支 Dispatcher 或 Session 广播投递的每个事件都已发布，因此只要分支存在，`atLeast = event.sequence` 就会成功。
 
 ### A.6 错误
 
@@ -398,7 +398,7 @@ fork 复制源 Session 的整个 `SessionConfig`；权限预设随复制过来�
 | 逐次调用的 acquire | `AgentIndex::acquire(id)`（已有，crate 内部使用），返回 `SessionUse` 租约 |
 | `input` | `Session::input(InputMessageData, branch)`（已有；对分支已持有的标识返回已提交的输入）；key 为 `InputBlock::Raw { key: Some(name), retire }` |
 | `lookup` | `Session::lookup(branch, submission_id)`，与 `session.input_lookup` 共用：读分支的提交标识索引，等待找到的输入发布 |
-| `history` | `Session::sequence(branch)`，低于 `at_least` 时以 `future_sequence` 失败，然后 `Session::local_page(branch, after, limit, through)` |
+| `history` | `Session::sequence(branch)`，低于 `at_least` 时以 `future_sequence` 失败，然后 `AgentIndex::history_page(id, branch, after, limit, through)` |
 | `withdraw` | `Session::service::<InputQueue>(branch)`，然后 `InputQueue::withdraw(InputWithdrawData { input_id, reason }, None) -> Result<(Withdrawal, Option<Arc<AgentEvent>>), AgentError>`（S1）：追加 `input/withdraw`，在 InputQueue 写下决定后回复；`Withdrawal::Deleted { sequence }` 或 `Withdrawal::NotHeld`。Agents 等该 `input/deleted` 发布后才回复 `deleted` |
 | `stop`、`idle` | `Session::stop`、`Session::idle`（已有） |
 | `delete` | `AgentIndex::delete(id)`（S5c，crate 内部使用）：准入闸门、关闭、`SessionStore::delete_session`、遗忘 |

@@ -220,8 +220,9 @@ impl Connection {
                 self.protocol_version(),
             )?));
         }
-        let events = session
-            .local_page(branch, after, limit, through)
+        let events = rpc
+            .index
+            .history_page(&params.session_id, branch, after, limit, through)
             .await
             .map_err(history_error)?;
         let next_after = events.last().map_or(after, |event| event.sequence);
