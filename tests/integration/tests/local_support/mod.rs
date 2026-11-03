@@ -683,7 +683,7 @@ impl HoldingStore {
     /// Whether this read is the one the flow holds, and arms nothing after it.
     fn held(&self, branch: &str) -> bool {
         let mut selected = self.read_branch.lock().unwrap();
-        let Some((held, skip)) = selected.as_mut().filter(|(held, _)| held == branch) else {
+        let Some((_, skip)) = selected.as_mut().filter(|(held, _)| held == branch) else {
             return false;
         };
         if *skip > 1 {
