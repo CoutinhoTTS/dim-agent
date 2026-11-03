@@ -37,6 +37,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `pluginFileTransactions` | process | PluginFiles | Rust-only | — |
 | `pluginFiles` | process | PluginFiles | yes | `open` async |
 | `pluginMounter` | process | rutis-loader | yes | — |
+| `promptSuggestionSettingsHost` | process | PromptSuggestionSettings | Rust-only | — |
 | `providerConnectionResolver` | process | Provider | Rust-only | — |
 | `providerService` | process | Provider | Rust-only | — |
 | `publication` | process | McpPublication | Rust-only | — |
