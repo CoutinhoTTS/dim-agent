@@ -436,6 +436,40 @@ fn field_enabled(
     }
 }
 
+/// The range an entry's `timeout` takes: one second to one day, in
+/// milliseconds.
+const MIN_TIMEOUT_MILLIS: u64 = 1_000;
+const MAX_TIMEOUT_MILLIS: u64 = 86_400_000;
+
+/// The members the decoder knows for a transport. An overlay may not add one
+/// of these: an unknown name there is the user's extension field, but a known
+/// name would be written back as the entry's own member (`merge_secret`).
+const STDIO_MEMBERS: &[&str] = &[
+    "type", "command", "args", "env", "cwd", "enabled", "timeout", "url", "headers", "auth",
+    "oauth",
+];
+const REMOTE_MEMBERS: &[&str] = &[
+    "type", "url", "headers", "auth", "oauth", "enabled", "timeout", "command", "args", "env",
+    "cwd",
+];
+
+fn field_timeout(
+    entry: &Map<String, Value>,
+    id: &str,
+) -> std::result::Result<Option<u64>, McpEntryError> {
+    const EXPECTED: &str = "an integer number of milliseconds from 1000 to 86400000";
+    let Some(value) = entry.get("timeout") else {
+        return Ok(None);
+    };
+    match value
+        .as_u64()
+        .filter(|millis| (MIN_TIMEOUT_MILLIS..=MAX_TIMEOUT_MILLIS).contains(millis))
+    {
+        Some(millis) => Ok(Some(millis)),
+        None => Err(entry_error(id, Some("timeout"), EXPECTED)),
+    }
+}
+
 fn decode_stdio(
     id: &str,
     entry: &Map<String, Value>,
@@ -467,6 +501,7 @@ fn decode_stdio(
         }
     };
     let enabled = field_enabled(entry, id)?;
+    let timeout = field_timeout(entry, id)?;
     for member in ["url", "headers", "auth", "oauth"] {
         if entry.get(member).is_some_and(|value| !value.is_null()) {
             return Err(entry_error(
@@ -476,12 +511,9 @@ fn decode_stdio(
             ));
         }
     }
-    let known = [
-        "type", "command", "args", "env", "cwd", "enabled", "url", "headers", "auth", "oauth",
-    ];
     let extra = entry
         .iter()
-        .filter(|(key, _)| !known.contains(&key.as_str()))
+        .filter(|(key, _)| !STDIO_MEMBERS.contains(&key.as_str()))
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
     Ok(McpServerSettings::Stdio {
@@ -491,6 +523,7 @@ fn decode_stdio(
         env,
         cwd,
         enabled,
+        timeout,
         extra,
     })
 }
@@ -527,6 +560,7 @@ fn decode_remote(
         }
     }
     let enabled = field_enabled(entry, id)?;
+    let timeout = field_timeout(entry, id)?;
     for member in ["command", "args", "env", "cwd"] {
         if entry.get(member).is_some_and(|value| !value.is_null()) {
             return Err(entry_error(
@@ -536,12 +570,9 @@ fn decode_remote(
             ));
         }
     }
-    let known = [
-        "type", "url", "headers", "auth", "oauth", "enabled", "command", "args", "env", "cwd",
-    ];
     let extra = entry
         .iter()
-        .filter(|(key, _)| !known.contains(&key.as_str()))
+        .filter(|(key, _)| !REMOTE_MEMBERS.contains(&key.as_str()))
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
     Ok(McpServerSettings::Remote {
@@ -551,6 +582,7 @@ fn decode_remote(
         auth,
         oauth,
         enabled,
+        timeout,
         extra,
     })
 }
@@ -696,6 +728,10 @@ pub enum McpServerSettings {
         cwd: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         enabled: Option<bool>,
+        /// The entry's `tools/call` limit in milliseconds; absent means the
+        /// default.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timeout: Option<u64>,
         #[serde(flatten)]
         extra: BTreeMap<String, serde_json::Value>,
     },
@@ -711,6 +747,10 @@ pub enum McpServerSettings {
         oauth: Option<Box<McpOAuthSettings>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         enabled: Option<bool>,
+        /// The entry's `tools/call` limit in milliseconds; absent means the
+        /// default.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timeout: Option<u64>,
         #[serde(flatten)]
         extra: BTreeMap<String, serde_json::Value>,
     },
@@ -739,6 +779,14 @@ impl McpServerSettings {
     pub fn enabled(&self) -> bool {
         match self {
             Self::Stdio { enabled, .. } | Self::Remote { enabled, .. } => enabled.unwrap_or(true),
+        }
+    }
+
+    /// The entry's `tools/call` limit in milliseconds; absent means the
+    /// default.
+    pub fn timeout(&self) -> Option<u64> {
+        match self {
+            Self::Stdio { timeout, .. } | Self::Remote { timeout, .. } => *timeout,
         }
     }
 }
@@ -1026,6 +1074,7 @@ pub(crate) fn split_entry(
             args,
             env,
             cwd,
+            timeout,
             extra,
             ..
         } => {
@@ -1042,6 +1091,7 @@ pub(crate) fn split_entry(
                 env: BTreeMap::new(),
                 cwd: cwd.clone(),
                 enabled: None,
+                timeout: *timeout,
                 extra: BTreeMap::new(),
             };
             (skeleton, (!secret.is_empty()).then_some(secret))
@@ -1052,6 +1102,7 @@ pub(crate) fn split_entry(
             headers,
             auth,
             oauth,
+            timeout,
             extra,
             ..
         } => {
@@ -1077,6 +1128,7 @@ pub(crate) fn split_entry(
                 auth: None,
                 oauth: oauth.as_deref().and_then(public_oauth).map(Box::new),
                 enabled: None,
+                timeout: *timeout,
                 extra: BTreeMap::new(),
             };
             (skeleton, (!secret.is_empty()).then_some(secret))
@@ -1108,7 +1160,13 @@ pub(crate) fn merge_secret(config: &mut McpServerSettings, secret: &McpSecretEnt
             if let Some(values) = &secret.env {
                 env.extend(values.clone());
             }
-            extra.extend(secret.extra.clone());
+            extra.extend(
+                secret
+                    .extra
+                    .iter()
+                    .filter(|(name, _)| !STDIO_MEMBERS.contains(&name.as_str()))
+                    .map(|(name, value)| (name.clone(), value.clone())),
+            );
         }
         McpServerSettings::Remote {
             url,
@@ -1141,7 +1199,13 @@ pub(crate) fn merge_secret(config: &mut McpServerSettings, secret: &McpSecretEnt
                 }
                 oauth.extra.extend(secret_oauth.extra.clone());
             }
-            extra.extend(secret.extra.clone());
+            extra.extend(
+                secret
+                    .extra
+                    .iter()
+                    .filter(|(name, _)| !REMOTE_MEMBERS.contains(&name.as_str()))
+                    .map(|(name, value)| (name.clone(), value.clone())),
+            );
         }
     }
     Ok(())
@@ -1536,6 +1600,7 @@ pub(crate) fn expand(
             env,
             cwd,
             enabled,
+            timeout,
             extra,
         } => McpServerSettings::Stdio {
             kind: kind.clone(),
@@ -1556,6 +1621,7 @@ pub(crate) fn expand(
                 }
             }),
             enabled: *enabled,
+            timeout: *timeout,
             extra: extra.clone(),
         },
         McpServerSettings::Remote {
@@ -1565,6 +1631,7 @@ pub(crate) fn expand(
             auth,
             oauth,
             enabled,
+            timeout,
             extra,
         } => McpServerSettings::Remote {
             kind: kind.clone(),
@@ -1583,6 +1650,7 @@ pub(crate) fn expand(
                 }),
             oauth: oauth.clone(),
             enabled: *enabled,
+            timeout: *timeout,
             extra: extra.clone(),
         },
     };
@@ -2048,6 +2116,7 @@ mod tests {
                 ..Default::default()
             })),
             enabled: None,
+            timeout: None,
             extra: BTreeMap::from([("note".into(), json!("${EXTRA}"))]),
         }
     }
@@ -2117,6 +2186,7 @@ mod tests {
             env: BTreeMap::from([("ENV_NAME".into(), "${VALUE}".into())]),
             cwd: Some("${DIR}".into()),
             enabled: Some(true),
+            timeout: Some(1_000),
             extra: BTreeMap::from([("note".into(), json!("${EXTRA}"))]),
         };
         let environment = |name: &str| match name {
@@ -2137,6 +2207,7 @@ mod tests {
             env,
             cwd,
             enabled,
+            timeout,
             extra,
         } = &expanded.configuration
         else {
@@ -2148,6 +2219,7 @@ mod tests {
         assert_eq!(env["ENV_NAME"].as_str(), "value");
         assert_eq!(cwd.as_deref(), Some("/tmp/work"));
         assert_eq!(*enabled, Some(true));
+        assert_eq!(*timeout, Some(1_000));
         assert_eq!(extra["note"], json!("${EXTRA}"));
         assert_eq!(
             expanded.referenced,
@@ -2339,6 +2411,7 @@ mod tests {
             env: BTreeMap::from([("KEY".into(), "${GITHUB_TOKEN}".into())]),
             cwd: Some("${GITHUB_TOKEN}".into()),
             enabled: None,
+            timeout: None,
             extra: BTreeMap::new(),
         };
         let expanded = expand(&entry, Origin::Plugin, &environment, &BTreeSet::new());
@@ -2384,6 +2457,89 @@ mod tests {
             "https://example.test"
         );
         assert_eq!(public_url("not a url"), "not a url");
+    }
+
+    #[test]
+    fn a_timeout_is_an_integer_number_of_milliseconds_from_1000_to_86400000() {
+        let document = McpSettings::from_file(
+            br#"{"mcpServers":{
+                "stdio": {"command":"server","timeout":1000},
+                "remote": {"type":"http","url":"https://example.test/mcp","timeout":86400000}
+            }}"#,
+        )
+        .unwrap();
+        assert!(document.invalid_entries().is_empty());
+        assert_eq!(document.entries()["stdio"].timeout(), Some(1_000));
+        assert_eq!(document.entries()["remote"].timeout(), Some(86_400_000));
+        assert!(document.validate().is_ok());
+        assert_eq!(
+            serde_json::to_value(&document.entries()["stdio"]).unwrap(),
+            json!({"command": "server", "timeout": 1000})
+        );
+
+        for value in [
+            json!(999),
+            json!(86_400_001),
+            json!(1500.5),
+            json!("1000"),
+            json!(-1),
+            json!(null),
+        ] {
+            let document = McpSettings::from_value(json!({"mcpServers":{
+                "broken": {"command":"server","timeout": value},
+                "valid": {"command":"server","timeout":1000}
+            }}))
+            .unwrap();
+            let error = document.invalid_error("broken").unwrap();
+            assert_eq!(error.id, "broken");
+            assert_eq!(error.field.as_deref(), Some("timeout"), "{value}");
+            assert!(
+                error.expected.contains("1000") && error.expected.contains("86400000"),
+                "{}",
+                error.expected
+            );
+            assert!(!error.to_string().contains(&value.to_string()), "{value}");
+            assert_eq!(document.entries()["valid"].timeout(), Some(1_000));
+            assert!(!document.contains("broken"));
+        }
+    }
+
+    #[test]
+    fn a_timeout_belongs_to_the_public_skeleton_not_the_secret_overlay() {
+        let entry = |timeout| McpServerSettings::Remote {
+            kind: RemoteTransport::Http,
+            url: "https://example.test".into(),
+            headers: BTreeMap::new(),
+            auth: None,
+            oauth: None,
+            enabled: None,
+            timeout,
+            extra: BTreeMap::new(),
+        };
+        let (skeleton, secret) = split_entry(&entry(Some(1_000)));
+        assert_eq!(skeleton.timeout(), Some(1_000));
+        assert!(secret.is_none());
+
+        // An overlay `timeout` is an unknown member: it changes neither a
+        // declared value nor an undeclared one.
+        let overlay = McpSecretEntry {
+            extra: BTreeMap::from([("timeout".into(), json!(5_000))]),
+            ..Default::default()
+        };
+        let mut merged = skeleton;
+        merge_secret(&mut merged, &overlay).unwrap();
+        assert_eq!(merged.timeout(), Some(1_000));
+        let mut undeclared = entry(None);
+        merge_secret(&mut undeclared, &overlay).unwrap();
+        assert_eq!(undeclared.timeout(), None);
+        // A write drops the overlay member, so it never becomes the entry's
+        // own field.
+        strip_secret(&mut undeclared, &overlay);
+        let document = McpSettings::from_value(
+            json!({"mcpServers":{"id": serde_json::to_value(&undeclared).unwrap()}}),
+        )
+        .unwrap();
+        assert_eq!(document.entries()["id"].timeout(), None);
     }
 
     #[test]

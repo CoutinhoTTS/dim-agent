@@ -1002,6 +1002,7 @@ mod tests {
             auth: None,
             oauth: None,
             enabled: None,
+            timeout: None,
             extra: Default::default(),
         }
     }

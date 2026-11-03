@@ -1225,6 +1225,113 @@ async fn scope_move_back_to_user_keeps_the_merged_entry_and_its_enablement() {
     fixture.close().await;
 }
 
+/// #953: an overlay `timeout` is not the entry's limit. A move to user scope
+/// writes the declared value once, and writes none when the entry declares
+/// none.
+#[tokio::test]
+async fn an_overlay_timeout_is_not_the_limit_a_move_to_user_carries() {
+    for declared in [Some(1_000), None] {
+        let fixture = Fixture::new().await;
+        let cancel = CancellationToken::new();
+        let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+        fixture
+            .mcp
+            .move_entry(
+                McpSource::User,
+                McpSource::Project(1),
+                "user-only".into(),
+                catalog.user_revision,
+                catalog.project_revision.unwrap(),
+                &cancel,
+            )
+            .await
+            .unwrap();
+
+        let project = fixture
+            .settings
+            .read::<McpSettings>(SettingsScope::Project(1), &cancel)
+            .await
+            .unwrap();
+        let mut project_document = project.document;
+        let McpServerSettings::Remote { timeout, .. } = project_document
+            .configure_mut("user-only")
+            .expect("the moved entry is remote")
+        else {
+            panic!("the moved entry is remote");
+        };
+        *timeout = declared;
+        fixture
+            .settings
+            .update(
+                SettingsScope::Project(1),
+                &project.revision,
+                project_document,
+                &cancel,
+            )
+            .await
+            .unwrap();
+
+        let overlay = fixture
+            .settings
+            .read::<McpSecrets>(SettingsScope::User, &cancel)
+            .await
+            .unwrap();
+        let mut overlay_document = overlay.document;
+        let record = overlay_document
+            .entries
+            .values_mut()
+            .filter_map(|servers| servers.get_mut("user-only"))
+            .next()
+            .expect("the move withheld a record");
+        record.extra.insert("timeout".into(), json!(5_000));
+        fixture
+            .settings
+            .update(
+                SettingsScope::User,
+                &overlay.revision,
+                overlay_document,
+                &cancel,
+            )
+            .await
+            .unwrap();
+
+        let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+        fixture
+            .mcp
+            .move_entry(
+                McpSource::Project(1),
+                McpSource::User,
+                "user-only".into(),
+                catalog.project_revision.unwrap(),
+                catalog.user_revision,
+                &cancel,
+            )
+            .await
+            .unwrap();
+        let user = fixture
+            .settings
+            .read::<McpSettings>(SettingsScope::User, &cancel)
+            .await
+            .unwrap()
+            .document;
+        let McpServerSettings::Remote { timeout, extra, .. } = &user.entries()["user-only"] else {
+            panic!("the moved entry is remote");
+        };
+        assert_eq!(*timeout, declared, "{declared:?}");
+        assert!(
+            !extra.contains_key("timeout"),
+            "the overlay member is not the entry's own"
+        );
+        let written = fs::read_to_string(fixture.home.join("mcp.json")).unwrap();
+        assert_eq!(
+            written.matches("\"timeout\"").count(),
+            usize::from(declared.is_some()),
+            "{written}"
+        );
+        fixture.close().await;
+    }
+}
+
 #[tokio::test]
 async fn scope_move_checks_the_destination_id_and_both_revisions() {
     let fixture = Fixture::new().await;

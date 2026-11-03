@@ -20504,6 +20504,7 @@
         "path McpServerSettings::Stdio",
         "path McpSettings",
         "path McpSettings::from_file",
+        "path McpSettings::from_value",
         "path Origin::Plugin",
         "path Origin::User",
         "path Origin::Workspace",
@@ -20511,7 +20512,10 @@
         "path RemoteTransport::Http",
         "path Stdio::Stdio",
         "path decode_entry",
-        "path expand"
+        "path expand",
+        "path merge_secret",
+        "path split_entry",
+        "path strip_secret"
       ]
     },
     {
