@@ -1129,13 +1129,6 @@ async fn node_scheduler_shared_policy_vectors_reach_native_save_launch_and_reuse
         .filter(|vector| vector["usage"] == "job-save-and-launch")
         .map(|vector| &vector["bound"])
         .chain(
-            vectors["reject"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|vector| &vector["bound"]),
-        )
-        .chain(
             vectors["reuse"]
                 .as_array()
                 .unwrap()
@@ -1175,50 +1168,13 @@ async fn node_scheduler_shared_policy_vectors_reach_native_save_launch_and_reuse
             .await;
         assert_ok(&after);
         assert_eq!(after["result"], before["result"]);
-        for vector in vectors["reject"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|vector| vector["bound"] == bound && vector["usage"] == "job-save-and-launch")
-        {
-            let rejected = client
-                .rpc(
-                    "schedule.save",
-                    json!({"job":{"name":vector["name"],"cwd":home,"prompt":"never admitted",
-                "policy":vector["requested"]["preset"],"schedule":{"at":"2030-01-01T00:00:00Z"}}}),
-                )
-                .await;
-            assert_eq!(
-                rejected["error"]["data"]["appError"], "schedule_invalid",
-                "{vector}: {rejected}"
-            );
-            let unchanged = client
-                .rpc("settings.read", json!({"source":"schedule","scope":"user"}))
-                .await;
-            assert_ok(&unchanged);
-            assert_eq!(unchanged["result"], before["result"]);
-        }
-        for (vector, representable) in vectors["cap"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|vector| (vector, true))
-            .chain(
-                vectors["reject"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .filter(|vector| vector["usage"] == "launch-only")
-                    .map(|vector| (vector, false)),
-            )
-            .filter(|(vector, _)| {
-                if vector["usage"] == "job-save-and-launch" {
-                    vector["bound"] == bound
-                } else {
-                    bound == unrestricted
-                }
-            })
-        {
+        for vector in vectors["cap"].as_array().unwrap().iter().filter(|vector| {
+            if vector["usage"] == "job-save-and-launch" {
+                vector["bound"] == bound
+            } else {
+                bound == unrestricted
+            }
+        }) {
             let authorizing_save = vector["usage"] == "job-save-and-launch";
             let before = client
                 .rpc("settings.read", json!({"source":"schedule","scope":"user"}))
@@ -1269,6 +1225,8 @@ async fn node_scheduler_shared_policy_vectors_reach_native_save_launch_and_reuse
                         .find(|entry| entry["id"] == *job)
                         .unwrap();
                     selected["policy_cap"] = vector["requested"].clone();
+                    selected["policy_cap"]["fileAccess"] = json!("read-only");
+                    selected["policy_cap"]["toolApproval"] = json!("ask");
                     selected["created_by"] = json!({"tool":{"session_id":starter["result"]["sessionId"],"branch_id":"main"}});
                     selected["revision"] = json!(2);
                     assert_ok(
@@ -1284,14 +1242,6 @@ async fn node_scheduler_shared_policy_vectors_reach_native_save_launch_and_reuse
                 let accepted = client.rpc("schedule.run_now", json!({"job_id":job})).await;
                 assert_ok(&accepted);
                 let run = settled(&mut client, job, &accepted["result"]["run_id"]).await;
-                if !representable {
-                    assert_eq!(run["state"], "failed", "{vector}: {run}");
-                    assert!(
-                        run["session_id"].is_null(),
-                        "an unrepresentable cap launches no Session: {run}"
-                    );
-                    continue;
-                }
                 assert_eq!(run["state"], "completed", "{vector}: {run}");
                 assert_eq!(run["policy"], vector["capped"], "{vector}");
                 let actual = client

@@ -329,6 +329,57 @@ fn models_area_shows_the_owner_error_for_an_unreadable_provider() {
     assert!(!stderr.contains("No provider has that id."), "{stderr}");
 }
 
+#[test]
+fn models_uses_each_saved_interface_language() {
+    for (locale, expected) in [
+        ("en", "Disabled flash."),
+        ("zh-CN", "已禁用 flash。"),
+        ("ja", "flash を無効にしました。"),
+        ("ko", "flash을(를) 비활성화했습니다."),
+        ("zh-Hant", "已停用 flash。"),
+        ("id", "flash dinonaktifkan."),
+        ("de", "flash deaktiviert."),
+        ("fr", "flash désactivé."),
+        ("es", "flash desactivado."),
+        ("pt-BR", "flash desativado."),
+        ("pt-PT", "flash desativado."),
+    ] {
+        let home = Home::new();
+        fs::write(
+            home.0.join("config.json"),
+            json!({"locale":locale}).to_string(),
+        )
+        .unwrap();
+        let daemon = home.daemon(|wire| {
+            hello(wire);
+            let request = wire.read("provider.management");
+            wire.reply(&request, provider(models(true), 3));
+            let request = wire.read("provider.models.set_enabled");
+            wire.reply(&request, json!({}));
+            let request = wire.read("provider.management");
+            wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                "code":-32000,"message":"the provider is unavailable"}}));
+        });
+        let output = home
+            .command()
+            .args(["models", "fixture", "disable", "flash"])
+            .output()
+            .unwrap();
+        daemon.join().unwrap();
+        assert!(output.status.success(), "{locale}: {output:?}");
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("{expected}\n"),
+            "{locale}"
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("the provider is unavailable"),
+            "{locale}: {stderr}"
+        );
+    }
+}
+
 /// A daemon that serves the models catalog without the toggle's method
 /// refuses the change with the kind's sentence, which names models.
 #[test]

@@ -275,6 +275,43 @@ fn wait(mut child: Child) -> Output {
 }
 
 #[test]
+fn empty_management_lists_explain_the_result() {
+    for (area, method, reply, message) in [
+        (
+            "scheduled",
+            "schedule.list",
+            json!({"jobs":[]}),
+            "No job is scheduled.\n",
+        ),
+        (
+            "skills",
+            "skills.catalog",
+            json!({"version":1,"entries":[],"issues":[]}),
+            "No Skill is configured.\n",
+        ),
+        (
+            "hooks",
+            "hooks.catalog",
+            json!({"userRevision":"user:1","projectsRevision":"user:1",
+                "disableAllHooks":false,"sources":[],"hooks":[]}),
+            "No hook is configured.\n",
+        ),
+    ] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[method]);
+            let request = wire.read(method);
+            wire.reply(&request, reply);
+        });
+        let output = home.command().args([area, "list"]).output().unwrap();
+        daemon.join().unwrap();
+        assert!(output.status.success(), "{area}: {output:?}");
+        assert!(output.stdout.is_empty(), "{area}: {output:?}");
+        assert_eq!(String::from_utf8(output.stderr).unwrap(), message, "{area}");
+    }
+}
+
+#[test]
 fn help_and_version_do_not_create_product_state() {
     let home = Home::new();
     fs::remove_dir_all(home.0.join("rust")).unwrap();
@@ -8085,9 +8122,9 @@ fn tui_permissions_keep_pending_file_and_member_questions_and_save_command_rules
         let read = wire.read("session.permission.get");
         wire.reply(&read, json!({"version":1,"policy":{"preset":"workspace-write","allowedTools":[],"disallowedTools":[]}}));
         let update = wire.read("session.permission.update");
-        assert_eq!(update["params"], json!({"sessionId":"session","branchId":"main","expectedVersion":1,"policy":{"preset":"workspace-write","toolApproval":"bypass","allowedTools":[],"disallowedTools":[]}}));
+        assert_eq!(update["params"], json!({"sessionId":"session","branchId":"main","expectedVersion":1,"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}));
         wire.reply(&update, json!({"version":2}));
-        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"perm-1","sequence":9,"create_at":1,"type":"permission","name":"changed","data":{"policy":{"preset":"workspace-write","toolApproval":"bypass","allowedTools":[],"disallowedTools":[]}}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"perm-1","sequence":9,"create_at":1,"type":"permission","name":"changed","data":{"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}}}));
         wire.notice("approval.request", json!({"sessionId":"session","branchId":"review","requestId":"req-1","source":{"kind":"model"},"call":{"name":"exec","input":{"command":"npm test"}},"reason":"shell command"}));
         let rules = wire.read("permission.rules");
         wire.reply(&rules, json!({"revision":"r1","commandRules":[]}));
@@ -8129,11 +8166,9 @@ fn tui_permissions_keep_pending_file_and_member_questions_and_save_command_rules
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"/approvals\r");
-    terminal.until("Process isolation");
+    terminal.until("Full access");
     terminal.write(b"\x1b[B\r");
-    terminal.until("Bypass");
-    terminal.write(b"\x1b[B\r");
-    terminal.until("Tool approval: Bypass (also for new sessions)");
+    terminal.until("Permission: full-access (also for new sessions)");
     terminal.until("Permission required");
     terminal.until("Allow always");
     terminal.write(b"a");
@@ -8150,20 +8185,27 @@ fn tui_permissions_keep_pending_file_and_member_questions_and_save_command_rules
     daemon.join().unwrap();
     let config: Value =
         serde_json::from_str(&fs::read_to_string(home.0.join("config.json")).unwrap()).unwrap();
-    assert_eq!(config["toolApproval"], "bypass");
+    assert_eq!(config["permission"], "full-access");
     assert!(config.get("permissionPreset").is_none());
+    let mut saved = config;
+    saved["permissionPreset"] = json!("read-only");
+    fs::write(
+        home.0.join("config.json"),
+        serde_json::to_string(&saved).unwrap(),
+    )
+    .unwrap();
     fs::remove_file(home.0.join("rust/daemon.sock")).unwrap();
     let daemon = home.daemon(|wire| {
         wire.hello(&["session.permission.get", "session.permission.update"]);
         let create = wire.read("session.create");
-        assert_eq!(create["params"]["permissionPolicy"], json!({"preset":"workspace-write","toolApproval":"bypass"}));
+        assert_eq!(create["params"]["permissionPolicy"], json!({"preset":"full-access"}));
         wire.reply(&create, json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         let read = wire.read("session.permission.get");
-        wire.reply(&read, json!({"version":1,"policy":{"preset":"workspace-write","toolApproval":"bypass","allowedTools":[],"disallowedTools":[]}}));
+        wire.reply(&read, json!({"version":1,"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}));
         wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
@@ -8173,14 +8215,14 @@ fn tui_permissions_keep_pending_file_and_member_questions_and_save_command_rules
         }
     });
     let mut terminal = Terminal::launch_tui(home.command());
-    terminal.until("Bypass");
+    terminal.until("Full access");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();
 }
 
 #[test]
-fn tui_approval_alias_sets_only_tool_approval_and_remembers_it() {
+fn tui_approval_alias_selects_presets_and_remembers_them() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.hello(&["session.permission.get", "session.permission.update"]);
@@ -8212,24 +8254,24 @@ fn tui_approval_alias_sets_only_tool_approval_and_remembers_it() {
         let update = wire.read("session.permission.update");
         assert_eq!(
             update["params"],
-            json!({"sessionId":"session","branchId":"main","expectedVersion":1,"policy":{"preset":"workspace-write","toolApproval":"bypass","allowedTools":[],"disallowedTools":[]}})
+            json!({"sessionId":"session","branchId":"main","expectedVersion":1,"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}})
         );
         wire.reply(&update, json!({"version":2}));
         wire.notice(
             "session.event",
-            json!({"sessionId":"session","branchId":"main","event":{"id":"perm-1","sequence":9,"create_at":1,"type":"permission","name":"changed","data":{"policy":{"preset":"workspace-write","toolApproval":"bypass","allowedTools":[],"disallowedTools":[]}}}}),
+            json!({"sessionId":"session","branchId":"main","event":{"id":"perm-1","sequence":9,"create_at":1,"type":"permission","name":"changed","data":{"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}}}),
         );
         let read = wire.read("session.permission.get");
         wire.reply(
             &read,
-            json!({"version":2,"policy":{"preset":"workspace-write","toolApproval":"bypass","allowedTools":[],"disallowedTools":[]}}),
+            json!({"version":2,"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}),
         );
         let update = wire.read("session.permission.update");
         assert_eq!(
             update["params"]["policy"]["preset"],
             json!("workspace-write")
         );
-        assert_eq!(update["params"]["policy"]["toolApproval"], "ask");
+
         wire.reply(&update, json!({"version":3}));
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
@@ -8239,23 +8281,19 @@ fn tui_approval_alias_sets_only_tool_approval_and_remembers_it() {
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"/approval\r");
-    terminal.until("Process isolation");
+    terminal.until("Full access");
     terminal.write(b"\x1b[B\r");
-    terminal.until("Bypass");
-    terminal.write(b"\x1b[B\r");
-    terminal.until("Tool approval: Bypass (also for new sessions)");
+    terminal.until("Permission: full-access (also for new sessions)");
     terminal.write(b"/approval\r");
-    terminal.until("Process isolation");
-    terminal.write(b"\x1b[B\r");
-    terminal.until("Bypass");
+    terminal.until("Full access");
     terminal.write(b"\x1b[A\r");
-    terminal.until("Tool approval: Ask (also for new sessions)");
+    terminal.until("Permission: workspace-write");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();
     let config: Value =
         serde_json::from_str(&fs::read_to_string(home.0.join("config.json")).unwrap()).unwrap();
-    assert_eq!(config["toolApproval"], "ask");
+    assert_eq!(config["permission"], "workspace-write");
     assert!(config.get("permissionPreset").is_none());
 }
 
