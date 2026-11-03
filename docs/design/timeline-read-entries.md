@@ -211,9 +211,9 @@ Not verified: whether each unclosed pair can cross a turn, so whether reading fr
 1. Decided: replay is removed. A part that needs facts still in flight (written, not yet dispatched) reads them through a Timeline read that returns the query result plus the undispatched tail. A part with no such need folds from its subscription alone. Section 7.7 gives the handover.
 2. Decided: the check that a position ends an atomic batch stays, and lives on the store port. It is not a field of the query.
 3. Decided: the checkpoint stores the resume event id and the caller continues with from_event, which names its branch. Section 7.6 shows the resume event is never step/text on the normal path. Known risk: when no entry is kept, resume falls back to the last event of the context, whose kind is not restricted; from_event is then slower but still resolves.
-4. The reads in §1.4 bypass the service. Which migration owns them?
-5. Proposed exits, not decided: `Branch` and `Agent` keep one `query` that only forwards, with no `history`, `local`, `context` or `page`; the Dispatcher has no reads, and goal takes the Timeline service; the App Server keeps one store read for sessions that are not loaded, with the same page shape as `query`. goal's binding to the Timeline service: the name `timeline` exists in `Services`, resolution for a branch part was not verified.
-6. Goal, file reads and the collaboration rebuild read to the committed position. Proposed: file reads and goal move to the published head only after their facts are shown to be published when read; until then they keep a read that reaches the undispatched tail.
+4. Decided: reads of loaded sessions that bypass the service (`Agent::local_page`, the TimelineTree part's own `TimelineStore::read_page`) move to the query in the bypass step of section 5. Reads of unloaded sessions stay on one `SessionStore` page read with the page shape of the query (section 7.3).
+5. Decided: `Branch` and `Session` keep one `query` that only forwards, with no `history`, `local`, `context` or `page`; the Dispatcher has no reads; the App Server keeps one store read for sessions that are not loaded, with the page shape of the query. Goal takes the Timeline service; whether the binding resolves `timeline` for a branch part is confirmed in the goal migration (section 6.6).
+6. Decided rule: a consumer that needs facts still in flight reads them through the Timeline read that adds the undispatched tail; a consumer with no such need folds from the query and its subscription. Which consumer is which (goal, file reads, collaboration rebuild) is settled in its own migration (section 6.6).
 
 ## 5. Order of work
 
@@ -295,14 +295,20 @@ The request carries no read point. The service passes each segment its bound: an
 - The App Server reads an unloaded session through `SessionStore`, because no Timeline service exists for it. The page shape matches `query`, so loading a session does not change the protocol.
 - After the reads are deleted, `xtask types` regenerates `npm/branch-services.d.ts` and `xtask graph` regenerates `catalog.md`; nothing else in the generated files may change.
 
-### 6.6 Not verified
+### 6.6 To confirm during development
 
-- Whether each unclosed pair can cross a turn, so whether reading from the latest `turn/start` is enough.
-- The second half of the Loop rebuild, and the full folds of BranchLine and Hooks.
-- How long the undispatched tail is during an opening.
-- Whether the compaction and budget facts read at `context_policy.rs:531` are published when read.
-- Whether the goal binding resolves `timeline` for a branch part.
-- The Mermaid diagrams in this document have not been rendered.
+None of these changes the design. Each is confirmed in the step named, by the method named.
+
+| Item | Step | Method |
+| --- | --- | --- |
+| Handover from the query to live delivery against the current subscription mechanism | Section 5, step 5, with Permission and Wait first | A test that the old and new rebuild give the same part state |
+| Whether an unclosed pair can cross a turn, so whether reading from the latest `turn/start` is enough | Section 5, step 5, per part | Read that part's fold |
+| The rest of the Loop rebuild, and the full folds of BranchLine and Hooks | Section 5, step 5, per part | Read that part's fold |
+| How long the undispatched tail is during an opening | Before step 2, with the performance baseline | Measure on the user store |
+| Whether goal, file reads and the collaboration rebuild need in-flight facts | Section 5, step 6, per consumer | Check when its facts are published |
+| Whether the facts read at `context_policy.rs:531` are published when read | Section 5, step 4 | Check the write and publish order |
+| Whether the goal binding resolves `timeline` for a branch part | Section 5, step 6, goal | Read the binding |
+| The Mermaid diagrams | Review | Render in a preview |
 
 Verified in this revision: `steer.apply` reads only `step/model-start` and `input/applied`; the session summary needs the first operator input and one point read; goal injects `dispatcher` and reads to the committed position.
 

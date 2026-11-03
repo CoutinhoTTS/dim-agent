@@ -211,9 +211,9 @@ flowchart LR
 1. 已定：取消重放。需要在途事实（已写入、尚未分发）的部件，通过一个 Timeline 读拿到查询结果加未分发的尾巴。没有这个需要的部件，只靠订阅折叠。交接见 §7.7。
 2. 已定：“某个位置是否是原子批末尾”的检查保留，放在存储端口上。它不是查询的字段。
 3. 已定：检查点存 resume 的事件编号，调用方用 from_event 续读，from_event 自带分支。§7.6 说明正常路径下 resume 事件不会是 step/text。已知风险：没有保留条目时 resume 退回上下文的最后一个事件，类型不受限；此时 from_event 更慢，但仍能解析。
-4. §1.4 的读绕过了服务。由哪个迁移负责？
-5. 建议的出口，未决定：`Branch` 和 `Agent` 只保留一个只做转发的 `query`，不再有 `history`、`local`、`context` 或 `page`；Dispatcher 不再有读，goal 改用 Timeline 服务；App Server 为未装载的会话保留一个存储读，页形状与 `query` 相同。goal 到 Timeline 服务的绑定：`Services` 里有 `timeline` 这个名字，分支部件能否解析它未核实。
-6. goal、文件读取和协作重建读到已分配位置。建议：文件读取和 goal 在证明它们读取时事实已发布之后，才改到已发布头；在此之前，它们保留一个能读到未分发尾巴的读。
+4. 已定：绕过服务的已装载会话读（`Agent::local_page`、TimelineTree 部件自己调的 `TimelineStore::read_page`）在 §5 的绕过服务那一步迁到查询。未装载会话的读保留一个 `SessionStore` 分页读，页形状与查询相同（§7.3）。
+5. 已定：`Branch` 和 `Session` 只保留一个只做转发的 `query`，不再有 `history`、`local`、`context` 或 `page`；Dispatcher 不再有读；App Server 为未装载的会话保留一个存储读，页形状与查询相同。goal 改用 Timeline 服务；绑定能否为分支部件解析 `timeline`，在 goal 的迁移中确认（§6.6）。
+6. 已定规则：需要在途事实的消费方，通过加上未分发尾巴的 Timeline 读取得；没有这个需要的消费方，用查询和订阅折叠。goal、文件读取、协作重建各属于哪一类，在各自迁移中判定（§6.6）。
 
 ## 5. 工作顺序
 
@@ -295,14 +295,20 @@ flowchart LR
 - App Server 通过 `SessionStore` 读未装载的会话，因为它没有 Timeline 服务可用。页形状与 `query` 一致，所以装载与否不改变协议。
 - 删除这些读之后，`xtask types` 重新生成 `npm/branch-services.d.ts`，`xtask graph` 重新生成 `catalog.md`；生成文件里其余内容不得变化。
 
-### 6.6 未核实
+### 6.6 开发时确认
 
-- 每个未闭合配对能否跨 turn，也就是从最近一个 `turn/start` 起读是否足够。
-- Loop rebuild 的后半段，以及 BranchLine 和 Hooks 的完整折叠。
-- 打开期间未分发的尾巴有多长。
-- `context_policy.rs:531` 读到的 compaction 和 budget 事实在读取时是否已发布。
-- goal 的绑定能否为分支部件解析 `timeline`。
-- 本文档里的 Mermaid 图没有渲染过。
+下面各项都不改变设计。每一项在所列步骤中、用所列方法确认。
+
+| 项 | 步骤 | 方法 |
+| --- | --- | --- |
+| 从查询到实时投递的交接，对照现有订阅机制 | §5 第 5 步，先做 Permission 和 Wait | 新旧重建得到相同部件状态的测试 |
+| 未闭合配对能否跨 turn，也就是从最近一个 `turn/start` 起读是否足够 | §5 第 5 步，逐个部件 | 读该部件的折叠 |
+| Loop rebuild 的后半段，以及 BranchLine 和 Hooks 的完整折叠 | §5 第 5 步，逐个部件 | 读该部件的折叠 |
+| 打开期间未分发尾巴有多长 | 第 2 步之前，随性能基线 | 用用户库实测 |
+| goal、文件读取、协作重建是否需要在途事实 | §5 第 6 步，逐个消费方 | 核查其事实何时发布 |
+| `context_policy.rs:531` 读到的事实在读取时是否已发布 | §5 第 4 步 | 核查写入与发布的顺序 |
+| goal 的绑定能否为分支部件解析 `timeline` | §5 第 6 步，goal | 读绑定代码 |
+| Mermaid 图 | 评审 | 在预览里渲染 |
 
 本次修订已核实：`steer.apply` 只读 `step/model-start` 和 `input/applied`；会话摘要只需要第一条操作员输入和一次点读；goal 注入的是 `dispatcher`，并且读到已分配位置。
 
