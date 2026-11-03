@@ -2046,7 +2046,8 @@
       "file": "crates/dim-app-server/src/mcp/config.rs",
       "unexpandedMacros": [
         "format",
-        "matches"
+        "matches",
+        "write"
       ]
     },
     {
@@ -2057,6 +2058,7 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
+        "format",
         "json"
       ]
     },
@@ -19808,6 +19810,7 @@
       "to": "dim_app_server::mcp::config",
       "references": [
         "mod config",
+        "path McpEntryError",
         "path McpPluginDocument",
         "path McpPluginServers",
         "path McpProjectEnablement",
@@ -19824,6 +19827,7 @@
         "path config::merge_secret",
         "path config::split_entry",
         "path config::workspace",
+        "use config::McpEntryError",
         "use config::McpPluginDocument",
         "use config::McpPluginServers",
         "use config::McpProjectEnablement",
@@ -19918,6 +19922,7 @@
       "references": [
         "path SettingsError",
         "path SettingsError::Conflict",
+        "path SettingsError::Document",
         "path SettingsError::Invalid",
         "path SettingsService",
         "use crate::settings::BusinessDocument",
@@ -20101,6 +20106,7 @@
         "path BusinessDocument",
         "path Result",
         "path SettingsError",
+        "path SettingsError::Document",
         "path SettingsError::Invalid",
         "path SettingsService",
         "path crate::settings::ProjectAuthorized",
@@ -20116,7 +20122,9 @@
       "to": "dim_app_server::mcp::config",
       "references": [
         "path McpSecretEntry",
-        "path McpSettings"
+        "path McpSettings",
+        "path McpSettings::from_file",
+        "path decode_entry"
       ]
     },
     {
@@ -20159,6 +20167,7 @@
         "path McpError::Closed",
         "path McpError::CredentialsAreUserScoped",
         "path McpError::Disabled",
+        "path McpError::InvalidEntry",
         "path McpError::InvalidId",
         "path McpError::MoveConflict",
         "path McpError::MovePartial",
@@ -20251,6 +20260,7 @@
         "path SettingsError::Cancelled",
         "path SettingsError::Closed",
         "path SettingsError::Conflict",
+        "path SettingsError::Document",
         "path SettingsError::Invalid",
         "path SettingsError::Worker",
         "path SettingsService",
@@ -38930,6 +38940,26 @@
       "path": "char::is_control"
     },
     {
+      "module": "dim_app_server::mcp::config",
+      "path": "D::Error"
+    },
+    {
+      "module": "dim_app_server::mcp::config",
+      "path": "Raw::deserialize"
+    },
+    {
+      "module": "dim_app_server::mcp::config",
+      "path": "S::Error"
+    },
+    {
+      "module": "dim_app_server::mcp::config",
+      "path": "S::Error::custom"
+    },
+    {
+      "module": "dim_app_server::mcp::config",
+      "path": "S::Ok"
+    },
+    {
       "module": "dim_app_server::mcp::management",
       "path": "D::Error"
     },
@@ -39080,6 +39110,10 @@
     {
       "module": "dim_app_server::settings",
       "path": "D::USER_FILE"
+    },
+    {
+      "module": "dim_app_server::settings",
+      "path": "D::decode"
     },
     {
       "module": "dim_app_server::settings",

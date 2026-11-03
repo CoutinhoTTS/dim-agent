@@ -383,6 +383,16 @@ pub struct McpCatalogResult {
     pub plugin_application: crate::mcp::McpApplication,
     pub project_application: Option<crate::mcp::McpApplication>,
     pub servers: Vec<McpCatalogEntry>,
+    /// Entries that did not decode, listed apart from `servers` so a client
+    /// that knows only `servers` still reads every valid entry.
+    pub invalid: Vec<McpInvalidCatalogEntry>,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpInvalidCatalogEntry {
+    pub id: String,
+    pub source: McpScope,
+    pub error: String,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -410,7 +420,10 @@ pub struct McpCatalogEntry {
 pub(crate) fn error(error: McpError) -> RpcError {
     let kind = match &error {
         McpError::Settings(SettingsError::Conflict) => "mcp_settings_conflict",
-        McpError::Settings(SettingsError::Invalid(_)) | McpError::InvalidId => "mcp_invalid_config",
+        McpError::Settings(SettingsError::Invalid(_))
+        | McpError::Settings(SettingsError::Document(_))
+        | McpError::InvalidId
+        | McpError::InvalidEntry(_) => "mcp_invalid_config",
         McpError::UnknownServer => "mcp_unknown_server",
         McpError::MoveConflict => "mcp_move_conflict",
         McpError::MovePartial { .. } => "mcp_move_partial",
@@ -469,6 +482,14 @@ fn source(scope: McpScope, project: Option<usize>) -> Result<McpSource, RpcError
         McpScope::Project => project
             .map(McpSource::Project)
             .ok_or_else(|| RpcError::invalid("Project MCP operations require cwd")),
+    }
+}
+
+fn scope(source: McpSource) -> McpScope {
+    match source {
+        McpSource::User => McpScope::User,
+        McpSource::Plugins => McpScope::Plugin,
+        McpSource::Project(_) => McpScope::Project,
     }
 }
 
@@ -568,9 +589,9 @@ pub(super) fn provide(
                             entry.configuration
                         };
                         let mut document = McpSettings::default();
-                        document.mcp_servers.insert(p.id.clone(), configuration);
+                        document.insert(p.id.clone(), configuration);
                         document.validate().map_err(|e| error(e.into()))?;
-                        let configuration = document.mcp_servers.remove(&p.id).unwrap();
+                        let configuration = document.remove(&p.id).unwrap();
                         let probe = directory.test(context, p.id, configuration, &stopping).await.map_err(error)?;
                         return reply(probe);
                     }
@@ -638,11 +659,7 @@ pub(super) fn provide(
                                             }
                                         }),
                                     id,
-                                    source: match entry.source {
-                                        McpSource::User => McpScope::User,
-                                        McpSource::Plugins => McpScope::Plugin,
-                                        McpSource::Project(_) => McpScope::Project,
-                                    },
+                                    source: scope(entry.source),
                                     enabled: entry.enabled(),
                                     transport: match entry.configuration {
                                         McpServerSettings::Stdio { .. } => "stdio",
@@ -657,6 +674,15 @@ pub(super) fn provide(
                                     },
                                 })
                                 .collect(),
+                            invalid: catalog
+                                .invalid
+                                .into_iter()
+                                .map(|entry| McpInvalidCatalogEntry {
+                                    id: entry.id,
+                                    source: scope(entry.source),
+                                    error: entry.error.to_string(),
+                                })
+                                .collect(),
                         });
                     }
                     "mcp.save" => {
@@ -666,16 +692,21 @@ pub(super) fn provide(
                             project(&settings, p.cwd, &stopping).await?,
                         )?;
                         let source = writable(mcp_source)?;
+                        // A broken project entry's record cannot apply to the
+                        // replacement, so a successful save deletes it at the
+                        // generation read here. A record that changed after
+                        // that read is kept.
+                        let mut replaced_record = None;
                         if matches!(mcp_source, McpSource::Project(_)) {
                             // A save replaces the whole entry, so an overlay
                             // is refused while its entry exists, and a record
                             // whose entry an external edit deleted is refused
                             // rather than merged into the new entry. The save
-                            // deletes nothing: a concurrent move may own that
-                            // record, and may have committed the entry between
-                            // the reads, so the entry read again after the
-                            // record decides the answer. An unreadable overlay
-                            // fails the save.
+                            // deletes nothing else: a concurrent move may own
+                            // that record, and may have committed the entry
+                            // between the reads, so the entry read again after
+                            // the record decides the answer. An unreadable
+                            // overlay fails the save.
                             match directory
                                 .editable(mcp_source, p.id.clone(), &stopping)
                                 .await
@@ -684,6 +715,15 @@ pub(super) fn provide(
                                     return Err(error(McpError::CredentialsAreUserScoped));
                                 }
                                 Ok(_) => {}
+                                // A broken entry is replaceable; its kept
+                                // record belongs to the entry being replaced.
+                                Err(McpError::InvalidEntry(_)) => {
+                                    replaced_record = directory
+                                        .overlay(source, p.id.clone(), &stopping)
+                                        .await
+                                        .map_err(error)?
+                                        .map(|secret| secret.generation);
+                                }
                                 Err(McpError::UnknownServer) => {
                                     if directory
                                         .overlay(source, p.id.clone(), &stopping)
@@ -711,6 +751,7 @@ pub(super) fn provide(
                                 Err(failure) => return Err(error(failure)),
                             }
                         }
+                        let id = p.id.clone();
                         directory
                             .update(
                                 source,
@@ -721,6 +762,12 @@ pub(super) fn provide(
                             )
                             .await
                             .map_err(error)?;
+                        if let Some(generation) = replaced_record {
+                            directory
+                                .clear_secret_if(source, id, generation, &stopping)
+                                .await
+                                .map_err(error)?;
+                        }
                     }
                     "mcp.remove" => {
                         let p: RemoveMcp = params(value)?;

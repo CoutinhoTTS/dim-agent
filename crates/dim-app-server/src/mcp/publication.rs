@@ -455,7 +455,7 @@ impl Projection {
                 Some(scope) => settings
                     .read::<McpSettings>(scope, cancel)
                     .await
-                    .map(|snapshot| (snapshot.revision, snapshot.document.mcp_servers)),
+                    .map(|snapshot| (snapshot.revision, snapshot.document.into_parts().0)),
                 None => settings
                     .read::<McpPluginServers>(SettingsScope::User, cancel)
                     .await
