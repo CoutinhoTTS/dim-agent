@@ -45,8 +45,7 @@ Paging is skipping, not a cursor: the caller repeats the query with a larger ski
 shorter than the count is what says the selection is exhausted. A page therefore does not align
 with an atomic batch — it may end inside one, and the next page carries the rest, which a
 consumer folding in order handles. A consumer that needs one consistent view reads at one read
-point: a published sequence is a batch end, so the view is fixed. A read point past the published
-head is invalid input.
+point: a published sequence is a batch end, so the view is fixed. 
 
 The existing reads do not share this convention: the context page accepts a cursor inside a batch
 and returns the row it names, and the history read has no page. A consumer that still uses its own
@@ -55,7 +54,7 @@ adopts.
 
 ### D3. The query addresses the event contract, not the storage
 
-Addressable: the session, the branch, the sequence, the kind, the event id, the two context
+Addressable: the session, the branch, the kind, the event id, the two context
 flags, and paths inside the event's data. Not addressable: table names, column names, index
 names, the content table, batch metadata, and any other storage layout. SQL text is not a
 capability interface.

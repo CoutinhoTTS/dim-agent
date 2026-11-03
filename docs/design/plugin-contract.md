@@ -209,7 +209,7 @@ A part reads facts through its branch's `timeline` service with one bounded quer
 | Kinds and flags | The event kinds it accepts (`domain/name`), and the envelope's context flags (§5.1) it selects on |
 | Event id | An equality on the event id: one id selects that event, so a caller reads one event or looks up its position without paging |
 | Predicate | One equality against one JSON scalar. The path is a sequence of field names inside the event's data joined by dots, with no array indexing and no wildcards |
-| Order | Ascending (oldest first) or descending (newest first). A reply is ordered by chain position, then sequence, in that order |
+| Order | Ascending (oldest first) or descending (newest first). A reply is ordered by chain position, then sequence, in the requested direction |
 | Page | How many matching events the read skips, and how many it returns; the second is nonzero by type, so no read is unbounded. Both count events, not storage rows |
 
 The elements combine: an event is selected when it satisfies all of them, and flags named together
@@ -221,8 +221,8 @@ nothing: no omission is an error.
 Paging is skipping: a caller repeats the query with a larger skip, and a page shorter than the
 count is what says the selection is exhausted. A page does not align with an atomic batch — it may
 end inside one and the next page carries the rest, which a consumer folding in order handles. A
-consumer that needs one consistent view reads at one read point: a published sequence is a batch
-end, so the view is fixed.
+read is taken at what is published when it runs, so a consumer that folds several pages drops what
+it has already folded.
 
 The path's spelling is fixed here and not in a binding: there is one form, the one above, and the
 storage translates that form. A binding writes this path syntax and invents no other.
@@ -231,8 +231,9 @@ The selection is what the query is for. Its elements describe events, not a slic
 the store executes them where the events are kept and returns the page those events form. A read
 never returns a fact above the coverage of the branch it reads: an ancestor to its cut, this branch
 to what is published, which the service bounds and no caller states. A
-selection the store can execute directly costs the page; one it cannot, an equality on a field it
-holds no index for, is evaluated as the store reads and proves the end of the scope the same way. A
+selection the store can execute from an index costs the page; one it cannot — an equality on a field
+it holds no index for, a flag set with no index of its own, or any selection in a store that filters
+in memory — costs the scoped range and proves the end of the scope the same way. A
 chain page reaches one segment after another, so it costs what it reaches. The reply carries each
 event's chain position with it, so a caller reads where an event sits without asking again.
 
@@ -242,11 +243,11 @@ whole prefix reads pages and folds them itself.
 
 | Input | Result |
 | --- | --- |
-| A read point past the published head | Invalid input |
 | A kind or a data path the store does not know | No rows; not an error |
 
-The query addresses the event contract, not the storage: the session, the branch, the sequence,
-the kind, the event id, the two context flags and paths inside the event's data. Table, column and
+The query addresses the event contract, not the storage: the session, the branch, the kind, the
+event id, the two context flags and paths inside the event's data. The reply carries each event's
+position, but the request does not select on one. Table, column and
 index names, the content table, batch metadata and every other part of the stored layout are not
 addressable, and SQL is not a capability interface
 ([ADR 019](../adr/019-event-query.md) D3).
