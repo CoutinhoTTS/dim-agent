@@ -167,6 +167,14 @@ back exactly as it was read. A file that is not JSON and a non-object `mcpServer
 whole document, with the decoder's line and column and no value. A client that predates `invalid`
 still reads every valid `servers` row and shows nothing about the broken entries.
 
+A stdio or remote entry may state `timeout`: an integer number of milliseconds from 1000 to
+86400000 that bounds that entry's `tools/call` requests. Without one a tool call waits up to ten
+minutes; every other request keeps its sixty-second exchange limit, and starting a server keeps its
+own deadline. Any other value, including `null`, is the entry's own error under the one-by-one
+rule. A timeout fails the call with an error that names the limit and its source and sends
+`notifications/cancelled` for the request, and the management read shows the value when it is
+stated ([MCP configuration management](../../docs/design/appserver/mcp-management.md#d20-a-tool-call-waits-as-long-as-its-entry-allows)).
+
 An entry's `command`, each argument, each `env` value, `cwd`, the remote `url`, each header value
 and the bearer token may carry `${NAME}` or `${NAME:-default}`; any other `$` text is literal, a
 variable set to the empty string counts as set, and a default ends at the first `}`. The daemon
