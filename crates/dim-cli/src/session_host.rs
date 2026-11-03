@@ -25,8 +25,8 @@ use crate::model::session::{
     DIM_OAUTH_ID, DraftPart, EmptyProvider, EmptyReason, ExecutionSnapshot, ManagementReply,
     ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider, OauthEvent, OauthStart,
     PluginItem, PluginReply, ProviderAction, ProviderEntry, RuntimeAction, RuntimeItem,
-    RuntimesError, SandboxBackend, SessionItem, SessionPort, SubagentModelPolicy, SwitchKind,
-    Update, Usage, stored_title,
+    RuntimesError, SandboxBackend, SessionItem, SessionPort, SessionsScope, SubagentModelPolicy,
+    SwitchKind, Update, Usage, stored_title,
 };
 use crate::model::view::{
     LineState, LineView, SideLine, TaskOutputState, TaskTarget, WorkflowInventory,
@@ -256,7 +256,7 @@ struct Worker {
     output: Option<OutputWatch>,
     /// The admitted read can outlive its detail; false discards that old reply.
     output_request: Option<(u64, bool)>,
-    catalog_request: Option<(u64, String, bool)>,
+    catalog_request: Option<(u64, String, bool, SessionsScope)>,
     /// When the next snapshot goes out; set by the first unpublished change.
     publish_at: Option<tokio::time::Instant>,
     /// The `shell.run` in flight: its request id and run id.
@@ -674,7 +674,7 @@ struct CancelNotice {
 
 impl Worker {
     async fn cancel_catalog(&mut self) -> crate::Result<()> {
-        if let Some((request, _, _)) = self.catalog_request.take()
+        if let Some((request, _, _, _)) = self.catalog_request.take()
             && self.client.offers("session.catalog.cancel")
         {
             self.client
@@ -682,6 +682,17 @@ impl Worker {
                 .await?;
         }
         Ok(())
+    }
+
+    /// The catalog `cwd` for `scope`: one workspace, the repository's set, or
+    /// none. A path that is not UTF-8 goes out as its lossy string, the one
+    /// the summaries fallback filters with.
+    fn scope_cwd(&self, scope: &SessionsScope) -> Option<serde_json::Value> {
+        match scope {
+            SessionsScope::Workspace => Some(json!(self.options.cwd.to_string_lossy())),
+            SessionsScope::Repository(workspaces) => Some(json!(workspaces)),
+            SessionsScope::All => None,
+        }
     }
 
     /// Creates or resumes the session the process was started for.
@@ -777,8 +788,10 @@ impl Worker {
 
     /// `session.create` parameters: the workspace and, when one is chosen,
     /// the permission preset, which the Session's branches and members inherit.
+    /// A path that is not UTF-8 goes out as its lossy string, as the catalog
+    /// scope sends it.
     fn create_params(&self) -> serde_json::Value {
-        let mut params = json!({"cwd": self.options.cwd});
+        let mut params = json!({"cwd": self.options.cwd.to_string_lossy()});
         if let Some(policy) = permission::creation_policy(&self.options) {
             params["permissionPolicy"] = policy;
         }
@@ -1213,6 +1226,7 @@ impl Worker {
                 query,
                 cursor,
                 show_acp,
+                scope,
             } => {
                 self.cancel_catalog().await?;
                 let paged = self.client.offers("session.catalog");
@@ -1220,6 +1234,9 @@ impl Worker {
                     let mut params = json!({"limit":50,"query":query,"withPreview":true});
                     if show_acp && self.client.offers("session.catalog.origins") {
                         params["withAcpSessions"] = json!(true);
+                    }
+                    if let Some(cwd) = self.scope_cwd(&scope) {
+                        params["cwd"] = cwd;
                     }
                     if let Some(cursor) = cursor {
                         params["cursor"] = cursor.into();
@@ -1229,12 +1246,26 @@ impl Worker {
                     ("session.summaries", json!({}))
                 };
                 match self.client.send(method, params).await {
-                    Ok(request) => self.catalog_request = Some((request, id, paged)),
+                    Ok(request) => self.catalog_request = Some((request, id, paged, scope)),
                     Err(error) => self.send(Update::Sessions {
                         id,
                         paged,
                         result: Err(error.to_string()),
                     }),
+                }
+            }
+            Command::FindRepository => {
+                let usable = self.client.offers("session.catalog.workspaces")
+                    || !self.client.offers("session.catalog");
+                if usable {
+                    let updates = self.updates.clone();
+                    let workspace = self.options.cwd.clone();
+                    tokio::spawn(async move {
+                        let workspaces = repository_workspaces(&workspace).await;
+                        if workspaces.len() > 1 {
+                            let _ = updates.send(Update::RepositoryWorkspaces(workspaces));
+                        }
+                    });
                 }
             }
             Command::CloseSessions => self.cancel_catalog().await?,
@@ -1610,11 +1641,19 @@ impl Worker {
                     return Ok(());
                 }
                 let model = self.model.clone();
-                match configure::run(&mut self.client, &self.session_id, model.as_ref(), &text)
-                    .await
-                {
-                    Ok(report) => self.report(report.lines.join("\n"), false),
-                    Err(error) => self.report(error.to_string(), true),
+                let result =
+                    configure::run(&mut self.client, &self.session_id, model.as_ref(), &text).await;
+                if matches!(text.as_str(), "/effort" | "/reasoning") {
+                    self.send(Update::EffortChoices(
+                        result
+                            .map(|report| report.effort.expect("bare effort query has choices"))
+                            .map_err(|error| error.to_string()),
+                    ));
+                } else {
+                    match result {
+                        Ok(report) => self.report(report.lines.join("\n"), false),
+                        Err(error) => self.report(error.to_string(), true),
+                    }
                 }
             }
             Command::SelectModel {
@@ -3490,9 +3529,9 @@ impl Worker {
         if self
             .catalog_request
             .as_ref()
-            .is_some_and(|(request, _, _)| *request == id)
+            .is_some_and(|(request, ..)| *request == id)
         {
-            let (_, id, paged) = self
+            let (_, id, paged, scope) = self
                 .catalog_request
                 .take()
                 .expect("matched catalog request");
@@ -3514,6 +3553,12 @@ impl Worker {
                 };
                 if !paged {
                     sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+                    let workspace = self.options.cwd.to_string_lossy();
+                    sessions.retain(|session| match &scope {
+                        SessionsScope::Workspace => session.cwd == workspace.as_ref(),
+                        SessionsScope::Repository(workspaces) => workspaces.contains(&session.cwd),
+                        SessionsScope::All => true,
+                    });
                 }
                 Ok((
                     sessions
@@ -4143,6 +4188,74 @@ fn compact_reply(result: Result<serde_json::Value, client::RpcError>) -> Option<
             _ => Some(CompactReply::Failed(error.message)),
         },
     }
+}
+
+/// The workspaces `/resume` offers as one repository: the launch workspace
+/// and the same relative directory in every worktree of its git repository.
+/// Both reads share one two-second bound; a git that fails or does not answer
+/// leaves the set empty, and the picker keeps its two other scopes.
+async fn repository_workspaces(workspace: &std::path::Path) -> Vec<String> {
+    let read = async {
+        let root = git_output(workspace, &["rev-parse", "--show-toplevel"]).await?;
+        let root = std::path::PathBuf::from(root.trim());
+        let root = std::fs::canonicalize(&root).unwrap_or(root);
+        let relative = workspace.strip_prefix(&root).ok()?;
+        let list = git_output(workspace, &["worktree", "list", "--porcelain", "-z"]).await?;
+        Some(worktree_workspaces(&list, relative, workspace))
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), read)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+/// One git read from the workspace; a failed read is no answer.
+async fn git_output(workspace: &std::path::Path, args: &[&str]) -> Option<String> {
+    let output = tokio::process::Command::new("git")
+        .current_dir(workspace)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// The listed worktrees, each joined with the workspace's relative directory.
+fn worktree_workspaces(
+    list: &str,
+    relative: &std::path::Path,
+    workspace: &std::path::Path,
+) -> Vec<String> {
+    let mut workspaces = vec![workspace.to_string_lossy().into_owned()];
+    let mut entry: Option<&str> = None;
+    let mut bare = false;
+    for field in list.split('\0') {
+        if field.is_empty() {
+            if let Some(path) = entry.take()
+                && !bare
+            {
+                let path = std::path::Path::new(path);
+                let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+                let workspace = path.join(relative).to_string_lossy().into_owned();
+                if !workspaces.contains(&workspace) {
+                    workspaces.push(workspace);
+                }
+            }
+            bare = false;
+        } else if let Some(path) = field.strip_prefix("worktree ") {
+            entry = Some(path);
+        } else if field == "bare" {
+            bare = true;
+        }
+    }
+    workspaces
 }
 
 #[derive(Deserialize)]

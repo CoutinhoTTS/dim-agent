@@ -55,8 +55,10 @@ pub const STRINGS: &[&str] = &[
     "Ctrl+T run",
     "Ctrl+X remove",
     "Tab inspect",
-    "Remove {name}? Enter confirm · Esc cancel",
-    "Reset {name}? Enter confirm · Esc cancel",
+    "Remove {name}?",
+    "Reset {name}?",
+    "Enter confirm",
+    "Esc cancel",
     "↑↓ scroll · Esc back",
     "Loading...",
     "No entries.",
@@ -508,11 +510,15 @@ impl ManagementPanel {
                 .entry(id)
                 .map(|entry| (safe_line(&entry.label), entry.remove_verb))
                 .unwrap_or_else(|| (safe_line(id), RemoveVerb::default()));
-            let prompt = match verb {
-                RemoveVerb::Remove => "Remove {name}? Enter confirm · Esc cancel",
-                RemoveVerb::Reset => "Reset {name}? Enter confirm · Esc cancel",
+            let question = match verb {
+                RemoveVerb::Remove => "Remove {name}?",
+                RemoveVerb::Reset => "Reset {name}?",
             };
-            self.list.set_hint(tf(prompt, &[("name", &label)]));
+            self.list.set_confirmation(
+                tf(question, &[("name", &label)]),
+                t("Enter confirm").to_owned(),
+                t("Esc cancel").to_owned(),
+            );
             return;
         }
         if self.detail.is_some() {
@@ -886,7 +892,6 @@ impl ManagementPanel {
         if !footer.is_empty() {
             footer.insert(0, String::new());
         }
-        footer.truncate(rows.saturating_sub(2 + 3 + 1));
         self.list.render_with_footer(width, rows, p, &footer)
     }
 }

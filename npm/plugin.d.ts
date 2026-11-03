@@ -90,8 +90,6 @@ export type FileAccess = 'read-only' | 'workspace-read-write' | 'unrestricted';
 export type ToolApproval = 'ask' | 'bypass';
 export interface PermissionPolicy {
   preset: PermissionPreset;
-  fileAccess?: FileAccess;
-  toolApproval?: ToolApproval;
   allowedTools: string[];
   disallowedTools: string[];
 }

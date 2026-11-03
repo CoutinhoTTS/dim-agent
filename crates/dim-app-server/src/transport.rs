@@ -696,6 +696,7 @@ async fn run_connection(
                                             methods.push("session.catalog");
                                             methods.push("session.catalog.cancel");
                                             methods.push("session.catalog.origins");
+                                            methods.push("session.catalog.workspaces");
                                         }
                                         methods
                                     } else {

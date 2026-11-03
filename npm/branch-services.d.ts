@@ -228,6 +228,79 @@ export interface Dispatcher {
   changed(): Promise<void>
 }
 
+/** Which branches a query covers. */
+export type TimelineQueryScope =
+  | /** The queried branch alone. */ "branch"
+  | /** The branch chain: each ancestor up to its cut, root first, then the queried branch. */ "chain"
+
+/**
+ * The end a page is taken from. A reply is always ordered by chain position
+ * and then sequence, in this direction; the offset counts from that end.
+ */
+export type TimelineQueryDirection =
+  | /** Oldest first: the page is the oldest matching facts, and `offset` starts it further along. */ "ascending"
+  | /** Newest first: the page is the newest matching facts, and `offset` starts it further back. */ "descending"
+
+/**
+ * One of the envelope's two context flags a query may name. Naming either
+ * returns the events that carry at least one named flag.
+ */
+export type TimelineQueryFlag =
+  | /** The flag that puts an event in the rendered context. */ "render"
+  | /** The flag that puts an event in the projection's checkpoint state. */ "state"
+
+/** One equality against one JSON scalar of an event's data. */
+export interface TimelineQueryPredicate {
+  /**
+   * Field names inside the event's data joined by dots; no array indexing
+   * and no wildcards.
+   */
+  path: string
+  /** The JSON scalar the path must equal. */
+  value: unknown
+}
+
+/**
+ * One bounded read of a branch's facts: what it covers, at which published
+ * sequence, what it accepts, and how much of the result it returns.
+ */
+export interface TimelineQuery {
+  scope: TimelineQueryScope
+  /**
+   * The end a page is taken from; ascending is the default. A reply is
+   * ordered by chain position and then sequence in this direction.
+   */
+  direction?: TimelineQueryDirection
+  /** Event kinds (`domain/name`) the read accepts; empty accepts every kind. */
+  kinds?: string[]
+  /**
+   * The context flags the read accepts; empty constrains nothing, and a
+   * non-empty set accepts events carrying at least one named flag.
+   */
+  flags?: TimelineQueryFlag[]
+  /** When named, only the event with this id. */
+  event_id?: string | null
+  /** One equality the event's data must satisfy. */
+  predicate?: TimelineQueryPredicate | null
+  /** How many matching events the page returns; nonzero by type. */
+  limit: number | bigint
+  /** How many matching events the read skips before the page. */
+  offset?: number | bigint
+}
+
+/**
+ * The facts a query read, in chain order and then sequence, in the query's
+ * direction, each with its position in the same order.
+ */
+export interface TimelineQueryReply {
+  events: import('./plugin.js').BranchEvent[]
+  /**
+   * One position per event, in the same order: the branch the event was
+   * read from and its sequence there.
+   */
+  positions: ({ branch_id: string; sequence: number | bigint })[]
+}
+
 export interface TraceStep {
   handler: string
   result?: { type: string; name: string; data: unknown; tags?: string[]; context_render?: boolean; context_state?: boolean } | null
@@ -262,6 +335,21 @@ export interface Timeline {
   hasPending(): Promise<boolean>
   /** @throws {AgentErrorThrown} */
   history(through?: number | bigint | null): Promise<import('./plugin.js').BranchEvent[]>
+  /**
+   * One bounded read over this branch or over its chain ([ADR 019](../../../../docs/adr/019-event-query.md),
+   * [plugin contract §5.4](../../../../docs/design/plugin-contract.md#54-the-event-query)):
+   * the direction, kinds, flags, event id, predicate, limit and offset
+   * select the facts, and the reply is up to `limit` of them in chain order
+   * and then sequence, in the query's direction, each with its position. A
+   * chain read is each ancestor to its cut and then this branch, root first
+   * ascending and this branch first descending; the offset the earlier
+   * segment did not use moves to the next one, so paging is skipping and a
+   * page shorter than the limit means the selection is exhausted. The read
+   * never returns a fact above a branch's coverage: an ancestor to its cut,
+   * this branch to its published head.
+   * @throws {AgentErrorThrown}
+   */
+  query(query: TimelineQuery): Promise<TimelineQueryReply>
   /**
    * Reads the rows this projection consumes after an event cursor; a cursor
    * inside an atomic batch reads that row and filters by sequence. The event

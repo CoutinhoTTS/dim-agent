@@ -172,7 +172,6 @@ async fn workspace_write_asks_for_each_external_mutation() {
                 preset: PermissionPreset::WorkspaceWrite,
                 allowed_tools: vec!["write".into(), "edit".into()],
                 disallowed_tools: vec![],
-                ..Default::default()
             },
         )
         .await

@@ -345,7 +345,7 @@ Attachments（[A.2](../plugins/Attachments.md#a2-attachmentput)）在 `Deps` 中
 
 ### 11.1 读取 Session 文件
 
-**决定：模型读取 Session 文件与读取任何文件相同。Session 自有文件是固定事实之一，所以读取通过文件范围检查且不记录授权。工具审批独立，显式 Ask 仍可对读取询问。**
+**决定：模型读取 Session 文件与读取任何文件相同。Session 自有文件是固定事实之一，所以读取通过文件范围检查且不记录授权。工具准入遵循预设与工具列表。**
 [Permission 合同](../../../architecture/rust-agent/plugins/Permission.md#policy-contract)拥有两个闸门与旧行为；
 所有权不是显式工具允许。[ADR 014](../../../adr/014-file-access-facts.md) 根据工作区、系统目录、Session 自有文件和授权决定文件读写；[ADR 013](../../../adr/013-command-output-ownership.md) 增加第二张所有权表，所以 `owns` 也回答命令输出。
 
@@ -359,8 +359,7 @@ Attachments（[A.2](../plugins/Attachments.md#a2-attachmentput)）在 `Deps` 中
    Read only or Workspace read/write, inside facts -----> pass file scope
    Read only or Workspace read/write, outside facts ----> scope Ask
    Unrestricted ----------------------------------------> pass file scope
-   tool gate -------------------------------------------> Ask unless allowed or bypassed;
-                                                         legacy risk behavior if override absent
+   tool gate -------------------------------------------> preset risk rules and tool lists
    scope Ask + tool Ask --------------------------------> one approval (exec denies and exits 3)
    |
    v

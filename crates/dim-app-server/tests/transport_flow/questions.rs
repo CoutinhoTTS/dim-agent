@@ -191,42 +191,6 @@ async fn a_client_answers_a_waiting_question_through_rpc() {
     server.join().await.unwrap();
 }
 
-/// Acceptance 2 on the wire: `session.create {interactive: false}` declares
-/// `ask_user` and lists the method, and the call returns the non-interactive
-/// error at once.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_non_interactive_session_answers_ask_user_at_once() {
-    let store = Store::new();
-    let server = launch_questions(&store).await;
-    let mut client = Client::new_version(&server, false, 3).await;
-    let sid = session(&mut client, false).await;
-    let methods = client
-        .rpc("session.methods", json!({"sessionId":sid}))
-        .await;
-    assert!(
-        methods["result"]["methods"]
-            .as_array()
-            .unwrap()
-            .contains(&json!({"name":"session.question.respond","mutating":true}))
-    );
-    submit(&mut client, &sid, ASK).await;
-    let settled = step(&mut client, "tool-result").await;
-    assert_eq!(
-        settled["event"]["data"]["results"][0]["result"],
-        json!({
-            "content": "No one is available to answer questions in this session. Proceed without asking.",
-            "isError": true
-        })
-    );
-    assert_ok(
-        &client
-            .rpc("session.idle", json!({"sessionId":sid,"branchId":"main"}))
-            .await,
-    );
-    server.shutdown();
-    server.join().await.unwrap();
-}
-
 /// Echoes like the mock model, but names every tool call it proposes `c1`,
 /// as a provider whose call ids restart in each response; keeps every
 /// request.

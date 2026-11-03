@@ -110,7 +110,7 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 
 | Capability | CLI | Web | Source |
 | --- | --- | --- | --- |
-| New, resume, Session list | done; project/all switch: none. `/resume` labels each row by creation origin and hides ACP Sessions unless the preference says otherwise | done (grouped by directory) | [Session classification](appserver/session-classification.md) |
+| New, resume, Session list | done; `/resume` opens on this workspace and `Ctrl+S` cycles it, this repository's worktrees when offered, and every workspace. It labels each row by creation origin and hides ACP Sessions unless the preference says otherwise | done (grouped by directory) | [Session classification](appserver/session-classification.md), [CLI commands](cli-commands.md#the-resume-picker) |
 | Export conversation | done in the line client and `dimcode session export`; inside the terminal UIs: none | — | [CLI commands](cli-commands.md) |
 | `/timeline` and message actions | done in the TUI; it also replaces `/history`'s paging | — | [Timeline UI §4.6](timeline-ui.md#46-timeline-jumping-to-a-message) |
 | Titles | automatic: done (optional SessionTitle package); manual rename: designed | — | [SessionTitle](plugins/SessionTitle.md) |
@@ -134,7 +134,7 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 | Open links, tool groups, `/tools` | done | done (rendering) | |
 | Streaming output, run status, terminal status and progress | done | done | |
 | File change feedback | done | done | |
-| Tool approvals | done (`/permissions` sets File access and Tool approval and manages command rules; `/approvals` and `/approval` are aliases) | done | [ADR 003](../adr/003-approval-scope.md) |
+| Tool approvals | done (`/permissions` selects the preset and manages command rules; `/approvals` and `/approval` are aliases) | done | [ADR 003](../adr/003-approval-scope.md) |
 | Member tool-approval forwarding and original-action review | done | done | [Member approval](subagent-tool-approval.md), [shared client requirements](#member-tool-approval) |
 | User questions (`ask_user`) | done (line client and terminal UIs) | none | [Questions](plugins/Questions.md) (implemented in #269, #336, #351) |
 | Todo status | out | out | [overview](overview.md) §1 |

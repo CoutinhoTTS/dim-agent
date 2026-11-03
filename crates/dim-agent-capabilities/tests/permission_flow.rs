@@ -230,6 +230,26 @@ async fn granted_agent(
     grants: Arc<dyn ReadSessionGrants>,
     files: Arc<TestFiles>,
 ) -> MinimalHost {
+    granted_agent_with(
+        tools,
+        grants,
+        files,
+        HostPlatform::current(ShellStatus::Unavailable {
+            code: "PERMISSION_TEST",
+            reason: "The permission flow starts no process".into(),
+        })
+        .unwrap(),
+        None,
+    )
+    .await
+}
+async fn granted_agent_with(
+    tools: Arc<RiskTools>,
+    grants: Arc<dyn ReadSessionGrants>,
+    files: Arc<TestFiles>,
+    platform: HostPlatform,
+    associations: Option<Arc<dyn file_access::AssociateWorktree>>,
+) -> MinimalHost {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
         .timeline_store(Arc::new(MemoryTimelineStore::default()))
@@ -238,13 +258,10 @@ async fn granted_agent(
         .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))))
         .session_value(Arc::new(SessionGrantsHost(grants)))
         .process_value(Arc::new(SessionFilesHost(files)))
-        .process_value(Arc::new(
-            HostPlatform::current(ShellStatus::Unavailable {
-                code: "PERMISSION_TEST",
-                reason: "The permission flow starts no process".into(),
-            })
-            .unwrap(),
-        ));
+        .process_value(Arc::new(platform));
+    if let Some(associations) = associations {
+        builder.process_value(Arc::new(file_access::WorktreeAssociations(associations)));
+    }
     defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
     file_access::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
@@ -949,7 +966,7 @@ async fn updates_are_versioned_per_branch_take_effect_when_dispatched_and_surviv
         let tools = Arc::new(RiskTools::default());
         let agent = agent(tools.clone()).await;
         let session = agent
-            .create_session(config(preset(PermissionPreset::FullAccess)))
+            .create_session(config(serde_json::from_value(serde_json::json!({"preset":"full-access","fileAccess":"read-only","toolApproval":"ask","allowedTools":[],"disallowedTools":[]})).unwrap()))
             .await
             .unwrap();
         let permission = session.service::<Permission>("main").unwrap();
@@ -2272,3 +2289,7 @@ async fn an_advisor_withdrawn_while_its_advice_is_pending_counts_as_none() {
     session.close().await.unwrap();
     agent.close().await.unwrap();
 }
+
+#[cfg(unix)]
+#[path = "permission_flow/worktrees.rs"]
+mod worktrees;

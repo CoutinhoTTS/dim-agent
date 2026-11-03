@@ -153,7 +153,7 @@ The frontend directory is fixed when the daemon starts (§2.4); a daemon started
 | `projection.ts` | Folds `session.history` pages, `session.event` and `session.model.progress` into timeline rows (user, assistant text, thinking, tool call and result, approval), following `crates/dim-cli/src/projection.rs`; also tracks the waiting `ask_user` calls of each branch (`step/tool-call` until its batch's `step/tool-result`) and folds each branch's goal (`goal.ts`, a port of `crates/dim-cli/src/goal.rs`) |
 | Sidebar | Workspaces are Session summaries grouped by `cwd`; new Session by `session.create {cwd}` with a typed path or a known workspace |
 | Chat | Timeline (markdown, Shiki) with a message rail (one marker per user message from three messages on, as dim-agent's rail: hover shows the message and its first reply, a click scrolls it into view and marks it for a moment; `/timeline` is not offered, dim-agent has none), composer (submit, stop, model menu and independent permission controls, below), approval prompt (`approval.request` → `approval.respond`; "Allow for this session" → `session.grants.add` and "Always allow" for a simple `exec` command → `permission.set_rules`, both before the allow), question prompt for `ask_user` (`step/tool-call` → `session.question.respond`, closed by `step/tool-result`); the approval and question prompts take the composer's place; queued messages of the main line above the composer (`input/message` until `input/applied` or `input/deleted`; Steer and Remove → `session.input.withdraw`, Steer resends the message's content with the withdrawal); composer attachments: pasted or dropped images are sent as image content blocks (`session.submit` with `user.content`), a paste longer than 16 KiB is stored with `attachment.put` when the Session serves it and its path is named in the message, as the TUI does (`crates/dim-cli/src/attachments.rs`); `@` file mentions: the composer offers the files of the Session's workspace from `session.files.search` (WorkspaceTools; the TUI picker's index and ranking), inserts a file as `@path` and sends it as a Markdown link to its absolute path (`[@path](/abs)`, as the TUI sends it); a directory steps into `@dir/` |
-| Session permissions | The composer and `/permissions` expose independent File access and Tool approval controls for `main`, following [ADR 017](../adr/017-independent-permission-controls.md) and the [Permission policy contract](../architecture/rust-agent/plugins/Permission.md#policy-contract). The client keeps the complete policy from `session.permission.get` and `permission/changed`, shows effective file access, explicit tool choices or legacy risk behavior, and the tool allow/deny lists. Each versioned `session.permission.update` changes only the selected explicit dimension, preserving every other field including the legacy preset; conflicts refresh the policy without retry, and unsupported overrides never fall back to a preset. Unrestricted paths and Bypass ask for confirmation before widening. Process isolation links to its existing settings and is not changed by either control. |
+| Session permissions | The composer and `/permissions` select the `main` preset under [ADR 018](../adr/018-permission-is-the-preset.md) and the [Permission policy contract](../architecture/rust-agent/plugins/Permission.md#policy-contract). The client reads `session.permission.get` and `permission/changed`, displays the preset and tool lists, and preserves both lists in a versioned `session.permission.update`. Conflicts refresh without retrying. Choosing Full access requires confirmation. Process isolation links to its Settings control. |
 | Lines | Right detail panel with a Lines tree and one tab per opened line; each tab folds that line's own history and sends, stops, approves and ends on its `branchId` (§4.1) |
 | i18n | `en` and `zh-CN` |
 
@@ -353,7 +353,7 @@ optional account feature must not prevent identity or usage from loading.
 | Appearance | Language, system/light/dark theme and text size, applied immediately |
 | Agent defaults | Persisted model and supported execution defaults; no accidental mutation of an active Session |
 | Modality | Operation defaults for image generation, editing, enhancement and understanding from `modality.capabilities`, written with `modality.configure` and its snapshot revision; understanding's Session consumer is a requirement on Agent/Prompt |
-| MCP | List, add/edit transports, enable/disable, test, authentication/sign-out and confirmed removal, preserving secret fields omitted from edits |
+| MCP | List, add/edit transports, enable/disable, test, authentication/sign-out, confirmed removal and user↔project scope migration; secret fields stay omitted from edits and a move never writes them into `.mcp.json` |
 | Plugins | List, enable/disable, installation/update/removal and the owner's typed settings surfaces |
 | Skills | List, enable/disable, source installation, update and confirmed removal |
 | Permissions | Default execution/network settings and command-rule management, with confirmation for privilege increases. The Execution card reads `host.execution.backend` and shows the owner's sandbox-backend reason when the host has none; the browser never infers the platform |
@@ -363,6 +363,46 @@ optional account feature must not prevent identity or usage from loading.
 Use the current owner's semantics when old terminology no longer describes the
 system, and document the mapping. Reuse existing Settings, MCP, PluginManager,
 Skills and Session owners rather than adding parallel browser-only state.
+
+#### MCP scope migration
+
+The MCP detail offers “Move to project” and “Move to user” with a confirmation
+that names the source and destination. The action sends `mcp.move` with the id,
+both scopes, `cwd` for the project side and both source revisions from
+`mcp.catalog`; it is not offered for a plugin entry or when `mcp.move` is not
+advertised. Into project, the confirmation says that withheld values stay in the
+user's local Dim configuration, the workspace file receives only the public
+configuration, and the entry starts disabled. Into user, it says the entry keeps
+its current enabled state. If a higher-precedence source holds the same id, the
+confirmation states that the moved entry will be shadowed until that entry is
+removed.
+
+After a move the page reloads the catalog and opens the destination entry. When
+`mcp.configuration` reports `secretsInUserScope`, the withheld editors (`args`,
+environment, headers, bearer, URL and the metadata URL) are disabled with the
+reason that they are edited in user scope; `mcp.save` is not offered, and
+non-secret fields save through `mcp.update`. The page offers “Move to user to
+edit” as the one-step action for a withheld field: it calls `mcp.move` from
+project to user with the current revisions, then the entry is fully editable; the
+same action is offered when `mcp_credentials_are_user_scoped` answers. On
+`mcp_move_conflict` or `mcp_settings_conflict` the page keeps the form and
+rereads. On `mcp_move_partial` it follows the direction's recovery: into project
+remove the destination and retry, into user remove the project source; it never
+removes the source while the destination may be incomplete, and it never resends
+the move blindly because the destination id would answer `mcp_move_conflict`.
+
+```text
+┌ MCP · github ────────────────────────────────────────────┐
+│ Source: user                                             │
+│ [Move to project…]  [Remove]                             │
+│ Withheld values stay in your local Dim configuration;    │
+│ the workspace file gets only the public configuration.   │
+│ The entry starts disabled.                               │
+└──────────────────────────────────────────────────────────┘
+```
+
+Only `mcp.move` is added to the MCP page's admitted methods; no secret value is
+read from the owner or stored in the browser.
 
 #### Diagnostics: the legacy logging controls
 
@@ -569,7 +609,7 @@ defaults, archive flags or copied credentials cannot substitute for owner behavi
 | [Modality](plugins/Modality.md) | Model capability declarations do not select or execute image generation, editing, enhancement or understanding tasks | Typed per-operation defaults with owner-computed options, effective automatic resolution and actionable reasons; `modality.capabilities`/`modality.configure` consumed by task dispatch; save persists before success; exactly those two methods admitted on the Web entry. Understanding's Session consumer is the Agent/Prompt requirement in Modality §9.4. |
 | [Session catalog](appserver/session-catalog.md) | A saved Session is not necessarily archived; reopening it cannot represent restore | Durable archive classification with search, restore and confirmed deletion; commit classification before publishing the new catalog view |
 | Skills | Plugin packages do not cover manifest-free skill repositories or selective installation | Owner-managed repository preview, selected installation and loose-skill update/removal, with explicit overwrite confirmation and catalog publication after persistence |
-| MCP | User and project sources have independent revisions, and safe projections deliberately hide credentials | An owner operation for scope migration that preserves hidden values and checks both source revisions; publish success only after the move commits |
+| MCP | User and project sources have independent revisions, and safe projections deliberately hide credentials | `mcp.move` reads the complete entry internally, checks both source revisions, keeps withheld values in the user-scope `mcp-secrets` overlay instead of `.mcp.json`, starts a project destination disabled, and reports a partial move as an error recovered by direction (remove destination and retry, or remove source); exactly `mcp.move` is admitted for the control. |
 
 Legacy permission patterns and tracing behavior do not override the current
 [command-rule design](appserver/permission-command-rules.md) or accepted ADR 016.

@@ -62,6 +62,9 @@ mod native_storage;
 #[path = "transport_flow/compaction.rs"]
 mod compaction;
 
+#[path = "transport_flow/default_effort.rs"]
+mod default_effort;
+
 #[path = "transport_flow/recall.rs"]
 mod recall;
 
@@ -2418,3 +2421,6 @@ async fn unmounted_management_preserves_mock_sessions_and_wire_admission() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+#[path = "transport_flow/worktrees.rs"]
+mod worktrees;

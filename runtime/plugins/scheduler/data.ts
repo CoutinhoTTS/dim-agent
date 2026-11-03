@@ -54,9 +54,7 @@ export function cap(requested: PermissionPolicy, bound: PermissionPolicy) {
 }
 
 export function within(actual: PermissionPolicy, bound: PermissionPolicy): boolean {
-  let capped: PermissionPolicy
-  try { capped = cap(actual, bound) }
-  catch (error) { if (error instanceof ScheduleError) return false; throw error }
+  const capped = cap(actual, bound)
   return actual.preset === capped.preset
     && [actual.allowedTools, actual.disallowedTools].every((names, index) => {
       const result = index === 0 ? capped.allowedTools : capped.disallowedTools

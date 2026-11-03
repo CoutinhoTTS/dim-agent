@@ -224,7 +224,7 @@ fn tui_home_remembers_permissions_without_login_and_applies_them_to_the_first_me
             } else {
                 terminal.until("test / model");
                 terminal.write(b"/new\r");
-                terminal.until("new session");
+                terminal.until("─ new session ─");
             }
             let mark = terminal.transcript.len();
             terminal.write(b"/permissions\r");
@@ -618,7 +618,7 @@ fn interactive_approvals_list_switch_and_edit_rules_with_version_checks() {
     terminal.until("permission: workspace-write");
     terminal.until("\n> ");
     terminal.write(b"/approvals\n");
-    terminal.until("Legacy preset seed (main branch): workspace-write");
+    terminal.until("permission: workspace-write");
     terminal.until("  disallowed tools: blocked-tool");
     terminal.until("Command rules (user scope, every Session):");
     terminal.until("  1  allow  exact   cargo test");

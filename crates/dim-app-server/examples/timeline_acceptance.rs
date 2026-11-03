@@ -19,14 +19,17 @@ use dim_agent_capabilities::{
 };
 use dim_agent_runtime::{testing::MinimalHost, *};
 use dim_agent_types::*;
-use dim_app_server::storage::{SqliteStorage, SqliteTimelineStore};
+use dim_app_server::storage::{SessionStore, SqliteStorage, SqliteTimelineStore};
 use rusqlite::Connection;
 use rutis::host::CtxHost;
 use std::{
     io::{BufRead, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
@@ -361,12 +364,22 @@ fn timed(
     )?;
     Ok(receiver)
 }
-/// `rounds [BRANCHES [PER_SECOND [CHAINS]]]`: for five seconds each of
+#[derive(Clone, Copy)]
+enum ChainKind {
+    Turn,
+    Consumed,
+}
+/// `rounds [BRANCHES [PER_SECOND [CHAINS [EVENT]]]]`: for five seconds each of
 /// BRANCHES Sessions appends a 128-byte `step/text` delta PER_SECOND times a
 /// second, the branches spread over the period, while each of CHAINS more
-/// Sessions runs chains of ten `turn/start` writes, each appended once the
-/// previous one is published, 20 to 80 ms apart.
-async fn rounds(branches: usize, per_second: f64, chains: usize) -> std::result::Result<(), Error> {
+/// Sessions runs chains of ten EVENT writes, each appended once the previous
+/// one is published, 20 to 80 ms apart.
+async fn rounds(
+    branches: usize,
+    per_second: f64,
+    chains: usize,
+    chain_kind: ChainKind,
+) -> std::result::Result<(), Error> {
     durable_vfs::install_tracking();
     let directory = directory("rounds");
     let db = SqliteStorage::open(directory.join("dimcode.sqlite"))?;
@@ -431,9 +444,14 @@ async fn rounds(branches: usize, per_second: f64, chains: usize) -> std::result:
                     let began = Instant::now();
                     for _ in 0..10 {
                         sequence += 1;
-                        let kind = EventKind::TurnStart(TurnStartData {
-                            turn_id: format!("turn-{sequence}"),
-                        });
+                        let kind = match chain_kind {
+                            ChainKind::Turn => EventKind::TurnStart(TurnStartData {
+                                turn_id: format!("turn-{sequence}"),
+                            }),
+                            ChainKind::Consumed => EventKind::InputConsumed(InputConsumedData {
+                                input_id: format!("input-{sequence}"),
+                            }),
+                        };
                         let (result, delay, round) =
                             timed(&store, &session, sequence, kind)?.await?;
                         result?;
@@ -531,6 +549,188 @@ async fn paged_reads() -> std::result::Result<(), Error> {
     db.close().await?;
     Ok(())
 }
+/// `read-load [STREAMS [PER_SECOND [EVENTS]]]`: STREAMS Sessions append a
+/// 128-byte delta PER_SECOND times a second, two readers read the head and a
+/// 64-event page of a Session of EVENTS 2 KiB events, and two Sessions each
+/// append the next `turn/start` once the previous one is published. It
+/// reports read and publication latency over an idle window, during a fork of
+/// the large Session and during a delete of the fork.
+async fn read_load(
+    streams: usize,
+    per_second: f64,
+    events: usize,
+) -> std::result::Result<(), Error> {
+    durable_vfs::install_tracking();
+    let directory = directory("read-load");
+    let db = SqliteStorage::open(directory.join("dimcode.sqlite"))?;
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("source", &SessionConfig::default())
+        .await?;
+    for index in 0..streams {
+        store
+            .create_session(&format!("stream-{index}"), &SessionConfig::default())
+            .await?;
+    }
+    for index in 0..2 {
+        store
+            .create_session(&format!("chain-{index}"), &SessionConfig::default())
+            .await?;
+    }
+    let mut sequence = 0;
+    while sequence < events {
+        let count = 256.min(events - sequence);
+        let batch = (0..count)
+            .map(|_| {
+                sequence += 1;
+                record(
+                    sequence as u64,
+                    EventKind::InputMessage(InputMessageData::text("x".repeat(2048), None)),
+                )
+            })
+            .collect();
+        committed(&store, "source", batch).await?;
+    }
+    let source = key("source");
+    let through = store.head(&source).await?;
+    durable_vfs::reset_measurement();
+    let stop = Arc::new(AtomicBool::new(false));
+    let reads = Arc::new(Mutex::new(Vec::<(Instant, Instant, f64)>::new()));
+    let publishes = Arc::new(Mutex::new(Vec::<(Instant, Instant, f64)>::new()));
+    let mut tasks = Vec::new();
+    for index in 0..streams {
+        let (store, stop) = (store.clone(), stop.clone());
+        let period = Duration::from_secs_f64(1. / per_second);
+        tasks.push(tokio::spawn(async move {
+            let mut tick = tokio::time::interval(period);
+            let mut sequence = 0;
+            while !stop.load(Ordering::Relaxed) {
+                tick.tick().await;
+                sequence += 1;
+                store.append(
+                    key(&format!("stream-{index}")),
+                    vec![record(
+                        sequence,
+                        EventKind::Text(DeltaData {
+                            turn_id: "turn".into(),
+                            request_id: "request".into(),
+                            delta: "x".repeat(128),
+                        }),
+                    )],
+                    Box::new(|_| {}),
+                )?;
+            }
+            Ok::<_, Error>(())
+        }));
+    }
+    for _ in 0..2 {
+        let (store, reads, stop) = (store.clone(), reads.clone(), stop.clone());
+        let source = source.clone();
+        tasks.push(tokio::spawn(async move {
+            while !stop.load(Ordering::Relaxed) {
+                let start = Instant::now();
+                let head = store.head(&source).await?;
+                let after = head.saturating_sub(63).max(1);
+                drop(store.read_page(&source, after, 64, head).await?);
+                reads.lock().unwrap().push((
+                    start,
+                    Instant::now(),
+                    start.elapsed().as_secs_f64() * 1000.,
+                ));
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            Ok::<_, Error>(())
+        }));
+    }
+    for index in 0..2 {
+        let (store, publishes, stop) = (store.clone(), publishes.clone(), stop.clone());
+        tasks.push(tokio::spawn(async move {
+            let session = format!("chain-{index}");
+            let mut sequence = 0;
+            while !stop.load(Ordering::Relaxed) {
+                sequence += 1;
+                let start = Instant::now();
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                store.append(
+                    key(&session),
+                    vec![record(
+                        sequence,
+                        EventKind::TurnStart(TurnStartData {
+                            turn_id: format!("turn-{sequence}"),
+                        }),
+                    )],
+                    Box::new(move |result| {
+                        let _ = sender.send(result);
+                    }),
+                )?;
+                receiver
+                    .await
+                    .map_err(|error| AgentError::Storage(error.to_string()))??;
+                publishes.lock().unwrap().push((
+                    start,
+                    Instant::now(),
+                    start.elapsed().as_secs_f64() * 1000.,
+                ));
+                tokio::task::yield_now().await;
+            }
+            Ok::<_, Error>(())
+        }));
+    }
+    let load_start = Instant::now();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let sessions = SessionStore::new(db.clone(), rutis::Ctx::root()?, 0);
+    let fork_start = Instant::now();
+    sessions.fork_session("source", "fork", through).await?;
+    let fork_end = Instant::now();
+    let fork_ms = fork_start.elapsed().as_secs_f64() * 1000.;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let delete_start = Instant::now();
+    store.rollback_session("fork").await?;
+    let delete_end = Instant::now();
+    let delete_ms = delete_start.elapsed().as_secs_f64() * 1000.;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    stop.store(true, Ordering::Relaxed);
+    for task in tasks {
+        task.await??;
+    }
+    let window = |samples: &[(Instant, Instant, f64)], from: Instant, to: Instant| {
+        let mut values: Vec<f64> = samples
+            .iter()
+            .filter(|(started, ended, _)| *started < to && *ended >= from)
+            .map(|(_, _, value)| *value)
+            .collect();
+        (!values.is_empty()).then(|| {
+            let max = values.iter().copied().fold(0.0, f64::max);
+            serde_json::json!({"count":values.len(),"p50Ms":quantile(&mut values,0.5),"p99Ms":quantile(&mut values,0.99),"maxMs":max})
+        })
+    };
+    {
+        let (reads, publishes) = (reads.lock().unwrap(), publishes.lock().unwrap());
+        let measured = durable_vfs::measurement();
+        println!(
+            "{}",
+            serde_json::json!({
+                "scenario":"read-load","streams":streams,"perSecond":per_second,"events":events,"eventBytes":2048,
+                "readBefore":window(&reads,load_start,fork_start),
+                "readFork":window(&reads,fork_start,fork_end),
+                "readDelete":window(&reads,delete_start,delete_end),
+                "publishBefore":window(&publishes,load_start,fork_start),
+                "publishFork":window(&publishes,fork_start,fork_end),
+                "publishDelete":window(&publishes,delete_start,delete_end),
+                "forkMs":fork_ms,
+                "deleteMs":delete_ms,
+                "walWrittenBytes":measured.wal_bytes,
+                "checkpointSyncs":measured.checkpoint_syncs,
+                "debugAssertions":cfg!(debug_assertions),
+                "database":directory
+            })
+        );
+    }
+    store.close().await?;
+    db.close().await?;
+    Ok(())
+}
+
 async fn reads() -> std::result::Result<(), Error> {
     let directory = directory("reads");
     let db = SqliteStorage::open(directory.join("dimcode.sqlite"))?;
@@ -706,6 +906,14 @@ impl TimelineStore for BarrierStore {
         interpreter: &'a str,
     ) -> BoxFuture<'a, Result<Option<RecoverySnapshot>>> {
         self.inner.latest_snapshot(k, s, interpreter)
+    }
+    fn query<'a>(
+        &'a self,
+        k: &'a TimelineKey,
+        query: &'a dim_agent_runtime::TimelineQuery,
+        through: u64,
+    ) -> BoxFuture<'a, Result<dim_agent_runtime::TimelineQueryPage>> {
+        self.inner.query(k, query, through)
     }
     fn append(&self, k: TimelineKey, e: Vec<StoredEvent>, publish: PublishCallback) -> Result<()> {
         let mode = self.mode.clone();
@@ -934,7 +1142,7 @@ async fn main() -> std::result::Result<(), Error> {
     match args.next().as_deref() {
         Some("memory") => memory(args.next().map(|n| n.parse()).transpose()?.unwrap_or(2000)).await,
         Some("rounds") => {
-            let usage = "usage: rounds [BRANCHES [PER_SECOND [CHAINS]]], BRANCHES and CHAINS counts (default 64 and 0, not both 0), PER_SECOND a positive rate (default 200)";
+            let usage = "usage: rounds [BRANCHES [PER_SECOND [CHAINS [EVENT]]]], BRANCHES and CHAINS counts (default 64 and 0, not both 0), PER_SECOND a positive rate (default 200), EVENT turn or consumed (default turn)";
             let count = |arg: Option<String>, default| {
                 arg.map_or(Some(default), |count| count.parse::<usize>().ok())
                     .ok_or(usage)
@@ -948,10 +1156,36 @@ async fn main() -> std::result::Result<(), Error> {
                 })
                 .ok_or(usage)?;
             let chains = count(args.next(), 0)?;
+            let chain_kind = match args.next().as_deref() {
+                None | Some("turn") => ChainKind::Turn,
+                Some("consumed") => ChainKind::Consumed,
+                Some(_) => return Err(usage.into()),
+            };
             if branches == 0 && chains == 0 || args.next().is_some() {
                 return Err(usage.into());
             }
-            rounds(branches, per_second, chains).await
+            rounds(branches, per_second, chains, chain_kind).await
+        }
+        Some("read-load") => {
+            let usage = "usage: read-load [STREAMS [PER_SECOND [EVENTS]]], STREAMS a positive count (default 8), PER_SECOND a positive rate (default 100), EVENTS a positive count (default 12000)";
+            let count = |arg: Option<String>, default| {
+                arg.map_or(Some(default), |value| value.parse::<usize>().ok())
+                    .filter(|&value| value > 0)
+                    .ok_or(usage)
+            };
+            let streams = count(args.next(), 8)?;
+            let per_second = args
+                .next()
+                .map_or(Some(100.), |rate| rate.parse::<f64>().ok())
+                .filter(|&rate| {
+                    Duration::try_from_secs_f64(1. / rate).is_ok_and(|period| !period.is_zero())
+                })
+                .ok_or(usage)?;
+            let events = count(args.next(), 12000)?;
+            if args.next().is_some() {
+                return Err(usage.into());
+            }
+            read_load(streams, per_second, events).await
         }
         Some("reads") => reads().await,
         Some("paged-reads") => paged_reads().await,
@@ -973,6 +1207,6 @@ async fn main() -> std::result::Result<(), Error> {
             .await
         }
         Some("powerloss") => power_parent().await,
-        _ => Err("expected memory [steps], rounds [branches [per-second [chains]]], reads, crashes, or powerloss".into()),
+        _ => Err("expected memory [steps], rounds [branches [per-second [chains [event]]]], read-load [streams [per-second [events]]], reads, paged-reads, crashes, or powerloss".into()),
     }
 }

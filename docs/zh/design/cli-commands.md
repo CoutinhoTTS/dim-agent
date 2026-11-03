@@ -10,16 +10,29 @@ CLI 接口；当前可执行文件由[原生 CLI 合同](../../../crates/dim-cli
 
 ## 命令菜单
 
-scrollback 与 fullscreen TUI 都按分类分组，分类及分类内的命令名按其英文标识的字母顺序排列。
-搜索时匹配程度优先，同等匹配按分类和命令名排序。
-退出和挂起必须完整匹配命令名或别名才执行：选择不完整匹配时只补全命令名并保留输入框。
+scrollback 与 fullscreen TUI 都按固定的任务顺序分组：会话、模型与权限、扩展与自动化、界面、应用。
+分类内也使用以下固定顺序，不按字母或最近使用顺序排列：
+
+| 分类 | 命令顺序 |
+| --- | --- |
+| `session` | `/new`、`/resume`、`/timeline`、`/goal`、`/tasks`、`/lines`、`/branch`、`/fork`、`/compact`、`/usage`、`/rename`、`/web` |
+| `model` | `/models`、`/agent`、`/effort`、`/fast`、`/permissions`、`/connect`、`/login` |
+| `extensions` | `/skills`、`/mcp`、`/plugins`、`/hooks`、`/scheduled`、`/workflow`、`/workflow:save`、`/reload-skills`、`/runtime` |
+| `view` | `/theme`、`/language`、`/tools`、`/tui` |
+| `app` | `/settings`、`/keys`、`/exit` |
+
+`/fast` 仅在模型声明支持服务层级时列出。搜索时匹配程度优先，同等匹配保持上述任务顺序。
+排序不受界面语言影响；打开 `/` 默认选中 `/new`，Enter 会新建会话。未筛选列表中的 `/exit` 始终在最后。
+退出必须完整匹配命令名或别名才执行：选择不完整匹配时只补全命令名并保留输入框。
 完整输入的命令（包括隐藏命令）仍走各自的处理流程。
+菜单选择即使完整匹配命令名，也可能只补全：带行内参数的命令和 `/goal` 会填入输入框，等待另一次提交。
 菜单中的权限入口为 `/permissions`；`/approvals` 和 `/approval` 是完整输入时仍可使用的兼容别名。
 菜单不列出运行、排队和 steer 的按键，它们只由按键触发。菜单只列出斜杠命令：选择较早消息、滚动到顶部或底部等视图操作也不列出；
 `Tab`、`Home`、`End` 保留各自的绑定。
 
-两种模式下，菜单都适应终端可用的列数和行数。命令名优先于描述和快捷键标签；快捷键标签会挤占
-命令名时省略标签，但不改变按键绑定。短屏幕少显示一些命令，可见窗口跟随选择。
+两种模式下，菜单都适应终端可用的列数和行数。命令名优先于分类标签、描述和快捷键标签；必要时缩短
+分类标签以保留完整命令名。快捷键标签会挤占命令名时省略标签，但不改变按键绑定。
+短屏幕少显示一些命令，可见窗口跟随选择。
 Scrollback 保留菜单上方的命令草稿，必要时省略菜单标题和页脚；fullscreen 保留输入框上方的
 命令面板查询行和选中项。分类分组和排序不随终端尺寸变化。
 
@@ -27,14 +40,38 @@ Scrollback 保留菜单上方的命令草稿，必要时省略菜单标题和页
 但不超过终端高度。Fullscreen 先减少输入框的空白内边距和命令面板查询行的留白，避免两个输入区域
 重叠。草稿编辑器在剩余行数内滚动，保持光标可见且不丢弃文字。其他情况下保留通常的历史空间。
 
+列表面板同样遵守行数预算：绘制的行数不超过分给它的行数；分到不足两行时什么都不画，因为仅两条
+边框就要占满预算。列表占用其余部分留下的行。
+当列表画不出前三条时，提示说明从末尾逐行让出，其前的空行随最后一行一起让出。当连一行列表
+都放不下时，面板按此顺序放弃：剩余的提示说明、筛选区的留白（先放弃查询行下方的那一行）、
+页脚行（先放弃第一行）、边框上方的多行按键提示、查询行，最后是列表的最后一行。选中项和
+关闭键保留最久。底部边框放不下的按键提示整段丢弃，保留首段和关闭键。确认不按按键提示的规则缩短：
+先画完整的提问和两个按键，再画出用 `…` 截断的提问加两个按键，然后只画两个按键，再只画确认键，
+最后画用 `…` 截断的确认键；确认键保留最久。
+
+```text
+自然高度                                            短预算，5 行
+╭─ Sessions ─────────────────────────────────────╮  ╭─ Sessions ─────────────────────────────────────╮
+│                                                │  │                                                │
+│ >                                              │  │ >                                              │
+│                                                │  │ › [Chat] review the parser                     │
+│   [Chat] review the parser                     │  ╰────── Enter open · Ctrl+R refresh · Esc close ─╯
+│   [Chat] fix the flaky test                    │
+│   [Chat] release notes                         │
+╰────── Enter open · Ctrl+R refresh · Esc close ─╯
+```
+
 ```text
 Commands
-  app     /exit        exit
-  app     /keys        show the key bindings
-  model   /permissions   file access, tool approval, process isolation and command rules
-  session /rename      rename this session
+  session /new         start a new session
+  session /resume      resume a previous session
+  session /timeline    jump to a message of the shown line
+  session /goal        follow or change the shown line's goal
+  session /tasks       view command output or interrupt a member
+  session /lines       follow, talk to and end this session's lines
 
-/ + Enter          -> /exit (completion only)
+/ + Enter          -> start a new session
+/ex + Enter        -> /exit (completion only)
 /exit + Enter      -> exit
 /permissions + Enter -> permission controls
 ```
@@ -43,10 +80,10 @@ Commands
 Fullscreen, 8 rows             Scrollback, 8 rows
 +- Command Palette -------+
 | >                       |   +- input -----------------+
-| app /exit               |   | > /                     |
+| session /new            |   | > /                     |
 +-------------------------+   +-------------------------+
                               +-------------------------+
-+- input -----------------+   | app /exit               |
++- input -----------------+   | session /new            |
 |                         |   +-------------------------+
 +-------------------------+   AGENT
 ```
@@ -120,9 +157,22 @@ Home / End          滚动（fullscreen，草稿为空） 滚动（fullscreen，
 [Goal](plugins/Goal.md#a2-session-方法)（A.2、A.3）和 [Pursuit](plugins/Pursuit.md#3-对-goal-的修改)；
 本节规定原生客户端用它们做什么。该命令作为 `session` 分类列在命令菜单里，与 `/compact` 相同。
 
+两种 TUI 模式中，用 Enter 或 Tab 选择 `/goal` 只会把 `/goal ` 填入输入框并关闭命令面板，
+不会执行。用户再次提交空参数草稿时，先打印 Dim 支持的用法，再显示当前目标及状态，或该线没有目标的提示。
+行模式下直接提交 `/goal` 也显示相同的帮助和状态。
+
+```text
+palette: goal + Enter -> /goal |          (completion only)
+/goal fix build + Enter -> set/edit goal
+/goal + Space + Enter   -> usage + current goal
+
+Usage: /goal [OBJECTIVE | set OBJECTIVE | edit OBJECTIVE | pause | resume | clear]
+No goal on main.
+```
+
 | 形式 | 调用 |
 | --- | --- |
-| `/goal` | 无调用：当前显示线上的目标，或它没有目标 |
+| `/goal` | 无调用：先显示用法，再显示当前线上的目标，或它没有目标 |
 | `/goal OBJECTIVE` | 目标处于进行中或暂停时 `session.goal.edit`，否则 `session.goal.set` |
 | `/goal set OBJECTIVE` | `session.goal.set` |
 | `/goal edit OBJECTIVE` | `session.goal.edit` |
@@ -146,7 +196,7 @@ Home / End          滚动（fullscreen，草稿为空） 滚动（fullscreen，
 **读取目标。** 客户端按 Goal A.3 的规则，从它本来就在读的分支事件中折叠目标：最新存活的
 `goal:objective` 块是目标文本，最新存活的 `goal:status` 块是状态，`clear` 退役两者，`edit` 保留裁判，
 被 InputQueue 删除的输入会使折叠跳过它的块。它不新增查询方法，也不向 Goal 询问任何东西。不带参数的 `/goal`
-打印这个折叠结果。在 `set` 与 `edit` 之间选择之前，客户端先把该线读到已发布的头部，写入之后再读一次才打印：
+先打印用法，再打印这个折叠结果。在 `set` 与 `edit` 之间选择之前，客户端先把该线读到已发布的头部，写入之后再读一次才打印：
 显示的状态与选择的方法都来自事件，而不是从回复猜出来的状态。折叠在该线自己的开场事件处重新开始——它的 `branch/start`，
 或分叉在复制完事实之后写入的 `session/forked`——所以新开的线没有目标，分叉 Session 的 `main` 也从不显示
 复制来的目标（Goal §2、A11）。v3 客户端会收到这个开场事件，因此分叉在客户端与 Goal 里的读法一致。
@@ -160,6 +210,7 @@ Home / End          滚动（fullscreen，草稿为空） 滚动（fullscreen，
 
 ```text
 > /goal
+Usage: /goal [OBJECTIVE | set OBJECTIVE | edit OBJECTIVE | pause | resume | clear]
 No goal on main.
 
 > /goal Make the CLI tests pass
@@ -175,6 +226,7 @@ Goal paused on main · paused (user)
   Keep the CLI tests green
 
 > /goal
+Usage: /goal [OBJECTIVE | set OBJECTIVE | edit OBJECTIVE | pause | resume | clear]
 Goal on main · paused (user)
   Keep the CLI tests green
 
@@ -186,9 +238,11 @@ Goal resumed on main · active
 Goal cleared on main.
 ```
 
-第一行给出实际调用的方法、目标所属的线和当前状态；`edited` 表示找到已有目标、只改了目标文本的那种形式。
+不带参数的 `/goal` 先打印用法，随后显示状态报告。写入形式直接显示状态报告，给出实际调用的方法、
+目标所属的线和当前状态；`edited` 表示找到已有目标、只改了目标文本的那种形式。
 目标由 Pursuit 的裁判判定时，状态后跟 `evaluator judge`。暂停状态给出原因：`user`、`interrupted`、
-`limit`、`turn failed` 或 `evaluation failed`。目标文本另起一行，按它自身的换行输出。目标已清除或该线没有目标时只打印一行。
+`limit`、`turn failed` 或 `evaluation failed`。目标文本另起一行，按它自身的换行输出。
+清除目标时只打印一行确认；在没有目标的线上提交空参数 `/goal` 则打印两行：用法和没有目标的提示。
 
 行客户端和两种终端 UI 模式都打印这些行；在终端 UI 里它们是一段报告，因此更早的报告仍能在上方读到。
 当前显示线跟随目标（进行中或暂停）时，状态区带一个短元素，完成、受阻或已清除的目标没有：
@@ -197,7 +251,7 @@ Goal cleared on main.
  ╭──────────────────────────────────────────────────────────────────────────────╮
  │ › _                                                                          │
  ╰────────────────────────────── ⑂ main ▸ child work · after message 0 ─────────╯
-  AGENT  ⏵⏵ Ask (legacy)  ◎ goal active  1.8K / 256K              provider/model
+  AGENT  ⏵⏵ Workspace write  ◎ goal active  1.8K / 256K              provider/model
 ```
 
 fullscreen 把同一元素画在输入框的下边框，位于运行状态旁：
@@ -205,7 +259,7 @@ fullscreen 把同一元素画在输入框的下边框，位于运行状态旁：
 ```text
  ╭──────────────────────────────────────────────────────────────────────────────╮
  │ › _                                                                          │
- ╰──── ◎ goal paused   ⏵⏵ Bypass   1.8K / 256K ───── ● main · after message 4 ─╯
+ ╰──── ◎ goal paused   Full access   1.8K / 256K ───── ● main · after message 4 ─╯
 ```
 
 ## 提供方账号
@@ -307,7 +361,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 
 ### 菜单项
 
-`/runtime` 是 `app` 类的 slash 命令，因此菜单把它列在 `/keys` 与 `/settings` 之间；它不需要 Session
+`/runtime` 是 `extensions` 类的 slash 命令，位置遵循[命令菜单顺序](#命令菜单)；它不需要 Session
 （`Needs::Nothing`），也不接受内联参数，因为动作都在面板里。下面打字的子形态只在输入时接受，不作为
 菜单补全列出。
 
@@ -384,16 +438,16 @@ python  system    3.12.15   off
 
 ## 进程隔离设置
 
-`/settings` 在沙箱设置旁提供 `Process isolation` 控件，替代旧 `Execution` 面板和独立 Sandbox 入口，
+`/settings` 在 Permissions 分组提供 `Process isolation` 控件，替代旧 `Execution` 面板和独立 Sandbox 入口，
 不保留重复开关；没有原生 `dimcode isolation`、`/isolation` 命令或策略文件。选项与布尔值的映射属于
 [进程隔离设计](../../design/host-platform-isolation.md#process-isolation)，不属于 Permission。
 `/permissions` 只链接到这里，不再承载这个控件。
 
 ```text
-Settings                         Sandbox
-  Permission           >         Workspace write
-  Process isolation    >         Off / Sandboxed · Network allowed
-                                 Applies to new processes and persistent shells.
+Settings
+  Permission           Workspace write >
+  Process isolation    >
+  Applies to new processes and persistent shells.
 ```
 
 打开控件时经 [`settings.read`](appserver/settings-service.md) 读取
@@ -717,8 +771,8 @@ run 就是 `mcp.test`：它执行或联系已存条目一次，不写入领域�
 │                        asking                                 │
 │   Command rules                                             › │
 │                                                               │
-│   Path scope and process isolation are the sandbox's:         │
-│   Settings · sandbox                                          │
+│   The preset fixes the path boundary.                         │
+│   Process isolation: Settings                                 │
 ╰──── ↑↓/Tab move · Enter apply · Esc close ────────────────────╯
 
 ╭─ Command rules ───────────────────────────────────────────────╮
@@ -762,6 +816,7 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 | `dimcode session delete SESSION` | 永久删除该 Session 及存储为它保留的一切；不弹出确认。 |
 | `dimcode session cleanup (--older-than DURATION\|--keep N) [--yes]` | 列出某个选择器命中的 Session，确认后删除。 |
 | `/rename TITLE` 或 `/rename --clear` | 设置或清除所显示 Session 的手动标题；该文本是命令，永不成为模型输入。 |
+| `/resume` | 在当前工作区上打开 Session 选择面板（[`/resume` 选择面板](#resume-选择面板)）；`Ctrl+S` 依次循环当前工作区、提供时的当前仓库与所有工作区。 |
 | `/export markdown PATH` 或 `/export json PATH` | 交互客户端空闲时把当前主分支导出到文件。 |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | 不经守护进程，把 Session 的完整 Timeline 写成带版本的 JSONL（[Timeline 导出](appserver/timeline-export.md)）；未给输出路径时写到 stdout。 |
 | `dimcode daemon vacuum [--database PATH]` | 用 SQLite `VACUUM` 重写离线原生库，回收已删除 Session 留下的页，并打印操作前后的大小（[存储格式](appserver/native-storage-format.md#sqlite-运行参数与空间回收)）；守护进程持库时失败，也不创建或升级库。 |
@@ -816,8 +871,8 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 | `!command` / `!!command` | 以 record/private 模式调用 Session 现有的 `shell.run`，模型回合进行中也可用。 |
 | `--permission read-only\|workspace-write\|full-access` | 为 `dimcode`、`tui`、`exec` 和 `exec resume` 选择新建或恢复的 Session 的预设（[权限控制](#权限控制)）。 |
 | `/goal [OBJECTIVE \| set OBJECTIVE \| edit OBJECTIVE \| pause \| resume \| clear]` | 在行客户端和两种终端 UI 模式下读取并写入当前显示线的目标（[目标](#目标)）。 |
-| `/permissions` | 打开 Permissions 面板：三个预设以及各自允许什么、一行指向沙箱设置，以及列出、添加、删除用户命令规则的 Command rules 行（[权限控制](#权限控制)）。 |
-| `/approvals`、`/approval` | `/permissions` 的兼容别名，仍支持旧预设参数。 |
+| `/permissions` | 打开 Permissions 面板：三个预设以及各自允许什么、一行指向 Settings 的进程隔离设置，以及列出、添加、删除用户命令规则的 Command rules 行（[权限控制](#权限控制)）。 |
+| `/approvals`、`/approval` | `/permissions` 的兼容别名，支持相同的预设参数。 |
 
 `dimcode hooks` 只写用户的 Hook 文档，而且只经 edit 这一种类：`dimcode hooks edit`、
 `dimcode hooks set PATH` 以及 `/hooks` 里的 Ctrl+E 都调用守护进程所服务 home 的 Settings
@@ -874,6 +929,55 @@ Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
 缺少路径或格式不支持时打印用法并回到提示符，不提交输入。`/exit` 不带参数。只拦截这些确切的命令名；
 其他文本走普通输入路径。子命令不建立插件命令注册表。
 
+### `/resume` 选择面板
+
+`/resume` 打开在 `dimcode` 启动时的工作区上：`--cwd` 指定的目录，经过规范化，也就是
+`session.create` 为在那里创建的 Session 记录的工作区。列表只含恰好属于该工作区的已存 Session，
+最新在前，每次打开都从这里开始。`Ctrl+S` 依次循环当前工作区、当前仓库与所有工作区，标题写明
+当前范围。过滤框保留输入框的 `Ctrl+A` 与 `Ctrl+W`，`Tab` 向下移动选择。
+
+```text
+╭─ Sessions · This workspace ──────────────────────────────────────────────────╮
+│                                                                              │
+│ >                                                                            │
+│                                                                              │
+│   Fix the failing test       3h ago                                          │
+│   Update the catalog design  1d ago                                          │
+╰───────────────────── Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close ─╯
+```
+
+```text
+╭─ Sessions · This repository ─────────────────────────────────────────────────╮
+│                                                                              │
+│ >                                                                            │
+│                                                                              │
+│   Fix the failing test       3h ago · ~/src/app/web                          │
+│   Update the catalog design  1d ago · ~/src/app-fix/web                      │
+╰───────────────────── Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close ─╯
+```
+
+```text
+╭─ Sessions · All workspaces ──────────────────────────────────────────────────╮
+│                                                                              │
+│ >                                                                            │
+│                                                                              │
+│   Fix the failing test       3h ago · ~/src/app/web                          │
+│   Update the catalog design  1d ago · ~/src/other                            │
+╰───────────────────── Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close ─╯
+```
+
+- 切换范围像一次新的查询：取消尚未完成的读取、丢掉游标、重新读第一页；查询保留，并在新范围内生效。
+- 当前仓库包含启动工作区，以及它所在 git 仓库每个 worktree 中同一个相对目录；选择面板打开时在后台用
+  `git rev-parse` 与 `git worktree list --porcelain` 读取。第一页不等 git，两次读取共用一个两秒的时限；
+  git 失败或不回答时该范围不出现，也不提示。只有当集合多于一个条目，并且守护进程读取一组工作区
+  （`session.catalog.workspaces`）或经 `session.summaries` 列目录时，才提供这个范围。bare worktree 不加入。
+- 在当前工作区范围之外，每行先写更新于多久之前，再写它所属的工作区，主目录写作 `~`。标签最多占一半
+  宽度，时间在最前，因此被截断的是长路径。
+- 当前工作区范围、没有 Session 且没有查询时，列表显示 `No saved sessions in this workspace. Ctrl+S shows more.`；
+  其余空列表与无匹配文案不变。
+- 没有 `session.catalog` 的守护进程经 `session.summaries` 列目录，客户端用同样的精确匹配把范围应用到收到的行上。
+- `dimcode --resume ID` 仍可恢复任何工作区的 Session，清理也在所有工作区范围内选择。
+
 ### 会话标题
 
 手动标题是 Session 自己的状态：`session.summaries` 以 `manual` 来源报告它，
@@ -927,7 +1031,8 @@ TITLE 视为缺失，也按同样方式拒绝。
 | `--older-than DURATION` | `updatedAt` 距今至少 `DURATION` 的每个 Session。`DURATION` 是数字加单位 `d`、`h` 或 `m`，例如 `30d`。 |
 | `--keep N` | 保留最近活跃的 N 个 Session；其余全部选中。 |
 
-清理只选 `/resume` 默认列出的 Session
+清理在所有工作区范围内选择，而不只是 `/resume` 打开时所在的那一个：它选的类别就是 `/resume`
+默认列出的那些
 （[分类](../../design/appserver/session-classification.md#35-catalog-visibility)）：来源为 `client` 或 `unknown`。
 `internal` 的 Session
 永远不会被选中：成员随其 leader 的删除一起消失，启动的 Session 属于它的插件。`acp` 的 Session
@@ -1124,14 +1229,14 @@ Ctrl+C 提示 CLI 正在等待结果，并持续消费后续中断直到操作�
 Permission 拥有由 `session.create {permissionPolicy}` 初始化、经带版本的
 `session.permission.get/update` 更新的分支策略。策略就是预设与工具名单，见
 [Permission 合同](../../architecture/rust-agent/plugins/Permission.md#policy-contract)；
-路径边界与进程隔离属于沙箱（[ADR 018](../../adr/018-permission-is-the-preset.md)）。命令规则仍使用
+预设决定路径边界，进程隔离留在 Settings（[ADR 018](../../adr/018-permission-is-the-preset.md)）。命令规则仍使用
 `permission.rules`/`permission.set_rules`（[F2](appserver/permission-command-rules.md)）；文件授权仍使用
 `session.grants.add/remove`（[ADR 012](../../adr/012-session-grants.md)）。
 
 | TUI 控件 | 选项 | 所有者 |
 | --- | --- | --- |
 | Permission | Read only / Workspace write / Full access | `preset` |
-| Path scope | 沙箱自己的设置 | [文件访问事实](../../adr/014-file-access-facts.md) |
+| Path scope | 由预设和 Session grant 决定 | [文件访问事实](../../adr/014-file-access-facts.md) |
 | Process isolation | Off / Sandboxed · No network / Sandboxed · Network allowed | `execution` 设置，不属于 Permission |
 
 ```text
@@ -1140,7 +1245,7 @@ Permission 拥有由 `session.create {permissionPolicy}` 初始化、经带版�
     Workspace write  writes inside the workspace; asks outside it
     Full access      no path limits; tools run without asking
     Command rules    >
-  Path scope and process isolation are the sandbox's: Settings · sandbox
+  The preset fixes the path boundary. Process isolation: Settings
 ```
 
 `↑↓` 移动，`Enter` 应用高亮的那一档，`Esc` 关闭。没有第二个策略控件：预设同时回答"什么能运行"和
@@ -1190,9 +1295,8 @@ $ dimcode exec resume <session-id> --permission read-only -p 'Summarize'
   attach -> history -> submit -> idle -> detach
 ```
 
-使用旧参数创建的新 Session 收到不带显式覆盖的 `{preset}`；该次运行的参数优先于记住的 CLI 选择。
-新成员继承发起分支的当前策略（见分支语义）。恢复时仅更新预设只改变旧种子，保留所有其他策略字段，
-包括显式覆盖与工具列表；显式覆盖仍优先于种子。通知必须显示其生效值，不能暗示改预设已替换显式控件。
+使用 `--permission` 创建的新 Session 收到 `{preset}`；该次运行的参数优先于记住的 CLI 选择。
+新成员继承发起分支的当前策略（见分支语义）。恢复时更新预设并保留工具列表，通知显示当前预设。
 更新发生在 attach 之前，所以本次调用提交的回合不会在旧预设下运行。没有参数或记住的选择时，
 `session.create` 省略策略，恢复的 Session 保持自己的策略。应用记住的选择时显式发送，不重新解释历史。
 守护进程没有声明 `session.permission.update` 时，恢复参数在 attach 之前失败。此处可重试冲突，因为
@@ -1200,10 +1304,9 @@ $ dimcode exec resume <session-id> --permission read-only -p 'Summarize'
 
 生效的控件值显示在标识 Session 的位置。守护进程声明了 `session.permission.get` 时，交互启动读取策略；
 `exec` 只在给出 `--permission` 时把它打印到 stderr，其他情况下现有诊断输出不变。实时到达 `main`
-的 `permission/changed` 事件，无论来自本客户端还是配对设备等其他客户端，都打印一条带独立值与旧工具例外的记录。
+的 `permission/changed` 事件，无论来自本客户端还是配对设备等其他客户端，都报告当前预设。
 
-总览和 Settings 使用 `Ask (legacy tool exceptions)`；紧凑 TUI scrollback 状态使用
-`Ask (legacy)`，为设置保存通知留出 80 列内的空间。它表示相同的旧策略，不是显式 Ask，也不是另一选项。
+总览、Settings 和紧凑 TUI scrollback 状态显示当前预设。
 
 ```text
 $ dimcode --permission read-only
@@ -1217,15 +1320,15 @@ Assistant: ...
 [permission] main branch preset: workspace-write  <- 由其他客户端修改
 ```
 
-滚动回显客户端在编辑器下方画一行状态行：代理标记与工具审批方式（旧策略下为 `Ask (legacy)`）、目标标记、
+滚动回显客户端在编辑器下方画一行状态行：代理标记与当前权限预设、目标标记、
 上下文对窗口的占用，以及一个显示当前状态的槽位——通知、需要回答或审批、`esc interrupt` 或后台任务数。
 模型（放得下时连同推理强度）靠右对齐；整行按终端宽度截断。
 
 ### 无头执行
 
-`exec` 保持其合同：审批请求得到普通拒绝，回合停止并收尾，退出码为 3。没有显式覆盖的旧策略中，
+`exec` 保持其合同：审批请求得到普通拒绝，回合停止并收尾，退出码为 3。
 `full-access` 不询问但显式拒绝仍生效；`read-only` 拒绝写入和命令；`workspace-write` 对命令询问并以 3
-退出。显式 Ask 也会对原本在范围内的读取询问；Bypass 仍保留文件范围审批。没有自动审批回答者。
+退出。没有自动审批回答者。
 参数是明确的旧策略选择，因此 `exec` 不要求确认。
 
 ### 分支语义
@@ -1261,8 +1364,8 @@ Session 创建配置 --> main 当前策略 --分支点--> 子分支策略
 ### `/permissions`
 
 `/permissions` 是两种 TUI 模式下可见的菜单入口；`/approvals` 和 `/approval` 作为兼容别名打开同一组
-控件，不另设预设选择器。控件作用于 `main`；每次字段选择使用当前完整策略与版本，只写所选维度。
-保存失败既不改变记住的选择，也不回退到旧预设。
+预设选择器。选择作用于 `main`，每次更新使用当前完整策略与版本，保留工具列表。
+保存失败既不改变记住的选择，也不回退到其他预设。
 
 Command rules 行打开[命令规则领域](#命令规则领域)的管理面板，在那里列出、添加和删除规则；Esc 返回本面板。终端 UI 中 `/permissions` 后面的参数改为打开该面板，而不是被忽略；面板打开时就带着一行说明参数在哪里生效——行内提示符与 `dimcode permissions`——这行一直显示在面板的答复之上，直到用户在这里按下第一个键，无论首次读取要多久；紧凑语法属于行内提示符。
 
@@ -1273,13 +1376,13 @@ Permissions (main branch)
   Full access      no path limits; tools run without asking
   Command rules                             >
 
-Path scope and process isolation are the sandbox's: Settings · sandbox
+The preset fixes the path boundary. Process isolation: Settings
 
 ↑↓/Tab move · Enter apply · Esc close
 ```
 
 每一行都写明该预设允许什么、会询问什么，所以不需要第二个菜单。仅打开面板不写入；`Enter` 通过带版本的更新
-写入预设，工具列表保持不变。行下方的说明指向沙箱，而不是在这里提供路径边界和进程隔离。
+写入预设，工具列表保持不变。说明指出预设决定路径边界，并指向 Settings 的进程隔离设置。
 
 审批提示不提供组合式放宽快捷入口。
 
@@ -1380,7 +1483,7 @@ write 授权也允许读取，read 授权从不允许写入，分叉不继承源
 
 ### 决定
 
-1. **记住的 CLI 选择不是宿主默认值。** 独立选择与旧配置一起保存，由 CLI 显式发送。
+1. **记住的 CLI 选择不是宿主默认值。** 预设选择保存在 CLI 配置中，由 CLI 显式发送。
    Web、ACP、配对设备和自动化共同遵守的默认值属于守护进程用户 Settings：需求 R1。
    不得重新解释旧配置或已有策略来模拟此类默认值。
 2. **不提供 `--allowed-tools`/`--disallowed-tools`。** 工具名属于守护进程配置，协议没有可用于校验的
@@ -1391,11 +1494,10 @@ write 授权也允许读取，read 授权从不允许写入，分叉不继承源
    普通行。循环切换需要编辑器返回动作结果和独立交互设计。`/permissions` 已覆盖切换。
 5. **`/permissions` 也能添加规则。** F2 §8 把添加列为面板的一部分；在产品存储下，规则位于用户无法当作
    文件编辑的数据库行中，没有 `add` 就无法从 CLI 创建 deny 规则。
-6. **只在结果不取决于读取内容时重试。** 启动预设、独立字段赋值和添加规则可在重新读取并保留未修改字段后
+6. **只在结果不取决于读取内容时重试。** 启动预设和添加规则可在重新读取并保留未修改字段后
    重试。旧面板预设切换和按编号删除报告冲突，因为用户根据所见内容选择。Execution Settings 保持读取时
    revision 的保存合同。
-7. **保留旧放宽预设确认。** 交互式旧 `full-access` 参数仍需确认；启动参数本身明确且可无头使用。
-   新控件说明各自独立的效果，不提供该组合 TUI 选项。
+7. **行模式完全访问需要确认。** 交互式 `full-access` 参数需确认；启动参数本身明确且可无头使用。
 
 ### 范围之外
 
@@ -1407,9 +1509,7 @@ write 授权也允许读取，read 授权从不允许写入，分叉不继承源
 | `--allowed-tools`/`--disallowed-tools` | 一个工具目录读取接口，用于在参数边界校验名字（决定 2） |
 | 回合运行中使用 `/permissions` | 只涉及 CLI：运行中的回合读取普通行并回答审批；面板调用需要加入它的多路复用循环 |
 
-本次改动中，ACP、Hooks 和 Web 的权限选择仍是仅使用旧预设的客户端。其现有预设控件不选择显式
-文件边界或工具审批覆盖，扩展这些 UI 属于独立工作，不在这里
-另做一套 TUI 控件；Web 现有 execution 设置仍属于宿主设置。
+ACP、Hooks 和 Web 使用同一预设策略合同；进程隔离属于 execution Settings。
 
 ### 规则检查
 
@@ -1420,13 +1520,13 @@ write 授权也允许读取，read 授权从不允许写入，分叉不继承源
 | §4 第 1 条（指令事件） | 策略修改经 Permission 现有的 `session.permission.update`，由它写 `permission/changed`；规则经其所有者的类型化写操作 |
 | §4 第 2 条（交接） | 不变 |
 | §4 第 3 条（before 回调） | 不使用 |
-| §4 第 4 条（核心不带业务含义） | Timeline 和 Dispatcher 不变；独立策略语义属于 Permission，不属于 CLI |
+| §4 第 4 条（核心不带业务含义） | Timeline 和 Dispatcher 不变；策略语义属于 Permission，不属于 CLI |
 | §4 第 5 条（批次） | 规则写入和审批回答是两个所有者各自的写入，由客户端按 F2 §5.4 规定的顺序执行 |
 | §4 第 6 条（上下文） | 模型只看到现有的结果和拒绝 |
 | §4 第 7 条（只经公开接口） | 只用公开方法和通知；CLI 从公开事件流读取 `permission/changed` |
 | §4 第 8 条（基础设施不变） | 不改；下文向 App Server 所有者而非基础设施提出两项需求 |
 | §4 第 9 条（只有需要的事实进 Timeline） | 没有新事件；规则不进 Timeline |
-| ADR 002 D1 至 D5 | 没有新部件、接线或依赖；增量策略字段遵循 ADR 017，CLI 偏好是本地业务配置 |
+| ADR 002 D1 至 D5 | 没有新部件、接线或依赖；预设策略遵循 ADR 018，CLI 偏好是本地业务配置 |
 | ADR 003 | 预设和规则只管 agent 工具调用；`!command` 不受影响；规则只有用户作用域，没有项目文件能放宽它们；重放、恢复和分叉不授予新权限 |
 
 ### 向机制所有者提出的需求
@@ -1568,8 +1668,8 @@ Ctrl+C 保持 TUI 既有中断/退出规则；实际中断时，先停止问题�
 是行模式的 `/permissions` 命令，审批提示留在 `session.rs`；两者只负责展示结果。`question/mod.rs` 存放
 任何客户端处理问题都需要的部分，不读终端、不做输出：`ask_user` 的输入规则、由事件推导出的等待中调用、
 `session.question.respond` 的参数以及回复的含义。`question/line.rs` 是行模式的问题提示，由
-`session.rs` 把通知和回复交给它。对话格式化属于 CLI。独立控件使用 Permission 的增量策略合同
-（ADR 017）与现有 execution Settings 合同；不需要改变核心生命周期、存储迁移或运行时注册。
+`session.rs` 把通知和回复交给它。对话格式化属于 CLI。预设控件使用 Permission 的策略合同
+（ADR 018）与现有 execution Settings 合同；不需要改变核心生命周期、存储迁移或运行时注册。
 
 复用 `cli_flow.rs` 及其真实守护进程配置夹具，覆盖 `exec` 和恢复、stdout/stderr 分离、公开 JSON 通知的
 保留、回合/审批失败和停止收尾、固定水位的多页导出、两种格式、拒绝已存在文件以及交互命令拦截。覆盖
@@ -1585,12 +1685,10 @@ Unix 文件私密性。只使用隔离的 home。实现需要通过相关的 CLI
 --permission` 修改恢复的分支；"总是"写入精确规则，之后相同的调用不再询问，直到 `/permissions remove`
 删除该规则。
 
-独立控件验收场景：显式 Ask 对范围内读取询问；工具允许只回答工具问题；Bypass 仍对范围外文件询问；
-Read only 即使工具已允许也拒绝写入；同时需要范围和工具同意时只询问一次；read 授权不能允许写入；
-Bypass 下显式拒绝仍优先；旧策略和配置保留精确旧行为，不静默写入。验证每次选择只改自己的字段、
-策略成功更新后才记住、Session 创建前也可使用，冲突或不支持服务器时不放宽。两种 TUI 的菜单只显示
-`/permissions`，两个别名可用，Process isolation 没有重复 Execution/Sandbox 入口。复用进程流程验证
-布尔映射、CAS 失败、后端不可用原因，以及切换隔离前启动的进程保持原边界。这些是要求，不表示实现或验证已完成。
+预设验收覆盖文件边界、工具与命令规则、Session grant 和一次审批。只读即使工具已允许也拒绝写入；
+完全访问仍遵守明确拒绝。保存的预设须跨进程重启生效，`permission` 优先于旧 `permissionPreset`，
+`--permission` 优先于二者。验证两种 TUI 的菜单只显示 `/permissions`，两个别名可用，进程隔离留在 Settings。
+复用进程流程验证布尔映射、CAS 失败、后端不可用及已启动进程保留原边界。
 
 问题由脚本化守护进程流程（`cli_flow/question.rs`）覆盖：单选和多选、自填文本、拒绝回答、无效输入行、
 处理器会拒绝的输入和其他工具不会触发询问、与审批双向的延后、等待中的 shell 结果、重复使用的调用 id、

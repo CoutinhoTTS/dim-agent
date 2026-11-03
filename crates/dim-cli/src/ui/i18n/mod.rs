@@ -321,8 +321,6 @@ mod tests {
                 "near the compaction threshold",
                 "This daemon does not support context compaction",
                 "compact the context of the shown line",
-                "Kept verbatim",
-                "Tool effects",
                 "insufficient space: {parts}",
                 "system prompt",
                 "tools",
@@ -348,6 +346,22 @@ mod tests {
                 "The Session is now untitled.",
                 "This daemon does not support renaming Sessions",
                 "Renaming failed",
+            ] {
+                assert!(lookup(key).is_some(), "{code} lacks {key:?}");
+            }
+        }
+    }
+
+    /// The `/resume` picker's scopes and its empty-workspace line are
+    /// translated in every locale.
+    #[test]
+    fn every_locale_translates_the_resume_picker_strings() {
+        for (code, lookup) in tables() {
+            for key in [
+                "Sessions · This workspace",
+                "Sessions · This repository",
+                "Sessions · All workspaces",
+                "No saved sessions in this workspace. Ctrl+S shows more.",
             ] {
                 assert!(lookup(key).is_some(), "{code} lacks {key:?}");
             }

@@ -2,7 +2,7 @@
 
 状态：基础存储、可丢弃恢复快照、分段读取与恢复扫描已实现。本文定义 Timeline 写入、发布、读取、错误与驻留；Session 的创建、装卸载与关闭等业务生命周期由 App Server 负责，SQL/JSON 见[存储格式](../../design/appserver/native-storage-format.md)。
 
-进程 SQLite 服务在关闭时先停止操作准入，再排空已受理的查询/事务并关闭连接；等待者被丢弃不取消实际 blocking 工作或已启动的关闭。成功关闭立即释放数据库维护锁，保留旧 `Arc` 不占锁且拒绝新操作；关闭失败保留实际连接与锁，错误明确返回。SessionStore 仍拥有业务 writer、批次与发布，沿依赖先停止 Session 并排空 writer，SQLite 不承接第二套事件队列。
+进程 SQLite 服务在关闭时先停止操作准入，再排空已受理的查询/事务，先关闭四个只读连接，再关闭写连接；等待者被丢弃不取消实际 blocking 工作或已启动的关闭。成功关闭立即释放数据库维护锁，保留旧 `Arc` 不占锁且拒绝新操作；关闭失败保留实际连接与锁，错误明确返回。SessionStore 仍拥有业务 writer、批次与发布，沿依赖先停止 Session 并排空 writer，SQLite 不承接第二套事件队列。
 
 ## 1. 结构与所有权
 
@@ -51,12 +51,12 @@
 | --- | --- |
 | append | `append`、`append_registered`、`append_batch_registered` 保持同步：执行 before 链、分配 sequence、运行登记回调，事件进入热窗口并交给 `TimelineStore` 排队；不等待磁盘 |
 | 写入轮 | 写入任务逐轮提交：一轮取走所有 Session 的全部待写批次（到下一条回滚或关闭命令为止），放进一个事务；原子批次不拆分，同一分支按 sequence 顺序写入。上一轮提交后，有待写批次就开始下一轮；只有待写批次全部只含输出行事件（`step/text`、`step/thinking`，见第 2 节“模型输出”）时，这一轮才等到上一轮开始后 20 ms，其间来了其他批次或回滚、关闭命令就不再等。这样区分只看存储的物理编码：输出行靠改写同一行增长，一轮把改过的页写入 WAL 并 fsync 一次，等待让只有流式输出时每秒至多 50 轮，增量最多等待的时间和以前一样。其他批次不等，所以一串依赖写入（每次等上一次发布后才写）每步只等一次提交 |
-| 耐久 | SQLite WAL，`synchronous=FULL`；macOS 另开 `fullfsync`。事务提交返回即已落盘。自动检查点关闭；writer 在提交与发布后按 WAL 大小执行被动检查点，WAL 文件有上限，关闭时截断（[存储格式](../../design/appserver/native-storage-format.md#sqlite-运行参数与空间回收)） |
+| 耐久 | SQLite WAL，写连接 `synchronous=FULL`；macOS 另开 `fullfsync`。事务提交返回即已落盘。自动检查点关闭；writer 在提交与发布后按 WAL 大小执行被动检查点，WAL 文件有上限，关闭时截断（[存储格式](../../design/appserver/native-storage-format.md#sqlite-运行参数与空间回收)）。fork/delete 的复制连接按块提交：只有使 Session 可见的那一块用 `FULL`，其余块用 `NORMAL`，其后的 `FULL` fsync 覆盖同一 WAL 中更早的帧；复制连接在 macOS 上也设置 `fullfsync`，该提交执行 F_FULLFSYNC |
 | 发布 | 提交返回后推进各分支发布水位并唤醒 Dispatcher |
 | 可见性 | 事件分配序号即是总线上的事实（[时间总线总纲](time-bus.md)）。能力经注入的 `Timeline` 读取到已写入位置 `committed()`，包括尚未发布、仍在热窗口的事件；Dispatcher 只分发已发布事件；`sequence()`、`watch()` 与分支外的读取（`Branch`、`Session`、RPC）只看到已发布事件，向外部表达的是“已落盘” |
 | 驻留 | 已提交历史本身不设容量上限；待提交事件由 writer 队列与热窗口暂持，按 writer 队列、热窗口、冷读结果与已装载实例的实际持有和释放时机估算内存，不为此新增业务硬配额或终态兜底。输入、并发、出站均不设预设额度 |
 
-发布与提交回调可能读取或追加；它们必须在连接互斥锁释放后运行，否则回调写入或读取时会在同一把锁上死锁。
+发布与提交回调可能读取或追加；它们必须在写连接互斥锁释放后运行，否则回调写入会在同一把锁上死锁。回调的读取走只读连接，不占写连接。
 
 同一事务内，writer 按 Session 和分支保留最后一个输出行的已解码 `Row`，
 后续增量直接追加，避免每条增量再次查询并解析已合并的 JSON。
@@ -78,6 +78,7 @@
 | `Timeline::context(through).await` | 祖先链起点起截至 `through` 的完整事实重放，不需要解释器或快照 |
 | `Timeline::context_with_checkpoint(through, interpreter, decode).await` | 选取 sequence 不大于 `through`、解释器相同的最近恢复快照，校验锚点事实后从其 `resume` 起读取；无可用快照时等同 `context` |
 | `Timeline::history(through).await` | 祖先链加本分支截至 `through` 的完整固定历史 |
+| `Timeline::page_cursor(through)`、`Timeline::page(cursor, limit, kinds).await` | 从固定 head 起按 kind 过滤、按存储行向前分页的祖先链读取；页内按序号升序，游标为所取最旧命中行的序号 |
 | `Timeline::local(range).await` | 本分支已写入事件的区间（默认终点 `committed()`），可分页 |
 | `Timeline::trace(sequence).await` | 该事件的 before 轨迹 |
 
@@ -89,12 +90,17 @@
 
 | 路径 | 读取边界 | 资源与校验 |
 | --- | --- | --- |
-| `context(through)` | 完整祖先链和本分支前缀 | 按段读取，每段释放连接锁 |
+| `context(through)` | 完整祖先链和本分支前缀 | 按段读取，每段释放读连接 |
 | `context_with_checkpoint(through, ..)` | 最近有效快照的 `resume` 起的祖先链和本分支后缀 | 不扫描快照恢复位置之前的请求正文 |
 | `local(range)`、`trace(sequence)` | 指定区间或命中事件的物理行 | 合并行完整解码后按逻辑序号过滤；trace 只返回指定事件的轨迹 |
-| 分段读取 | 固定水位，按键 seek；内部读段可切开原子批次，`TimelineStore::read/read_segments` 的最终区间终点须为批次边界 | 每段结束释放连接锁；合并行完整解码后截取，不在锁内解码无限历史 |
+| 分段读取 | 固定水位，按键 seek；内部读段可切开原子批次，`TimelineStore::read/read_segments` 的最终区间终点须为批次边界 | 每段结束释放读连接；合并行完整解码后截取，不在锁内解码无限历史 |
+| 反向按种类分页 | `read_kind_page`：从固定水位向前取最近 `limit` 个命中行，页内按序号升序；游标为所取最旧命中行的序号减一 | 命中行在取出前按 kind 过滤；扫描沿 `(session_id, branch_id, sequence)` 主键反向 seek，不新增索引；合并行整行解码后返回；调用方以固定 head 分页，页尾即下一段的输入 |
 | 不读请求正文的分页 | `read_page_without_request_bodies`：历史分页、摘要、协作与流式投影；批次边界与 `read_page` 相同 | 不还原 `context/prepare`、`model/call` 的请求，也不加载其内容行，只校验记录种类与引用形状（[请求增量存储 §7.5](../../design/appserver/request-delta-storage.md#75-不使用请求正文的读取)）；使用请求的读取与首次恢复仍完整校验 |
-| 恢复 | 固定 Session 目录和所有分支头，逐页校验事件、引用、祖先截点及 completed 事实的 through 边界；可选快照 state 不参与恢复校验 | 每页结束释放连接锁；解码内容缓存跨页共用、有界（第 2 节），校验结束释放；跨页保留事件 ID 和目录校验信息；进程内首次恢复全量校验，之后目录与所有分支头不变时复用上次结果，记录只在存储的进程内存，校验失败或目录变化回退全量（[恢复校验复用](../../design/appserver/restore-validation.md)）；校验内容与不变量不变 |
+| 恢复 | 固定 Session 目录和所有分支头，逐页校验事件、引用、祖先截点及 completed 事实的 through 边界；可选快照 state 不参与恢复校验 | 每页结束释放读连接；解码内容缓存跨页共用、有界（第 2 节），校验结束释放；跨页保留事件 ID 和目录校验信息；进程内首次恢复全量校验，之后目录与所有分支头不变时复用上次结果，记录只在存储的进程内存，校验失败或目录变化回退全量（[恢复校验复用](../../design/appserver/restore-validation.md)）；校验内容与不变量不变 |
+
+存储服务的所有业务读取（历史、目录、校验、设置、Provider 与 Session 文件）走四个只读连接，按调用轮换；读取在语句开始时的最后提交上运行，不进入写连接的互斥锁。目录扫描这类长读只占其中一个连接。
+
+fork 与 Session 删除在复制连接上分块提交（事件与快照每 256 个逻辑序号、内容每 1024 个哈希），每块之间让写入轮取得写锁。fork 先以只读连接分段解析源事件引用并求出内容闭包，最后才在插入 `agent_sessions` 的事务中发布整个 fork；删除先在一个事务中移除使 Session 可见的行，再分块删除事件、快照与内容。两者都不改变持久化格式，见[存储格式](../../design/appserver/native-storage-format.md#sqlite-运行参数与空间回收)。
 
 协作 `read_page` 的 `after` 和固定水位必须为批次边界；页长是目标值，末批超出时完整返回。内部读段可切开批次，但不把内部段尾作为业务游标。反向 `session.history` 仍为独立协议草案。
 
@@ -174,6 +180,7 @@ SQLite 关闭与 lease：只关闭描述符可能让并发派生的子进程在 
 | 检查点 | 从快照投影与从起点完整投影的结果一致，覆盖跨压缩的排队输入、prompt 变更、上下文基线和游标位于多结果工具事件内部；快照缺失、损坏、摘要不符或越界时回退事实重放且保留 summary |
 | 读取 | 每个模型步骤两次 `context` 读取和一次同准备 `local` 尾读；测量 p99、max 规模合成会话的每步耗时与 stop 分发延迟 |
 | 写入 | 11 与 64 个流式分支（每个分支每秒 30 与 200 个增量）下测量写入轮频率、发布延迟、WAL 写入量，以及 writer 队列、热窗口、trace 的实际存活字节；另有相互独立的依赖写入链（各在自己的 Session，每次写入等上一次发布后才追加）：64 个流式分支下 1、11 与 64 条，没有流式分支时 11 与 64 条；测量链上每步的发布延迟、链的写入吞吐、写入轮与 fsync 频率和 WAL 写入量，并在 macOS 上另测 fsync 不刷新磁盘缓存的模型；慢盘下记录产生与提交速率、峰值及恢复后的释放。流式分支和依赖写入链用 [`timeline_acceptance rounds`](../../../crates/dim-app-server/examples/timeline_acceptance/README.md) 在本地 release 构建中测量，结果写进 PR，不作为 CI 阈值 |
+| 读写并发与 fork/delete | 流式写入下测读取 p50/p99；再在大 Session 的 fork 与删除期间测读取与依赖写入的发布延迟，确认分块复制/删除不长期占住写锁：`timeline_acceptance read-load`，本地 release 构建测量，结果写进 PR，不作为 CI 阈值 |
 | 进程中断 | 在事务提交前、提交后发布前、发布后终止进程：恢复结果符合第 3 节；sequence 连续；在途输出按失败结算 |
 | 断电 | 以事务提交返回的事件为准，模拟断电后已发布事件完整 |
 | 存储故障 | 分别注入读取失败与提交失败：前者提交当前操作的失败终态且允许后续操作，后者只清理写入失败的 Session；其他 Session 照常发布 |

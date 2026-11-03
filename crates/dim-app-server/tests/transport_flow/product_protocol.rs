@@ -483,6 +483,144 @@ async fn a_stale_project_remove_leaves_the_enablement_unchanged() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_scope_move_preserves_withheld_values_and_enablement() {
+    let home = std::path::PathBuf::from("/tmp").join(format!("dm-move-{}", uuid::Uuid::new_v4()));
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project = std::fs::canonicalize(&project).unwrap();
+    std::fs::write(
+        project.join(".mcp.json"),
+        json!({"mcpServers":{"github":{"command":"echo","args":["--token","secret-arg"],"env":{"TOKEN":"secret-env"},"enabled":true}}})
+            .to_string(),
+    )
+    .unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let mut remote = Client::new_version(&server, true, 3).await;
+    assert!(
+        client
+            .features
+            .as_array()
+            .unwrap()
+            .contains(&json!("mcp.move"))
+    );
+    assert_eq!(
+        remote.rpc("mcp.move", json!({})).await["error"]["data"]["appError"],
+        "local_transport_required"
+    );
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    assert_eq!(catalog["result"]["servers"][0]["enabled"], false);
+    assert_ok(&client.rpc("mcp.set_enabled", json!({"source":"project","id":"github","cwd":project,"expectedVersion":catalog["result"]["projectRevision"],"enabled":true})).await);
+
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&client.rpc("mcp.move", json!({"id":"github","from":"project","to":"user","cwd":project,"expectedFromVersion":catalog["result"]["projectRevision"],"expectedToVersion":catalog["result"]["userRevision"]})).await);
+    let user = client
+        .rpc("mcp.configuration", json!({"source":"user","id":"github"}))
+        .await;
+    assert_ok(&user);
+    assert_eq!(user["result"]["secretsInUserScope"], false);
+    assert_eq!(user["result"]["enabled"], true);
+    assert_eq!(user["result"]["configuration"]["argsCount"], 2);
+    assert_eq!(
+        user["result"]["configuration"]["envNames"],
+        json!(["TOKEN"])
+    );
+    assert!(!user.to_string().contains("secret-arg"));
+    let stored: Value =
+        serde_json::from_slice(&std::fs::read(project.join(".mcp.json")).unwrap()).unwrap();
+    assert!(
+        stored["mcpServers"].get("github").is_none(),
+        "the project source is removed"
+    );
+
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&client.rpc("mcp.move", json!({"id":"github","from":"user","to":"project","cwd":project,"expectedFromVersion":catalog["result"]["userRevision"],"expectedToVersion":catalog["result"]["projectRevision"]})).await);
+    let project_view = client
+        .rpc(
+            "mcp.configuration",
+            json!({"source":"project","id":"github","cwd":project}),
+        )
+        .await;
+    assert_ok(&project_view);
+    assert_eq!(project_view["result"]["secretsInUserScope"], true);
+    assert_eq!(
+        project_view["result"]["enabled"], false,
+        "a project destination starts disabled"
+    );
+    assert_eq!(project_view["result"]["configuration"]["argsCount"], 2);
+    assert_eq!(
+        project_view["result"]["configuration"]["envNames"],
+        json!(["TOKEN"])
+    );
+    let stored: Value =
+        serde_json::from_slice(&std::fs::read(project.join(".mcp.json")).unwrap()).unwrap();
+    let github = &stored["mcpServers"]["github"];
+    assert_eq!(github["command"], "echo");
+    assert!(github.get("args").is_none());
+    assert!(github.get("env").is_none());
+    assert!(!stored.to_string().contains("secret-arg"));
+    assert!(!stored.to_string().contains("secret-env"));
+
+    let revision = project_view["result"]["revision"].clone();
+    assert_eq!(
+        client.rpc("mcp.save", json!({"source":"project","id":"github","cwd":project,"expectedVersion":revision,"configuration":{"command":"echo","args":["new"],"env":{"TOKEN":"new"}}})).await["error"]["data"]["appError"],
+        "mcp_credentials_are_user_scoped"
+    );
+    assert_eq!(
+        client.rpc("mcp.update", json!({"source":"project","id":"github","cwd":project,"expectedVersion":revision,"patch":{"args":["new"]}})).await["error"]["data"]["appError"],
+        "mcp_credentials_are_user_scoped"
+    );
+    assert_ok(&client.rpc("mcp.update", json!({"source":"project","id":"github","cwd":project,"expectedVersion":revision,"patch":{"command":"echo-2"}})).await);
+    let stored: Value =
+        serde_json::from_slice(&std::fs::read(project.join(".mcp.json")).unwrap()).unwrap();
+    assert_eq!(stored["mcpServers"]["github"]["command"], "echo-2");
+    assert!(stored["mcpServers"]["github"].get("args").is_none());
+    let view = client
+        .rpc(
+            "mcp.configuration",
+            json!({"source":"project","id":"github","cwd":project}),
+        )
+        .await;
+    assert_ok(&view);
+    assert_eq!(view["result"]["configuration"]["argsCount"], 2);
+
+    assert_ok(&client.rpc("mcp.remove", json!({"source":"project","id":"github","cwd":project,"expectedVersion":view["result"]["revision"]})).await);
+    assert_eq!(
+        client
+            .rpc(
+                "mcp.configuration",
+                json!({"source":"project","id":"github","cwd":project})
+            )
+            .await["error"]["data"]["appError"],
+        "mcp_unknown_server"
+    );
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    assert_ok(&client.rpc("mcp.save", json!({"source":"project","id":"github","cwd":project,"expectedVersion":catalog["result"]["projectRevision"],"configuration":{"command":"echo","enabled":false}})).await);
+    let clean = client
+        .rpc(
+            "mcp.configuration",
+            json!({"source":"project","id":"github","cwd":project}),
+        )
+        .await;
+    assert_ok(&clean);
+    assert_eq!(clean["result"]["secretsInUserScope"], false);
+    assert_eq!(clean["result"]["configuration"]["argsCount"], 0);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_connection_tests_are_disposable_preserve_drafts_and_respect_project_authority() {
     let home = std::path::PathBuf::from("/tmp").join(format!("dm-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(home.join("project")).unwrap();
@@ -1713,8 +1851,15 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     assert_ok(&client.rpc("session.idle", branch.clone()).await);
     let policy = client.rpc("session.permission.get", branch.clone()).await;
     assert_ok(&policy);
-    let changed = client.rpc("session.permission.update", json!({"sessionId":sid,"branchId":"main","expectedVersion":policy["result"]["version"],"policy":{"preset":"read-only","allowedTools":[],"disallowedTools":[]}})).await;
+    let invalid = client.rpc("session.permission.update", json!({"sessionId":sid,"branchId":"main","expectedVersion":policy["result"]["version"],"unknown":true,"policy":{"preset":"read-only"}})).await;
+    assert_eq!(invalid["error"]["code"], -32602);
+    let changed = client.rpc("session.permission.update", json!({"sessionId":sid,"branchId":"main","expectedVersion":policy["result"]["version"],"policy":{"preset":"read-only","fileAccess":"unrestricted","toolApproval":"bypass","unknown":true,"allowedTools":[],"disallowedTools":[]}})).await;
     assert_ok(&changed);
+    let current = client.rpc("session.permission.get", branch.clone()).await;
+    assert_eq!(
+        current["result"]["policy"],
+        json!({"preset":"read-only","allowedTools":[],"disallowedTools":[]})
+    );
     assert_eq!(client.rpc("session.permission.update", json!({"sessionId":sid,"branchId":"main","expectedVersion":policy["result"]["version"],"policy":policy["result"]["policy"]})).await["error"]["data"]["appError"], "permission_conflict");
     async fn project_rule(session: &dim_agent_runtime::Session) -> (String, String) {
         let context = session
@@ -2608,6 +2753,189 @@ async fn model_progress_follows_a_reloaded_provider() {
     assert_eq!(notice["params"]["text"], "after reload");
     server.shutdown();
     server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_save_refuses_a_leftover_overlay_and_remove_cleans_it() {
+    let home = std::path::PathBuf::from("/tmp").join(format!("dm-save-{}", uuid::Uuid::new_v4()));
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project = std::fs::canonicalize(&project).unwrap();
+    std::fs::write(
+        home.join("mcp.json"),
+        json!({"mcpServers":{"gh":{"command":"echo","args":["--stdio"],"env":{"TOKEN":"secret-env"}}}})
+            .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join(".mcp.json"),
+        json!({"mcpServers":{}}).to_string(),
+    )
+    .unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    assert_ok(&client.rpc("mcp.move", json!({"id":"gh","from":"user","to":"project","cwd":project,"expectedFromVersion":catalog["result"]["userRevision"],"expectedToVersion":catalog["result"]["projectRevision"]})).await);
+    std::fs::write(
+        project.join(".mcp.json"),
+        json!({"mcpServers":{}}).to_string(),
+    )
+    .unwrap();
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    assert!(
+        catalog["result"]["servers"].as_array().unwrap().is_empty(),
+        "the externally deleted entry leaves only its overlay behind"
+    );
+
+    let refused = client.rpc("mcp.save", json!({"source":"project","id":"gh","cwd":project,"expectedVersion":catalog["result"]["projectRevision"],"configuration":{"command":"newcmd","args":["new-arg"],"enabled":false}})).await;
+    assert_eq!(
+        refused["error"]["data"]["appError"], "mcp_stale_secret_record",
+        "a save over a leftover overlay is refused instead of deleting it"
+    );
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    assert!(
+        catalog["result"]["servers"].as_array().unwrap().is_empty(),
+        "the refused save writes no entry"
+    );
+
+    let removed = client.rpc("mcp.remove", json!({"source":"project","id":"gh","cwd":project,"expectedVersion":catalog["result"]["projectRevision"]})).await;
+    assert_eq!(
+        removed["error"]["data"]["appError"], "mcp_unknown_server",
+        "removing an entry that is already absent deletes the leftover record"
+    );
+    assert_ok(&client.rpc("mcp.save", json!({"source":"project","id":"gh","cwd":project,"expectedVersion":catalog["result"]["projectRevision"],"configuration":{"command":"newcmd","args":["new-arg"],"enabled":false}})).await);
+    let saved = client
+        .rpc(
+            "mcp.configuration",
+            json!({"source":"project","id":"gh","cwd":project}),
+        )
+        .await;
+    assert_ok(&saved);
+    assert_eq!(saved["result"]["secretsInUserScope"], false);
+    assert_eq!(saved["result"]["configuration"]["command"], "newcmd");
+    assert_eq!(saved["result"]["configuration"]["argsCount"], 1);
+    assert_eq!(saved["result"]["configuration"]["envNames"], json!([]));
+
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&client.rpc("mcp.move", json!({"id":"gh","from":"project","to":"user","cwd":project,"expectedFromVersion":catalog["result"]["projectRevision"],"expectedToVersion":catalog["result"]["userRevision"]})).await);
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&client.rpc("mcp.move", json!({"id":"gh","from":"user","to":"project","cwd":project,"expectedFromVersion":catalog["result"]["userRevision"],"expectedToVersion":catalog["result"]["projectRevision"]})).await);
+    std::fs::write(
+        project.join(".mcp.json"),
+        json!({"mcpServers":{}}).to_string(),
+    )
+    .unwrap();
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    assert!(catalog["result"]["servers"].as_array().unwrap().is_empty());
+
+    let refused = client.rpc("mcp.save", json!({"source":"project","id":"gh","cwd":project,"expectedVersion":catalog["result"]["projectRevision"],"configuration":{"type":"http","url":"https://example.test/mcp","enabled":false}})).await;
+    assert_eq!(
+        refused["error"]["data"]["appError"],
+        "mcp_stale_secret_record"
+    );
+    let removed = client.rpc("mcp.remove", json!({"source":"project","id":"gh","cwd":project,"expectedVersion":catalog["result"]["projectRevision"]})).await;
+    assert_eq!(removed["error"]["data"]["appError"], "mcp_unknown_server");
+    assert_ok(&client.rpc("mcp.save", json!({"source":"project","id":"gh","cwd":project,"expectedVersion":catalog["result"]["projectRevision"],"configuration":{"type":"http","url":"https://example.test/mcp","enabled":false}})).await);
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    assert_eq!(catalog["result"]["servers"].as_array().unwrap().len(), 1);
+    let saved = client
+        .rpc(
+            "mcp.configuration",
+            json!({"source":"project","id":"gh","cwd":project}),
+        )
+        .await;
+    assert_ok(&saved);
+    assert_eq!(saved["result"]["secretsInUserScope"], false);
+    assert_eq!(saved["result"]["configuration"]["type"], "http");
+    assert_eq!(saved["result"]["configuration"]["headerNames"], json!([]));
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_update_refuses_oauth_over_an_overlay_static_credential() {
+    let home = std::path::PathBuf::from("/tmp").join(format!("dm-oauth-{}", uuid::Uuid::new_v4()));
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project = std::fs::canonicalize(&project).unwrap();
+    std::fs::write(
+        home.join("mcp.json"),
+        json!({"mcpServers":{"remote":{"type":"http","url":"https://example.test/mcp","auth":{"type":"bearer","token":"secret-token"},"enabled":false}}})
+            .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join(".mcp.json"),
+        json!({"mcpServers":{}}).to_string(),
+    )
+    .unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    assert_ok(&client.rpc("mcp.move", json!({"id":"remote","from":"user","to":"project","cwd":project,"expectedFromVersion":catalog["result"]["userRevision"],"expectedToVersion":catalog["result"]["projectRevision"]})).await);
+    let view = client
+        .rpc(
+            "mcp.configuration",
+            json!({"source":"project","id":"remote","cwd":project}),
+        )
+        .await;
+    assert_ok(&view);
+    assert_eq!(view["result"]["secretsInUserScope"], true);
+    assert_eq!(view["result"]["configuration"]["authConfigured"], true);
+    let revision = view["result"]["revision"].clone();
+    for patch in [
+        json!({"oauth":{"action":"set","clientId":"abc"}}),
+        json!({"oauth":{"action":"remove"}}),
+    ] {
+        assert_eq!(
+            client
+                .rpc("mcp.update", json!({"source":"project","id":"remote","cwd":project,"expectedVersion":revision,"patch":patch}))
+                .await["error"]["data"]["appError"],
+            "mcp_credentials_are_user_scoped"
+        );
+    }
+    let stored: Value =
+        serde_json::from_slice(&std::fs::read(project.join(".mcp.json")).unwrap()).unwrap();
+    assert!(
+        stored["mcpServers"]["remote"].get("oauth").is_none(),
+        "the refused patch writes nothing"
+    );
+
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&client.rpc("mcp.move", json!({"id":"remote","from":"project","to":"user","cwd":project,"expectedFromVersion":catalog["result"]["projectRevision"],"expectedToVersion":catalog["result"]["userRevision"]})).await);
+    let moved = client
+        .rpc("mcp.configuration", json!({"source":"user","id":"remote"}))
+        .await;
+    assert_ok(&moved);
+    assert_eq!(moved["result"]["secretsInUserScope"], false);
+    assert_eq!(moved["result"]["configuration"]["authConfigured"], true);
+    assert_eq!(moved["result"]["configuration"]["oauthConfigured"], false);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
 }
 
 /// An in-process MCP server that declares a widget tool, an app-only tool and

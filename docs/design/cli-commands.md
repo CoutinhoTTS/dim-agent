@@ -12,14 +12,57 @@ local image sources and paste handling. The multiline/paste editor and headless 
 arguments, clipboard/file insertion, completion and dropped paths are implemented. The attachment
 contract records the native platform acceptance evidence and outstanding checks.
 
+## Transcript detail settings
+
+In both scrollback and fullscreen TUI, `/settings` exposes independent
+`Tool details` and `Thinking details` settings. Enter, Left/Right or Space
+cycles Tool details through collapsed, summary and expanded, and toggles
+Thinking details between collapsed and expanded. Changes save immediately in
+the CLI home. Both settings default to collapsed; saved preferences, including
+the old boolean tool preference, are preserved independently.
+
+```text
+Settings · Interface
+  Tool details       summary
+  Thinking details   collapsed
+```
+
+Collapsed tool groups retain their existing header and member cards. Summary
+adds one row per call, in call order, naming its tool and input target or command,
+without output, diffs or script bodies. Each row truncates to one terminal row;
+a multiline command shows its first nonblank line followed by `…`. Expanded
+retains the full tool details. Clicking a tool header cycles the same three forms
+for that group only. A member's summary row still opens its conversation.
+
+`/tools` cycles the three tool forms, retaining its control of compaction details:
+only expanded shows a compaction's summary body. Thinking details controls both streaming and completed thoughts,
+including the line side panel. Changing either setting updates its retained
+history and live content without changing the other setting. Scrollback already
+written to the terminal remains append-only; fullscreen redraws retained history.
+
 ## Command menu
 
-In both scrollback and fullscreen TUI, group commands by category and sort
-categories and command names alphabetically by their canonical English identifiers.
-Search relevance takes priority; equally ranked matches use the same category/name order.
+In both scrollback and fullscreen TUI, list commands in a fixed task order:
+Session, model and permissions, extensions and automation, view, then app.
+Within each category use the following order, not alphabetical or recent-use order:
+
+| Category | Commands in order |
+| --- | --- |
+| `session` | `/new`, `/resume`, `/timeline`, `/goal`, `/tasks`, `/lines`, `/branch`, `/fork`, `/compact`, `/usage`, `/rename`, `/web` |
+| `model` | `/models`, `/agent`, `/effort`, `/fast`, `/permissions`, `/connect`, `/login` |
+| `extensions` | `/skills`, `/mcp`, `/plugins`, `/hooks`, `/scheduled`, `/workflow`, `/workflow:save`, `/reload-skills`, `/runtime` |
+| `view` | `/theme`, `/language`, `/tools`, `/tui` |
+| `app` | `/settings`, `/keys`, `/exit` |
+
+`/fast` is listed only when the model advertises service tiers.
+Search relevance takes priority; equally ranked matches keep this task order.
+The order is independent of the interface language. Opening `/` selects `/new`;
+`/exit` is last in the unfiltered command list.
 Exit requires its exact name or alias before dispatch: choosing an
 incomplete match fills the command name and keeps the composer open. Exact typed
 commands, including hidden commands, retain their own dispatch behavior.
+Menu selection can still complete rather than dispatch an exact name: commands
+with inline arguments and `/goal` fill the composer for a separate submission.
 The command menu lists `/permissions` as the permission entry. `/approvals` and `/approval`
 remain compatibility aliases when typed directly. Run, queue and steer keys are
 omitted from the menu. The menu only lists slash commands: the view actions for
@@ -27,7 +70,8 @@ picking an earlier message and scrolling to the top or bottom are also omitted;
 `Tab`, `Home` and `End` retain their bindings.
 
 The menu fits the available terminal columns and rows in both modes. Command
-names take priority over descriptions and shortcut labels; a shortcut that
+names take priority over category labels, descriptions and shortcut labels;
+category labels shorten when needed to preserve command names. A shortcut that
 would crowd out its command name is omitted from the row, without changing
 the binding. On short screens, fewer commands are shown and the window follows
 the selection. Scrollback keeps the command draft visible above the menu and
@@ -42,14 +86,44 @@ and the palette's query padding before overlapping either input. The draft
 editor scrolls within the remaining rows and keeps its caret visible without
 discarding text. Otherwise the usual history reservation is retained.
 
+A list panel never draws more rows than it is given; given fewer than two, it
+draws nothing, since the two borders alone would take the budget. The list fills
+the rows the other parts leave. While the list cannot draw its first three
+entries, the notes give up lines from the end, the blank row before them going
+with the last line. When not even one list row fits beside the other parts, the
+panel gives up the rest of the notes, the filter's padding (the row below the
+query first), its footer lines (the first first), the hint's rows above the
+border, the query row and the list's last row, in that order. The selected entry
+and the hint's closing key stay the longest. A hint too wide for the bottom
+border drops whole parts and keeps its first and closing keys. A confirmation is
+shortened by its own rule: the full question and its two keys first, then the
+question cut with `…`, then the two keys, then the confirm key alone, and last
+that key cut with `…`; the confirm key stays the longest.
+
+```text
+Natural height                                      Short budget, 5 rows
+╭─ Sessions ─────────────────────────────────────╮  ╭─ Sessions ─────────────────────────────────────╮
+│                                                │  │                                                │
+│ >                                              │  │ >                                              │
+│                                                │  │ › [Chat] review the parser                     │
+│   [Chat] review the parser                     │  ╰────── Enter open · Ctrl+R refresh · Esc close ─╯
+│   [Chat] fix the flaky test                    │
+│   [Chat] release notes                         │
+╰────── Enter open · Ctrl+R refresh · Esc close ─╯
+```
+
 ```text
 Commands
-  app     /exit        exit
-  app     /keys        show the key bindings
-  model   /permissions   permission preset, sandbox settings and command rules
-  session /rename      rename this session
+  session /new         start a new session
+  session /resume      resume a previous session
+  session /timeline    jump to a message of the shown line
+  session /goal        follow or change the shown line's goal
+  session /tasks       view command output or interrupt a member
+  session /lines       follow, talk to and end this session's lines
+  model   /permissions permission preset and command rules
 
-/ + Enter          -> /exit (completion only)
+/ + Enter          -> start a new session
+/ex + Enter        -> /exit (completion only)
 /exit + Enter      -> exit
 /permissions + Enter -> permission controls
 ```
@@ -58,10 +132,10 @@ Commands
 Fullscreen, 8 rows             Scrollback, 8 rows
 +- Command Palette -------+
 | >                       |   +- input -----------------+
-| app /exit               |   | > /                     |
+| session /new            |   | > /                     |
 +-------------------------+   +-------------------------+
                               +-------------------------+
-+- input -----------------+   | app /exit               |
++- input -----------------+   | session /new            |
 |                         |   +-------------------------+
 +-------------------------+   AGENT
 ```
@@ -151,9 +225,24 @@ registers. The methods, the marker blocks and the rule that reads the goal belon
 this section owns what the native clients do with them. The command is listed in the palette as a
 `session` command, like `/compact`.
 
+In both TUI modes, selecting `/goal` with Enter or Tab only fills `/goal ` in the
+composer and closes the palette. It does not dispatch until the user submits the
+draft. Submitting without arguments prints usage for Dim's supported forms,
+followed by the current goal and status, or that the shown line has no goal.
+The line-mode prompt prints the same help and state for bare `/goal`.
+
+```text
+palette: goal + Enter -> /goal |          (completion only)
+/goal fix build + Enter -> set/edit goal
+/goal + Space + Enter   -> usage + current goal
+
+Usage: /goal [OBJECTIVE | set OBJECTIVE | edit OBJECTIVE | pause | resume | clear]
+No goal on main.
+```
+
 | Form | Call |
 | --- | --- |
-| `/goal` | none: the goal in force on the shown line, or that it has none |
+| `/goal` | none: usage, then the goal in force on the shown line, or that it has none |
 | `/goal OBJECTIVE` | `session.goal.edit` while the goal is active or paused, `session.goal.set` otherwise |
 | `/goal set OBJECTIVE` | `session.goal.set` |
 | `/goal edit OBJECTIVE` | `session.goal.edit` |
@@ -181,7 +270,7 @@ A `/pursue` form is Pursuit's later option (§10) and is not part of this contra
 A.3's rule: the latest live `goal:objective` block is the objective, the latest live `goal:status`
 block is the status, `clear` retires both, `edit` keeps the judge, and an input the InputQueue
 deleted leaves the fold. It adds no query method and asks Goal no question. `/goal` with no
-arguments prints that fold. Before it picks between `set` and `edit` the client reads the line up
+arguments prints usage before that fold. Before it picks between `set` and `edit` the client reads the line up
 to its published head, and after a write it reads again before printing: the state shown and the
 method chosen come from the events, never from a guess taken from the reply. The fold starts over
 at the line's own opening — its
@@ -199,6 +288,7 @@ a `/goal` that writes sends Goal's own change input, and Goal decides what follo
 
 ```text
 > /goal
+Usage: /goal [OBJECTIVE | set OBJECTIVE | edit OBJECTIVE | pause | resume | clear]
 No goal on main.
 
 > /goal Make the CLI tests pass
@@ -214,6 +304,7 @@ Goal paused on main · paused (user)
   Keep the CLI tests green
 
 > /goal
+Usage: /goal [OBJECTIVE | set OBJECTIVE | edit OBJECTIVE | pause | resume | clear]
 Goal on main · paused (user)
   Keep the CLI tests green
 
@@ -225,11 +316,13 @@ Goal resumed on main · active
 Goal cleared on main.
 ```
 
-The first line names the call that ran, the line the goal belongs to and the status in force;
+Bare `/goal` starts with usage; its state report follows. A writing form starts with
+the state report, naming the call that ran, the line the goal belongs to and the status in force;
 `edited` is the form that found a goal and changed only its objective. `evaluator judge` follows
 the status when Pursuit's judge is on the goal. A paused status names its reason: `user`,
 `interrupted`, `limit`, `turn failed` or `evaluation failed`. The objective follows, one line per
-line of it. A cleared goal and a line without one print one line.
+line of it. Clearing a goal prints one confirmation line. Bare `/goal` on a line without a goal
+prints two lines: usage, then the no-goal notice.
 
 The line client and both terminal UI modes print these lines; in the terminal UI they are one
 report in the transcript, so earlier reports stay readable above later ones. The status area
@@ -240,7 +333,7 @@ blocked or cleared one:
  ╭──────────────────────────────────────────────────────────────────────────────╮
  │ › _                                                                          │
  ╰────────────────────────────── ⑂ main ▸ child work · after message 0 ─────────╯
-  AGENT  ⏵⏵ Ask (legacy)  ◎ goal active  1.8K / 256K              provider/model
+  AGENT  ⏵⏵ Workspace write  ◎ goal active  1.8K / 256K              provider/model
 ```
 
 Fullscreen draws the same element in the composer's bottom border, beside the run status:
@@ -248,7 +341,7 @@ Fullscreen draws the same element in the composer's bottom border, beside the ru
 ```text
  ╭──────────────────────────────────────────────────────────────────────────────╮
  │ › _                                                                          │
- ╰──── ◎ goal paused   ⏵⏵ Bypass   1.8K / 256K ───── ● main · after message 4 ─╯
+ ╰──── ◎ goal paused   Full access   1.8K / 256K ───── ● main · after message 4 ─╯
 ```
 
 ## Provider accounts
@@ -367,10 +460,10 @@ daemon already reports it.
 
 ### Menu entry
 
-`/runtime` is a slash command in category `app`, so the menu lists it between `/keys` and
-`/settings`; it needs no Session (`Needs::Nothing`) and takes no inline argument, because the panel
-carries the actions. The typed subforms below are accepted when typed, not offered as menu
-completions.
+`/runtime` is a slash command in category `extensions`; its position follows the
+[command menu order](#command-menu). It needs no Session (`Needs::Nothing`) and takes no inline
+argument, because the panel carries the actions. The typed subforms below are accepted when typed,
+not offered as menu completions.
 
 ### Keys
 
@@ -452,17 +545,17 @@ runtimes".
 
 ## Process isolation settings
 
-`/settings` exposes the `Process isolation` control beside the sandbox settings. `/permissions`
+`/settings` exposes the `Process isolation` control under Permissions. `/permissions`
 links to this section instead of hosting it. It replaces the old `Execution` panel and separate
 Sandbox entry; there is no duplicate toggle, native `dimcode isolation` command, `/isolation`
 command or policy file. Choices and their stored boolean mapping belong to the [process isolation
 design](host-platform-isolation.md#process-isolation), not to Permission.
 
 ```text
-Settings                         Sandbox
-  Permission           >         Workspace write
-  Process isolation    >         Off / Sandboxed · Network allowed
-                                 Applies to new processes and persistent shells.
+Settings
+  Permission           Workspace write >
+  Process isolation    >
+  Applies to new processes and persistent shells.
 ```
 
 Opening the control reads `{source: "execution", scope: "user"}` through
@@ -864,6 +957,10 @@ Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close
 `dimcode models PROVIDER remove MODEL` removes without the panel's confirmation, and `dimcode
 models PROVIDER inspect MODEL` prints the lines the detail shows.
 
+Bare `/effort` and `/reasoning` open the current model's inline effort picker in both TUI
+modes; explicit-value forms and the line client keep their command behavior. The selection
+contract is owned by [model configuration](model-configuration.md#scrollback-interaction).
+
 ### The Workflow area
 
 Workflow (#816): the `/workflow` panel, `/workflow:save` its create editor in both modes, and `dimcode
@@ -1038,7 +1135,7 @@ owner reports the list and its Settings revision with `permission.rules`, and re
 list at that revision with `permission.set_rules`; a stale revision is
 `permission_rules_conflict`.
 
-The row is appended after Process isolation, so the existing rows keep their positions. It opens
+The row is appended after the three presets, so the existing rows keep their positions. It opens
 this area's panel, and Esc there returns to the Permissions panel.
 
 ```text
@@ -1052,8 +1149,8 @@ this area's panel, and Esc there returns to the Permissions panel.
 │                        asking                                 │
 │   Command rules                                             › │
 │                                                               │
-│   Path scope and process isolation are the sandbox's:         │
-│   Settings · sandbox                                          │
+│   The preset fixes the path boundary.                         │
+│   Process isolation: Settings                                 │
 ╰──── ↑↓/Tab move · Enter apply · Esc close ────────────────────╯
 
 ╭─ Command rules ───────────────────────────────────────────────╮
@@ -1129,6 +1226,7 @@ whole rule as one quoted argument, so global options stay unambiguous.
 | `dimcode session delete SESSION` | Permanently delete the Session and everything the store keeps for it; there is no prompt. |
 | `dimcode session cleanup (--older-than DURATION\|--keep N) [--yes]` | Show the Sessions one selector matches, then delete them after confirmation. |
 | `/rename TITLE` or `/rename --clear` | Set, or clear, the shown Session's manual title; the text is a command and never becomes model input. |
+| `/resume` | Open the Sessions picker on this workspace ([the `/resume` picker](#the-resume-picker)); `Ctrl+S` cycles this workspace, this repository when offered, and every workspace. |
 | `/export markdown PATH` or `/export json PATH` | Export the current main branch to a file while the interactive client is idle. |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | Write the Session's whole Timeline as versioned JSONL without a daemon ([Timeline export](appserver/timeline-export.md)); write to stdout when no output path is supplied. |
 | `dimcode daemon vacuum [--database PATH]` | Rewrite an offline native store with SQLite `VACUUM` to reclaim the pages deleted Sessions left, and print its size before and after ([storage format](appserver/native-storage-format.md#sqlite-运行参数与空间回收)); it fails while a daemon owns the database and never creates or upgrades one. |
@@ -1186,8 +1284,8 @@ whole rule as one quoted argument, so global options stay unambiguous.
 | `!command` / `!!command` | Call the Session's existing `shell.run` in record/private mode, including during a model turn. |
 | `--permission read-only\|workspace-write\|full-access` | Select the preset of a new or resumed Session for `dimcode`, `tui`, `exec` and `exec resume` ([permission controls](#permission-controls)). |
 | `/goal [OBJECTIVE \| set OBJECTIVE \| edit OBJECTIVE \| pause \| resume \| clear]` | Read and write the goal of the shown line, in the line client and both terminal UI modes ([goal](#goal)). |
-| `/permissions` | Open the Permissions panel: the three presets with what each one allows, a link to the sandbox settings, and the Command rules row that lists, adds and removes the user's command rules ([permission controls](#permission-controls)). |
-| `/approvals`, `/approval` | Compatibility aliases for `/permissions`; legacy preset arguments remain supported. |
+| `/permissions` | Open the Permissions panel: the three presets with what each one allows, directions to Settings for process isolation, and the Command rules row that lists, adds and removes the user's command rules ([permission controls](#permission-controls)). |
+| `/approvals`, `/approval` | Compatibility aliases for `/permissions`; preset arguments remain supported. |
 
 `dimcode hooks` writes only the user's hook document, and only through the edit kind: `dimcode hooks
 edit` and `dimcode hooks set PATH`, and Ctrl+E in `/hooks`, call `hooks.save` on the Settings source
@@ -1265,6 +1363,69 @@ to the prompt without submitting input. `/exit` takes no arguments. Only these
 exact command names are intercepted; other text follows the normal input path.
 Subcommands do not create a plugin command registry.
 
+### The `/resume` picker
+
+`/resume` opens on the workspace `dimcode` was launched in: the directory
+`--cwd` names, canonicalized, which is also the workspace `session.create`
+records for a Session it creates there. The list holds the stored Sessions of
+exactly that workspace, newest first, and every open starts there. `Ctrl+S`
+cycles this workspace, this repository and all workspaces, and the title names
+the scope shown. The filter keeps the composer's `Ctrl+A` and `Ctrl+W`, and
+`Tab` moves the selection down.
+
+```text
+╭─ Sessions · This workspace ──────────────────────────────────────────────────╮
+│                                                                              │
+│ >                                                                            │
+│                                                                              │
+│   Fix the failing test       3h ago                                          │
+│   Update the catalog design  1d ago                                          │
+╰───────────────────── Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close ─╯
+```
+
+```text
+╭─ Sessions · This repository ─────────────────────────────────────────────────╮
+│                                                                              │
+│ >                                                                            │
+│                                                                              │
+│   Fix the failing test       3h ago · ~/src/app/web                          │
+│   Update the catalog design  1d ago · ~/src/app-fix/web                      │
+╰───────────────────── Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close ─╯
+```
+
+```text
+╭─ Sessions · All workspaces ──────────────────────────────────────────────────╮
+│                                                                              │
+│ >                                                                            │
+│                                                                              │
+│   Fix the failing test       3h ago · ~/src/app/web                          │
+│   Update the catalog design  1d ago · ~/src/other                            │
+╰───────────────────── Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close ─╯
+```
+
+- A scope change works like a new query: it cancels the pending read, drops the
+  cursor and reads the first page again; the query stays and applies within the
+  new scope.
+- This repository holds the launch workspace and the same relative directory in
+  every worktree of its git repository, read with `git rev-parse` and
+  `git worktree list --porcelain` in the background when the picker opens. The
+  first page does not wait for git, and both reads share a two-second bound; a
+  git that fails or does not answer leaves the scope out, without a notice. It
+  is offered only when the set holds more than one entry and the daemon reads a
+  set of workspaces (`session.catalog.workspaces`) or lists through
+  `session.summaries`. A bare worktree adds nothing.
+- Outside this workspace's scope every row leads with its update time and then
+  names its workspace, with the home directory written `~`. The label takes at
+  most half the row, and the time comes first, so a long path is what gets cut.
+- With no Sessions and no query, this workspace's scope says `No saved sessions
+  in this workspace. Ctrl+S shows more.`; the other empty and no-match lines
+  stay unchanged.
+- A daemon before `session.catalog` is listed through `session.summaries`, and
+  the client applies the scope to the rows it receives with the same exact
+  match.
+- `dimcode --resume ID` resumes a Session of any workspace, and cleanup selects
+  across every workspace.
+
 ### Session titles
 
 The manual title is the Session's own state: `session.summaries`
@@ -1332,7 +1493,8 @@ selects with one of two selectors and reads both from the `updatedAt` of
 | `--older-than DURATION` | Every Session whose `updatedAt` is at least `DURATION` ago. `DURATION` is a count and a unit `d`, `h` or `m`, such as `30d`. |
 | `--keep N` | The N most recently active Sessions stay; every other Session is selected. |
 
-Cleanup selects only the Sessions `/resume` lists by default
+Cleanup selects across every workspace, not only the one `/resume` opens on: the
+classes it selects are the ones `/resume` lists by default
 ([classification](appserver/session-classification.md#35-catalog-visibility)): origin
 `client` or `unknown`. An `internal` Session is never selected: a member goes with
 its leader's delete and a launched Session belongs to its plugin. An `acp` Session is
@@ -1605,7 +1767,7 @@ settlement, and exits with code 3. A [question](#questions) gets no answer
 the same way: the question's branch and the turn are stopped, and the exit code is 3.
 It does not change
 `SessionConfig.interactive`. Sessions created as noninteractive retain Approval's existing owner-side policy (#98 D10).
-`--permission` selects a legacy policy, including its file scope and risk decisions; a call that still asks is denied
+`--permission` selects a preset, including its file scope and risk decisions; a call that still asks is denied
 the same way ([headless execution](#headless-execution)).
 Other exit codes retain the native CLI contract, including 2 for turn failure
 and 130 for interruption. A transport failure does not retry a submission.
@@ -1681,16 +1843,16 @@ interrupts do not become an exit or draft-clear action at the next prompt.
 ## Permission controls
 
 Permission owns the branch policy seeded by `session.create {permissionPolicy}` and changed with
-versioned `session.permission.get/update`. The independent optional fields and legacy semantics
-are the [Permission contract](../architecture/rust-agent/plugins/Permission.md#policy-contract),
-extended by [ADR 017](../adr/017-independent-permission-controls.md). Command rules remain
+versioned `session.permission.get/update`. The preset and tool lists are defined by the
+[Permission contract](../architecture/rust-agent/plugins/Permission.md#policy-contract),
+with [ADR 018](../adr/018-permission-is-the-preset.md). Command rules remain
 `permission.rules`/`permission.set_rules` ([F2](appserver/permission-command-rules.md)); file grants
 remain `session.grants.add/remove` ([ADR 012](../adr/012-session-grants.md)).
 
 | TUI control | Choices | Owner |
 | --- | --- | --- |
 | Permission | Read only / Workspace write / Full access | `preset` |
-| Path scope | the sandbox's own settings | [file access facts](../adr/014-file-access-facts.md) |
+| Path scope | Fixed by the preset and Session grants | [file access facts](../adr/014-file-access-facts.md) |
 | Process isolation | Off / Sandboxed · No network / Sandboxed · Network allowed | `execution` settings, not Permission |
 
 ```text
@@ -1699,7 +1861,7 @@ remain `session.grants.add/remove` ([ADR 012](../adr/012-session-grants.md)).
     Workspace write  writes inside the workspace; asks outside it
     Full access      no path limits; tools run without asking
     Command rules    >
-  Path scope and process isolation are the sandbox's: Settings · sandbox
+  The preset fixes the path boundary. Process isolation: Settings
 ```
 
 `↑↓` moves, `Enter` applies the highlighted preset, `Esc` closes. There is no second policy
@@ -1755,29 +1917,11 @@ $ dimcode exec resume <session-id> --permission read-only -p 'Summarize'
   attach -> history -> submit -> idle -> detach
 ```
 
-A new Session created with the legacy flag receives `{preset}` without explicit overrides.
+A new Session created with `--permission` receives `{preset}`.
 The flag wins over remembered CLI choices for that run. New members inherit the requesting
 branch's current policy (see branch semantics). A preset-only update on resume changes only
-the legacy seed and retains all other policy fields, including explicit overrides and tool lists;
-explicit overrides still take precedence over that seed. The notice must show their effective
-values rather than suggest that changing a preset replaced explicit controls.
-The update happens before attach, so no turn submitted by this invocation runs under the old
-preset. Without the flag or remembered choices, `session.create` omits the policy and a resumed
-Session keeps its own. Remembered choices are supplied explicitly when applied; they never
-reinterpret stored history.
-A resume flag against a daemon that does not advertise `session.permission.update` fails before
-attach. A conflict retry is correct here because the requested preset does not depend on what
-the read returned; the read only supplies the version and the tool lists to keep.
-
-The effective controls are shown where the Session is identified. Interactive start reads the policy with
-`session.permission.get` when the daemon advertises that method; `exec` prints it to stderr only
-when `--permission` was given, so its existing diagnostics are otherwise unchanged. A
-`permission/changed` event that arrives live on `main`, from this or another client such as a
-paired device, prints one record with the independent values and any legacy tool exceptions.
-
-The overview and Settings use `Ask (legacy tool exceptions)`. The compact TUI scrollback status
-uses `Ask (legacy)` so saved-setting notices still fit 80 columns; this is the same legacy policy,
-not explicit Ask or another option.
+the preset and retains both tool lists. An invalid preset or a failed update leaves the policy
+unchanged. A live `permission/changed` on `main` reports the current preset.
 
 ```text
 $ dimcode --permission read-only
@@ -1792,7 +1936,7 @@ Assistant: ...
 ```
 
 The scrollback client draws a status line under the composer: the agent marker and the
-tool-approval mode (`Ask (legacy)` for the legacy policy), the goal marker, the context use against
+permission preset, the goal marker, the context use against
 its window, and one slot for the state in force — a notice, a required answer or permission,
 `esc interrupt`, or the background task count. The model, with its effort when both fit, is
 right-aligned on the same line; the line is clipped to the terminal width.
@@ -1800,11 +1944,10 @@ right-aligned on the same line; the line is clipped to the terminal width.
 ### Headless execution
 
 `exec` keeps its contract: an approval request is answered with the ordinary denial, the turn is
-stopped and settled, and the exit code is 3. For legacy policies without explicit overrides,
-`full-access` asks nothing except that explicit denies still refuse calls; `read-only` denies
-writes and commands; `workspace-write` asks for commands and exits 3. Explicit Ask also asks for
-otherwise in-scope reads; Bypass still leaves file-scope approvals intact. There is no automatic
-approval answerer. The flag is an explicit legacy choice, so `exec` asks for no confirmation.
+stopped and settled, and the exit code is 3. `full-access` asks nothing, while explicit denies
+still refuse calls; `read-only` denies writes and commands; `workspace-write` asks for commands
+and exits 3. There is no automatic approval answerer. The startup flag is an explicit choice,
+so `exec` asks for no confirmation.
 
 ### Branch semantics
 
@@ -1915,11 +2058,10 @@ approves nor cancels work by that fact alone.
 ### `/permissions`
 
 `/permissions` is the visible menu entry in both TUI modes; `/approvals` and `/approval` open the
-same controls as compatibility aliases, not a second preset chooser. The control applies to
-`main`; each field selection writes only its dimension using the current whole policy and
-version. A failed save neither changes remembered choices nor falls back to a legacy preset.
+same preset picker as compatibility aliases. The control applies to `main`; selecting a preset
+uses the current policy and version, preserving the tool lists. A failed save neither changes remembered choices nor falls back to another preset.
 
-Process isolation opens the execution settings. The Command rules row opens the management panel
+Process isolation stays in Settings. The Command rules row opens the management panel
 of [The command rules area](#the-command-rules-area), where the rules are listed, added and
 removed; Esc there returns to this panel.
 
@@ -1935,17 +2077,17 @@ Permissions (main branch)
   Full access      no path limits; tools run without asking
   Command rules                             >
 
-Path scope and process isolation are the sandbox's: Settings · sandbox
+The preset fixes the path boundary. Process isolation: Settings
 
 ↑↓/Tab move · Enter apply · Esc close
 ```
 
 Each row states what its preset allows and what it asks, so the choice needs no second menu.
 Merely opening the panel writes nothing; `Enter` writes the preset through the versioned update,
-and the tool lists are preserved. The block below the rows names the sandbox for the path
-boundary and process isolation instead of offering them here.
+and the tool lists are preserved. The notes state that the preset fixes the path boundary and
+point to Settings for process isolation.
 
-Increasing file access or choosing Bypass explains that explicit denies remain and process
+Choosing Full access explains that explicit denies remain and process
 isolation is unchanged; it does not claim every call will run. No combined permissive shortcut
 appears in an approval prompt.
 
@@ -1972,7 +2114,7 @@ Command rules (user scope, every Session):
 | --- | --- | --- |
 | `/permissions` | `session.permission.get` on `main`; `permission.rules`; existing execution settings read | none |
 | Preset selection in the panel | `get`, then `update` preserving the tool lists | Re-read before any retry; never replace the tool lists |
-| `/permissions PRESET` (legacy) | `get`; for `full-access` a `[y/N]` confirmation where Enter, any other answer, EOF and Ctrl+C mean No; then `update` with the read version and otherwise unchanged policy | `permission_conflict`: read again, print the current policy, write nothing; the user decides again |
+| `/permissions PRESET` | `get`; for `full-access` a `[y/N]` confirmation where Enter, any other answer, EOF and Ctrl+C mean No; then `update` with the read version and otherwise unchanged policy | `permission_conflict`: read again, print the current policy, write nothing; the user decides again |
 | `/permissions allow\|deny exact\|prefix COMMAND` | `permission.rules`; unless the same rule exists, `set_rules(revision, rules + rule)`, then print the new list | read again and retry, at most 3 attempts: adding does not depend on the other rules |
 | `/permissions remove N` | `set_rules(listing revision, listing without rule N)`, then print the new list | `permission_rules_conflict`: read again, print the current list, remove nothing |
 
@@ -2065,8 +2207,8 @@ authorizes a write, and a fork starts without the source's grants.
 
 ### Decisions
 
-1. **Remembered CLI choices are not a host default.** Independent choices are saved alongside
-   old config and sent explicitly by the CLI. A default honored by Web, ACP, paired devices and
+1. **Remembered CLI choices are not a host default.** The preset is saved in CLI config and sent
+   explicitly by the CLI. A default honored by Web, ACP, paired devices and
    automation belongs to the daemon's user Settings: requirement R1. Do not reinterpret old
    config or existing policies to simulate such a default.
 2. **No `--allowed-tools`/`--disallowed-tools`.** Tool names belong to the daemon profile and the
@@ -2080,13 +2222,11 @@ authorizes a write, and a fork starts without the source's grants.
 5. **`/permissions` also adds rules.** F2 §8 lists adding as part of the panel, and with product
    storage the rules live in a database row that the user cannot edit as a file; without `add`
    a deny rule could not be created from the CLI.
-6. **Retry only when the outcome does not depend on the read.** A startup preset, an independent
-   field assignment and adding a rule can retry after re-reading and preserving untouched fields.
-   Legacy panel preset switching and removal by number report conflicts because the user chose
+6. **Retry only when the outcome does not depend on the read.** A startup preset and adding a rule can retry after re-reading and preserving untouched fields.
+   Panel preset switching and removal by number report conflicts because the user chose
    from what was shown. Execution Settings retains its inspected-revision save contract.
-7. **Legacy permissive preset confirmation remains.** An interactive legacy `full-access`
-   argument still requires confirmation; the startup flag is itself explicit and works headless.
-   New controls describe their independent effects rather than offering that combined TUI choice.
+7. **Line-mode Full access requires confirmation.** The interactive `full-access` argument
+   requires confirmation; the startup flag is explicit and works headless.
 
 ### Out of scope
 
@@ -2097,10 +2237,7 @@ authorizes a write, and a fork starts without the source's grants.
 | `--allowed-tools`/`--disallowed-tools` | A tool catalog read to validate names at the argument boundary (decision 2) |
 | `/permissions` during a running turn | CLI only: the running turn reads plain lines and answers approvals; panel calls would join its multiplexed loop |
 
-ACP, Hooks and Web remain legacy/preset-only clients for permission selection in this change.
-Their preset controls do not select a file boundary or a tool-approval override, and their
-omitted overrides retain legacy risk decisions. Extending those UIs is separate work, not a
-second implementation of the TUI controls; Web's existing execution settings remain host settings.
+ACP, Hooks and Web use the same preset policy contract. Web execution settings remain host settings.
 
 ### Rule check
 
@@ -2111,13 +2248,13 @@ second implementation of the TUI controls; Web's existing execution settings rem
 | §4 rule 1 (command events) | Policy changes go through Permission's existing `session.permission.update`, which writes `permission/changed`; rules and grants go through their owners' typed writes |
 | §4 rule 2 (handover) | Unchanged |
 | §4 rule 3 (before callback) | Not used |
-| §4 rule 4 (core has no business meaning) | Timeline and Dispatcher are unchanged; independent policy semantics belong to Permission, not the CLI |
+| §4 rule 4 (core has no business meaning) | Timeline and Dispatcher are unchanged; policy semantics belong to Permission, not the CLI |
 | §4 rule 5 (batches) | The rule write and the approval answer are separate owners' writes, ordered by the client as F2 §5.4 specifies |
 | §4 rule 6 (context) | The model sees only the existing results and denials |
 | §4 rule 7 (public interfaces only) | Only public methods and notifications; the CLI reads `permission/changed` from the public event stream |
 | §4 rule 8 (infrastructure unchanged) | No change; two requirements are raised below for App Server owners, not infrastructure |
 | §4 rule 9 (only needed facts in Timeline) | No new event; rules and grants stay out of the Timeline |
-| ADR 002 D1 to D5 | No new part, wiring or dependency; additive policy fields follow ADR 017, CLI preferences are local business configuration |
+| ADR 002 D1 to D5 | No new part, wiring or dependency; preset policies follow ADR 018, CLI preferences are local business configuration |
 | ADR 003 | Presets and rules govern only agent tool calls; `!command` is unaffected; rules are user scope only, so no project file can widen them; replay, restore and fork confer nothing new |
 
 ### Requirements raised to mechanism owners
@@ -2289,7 +2426,7 @@ steps for a turn loop that multiplexes its connection, and the allow answer).
 without terminal input or output: the `ask_user` input rules, the waiting calls derived from
 events, the `session.question.respond` params and what a reply means. `question/line.rs` is the
 line-mode prompt that `session.rs` feeds with notices and replies. Conversation formatting belongs
-to the CLI. Independent controls use Permission's additive policy contract (ADR 017) and the
+to the CLI. Preset selection uses Permission's policy contract (ADR 018) and the
 existing execution Settings contract; no core lifecycle, storage migration or runtime registration
 change is required.
 
@@ -2315,17 +2452,14 @@ process tool without a question, that default `exec` still exits 3, that `exec r
 --permission` changes the resumed branch, and that "always" writes an exact rule after which the
 identical call runs without asking, until `/permissions remove` deletes it.
 
-The independent-control acceptance cases are: an in-scope read asks with explicit Ask; a tool
-allow answers only the tool question; Bypass still asks outside file scope; Read only denies a
-write even with a tool allow; one call needing scope and tool consent prompts once; a read grant
-cannot authorize a write; an explicit deny wins with Bypass; old policies/config retain exact
-legacy behavior without silent writes. Verify each choice changes only its own field, remembers
-it only after a successful policy update, works before Session creation, and reports conflicts or
-unsupported servers without widening. Check both TUI modes show only `/permissions` in the menu,
-both aliases work, and Process isolation has no duplicate Execution/Sandbox entry. Reuse process
-flows for the boolean mapping, CAS failure, unavailable-backend reason, and a process started
-before an isolation change retaining its old boundary. These are requirements, not a claim of
-implementation or verification completion.
+The preset acceptance cases cover file boundaries, explicit tool and command rules, Session grants,
+and one approval for a call requiring consent. A Read only policy denies writes even with a tool
+allow; explicit denies win under Full access. A saved preset survives a fresh terminal launch,
+the current `permission` key takes precedence over legacy `permissionPreset`, and `--permission`
+overrides both. Verify conflicts and unsupported servers without retrying a failed policy write.
+Check both TUI modes show only `/permissions` in the menu, both aliases work, and Process isolation
+stays in Settings. Reuse process flows for the boolean mapping, CAS failure, unavailable-backend
+reason, and a process started before an isolation change retaining its old boundary.
 
 Questions are covered by scripted daemon flows (`cli_flow/question.rs`): single and multiple
 choices, custom text, a decline, invalid lines, inputs the handler rejects and other tools that

@@ -132,8 +132,8 @@ fn an_incompatible_store_reports_the_startup_note() {
     rusqlite::Connection::open(&database)
         .unwrap()
         .execute_batch(
-            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 32));
-             INSERT INTO agent_store_format VALUES (32);",
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 34));
+             INSERT INTO agent_store_format VALUES (34);",
         )
         .unwrap();
     let original = fs::read(&database).unwrap();
@@ -145,10 +145,10 @@ fn an_incompatible_store_reports_the_startup_note() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("Cannot open native store"), "{stderr}");
-    assert!(stderr.contains("Store format: v32"), "{stderr}");
-    assert!(stderr.contains("Daemon format: v31"), "{stderr}");
+    assert!(stderr.contains("Store format: v34"), "{stderr}");
+    assert!(stderr.contains("Daemon format: v33"), "{stderr}");
     assert!(stderr.contains("Existing data was preserved"), "{stderr}");
-    assert!(stderr.contains("Run a build supporting v32"), "{stderr}");
+    assert!(stderr.contains("Run a build supporting v34"), "{stderr}");
     assert!(stderr.contains("Details:"), "{stderr}");
     assert!(!stderr.contains("App Server exited"), "{stderr}");
     assert_eq!(fs::read(&database).unwrap(), original);
@@ -168,7 +168,7 @@ fn a_server_that_exits_without_a_note_keeps_the_requirement() {
         .args(["--server", server.to_str().unwrap(), "exec", "-p", "hello"])
         .output()
         .unwrap();
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("--server must name a standalone dim-app-server binary"),

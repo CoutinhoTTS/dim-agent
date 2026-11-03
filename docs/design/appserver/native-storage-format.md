@@ -1,6 +1,6 @@
 # Rust 会话存储格式
 
-The current native format is **v31**, with source-owned `settings_documents`,
+The current native format is **v33**, with worktree directory and Session usage records, source-owned `settings_documents`,
 SessionStore's Session-file rows, its title metadata, request messages stored
 as lists of content-addressed nodes, extension event rows, Session
 configurations and Agent profiles that may omit their mount list, the two
@@ -9,11 +9,11 @@ omit `type`, the Session catalog projection, a configuration's System source,
 a model limit that only a declaration writes, a delegation's Agent owner and
 member leader, a Session's creation origin, Session file grants, command output
 ownership and the two context reading switches on timeline events. Startup
-requires the exact v31 SQL schema and a single
-format marker of 31 before writable PRAGMAs, or the exact v30, v29, v28, v27, v26, v25, v24, v23,
+requires the exact v33 SQL schema and a single
+format marker of 33 before writable PRAGMAs, or the exact v32, v31, v30, v29, v28, v27, v26, v25, v24, v23,
 v22, v21, v20, v19, v18, v17, v16, v15 or v13 schema with its own marker,
-which the same startup transaction upgrades in place to v31 one step after
-another ([#708 v31 decision](#708-v31-格式决定), [#557 v30 decision](#557-v30-格式决定), [ADR 013 v29 decision](#adr-013-v29-格式决定), [#717 v28 decision](#717-v28-格式决定), [#593 v27 decision](#593-v27-格式决定),
+which the same startup transaction upgrades in place to v33 one step after
+another ([#911 v33 decision](#911-v33-格式决定), [#605 v32 decision](#605-v32-格式决定), [#708 v31 decision](#708-v31-格式决定), [#557 v30 decision](#557-v30-格式决定), [ADR 013 v29 decision](#adr-013-v29-格式决定), [#717 v28 decision](#717-v28-格式决定), [#593 v27 decision](#593-v27-格式决定),
 [S5a v15 decision](#s5a-v15-格式决定),
 [S5b v16 decision](#s5b-v16-格式决定), [#193 v17 decision](#193-v17-格式决定),
 [#2 v18 decision](#2-v18-格式决定), [#364 v19 decision](#364-v19-格式决定),
@@ -26,14 +26,18 @@ branch-only v14 `user_configuration` format are unsupported and preserved, never
 migrated, downgraded or interpreted as an admitted format.
 No migration API or startup option is provided. S5c (Session deletion and fork)
 kept v15 unchanged ([S5c decision](#s5c-格式决定)). v13 document bytes remain
-valid in v31, and v16 request rows stay readable as written.
-除格式自身的 SQL 外，每次打开都接受派生索引 `timeline_history_anchors`
+valid in v33, and v16 request rows stay readable as written.
+除格式自身的 SQL 外，每次打开都接受派生索引：`timeline_history_anchors`
 （`(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'input/message')`，
-[latest-turn 窗口 §5.1](session-history-window.md#51-the-derived-index)）：读写打开在启动事务内用
-`CREATE INDEX IF NOT EXISTS` 创建或补建，只读导出只接受它。它不含数据，可从
-`timeline_events` 重新推导，读同一份事件不因它有无而不同，因此不属于格式：启动门禁的
-精确结构比较忽略这一个名字，标记保持 30；其余任何多余对象仍按原规则拒绝。代价是早于
-该变更的二进制不认识这个名字，会以 "unsupported SQLite schema … preserved" 拒绝已有该
+[latest-turn 窗口 §5.1](session-history-window.md#51-the-derived-index)）、
+`timeline_policy_turns`（`(session_id, branch_id, kind, sequence, event_id) WHERE kind = 'turn/start'`，
+[上下文读取开关与裁剪点 §5](context-read-and-compaction.md#5-策略的位置)）与事件查询的
+`timeline_events_by_kind`（`(session_id, branch_id, kind, sequence, event_id)`，按 kind
+读取事件而不碰事件体，[ADR 019](../../adr/019-event-query.md) D4）：读写打开在启动事务内用
+`CREATE INDEX IF NOT EXISTS` 创建或补建，只读导出只接受它们。它们不含数据，可从
+`timeline_events` 重新推导，读同一份事件不因它们有无而不同，因此不属于格式：启动门禁的
+精确结构比较忽略这些名字，格式标记不变（当前 v33）；其余任何多余对象仍按原规则拒绝。代价是早于
+该变更的二进制不认识这些名字，会以 "unsupported SQLite schema … preserved" 拒绝已有该
 索引的库（行不变，新二进制可再次打开）。
 Storage versions are independent of RPC versions. Private MCP/Skill business documents do not belong
 in loader rows, events, diagnostics, Sessions or Timelines.
@@ -60,12 +64,12 @@ home 目录继承的 ACL；正常打开不写）。说明只描述本次启动�
 
 | 情形 | 判据 | 说明的结论 |
 | --- | --- | --- |
-| 更新格式 | 结构不是本构建认识的形状，`agent_store_format` 可读且恰有一行 `version > FORMAT`（当前 29） | 本构建读不了这个更新格式的库 |
+| 更新格式 | 结构不是本构建认识的形状，`agent_store_format` 可读且恰有一行 `version > FORMAT`（当前 33） | 本构建读不了这个更新格式的库 |
 | 标记与结构不符 | 结构是本构建认识的形状（当前格式或某个升级起点），但标记行不是该版本的唯一值 | 标记和结构不一致；不诊断为“降级” |
 | 无法识别 | 结构不是本构建认识的形状，且可读的单一标记在本构建接受的范围内（`MIN_FORMAT ≤ version ≤ FORMAT`，已移除的 v14 除外），或没有可读的单一标记 | 结构无法识别；读出标记时一并给出 |
 | 过旧或不再准入 | 结构不是本构建认识的形状，且可读的单一标记低于 `MIN_FORMAT`，或为已移除的 v14 | 该格式不再被这个构建读取 |
 
-正文模板（`<path>`、`<marker>`、`<schema>` 由存储填写；`<format>` 取 `FORMAT` 常量（当前 29），不写字面量）。
+正文模板（`<path>`、`<marker>`、`<schema>` 由存储填写；`<format>` 取 `FORMAT` 常量（当前 33），不写字面量）。
 更新格式：
 
 ```text
@@ -123,29 +127,33 @@ Cannot open native store <path>.
 - **写入与清理**：拒绝前用同目录临时文件写入并原子替换；写入失败不改变返回值，原错误照常返回。正常打开、升级成功和其他启动失败不写说明。成功打开（含升级成功）时，存储 owner 删除遗留说明；删除失败不影响启动，下一次成功打开再清理。说明的读取、打印和其余清理属于 CLI 启动，见 [CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)；说明不进入日志历史。
 - **位置**：说明是库的同级文件，不是新数据库格式，也不是 `daemon.log` 的一部分。CLI 启动的守护进程使用 `<native home>/dimcode.sqlite`，所以 CLI 读取 `<native home>/dimcode.sqlite.startup`。直接以 `--database` 启动的守护进程把说明写在它的库旁，CLI 的启动路径不读取。
 - **不自动恢复**：不删除、重建、降级、重置标记或复制库；`--home PATH` 只建立另一个环境。终端说明只给兼容构建和 `--home` 两条路；开发说明继续使用 `./dev` 的隔离 home。
-- **验证**：`storage_flow` 用一次性库覆盖全部分支：v32 标记的未知结构被拒绝、库字节不变，说明为“更新格式”；当前格式的库把标记改成 v29，以及 v13 结构配 v31 标记，都得到“标记与结构不符”而不是“更新格式”；当前格式的空标记表得到 `v31 (format marker is missing or ambiguous)`；未知结构配可读标记 v20 得到 `v20 (unrecognized schema)`，没有可读标记得到 `unrecognized`；v12 和已移除的 v14 得到“过旧”；正常打开和升级成功删除遗留说明，失败替换上一次留下的说明。CLI 启动流程另覆盖终端打印、PID、权限和控制字符，见 [CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)。
+- **验证**：`storage_flow` 用一次性库覆盖全部分支：v34 标记的未知结构被拒绝、库字节不变，说明为“更新格式”；当前格式的库把标记改成 v29，以及 v13 结构配 v32 标记，都得到“标记与结构不符”而不是“更新格式”；当前格式的空标记表得到 `v33 (format marker is missing or ambiguous)`；未知结构配可读标记 v20 得到 `v20 (unrecognized schema)`，没有可读标记得到 `unrecognized`；v12 和已移除的 v14 得到“过旧”；正常打开和升级成功删除遗留说明，失败替换上一次留下的说明。CLI 启动流程另覆盖终端打印、PID、权限和控制字符，见 [CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)。
 
 ## SQLite 运行参数与空间回收
 
-进程用一个连接打开本库；格式门禁及其准入事务提交后，才设置连接级 PRAGMA：`journal_mode=WAL`、`synchronous=FULL`（macOS 另加 `fullfsync`）、`foreign_keys=ON`、`wal_autocheckpoint=0`、`journal_size_limit=64 MiB`、`cache_size=-32768`（32 MiB）。
+进程用一个写连接打开本库，另有四个只读连接服务读取（[#599](https://github.com/arcships/dim/issues/599)）：写连接在格式门禁及其准入事务提交后才设置连接级 PRAGMA：`journal_mode=WAL`、`synchronous=FULL`（macOS 另加 `fullfsync`）、`foreign_keys=ON`、`wal_autocheckpoint=0`、`journal_size_limit=64 MiB`、`cache_size=-32768`（32 MiB）。只读连接以 `SQLITE_OPEN_READ_ONLY` 打开，只设 `busy_timeout=5s`、`cache_size=-32768` 和 `catalog_fold` 函数，不设 `journal_mode`、`synchronous`、`foreign_keys`、`wal_autocheckpoint`、`journal_size_limit` 或 `fullfsync`。每次读取在其语句开始时的最后提交上运行，不等待写事务或 fsync；调用按顺序轮换连接，目录扫描等长读不会占住其他读取。写连接与 fork/delete 的复制连接用 `sqlite3_busy_handler`：每 1 ms 重试一次、约 5 秒后放弃，两者因此轮流取得写锁，而不是一方在另一方退避期间长期占有。
 
 | 参数 | 值 | 作用 |
 | --- | --- | --- |
-| `wal_autocheckpoint` | `0` | 关闭提交事务内的自动检查点。writer 在每轮提交并发布后、WAL 达到 4 MiB（SQLite 默认的 1000 页）时执行 `PRAGMA wal_checkpoint(PASSIVE)`；检查点因此不占提交路径。 |
+| `wal_autocheckpoint` | `0` | 关闭提交事务内的自动检查点。writer 在每轮提交并发布后、WAL 达到 4 MiB（SQLite 默认的 1000 页）时执行 `PRAGMA wal_checkpoint(PASSIVE)`；检查点因此不占提交路径。只读连接不自动检查点。 |
 | `journal_size_limit` | 64 MiB | 检查点重启 WAL 后，文件截到不超过该值；单轮写入本身更大时保留该轮的大小。导出等读者持长读事务时 WAL 仍会在导出期间增长，导出结束后下一次检查点照常复制并重启。被动检查点不等待读者。 |
-| `cache_size` | 32 MiB | 在 650 MB、2,300 个 Session 的一次性库上重复读取每个 Session 的尾部事件：缓存为 2–16 MiB 时十次读取共从分页器读约 205 MB，32 MiB 起降到约 20 MB，64 MiB 与 128 MiB 不再减少。32 MiB 是容纳该热点工作集的最小值。 |
+| `cache_size` | 每个连接 32 MiB | 在 650 MB、2,300 个 Session 的一次性库上重复读取每个 Session 的尾部事件：缓存为 2–16 MiB 时十次读取共从分页器读约 205 MB，32 MiB 起降到约 20 MB，64 MiB 与 128 MiB 不再减少。32 MiB 是容纳该热点工作集的最小值；写连接和四个只读连接各用该值。 |
+| `busy handler` | 每 1 ms，约 5 秒 | 写连接与 fork/delete 的复制连接共用；两者在同一 WAL 上交替取得写锁，使分块的复制/删除与写入轮都能前进。 |
+| `foreign_keys` | 复制连接 `OFF` | fork 在最后一个事务才插入 `agent_sessions`，此前先写事件、内容、快照与分支；SQLite 的外键是连接级设置，复制连接关闭它，最后一个事务在提交时仍满足全部约束。 |
 
-关闭时执行 `PRAGMA wal_checkpoint(TRUNCATE)`，把 WAL 折回数据库并截为零；另一个连接（如运行中的导出）仍持读事务时这一步可能失败，下次打开继续。
+关闭时先关闭四个只读连接，再执行 `PRAGMA wal_checkpoint(TRUNCATE)`，把 WAL 折回数据库并截为零；另一个连接（如运行中的导出）仍持读事务时这一步可能失败，下次打开继续。
+
+fork 与 Session 删除各用一条复制连接，按 256 个逻辑序号（内容按 1024 个哈希）分块提交，每块之间让写入轮取得写锁。复制连接与写连接一样在 macOS 上设置 `fullfsync`。fork 的中间块以 `synchronous=NORMAL` 提交，最后插入 `agent_sessions` 的事务以 `FULL` 提交：它的 fsync（macOS 上为 F_FULLFSYNC）覆盖此前写入 WAL 的全部帧，中断只留下不可达的行，不会出现可见但不完整的 Session。删除先在一个 `FULL` 事务中移除使 Session 可见的行（文件与输出归属、授权、标题、目录、owner、session 与分支），再以 `NORMAL` 分块删除事件、快照和内容；中断只留下不可达的行，重试同一 id 即可清除。两者都不改变持久化格式。
 
 删除 Session 只释放库内页，数据库文件本身不缩小。维护入口是 `dimcode daemon vacuum [--database PATH]`：守护进程未运行时它取同一把维护锁，校验当前格式的精确结构后执行 `VACUUM`，打印操作前后数据库与 WAL 的字节数之和。`VACUUM` 重写整个库，需要约等于库大小的临时空间；守护进程持锁时该命令拒绝执行，也不升级或创建库。
 
-## Current v31 tables
+## Current v33 tables
 
 下表逐列对应 `SqliteStorage::SCHEMA`。新表按业务实体命名，其中 `agent_sessions` 与旧 TypeScript 的 `sessions` 区分；当前启动门禁仍只接受本格式，不因此支持旧表同库存取。`—` 表示 SQL 中没有显式 `DEFAULT`；可空列若省略会得到 SQLite 的隐式 `NULL`。SQLite rowid 表中的 `TEXT PRIMARY KEY` 不自动保证非空，因此下表如实标出 v1 的两个缺口；正常写入仍必须给出 ID。
 
 | 表.列 | SQLite 类型 | 可空 | 默认 | 约束与含义 |
 | --- | --- | --- | --- | --- |
-| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 31)`; exactly one row |
+| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 33)`; exactly one row |
 | `settings_documents.source` | `TEXT` | No | — | Primary key; `user/mcp`, `user/skills`, `user/mcp-projects` or `user/mcp-plugins`; workspace files are not mirrored |
 | `settings_documents.version` | `INTEGER` | No | — | Positive per-source CAS revision; token `native:<source>:<version>` |
 | `settings_documents.document` | `TEXT` | No | — | Plain business payload JSON, without a `{kind, document}` envelope; unknown business fields are preserved |
@@ -212,6 +220,12 @@ Cannot open native store <path>.
 | `session_grants.mode` | `TEXT` | 否 | — | `CHECK (mode IN ('read', 'write'))`；write 同时允许读，read 不降级已有 write |
 | `session_output_owners.session_id` | `TEXT` | 否 | — | 联合主键第 1 列；外键到 `agent_sessions(session_id)`；随 Session 删除（v29，ADR 013） |
 | `session_output_owners.path` | `TEXT` | 否 | — | 联合主键第 2 列；命令输出的规范绝对路径；fork 复制行，删除时按父目录清理 |
+| `worktree_directories.repository` | `TEXT` | 否 | — | 联合主键第 1 列；规范公共 Git 目录，UTF-8 绝对路径（v33） |
+| `worktree_directories.root` | `TEXT` | 否 | — | 联合主键第 2 列；worktree 规范根目录；最后关联解除后保留 |
+| `session_worktrees.session_id` | `TEXT` | 否 | — | 联合主键第 1 列；外键到 `agent_sessions(session_id)`；随 Session 删除，不随 fork 复制 |
+| `session_worktrees.repository` | `TEXT` | 否 | — | 联合主键第 2 列；与 `root` 联合作为外键引用 `worktree_directories(repository, root)` |
+| `session_worktrees.root` | `TEXT` | 否 | — | 联合主键第 3 列；关联的 worktree 根目录 |
+| `session_worktrees.subtree` | `TEXT` | 否 | — | 本 Session 核验的继承子树；规范 UTF-8 绝对路径，位于 `root` 内 |
 | `session_metadata.session_id` | `TEXT` | 否 | — | 主键；外键到 `agent_sessions(session_id)`；每个 Session 至多一行，没有行表示修订号 0、没有标题（v16） |
 | `session_metadata.revision` | `INTEGER` | 否 | — | `CHECK(revision > 0)`；该 Session 已提交 `setTitle` 的次数，`setTitle` 的 CAS 修订号 |
 | `session_metadata.title` | `TEXT` | 是 | 隐式 `NULL` | 标题文本，原样保存；清除后为 `NULL`，行保留 |
@@ -274,17 +288,14 @@ Managed `providers.record` is `{kind:"managed", account, models, modelConfigOver
 
 静态目录的 record 为 `{kind, displayName, driverKind, auth, credentialAuthority, baseUrl, network, headers, credential, models, remoteModels, endpointTypes, modelConfigOverrides, disabledModelIds, enabled, definitionFingerprint, version, userModels?, modelPreferences?, endpointOverrides?}`。可选的 `userModels`、`modelPreferences`、`endpointOverrides` 沿 #329 格式决定保存用户模型、偏好和端点覆盖，缺失表示无对应配置。`kind` 为 `builtin` 或 `custom`；models 和覆盖均为完整 `ModelEntry`；`definitionFingerprint` 是 bundled 定义的 SHA-256，自定义记录为 null。`credentialAuthority` 为 `static`、`openai_codex` 或 `grok`，缺省仅解释为静态来源；后两者只允许对应内置 Provider 的固定非秘密绑定，credential 必须为空。`credential` 可保存静态凭据或不透明秘密引用，但不写回引用解析结果；`network` 保存逐连接代理与超时，只读 `provider.list` 不返回代理 URL；`provider.management` 只返回去除 user info 的 `proxyUrl`，代理认证仍不返回，展示值不得自动写回。`remoteModels` 标记已取得的独立模型快照，避免 bundled 升级覆盖；`endpointTypes` 保存显式协议映射，派生路由不落盘。凭据和 header 值只由 resolver 使用，管理面仅返回非秘密摘要。写入及读取边界校验模型、地址和请求头，外层 SQL 版本须与 record.version 一致；seed、编辑和删除规则见[Provider合同](../../../crates/dim-app-server/README.md)。
 
-`agents.profile` 是 `AgentProfile`：`{name, description, systemPrompt, tools?, model?}`；`model` 若存在为 `{providerId, modelId}`。`agent_sessions.config` 是 `SessionConfig`：`{permissionPolicy, cwd, model, systemPrompt, tools?, collaborationRole, interactive?}`；两者的 `tools` 是字符串数组形式的挂载列表，没有挂载列表时省略（[Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-fields)，格式决定见 [#364 v19 格式决定](#364-v19-格式决定)）；其中 `model` 是 `ModelSelection {providerId, modelId, config?, metadata?}`，创建时固定完整模型参数，省略参数的身份记录仍可读取。`permissionPolicy` 为 `{preset, allowedTools, disallowedTools, fileAccess?, toolApproval?}`（兼容规则见下段），`collaborationRole` 为 `leader` 或 `member`。可选字段 `interactive`（布尔，缺省 `true`）由[路线图](../roadmap.md) C2 加入，已实现，格式决定如下：保持 v13，不升级到 v14，这是配置 JSON 中增量的可选字段；缺少它的已存储记录表示 `true`，因为该字段出现之前创建的每个 Session 都是客户端 Session；只写入 `false`，交互式记录不含该字段，与该字段出现之前写入的记录格式相同；这一省略规则写在 `SessionConfig` 的 serde 定义上，原生存储是它唯一的序列化方，在其他地方暴露 `SessionConfig` 须另行决定；旧版守护进程忽略该字段，会把非交互记录读成交互式，这一点可以接受。字段合同见 [Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-fields)。`timeline_branches.info` 是 `BranchRecord`：`main` 为 `{id:"main"}`，子分支为 `{id, parent, branch_point, create_anchor}`；后两项是父分支的本地序号。运行时的 `TimelineInfo` 是它加上 `source`，该字段不落盘。JSON 字段名按各类型的 serde 定义，不能由 SQL 列名的拼写推断。
+`agents.profile` 是 `AgentProfile`：`{name, description, systemPrompt, tools?, model?}`；`model` 若存在为 `{providerId, modelId}`。`agent_sessions.config` 是 `SessionConfig`：`{permissionPolicy, cwd, model, systemPrompt, tools?, collaborationRole, interactive?}`；两者的 `tools` 是字符串数组形式的挂载列表，没有挂载列表时省略（[Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-fields)，格式决定见 [#364 v19 格式决定](#364-v19-格式决定)）；其中 `model` 是 `ModelSelection {providerId, modelId, config?, metadata?}`，创建时固定完整模型参数，省略参数的身份记录仍可读取。`permissionPolicy` 为 `{preset, allowedTools, disallowedTools}`（兼容规则见下段），`collaborationRole` 为 `leader` 或 `member`。可选字段 `interactive`（布尔，缺省 `true`）由[路线图](../roadmap.md) C2 加入，已实现，格式决定如下：保持 v13，不升级到 v14，这是配置 JSON 中增量的可选字段；缺少它的已存储记录表示 `true`，因为该字段出现之前创建的每个 Session 都是客户端 Session；只写入 `false`，交互式记录不含该字段，与该字段出现之前写入的记录格式相同；这一省略规则写在 `SessionConfig` 的 serde 定义上，原生存储是它唯一的序列化方，在其他地方暴露 `SessionConfig` 须另行决定；旧版守护进程忽略该字段，会把非交互记录读成交互式，这一点可以接受。字段合同见 [Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-fields)。`timeline_branches.info` 是 `BranchRecord`：`main` 为 `{id:"main"}`，子分支为 `{id, parent, branch_point, create_anchor}`；后两项是父分支的本地序号。运行时的 `TimelineInfo` 是它加上 `source`，该字段不落盘。JSON 字段名按各类型的 serde 定义，不能由 SQL 列名的拼写推断。
 
-`PermissionPolicy` 的增量可选字段沿用当前 v28 SQL schema 和格式标记，不重写旧记录。
-`fileAccess` 的值为 `read-only`、`workspace-read-write` 或 `unrestricted`，`toolApproval` 的值为
-`ask` 或 `bypass`；省略时序列化仍不写入，分别保留 `preset` 原有的文件行为和风险判定，不补成显式 Ask。
-同一扩展类型也用于 `permission/changed {policy}` 的持久化正文；每次更新保留未修改的覆盖字段和工具列表。
-字段语义属于 [Permission 合同](../../architecture/rust-agent/plugins/Permission.md#policy-contract)
-（[ADR 017](../../adr/017-independent-permission-controls.md)）。新二进制可读取旧策略不表示反向兼容：
-旧二进制拒绝含显式 `fileAccess` 或 `toolApproval` 的策略，包括 Session 配置和事件正文。
-写入这些字段后的数据库不支持降级；相同的 v28 标记并不保证旧二进制能恢复这些记录，也没有删除字段或
-转换为预设的降级路径。不得通过丢弃覆盖字段来恢复读取，因为这会改变权限决策。
+`PermissionPolicy` 的格式决定见 [ADR 018](../../adr/018-permission-is-the-preset.md)。
+SQL schema 和格式标记不变，读取不重写记录。策略对象中的未知键被忽略，包括已删除的
+`fileAccess` 和 `toolApproval`；保存时只写入预设和工具列表。Session 配置与
+`permission/changed {policy}` 的正文采用同一策略类型，外层记录仍严格校验。
+旧记录按保存的预设执行，包括曾受更严格覆盖字段限制的记录；不映射旧字段、不添加提示。
+字段语义属于 [Permission 合同](../../architecture/rust-agent/plugins/Permission.md#policy-contract)。
 
 `context/configured` 的 `ModelConfiguration` 分别固定模型与工具部分：模型使用上述参数，`tools` 为已采用声明，可选 `toolSources` 为 `{key,version}[]` 的来源版本；没有来源时省略。模型更新保留已采用的工具部分，工具采用保留模型部分，完整合同见[App Server合同](../../../crates/dim-app-server/README.md)。
 
@@ -560,6 +571,35 @@ ProjectionCheckpoint = {
 - **单向**：v21 daemon 按现有精确 SQL 结构检查拒绝 `CHECK (version = 22)`，不会尝试解码新值；不做降级或备份。升级提交后沿用一次性 stderr 日志：`Upgraded native store <path> from format v21 to v22; earlier dimcode versions cannot open it.`
 - **验证**：`storage_flow.rs` 的 `a_v21_store_upgrades_in_place_once_and_restores_typeless_tool_schemas` 使用一次性 v21 库，核对所有原有业务行不变、新结构和标记、再次打开不再升级，并在采用工具配置和模型请求两条路径写入无 `type` 的组合 schema，关闭后恢复 Session，逐值核对。既有各版本升级与非法结构保留测试覆盖准入路径；冻结 wire fixtures 不变。
 
+### #911 v33 格式决定
+
+[Worktree access](../worktree-access.md#4-持久使用关联与清理边界) 的关联存储使用 **v33**，
+从精确匹配且标记相符的 v32 原地升级。若合并前其他格式变更占用该编号，使用主线的下一个编号。
+
+- **结构**：新增 `worktree_directories(repository TEXT NOT NULL, root TEXT NOT NULL, PRIMARY KEY (repository, root))`
+  和 `session_worktrees(session_id TEXT NOT NULL REFERENCES agent_sessions(session_id), repository TEXT NOT NULL,
+  root TEXT NOT NULL, subtree TEXT NOT NULL, PRIMARY KEY (session_id, repository, root),
+  FOREIGN KEY (repository, root) REFERENCES worktree_directories(repository, root))`。
+  `session_worktrees_by_directory(repository, root, session_id)` 支持查询某目录的所有 Session 关联。
+- **升级**：现有启动事务内创建两张空表及索引，重建标记表并写入 33；不扫描 Git、不回填关联、
+  不修改其他业务行。更早受支持的格式先走已有步骤。任一步失败回滚。
+- **生命周期**：关联与目录原子写入；Session 删除和创建回滚只移除关联，保留目录；fork 不复制关联。
+  完整调用与错误契约见 [SessionStore](session-deletion-and-fork.md#17-worktree-usage-records)。
+- **单向**：v32 守护进程拒绝 v33 库；不降级。目录记录和关联都不是授权、创建者证据或删除许可。
+- **不兼容结构**：标记为 v32、包含 worktree 表但仍使用两个旧上下文读取索引的结构不是准入的 v32；精确结构门禁拒绝并保留它，不根据相同标记猜测转换。
+- **验证**：一次性 v32 库升级后结构和标记精确匹配 v33，已有行保持不变，两张新表为空；
+  重开不重复升级。公开存储流程覆盖去重、原子失败、多 Session、fork、删除和迟到写入。
+
+### #605 v32 格式决定
+
+[#605](https://github.com/arcships/dim/issues/605) 的存储格式决定：升级到 **v32**，从 v31 原地升级。v31 为两个上下文读取开关各建一个部分索引，键都是 `(session_id, branch_id, sequence)`；同一行两个开关都为 1 时，一次插入维护两个键相同的索引，WAL 多写一页。
+
+- **结构变化**：删除 `timeline_events_render`、`timeline_events_state`，新增 `timeline_events_context (session_id, branch_id, sequence) WHERE context_render = 1 OR context_state = 1`。列、其他索引、持久化 JSON、内容寻址与事件引用均不变。上下文读取的条件本就是 `context_render=1 OR context_state=1`，新索引与它逐字对应；`EXPLAIN QUERY PLAN` 仍按 `(session_id, branch_id, sequence)` 定位并按 `sequence` 顺序返回，不需要临时 B 树。
+- **升级**：沿用 `IMMEDIATE` 启动准入事务。空库直接建 v32。精确匹配且标记相符的 v31 库删除 `timeline_events_render`、`timeline_events_state`，创建 `timeline_events_context` 并重建标记表。v30 及更早的受支持格式先执行已有步骤：v30 步骤只添加两列、按 key 回填两个开关并创建 `timeline_events_positions`，不再创建两个旧索引；本步只创建合并索引，因此不存在“先建旧索引再删”的中间状态。失败回滚，旧业务行与开关值不变。
+- **单向**：v31 守护进程拒绝 v32 库；不降级。准入仍要求精确 SQL 结构及对应标记。
+- **测量**：`timeline_acceptance rounds 0 200 64 consumed`（64 个 Session 每轮各追加一条约 230 字节的 `input/consumed` 行，两个开关都为 1，逐条独立成行）在 v31 与 v32 上交替运行三次，每事件 WAL 中位数分别约 16.0 KB 与 12.4 KB，约少 23%（v32 的 12.3–12.6 KB 对 v31 的 15.7–16.2 KB）。`turn` 事件只置 `context_state`，只用一个部分索引，不受影响。
+- **验证**：`storage_flow.rs` 的 `a_v31_store_upgrades_in_place_once` 用一次性 v31 库核对结构、标记、业务行与开关值，重复打开不再升级；v13 起的各版一次升级到 v32。`timeline_acceptance` 报告改动前后的每事件 WAL 字节，结果写在 PR。
+
 ### #708 v31 格式决定
 
 [#708](https://github.com/arcships/dim/issues/708) 的读取边界：`timeline_events` 增加两个 0/1 冗余开关，从 v30 原地升级。
@@ -634,7 +674,7 @@ ProjectionCheckpoint = {
 - **版本边界**：`agent_store_format` 改为 `CHECK (version = 25)`，唯一标记为 25。不能在 v24 内删除索引，因为启动门禁要求精确 SQL 结构；v24 守护进程拒绝 v25 库并保留数据。
 - **升级**：空库直接创建 v25。精确的 v24 库在同一启动准入事务内删除索引、重建标记并写入 25；精确的 v13、v15–v23 库先执行已有步骤，再删除索引。旧结构校验仍要求该索引存在，缺失索引、标记不符或半升级的库都拒绝并保留。失败回滚整个事务，不改写任何已有业务行。
 - **读取与迁移**：只读导出可以原样打开 v24 及既有受支持格式，也可读取 v25，不升级来源。迁移目标使用 v25；已有目标由同一存储准入路径升级。升级单向，不新增备份、降级或迁移选项。
-- **验证**：一次性 v24 库升级后精确结构、标记与业务行保持预期，重复打开不再升级；既有各版升级、损坏库保留、只读导出、迁移和主键区间计划由公共流程验证。`timeline_acceptance rounds` 报告前后的每事件 WAL 字节与 checkpoint sync 次数，测量结果放在 PR。
+- **验证**：一次性 v24 库升级后精确结构、标记与业务行保持预期，重复打开不再升级；既有各版升级、损坏库保留、只读导出、迁移和主键区间计划由公共流程验证。`timeline_acceptance rounds` 报告前后的每事件 WAL 字节与 checkpoint sync 次数，`read-load` 报告流式写入下的读延迟与 fork/delete 期间的发布延迟，测量结果放在 PR。
 
 ### #555 v24 格式决定
 
@@ -729,6 +769,8 @@ ProjectionCheckpoint = {
 | v27 `agents_by_owner` | `(owner_session_id)` | 删除 owner 时定位它拥有的 Agent；启动时找出无成员或失去 owner 的私有 Agent |
 | v27 `agent_sessions_by_leader` | `(leader_session_id)` | 装载时重建 Team 关系 |
 | 派生（不占格式号）`timeline_history_anchors` | `(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'input/message')` | 最新回合边界与回合提示输入的查找（[latest-turn 窗口](session-history-window.md)） |
+| 派生（不占格式号）`timeline_policy_turns` | `(session_id, branch_id, kind, sequence, event_id) WHERE kind = 'turn/start'` | 压缩裁剪点的轮次开始查找：`event_id` 在索引内，读轮次开始不访问表行（[上下文读取开关与裁剪点 §5](context-read-and-compaction.md#5-策略的位置)） |
+| 派生（不占格式号）`timeline_events_by_kind` | `(session_id, branch_id, kind, sequence, event_id)` | 按 kind 的事件查询与它的事件 id（[ADR 019](../../adr/019-event-query.md) D4） |
 | v12 主键 `timeline_snapshots` | `(session_id, branch_id, interpreter, sequence)` | 兼容 interpreter，`sequence<=through ORDER BY sequence DESC LIMIT 1`；连接事件锚点 |
 | v15 主键 `session_files` | `(file_id)` | put 的两次事务与放弃、清扫按文件定点更新和删除 |
 | v15 主键 `session_file_owners` | `(session_id, file_id)` | put 写入 owner；fork 复制、删除和创建回滚按 Session 读取和删除 |
@@ -739,6 +781,9 @@ ProjectionCheckpoint = {
 | v28 主键 `session_grants` | `(session_id, path)` | 一个 Session 的 grant 读取、add 的 upsert、remove 与 delete 按 Session 定点删除 |
 | v29 主键 `session_output_owners` | `(session_id, path)` | 注册的 upsert、`owns` 的精确查找、fork 复制与 delete 按 Session 定点删除 |
 | v29 `session_output_owners_by_path` | `(path)` | 删除一个目录前判断本库是否还有别的 Session 在该目录下有行 |
+| v33 主键 `worktree_directories` | `(repository, root)` | 目录去重和候选列表；无 Session 关联也保留 |
+| v33 主键 `session_worktrees` | `(session_id, repository, root)` | Session 内目录去重、删除与创建回滚 |
+| v33 `session_worktrees_by_directory` | `(repository, root, session_id)` | 某目录的所有 Session 及继承子树 |
 
 ## 分页查询
 
@@ -749,15 +794,14 @@ ProjectionCheckpoint = {
 | `session_owners_by_agent` | `(agent_id, protocol_version, session_id)` | 按 Agent 和协议过滤目录 |
 | `timeline_events_by_id` | `(session_id, event_id) WHERE event_id IS NOT NULL`，非唯一 | 按事件 ID 查找跨页 ToolCall |
 | `timeline_tool_use_starts` | `(session_id, json_extract(body, '$.record.event.data.request_id'), json_extract(body, '$.record.event.data.call_id')) WHERE branch_id = 'main' AND kind = 'step/tool-use-start'` | 按请求与调用 ID 查找跨页 `step/tool-use-start`，为不带 `call_event_id` 的结果取调用名；查询须使用相同表达式与条件 |
-| `timeline_events_render` | `(session_id, branch_id, sequence) WHERE context_render = 1` | 只取渲染器消费的行（v31） |
-| `timeline_events_state` | `(session_id, branch_id, sequence) WHERE context_state = 1` | 只取 checkpoint 折叠消费的行（v31） |
+| `timeline_events_context` | `(session_id, branch_id, sequence) WHERE context_render = 1 OR context_state = 1` | 只取渲染器或 checkpoint 折叠消费的行（v32；v31 的两个部分索引各取其一） |
 | `timeline_events_positions` | `(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'context/compaction-start', 'context/compaction')` | 策略定位：轮次开始与压缩边界（v31） |
 
-正向页的 `after` 与 `through` 须为批次边界；上下文页（`stored_context_page`）例外：游标是事件序号，落在合并行内部时从覆盖它的物理行开始读、再按序号过滤，见 [读取边界](context-read-and-compaction.md#4-读取边界)。`limit` 为目标事件数，末批超出时完整返回。区间查询先按主键定位起点之前或等于起点的最后一条物理行，以其 `sequence` 为下界、区间终点为上界，按 `sequence` 读取；没有前驱行时以下界起点读取，并以 `last_sequence >= 起点` 排除不相交的前驱行。合并行覆盖页起点时完整解码，再按内部 sequence 过滤；反向页须纳入 `sequence < before <= last_sequence` 的跨界行，并停在原子批次边界。正向读取按 256 个逻辑序号分段，恢复校验按 64 条物理行分段，每段结束释放连接锁；请求列表的遍历每加载至多 256 个节点也释放一次，下一次持有从中断处继续。单条物理行完整解码，允许超过通常页大小。流程测试用 `EXPLAIN QUERY PLAN` 核对正向读取主键的上下界；`timeline_acceptance paged-reads` 测量长历史读/恢复与并发提交延迟；`restore_cost` 在一次性库上经 mock 模型轮次增长 Session，按历史规模测量恢复耗时，并拆分目录校验、事件读取与 `branch/resume` 写入，同时报告每条事件的存储字节数（`cargo run --release --locked -p dim-app-server --example restore_cost -- [plain|tools|product] [1001,3001,10001] [7]`；`product` 使用产品上下文窗口与摘要压缩）；`single-append` 与 `single-partial` 测量单个请求的冷读与重开后第一次写入（`-- [single-append|single-partial] [2000,20000] [7] [chain|last]`）。`timeline_acceptance crashes` 与 `powerloss` 的中断批次含一个请求，恢复后校验行可读、序号连续、每个列表的节点俱在，并核对重启后写入与未中断写入的行逐字节一致。反向历史接口仍为独立协议草案。
+正向页的 `after` 与 `through` 须为批次边界；上下文页（`stored_context_page`）例外：游标是事件序号，落在合并行内部时从覆盖它的物理行开始读、再按序号过滤，见 [读取边界](context-read-and-compaction.md#4-读取边界)。`limit` 为目标事件数，末批超出时完整返回。区间查询先按主键定位起点之前或等于起点的最后一条物理行，以其 `sequence` 为下界、区间终点为上界，按 `sequence` 读取；没有前驱行时以下界起点读取，并以 `last_sequence >= 起点` 排除不相交的前驱行。合并行覆盖页起点时完整解码，再按内部 sequence 过滤；反向页须纳入 `sequence < before <= last_sequence` 的跨界行，并停在原子批次边界。正向读取按 256 个逻辑序号分段，恢复校验按 64 条物理行分段，每段结束释放读连接；请求列表的遍历每加载至多 256 个节点也释放一次，下一次持有从中断处继续。单条物理行完整解码，允许超过通常页大小。流程测试用 `EXPLAIN QUERY PLAN` 核对正向读取主键的上下界；`timeline_acceptance paged-reads` 测量长历史读/恢复与并发提交延迟；`restore_cost` 在一次性库上经 mock 模型轮次增长 Session，按历史规模测量恢复耗时，并拆分目录校验、事件读取与 `branch/resume` 写入，同时报告每条事件的存储字节数（`cargo run --release --locked -p dim-app-server --example restore_cost -- [plain|tools|product] [1001,3001,10001] [7]`；`product` 使用产品上下文窗口与摘要压缩）；`single-append` 与 `single-partial` 测量单个请求的冷读与重开后第一次写入（`-- [single-append|single-partial] [2000,20000] [7] [chain|last]`）。`timeline_acceptance crashes` 与 `powerloss` 的中断批次含一个请求，恢复后校验行可读、序号连续、每个列表的节点俱在，并核对重启后写入与未中断写入的行逐字节一致。反向历史接口仍为独立协议草案。
 
 `session_owners.session_id` 与 `agents.agent_id` 两个 ID 列的 SQL 可空缺口见表结构。永久关闭字段与旧记录回填尚未设计。
 
-## 完整记录示例（v26；v27 未改动这些行，v28 追加 grants 行，v29 追加输出行，v30 为 `agent_sessions` 追加 `origin` 列）
+## 完整记录示例（v33）
 
 下例是一条 Session `s1`、主分支 `main` 和子分支 `child` 的全部原生表记录，用于核对存储关系，不代表完整的对话执行序列。为便于阅读，`profile`、`config`、`info` 和事件 `body` 这几个实际为 `TEXT` 的列在展示时解析为 JSON；写入时各自是完整 JSON 字符串，类型规定省略的可选字段照常省略。ID/时间是示例值。`timeline_content.body` 保留实际写入的字符串形式，因此下面各 hash 可以按上文算法复核。`main` 第 4 条 `model/call` 是升级前 v16 写入的行，`child` 第 3 条是升级后 v17 写入的行，示例同时展示两种行混存。
 
@@ -770,7 +814,7 @@ current manual title.
 
 ```json
 {
-  "agent_store_format": [{"version": 30}],
+  "agent_store_format": [{"version": 33}],
   "session_catalog": [{"session_id":"s1","updated_at_ms":1008,"preview":"Hi","cwd":"/work"}],
   "settings_documents": [],
   "providers": [],
@@ -917,6 +961,8 @@ current manual title.
   "session_file_owners": [{"session_id": "s1", "file_id": "0b4e7d2c-5a1f-4c3e-9f6a-2d8b1e7c4a90"}],
   "session_grants": [{"session_id": "s1", "path": "/work/notes.md", "kind": "file", "mode": "write"}],
   "session_output_owners": [{"session_id": "s1", "path": "/work/command-output/s1/exec.log"}],
+  "worktree_directories": [{"repository":"/repo/.git","root":"/repo-wt"}],
+  "session_worktrees": [{"session_id":"s1","repository":"/repo/.git","root":"/repo-wt","subtree":"/repo-wt"}],
   "session_metadata": [{"session_id": "s1", "revision": 2, "title": "Example conversation", "title_source": "manual"}]
 }
 ```

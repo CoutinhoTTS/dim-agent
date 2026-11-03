@@ -493,9 +493,9 @@ history, as moving a workspace breaks paths into it.
 
 **Decision: the model reads a Session file the way it reads any file. A Session-owned artifact
 is one of the fixed facts, so its read passes file scope without recording a grant. Tool approval
-is independent: explicit Ask can still ask for that read.** The
+follows the preset and tool lists.** The
 [Permission contract](../../architecture/rust-agent/plugins/Permission.md#policy-contract) owns
-the two gates and legacy behavior; ownership is not an explicit tool allow.
+the two gates; ownership is not an explicit tool allow.
 [ADR 014](../../adr/014-file-access-facts.md) decides file reads and writes from the workspace,
 system roots, Session-owned artifacts and grants; [ADR 013](../../adr/013-command-output-ownership.md)
 adds the second ownership table, so `owns` also answers for command output and a read of it is
@@ -511,8 +511,7 @@ allowed under `read-only` and `workspace-write` without an approval.
    Read only or Workspace read/write, inside facts -----> pass file scope
    Read only or Workspace read/write, outside facts ----> scope Ask
    Unrestricted ----------------------------------------> pass file scope
-   tool gate -------------------------------------------> Ask unless allowed or bypassed;
-                                                         legacy risk behavior if override absent
+   tool gate -------------------------------------------> preset risk rules and tool lists
    scope Ask + tool Ask --------------------------------> one approval (exec denies and exits 3)
    |
    v

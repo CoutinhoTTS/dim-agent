@@ -6,12 +6,10 @@
 //!   Workspace write  writes inside the workspace; asks outside it
 //!   Full access      no path limits; tools run without asking
 //!   Command rules    ›
-//!   Path scope and process isolation: Settings · sandbox
+//!   Process isolation: Settings
 //! ```
 //!
-//! Permission is the preset. The path boundary and process isolation are the
-//! sandbox's settings (ADR 018), so this panel names them and leaves them
-//! where they are owned.
+//! Permission is the preset (ADR 018). Process isolation stays in Settings.
 
 use dim_agent_types::{PermissionPolicy, PermissionPreset};
 
@@ -61,7 +59,7 @@ impl ApprovalsPanel {
             .into_iter()
             .map(|preset| format!("{}: {}", preset_label(preset), consequence(preset)))
             .chain(std::iter::once(
-                "Path scope and process isolation are the sandbox's: Settings · sandbox".to_owned(),
+                "The preset fixes the path boundary. Process isolation: Settings".to_owned(),
             ))
             .collect();
         self.list = ListPanel::new("Permissions", HINT, "", "", "", false)

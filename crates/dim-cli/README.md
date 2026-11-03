@@ -176,7 +176,8 @@ unsupported daemon.
 call removed the Session: `true` prints `Deleted ID`; `false` prints `Nothing was
 removed: no stored Session ID.` on stderr and exits 1,
 and a reply without the field, from an older App Server, prints `Deleted ID`. Cleanup
-selects only the Sessions `/resume` lists by default
+selects across every workspace, not only the one `/resume` opens on: the classes it
+selects are the ones `/resume` lists by default
 ([classification](../../docs/design/appserver/session-classification.md)): origin
 `client` or `unknown`, or a daemon that records none; an `internal` or `acp` Session is
 never selected, does not count toward `--keep N` and does not appear in the preview.
@@ -251,7 +252,10 @@ At the idle interactive prompt, `/effort VALUE` (alias `/reasoning`) changes
 reasoning effort, `/fast on|off` selects priority/default service tiers, and
 `/agent ID` adopts an Agent profile's prompt and optional model. Tools and
 permissions keep the current Session configuration. A profile with a model resets effort
-and service tier to that model's defaults; a prompt-only profile preserves them. Bare commands list choices;
+and service tier to that model's defaults; a prompt-only profile preserves them. In both TUI modes,
+bare `/effort` opens an AskUser-style single-choice dialog for the current model:
+↑/↓ or 1–9 select, Enter applies, Esc cancels. It changes only the Session, not saved model defaults.
+The line client and the other bare commands list choices;
 unsupported values leave the prompt usable. Commands in `--prompt` or piped input
 remain literal model input. See [model configuration](../../docs/design/model-configuration.md).
 
@@ -416,29 +420,27 @@ See the [MCP OAuth contract](../../docs/design/appserver/mcp-oauth.md#13-require
 ## Permission presets and approvals
 
 The App Server decides each tool call; the CLI selects settings and never decides a call itself.
-`/permissions` opens three independent controls, also available under `/settings`, and the
-Command rules area:
+`/permissions` selects a preset and opens the Command rules area:
 
 ```text
 Permissions
-  File access         Read only / Workspace read/write / Unrestricted
-  Tool approval       Ask / Bypass
-  Process isolation   Off / Sandboxed · No network / Sandboxed · Network allowed
+  Read only           Read files; deny writes and process commands
+  Workspace write     Write inside the workspace; ask outside it
+  Full access         No path limits; tools run without asking
   Command rules       List, add and remove the user's command rules
+
+Settings
+  Permission          Workspace write >
+  Process isolation   >
 ```
 
 The Command rules row opens the management panel of `Area::Permissions`: one entry per rule,
 whose id and label are the rule's value (`DECISION MATCH COMMAND`), with `Ctrl+R` reload, `Ctrl+N`
-add and `Ctrl+X` remove. A rule has a decision, not an on/off state. Esc returns to the Permissions
-panel.
+add and `Ctrl+X` remove. Esc returns to the Permissions panel.
 
-Choosing File access writes only `fileAccess`; choosing Tool approval writes only `toolApproval`.
-The UI preserves the branch's legacy preset and tool lists, and saves the chosen field alone in
-`config.json` for new sessions, keeping other configuration keys. Ask asks about all tools except
-explicitly allowed tools and commands; Bypass skips only tool questions, not file restrictions,
-deny rules or process isolation. The picker identifies legacy risk-based behavior until an
-explicit tool-approval choice is made. Existing `permissionPreset` configuration and `--permission`
-remain compatibility seeds, with this behavior when the independent fields are omitted:
+Choosing a preset preserves the tool lists and saves `permission` in `config.json` for later
+terminal Sessions. The CLI reads the legacy `permissionPreset` only when `permission` is absent;
+`--permission` takes precedence. Process isolation stays in Settings.
 
 | Preset | Reads | File writes | Commands, network, unclassified tools |
 | --- | --- | --- | --- |
@@ -446,8 +448,9 @@ remain compatibility seeds, with this behavior when the independent fields are o
 | `workspace-write` (product default) | run | run inside the workspace; ask outside | ask |
 | `full-access` | run | run | run |
 
-Every outside file write asks for that call, even when its tool is explicitly
-allowed; no path grant is remembered. The server resolves symlinks and new-file
+Under workspace-write, an outside write without a matching Session grant asks for that call,
+even when its tool is explicitly allowed. Approval does not automatically save a grant.
+The server resolves symlinks and new-file
 parents before checking the [workspace boundary](../../docs/architecture/rust-agent/plugins/Permission.md#workspace-write-targets).
 
 `--permission read-only|workspace-write|full-access` works with `dimcode`, `tui`, `exec` and
@@ -458,9 +461,8 @@ shows the preset; `exec` prints it to stderr only when the flag is given. A live
 `main`, from any client, prints `[permission] main branch preset: ...`.
 
 At the line-mode idle prompt, `/permissions` (aliases `/approvals` and `/approval`) shows the
-independent controls, the legacy preset seed and the user's command rules. It accepts
-`file-access read-only|workspace-read-write|unrestricted` and `tool-approval ask|bypass` for the
-active main branch. `/approvals PRESET` still switches the legacy seed; `full-access` asks `[y/N]` and only `y`/`yes`
+preset, tool exceptions and the user's command rules. `/permissions PRESET` changes the active
+main branch's preset; `full-access` asks `[y/N]` and only `y`/`yes`
 confirms. `/approvals allow|deny exact|prefix COMMAND` adds a rule and `/approvals remove N`
 removes rule N of the list printed last; both print the new numbered list. A preset or rule list
 that changed since it was shown is reported and nothing is written. Child branches and native members created later from the changed branch inherit its current policy;
@@ -498,10 +500,15 @@ rule that reads them are [Goal §A.2–A.3](../../docs/design/plugins/Goal.md#a2
 
 | Form | Call |
 | --- | --- |
-| `/goal` | none; the goal in force on the shown line, or that it has none |
+| `/goal` | none; usage, then the goal in force on the shown line, or that it has none |
 | `/goal OBJECTIVE` | `session.goal.edit` while the goal is active or paused, `session.goal.set` otherwise |
 | `/goal set OBJECTIVE`, `/goal edit OBJECTIVE` | the named method |
 | `/goal pause`, `/goal resume`, `/goal clear` | the method of the same name |
+
+In both TUI modes, selecting `/goal` with Enter or Tab fills `/goal ` and closes the palette
+without dispatching. Submitting that draft without an objective prints usage, followed by the
+current goal/status or the no-goal notice. Bare `/goal` at the line-mode prompt prints the same
+help and state; without a goal, the output has two lines.
 
 Every call sends the shown line's id as `branchId`: the line client always shows `main`, and the
 terminal UI sends the line whose transcript it displays. An objective that is one of the form words
@@ -525,6 +532,7 @@ Goal set on main · active
 Goal paused on main · paused (user)
   Keep the CLI tests green
 > /goal
+Usage: /goal [OBJECTIVE | set OBJECTIVE | edit OBJECTIVE | pause | resume | clear]
 Goal on main · paused (user)
   Keep the CLI tests green
 > /goal clear
@@ -538,8 +546,7 @@ installs no Goal — its `session.methods` lists no `session.goal.set` — `/goa
 
 ## Execution boundary
 
-The sandbox is a setting, and it is off by default. `/permissions > Process isolation` and
-`/settings > Process isolation` open the same picker: Off, Sandboxed · No network, or
+The sandbox is a setting, and it is off by default. `/settings > Process isolation` opens the picker: Off, Sandboxed · No network, or
 Sandboxed · Network allowed. Save, Reset and Reload reuse the existing user-scope execution settings
 and their revision conflict checks. The stored `sandbox` and `network` switches both start off;
 Network applies only while Sandbox is on. The setting
@@ -774,7 +781,7 @@ The interactive terminal UI has two modes over the same session. Scrollback (the
 | Sending a message | Follow the bottom again |
 | Mouse drag | Select transcript text; release copies it (OSC 52, plus `pbcopy` locally on macOS; inside tmux OSC 52 goes through passthrough, which needs `set -g allow-passthrough on`) |
 | Click a link | Opens it in the system browser (OSC 8 links, or a bare `http(s)://` URL); over SSH the status row shows the URL instead |
-| Click a tool group's header or a thought's title | Opens (`▾`) or closes (`▸`) that group, or shows a settled thought whole or as its one-row summary; a running group keeps the form it is given when it settles. A settled block opens in place: the view stops following the bottom so the header stays under the pointer. A press counts as a click only if no drag followed and its row still shows the same text at the release, so output arriving in between cannot redirect it. `/tools` sets every group and thought, settled ones included, and lays the transcript out again from the bottom |
+| Click a tool group's header or a thought's title | Cycles a tool group through collapsed (`▸`), summary (`▾`) and expanded (`▾`), or shows a settled thought whole or as its one-row summary; a running group keeps the form it is given when it settles. A settled block opens in place: the view stops following the bottom so the header stays under the pointer. A press counts as a click only if no drag followed and its row still shows the same text at the release, so output arriving in between cannot redirect it. `/tools` sets every tool group and compaction row, settled ones included, and lays the transcript out again from the bottom; thinking details have their own switch in `/settings` |
 | `Tab` / `Shift+Tab` | Pick older / newer user messages (`Up` / `Down` while one is picked); past the newest the pick ends. `Esc` ends it, `e` puts the message in the composer to edit and send again; `b` opens a line of the shown line cut just before the message, with the message in the composer as its opening input (`Enter` opens it through `session.branch_create` and shows it, `Esc` cancels); `f`, on `main` only, asks, then forks the Session just before the message (`session.fork`) and attaches to the fork with the message in its composer. A `⑂ line` row, written where a line opened on the shown line, is picked too: `Enter` (or a click) shows that line ([timeline UI](../../docs/design/timeline-ui.md)); so is the load-more row at the top, which `Enter` loads |
 | `/`, `Ctrl+O`, `Ctrl+P` | Open the command palette centred over the dimmed transcript, with its own query row; a draft set aside by `Ctrl+O`/`Ctrl+P` returns when the command entry it opened ends (`Enter`, `Esc` or an emptied draft). With a question pending whose free-text answer is not being edited, the palette opens over it instead, and the question keeps its answers while the command's argument is typed |
 | `Home` / `End` | With an empty composer: scroll to the top / bottom of the transcript |
@@ -796,6 +803,19 @@ Opening the group still shows each tool's full path and diff.
 ✓ Edited 2 files (+18 -5) · src/main.rs, src/config.rs ▸
 ✓ Edited 5 files (+42 -16) · src/main.rs, … 4 more ▸
 ✓ Ran 1 command, edited src/main.rs (+12 -3) ▸
+```
+
+Summary keeps the group header and adds one row per call in its original order,
+with the tool name and command, path or primary input. Each call takes at most
+one terminal row, even for a long command. Multiline commands show only the first
+nonblank line followed by `…`; output, diff bodies and script bodies stay hidden
+until expanded. Member summary rows still open their conversations.
+
+```text
+✓ Ran 1 command, read 1 file, edited src/main.rs (+12 -3) ▾
+  ✓ Exec · cargo check -p dim-cli
+  ✓ Read · docs/INDEX.md
+  ✓ Edited src/main.rs (+12 -3)
 ```
 
 Interrupting a turn immediately shows a transient `Stopping` notice in the status slot. The transcript records the user-interruption note from the confirmed cancellation, after the answer has finished revealing and immediately before `stopped`, once per cancelled turn. Reopening preserves this order for turns interrupted by this version of the TUI. Older cancellations and cancellations from the line client retain their existing `stopped` display.
@@ -836,23 +856,15 @@ An explicit provider error presentation keeps its message and suggested action.
  ■ turn failed: <reason>
 ```
 
-The row shows what the record holds:
+The expanded row shows only the summary body:
 
 ```text
  › try the RwLock for the cache lock
  … reply …
  · Compacting context…
  ✓ Context compacted ▾
- ▎ <dim-summary>
  ▎ The cache lock moved into a RwLock; the parser race is next.
  ▎ …
- ▎ Tool effects
- ▎ <dim-digest>
- ▎ …
- ▎ wrote src/cache.rs
- ▎ ran exit 0: cargo test -p cache
- ▎ Kept verbatim
- ▎ Try the RwLock before touching the parser.
  › carry on
  ✗ Context compaction failed · the summarizer returned nothing
  ◦ Context compaction skipped · nothing to cut
@@ -860,7 +872,7 @@ The row shows what the record holds:
  ✓ Context compacted · insufficient space: summary 3.2K, pinned inputs 1.1K ▸
 ```
 
-`✓` is a completed compaction, `✗` a failed one, `◦` one that did not apply, and the skipped, failed and cancelled rows carry the reason or error of their record. The text a completed compaction wrote in place of the cut history is the row's detail, opened and closed the way a tool group's body is: a click on the row, or `/tools` with the other details (`▸` closed, `▾` open). The detail is split where the record says it is: with `replacement_parts`, the strategy's messages are the summary, the digest the runtime recorded from the effects tools declared follows under `Tool effects`, and the inputs the compaction pinned follow under `Kept verbatim`; a record without the field shows the whole replacement as the summary, with no digest and nothing pinned. A record whose parts cannot meet the bound carries `insufficientSpace`, and the completed row's header names its parts largest first, with the token counts the gauge's formatter gives them — `insufficient space: summary 3.2K, pinned inputs 1.1K`. The part names are localized labels and the mark is read from the record; the client never decides it. The transcript keeps every earlier row and the compaction adds no boundary of its own; a resume rebuilds the rows from history as they were drawn live. [Compaction requirements](../../docs/design/compaction-quality.md#4-what-users-see-and-control) say what a compaction row must show.
+`✓` is a completed compaction, `✗` a failed one, `◦` one that did not apply, and the skipped, failed and cancelled rows carry the reason or error of their record. A completed compaction's summary is the row's detail: a click on the row toggles it (`▸` closed, `▾` open). `/tools` cycles the global tool form; only expanded opens compaction bodies, while collapsed and summary keep them closed. From the default collapsed form, the first `/tools` selects summary and the second selects expanded. With `replacement_parts`, the strategy's messages supply the summary; a record without the field uses the whole replacement. A summary wrapped in `<dim-summary>` … `</dim-summary>` displays only its body, without the runtime's fixed opening background notice and closing sentence. Unwrapped text and such wording quoted within the summary are preserved. The markers, digest and pinned inputs are not shown; the stored record and model context are unchanged. A record whose parts cannot meet the bound carries `insufficientSpace`, and the completed row's header names its parts largest first, with the token counts the gauge's formatter gives them — `insufficient space: summary 3.2K, pinned inputs 1.1K`. The part names are localized labels and the mark is read from the record; the client never decides it. The transcript keeps every earlier row and the compaction adds no boundary of its own; a resume rebuilds the rows from history as they were drawn live. [Compaction requirements](../../docs/design/compaction-quality.md#4-what-users-see-and-control) say what a compaction row must show.
 
 `/models` uses Ctrl+X to clear the highlighted model's saved reasoning/tier preferences with the displayed record version; Enter adopts it separately. For noninteractive recovery, run `dimcode models PROVIDER --clear-preferences MODEL`. A concurrent change fails and requires a reread/retry, and the reread lands before that notice, so a retry uses the record's current version; preferences are never silently discarded.
 
@@ -879,13 +891,13 @@ Pickers (`/resume`, `/models`, `/connect`, `/login`, `/approvals`, `/theme`, `/l
                       ╰────────────────────────────────────╯
 ```
 
-Both scrollback and fullscreen palettes list slash commands, grouped by category and sorted alphabetically by canonical English category and command name. Each row shows its category, `/command`, description and any command shortcut. Commands requiring a session are faint and marked `(unavailable)` until one exists. Keyboard-only actions are omitted from both menus; `/keys` lists `Enter` queue and `Ctrl+S` steer while a run is in progress (`Enter` on an empty draft steers too), `Esc` interrupt, and the fullscreen `Home` / `End` scroll and `Tab` message picker bindings.
+Both scrollback and fullscreen palettes list slash commands in the fixed task order defined by the [command menu design](../../docs/design/cli-commands.md#command-menu): session, model and permissions, extensions and automation, view, then app. `/new` is first and `/exit` is last in the unfiltered command list. Each row shows its category, `/command`, description and any command shortcut. Commands requiring a session are faint and marked `(unavailable)` until one exists. Keyboard-only actions are omitted from both menus; `/keys` lists `Enter` queue and `Ctrl+S` steer while a run is in progress (`Enter` on an empty draft steers too), `Esc` interrupt, and the fullscreen `Home` / `End` scroll and `Tab` message picker bindings.
 
-`/permissions` is the single visible permission entry; `/approvals` and `/approval` are compatibility aliases for the same unified flow. Selecting an incomplete `exit` match only fills the command name; its exact name or alias is required before dispatch. Thus `/` + Enter completes `/exit` without quitting, and another Enter executes the completed command.
+Opening `/` selects `/new`; pressing Enter starts a new session. `/permissions` is the single visible permission entry; `/approvals` and `/approval` are compatibility aliases for the same unified flow. Selecting an incomplete `exit` match only fills the command name; its exact name or alias is required before dispatch. Thus `/ex` + Enter completes `/exit` without quitting, and another Enter executes the completed command.
 
-Typing ranks the matches: the exact name, a name prefix, an alias prefix, a prefix of a name part (`reload-skills` for `sk`), a name containing the query, a description word starting with it, then three or more letters in order through the name (`stg` for `settings`); a match inside a description word does not count. Equally ranked matches use the category/name order. See the [command menu design](../../docs/design/cli-commands.md#command-menu).
+Typing ranks the matches: the exact name, a name prefix, an alias prefix, a prefix of a name part (`reload-skills` for `sk`), a name containing the query, a description word starting with it, then three or more letters in order through the name (`stg` for `settings`); a match inside a description word does not count. Equally ranked matches keep the fixed task order.
 
-`/settings` gathers the interface settings: theme and language (each opens its picker and comes back), the startup form (`tuiMode`), tool details (`tuiToolDetailsExpanded`: expanded by default in both modes; collapsed shows each tool group as its header, folds thoughts and closes a compaction row's summary, digest and kept input, and `/tools` flips it too), the fullscreen mouse (`tuiMouseMode`: off hands selection and the wheel to the terminal), notifications (`tuiNotifyOnComplete`, on by default), ACP Sessions in `/resume` (`showAcpSessions`, off by default), tool approvals and execution settings. Model selection stays in `/model` (`/models`). Switches flip with `Enter`, `←`/`→` or `Space` and are saved to `config.json` at once.
+`/settings` gathers the interface settings: theme and language (each opens its picker and comes back), the startup form (`tuiMode`), tool details (`tuiToolDetails`: `collapsed`, `summary`, `expanded`), thinking details (`tuiThinkingDetailsExpanded`), the fullscreen mouse (`tuiMouseMode`: off hands selection and the wheel to the terminal), notifications (`tuiNotifyOnComplete`, on by default), ACP Sessions in `/resume` (`showAcpSessions`, off by default), the permission preset and execution settings. Tool and thinking details are independent and both default to collapsed in both modes. The old `tuiToolDetailsExpanded` boolean is read when no valid three-state preference exists; new changes save to `tuiToolDetails` without replacing the legacy key's format. Collapsed tool groups retain their header and member cards; summary shows one row per call; expanded shows full details. Compaction bodies show only in expanded. `/tools` cycles the three forms without changing thinking. Model selection stays in `/model` (`/models`). Settings change with `Enter`, `←`/`→` or `Space` and save to `config.json` at once. See the [transcript detail settings contract](../../docs/design/cli-commands.md#transcript-detail-settings).
 
 Notifications reach a user who switched windows when the run finishes or waits on a permission or a question (each request once): iTerm2 gets `OSC 9`, kitty `OSC 99`, Ghostty, WezTerm and foot `OSC 777`; tmux and any other terminal get a bell, which tmux forwards and terminals turn into a Dock bounce, a taskbar flash or a tab badge.
 
@@ -958,6 +970,20 @@ Answers are laid out at the margin with no mark, `-` list items that wrap back t
 `e` cannot rewrite history: the App Server has no rewind or fork, so the edited text is sent as a new message.
 
 Streaming is paced for the screen: the session worker publishes a snapshot one frame after the first change however fast events arrive, and snapshot rows are shared with the worker rather than copied. Text is revealed at a steady rate that follows the stream: an average of what arrived over the last ~0.6 s, keeping ~0.3 s in reserve to bridge the pauses between bursts, so a bursty stream reads as an even flow at the model's real speed; an answer that ended drains within ~0.4 s. A frame waits while the last one is still being written, so a slow terminal (ssh, tmux) gets fewer, current frames instead of a queue of stale ones. An open code fence commits its finished lines as they arrive, laid out as the closed block will be, so a long block never piles up above the composer (a mermaid fence is drawn once its source is whole, with a two-row placeholder meanwhile; tabs expand to four-column stops); in scrollback, rows committed from the top of the live region stay where they are drawn, so streaming neither erases the region nor moves the composer, and a changed row is rewritten in place before the rest of it is erased.
+
+The frame interval targets up to 240 FPS; unchanged frames write nothing and terminal backpressure can lower the actual rate. This is a requested upper bound on text-reveal cadence, not the terminal's display refresh rate or a requirement of the scroll-margin fix. While output is still being written, the loop waits for input at its normal polling interval rather than polling an expired frame deadline. Inside tmux, where synchronized output is disabled, ordinary streaming scrolls only the transcript above a bottom-pinned composer instead of scrolling the composer away and repainting it. The scroll margins are restored after each update; native terminal history remains available. Resizing, changing the dock's height and oversized wrapped commits can still require relayout.
+
+When only the transcript scrolls, blank cached rows are inserted at the old tail boundary, before the dock. The tail and viewport heights grow by the same amount until the committed prefix is removed, keeping cached dock rows aligned with their unchanged physical rows. A commit may reuse matching transcript rows, but never matching dock rows: committed text must remain above the dock even if it has the same text as a dock row.
+
+```text
+ +------------------------------+
+ | transcript: scrolls upward   | <- temporary scroll region
+ | streamed answer              |
+ +------------------------------+
+ | composer: stays in place     | <- outside the scroll region
+ | status                       |
+ +------------------------------+
+```
 
 The transcript is a virtual list. The CLI keeps each committed block once, as its source (Markdown text, tool records), up to 5,000 blocks; fullscreen keeps only every block's height for the current width and renders the rows of the blocks within about a screen of the viewport, dropping them as it moves away. Heights start as estimates (Markdown by its wrapped source lines) and become exact when the viewport first reaches a block, so a settled resize or theme change lays out only the blocks around the view. A scrolled view is held by its top block, so it stays put while heights above it settle and across a resize. The scrollback interface lays out the newest 10,000 rows of the same history when it rewrites the terminal's scrollback.
 
@@ -1126,16 +1152,16 @@ The terminal UI reaches the same Session methods as the line client:
 | `/scheduled` (`/schedule`) | Lists the jobs the Scheduler holds from `schedule.list`, one entry per job with its schedule, next window and last outcome as its detail, and a job whose schedule the owner cannot use marked with that error; jobs are the host's, not the Session's or workspace's, and only a new job's default `cwd` comes from the Session. `Enter` or `Space` enables or pauses the job (`schedule.set_enabled`), `Ctrl+E` edits the job's document in `$EDITOR` with the revision the list reported (`schedule.save`), `Ctrl+N` creates a job from the document the adapter supplies, `Ctrl+X` removes the job after `Remove NAME? Enter confirm · Esc cancel` (`schedule.delete`), `Ctrl+T` runs it now (`schedule.run_now`) and reports the state the owner returned, `Tab` asks the inspect kind, which the Scheduler serves as history (`schedule.history`), and shows the job's recent runs in place of the list with `Esc` returning to it, `Ctrl+R` reads the list again. An edit sends only the members the draft changed |
 | `/login` | Opens the Dim sign-in panel. It shows the account from `account.status` as a status line; signed out, its entries are browser, enterprise-email or device sign-in through `account.login.*` at the entry's account directory (below), each entering its own flow (`Esc` after a failure returns to the entries); signed in, it shows the account's name and email, its plan, credits, token windows and feature meters from `account.usage` (`Ctrl+R` asks again; a plugin without the method shows why), and its entries open `/models`, open the plan page at the account directory's `/console/subscription` in the browser, or sign out with `account.logout`, after which the panel shows the sign-in entries again. Browser sign-in redirects to `http://localhost:54321/auth/callback` (`--redirect-uri` overrides it), catches the callback on a loopback listener when that port is free and opens the authorization URL (neither over SSH); a callback URL pasted in the panel completes it too; device sign-in shows the code and polls the attempt every second. `Esc` closes the panel and cancels a pending attempt. On success the catalog is refreshed with `provider.refresh` and `/models` opens |
 | `/connect` | Reads safe connection snapshots with `provider.management`. `Test + apply` probes the unsaved draft, then updates only changed fields at the form's original version with `provider.update`; a record whose models are its own has them replaced by the new endpoint's listing in that same write when the edit changes `baseUrl`, `credential` or `headers`, so the catalog follows the new endpoint, while a proxy or timeout edit saves alone and a builtin whose models are the bundled catalog's keeps them; unsupported model listing still permits saving and reports that the key was not tested. Other probe failures keep the draft. `Disconnect` atomically clears credentials and disables the record, and a catalog of the record's own goes with it, because the listing taken with that key is that key's view; the next connect lists the endpoint again. Enable/Disable update only that flag. `Add custom provider` probes a Name, Base URL and API Key draft, then calls `provider.create` with the form's retained UUID and discovered defaults. IDs never derive from names. Failures retain edits; rereads update the safe status/version and require confirmation before retrying. `Ctrl+R` rereads without discarding the draft. Fields and filters use the composer's line editor. A row whose entry carries an `account` descriptor opens the account step instead of the form: signed out, its row says `Sign in` and opening it starts the only flow the descriptor's `loginMethods` list, and signed in, it shows `Signed in` and signs out through `<namespace>.logout`; a daemon that does not advertise the method reports that instead; a row whose namespace is `account` opens the Dim account's `/login` panel instead |
-| `/resume` | Lists saved Sessions across workspaces, 50 at a time through `session.catalog`; moving near the end loads the next page. Each row is labelled by the Session's creation origin — `[Chat]`, `[ACP ]` or `[Agent]` — and reads its title, else its first message, else its id; the placeholder `New session` counts as no title. Sessions Dim created for its own work are not listed; ACP Sessions are listed only while `/settings` → Show ACP sessions is on, and only on a daemon that advertises `session.catalog.origins`. The filter searches the server after 150 ms, including Sessions not loaded yet. Ctrl+R refreshes; closing, refreshing or replacing a search cancels the pending read when the daemon advertises `session.catalog.cancel`. Older daemons use `session.summaries` and local filtering |
+| `/resume` | Lists saved Sessions, 50 at a time through `session.catalog`; moving near the end loads the next page. The first read carries the workspace `dimcode` was launched in, so every open starts there. Ctrl+S cycles this workspace, this repository when offered, and every workspace, and the title names the scope shown; a scope change keeps the query, drops the cursor and reads the first page again. Each row is labelled by the Session's creation origin — `[Chat]`, `[ACP ]` or `[Agent]` — and reads its title, else its first message, else its id; the placeholder `New session` counts as no title. Sessions Dim created for its own work are not listed; ACP Sessions are listed only while `/settings` → Show ACP sessions is on, and only on a daemon that advertises `session.catalog.origins`. The filter searches the server after 150 ms, including Sessions not loaded yet. Ctrl+R refreshes; closing, refreshing or replacing a search cancels the pending read when the daemon advertises `session.catalog.cancel`. Older daemons use `session.summaries` and local filtering, with the scope applied to the rows the client receives |
 | `/models` | Lists enabled, executable models from `provider.list`/`provider.catalog`; a model whose context window or maximum output no source declares is not offered. Every provider with such a model keeps one muted row after its models, counting them and naming `dimcode models PROVIDER --set-missing-limits`; when the provider has nothing selectable, that row replaces its empty-provider row. A static provider whose catalog holds no models is asked to fill it with `provider.refresh` once per catalog version in a connection when the daemon says its models can be listed, and the picker shows what the catalog then holds, because the Provider owner decides what a catalog holds; a successful refresh records the version it wrote, so a listing that comes back empty is not asked for again, and a write to the record asks once more; the picker re-reads the list when such a refresh returns while it is open, and a reply that arrives after it closed is shown by the next open. A provider that offers nothing selectable keeps a muted row saying why: no models with `dimcode models PROVIDER --refresh` when the daemon says its models can be listed, no models with `provider.models.create` when it cannot, an unreadable catalog, or how many models are unavailable, disabled, or both, and `dimcode models PROVIDER` for the details. An explicit pick sends the saved effort/tier preferences for that exact `{providerId, modelId}` with `session.create` or `session.model.update`, then saves the scoped default with `provider.select`. The adopted model stays in effect even when saving the default fails; the failure is reported as a notice. Unsupported saved preferences are reported and retained for the user to edit or clear; there is no silent fallback. When the daemon advertises `collaboration.model_policy`/`collaboration.set_model_policy`, a "Subagent models" row chooses Agent choice, Inherit requesting branch or a fixed model (from the same model list) for new Collaboration members; it writes only `collaboration.set_model_policy` with the revision it read, and after a revision conflict the next choice rereads before saving ([subagent model policy](../../docs/design/subagent-model-policy.md#5-native-cli-interaction)) |
 | `/lines` | Lists `main` and every line under the line it was opened from, ordered by where it was cut and labelled `after message N`, each with its state (working, waiting, ended itself, ended by an operation, creation failed); while a line is shown the composer's bottom border names its path from `main` (`line main ▸ b-91 · after message 4`); Enter shows the selected line's conversation in place of `main`'s, and the composer, `!command` and the interrupt then address that line; `x`, then `y`, ends the selected line through `session.branch_end`, refused on `main` |
-| `/timeline` | Lists the shown line's user messages, oldest first, numbered, each with the first text of its answer, the newest selected. Typing does not filter: `e`, `q`, `b` and `f` act on the selected message as on a pick. `Enter` jumps: fullscreen picks the message (drawing from it first when it is earlier history), so the pick keys apply; scrollback draws a message it has not drawn yet, and everything after it up to what is drawn, as an earlier-history page, and otherwise says `/tui` can jump to it ([timeline UI §4.6](../../docs/design/timeline-ui.md#46-timeline-jumping-to-a-message)) |
-| `/branch [TEXT]`, `/fork [TEXT]` | As `b` and `f` on a picked message, at the shown line's newest turn end: `/branch` puts `TEXT` in the composer as the new line's opening input; `/fork` asks, then forks `main` there with `TEXT` in the fork's composer |
+| `/timeline` | Lists the shown line's user messages, oldest first, numbered, each with the first text of its answer, the newest selected. `Enter` opens an action dialog: jump, edit as a new draft, quote, branch or fork. Up/Down and Enter choose; 1–5 select directly. Esc returns to the message list with its selection intact. Typing does not filter: `e`, `q`, `b` and `f` remain shortcuts in both lists. Jump picks the message in fullscreen, or draws an earlier-history page in scrollback when not drawn yet; otherwise scrollback says `/tui` can jump to it. Dialogs are live controls in scrollback and overlays in fullscreen ([timeline UI §4.6](../../docs/design/timeline-ui.md#46-timeline-jumping-to-a-message)) |
+| `/branch [TEXT]`, `/fork [TEXT]` | As `b` and `f` on a picked message, at the shown line's newest turn end: `/branch` puts `TEXT` in the composer as the new line's opening input; `/fork` opens a bordered confirmation naming the cut, with Cancel selected initially. Up/Down or Tab selects, Enter confirms, `1`/`y` forks and `2`/`n`/Esc cancels. Confirmation forks `main` there with `TEXT` in the fork's composer; cancellation restores the input or the Timeline action list |
 | `/usage` | Reports main's context window from `session.context.usage`: estimated input tokens against the window, the output allowance and the compaction threshold; before a model has answered it says so, and a failed call is reported alone. With the reading it appends the cache read share of the last `model/usage` request on `main` (` · last request cached {percent}`), rounded down: `100%` only when every prompt token was a cache read, one decimal between `99%` and `100%`, an integer between `1%` and `99%`, `<1%` for a positive share below one percent, and `0%` for a request that reported no cache reads; the prompt token count includes cache writes, so a request that only writes the cache reads `0%`. The segment appears only once `main`'s history has finished loading, so a page that is not the last never reports its older request; after that it shows the newest request, whether it came from the history or a live event. It is absent when that request reported no cache read count or its counters cannot produce a share (cache reads above prompt tokens, or a zero prompt) |
 | `/compact` | Asks the shown line to compact its context with `session.context.compact`, during a run too. The matching Timeline row reports the work and its terminal outcome once; the RPC reply adds no second completed, skipped, failed or cancelled notice. Failures of the call itself and invalid replies are reported separately. A daemon without the method says it does not support context compaction |
 | `/rename TITLE`, `/rename --clear` | Sets, or clears, the shown Session's manual title with `session.rename` and reports the stored title or that the Session is untitled. Choosing `/rename` from the palette fills `/rename ` and waits; a bare `/rename` is refused with a notice and sends nothing, so `--clear` is the way to clear it without a title. The text is a command: it is never queued or submitted, also while a turn runs. With no Session shown it says so, and a Session that does not serve `session.rename` (`unknown_method`) reports that instead. The window title shows the stored title, or the first message's topic until the Session has one |
-| `/goal [OBJECTIVE \| set OBJECTIVE \| edit OBJECTIVE \| pause \| resume \| clear]` | Reads and writes the goal of the shown line through `session.goal.*`. The command's first line names the call, the line and the status in force, the objective follows it, and `/goal` alone prints the goal the line's events give; `edited` is the form that found a live goal and changed only its objective, and a typed objective after a finished goal starts a new one. While the shown line follows a goal the status area carries `◎ goal active` or `◎ goal paused`. A daemon whose Session lists no `session.goal.set` says Goal is not available and calls nothing ([Goal](#goal)) |
-| `/effort VALUE` (`/reasoning`), `/fast on\|off`, `/agent ID` | Change the Session's reasoning effort, service tier or agent; without a value they list the choices for the adopted model. `/fast` is listed in the palette only while the adopted model's catalog entry advertises priority/default service tiers |
+| `/goal [OBJECTIVE \| set OBJECTIVE \| edit OBJECTIVE \| pause \| resume \| clear]` | Reads and writes the goal of the shown line through `session.goal.*`. Selecting it with Enter or Tab only fills `/goal ` for a separate submission. Bare `/goal` prints usage before the current goal/status, or before the no-goal notice (two lines when no goal is set). Writing forms start with the call, line and status, followed by the objective; `edited` found a live goal and changed only its objective, and a typed objective after a finished goal starts a new one. While the shown line follows a goal the status area carries `◎ goal active` or `◎ goal paused`. A daemon whose Session lists no `session.goal.set` says Goal is not available and calls nothing ([Goal](#goal)) |
+| `/effort [VALUE]` (`/reasoning`), `/fast on\|off`, `/agent ID` | Change the Session's reasoning effort, service tier or agent. Bare `/effort` opens an AskUser-style picker for the adopted model in both TUI modes; ↑/↓ or 1–9 select, Enter applies, Esc cancels. The line client and the other bare commands list choices. `/fast` is listed in the palette only while the adopted model's catalog entry advertises priority/default service tiers |
 | Paste of local file paths | An image the model takes becomes an `[Image #N]` token sent as an image block; another file is inserted as its path, and so is an image the model does not take. At most 20 images, a group all or nothing |
 | `Ctrl+V` | Reads the native clipboard off the interface thread: files, then an image, then text. `Enter` waits until the read is in |
 | A paste of 4 lines or 201 characters or more | Stays a `[... N lines]` token; on send it is stored with `attachment.put` and referenced as `[Pasted text: PATH (N lines)]` |

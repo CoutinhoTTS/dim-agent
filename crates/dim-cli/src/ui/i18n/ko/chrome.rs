@@ -30,8 +30,19 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "line {id}" => "라인 {id}",
         "jump to a message of the shown line" => "표시 중인 라인의 메시지로 이동",
         "Timeline" => "타임라인",
-        "Enter jump · e edit · q quote · b branch · f fork · Esc close" => {
-            "Enter 이동 · e 편집 · q 인용 · b 브랜치 · f 포크 · Esc 닫기"
+        "Enter actions · Esc close" => "Enter 작업 · Esc 닫기",
+        "Timeline actions" => "타임라인 작업",
+        "↑↓ select · Enter confirm · Esc cancel" => "↑↓ 선택 · Enter 확인 · Esc 취소",
+        "Jump to message" => "메시지로 이동",
+        "Edit as a new draft" => "새 초안으로 편집",
+        "Quote message" => "메시지 인용",
+        "Create branch from here" => "여기서 브랜치 생성",
+        "Before this message" => "이 메시지 이전",
+        "Fork session" => "세션 포크",
+        "1. Create fork" => "1. 포크 생성",
+        "2. Cancel" => "2. 취소",
+        "Creates a new session; the current session stays unchanged." => {
+            "새 세션을 만듭니다. 현재 세션은 변경되지 않습니다."
         }
         "No messages yet." => "아직 메시지가 없습니다.",
         "Already on screen above; /tui jumps to it" => "이미 위에 있음. /tui 에서 바로 이동",
@@ -39,8 +50,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "이전 메시지 {count}개 · Enter 또는 클릭으로 불러오기"
         }
         "follow, talk to and end this session's lines" => "이 세션의 라인을 보고, 대화하고, 종료",
-        "End line" => "라인 종료",
-        "y/N" => "y/N",
+        "End line {id}?" => "{id} 라인을 종료할까요?",
+        "y end it" => "y 종료",
+        "n cancel" => "n 취소",
         "main is the session itself; a line ends, main does not" => {
             "main은 세션 자체입니다. 라인은 종료되지만 main은 그렇지 않습니다"
         }
@@ -52,12 +64,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "e edit · b branch · f fork" => "e 편집 · b 브랜치 · f 포크",
         "e edit" => "e 편집",
-        "Fork the session before “{message}”? (y/N)" => {
-            "“{message}” 앞에서 세션을 포크할까요? (y/N)"
-        }
-        "Fork the session after the last turn? (y/N)" => {
-            "마지막 턴 뒤에서 세션을 포크할까요? (y/N)"
-        }
+        "Fork the session before “{message}”?" => "“{message}” 앞에서 세션을 포크할까요?",
+        "Fork the session after the last turn?" => "마지막 턴 뒤에서 세션을 포크할까요?",
         "⑂ new line from {id} · Esc cancel" => "⑂ {id}에서 새 라인 · Esc 취소",
         "A fork copies main; b opens a line here" => {
             "포크는 main만 복사합니다. b로 여기서 라인을 여세요"
@@ -226,6 +234,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Connected {provider}" => "{provider} 연결됨",
         "Opened {url}" => "{url} 열림",
         "Tool details not saved: {error}" => "도구 상세 저장 실패: {error}",
+        "Thinking details not saved: {error}" => "생각 상세 저장 실패: {error}",
         "/{name} needs a session — send a message first" => {
             "/{name}에는 세션 필요 — 먼저 메시지 전송"
         }
@@ -271,6 +280,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "run" => "실행",
         "view" => "보기",
         "model" => "모델",
+        "extensions" => "확장",
         "app" => "앱",
         "skill" => "스킬",
         // composer/commands.rs: descriptions
@@ -289,9 +299,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "맨 위로 스크롤",
         "scroll to the bottom" => "맨 아래로 스크롤",
         "pick an earlier message to edit or quote" => "편집/인용할 이전 메시지 선택",
-        "collapse or expand tool details, thoughts and compaction summaries" => {
-            "도구 상세·생각·압축 요약 접기/펼치기"
-        }
+        "cycle tool details and compaction summaries" => "도구 상세와 압축 요약 순환 전환",
         "switch between fullscreen and scrollback" => "전체 화면/스크롤백 전환",
         "switch theme" => "테마 전환",
         "switch language" => "언어 전환",
@@ -334,6 +342,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "fullscreen" => "전체 화면",
         "scrollback" => "스크롤백",
         "Tool details" => "도구 상세",
+        "Thinking details" => "생각 상세",
         "expanded" => "펼침",
         "collapsed" => "접힘",
         "Mouse (fullscreen)" => "마우스 (전체 화면)",
@@ -357,7 +366,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
 
         // sessions_panel.rs
         "Sessions" => "세션",
-        "Enter open · Ctrl+R refresh · Esc close" => "Enter 열기 · Ctrl+R 새로고침 · Esc 닫기",
+        "Sessions · This workspace" => "세션 · 이 워크스페이스",
+        "Sessions · This repository" => "세션 · 이 저장소",
+        "Sessions · All workspaces" => "세션 · 모든 워크스페이스",
+        "No saved sessions in this workspace. Ctrl+S shows more." => {
+            "이 워크스페이스에 저장된 세션 없음. Ctrl+S로 더 보기."
+        }
+        "Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close" => {
+            "Enter 열기 · Ctrl+S 범위 · Ctrl+R 새로고침 · Esc 닫기"
+        }
         "Loading sessions..." => "세션 불러오는 중…",
         "No saved sessions yet." => "저장된 세션 없음",
         "No matching sessions." => "일치하는 세션 없음",
@@ -490,8 +507,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "follow or change the shown line's goal" => "표시된 라인의 목표 추적 또는 변경",
         "◎ goal active" => "◎ 목표 진행 중",
         "◎ goal paused" => "◎ 목표 일시정지",
-        "Kept verbatim" => "원문 그대로 유지",
-        "Tool effects" => "도구 작업 기록",
         "insufficient space: {parts}" => "공간 부족: {parts}",
         "system prompt" => "시스템 프롬프트",
         "tools" => "도구",

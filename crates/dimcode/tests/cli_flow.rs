@@ -4004,6 +4004,193 @@ fn a_new_session_shows_the_effort_its_creation_adopted() {
     }
 }
 
+/// A model-config profile records the protocol its selection adopts, so the
+/// configured effort reaches the status line; a profile with no effort shows
+/// no suffix.
+#[test]
+#[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
+fn the_model_label_shows_a_configured_profile_effort() {
+    let binary = std::env::var("DIM_TEST_APP_SERVER")
+        .expect("Set DIM_TEST_APP_SERVER to the dim-app-server binary");
+    for (suffix, label) in [
+        ("effortful", "fixture / fixture-model · low"),
+        ("plain", "fixture / fixture-model"),
+    ] {
+        let home = Home::new();
+        let config = home.0.join("model.json");
+        let mut model = json!({"id":"fixture-model","contextWindow":32_000,
+            "maxOutputTokens":4_096,"config":{"maxTokens":4096}});
+        if suffix == "effortful" {
+            model["config"]["reasoning"] = json!({"effort":"low"});
+        }
+        fs::write(
+            &config,
+            serde_json::to_vec(&json!({
+                "defaultModel":{"providerId":"fixture","modelId":"fixture-model"},
+                "providers":[{"id":"fixture","kind":"anthropic",
+                    "baseUrl":"http://127.0.0.1:9","models":[model]}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut command = home.command();
+        command.args([
+            "--server",
+            &binary,
+            "--model-config",
+            config.to_str().unwrap(),
+            "--cwd",
+            home.0.to_str().unwrap(),
+        ]);
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until(label);
+        if suffix == "plain" {
+            assert!(
+                !terminal.transcript.contains("· low"),
+                "a profile without an effort drew a suffix: {}",
+                terminal.transcript
+            );
+        }
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
+    }
+}
+
+/// `/new` returns home: the status line keeps the provider and model it
+/// showed and drops the effort, because nothing has been adopted there yet.
+#[test]
+fn home_after_new_drops_the_previous_sessions_effort() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[
+            "ui.open",
+            "ui.close",
+            "ui.attach",
+            "ui.status",
+            "ui.shutdown",
+            "ui.replace",
+        ]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let register = wire.read("ui.attach");
+        wire.reply(&register, json!({"uiId":"ui-1"}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[configured_event(4, "model", json!({"reasoningEffort":"high"}))],
+                "through":8,"nextAfter":8,"done":true}),
+        );
+        wire.no_context();
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+
+        // `/effort high` adopts the value on the first Session.
+        let catalog = wire.read("provider.catalog");
+        assert_eq!(catalog["params"], json!({"providerId":"test"}));
+        let mut capabilities = serde_json::to_value(
+            dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384),
+        )
+        .unwrap();
+        capabilities["reasoning"] = json!(true);
+        wire.reply(
+            &catalog,
+            json!({"catalog":{"models":[{"id":"model","capabilities":capabilities,
+                "metadata":{"reasoning":{"supported":true,"effortOptions":["high","low"]}}}]}}),
+        );
+        let effort = wire.read("session.model.update");
+        assert_eq!(
+            effort["params"],
+            json!({"sessionId":"session","branchId":"main",
+                "modelPreferences":{"reasoningEffort":"high"}})
+        );
+        wire.reply(&effort, json!({"outcome":"adopted"}));
+
+        // `/new` and its first message create the next Session, which has
+        // adopted no preference yet.
+        let create = wire.read("session.create");
+        assert!(
+            create["params"].get("modelPreferences").is_none(),
+            "{create}"
+        );
+        wire.reply(
+            &create,
+            json!({"sessionId":"next","sequence":8,"model":{"providerId":"test","modelId":"model"}}),
+        );
+        let detach = wire.read("session.detach");
+        assert_eq!(detach["params"], json!({"sessionId":"session"}));
+        wire.reply(&detach, json!({}));
+        let attach = wire.read("session.attach");
+        assert_eq!(attach["params"], json!({"sessionId":"next"}));
+        wire.reply(&attach, attach_record(&attach));
+        let register = wire.read("ui.attach");
+        assert_eq!(register["params"], json!({"sessionId":"next","kind":"tui"}));
+        wire.reply(&register, json!({"uiId":"ui-2"}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["sessionId"], "next");
+        wire.reply(&submit, json!({"event":{}}));
+        wire.no_context();
+        wire.notice("session.event", json!({"sessionId":"next","branchId":"main",
+            "event":{"id":"next-text","sequence":9,"create_at":1,"type":"step","name":"text",
+                "data":{"turn_id":"next-turn","request_id":"next-request","delta":"next reply"}}}));
+        wire.hold();
+    });
+    let mut command = home.command();
+    // The waits below close on the end of a synchronized update, which frames
+    // every repaint; tmux would turn that framing off for the child.
+    command.env_remove("TMUX");
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / model · high");
+    terminal.write(b"/effort high\r");
+    terminal.until("Reasoning effort configuration adopted: high");
+    terminal.write(b"/new\r");
+    // The palette lists `/new` with its description while it is typed, so
+    // wait for the rule the boundary commits once the command has run.
+    terminal.until("─ new session ─");
+    // Widen the terminal so the whole label fits and every row is repainted:
+    // the status line at home must carry the model alone.
+    let size = libc::winsize {
+        ws_row: 24,
+        ws_col: 200,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    assert_eq!(
+        unsafe {
+            libc::ioctl(
+                terminal.master.as_ref().unwrap().as_raw_fd(),
+                libc::TIOCSWINSZ,
+                &size,
+            )
+        },
+        0
+    );
+    let resized_at = terminal.transcript.len();
+    terminal.signal(libc::SIGWINCH);
+    // The repaint of a resize clears the screen first; its status line is
+    // the last row of the frame, so wait for the label on that row and for
+    // the frame to close behind it before reading either.
+    terminal.until("\u{1b}[2J\u{1b}[H\u{1b}[3J");
+    terminal.until("test / model");
+    terminal.until("\u{1b}[?2026l");
+    let home = &terminal.transcript[resized_at..];
+    assert!(home.contains("test / model"), "home drew no label: {home}");
+    assert!(
+        !home.contains("· high"),
+        "home kept the previous Session's effort: {home}"
+    );
+    terminal.write(b"hello\r");
+    terminal.until("next reply");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
 /// Re-picking the model the label already shows keeps its effort: an
 /// `unchanged` adoption publishes no `context/configured` fact to redraw it.
 #[test]
@@ -4349,6 +4536,95 @@ fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
         "{}",
         terminal.transcript
     );
+}
+
+#[test]
+fn tui_effort_dialog_selects_the_current_models_effort_and_cancels_without_writing() {
+    fn catalog(wire: &mut Wire) {
+        let request = wire.read("provider.catalog");
+        assert_eq!(request["params"], json!({"providerId":"test"}));
+        let mut capabilities = serde_json::to_value(
+            dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384),
+        )
+        .unwrap();
+        capabilities["reasoning"] = json!(true);
+        wire.reply(
+            &request,
+            json!({"catalog":{"models":[
+                {"id":"other","capabilities":capabilities,"metadata":{"reasoning":{
+                    "supported":true,"effortOptions":["invalid-neighbor"]}}},
+                {"id":"model","capabilities":capabilities,"metadata":{"reasoning":{
+                    "supported":true,"effortOptions":["low","high"],
+                    "off":{"kind":"enable_thinking","value":false}}}}
+            ]}}),
+        );
+    }
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let daemon = home.daemon(|wire| {
+            wire.hello(&[]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history");
+            wire.reply(
+                &history,
+                json!({"events":[configured_event(4, "model", json!({"reasoningEffort":"high"}))],
+                "through":8,"nextAfter":8,"done":true}),
+            );
+            wire.no_context();
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            catalog(wire);
+            catalog(wire);
+            let selected = wire.read("session.model.update");
+            assert_eq!(
+                selected["params"],
+                json!({"sessionId":"session","branchId":"main",
+                "modelPreferences":{"reasoningEffort":"high"}})
+            );
+            wire.reply(&selected, json!({"outcome":"unchanged"}));
+            catalog(wire);
+            catalog(wire);
+            catalog(wire);
+            let selected = wire.read("session.model.update");
+            assert_eq!(
+                selected["params"],
+                json!({"sessionId":"session","branchId":"main",
+                "modelPreferences":{"reasoningEffort":"none"}})
+            );
+            wire.reply(&selected, json!({"outcome":"adopted"}));
+            wire.hold();
+        });
+        let mut command = home.command();
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("test / model · high");
+        terminal.write(b"/effort\r");
+        terminal.until("Current: high");
+        terminal.until("2 (•) high");
+        terminal.write(b"\r");
+        terminal.until("Reasoning effort configuration unchanged: high");
+        terminal.write(b"/effort\r");
+        terminal.until("Current: high");
+        terminal.write(b"\x1b");
+        terminal.until(if fullscreen {
+            "test / model · high"
+        } else {
+            "Ask anything..."
+        });
+        terminal.write(b"/reasoning\r");
+        terminal.until("Current: high");
+        terminal.until("3 ( ) none");
+        assert!(!terminal.transcript.contains("invalid-neighbor"));
+        terminal.write(b"3\r");
+        terminal.until("Reasoning effort configuration adopted: none");
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
 }
 
 #[test]
@@ -7268,7 +7544,7 @@ fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
     terminal.until("test / model");
     // `/new` goes home; the message starts the Session the UI moves to.
     terminal.write(b"/new\r");
-    terminal.until("new session");
+    terminal.until("─ new session ─");
     terminal.write(b"hello\r");
     terminal.until("The App Server closed this interface: another terminal took over");
     terminal.until("Bye!");
@@ -7771,9 +8047,9 @@ fn tui_permissions_keep_pending_file_and_member_questions_and_save_command_rules
         let read = wire.read("session.permission.get");
         wire.reply(&read, json!({"version":1,"policy":{"preset":"workspace-write","allowedTools":[],"disallowedTools":[]}}));
         let update = wire.read("session.permission.update");
-        assert_eq!(update["params"], json!({"sessionId":"session","branchId":"main","expectedVersion":1,"policy":{"preset":"workspace-write","toolApproval":"bypass","allowedTools":[],"disallowedTools":[]}}));
+        assert_eq!(update["params"], json!({"sessionId":"session","branchId":"main","expectedVersion":1,"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}));
         wire.reply(&update, json!({"version":2}));
-        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"perm-1","sequence":9,"create_at":1,"type":"permission","name":"changed","data":{"policy":{"preset":"workspace-write","toolApproval":"bypass","allowedTools":[],"disallowedTools":[]}}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"perm-1","sequence":9,"create_at":1,"type":"permission","name":"changed","data":{"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}}}));
         wire.notice("approval.request", json!({"sessionId":"session","branchId":"review","requestId":"req-1","source":{"kind":"model"},"call":{"name":"exec","input":{"command":"npm test"}},"reason":"shell command"}));
         let rules = wire.read("permission.rules");
         wire.reply(&rules, json!({"revision":"r1","commandRules":[]}));
@@ -7815,11 +8091,9 @@ fn tui_permissions_keep_pending_file_and_member_questions_and_save_command_rules
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"/approvals\r");
-    terminal.until("Process isolation");
+    terminal.until("Full access");
     terminal.write(b"\x1b[B\r");
-    terminal.until("Bypass");
-    terminal.write(b"\x1b[B\r");
-    terminal.until("Tool approval: Bypass (also for new sessions)");
+    terminal.until("Permission: full-access (also for new sessions)");
     terminal.until("Permission required");
     terminal.until("Allow always");
     terminal.write(b"a");
@@ -7836,20 +8110,27 @@ fn tui_permissions_keep_pending_file_and_member_questions_and_save_command_rules
     daemon.join().unwrap();
     let config: Value =
         serde_json::from_str(&fs::read_to_string(home.0.join("config.json")).unwrap()).unwrap();
-    assert_eq!(config["toolApproval"], "bypass");
+    assert_eq!(config["permission"], "full-access");
     assert!(config.get("permissionPreset").is_none());
+    let mut saved = config;
+    saved["permissionPreset"] = json!("read-only");
+    fs::write(
+        home.0.join("config.json"),
+        serde_json::to_string(&saved).unwrap(),
+    )
+    .unwrap();
     fs::remove_file(home.0.join("rust/daemon.sock")).unwrap();
     let daemon = home.daemon(|wire| {
         wire.hello(&["session.permission.get", "session.permission.update"]);
         let create = wire.read("session.create");
-        assert_eq!(create["params"]["permissionPolicy"], json!({"preset":"workspace-write","toolApproval":"bypass"}));
+        assert_eq!(create["params"]["permissionPolicy"], json!({"preset":"full-access"}));
         wire.reply(&create, json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         let read = wire.read("session.permission.get");
-        wire.reply(&read, json!({"version":1,"policy":{"preset":"workspace-write","toolApproval":"bypass","allowedTools":[],"disallowedTools":[]}}));
+        wire.reply(&read, json!({"version":1,"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}));
         wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
@@ -7859,14 +8140,14 @@ fn tui_permissions_keep_pending_file_and_member_questions_and_save_command_rules
         }
     });
     let mut terminal = Terminal::launch_tui(home.command());
-    terminal.until("Bypass");
+    terminal.until("Full access");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();
 }
 
 #[test]
-fn tui_approval_alias_sets_only_tool_approval_and_remembers_it() {
+fn tui_approval_alias_selects_presets_and_remembers_them() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.hello(&["session.permission.get", "session.permission.update"]);
@@ -7898,24 +8179,24 @@ fn tui_approval_alias_sets_only_tool_approval_and_remembers_it() {
         let update = wire.read("session.permission.update");
         assert_eq!(
             update["params"],
-            json!({"sessionId":"session","branchId":"main","expectedVersion":1,"policy":{"preset":"workspace-write","toolApproval":"bypass","allowedTools":[],"disallowedTools":[]}})
+            json!({"sessionId":"session","branchId":"main","expectedVersion":1,"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}})
         );
         wire.reply(&update, json!({"version":2}));
         wire.notice(
             "session.event",
-            json!({"sessionId":"session","branchId":"main","event":{"id":"perm-1","sequence":9,"create_at":1,"type":"permission","name":"changed","data":{"policy":{"preset":"workspace-write","toolApproval":"bypass","allowedTools":[],"disallowedTools":[]}}}}),
+            json!({"sessionId":"session","branchId":"main","event":{"id":"perm-1","sequence":9,"create_at":1,"type":"permission","name":"changed","data":{"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}}}),
         );
         let read = wire.read("session.permission.get");
         wire.reply(
             &read,
-            json!({"version":2,"policy":{"preset":"workspace-write","toolApproval":"bypass","allowedTools":[],"disallowedTools":[]}}),
+            json!({"version":2,"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}),
         );
         let update = wire.read("session.permission.update");
         assert_eq!(
             update["params"]["policy"]["preset"],
             json!("workspace-write")
         );
-        assert_eq!(update["params"]["policy"]["toolApproval"], "ask");
+
         wire.reply(&update, json!({"version":3}));
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
@@ -7925,23 +8206,19 @@ fn tui_approval_alias_sets_only_tool_approval_and_remembers_it() {
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"/approval\r");
-    terminal.until("Process isolation");
+    terminal.until("Full access");
     terminal.write(b"\x1b[B\r");
-    terminal.until("Bypass");
-    terminal.write(b"\x1b[B\r");
-    terminal.until("Tool approval: Bypass (also for new sessions)");
+    terminal.until("Permission: full-access (also for new sessions)");
     terminal.write(b"/approval\r");
-    terminal.until("Process isolation");
-    terminal.write(b"\x1b[B\r");
-    terminal.until("Bypass");
+    terminal.until("Full access");
     terminal.write(b"\x1b[A\r");
-    terminal.until("Tool approval: Ask (also for new sessions)");
+    terminal.until("Permission: workspace-write (also for new sessions)");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();
     let config: Value =
         serde_json::from_str(&fs::read_to_string(home.0.join("config.json")).unwrap()).unwrap();
-    assert_eq!(config["toolApproval"], "ask");
+    assert_eq!(config["permission"], "workspace-write");
     assert!(config.get("permissionPreset").is_none());
 }
 
@@ -8235,22 +8512,21 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
             {"id":"dim-compaction","sequence":13,"create_at":1,"type":"context","name":"compaction",
              "data":{"through":11,"start":12,"status":"completed","retain_from":"dim-2","strategy":"summary",
-                     "replacement":[{"role":"user","content":"<dim-summary>\nThe parser is half done.\n</dim-summary>"}],
+                     "replacement":[dim_agent_capabilities::history::summary_message("The parser is half done.")],
                      "diagnostics":{"reason":"auto","trigger":"provider_output_budget_exhausted","estimatedInputTokens":300.0,
                                     "entriesReplaced":3,"modelCallCount":1,"durationMs":10,"strategy":{"kind":"summary"}}}}}));
         wire.no_context();
         wait_more.recv().unwrap();
-        // A record that locates its parts: the summary is the strategy's
-        // message, and the pinned input follows it, shown apart.
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
             {"id":"dim-compaction-start-2","sequence":14,"create_at":1,"type":"context","name":"compaction-start",
              "data":{"through":11,"trigger":"manual","strategy":"summary"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
             {"id":"dim-compaction-2","sequence":15,"create_at":1,"type":"context","name":"compaction",
              "data":{"through":11,"start":14,"status":"completed","retain_from":"dim-2","strategy":"summary",
-                     "replacement":[{"role":"user","content":"<dim-summary>\nThe cache lock moved into a RwLock."},
+                     "replacement":[dim_agent_capabilities::history::summary_message("The cache lock moved into a RwLock."),
+                                    {"role":"user","content":"<dim-digest>\nwrote src/cache.rs\n</dim-digest>"},
                                     {"role":"user","content":"Keep the parser race in mind."}],
-                     "replacement_parts":{"strategy":1,"digest":0},
+                     "replacement_parts":{"strategy":1,"digest":1},
                      "diagnostics":{"reason":"manual","trigger":"manual","estimatedInputTokens":300.0,
                                     "entriesReplaced":3,"modelCallCount":1,"durationMs":10,"strategy":{"kind":"summary"}}}}}));
         wire.no_context();
@@ -8284,29 +8560,24 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
     shown.send(()).unwrap();
     terminal.until("Compacting context…");
     started.send(()).unwrap();
-    terminal.until("Context compacted");
+    terminal.until("Context compacted ▸");
+    terminal.write(b"/tools\r");
+    terminal.until("Context compacted ▸");
+    terminal.until("test / model");
+    assert!(
+        !terminal.transcript.contains("The parser is half done."),
+        "summary tool form keeps the compaction body closed"
+    );
+    terminal.write(b"/tools\r");
     terminal.until("The parser is half done.");
+    terminal.write(b"/tools\r");
+    terminal.until("Context compacted ▸");
     terminal.write(b"/tools\r");
     terminal.until("Context compacted ▸");
     terminal.write(b"/tools\r");
     terminal.until("The parser is half done.");
     more.send(()).unwrap();
-    terminal.until("Kept verbatim");
-    terminal.until("Keep the parser race in mind.");
-    let transcript = terminal.transcript.clone();
-    let at = |needle: &str| {
-        transcript
-            .find(needle)
-            .unwrap_or_else(|| panic!("no {needle:?}: {transcript}"))
-    };
-    assert!(
-        at("The cache lock moved into a RwLock.") < at("Kept verbatim"),
-        "the summary comes before the kept input: {transcript}"
-    );
-    assert!(
-        at("Kept verbatim") < at("Keep the parser race in mind."),
-        "the kept input follows its label: {transcript}"
-    );
+    terminal.until("The cache lock moved into a RwLock.");
     terminal.until("insufficient space: summary 3.2K, pinned inputs 1.1K");
     fail.send(()).unwrap();
     terminal.until("turn failed: Context recovery could not fit the request.");
@@ -8326,6 +8597,19 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
         terminal.transcript
     );
     daemon.join().unwrap();
+    for hidden in [
+        "<dim-summary>",
+        "</dim-summary>",
+        "Background from earlier parts",
+        "End of recorded background.",
+        "<dim-digest>",
+        "Tool effects",
+        "wrote src/cache.rs",
+        "Kept verbatim",
+        "Keep the parser race in mind.",
+    ] {
+        assert!(!terminal.transcript.contains(hidden), "{hidden}");
+    }
 }
 
 #[test]
@@ -8595,7 +8879,7 @@ fn tui_rebuilds_compaction_rows_from_history_on_resume() {
                  "data":{"through":2,"trigger":"threshold","strategy":"summary"}},
                 {"id":"dim-compaction","sequence":4,"create_at":1,"type":"context","name":"compaction",
                  "data":{"through":2,"start":3,"status":"completed","retain_from":"dim-1","strategy":"summary",
-                         "replacement":[{"role":"user","content":"<dim-summary>\nRestored summary text.\n</dim-summary>"}],
+                         "replacement":[dim_agent_capabilities::history::summary_message("Restored summary text.")],
                          "diagnostics":{"reason":"auto","trigger":"threshold","estimatedInputTokens":300.0,
                                         "entriesReplaced":3,"modelCallCount":1,"durationMs":10,"strategy":{"kind":"summary"}}}}],
                 "through":8,"nextAfter":8,"done":true}),
@@ -8611,12 +8895,29 @@ fn tui_rebuilds_compaction_rows_from_history_on_resume() {
     let mut command = home.command();
     command.args(["--resume", "session"]);
     let mut terminal = Terminal::launch_tui(command);
-    terminal.until("Context compacted");
+    terminal.until("Context compacted ▸");
+    terminal.until("test / model");
+    terminal.write(b"/tools\r");
+    terminal.until("Context compacted ▸");
+    terminal.until("test / model");
+    assert!(
+        !terminal.transcript.contains("Restored summary text."),
+        "summary tool form keeps the restored compaction body closed"
+    );
+    terminal.write(b"/tools\r");
     terminal.until("Restored summary text.");
     terminal.write(b"/exit\r");
     terminal.until("Bye!");
     assert!(terminal.wait().success());
     daemon.join().unwrap();
+    assert!(!terminal.transcript.contains("<dim-summary>"));
+    assert!(!terminal.transcript.contains("</dim-summary>"));
+    assert!(
+        !terminal
+            .transcript
+            .contains("Background from earlier parts")
+    );
+    assert!(!terminal.transcript.contains("End of recorded background."));
 }
 
 /// `dimcode export` (Timeline export design §7, §13 item 6): the sibling

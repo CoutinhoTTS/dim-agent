@@ -17,6 +17,7 @@ use crate::{
 };
 use dim_agent_runtime::Branch;
 use dim_agent_types::*;
+use rutis::host::CtxHost;
 use serde_json::{Value, json};
 use std::{
     io,
@@ -1267,13 +1268,15 @@ pub(super) async fn execute(
         cwd: cwd_text,
         timeout_ms: effective_timeout.map_or(-1, |timeout| timeout as i64),
     };
-    let (spec, temporary, isolation) = match platform
-        .prepare_isolated_process(spec, &tools.cwd, None)
-        .await
-    {
-        Ok(prepared) => prepared,
-        Err(error) => return Ok(failed(error.reason, error.code)),
+    let roots = match tools.ctx.get_at(&tools.facts) {
+        Some(facts) => facts.0.workspace_roots(&cwd, cancel.clone()).await?,
+        None => vec![tools.cwd.clone()],
     };
+    let (spec, temporary, isolation) =
+        match platform.prepare_isolated_process(spec, &roots, None).await {
+            Ok(prepared) => prepared,
+            Err(error) => return Ok(failed(error.reason, error.code)),
+        };
     let tree = match platform.spawn(spec) {
         Ok(tree) => tree,
         Err(error) => {

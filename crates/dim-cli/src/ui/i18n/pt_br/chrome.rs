@@ -34,8 +34,21 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "line {id}" => "linha {id}",
         "jump to a message of the shown line" => "ir para uma mensagem da linha exibida",
         "Timeline" => "Linha do tempo",
-        "Enter jump · e edit · q quote · b branch · f fork · Esc close" => {
-            "Enter ir · e editar · q citar · b ramo · f fork · Esc fechar"
+        "Enter actions · Esc close" => "Enter ações · Esc fechar",
+        "Timeline actions" => "Ações da linha do tempo",
+        "↑↓ select · Enter confirm · Esc cancel" => {
+            "↑↓ selecionar · Enter confirmar · Esc cancelar"
+        }
+        "Jump to message" => "Ir para a mensagem",
+        "Edit as a new draft" => "Editar como novo rascunho",
+        "Quote message" => "Citar mensagem",
+        "Create branch from here" => "Criar ramo a partir daqui",
+        "Before this message" => "Antes desta mensagem",
+        "Fork session" => "Fazer fork da sessão",
+        "1. Create fork" => "1. Criar fork",
+        "2. Cancel" => "2. Cancelar",
+        "Creates a new session; the current session stays unchanged." => {
+            "Cria uma sessão; a sessão atual permanece inalterada."
         }
         "No messages yet." => "Ainda não há mensagens.",
         "Already on screen above; /tui jumps to it" => "Já está acima; /tui vai direto",
@@ -45,8 +58,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "follow, talk to and end this session's lines" => {
             "acompanhar, conversar e encerrar as linhas desta sessão"
         }
-        "End line" => "Encerrar linha",
-        "y/N" => "y/N",
+        "End line {id}?" => "Encerrar a linha {id}?",
+        "y end it" => "y encerrar",
+        "n cancel" => "n cancelar",
         "main is the session itself; a line ends, main does not" => {
             "main é a própria sessão; uma linha encerra, main não"
         }
@@ -58,12 +72,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "e edit · b branch · f fork" => "e editar · b ramo · f fork",
         "e edit" => "e editar",
-        "Fork the session before “{message}”? (y/N)" => {
-            "Fazer fork da sessão antes de “{message}”? (y/N)"
-        }
-        "Fork the session after the last turn? (y/N)" => {
-            "Fazer fork da sessão após o último turno? (y/N)"
-        }
+        "Fork the session before “{message}”?" => "Fazer fork da sessão antes de “{message}”?",
+        "Fork the session after the last turn?" => "Fazer fork da sessão após o último turno?",
         "⑂ new line from {id} · Esc cancel" => "⑂ nova linha a partir de {id} · Esc cancelar",
         "A fork copies main; b opens a line here" => "Um fork copia main; b abre uma linha aqui",
         "A line opens from text; images and files were not included" => {
@@ -256,6 +266,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Connected {provider}" => "{provider} conectado",
         "Opened {url}" => "{url} aberto",
         "Tool details not saved: {error}" => "Detalhes de ferramentas não salvos: {error}",
+        "Thinking details not saved: {error}" => "Detalhes de raciocínio não salvos: {error}",
         "/{name} needs a session — send a message first" => {
             "/{name} requer sessão — envie uma mensagem antes"
         }
@@ -303,6 +314,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "run" => "execução",
         "view" => "exibição",
         "model" => "modelo",
+        "extensions" => "extensões",
         "app" => "app",
         "skill" => "skill",
         // composer/commands.rs: descriptions
@@ -325,8 +337,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "pick an earlier message to edit or quote" => {
             "escolher mensagem anterior para editar ou citar"
         }
-        "collapse or expand tool details, thoughts and compaction summaries" => {
-            "recolher/expandir detalhes de ferramentas, pensamentos e resumos de compactação"
+        "cycle tool details and compaction summaries" => {
+            "alternar detalhes de ferramentas e resumos de compactação"
         }
         "switch between fullscreen and scrollback" => "alternar entre tela cheia e scrollback",
         "switch theme" => "trocar tema",
@@ -370,6 +382,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "fullscreen" => "tela cheia",
         "scrollback" => "scrollback",
         "Tool details" => "Detalhes de ferramentas",
+        "Thinking details" => "Detalhes de raciocínio",
         "expanded" => "expandido",
         "collapsed" => "recolhido",
         "Mouse (fullscreen)" => "Mouse (tela cheia)",
@@ -397,8 +410,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
 
         // sessions_panel.rs
         "Sessions" => "Sessões",
-        "Enter open · Ctrl+R refresh · Esc close" => {
-            "Enter abrir · Ctrl+R atualizar · Esc fechar"
+        "Sessions · This workspace" => "Sessões · Este espaço de trabalho",
+        "Sessions · This repository" => "Sessões · Este repositório",
+        "Sessions · All workspaces" => "Sessões · Todos os espaços de trabalho",
+        "No saved sessions in this workspace. Ctrl+S shows more." => {
+            "Sem sessões salvas neste espaço de trabalho. Ctrl+S mostra mais."
+        }
+        "Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close" => {
+            "Enter abrir · Ctrl+S escopo · Ctrl+R atualizar · Esc fechar"
         }
         "Loading sessions..." => "Carregando sessões…",
         "No saved sessions yet." => "Sem sessões salvas.",
@@ -530,8 +549,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "follow or change the shown line's goal" => "seguir ou alterar o objetivo da linha exibida",
         "◎ goal active" => "◎ objetivo ativo",
         "◎ goal paused" => "◎ objetivo pausado",
-        "Kept verbatim" => "Mantido literalmente",
-        "Tool effects" => "Ações das ferramentas",
         "insufficient space: {parts}" => "espaço insuficiente: {parts}",
         "system prompt" => "prompt do sistema",
         "tools" => "ferramentas",

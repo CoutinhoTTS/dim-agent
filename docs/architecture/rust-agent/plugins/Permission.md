@@ -30,7 +30,7 @@ The policy is the preset and two tool-name lists:
 ([ADR 018](../../../adr/018-permission-is-the-preset.md)): `read-only` denies writes and
 process/network/unclassified risks, `workspace-write` allows workspace writes and Session tools,
 asking for the rest, and `full-access` runs every call without asking. Tool lists refine that,
-one name at a time; they never lift a deny, a file check or process isolation.
+one name at a time; they never lift an explicit deny, a file check or process isolation.
 
 The type ignores keys it does not name. Policies written while ADR 017's `fileAccess` and
 `toolApproval` existed still load, with those keys dropped: nothing compares or migrates them, and
@@ -103,10 +103,13 @@ decided differently.
 
 [ADR 014](../../../adr/014-file-access-facts.md) fixes what a file operation is
 decided from. The `FileAccessFacts` Session part registers `fileAccessFacts`
-with `facts(session_id, fileAccess, path, mode) -> FileFacts`: `workspace` from
-`SessionConfig`, `system` from HostPlatform's platform roots, `owned` from
-`SessionFiles.owns`, and `grant` from the Session's grants. The part holds no
-state; it reads at use time and imports no SessionStore. A query failure denies.
+with `facts(session_id, fileAccess, path, mode, cancel) -> FileFacts`: `workspace` from
+`SessionConfig` and the Session's confirmed worktree roots, `system` from HostPlatform's platform roots, `owned` from `SessionFiles.owns`, and `grant` from the Session's grants.
+The facts part requires SessionConfig, SessionIdentity, SessionLifecycle, HostPlatform,
+SessionFilesHost and SessionGrantsHost. Only external directory membership is cached;
+permission decisions are read at use time.
+The facts part consumes the association port and imports no SessionStore. Ownership or grant
+query failure denies; discovery unavailability preserves approval with its reason.
 
 For a file call, Permission resolves the call's path to the same canonical target
 the tool owner admitted and calls the service with the effective file access and the
@@ -115,10 +118,10 @@ call's mode (`read` for `read`, `grep` and `glob`; `write` for `write` and
 targets, so cwd, `~`, `..` and symlinks are settled before the query; a
 `grep` or `glob` without a path targets the Session cwd. A composition without
 HostPlatform cannot expand `~` or join a relative target and keeps the fallback
-rules below. The path check runs before the tool lists and `allowedTools`, so an
+rules below. The path check runs before tool allows, so an
 allowed tool does not bypass a path fact; a resolution failure refuses the call.
 
-Effective file access is the explicit `fileAccess`, or the legacy preset's corresponding scope:
+File access follows the preset:
 `read-only` → Read only, `workspace-write` → Workspace read/write, `full-access` → Unrestricted.
 The fixed facts themselves do not depend on tool approval or sandbox state.
 
@@ -128,12 +131,27 @@ The fixed facts themselves do not depend on tool approval or sandbox state.
 | Workspace read/write | The same read facts pass; others ask | Workspace or matching write grant passes; system roots and Session-owned artifacts denied; other targets ask |
 | Unrestricted | Passes without a facts query | Passes without a facts query |
 
-Passing file scope does not answer an explicit tool Ask. Tool allows, command allows and Bypass
-cannot answer a file-scope question or lift a file denial. A read grant never permits a write.
-For policies with no file override, retain the exact legacy file behavior, including existing
-tool-list interactions; do not reinterpret old history as an explicit Read only selection.
+Tool allows and command allows cannot answer a file-scope question or lift a file denial.
+A read grant never permits a write.
 Without the facts service a read has the legacy unrestricted read-scope fallback, then the tool
 gate applies; workspace writes use the fallback below.
+
+### On-demand worktree membership
+
+[Worktree access](../../../design/worktree-access.md) extends the workspace fact with Session-local,
+Git-verified roots. FileAccessFacts owns discovery, shared in-flight probes and root identities;
+its optional process dependency `worktreeAssociations` persists a repository/root and Session subtree
+atomically before publication. Without this port it keeps the original workspace boundary.
+The service reports discovery unavailability separately from failed ownership/grant reads: the former
+keeps the existing approval path with a reason, while the latter still denies. Cancellation is not denial.
+Permission samples its dispatched policy again after file facts finish, so tightening during discovery
+applies to the waiting call. Explicit denies and already decisive facts do not trigger discovery.
+
+The Session service supplies the original workspace and confirmed roots for process preparation, recognizing the
+resolved explicit cwd first. It verifies cached directory identities and fixed subtree prefixes before
+returning roots. Closing cancels and joins probes; reload and restore start empty. Concurrent callers
+share one probe for an existing directory, while cancellation only ends that caller's wait. No negative
+candidate result or permission decision is cached. The worktree design owns Git and subtree semantics.
 
 ### Write targets without the facts
 
@@ -205,7 +223,7 @@ the reason and a Session-scoped grant action for file tools:
   existing HostPlatform dependency. The bound handler's `resolve_write`
   prepares the actual call at its external path boundary before admission; it
   reads metadata and performs no file mutation or process execution.
-- ADR 002 D4–D5: policy gains the optional language-neutral fields defined above under ADR 017;
+- ADR 002 D4–D5: the language-neutral policy is a preset and tool lists under ADR 018;
   approval request/reply formats stay unchanged. No structural configuration changes.
 - §4 rule 8: no new Timeline, Dispatcher, loader or rutis mechanism is required.
 

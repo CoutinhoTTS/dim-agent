@@ -299,10 +299,7 @@ fn settlement(error: AgentError) -> SessionsError {
 /// The launch cap (sessions service §6.1): the lower preset, the union of the
 /// disallowed tools, and only the allowed tools both sides allow
 /// unconditionally. It is never wider than either side.
-fn cap(
-    requested: &PermissionPolicy,
-    bound: &PermissionPolicy,
-) -> Result<PermissionPolicy, SessionsError> {
+fn cap(requested: &PermissionPolicy, bound: &PermissionPolicy) -> PermissionPolicy {
     fn rank(preset: PermissionPreset) -> u8 {
         match preset {
             PermissionPreset::ReadOnly => 0,
@@ -333,11 +330,11 @@ fn cap(
             allowed_tools.push(tool.clone());
         }
     }
-    Ok(PermissionPolicy {
+    PermissionPolicy {
         preset: std::cmp::min_by_key(requested.preset, bound.preset, |preset| rank(*preset)),
         allowed_tools,
         disallowed_tools,
-    })
+    }
 }
 
 impl AgentIndex {
@@ -400,7 +397,7 @@ impl AgentIndex {
                     None if request.starter.is_some() => bound.clone(),
                     None => PermissionPolicy::default(),
                 };
-                let policy = cap(&requested, &bound)?;
+                let policy = cap(&requested, &bound);
                 let mut config = super::session_config(&host.profile, &self.session_defaults);
                 config.cwd = cwd;
                 config.permission_policy = policy.clone();
@@ -643,6 +640,8 @@ impl AgentIndex {
         self.until_unloaded(async {
             let lease = self.acquire(&at.session_id).await?;
             let session = &lease.session;
+            #[cfg(feature = "testing")]
+            self.idle_admitted.notify_one();
             let idle = tokio::select! {
                 idle = session.idle(&at.branch_id) => idle,
                 _ = session.closed() => Err(AgentError::Closed(session.id().into())),

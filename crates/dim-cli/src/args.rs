@@ -141,9 +141,9 @@ Ctrl+C stops a running turn and waits for settlement; idle Ctrl+C or EOF exits.\
 Without -p, exec reads redirected stdin through EOF, including with --image.\n\
 Idle commands: /export <markdown|json> PATH, /rename TITLE|--clear, /exit.\n\
 PATH is relative to the CLI current directory; ~ is literal.\n\
-/permissions (aliases /approvals, /approval) opens separate File access, Tool\n\
-  approval (Ask/Bypass) and Process isolation controls in the terminal UI, and\n\
-  a Command rules row that lists, adds and removes the user's command rules.\n\
+/permissions (aliases /approvals, /approval) selects a permission preset in the terminal UI, with\n\
+  Read only, Workspace write and Full access choices, and\n\
+  a Command rules row. Process isolation is in Settings.\n\
 The line prompt accepts PRESET, allow|deny exact|prefix COMMAND, or remove N.\n\
 Approval accepts only y/yes; empty input denies. For a simple exec command, a/always\n\
   also saves a command rule. Noninteractive approval exits 3.\n\

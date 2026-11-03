@@ -69,6 +69,8 @@ pub fn install(builder: &mut AgentBuilder, config: WorkspaceToolsConfig) {
 }
 
 pub(crate) struct WorkspaceTools {
+    ctx: Ctx,
+    facts: Key<crate::file_access::FileAccessFacts>,
     platform: Arc<HostPlatform>,
     cwd: PathBuf,
     output_dir: PathBuf,
@@ -221,6 +223,7 @@ impl ToolDriver for WorkspaceTools {
 }
 
 struct WorkspaceToolsPlugin {
+    facts: Key<crate::file_access::FileAccessFacts>,
     host: Key<ToolHost>,
     platform: Key<HostPlatform>,
     session_config: Key<SessionConfig>,
@@ -237,6 +240,7 @@ impl WorkspaceToolsPlugin {
         coordinator: Arc<FileWriteCoordinator>,
     ) -> rutis::Result<Self> {
         Ok(Self {
+            facts: names.key()?,
             host: names.key()?,
             platform: names.key()?,
             session_config: names.key()?,
@@ -271,6 +275,8 @@ impl DynPlugin for WorkspaceToolsPlugin {
             let cwd = PathBuf::from(&config.cwd);
             let output_dir = self.config.output_root.join(&identity.session_id);
             let tools = Arc::new(WorkspaceTools {
+                ctx: ctx.clone(),
+                facts: self.facts.clone(),
                 files: FileTools::with_coordinator(
                     cwd.clone(),
                     platform.home.clone(),

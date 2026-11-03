@@ -1,6 +1,8 @@
 //! Serialized host authority for source selection and cross-Session retirement.
 //! Connection resources and disposal belong exclusively to loader instances.
-use super::config::{self, McpPluginServers, McpProjectEnablement, McpServerSettings, McpSettings};
+use super::config::{
+    self, McpPluginServers, McpProjectEnablement, McpSecrets, McpServerSettings, McpSettings,
+};
 use super::{
     McpAuth, McpConnection, McpError, McpSource, Result,
     server::{McpRuntime, McpServer, McpServerError, McpServerPlugin, McpServerState},
@@ -423,11 +425,32 @@ impl Projection {
         };
         let unreadable = enablement.is_err();
         let enablement = enablement.unwrap_or_default();
+        let secrets = if projects.is_empty() {
+            Ok(McpSecrets::default())
+        } else {
+            settings
+                .read::<McpSecrets>(SettingsScope::User, cancel)
+                .await
+                .map(|snapshot| snapshot.document)
+        };
+        let secrets_unreadable = secrets.is_err();
+        let secrets = secrets.unwrap_or_default();
         for source in [McpSource::User, McpSource::Plugins].into_iter().chain(
             projects
                 .into_iter()
                 .map(|(root, _)| McpSource::Project(root)),
         ) {
+            if secrets_unreadable && matches!(source, McpSource::Project(_)) {
+                let intent = self.sources.entry(source).or_insert_with(|| Source {
+                    revision: String::new(),
+                    configured: BTreeSet::new(),
+                    current: BTreeMap::new(),
+                    error: None,
+                    degraded: None,
+                });
+                intent.error = Some("MCP project secrets could not be read");
+                continue;
+            }
             let read = match source.scope() {
                 Some(scope) => settings
                     .read::<McpSettings>(scope, cancel)
@@ -470,7 +493,25 @@ impl Projection {
             let configured = servers.keys().cloned().collect();
             let mut current = BTreeMap::new();
             let mut error = None;
-            for (id, config) in servers {
+            let workspace = match source.scope() {
+                Some(scope @ SettingsScope::Project(_)) => config::workspace(settings, scope).ok(),
+                _ => None,
+            };
+            let project_unresolved = matches!(source, McpSource::Project(_)) && workspace.is_none();
+            if project_unresolved {
+                error = Some("MCP configuration could not be resolved");
+            }
+            for (id, mut config) in servers {
+                if project_unresolved {
+                    continue;
+                }
+                if let Some(workspace) = &workspace
+                    && let Some(secret) = secrets.get(workspace, &id)
+                    && config::merge_secret(&mut config, secret).is_err()
+                {
+                    error = Some("MCP configuration could not be resolved");
+                    continue;
+                }
                 let config = match source.scope() {
                     Some(scope) => config::effective(settings, scope, &id, config, &enablement),
                     None => Ok(config),

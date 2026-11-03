@@ -408,18 +408,24 @@ pub async fn available(client: &mut Client, session_id: &str) -> bool {
 /// What `/goal` says when this daemon installs no Goal.
 pub const NOT_AVAILABLE: &str = "Goal is not available on this daemon.";
 
-/// What `/goal` prints when its words name no form.
+/// The usage shown by bare `/goal` and invalid forms.
 pub const USAGE: &str =
     "Usage: /goal [OBJECTIVE | set OBJECTIVE | edit OBJECTIVE | pause | resume | clear]";
 
-/// What `/goal` prints for `branch`: the call it made, none for the read,
-/// and the state the branch's events give through the call.
+/// Reports the call and resulting goal state for `branch`; the read form
+/// prefixes usage before the current state.
 pub fn report(branch: &str, call: Option<Call>, goal: Option<&Goal>) -> Vec<String> {
+    let mut lines = if call.is_none() {
+        vec![USAGE.to_owned()]
+    } else {
+        Vec::new()
+    };
     let Some(goal) = goal else {
-        return vec![match call {
+        lines.push(match call {
             Some(Call::Clear) => format!("Goal cleared on {branch}."),
             _ => format!("No goal on {branch}."),
-        }];
+        });
+        return lines;
     };
     let mut first = match call {
         Some(call) => format!("Goal {} on {branch}", call.words()),
@@ -430,7 +436,7 @@ pub fn report(branch: &str, call: Option<Call>, goal: Option<&Goal>) -> Vec<Stri
     if goal.evaluator {
         first.push_str(" · evaluator judge");
     }
-    let mut lines = vec![first];
+    lines.push(first);
     for line in goal.objective.lines() {
         lines.push(format!("  {line}"));
     }
@@ -582,17 +588,6 @@ mod tests {
     }
 
     #[test]
-    fn a_set_by_an_evaluator_names_the_judge() {
-        let mut fold = Fold::default();
-        fold.apply(&input(
-            10,
-            json!([{"type":"raw","key":OBJECTIVE_KEY,"text":
-                "<dim-goal kind=\"goal\" op=\"set\" judge=\"evaluator\" branch=\"main\">\nObjective:\nShip it\n\nGoal.\n</dim-goal>"}]),
-        ));
-        assert!(fold.goal().unwrap().evaluator);
-    }
-
-    #[test]
     fn an_escaped_objective_reads_back_verbatim() {
         let mut fold = Fold::default();
         fold.apply(&input(
@@ -650,7 +645,13 @@ mod tests {
     #[test]
     fn an_evaluator_judged_goal_keeps_its_judge_through_an_edit() {
         let mut fold = Fold::default();
-        fold.apply(&evaluator_set(10));
+        // The set may arrive as the objective part alone, with no status
+        // block of its own.
+        fold.apply(&input(
+            10,
+            json!([{"type":"raw","key":OBJECTIVE_KEY,"text":
+                "<dim-goal kind=\"goal\" op=\"set\" judge=\"evaluator\" branch=\"main\">\nObjective:\nShip it\n\nGoal.\n</dim-goal>"}]),
+        ));
         assert!(fold.goal().unwrap().evaluator);
         fold.apply(&change(11, "edit", OBJECTIVE_KEY, "", false));
         assert_eq!(fold.goal().unwrap().objective, "Objective 11");

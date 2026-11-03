@@ -300,11 +300,6 @@ fn tool_batch(text: String) -> Option<Vec<ToolCall>> {
 /// The Session's command rules as the test sets them.
 #[derive(Default)]
 struct TestRules(Mutex<Vec<CommandRule>>);
-impl TestRules {
-    fn set(&self, rules: Vec<CommandRule>) {
-        *self.0.lock().unwrap() = rules;
-    }
-}
 impl ReadCommandRules for TestRules {
     fn rules(&self, _: CancellationToken) -> HostFuture<'_, Vec<CommandRule>> {
         let rules = self.0.lock().unwrap().clone();
@@ -476,8 +471,6 @@ struct Env {
     sources: Arc<Sources>,
     model: Arc<Model>,
     dir: PathBuf,
-    /// The Session's command rules as the test sets them.
-    rules: Arc<TestRules>,
     /// The `HooksSession` instance the test can unload, when the harness
     /// mounts it through an owner (`Env::with_mounted_hooks`).
     hooks: Arc<Mutex<Vec<FiberView>>>,
@@ -652,7 +645,6 @@ impl Env {
             sources,
             model,
             dir,
-            rules,
             hooks,
             branch_hooks,
             mounted: vec!["read".into(), "exec".into()],
@@ -3253,78 +3245,6 @@ async fn a_pre_tool_use_ask_asks_the_user_like_any_other_ask() {
         "Tool execution denied by user"
     );
     assert!(!ran.exists(), "a denied call ran");
-    env.close().await;
-}
-
-/// Appendix D 3: a command-rule deny is not overridden, and no hook runs for
-/// it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_command_rule_deny_runs_no_pre_tool_use_hook() {
-    let env = Env::new().await;
-    let ran = env.path("rule-hook-ran");
-    env.sources.set(document(serde_json::json!({
-        "PreToolUse": [command(serde_json::json!({
-            "type": "command",
-            "command": format!(
-                "printf ran > {}; printf '{{\"hookSpecificOutput\":{{\"permissionDecision\":\"allow\"}}}}'",
-                ran.display(),
-            ),
-        }))],
-    })));
-    env.rules.set(vec![CommandRule {
-        command: "rm -rf".into(),
-        matching: CommandMatch::Exact,
-        decision: CommandRuleDecision::Deny,
-    }]);
-    let session = env.session_with(PermissionPreset::WorkspaceWrite).await;
-    turn(&session, "tool:exec {\"command\":\"rm -rf\"}").await;
-    assert_eq!(
-        result_text(&last_result(&session).await),
-        "Command denied by command rule `rm -rf` (exact)"
-    );
-    assert!(!ran.exists(), "a hook ran for a denied call");
-    env.close().await;
-}
-
-/// Appendix D 3: Approval's recheck after an answer runs no hook; the marker
-/// counts the hook's runs.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_recheck_after_an_answer_runs_no_pre_tool_use_hook() {
-    let env = Env::new().await;
-    let runs = env.path("recheck-runs");
-    env.sources.set(document(serde_json::json!({
-        "PreToolUse": [command(serde_json::json!({
-            "type": "command",
-            "command": format!(
-                "printf x >> {}; \
-                 printf '{{\"hookSpecificOutput\":{{\"permissionDecision\":\"ask\",\
-                 \"permissionDecisionReason\":\"the guard is unsure\"}}}}'",
-                runs.display(),
-            ),
-        }))],
-    })));
-    let session = env.session_with(PermissionPreset::WorkspaceWrite).await;
-    session
-        .submit(
-            "tool:exec {\"command\":\"true\"}".into(),
-            InputMode::Queue,
-            "main",
-        )
-        .await
-        .unwrap();
-    let approval_id = wait_event(&session, |kind| match kind {
-        EventKind::ApprovalRequest(data) => Some(data.approval_id.clone()),
-        _ => None,
-    })
-    .await;
-    answer(&session, &approval_id, ApprovalDecision::Allow).await;
-    session.idle("main").await.unwrap();
-    assert_eq!(last_result(&session).await.is_error, None);
-    assert_eq!(
-        std::fs::read_to_string(&runs).unwrap(),
-        "x",
-        "the recheck ran the hook again"
-    );
     env.close().await;
 }
 

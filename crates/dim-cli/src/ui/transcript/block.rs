@@ -46,12 +46,10 @@ pub enum Block {
     /// The calls of one model request.
     ToolGroup(ToolGroup),
     /// A context compaction: running, then its outcome; a completed one's
-    /// summary, digest and kept inputs sit behind the disclosure.
+    /// summary sits behind the disclosure.
     Compaction {
         state: CompactionState,
         text: String,
-        digest: Option<String>,
-        kept: Option<String>,
         insufficient: Vec<CompactionPartSize>,
         expanded: bool,
     },
@@ -116,8 +114,6 @@ pub fn project_row(rows: &[Arc<ViewRow>], index: usize, detail: Detail) -> Block
             Some(compaction) => Block::Compaction {
                 state: compaction.state,
                 text: compaction.text.clone(),
-                digest: compaction.digest.clone(),
-                kept: compaction.kept.clone(),
                 insufficient: compaction.insufficient.clone(),
                 expanded: detail == Detail::Expanded,
             },
@@ -328,6 +324,97 @@ mod tests {
     }
 
     #[test]
+    fn summaries_show_each_call_in_order_without_bodies_or_wrapping() {
+        let mut failed = call(
+            "execute",
+            json!({"command": format!("CARGO_TARGET_DIR=/tmp/check cargo clippy {}", "--locked ".repeat(25))}),
+            Some("compiler output must stay hidden"),
+        );
+        failed.result_is_error = true;
+        failed.exit_code = Some(101);
+        let mut edit = call("edit", json!({"path": "src/main.rs"}), Some("ok"));
+        edit.diff =
+            Some("@@ -1,1 +1,2 @@\n-secret old body\n+secret new body\n+another line".into());
+        let mut waiting = call("wait", json!({"taskId": "task-42"}), None);
+        waiting.pending = true;
+        let rows = [
+            failed,
+            call(
+                "read",
+                json!({"path": "docs/中文/👩‍💻/README.md"}),
+                Some("private file body"),
+            ),
+            call(
+                "grep",
+                json!({"path": "crates/", "pattern": "BranchLifecycle"}),
+                Some("  private match body"),
+            ),
+            edit,
+            call(
+                "exec",
+                json!({"command": "\npython3 - <<'PY'\nprint('script body')\nPY"}),
+                Some("script output"),
+            ),
+            call(
+                "bash",
+                json!({"command": "cargo check"}),
+                Some("build output"),
+            ),
+            call(
+                "mcp__docs__search",
+                json!({"query": "timeline ownership"}),
+                Some("web result body"),
+            ),
+            waiting,
+        ];
+        let lines = drawn(&rows, Detail::Summary, 200);
+        assert_eq!(lines.len(), rows.len() + 1);
+        assert!(lines[0].contains("1 failed"), "{lines:?}");
+        assert!(
+            lines[1].starts_with("  ✗ Execute · CARGO_TARGET_DIR=/tmp/check cargo clippy"),
+            "{lines:?}"
+        );
+        assert_eq!(lines[2], "  ✓ Read · docs/中文/👩‍💻/README.md");
+        assert_eq!(lines[3], "  ✓ Grep · crates/ \"BranchLifecycle\"");
+        assert_eq!(lines[4], "  ✓ Edited src/main.rs (+2 -1)");
+        assert_eq!(lines[5], "  ✓ Exec · python3 - <<'PY' …");
+        assert_eq!(lines[6], "  ✓ Bash · cargo check");
+        assert_eq!(lines[7], "  ✓ Mcp__docs__search · timeline ownership");
+        assert!(lines[8].ends_with("Wait · task-42"), "{lines:?}");
+        let text = lines.join("\n");
+        for hidden in [
+            "compiler output",
+            "private file body",
+            "private match body",
+            "secret old body",
+            "secret new body",
+            "script body",
+            "script output",
+            "build output",
+            "web result body",
+        ] {
+            assert!(!text.contains(hidden), "{hidden}: {text}");
+        }
+        for width in 12..100 {
+            let narrow = drawn(&rows, Detail::Summary, width);
+            assert_eq!(narrow.len(), rows.len() + 1);
+            assert!(narrow[0].ends_with(" ▾"), "{width}: {narrow:?}");
+            assert!(
+                narrow
+                    .iter()
+                    .all(|line| crate::ui::text::display_width(line) <= width),
+                "{width}: {narrow:?}"
+            );
+        }
+        assert_eq!(drawn(&rows, Detail::Collapsed, 100).len(), 1);
+        assert!(
+            drawn(&rows, Detail::Expanded, 100)
+                .join("\n")
+                .contains("print('script body')")
+        );
+    }
+
+    #[test]
     fn tool_output_cannot_emit_terminal_commands_or_links() {
         let attack = "visible\x1b]52;c;clipboard-payload\x07\x1b]8;;file:///tmp/unsafe-link\x07label\x1b]8;;\x07\x1b[2J";
         let name = "exec";
@@ -532,36 +619,78 @@ mod tests {
         assert!(expanded.contains("cargo test"), "{expanded}");
     }
 
-    /// A completed compaction's detail draws its summary, then the digest
-    /// under its own label, then the kept input, in the replacement's order;
-    /// collapsed, all three stay behind the disclosure.
     #[test]
-    fn a_completed_compaction_draws_its_summary_digest_and_kept_input_in_order() {
-        let mut completed = row(RowKind::Compaction, "");
-        completed.compaction = Some(CompactionView {
-            state: CompactionState::Completed,
-            text: "The cache lock moved into a RwLock.".into(),
-            digest: Some("<dim-digest>\nwrote src/cache.rs".into()),
-            kept: Some("Try the RwLock before touching the parser.".into()),
-            insufficient: Vec::new(),
-        });
-        let rows = shared(&[completed]);
-        assert_eq!(
-            compaction_rows(&rows, Detail::Expanded),
-            [
-                "✓ Context compacted ▾",
-                "▎ The cache lock moved into a RwLock.",
-                "▎ Tool effects",
-                "▎ <dim-digest>",
-                "▎ wrote src/cache.rs",
-                "▎ Kept verbatim",
-                "▎ Try the RwLock before touching the parser.",
-            ]
-        );
-        assert_eq!(
-            compaction_rows(&rows, Detail::Collapsed),
-            ["✓ Context compacted ▸"]
-        );
+    fn a_completed_compaction_draws_only_its_summary_body() {
+        let dim_agent_types::MessageContent::Text(production) =
+            dim_agent_capabilities::history::summary_message("The cache lock moved into a RwLock.")
+                .content
+        else {
+            panic!("summary_message must produce text");
+        };
+        for text in [
+            production.as_str(),
+            "The cache lock moved into a RwLock.",
+            "<dim-summary>\nThe cache lock moved into a RwLock.\n</dim-summary>",
+            "<dim-summary>\nThe cache lock moved into a RwLock.",
+            "<dim-summary>\nThe cache lock moved into a RwLock.\n</dim-summary>\n<dim-digest>\nwrote src/cache.rs\n</dim-digest>",
+        ] {
+            let mut completed = row(RowKind::Compaction, "");
+            completed.compaction = Some(CompactionView {
+                state: CompactionState::Completed,
+                text: text.into(),
+                insufficient: Vec::new(),
+            });
+            let rows = shared(&[completed]);
+            assert_eq!(
+                compaction_rows(&rows, Detail::Expanded),
+                [
+                    "✓ Context compacted ▾",
+                    "▎ The cache lock moved into a RwLock.",
+                ]
+            );
+            for detail in [Detail::Collapsed, Detail::Summary] {
+                assert_eq!(compaction_rows(&rows, detail), ["✓ Context compacted ▸"]);
+            }
+        }
+        for text in [
+            "Keep <dim-summary> literal.",
+            "End of recorded background. The live conversation governs.",
+            "Background from earlier parts of this session, recorded by a summarizer.",
+        ] {
+            for (content, expected) in [
+                (
+                    dim_agent_types::MessageContent::Text(text.into()),
+                    text.to_owned(),
+                ),
+                (
+                    dim_agent_types::MessageContent::Text(format!(
+                        "<dim-summary>\n{text}\n</dim-summary>"
+                    )),
+                    text.to_owned(),
+                ),
+                (
+                    dim_agent_capabilities::history::summary_message(text).content,
+                    text.replace('<', "&lt;").replace('>', "&gt;"),
+                ),
+            ] {
+                let dim_agent_types::MessageContent::Text(content) = content else {
+                    panic!("summary_message must produce text");
+                };
+                let mut completed = row(RowKind::Compaction, "");
+                completed.compaction = Some(CompactionView {
+                    state: CompactionState::Completed,
+                    text: content,
+                    insufficient: Vec::new(),
+                });
+                let rendered = compaction_rows(&shared(&[completed]), Detail::Expanded);
+                let body = rendered[1..]
+                    .iter()
+                    .map(|line| line.trim_start_matches("▎ "))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                assert_eq!(body, expected);
+            }
+        }
     }
 
     /// The rows a compaction row draws at `detail`, without escape sequences.

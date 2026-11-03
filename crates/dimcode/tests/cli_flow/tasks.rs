@@ -348,6 +348,8 @@ fn event(wire: &mut Wire, branch: &str, event: Value) {
 fn tui_task_history_resume_windows_complete_main_pages_and_preserves_the_draft() {
     for resume_on_launch in [true, false] {
         let home = Home::new();
+        let workspace = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+        let workspace = workspace.to_string_lossy().into_owned();
         let (ready, readiness) = std::sync::mpsc::channel();
         let (proceed, control) = std::sync::mpsc::channel();
         let daemon = home.daemon(move |wire| {
@@ -364,7 +366,7 @@ fn tui_task_history_resume_windows_complete_main_pages_and_preserves_the_draft()
             }
             if !resume_on_launch {
                 let summaries = wire.read("session.summaries");
-                wire.reply(&summaries, json!([{"sessionId":"paged","cwd":"/workspace",
+                wire.reply(&summaries, json!([{"sessionId":"paged","cwd":workspace,
                     "preview":"Paged history","model":{"providerId":"test","modelId":"restored-model"},"updatedAt":1}]));
             }
             if !resume_on_launch {
@@ -556,6 +558,8 @@ fn tui_task_inventory_restores_branch_pages_and_retries_only_on_reopen() {
 #[test]
 fn tui_task_inventory_discards_old_pages_and_queued_retries_after_resuming_the_same_session() {
     let home = Home::new();
+    let workspace = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+    let workspace = workspace.to_string_lossy().into_owned();
     let (ready, readiness) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
@@ -585,9 +589,9 @@ fn tui_task_inventory_discards_old_pages_and_queued_retries_after_resuming_the_s
         wire.quiet(Duration::from_millis(150));
         ready.send(()).unwrap();
         let summaries = json!([
-            {"sessionId":"other","cwd":"/workspace","preview":"Other workspace",
+            {"sessionId":"other","cwd":workspace.clone(),"preview":"Other workspace",
                 "model":{"providerId":"test","modelId":"model"},"updatedAt":1},
-            {"sessionId":"session","cwd":"/workspace","preview":"Back to original",
+            {"sessionId":"session","cwd":workspace,"preview":"Back to original",
                 "model":{"providerId":"test","modelId":"model"},"updatedAt":2},
         ]);
         let picker = wire.read("session.summaries");
@@ -654,6 +658,7 @@ fn tui_task_inventory_discards_old_pages_and_queued_retries_after_resuming_the_s
     terminal.write(b"/tasks\r");
     terminal.until("Loading branch history");
     terminal.write(b"\x1b[27u/new\r");
+    terminal.until("─ new session ─");
     readiness.recv_timeout(Duration::from_secs(10)).unwrap();
     terminal.write(b"/resume\r");
     terminal.until("Back to original");
@@ -926,7 +931,7 @@ fn tui_task_stop_all_keeps_admitted_targets_after_a_session_switch() {
     terminal.write(b"\x18");
     readiness.recv_timeout(Duration::from_secs(10)).unwrap();
     terminal.write(b"\x1b[27u/new\r");
-    terminal.until("new session");
+    terminal.until("─ new session ─");
     proceed.send(()).unwrap();
     terminal.until("attempted 2, errors 0, unavailable 0");
     terminal.signal(libc::SIGKILL);
@@ -1846,6 +1851,11 @@ fn tui_member_cards_attach_only_unfinished_members_and_keep_a_failed_read_unavai
 #[test]
 fn tui_member_cards_read_agent_names_once_for_ids_the_list_does_not_return() {
     let home = Home::new();
+    fs::write(
+        home.0.join("config.json"),
+        json!({"locale":"en","tuiToolDetailsExpanded":true}).to_string(),
+    )
+    .unwrap();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
         wire.created();
@@ -2014,6 +2024,11 @@ fn tui_member_cards_keep_the_id_when_the_shared_agent_list_read_fails() {
 #[test]
 fn tui_rejected_delegations_are_not_agents_the_leader_worked_with() {
     let home = Home::new();
+    fs::write(
+        home.0.join("config.json"),
+        json!({"locale":"en","tuiToolDetailsExpanded":true}).to_string(),
+    )
+    .unwrap();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
         wire.created();
@@ -2196,7 +2211,7 @@ fn tui_new_creates_the_session_on_the_first_message() {
     terminal.until("test / model");
     readiness.recv_timeout(PATIENCE).unwrap();
     terminal.write(b"/new\r");
-    terminal.until("new session");
+    terminal.until("─ new session ─");
     readiness.recv_timeout(PATIENCE).unwrap();
     terminal.write(b"first words\r");
     daemon.join().unwrap();

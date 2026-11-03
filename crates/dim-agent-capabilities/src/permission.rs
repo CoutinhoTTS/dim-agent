@@ -254,7 +254,8 @@ impl Permission {
             },
             None => None,
         };
-        let policy = self.state.get().policy;
+        let dispatched = self.state.get();
+        let policy = dispatched.policy;
         let access = policy.preset.file_access();
         let name = &call.name;
         if policy.disallowed_tools.contains(name) {
@@ -274,7 +275,7 @@ impl Permission {
             let facts = self.ctx.get_at(&self.facts);
             if let (Some(Ok((_, target))), Some(facts)) = (&target, facts) {
                 let facts = tokio::select! {
-                    result = facts.0.facts(&self.session_id, access, target, GrantMode::Write) => result,
+                    result = facts.0.facts(&self.session_id, access, target, GrantMode::Write, cancel.clone()) => result,
                     _ = cancel.cancelled() => return Err(HostError::Cancelled(CANCELLED.into())),
                 };
                 let facts = match facts {
@@ -288,6 +289,9 @@ impl Permission {
                         });
                     }
                 };
+                if self.state.get().version != dispatched.version {
+                    return Box::pin(self.decide(call, risk, cancel)).await;
+                }
                 let scope = match access {
                     FileAccess::ReadOnly => "the read-only preset",
                     FileAccess::WorkspaceReadWrite => "the workspace-write preset",
@@ -311,8 +315,13 @@ impl Permission {
                     }
                     return Ok(Decision::Ask {
                         reason: format!(
-                            "Writing outside the session workspace requires approval: {}",
-                            target.display()
+                            "Writing outside the session workspace requires approval: {}{}",
+                            target.display(),
+                            facts
+                                .discovery_error
+                                .as_ref()
+                                .map(|error| format!(" (worktree discovery: {error})"))
+                                .unwrap_or_default()
                         ),
                     });
                 }
@@ -355,7 +364,7 @@ impl Permission {
                 }
             };
             let facts = tokio::select! {
-                result = facts.0.facts(&self.session_id, access, target, GrantMode::Read) => result,
+                result = facts.0.facts(&self.session_id, access, target, GrantMode::Read, cancel.clone()) => result,
                 _ = cancel.cancelled() => return Err(HostError::Cancelled(CANCELLED.into())),
             };
             let facts = match facts {
@@ -369,11 +378,19 @@ impl Permission {
                     });
                 }
             };
+            if self.state.get().version != dispatched.version {
+                return Box::pin(self.decide(call, risk, cancel)).await;
+            }
             if !(facts.workspace || facts.system || facts.owned || facts.grant) {
                 return Ok(Decision::Ask {
                     reason: format!(
-                        "Reading outside the session workspace requires approval: {}",
-                        target.display()
+                        "Reading outside the session workspace requires approval: {}{}",
+                        target.display(),
+                        facts
+                            .discovery_error
+                            .as_ref()
+                            .map(|error| format!(" (worktree discovery: {error})"))
+                            .unwrap_or_default()
                     ),
                 });
             }

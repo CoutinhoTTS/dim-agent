@@ -1,6 +1,4 @@
-//! `/permissions` at the line-mode prompt: independent file and tool controls,
-//! legacy preset compatibility, and command rules,
-//! through the operations in [`crate::permission`].
+//! `/permissions` at the line-mode prompt: permission presets and command rules.
 use crate::{
     Result,
     client::Client,
@@ -11,7 +9,7 @@ use crate::{
 };
 use dim_agent_types::PermissionPreset;
 
-const USAGE: &str = "Usage: /permissions [file-access read-only|workspace-read-write|unrestricted | tool-approval ask|bypass | PRESET | allow|deny exact|prefix COMMAND | remove N]";
+const USAGE: &str = "Usage: /permissions [PRESET | allow|deny exact|prefix COMMAND | remove N]";
 
 /// What the prompt says when Ctrl+C arrives while a form is in flight.
 const NOTICE: &str = "Waiting for the permission result before accepting more input.";
@@ -19,10 +17,6 @@ const NOTICE: &str = "Waiting for the permission result before accepting more in
 fn print_state(display: &mut Display, state: &State) -> Result<()> {
     display.record(&format!(
         "permission: {}",
-        permission::name(state.policy.preset)
-    ))?;
-    display.record(&format!(
-        "Legacy preset seed (main branch): {}",
         permission::name(state.policy.preset)
     ))?;
     for (label, tools) in [
@@ -177,7 +171,7 @@ async fn switch(
         return print_state(display, &seen);
     }
     if preset == PermissionPreset::FullAccess {
-        display.record("The legacy full-access seed allows files and bypasses tool questions only where independent settings are omitted.")?;
+        display.record("Full access removes path limits and skips tool questions. Explicit denies and process isolation still apply.")?;
         input.prompt("Switch the main branch to full-access? [y/N] ")?;
         let line = tokio::select! {
             biased;
