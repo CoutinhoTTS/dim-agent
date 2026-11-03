@@ -77,7 +77,7 @@ Rules: [design rules](../architecture/rust-agent/principles.md)、[ADR 002](../a
 
 ## 6. 迁移与兼容
 
-- 只加两列和三个部分索引：`WHERE context_render = 1`、`WHERE context_state = 1`，以及策略定位用的 `timeline_events_positions`（`WHERE kind IN ('turn/start', 'context/compaction-start', 'context/compaction')`）。事件正文不变，冻结 fixture 不变。
+- 只加两列和三个部分索引：`WHERE context_render = 1`、`WHERE context_state = 1`，以及策略定位用的 `timeline_events_positions`（`WHERE kind IN ('turn/start', 'context/compaction-start', 'context/compaction')`）。事件正文不变，冻结 fixture 不变。v32（[#605](https://github.com/arcships/dim/issues/605)）把两个键相同的读取索引合并为一个 `WHERE context_render = 1 OR context_state = 1`；读取条件不变，写入不再为同一行维护两个索引。
 - **填充**：核心事件的两列是其 key 的纯函数（`context_flags`）；扩展事件的两列取事件自己的值，
   已有的扩展事件没有这两个字段，回填为 0。升级在同一事务里加列并按 key 集合回填；事务提交前库不可用，提交后整体生效，不存在部分迁移的状态。不复制正文，不按会话暂存。
 - **等价性**：开关集合就是渲染/折叠实际消费的集合，由差分测试证明——同一前缀上，过滤读取的 entries 与状态必须与不过滤的结果逐条一致。
@@ -106,7 +106,7 @@ Rules: [design rules](../architecture/rust-agent/principles.md)、[ADR 002](../a
 - **Storage（原生存储）**
   - 被挡住的规则：读取要能跳过无关行，且迁移不能留下新旧并存的库。
   - 考虑过的机制：只改事件正文（要解析正文才能筛）、逐会话提交（失败会留下半迁移库）。
-  - 通用能力：两列与三个部分索引（含 `timeline_events_positions`）。
+  - 通用能力：两列与两个部分索引（含 `timeline_events_positions`；v31 的三个中两个读取索引在 v32 合并）。
   - owner 与 issue：存储文档与实现。
 
 ## 9. 验收
@@ -123,6 +123,6 @@ Rules: [design rules](../architecture/rust-agent/principles.md)、[ADR 002](../a
 
 ## 10. 删减检查
 
-- 只加两列三个索引；不新增事件、字段、缓存或配置。
+- 只加两列两个索引；不新增事件、字段、缓存或配置。
 - 不复制正文，不引入第二份状态；开关只是索引。
 - 不描述渲染、checkpoint、压缩的内部逻辑；它们留在各自实现。
