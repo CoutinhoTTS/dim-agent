@@ -184,6 +184,8 @@ session.notice {sessionId, source: "PromptSuggestion", kind: "cleared", data: {t
 
 上下文门在任何构建之前，按 `session.context.usage` 的同一读法，通过 `ContextPreparation` 读取 `main` 的用量；指令的 token 按每 token 四字符估算，因为部件没有模型计数器。建议从不运行准备、因而从不压缩：在真实请求会先压缩的头上，建议不发送，因为它将建立在那个请求即将替换的前缀上。用量读不到时（没有装载压缩、尚无配置），不会有即将发生的压缩，请求照常进行。
 
+保持开关开启的提交写入不取消任何东西：正在显示的提示和在途请求在开始时就已有效，下一次请求读取新的 `maxChars`。
+
 取消始终让 Session 唯一的在途槽保持一致；当提示正在显示或请求已被接受时，每种取消都会发 `cleared` 并带原因：
 
 | 触发 | 清除原因 |
@@ -332,7 +334,7 @@ metadata：turnId 与 extensions.requestId 加 "/suggestion"
 5. 校验：多行回复、以 `/` 开头、`<none>`、拒绝语与重复上一条用户消息，各自以 `invalid` 清除。
 6. 未采用计数：连续 20 次未采用后 `throttled`；一次采用后重置。
 7. 上下文门：模型的用量让 `main` 的头超过阈值时，`request` 答复 `compaction_due` 且不发出任何模型请求。
-8. 设置：默认关闭、`maxChars` 有范围校验、项目作用域被拒绝、修改无需重载即生效。
+8. 设置：默认关闭、`maxChars` 有范围校验、项目作用域被拒绝、修改无需重载即生效；`maxChars` 的修改保留正在显示的提示，关闭开关则以 `disabled` 清除。
 
 CLI 流程（`crates/dimcode/tests/cli_flow/prompt_suggestion.rs`）用脚本化 daemon：只在完成的轮次之后、输入框为空时才发送请求；提示在两种布局中绘制，窄终端截断；`Right` 只插入不发送；`Tab` 在滚动视图接受、在全屏聚焦卡片；空输入框上的 `Enter` 不发送；`Esc` 与编辑会隐藏并发送 `respond dismiss`；`/settings` 可切换开关。
 

@@ -931,6 +931,46 @@ async fn twenty_unused_offers_stop_offering_until_an_accept() {
     fixture.end().await;
 }
 
+/// A `maxChars` rewrite leaves a shown offer alone, because it was valid when
+/// the request was accepted; turning the switch off withdraws it with
+/// `disabled`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_max_chars_change_keeps_the_offer_and_disabling_clears_it() {
+    let fixture = serve_fixture(Reply::Text("run the tests".into())).await;
+    let (mut client, id) = create(&fixture, true).await;
+    submit(&mut client, &id, "add a test").await;
+    let turn = latest_turn(&mut client, &id).await;
+    configure(&mut client, json!({"enabled":true,"maxChars":80})).await;
+
+    assert_eq!(
+        suggest(&mut client, &id, &turn).await,
+        json!({"accepted": true})
+    );
+    let offer = suggestion_notice(&mut client, "offer").await;
+    assert_eq!(offer["params"]["data"]["text"], "run the tests");
+
+    configure(&mut client, json!({"enabled":true,"maxChars":120})).await;
+    // The change listener reads the document in its own task: once it has
+    // run, a withdrawal would have happened.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    respond(&mut client, &id, &turn, "accept").await;
+    let cleared = suggestion_notice(&mut client, "cleared").await;
+    assert_eq!(
+        cleared["params"]["data"]["reason"], "accepted",
+        "the offer survived a maxChars change"
+    );
+
+    assert_eq!(
+        suggest(&mut client, &id, &turn).await,
+        json!({"accepted": true})
+    );
+    suggestion_notice(&mut client, "offer").await;
+    configure(&mut client, json!({"enabled":false,"maxChars":120})).await;
+    let cleared = suggestion_notice(&mut client, "cleared").await;
+    assert_eq!(cleared["params"]["data"]["reason"], "disabled");
+    fixture.end().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_settings_source_is_user_only_and_range_checked() {
     let fixture = serve_fixture(Reply::Text("run the tests".into())).await;

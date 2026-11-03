@@ -184,6 +184,8 @@ The unused counter: an offer shown and then cleared without an accept counts onc
 
 The context gate reads `main`'s usage through `ContextPreparation` exactly as `session.context.usage` reads it, before anything is built; the instruction's tokens are counted at four characters per token, since the part has no model counter. The suggestion never runs preparation and so never compacts: at a head where a real request would compact first, the suggestion is not sent, because it would be built on the prefix that request is about to replace. When the usage cannot be read (no compaction installed, no configuration yet), no compaction is imminent and the request proceeds as it is.
 
+A committed write that leaves the switch on cancels nothing: the shown offer and the request in flight were valid when they began, and the next request reads the new `maxChars`.
+
 Cancellation always keeps the Session's one in-flight slot consistent, and each one emits `cleared` with its reason when an offer is showing or a request was accepted:
 
 | Trigger | Clearing reason |
@@ -332,7 +334,7 @@ Transport flows (`crates/dim-app-server/tests/transport_flow/prompt_suggestion.r
 5. The validator: a multi-line reply, a leading `/`, `<none>`, a refusal and a repeat of the last user message each clear with `invalid`.
 6. The unused counter: 20 unused offers then `throttled`; an accept resets it.
 7. The context gate: a model whose usage puts `main`'s head over its threshold makes `request` answer `compaction_due` and start no model request.
-8. Settings: the default is off, `maxChars` is range-checked, project scope is refused, and a change applies without a reload.
+8. Settings: the default is off, `maxChars` is range-checked, project scope is refused, and a change applies without a reload; a `maxChars` rewrite keeps a shown offer, and turning the switch off clears it with `disabled`.
 
 CLI flows (`crates/dimcode/tests/cli_flow/prompt_suggestion.rs`) over a scripted daemon: the request is sent only after a completed turn with an empty composer; the offer is drawn in both layouts and truncated on a narrow terminal; `Right` inserts without sending; `Tab` accepts in scrollback and focuses a card in fullscreen; `Enter` on an empty composer does not send; `Esc` and an edit dismiss and send `respond dismiss`; `/settings` toggles the switch.
 

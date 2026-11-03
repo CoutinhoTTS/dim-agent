@@ -338,6 +338,9 @@ struct State {
     offer: Option<Offer>,
     in_flight: Option<InFlight>,
     unused: u32,
+    /// The switch as the part last read it: a change listener compares the
+    /// document it reads against this to tell a turn-off from a rewrite.
+    enabled: Option<bool>,
 }
 
 impl State {
@@ -480,8 +483,11 @@ impl DynPlugin for PromptSuggestionPlugin {
                 ctx.listen::<SettingsChanged>()
                     .name(settings_changes(SOURCE))
                     .on(move |_, _| {
-                        part.settings_changed();
-                        async { Ok(None) }
+                        let part = part.clone();
+                        async move {
+                            part.settings_changed().await;
+                            Ok(None)
+                        }
                     })?
             };
             ctx.effect(move || async move {
@@ -574,15 +580,43 @@ impl Part {
         }
     }
 
-    fn settings_changed(&self) {
+    /// A committed write on the source: read the new document, and clear the
+    /// shown offer and the request in flight only when the switch turned off.
+    /// A `maxChars` change alone leaves them alone, because they were valid
+    /// when they began; the next request reads the new value.
+    async fn settings_changed(self: Arc<Self>) {
+        let Ok(settings) = self.read_settings(CancellationToken::new()).await else {
+            return;
+        };
         let clear = {
             let mut state = self.state.lock().unwrap();
-            let cleared = state.take_offer().map(|turn_id| (turn_id, "disabled"));
-            let flight = state.cancel_in_flight();
-            cleared.or(flight.map(|turn_id| (turn_id, "disabled")))
+            let before = state.enabled.replace(settings.enabled);
+            if settings.enabled || before == Some(false) {
+                None
+            } else {
+                let cleared = state.take_offer().map(|turn_id| (turn_id, "disabled"));
+                let flight = state.cancel_in_flight();
+                cleared.or(flight.map(|turn_id| (turn_id, "disabled")))
+            }
         };
         if let Some((turn_id, reason)) = clear {
             self.notice("cleared", json!({"turnId": turn_id, "reason": reason}));
+        }
+    }
+
+    /// The `prompt-suggestion` document as the source holds it now; the
+    /// default document when the assembly binds no source.
+    async fn read_settings(
+        &self,
+        cancel: CancellationToken,
+    ) -> Result<PromptSuggestionSettings, RpcError> {
+        match &self.hosts.settings {
+            Some(host) => host
+                .0
+                .read(cancel)
+                .await
+                .map_err(|error| RpcError::service("failed", error.to_string())),
+            None => Ok(PromptSuggestionSettings::default()),
         }
     }
 
@@ -676,17 +710,11 @@ impl Part {
         cancel: CancellationToken,
     ) -> Result<Value, RpcError> {
         let params: RequestParams = params(value)?;
-        let settings = match &self.hosts.settings {
-            Some(host) => host
-                .0
-                .read(cancel.clone())
-                .await
-                .map_err(|error| RpcError::service("failed", error.to_string()))?,
-            None => PromptSuggestionSettings::default(),
-        };
+        let settings = self.read_settings(cancel.clone()).await?;
         let max_chars = settings.max_chars.clamp(10, 200);
         let first = {
-            let state = self.state.lock().unwrap();
+            let mut state = self.state.lock().unwrap();
+            state.enabled = Some(settings.enabled);
             self.decision(&state, &params.turn_id, &settings)
         };
         let (call, content) = match first {
