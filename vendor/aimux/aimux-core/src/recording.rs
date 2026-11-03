@@ -1752,10 +1752,12 @@ fn write_ready_all(
 
 fn write_line(w: &mut impl Write, rec: Recording, write_error: &Mutex<Option<String>>) {
     match serde_json::to_string(&rec) {
-        Ok(line) => {
+        Ok(mut line) => {
             // 每行落盘,保证崩溃前已写行可见;失败记入粘性错误槽,
-            // 由 try_flush 显式暴露。
-            if let Err(e) = writeln!(w, "{line}").and_then(|()| w.flush()) {
+            // 由 try_flush 显式暴露。换行与记录同一次写出:大记录会先填满
+            // 缓冲,若换行另写,重叠的 recorder 会插在两者之间。
+            line.push('\n');
+            if let Err(e) = w.write_all(line.as_bytes()).and_then(|()| w.flush()) {
                 note_write_error(write_error, &e);
             }
         }
