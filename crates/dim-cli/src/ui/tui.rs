@@ -977,8 +977,6 @@ struct App {
     /// A line about to open on the shown line: the next submit is its
     /// opening input (timeline UI §4.2).
     line_draft: Option<LineDraft>,
-    /// A fork the user asked for, until they answer (timeline UI §4.3).
-    fork_confirm: Option<ForkAsk>,
     /// The picked message, set in the fork's composer once it is attached.
     fork_draft: Option<String>,
     /// A management area's drafts while the editor runs and until their write
@@ -1027,8 +1025,6 @@ fn management_notice(line: &str, read_error: Option<&str>) -> String {
     }
 }
 
-/// Where a line the user is drafting opens.
-/// A fork waiting for its `y`.
 struct ForkAsk {
     at: u64,
     /// What the fork's composer starts with.
@@ -1036,6 +1032,73 @@ struct ForkAsk {
     /// The picked message the fork cuts before; none for `/fork`, which
     /// cuts after the last turn.
     before: Option<String>,
+    create: bool,
+    timeline: Option<Box<TimelinePanel>>,
+}
+
+impl ForkAsk {
+    fn handle_key(&mut self, key: KeyEvent) -> Effect {
+        match key.code {
+            KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::BackTab => {
+                self.create = !self.create;
+                Effect::None
+            }
+            KeyCode::Enter if self.create => Effect::Fork,
+            KeyCode::Enter | KeyCode::Esc => Effect::Close,
+            KeyCode::Char('y' | 'Y' | '1') if key.mods == Modifiers::NONE => Effect::Fork,
+            KeyCode::Char('n' | 'N' | '2') if key.mods == Modifiers::NONE => Effect::Close,
+            _ => Effect::None,
+        }
+    }
+
+    fn render(&self, width: usize, rows: usize, p: &Palette) -> Vec<String> {
+        use crate::ui::render::panel::{bordered, choices};
+        let inner = width.saturating_sub(4).max(1);
+        let question = match &self.before {
+            Some(message) => tf(
+                "Fork the session before “{message}”?",
+                &[("message", &crate::sanitize::safe_line(message))],
+            ),
+            None => t("Fork the session after the last turn?").to_owned(),
+        };
+        let mut body = wrap_words(&question, inner);
+        let mut hints = wrap_words(t("↑↓ select · Enter confirm · Esc cancel"), inner);
+        if body.len() + 4 + hints.len() > rows {
+            hints.clear();
+        }
+        let body_rows = rows.saturating_sub(4 + hints.len());
+        if body.len() > body_rows {
+            body.truncate(body_rows);
+            if let Some(last) = body.last_mut() {
+                *last = truncate_cells(&format!("{last} …"), inner);
+            }
+        }
+        let explanation = wrap_words(
+            t("Creates a new session; the current session stays unchanged."),
+            inner,
+        );
+        if body.len() + 1 + explanation.len() <= body_rows {
+            body.push(String::new());
+            body.extend(explanation);
+        }
+        let mut content: Vec<String> = body.iter().map(|line| fg(line, &p.text)).collect();
+        for (index, label) in [t("1. Create fork"), t("2. Cancel")].iter().enumerate() {
+            content.push(choices(
+                &[truncate_cells(label, inner.saturating_sub(2))],
+                if self.create == (index == 0) { 0 } else { 1 },
+                p,
+            ));
+        }
+        content.extend(hints.into_iter().map(|line| fg(&line, &p.muted)));
+        bordered(
+            &content,
+            width,
+            None,
+            &p.border,
+            Some(t("Fork session")),
+            None,
+        )
+    }
 }
 
 struct LineDraft {
@@ -1074,6 +1137,7 @@ enum Prompt {
     Tasks(TasksPanel),
     Lines(Box<LinesPanel>),
     Timeline(Box<TimelinePanel>),
+    Fork(ForkAsk),
     Models(ModelsPanel),
     Providers(Box<ProvidersPanel>),
     Plugins(PluginsPanel),
@@ -1191,7 +1255,6 @@ impl App {
             member_target: None,
             upgrade: None,
             line_draft: None,
-            fork_confirm: None,
             fork_draft: None,
             management_edits: Vec::new(),
             management_named: None,
@@ -1449,7 +1512,8 @@ impl App {
             | Some(Prompt::Settings(_))
             | Some(Prompt::Isolation(_))
             | Some(Prompt::Lines(_))
-            | Some(Prompt::Timeline(_)) => {}
+            | Some(Prompt::Timeline(_))
+            | Some(Prompt::Fork(_)) => {}
             Some(Prompt::Tasks(_)) if approval.is_none() && question.is_none() => {}
             Some(Prompt::Upgrade(_)) if approval.is_none() && question.is_none() => {}
             Some(Prompt::Permission(p))
@@ -2216,12 +2280,6 @@ impl App {
         if ctrl && key.code == KeyCode::Char('c') {
             return self.ctrl_c();
         }
-        if let Some(ask) = self.fork_confirm.take() {
-            if matches!(key.code, KeyCode::Char('y' | 'Y')) && key.mods == Modifiers::NONE {
-                self.fork(ask.at, ask.text);
-            }
-            return Outcome::Continue;
-        }
         // A question keeps the keys, but a command entered over it keeps
         // them from `/`, Ctrl+O or Ctrl+P through its argument: only Enter,
         // Esc or a draft that stops being a command gives them back.
@@ -2251,6 +2309,7 @@ impl App {
                 Prompt::Tasks(p) => p.handle_key(key),
                 Prompt::Lines(p) => p.handle_key(key),
                 Prompt::Timeline(p) => p.handle_key(key),
+                Prompt::Fork(p) => p.handle_key(key),
                 Prompt::Models(p) => p.handle_key(key),
                 Prompt::Providers(p) => p.handle_key(key),
                 Prompt::Plugins(p) => p.handle_key(key),
@@ -2638,21 +2697,6 @@ impl App {
     }
 
     fn place_label(&self) -> String {
-        if let Some(ask) = &self.fork_confirm {
-            return match &ask.before {
-                Some(message) => tf(
-                    "Fork the session before “{message}”? (y/N)",
-                    &[(
-                        "message",
-                        &truncate_cells(
-                            &crate::sanitize::safe(message.lines().next().unwrap_or_default()),
-                            32,
-                        ),
-                    )],
-                ),
-                None => t("Fork the session after the last turn? (y/N)").to_owned(),
-            };
-        }
         if let Some(draft) = &self.line_draft {
             let lines = self.snapshot.as_ref().map_or(&[][..], |s| &s.lines[..]);
             return tf(
@@ -2729,7 +2773,22 @@ impl App {
             Some(snapshot) if snapshot.focus != "main" => {
                 self.set_notice(t("A fork copies main; b opens a line here"));
             }
-            Some(_) => self.fork_confirm = Some(ForkAsk { at, text, before }),
+            Some(_) => {
+                let timeline = match self.prompt.take() {
+                    Some(Prompt::Timeline(panel)) => Some(panel),
+                    prompt => {
+                        self.prompt = prompt;
+                        None
+                    }
+                };
+                self.open_prompt(Prompt::Fork(ForkAsk {
+                    at,
+                    text,
+                    before,
+                    create: false,
+                    timeline,
+                }));
+            }
         }
     }
 
@@ -2761,7 +2820,15 @@ impl App {
                 if matches!(self.prompt, Some(Prompt::Sessions(_))) {
                     self.host.send(Command::CloseSessions);
                 }
-                self.prompt = None;
+                self.prompt = match self.prompt.take() {
+                    Some(Prompt::Fork(ask)) => ask.timeline.map(Prompt::Timeline),
+                    _ => None,
+                };
+            }
+            Effect::Fork => {
+                if let Some(Prompt::Fork(ask)) = self.prompt.take() {
+                    self.fork(ask.at, ask.text);
+                }
             }
             Effect::Exit => return Outcome::Exit(130),
             Effect::Restart { confirmed } => {
@@ -2841,7 +2908,9 @@ impl App {
                 self.host.send(Command::FocusLine(line));
             }
             Effect::Timeline { row_id, action } => {
-                self.prompt = None;
+                if action != TimelineAction::Fork {
+                    self.prompt = None;
+                }
                 self.timeline(&row_id, action);
             }
             Effect::EndLine {
@@ -4339,7 +4408,14 @@ impl App {
         let replaced = !command_entry
             && matches!(
                 self.prompt,
-                Some(Prompt::Permission(_) | Prompt::Ask(_) | Prompt::Exit(_) | Prompt::Upgrade(_))
+                Some(
+                    Prompt::Permission(_)
+                        | Prompt::Ask(_)
+                        | Prompt::Exit(_)
+                        | Prompt::Upgrade(_)
+                        | Prompt::Fork(_)
+                        | Prompt::Timeline(_)
+                )
             );
         if !replaced {
             live.extend(composer_box);
@@ -4410,6 +4486,7 @@ impl App {
                     list(prompt.render(list_width, budget, p, &self.markdown))
                 }
                 Some(Prompt::Timeline(prompt)) => list(prompt.render(list_width, budget, p)),
+                Some(Prompt::Fork(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Models(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Providers(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Plugins(prompt)) => list(prompt.render(list_width, budget, p)),
@@ -4437,6 +4514,7 @@ impl App {
                 Some(prompt.render(outer, panel_rows, p, &self.markdown))
             }
             Some(Prompt::Timeline(prompt)) => Some(prompt.render(outer, panel_rows, p)),
+            Some(Prompt::Fork(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Models(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Providers(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Plugins(prompt)) => Some(prompt.render(outer, panel_rows, p)),
@@ -4797,7 +4875,9 @@ impl App {
         self.awaiting_window = true;
         self.pending_line = Some(line);
         self.line_draft = None;
-        self.fork_confirm = None;
+        if matches!(self.prompt, Some(Prompt::Fork(_))) {
+            self.prompt = None;
+        }
         self.card_blocks.clear();
         self.message_blocks.clear();
         if self.fullscreen {
@@ -4851,7 +4931,6 @@ impl App {
         };
         self.composer.clear();
         self.line_draft = None;
-        self.fork_confirm = None;
         if let Some(text) = self.fork_draft.take()
             && kind == SwitchKind::Forked
         {
@@ -7163,18 +7242,29 @@ mod tests {
 
         app.apply(snapshot("b-7c"));
         app.ask_fork(4, "from a line".into(), Some("try RwLock".into()));
-        assert!(app.fork_confirm.is_none(), "a fork copies main only");
+        assert!(
+            !matches!(app.prompt, Some(Prompt::Fork(_))),
+            "a fork copies main only"
+        );
         app.apply(snapshot("main"));
         app.ask_fork(4, String::new(), None);
-        assert!(app.place_label().contains("after the last turn"));
+        assert!(
+            app.frame((80, 30))
+                .live
+                .join("\n")
+                .contains("after the last turn")
+        );
         app.handle_input(key(KeyCode::Char('n')));
         app.ask_fork(4, "try RwLock".into(), Some("try RwLock".into()));
         assert!(
-            app.place_label().contains("before “try RwLock”"),
+            app.frame((80, 30))
+                .live
+                .join("\n")
+                .contains("before “try RwLock”"),
             "the question names the message"
         );
         app.handle_input(key(KeyCode::Char('n')));
-        assert!(app.fork_confirm.is_none());
+        assert!(app.prompt.is_none());
         let count = sent.borrow().len();
         app.ask_fork(4, "try RwLock".into(), Some("try RwLock".into()));
         app.handle_input(key(KeyCode::Char('y')));
@@ -8474,6 +8564,132 @@ mod tests {
     }
 
     #[test]
+    fn timeline_dialogs_keep_actions_drafts_and_history_in_both_modes() {
+        use crate::ui::render::panel::visible_width;
+
+        for locale in [i18n::Locale::En, i18n::Locale::ZhCn] {
+            i18n::set(locale);
+            for fullscreen in [false, true] {
+                for size in [(32, 12), (48, 24), (80, 24), (120, 40)] {
+                    let mut drawn = Drawn::new(size, None, true);
+                    drawn.app.fullscreen = fullscreen;
+                    resume_asks(&mut drawn, 12);
+                    drawn.app.snapshot.as_mut().unwrap().ended =
+                        Some((45, crate::model::view::TurnEnd::Completed));
+                    let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+                    drawn.app.host = Box::new(Recorder(sent.clone()));
+                    drawn.app.composer.set_draft("unfinished draft");
+                    let mut full = FullScreen::new(size, true);
+                    let mut screen = Screen::new(size, true);
+                    let mut emu =
+                        crate::ui::render::testterm::Emu::new(size.0 as usize, size.1 as usize);
+                    if fullscreen {
+                        let frame = drawn.app.frame(size);
+                        let bytes = full.render(&frame, size, &drawn.app.palette, &drawn.app);
+                        emu.feed(&bytes);
+                        full.scroll_to_top();
+                    }
+                    let mut shown = |app: &mut App| {
+                        let frame = app.frame(size);
+                        let rows = frame.overlay.as_ref().map_or(&frame.live, |o| &o.rows);
+                        assert!(rows.iter().all(|row| visible_width(row) <= size.0 as usize));
+                        if size.0 == 32 && matches!(app.prompt, Some(Prompt::Fork(_))) {
+                            let lines: Vec<_> = rows
+                                .iter()
+                                .map(|row| crate::ui::render::panel::strip_escapes(row))
+                                .collect();
+                            for line in lines
+                                .iter()
+                                .skip_while(|line| !line.trim().starts_with('╭'))
+                                .skip(1)
+                                .take_while(|line| !line.trim().starts_with('╰'))
+                            {
+                                let text = line.trim().trim_matches('│').trim();
+                                assert!(
+                                    !text.is_empty() && text != "…",
+                                    "compact fork dialog has no empty or ellipsis-only rows: {lines:?}"
+                                );
+                            }
+                        }
+                        let bytes = if fullscreen {
+                            full.render(&frame, size, &app.palette, app)
+                        } else {
+                            screen.render(&frame, size)
+                        };
+                        emu.feed(&bytes);
+                        emu.rows_text()
+                            .join("\n")
+                            .replace(['\0', '│'], "")
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    };
+                    let before = shown(&mut drawn.app);
+                    drawn.app.run_command("fork", "");
+                    let text = shown(&mut drawn.app);
+                    for label in [t("Fork session"), t("1. Create fork"), t("2. Cancel")] {
+                        assert!(
+                            text.contains(label),
+                            "{size:?} fullscreen={fullscreen}: {text}"
+                        );
+                    }
+                    drawn.key(KeyCode::Char('x'));
+                    assert!(shown(&mut drawn.app).contains(t("2. Cancel")));
+                    drawn.key(KeyCode::Enter);
+                    assert!(sent.borrow().is_empty(), "Enter defaults to cancel");
+                    let after = shown(&mut drawn.app);
+                    assert!(after.contains("unfinished draft"));
+                    if fullscreen {
+                        assert_eq!(after, before, "cancelling restores the scrolled transcript");
+                    }
+                    drawn.app.run_command("timeline", "");
+                    drawn.key(KeyCode::Home);
+                    drawn.key(KeyCode::Down);
+                    drawn.key(KeyCode::Enter);
+                    let text = shown(&mut drawn.app);
+                    assert!(text.contains(t("Timeline actions")), "{text}");
+                    assert!(text.contains(t("Jump to message")), "{text}");
+                    drawn.key(KeyCode::End);
+                    let text = shown(&mut drawn.app);
+                    assert!(text.contains(t("Fork session from here")), "{text}");
+                    assert!(text.contains("#2"), "the selected message is named: {text}");
+                    drawn.key(KeyCode::Enter);
+                    assert!(shown(&mut drawn.app).contains("ask 1"));
+                    drawn.key(KeyCode::Esc);
+                    assert!(shown(&mut drawn.app).contains(t("Fork session from here")));
+                    drawn.key(KeyCode::Esc);
+                    drawn.key(KeyCode::Enter);
+                    drawn.key(KeyCode::Char('2'));
+                    assert_eq!(drawn.app.composer.text(), "ask 1");
+                    let text = shown(&mut drawn.app);
+                    assert!(!text.contains(t("Timeline actions")), "{text}");
+                    drawn.app.run_command("timeline", "");
+                    drawn.key(KeyCode::Home);
+                    drawn.key(KeyCode::Down);
+                    drawn.key(KeyCode::Enter);
+                    drawn.key(KeyCode::Char('5'));
+                    shown(&mut drawn.app);
+                    drawn.key(KeyCode::Up);
+                    drawn.key(KeyCode::Enter);
+                    shown(&mut drawn.app);
+                    assert!(matches!(
+                        sent.borrow().as_slice(),
+                        [Command::Fork { at: 1, .. }]
+                    ));
+                    assert!(
+                        emu.scrollback
+                            .iter()
+                            .all(|row| !row.contains(t("1. Create fork"))
+                                && !row.contains(t("Timeline actions"))),
+                        "dialogs must not become terminal history"
+                    );
+                }
+            }
+        }
+        i18n::set(i18n::Locale::En);
+    }
+
+    #[test]
     fn a_timeline_jump_in_scrollback_draws_earlier_history_from_the_message() {
         let mut drawn = Drawn::new((80, 40), None, true);
         resume_asks(&mut drawn, 120);
@@ -8489,12 +8705,14 @@ mod tests {
         drawn.key(KeyCode::Down);
         drawn.key(KeyCode::Down);
         drawn.key(KeyCode::Enter);
+        drawn.key(KeyCode::Enter);
         assert!(drawn.app.prompt.is_none(), "a jump closes the panel");
         let text = drawn.transcript();
         let page = text.find("Earlier history").expect("the page is drawn");
         assert!(text[page..].contains("ask 2"), "{text}");
         assert!(!text[page..].contains("ask 1\n"), "{text}");
         drawn.app.run_command("timeline", "");
+        drawn.key(KeyCode::Enter);
         drawn.key(KeyCode::Enter);
         assert_eq!(
             drawn.app.notice.as_ref().map(|(text, _)| text.as_str()),
@@ -8550,6 +8768,7 @@ mod tests {
         drawn.app.run_command("timeline", "");
         drawn.key(KeyCode::Home);
         drawn.key(KeyCode::Down);
+        drawn.key(KeyCode::Enter);
         drawn.key(KeyCode::Enter);
         let picked = drawn
             .app

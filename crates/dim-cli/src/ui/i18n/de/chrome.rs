@@ -32,8 +32,23 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "line {id}" => "Zweig {id}",
         "jump to a message of the shown line" => "zu einer Nachricht des gezeigten Zweigs springen",
         "Timeline" => "Zeitleiste",
-        "Enter jump · e edit · q quote · b branch · f fork · Esc close" => {
-            "Enter springen · e bearbeiten · q zitieren · b Zweig · f Fork · Esc schließen"
+        "Enter actions · Esc close" => "Enter Aktionen · Esc schließen",
+        "Timeline actions" => "Zeitleistenaktionen",
+        "↑↓ select · Enter confirm · Esc back" => "↑↓ wählen · Enter bestätigen · Esc zurück",
+        "↑↓ select · Enter confirm · Esc cancel" => {
+            "↑↓ wählen · Enter bestätigen · Esc abbrechen"
+        }
+        "Jump to message" => "Zur Nachricht springen",
+        "Edit as a new draft" => "Als neuen Entwurf bearbeiten",
+        "Quote message" => "Nachricht zitieren",
+        "Create branch from here" => "Zweig ab hier erstellen",
+        "Fork session from here" => "Sitzung ab hier forken",
+        "Before this message" => "Vor dieser Nachricht",
+        "Fork session" => "Sitzung forken",
+        "1. Create fork" => "1. Fork erstellen",
+        "2. Cancel" => "2. Abbrechen",
+        "Creates a new session; the current session stays unchanged." => {
+            "Erstellt eine neue Sitzung; die aktuelle bleibt unverändert."
         }
         "No messages yet." => "Noch keine Nachrichten.",
         "Already on screen above; /tui jumps to it" => "Steht schon weiter oben; /tui springt hin",
@@ -56,10 +71,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "e edit · b branch · f fork" => "e bearbeiten · b Zweig · f Fork",
         "e edit" => "e bearbeiten",
-        "Fork the session before “{message}”? (y/N)" => "Sitzung vor „{message}“ forken? (y/N)",
-        "Fork the session after the last turn? (y/N)" => {
-            "Sitzung nach dem letzten Zug forken? (y/N)"
-        }
+        "Fork the session before “{message}”?" => "Sitzung vor „{message}“ forken?",
+        "Fork the session after the last turn?" => "Sitzung nach dem letzten Zug forken?",
         "⑂ new line from {id} · Esc cancel" => "⑂ neuer Zweig von {id} · Esc abbrechen",
         "A fork copies main; b opens a line here" => {
             "Ein Fork kopiert main; b öffnet hier einen Zweig"

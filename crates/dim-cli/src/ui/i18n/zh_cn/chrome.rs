@@ -25,8 +25,21 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "line {id}" => "线 {id}",
         "jump to a message of the shown line" => "跳到当前线的某条消息",
         "Timeline" => "时间线",
-        "Enter jump · e edit · q quote · b branch · f fork · Esc close" => {
-            "Enter 跳转 · e 编辑 · q 引用 · b 分支 · f 派生 · Esc 关闭"
+        "Enter actions · Esc close" => "Enter 操作 · Esc 关闭",
+        "Timeline actions" => "时间线操作",
+        "↑↓ select · Enter confirm · Esc back" => "↑↓ 选择 · Enter 确认 · Esc 返回",
+        "↑↓ select · Enter confirm · Esc cancel" => "↑↓ 选择 · Enter 确认 · Esc 取消",
+        "Jump to message" => "跳转到消息",
+        "Edit as a new draft" => "编辑为新草稿",
+        "Quote message" => "引用消息",
+        "Create branch from here" => "从这里创建分支",
+        "Fork session from here" => "从这里派生会话",
+        "Before this message" => "在这条消息之前",
+        "Fork session" => "派生会话",
+        "1. Create fork" => "1. 创建派生会话",
+        "2. Cancel" => "2. 取消",
+        "Creates a new session; the current session stays unchanged." => {
+            "创建新会话，当前会话保持不变。"
         }
         "No messages yet." => "还没有消息。",
         "Already on screen above; /tui jumps to it" => "已在上方；/tui 可直接跳转",
@@ -47,8 +60,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "e edit · b branch · f fork" => "e 编辑 · b 分支 · f 派生",
         "e edit" => "e 编辑",
-        "Fork the session before “{message}”? (y/N)" => "在“{message}”之前派生会话？(y/N)",
-        "Fork the session after the last turn? (y/N)" => "在最近一个回合之后派生会话？(y/N)",
+        "Fork the session before “{message}”?" => "在“{message}”之前派生会话？",
+        "Fork the session after the last turn?" => "在最近一个回合之后派生会话？",
         "⑂ new line from {id} · Esc cancel" => "⑂ 从 {id} 开新线 · Esc 取消",
         "A fork copies main; b opens a line here" => "派生只复制 main；按 b 在这里开线",
         "A line opens from text; images and files were not included" => {

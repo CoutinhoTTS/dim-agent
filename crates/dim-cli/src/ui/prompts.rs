@@ -72,6 +72,7 @@ pub enum Effect {
     None,
     /// The prompt wants to leave without answering anything.
     Close,
+    Fork,
     Exit,
     /// Leave and start the updated CLI on this session; `confirmed` once a
     /// busy session's confirmation said so.

@@ -70,7 +70,21 @@ A box too narrow for the hint shows `e edit`.
 
 ### 4.3 `f`: fork here
 
-On `main` only, from a Tab pick or `/timeline` (§4.6), which is how scrollback picks a message. The composer's border names what it forks: `Fork the session before “try RwLock for the cache”? (y/N)` for a picked message, `Fork the session after the last turn? (y/N)` for `/fork`. `y` sends `session.fork {sessionId, at}` and attaches to the fork under a `forked ID · N messages` boundary, with the picked message in its composer. A fork starts no work until the user submits (fork design §6.5).
+On `main` only, from a Tab pick or `/timeline` (§4.6), which is how scrollback picks a message. A bordered confirmation names the cut and explains that the source Session stays unchanged. Cancel is selected initially; Up/Down or Tab selects an action, Enter confirms, `1` or `y` creates the fork, and `2`, `n` or Esc cancels. Other keys do not dismiss it. The question and actions are in the body, not the composer's border:
+
+```text
+╭─ Fork session ─────────────────────────────────────────────╮
+│ Fork the session before “try RwLock for the cache”?         │
+│ Creates a new session; the current session stays unchanged.│
+│   1. Create fork                                           │
+│ › 2. Cancel                                               │
+│ ↑↓ select · Enter confirm · Esc cancel                     │
+╰───────────────────────────────────────────────────────────╯
+```
+
+For `/fork`, the question is `Fork the session after the last turn?`. Confirmation sends `session.fork {sessionId, at}` and attaches to the fork under a `forked ID · N messages` boundary, with the picked message in its composer. A fork starts no work until the user submits (fork design §6.5). Cancelling returns to the Timeline action list when opened there, otherwise to the original input. The draft and transcript position are preserved.
+
+In scrollback the dialog replaces the composer in the live interaction region, never entering committed history. In fullscreen it is an overlay. Both modes use the same choices and keyboard behavior; narrow dialogs wrap the question and retain selectable actions.
 
 ### 4.4 Markers
 
@@ -105,11 +119,12 @@ The Timeline's points are its user messages. Tab walks them one at a time from t
 │   #1  weather in Shanghai      Cloudy, 20°C, light wind …        │
 │   #2  try RwLock for the cache The lock moves into …             │
 │ › #3  adsa                                                       │
-└──── Enter jump · e edit · q quote · b branch · f fork · Esc close ┘
+└────────────────────────────────── Enter actions · Esc close ┘
 ```
 
 - The newest message is selected. Typing does not filter: the letters act on the selected message as they do on a pick (§4.1–4.3).
-- `Enter` jumps. Fullscreen picks the message, as Tab would, and the pick keys apply. Scrollback cannot move up: a message it has not drawn yet is drawn from there on as an earlier-history page; one already drawn gets a notice that `/tui` can jump to it.
+- `Enter` opens a bordered action list naming the selected message: Jump to message, Edit as a new draft, Quote message, Create branch from here, Fork session from here. The fork choice states that its cut is before the selected message. Up/Down and Enter select an action; numbers 1–5 select directly. Existing `e`, `q`, `b` and `f` shortcuts work in both lists. Esc returns to the message list with its selection and list position intact, then closes it. Fullscreen shows the lists as overlays; scrollback shows them in the live interaction region without committing them to history.
+- Jump closes the panel. Fullscreen picks the message, as Tab would, and the pick keys apply. Scrollback cannot move up: a message it has not drawn yet is drawn from there on as an earlier-history page; one already drawn gets a notice that `/tui` can jump to it.
 
 A resume draws the newest 100 messages. Fullscreen tops the transcript with a load-more row (`↑ 130 earlier messages · Enter or click to load`): a click, or Tab up to it and `Enter`, draws the previous 100 above and keeps the oldest drawn message at the top of the view. Scrollback has no such row; its earlier history comes from `/timeline` jumps. This replaces `/history`, which paged earlier messages in after the newest ones.
 
@@ -216,7 +231,7 @@ Forks are other Sessions and belong to `/resume`. Keys stay as #427 §14 defines
 ## 9. Ablation review
 
 - No new mode: points reuse the Tab pick, line markers and the load-more row reuse the card pick, the switch reuses #427's, the fork's attach reuses `/resume`'s. The one new panel, `/timeline`, lists the points the pick walks and takes the pick's keys.
-- New interaction: `b`/`f` on a pick, the composer's line draft and fork question, the path border, `/branch` and `/fork`. Each serves one rule of §2.
+- New interaction: `b`/`f` on a pick, the composer's line draft, the fork confirmation, the Timeline action list, the path border, `/branch` and `/fork`. The confirmation makes the cut and consequences visible; the action list makes the actions discoverable without reading shortcut hints. Both reuse existing prompt rendering and leave no durable history.
 - The side panel (§4.7) is the one new surface: following a line without leaving the parent needs a view of the line that the parent's Timeline cannot hold. It folds nothing new; the CLI already keeps a transcript per opened line. Its collapsed form is the existing `⑂` marker, so dismissal writes nothing.
 - Considered and dropped: a `b` key in the lines panel (needs each line's head; `/branch` on the shown line covers it), greyed hints per point (a notice on the key says the same with less state), end markers (§4.4), a one-row summary of the inherited prefix and `Esc Esc` back to the parent (§5 and the marker already lead there).
 - The pending message (§4.8) adds no list of its own: it is the same row, keyed by input id, and the queue strip is that row's earlier state. Scrollback's live tail and fullscreen's in-place redraw are the rules a streaming answer, a running tool group and a delegation card already follow, and the three states come from events the client already receives — no timer, no new event, no second transcript.

@@ -32,8 +32,23 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "line {id}" => "ligne {id}",
         "jump to a message of the shown line" => "aller à un message de la ligne affichée",
         "Timeline" => "Chronologie",
-        "Enter jump · e edit · q quote · b branch · f fork · Esc close" => {
-            "Enter aller · e modifier · q citer · b branche · f fork · Esc fermer"
+        "Enter actions · Esc close" => "Enter actions · Esc fermer",
+        "Timeline actions" => "Actions de chronologie",
+        "↑↓ select · Enter confirm · Esc back" => "↑↓ choisir · Enter confirmer · Esc retour",
+        "↑↓ select · Enter confirm · Esc cancel" => {
+            "↑↓ choisir · Enter confirmer · Esc annuler"
+        }
+        "Jump to message" => "Aller au message",
+        "Edit as a new draft" => "Modifier comme nouveau brouillon",
+        "Quote message" => "Citer le message",
+        "Create branch from here" => "Créer une branche ici",
+        "Fork session from here" => "Forker la session ici",
+        "Before this message" => "Avant ce message",
+        "Fork session" => "Forker la session",
+        "1. Create fork" => "1. Créer le fork",
+        "2. Cancel" => "2. Annuler",
+        "Creates a new session; the current session stays unchanged." => {
+            "Crée une session ; la session actuelle reste inchangée."
         }
         "No messages yet." => "Aucun message pour l'instant.",
         "Already on screen above; /tui jumps to it" => "Déjà plus haut ; /tui y va directement",
@@ -56,12 +71,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "e edit · b branch · f fork" => "e modifier · b branche · f fork",
         "e edit" => "e modifier",
-        "Fork the session before “{message}”? (y/N)" => {
-            "Forker la session avant « {message} » ? (y/N)"
-        }
-        "Fork the session after the last turn? (y/N)" => {
-            "Forker la session après le dernier tour ? (y/N)"
-        }
+        "Fork the session before “{message}”?" => "Forker la session avant « {message} » ?",
+        "Fork the session after the last turn?" => "Forker la session après le dernier tour ?",
         "⑂ new line from {id} · Esc cancel" => "⑂ nouvelle ligne depuis {id} · Échap annuler",
         "A fork copies main; b opens a line here" => "Un fork copie main ; b ouvre une ligne ici",
         "A line opens from text; images and files were not included" => {
