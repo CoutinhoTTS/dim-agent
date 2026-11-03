@@ -6,7 +6,8 @@ use crate::{
 use dim_agent_runtime::{
     AgentError, Branch, BranchLifecycle, BranchOptions, Delivery, Dispatcher, Names, Result,
     SessionIdentity, StoredBranch, StoredEvent, Timeline, TimelineContext, TimelineFactory,
-    TimelineIdentity, TimelineInfo, TimelineKey, TimelineStore, TimelineTreeControl,
+    TimelineIdentity, TimelineInfo, TimelineKey, TimelineQuery, TimelineQueryDirection,
+    TimelineQueryOrderBy, TimelineQueryScope, TimelineStore, TimelineTreeControl,
 };
 use dim_agent_types::*;
 use futures_util::{FutureExt, future::join_all};
@@ -68,6 +69,8 @@ struct Node {
     /// The built branch, before and after publication.
     context: Option<Arc<TimelineContext>>,
     ready: watch::Sender<Option<Result<Branch>>>,
+    /// The sequence of the line's latest `turn/end`, 0 before the first.
+    turn_end: watch::Sender<u64>,
     started: bool,
 }
 struct EndedLine {
@@ -194,6 +197,27 @@ impl TreeCommands {
     #[service(skip)]
     fn head(&self, id: &str) -> Option<u64> {
         self.tree.upgrade()?.head(id)
+    }
+    /// A signal that changes when line `id` ends a turn; it carries that
+    /// `turn/end`'s sequence.
+    #[service(skip)]
+    fn turn_ends(&self, id: &str) -> Option<watch::Receiver<u64>> {
+        self.tree.upgrade()?.turn_ends(id)
+    }
+    /// Whether line `id` did anything after `from` that a line it opened must
+    /// see: an operator input, or a tool call.
+    #[service(skip)]
+    async fn activity_after(
+        &self,
+        id: &str,
+        from: u64,
+        through: u64,
+    ) -> std::result::Result<bool, AgentError> {
+        self.tree
+            .upgrade()
+            .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?
+            .activity_after(id, from, through)
+            .await
     }
     /// Creates a child of `parent` cut at `at` and returns its id.
     /// `cancelled` is the caller's cancellation as an explicit argument, the
@@ -486,12 +510,14 @@ impl TimelineTree {
             ));
         }
         let (ready, receiver) = watch::channel(None);
+        let (turn_end, _) = watch::channel(0);
         state.nodes.insert(
             info.id.clone(),
             Node {
                 info,
                 context: None,
                 ready,
+                turn_end,
                 started: false,
             },
         );
@@ -671,12 +697,68 @@ impl TimelineTree {
             .map(|record| record.event)
             .collect())
     }
+    /// Whether `id` did anything after `from` up to `through` that a line it
+    /// opened must see ([timeline branches §7.1.1](../../../docs/design/timeline-branches.md#711-the-parent-block-branchparent)):
+    /// an operator input, or a tool call.
+    async fn activity_after(&self, id: &str, from: u64, through: u64) -> Result<bool> {
+        const PAGE: u64 = 8;
+        if through <= from {
+            return Ok(false);
+        }
+        let key = TimelineKey {
+            session_id: self.session_id.clone(),
+            branch_id: id.into(),
+        };
+        let mut offset = 0;
+        loop {
+            let query = TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                from_event: None,
+                from_sequence: None,
+                order_by: TimelineQueryOrderBy::Sequence,
+                direction: TimelineQueryDirection::Descending,
+                kinds: vec!["input/message".into(), "step/tool-use".into()],
+                flags: Vec::new(),
+                event_id: None,
+                predicate: None,
+                limit: std::num::NonZeroU64::new(PAGE).expect("a page is nonzero"),
+                offset,
+            };
+            let page = self
+                .store
+                .query(&key, &query, from.saturating_add(1), through)
+                .await?;
+            if page.events.is_empty() {
+                return Ok(false);
+            }
+            for event in &page.events {
+                if event.sequence <= from {
+                    return Ok(false);
+                }
+                if counts_as_activity(event) {
+                    return Ok(true);
+                }
+            }
+            if (page.events.len() as u64) < PAGE {
+                return Ok(false);
+            }
+            offset += PAGE;
+        }
+    }
     fn head(&self, id: &str) -> Option<u64> {
         if let Some(ended) = self.state.lock().unwrap().ended.get(id) {
             return Some(ended.head);
         }
         self.owned_context(id)
             .map(|context| context.timeline().sequence())
+    }
+    fn turn_ends(&self, id: &str) -> Option<watch::Receiver<u64>> {
+        self.state
+            .lock()
+            .unwrap()
+            .nodes
+            .get(id)
+            .map(|node| node.turn_end.subscribe())
     }
     async fn own_end(&self, branch: &str, head: u64) -> Result<Option<(u64, BranchEndData)>> {
         if head == 0 {
@@ -829,9 +911,16 @@ impl TimelineTree {
         }
         self.close_ended(id, sequence, data);
     }
-    /// Closes a line whose end command is part of the turn that just ended.
-    fn on_turn_end(self: &Arc<Self>, id: &str) {
-        let pending = self.state.lock().unwrap().pending.remove(id);
+    /// Closes a line whose end command is part of the turn that just ended,
+    /// and lets the line's children see that it moved.
+    fn on_turn_end(self: &Arc<Self>, id: &str, sequence: u64) {
+        let pending = {
+            let mut state = self.state.lock().unwrap();
+            if let Some(node) = state.nodes.get(id) {
+                node.turn_end.send_replace(sequence);
+            }
+            state.pending.remove(id)
+        };
         if let Some(pending) = pending {
             self.close_ended(id, pending.sequence, pending.data);
         }
@@ -1542,7 +1631,7 @@ impl DynPlugin for TreeTimelinePlugin {
                             .tree
                             .upgrade()
                             .ok_or_else(|| AgentError::Closed("TimelineTree".into()))
-                            .map(|tree| tree.on_turn_end(branch)),
+                            .map(|tree| tree.on_turn_end(branch, event.sequence)),
                         _ => Ok(()),
                     };
                     Box::pin(async move { result })
@@ -1680,6 +1769,7 @@ enum Decision {
     Roster,
     Ended(String),
     Idle { turn: String, status: &'static str },
+    Parent,
 }
 /// BranchLine's fold of its own line's facts.
 #[derive(Default)]
@@ -1696,6 +1786,10 @@ struct LineView {
     cursors: BTreeMap<String, u64>,
     /// The line a pending `branch` read names, by its call id.
     reads: BTreeMap<String, String>,
+    /// The event id of the latest `branch:parent` block on this line.
+    parent_input: Option<String>,
+    /// The parent head the latest `branch:parent` block reported.
+    parent_told: u64,
     /// Inputs committed and not consumed, with their modes.
     held: BTreeMap<String, InputMode>,
     /// The sequence of each input's `input/applied`.
@@ -1716,6 +1810,9 @@ const ROSTER_CLOSING: &str = "They message you when they find something, need yo
 
 /// `<dim-branch-message>`, `<dim-branch-idle>` and `<dim-branch-ended>`.
 const BRANCH_MESSAGE_ENTRY: &str = r#"<dim-branch-message from="C" to="main">: a message from another line of this session, in that line's own words and not the operator's. dim-branch-idle and dim-branch-ended are the runtime's reports about a line you opened: information, not requests."#;
+
+/// `<dim-branch-parent>`, written by BranchLine on a line whose parent moved.
+const PARENT_ENTRY: &str = r#"<dim-branch-parent branch="P" head="H" after="A">: on a line, the runtime reports that the line it was cut from has moved past where this line last read it, and where the next read starts. A later block of this name replaces the earlier one; it is state about that line, not a request."#;
 
 pub struct BranchLinePlugin {
     line: Key<BranchLine>,
@@ -1783,6 +1880,23 @@ impl DynPlugin for BranchLinePlugin {
                     },
                 )?;
             }
+            // Only a line with a parent can receive the parent block, and
+            // composing an entry that can never appear only grows the guide.
+            let parent = tree
+                .info(identity.branch_id.clone())
+                .ok()
+                .and_then(|info| info.parent);
+            if parent.is_some() {
+                guide.register(
+                    ctx,
+                    scope,
+                    GuideEntry {
+                        markers: vec!["dim-branch-parent".into()],
+                        order: 45,
+                        text: PARENT_ENTRY.into(),
+                    },
+                )?;
+            }
             let line = Arc::new(BranchLine {
                 own: identity.branch_id.clone(),
                 tree,
@@ -1824,6 +1938,7 @@ impl DynPlugin for BranchLinePlugin {
                 )
                 .await?;
             line.want(Decision::Roster);
+            line.want(Decision::Parent);
             let writer = line.clone();
             let phase = lifecycle.clone();
             let tasks = TaskTracker::new();
@@ -1927,6 +2042,11 @@ impl BranchLine {
                     {
                         if key == &line_key() {
                             view.roster = Some((text.clone(), *retire));
+                        } else if key == &parent_key() {
+                            view.parent_input = Some(event.id.clone());
+                            if let Some(head) = parent_head(text) {
+                                view.parent_told = head;
+                            }
                         }
                     }
                 }
@@ -2016,6 +2136,23 @@ impl BranchLine {
     fn cursor(&self, target: &str) -> Option<u64> {
         self.view.lock().unwrap().cursors.get(target).copied()
     }
+    /// The sequence this line was cut from its parent at; 0 for main.
+    fn branch_point(&self) -> u64 {
+        self.tree
+            .info(self.own.clone())
+            .ok()
+            .and_then(|info| info.branch_point)
+            .unwrap_or(0)
+    }
+    /// The sequence of the `branch/create` event on the parent that opened
+    /// this line; every cut is at or below it.
+    fn opened(&self) -> u64 {
+        self.tree
+            .info(self.own.clone())
+            .ok()
+            .and_then(|info| info.create_anchor)
+            .unwrap_or(0)
+    }
     /// The line's role and parent, from its directory record.
     fn resolved(&self) -> Option<(LineRole, Option<String>)> {
         {
@@ -2040,18 +2177,47 @@ impl BranchLine {
         self.changed.notify_one();
     }
     async fn run(self: Arc<Self>) {
+        /// What woke the writer when its queue was empty.
+        enum Wake {
+            Queued,
+            Parent,
+            Lost,
+        }
+        let mut parent = self
+            .resolved()
+            .and_then(|(_, parent)| parent)
+            .and_then(|parent| self.tree.turn_ends(&parent));
         loop {
             let next = self.wanted.lock().unwrap().pop_front();
-            let Some(decision) = next else {
-                tokio::select! {
-                    _ = self.stop.cancelled() => return,
-                    _ = self.changed.notified() => continue,
+            if let Some(decision) = next {
+                if self.stop.is_cancelled() {
+                    return;
+                }
+                let _ = self.write(decision).await;
+                continue;
+            }
+            let wake = match parent.as_mut() {
+                Some(signal) => {
+                    tokio::select! {
+                        _ = self.stop.cancelled() => return,
+                        _ = self.changed.notified() => Wake::Queued,
+                        changed = signal.changed() => {
+                            if changed.is_ok() { Wake::Parent } else { Wake::Lost }
+                        }
+                    }
+                }
+                None => {
+                    tokio::select! {
+                        _ = self.stop.cancelled() => return,
+                        _ = self.changed.notified() => Wake::Queued,
+                    }
                 }
             };
-            if self.stop.is_cancelled() {
-                return;
+            match wake {
+                Wake::Queued => {}
+                Wake::Parent => self.want(Decision::Parent),
+                Wake::Lost => parent = None,
             }
-            let _ = self.write(decision).await;
         }
     }
     async fn write(&self, decision: Decision) -> Result<()> {
@@ -2106,6 +2272,59 @@ impl BranchLine {
                     ..InputMessageData::default()
                 };
                 self.tree.input(parent, data).await.map(|_| ())
+            }
+            Decision::Parent => {
+                let Some(parent) = parent.filter(|_| role != LineRole::Main) else {
+                    return Ok(());
+                };
+                let Some(head) = self.tree.head(&parent) else {
+                    return Ok(());
+                };
+                let cut = self.branch_point();
+                let opened = self.opened();
+                let (after, from) = {
+                    let view = self.view.lock().unwrap();
+                    if !parent_due(&view) {
+                        return Ok(());
+                    }
+                    (
+                        view.cursors.get(&parent).copied().unwrap_or(cut),
+                        parent_from(&view, &parent, opened),
+                    )
+                };
+                if !self.tree.activity_after(&parent, from, head).await? {
+                    return Ok(());
+                }
+                let body = format!(
+                    "Line {parent} has new activity: it was at {head} when this was written, and you have read it to {after}. Read what is new with the branch tool (action read, branch \"{parent}\"); with no after, the read continues from {after}. Read it when what {parent} did changes what you do, and before your final message; do not page through all of {parent}'s work."
+                );
+                let block = crate::context_block::raw(
+                    crate::context_block::element(
+                        "dim-branch-parent",
+                        &[
+                            ("branch", &parent),
+                            ("head", &head.to_string()),
+                            ("after", &after.to_string()),
+                        ],
+                        &body,
+                    ),
+                    Some(parent_key()),
+                );
+                let data = InputMessageData {
+                    blocks: vec![block],
+                    mode: Some(InputMode::Append),
+                    ..InputMessageData::default()
+                };
+                let written = self.tree.input(self.own.clone(), data).await?;
+                let mut view = self.view.lock().unwrap();
+                if view.parent_input.as_deref() != Some(written.id.as_str()) {
+                    // The live fold may not have seen this input yet; a trigger
+                    // that arrives first must still see it held.
+                    view.held.insert(written.id.clone(), InputMode::Append);
+                }
+                view.parent_told = head;
+                view.parent_input = Some(written.id.clone());
+                Ok(())
             }
         }
     }
@@ -2206,6 +2425,47 @@ fn read_target(call: &ToolCall) -> Option<String> {
         .get("branch")
         .and_then(|value| value.as_str())
         .map(str::to_owned)
+}
+/// The parent head a `<dim-branch-parent>` block reports.
+fn parent_head(text: &str) -> Option<u64> {
+    let rest = text.strip_prefix("<dim-branch-parent ")?;
+    let start = rest.find("head=\"")? + "head=\"".len();
+    let digits = &rest[start..];
+    let end = digits.find('"')?;
+    digits[..end].parse().ok()
+}
+/// Whether the parent moved past both the line's read cursor and the block it
+/// was last told (design §7.1).
+/// The conditions a parent block needs besides new activity: the line is not
+/// ending and no earlier block is still held.
+fn parent_due(view: &LineView) -> bool {
+    !view.ending
+        && !view
+            .parent_input
+            .as_ref()
+            .is_some_and(|id| view.held.contains_key(id))
+}
+/// The sequence the parent is checked after: what the line read, what the
+/// last block told it, and its opening (design §7.1.1). Every cut is at or
+/// below the opening, so a line that has not read starts there, and activity
+/// from before the line existed is never news; the line reads it when it needs
+/// it.
+fn parent_from(view: &LineView, parent: &str, opened: u64) -> u64 {
+    view.cursors
+        .get(parent)
+        .copied()
+        .unwrap_or(opened)
+        .max(view.parent_told)
+        .max(opened)
+}
+/// Whether `event` is activity a line must hear about (design §7.1.1): an
+/// operator input, or a tool call.
+fn counts_as_activity(event: &AgentEvent) -> bool {
+    match &event.kind {
+        EventKind::InputMessage(data) => data.user.is_some(),
+        EventKind::ToolUse(_) => true,
+        _ => false,
+    }
 }
 /// The first line of a purpose, at most 120 characters (design §12.1).
 fn first_line(purpose: &str) -> String {
@@ -2680,6 +2940,9 @@ impl ToolHandler for BranchTool {
 fn line_key() -> String {
     "branch:line".into()
 }
+fn parent_key() -> String {
+    "branch:parent".into()
+}
 
 fn first_input(parent: &str, data: &BranchCreateData) -> InputMessageData {
     let (blocks, user) = match data.source {
@@ -2926,5 +3189,90 @@ mod tests {
         BranchLine::fold(&mut view, &page(6, "elsewhere", Some(7), false));
         assert_eq!(view.cursors.get("other"), Some(&7));
         assert_eq!(view.cursors.get("main"), Some(&42), "cursors are per line");
+    }
+
+    #[test]
+    fn a_parent_block_starts_after_the_read_cursor_the_last_block_and_the_opening() {
+        let mut view = line();
+        view.cursors.insert("main".into(), 5);
+        assert_eq!(parent_from(&view, "main", 1), 5);
+        assert_eq!(
+            parent_from(&view, "other", 8),
+            8,
+            "activity before the opening is not news"
+        );
+        view.parent_told = 6;
+        assert_eq!(parent_from(&view, "main", 1), 6);
+        assert_eq!(parent_from(&view, "main", 9), 9, "the opening is a floor");
+        let text = crate::context_block::element(
+            "dim-branch-parent",
+            &[("branch", "main"), ("head", "6"), ("after", "5")],
+            "Line main has new activity.",
+        );
+        BranchLine::fold(
+            &mut view,
+            &event(
+                7,
+                EventKind::InputMessage(InputMessageData {
+                    blocks: vec![crate::context_block::raw(text, Some(parent_key()))],
+                    mode: Some(InputMode::Append),
+                    ..InputMessageData::default()
+                }),
+            ),
+        );
+        assert_eq!(view.parent_told, 6, "the block's head is folded");
+        assert_eq!(view.parent_input.as_deref(), Some("event-7"));
+        assert!(!parent_due(&view), "a held block is not written over");
+        view.held.clear();
+        assert!(parent_due(&view));
+        view.ending = true;
+        assert!(!parent_due(&view), "an ending line gets no block");
+    }
+
+    #[test]
+    fn activity_is_an_operator_input_or_a_tool_call() {
+        let operator = event(
+            1,
+            EventKind::InputMessage(InputMessageData::text("move on", Some(InputMode::Queue))),
+        );
+        assert!(counts_as_activity(&operator));
+        let block_only = event(
+            2,
+            EventKind::InputMessage(InputMessageData {
+                blocks: vec![crate::context_block::raw("state".to_string(), None)],
+                mode: Some(InputMode::Append),
+                ..InputMessageData::default()
+            }),
+        );
+        assert!(!counts_as_activity(&block_only));
+        let call = |id: &str| {
+            event(
+                3,
+                EventKind::ToolUse(ToolUseData {
+                    turn_id: "turn".into(),
+                    request_id: "request".into(),
+                    call: ToolCall {
+                        id: id.into(),
+                        name: "echo".into(),
+                        input: serde_json::Map::new(),
+                    },
+                }),
+            )
+        };
+        assert!(
+            counts_as_activity(&call("creating")),
+            "the creating call is below the opening, so it never reaches this check"
+        );
+        assert!(counts_as_activity(&call("later")));
+        let end = event(
+            4,
+            EventKind::TurnEnd(TurnEndData {
+                turn_id: "turn".into(),
+                outcome: TurnOutcome::Completed {
+                    reason: "stop".into(),
+                },
+            }),
+        );
+        assert!(!counts_as_activity(&end));
     }
 }

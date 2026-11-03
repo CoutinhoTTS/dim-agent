@@ -12774,6 +12774,20 @@
     },
     {
       "from": "dim_agent_capabilities::timeline_tree",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQuery",
+        "path TimelineQueryDirection::Descending",
+        "path TimelineQueryOrderBy::Sequence",
+        "path TimelineQueryScope::Branch",
+        "use dim_agent_runtime::TimelineQuery",
+        "use dim_agent_runtime::TimelineQueryDirection",
+        "use dim_agent_runtime::TimelineQueryOrderBy",
+        "use dim_agent_runtime::TimelineQueryScope"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::timeline_tree",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
         "path StoredBranch",
@@ -12864,6 +12878,13 @@
     },
     {
       "from": "dim_agent_capabilities::timeline_tree::tests",
+      "to": "dim_agent_capabilities::context_block",
+      "references": [
+        "path crate::context_block::element"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::timeline_tree::tests",
       "to": "dim_agent_capabilities::timeline_tree",
       "references": [
         "path BranchLine::fold",
@@ -12878,10 +12899,19 @@
       "references": [
         "path AgentEvent",
         "path EventKind",
+        "path EventKind::InputMessage",
         "path EventKind::ToolResult",
         "path EventKind::ToolUse",
+        "path EventKind::TurnEnd",
+        "path InputMessageData",
+        "path InputMessageData::default",
+        "path InputMessageData::text",
+        "path InputMode::Append",
+        "path InputMode::Queue",
         "path ToolResultData",
-        "path ToolUseData"
+        "path ToolUseData",
+        "path TurnEndData",
+        "path TurnOutcome::Completed"
       ]
     },
     {
@@ -38938,6 +38968,18 @@
     {
       "module": "dim_agent_capabilities::skills::session",
       "path": "char::is_whitespace"
+    },
+    {
+      "module": "dim_agent_capabilities::timeline_tree",
+      "path": "Wake::Lost"
+    },
+    {
+      "module": "dim_agent_capabilities::timeline_tree",
+      "path": "Wake::Parent"
+    },
+    {
+      "module": "dim_agent_capabilities::timeline_tree",
+      "path": "Wake::Queued"
     },
     {
       "module": "dim_agent_capabilities::workspace_tools::files",

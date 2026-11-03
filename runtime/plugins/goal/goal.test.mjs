@@ -957,6 +957,26 @@ test('Pursuit 4: a report outside the first block decides nothing', async t => {
   assert.equal(goal.branch.fold.status.status, 'active')
 })
 
+test('a parent-moved block on an evaluator changes no Goal decision', async t => {
+  const evaluator = 'E1'
+  const goal = await loadGoalBranch(async () => settingsDocument(5), { branchId: evaluator })
+  t.after(() => goal.unload())
+  const text = '<dim-branch-parent branch="main" head="9" after="4">\nLine main has new activity: it was at 9 when this was written, and you have read it to 4. Read what is new with the branch tool (action read, branch "main"); with no after, the read continues from 4. Read it when what main did changes what you do, and before your final message; do not page through all of main\'s work.\n</dim-branch-parent>'
+  const moved = await goal.emit('input', 'message', {
+    mode: 'append',
+    blocks: [{ type: 'raw', text, key: 'branch:parent', retire: false }],
+  })
+  await flush()
+  assert.equal(goal.writes.length, 0, 'the block is runtime state, not a goal input')
+  assert.deepEqual([...goal.branch.fold.conclusions], [])
+  assert.equal(goal.branch.fold.status, undefined)
+  assert.equal(goal.branch.fold.objective, undefined)
+  await goal.turn(moved)
+  await flush()
+  assert.equal(goal.writes.length, 0, 'the evaluator decides nothing at its turn end')
+  assert.deepEqual([...goal.branch.fold.conclusions], [])
+})
+
 test('Pursuit 2: a CONTINUE conclusion writes one Pursuit continuation, or Goal limit pause', async t => {
   const goal = await loadGoalBranch(async () => settingsDocument(20))
   t.after(() => goal.unload())
