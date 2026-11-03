@@ -19,11 +19,14 @@ use std::{
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
+/// Publish callbacks a test holds back until it releases them.
+type HeldPublishes = Arc<Mutex<VecDeque<(PublishCallback, Result<()>)>>>;
+
 /// Memory storage whose publications wait for [`Self::release`], so a test can
 /// write a fact and keep it unpublished.
 struct Held {
     memory: MemoryTimelineStore,
-    held: Arc<Mutex<VecDeque<(PublishCallback, Result<()>)>>>,
+    held: HeldPublishes,
     released: Arc<AtomicBool>,
 }
 impl Default for Held {
