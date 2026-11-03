@@ -209,6 +209,7 @@ key 与模式互不相关（[history.rs](../../../crates/dim-agent-capabilities/
 - **检查方式。** 父线的事实通过唯一的事件查询读取（[ADR 019](../adr/019-event-query.md)）：该分支的 `input/message` 和 `step/tool-use` 事件，从新到旧分页，直到有一个符合条件，或读取到达 `from`。不折叠任何其他线的事件。
 - **写入。** 一条带 key 的 Append，key 为 `branch:parent`，经 `TreeCommands.input` 写在这条线自己身上，属性是父线的 id、`head` 和 `after`。同一 key 的后一个块会在带 key 的基线里取代前一个。写完之后折叠记下新头部和新输入，所以队列里的第二次决定不会再写。
 - **随后发生什么。** 运行中的线在下一次模型请求时拿到这个块。空闲的线不会被唤醒：这个块在它下一轮的第一个请求里、先于开启那一轮的输入被消费，这是有文档记录的 Append 规则（[session access](contracts/session-access.md)、[Loop](../../architecture/rust-agent/plugins/Loop.md)）。重载不写任何东西；重启最多写当时已经该写的那个块。`main` 拿不到块：它上面没有东西。
+- **记录。** 这条线把自己发送的 System 记为自己的配置：父线条目从线开启时就在生效，线的 `context/configured` 在第一次请求之前就带着组合后的 System。
 - **被否决的替代方案。**
   - 在线自己一轮结束时写，错过了这个变化存在的场景：线结束一轮，父线继续，随后用户或父线来找这条线。那一轮不携带块。
   - 在线一轮开始时或它的请求之间写，是在请求准备好之后才响应事件；一条已提交的 Append 可能落在它本该服务的那次请求之后，而且需要 Loop 里的钩子。
