@@ -311,6 +311,16 @@ fn unwrap_record(bytes: &[u8]) -> Option<Vec<u8>> {
     serde_json::to_vec(&inner).ok()
 }
 
+/// Decodes a stored account file, accepting the PluginFiles record the
+/// TypeScript plugin wrote.
+fn document(bytes: &[u8]) -> Result<Doc> {
+    let text = unwrap_record(bytes).unwrap_or_else(|| bytes.to_vec());
+    match serde_json::from_slice::<Value>(&text) {
+        Ok(Value::Object(doc)) => Ok(doc),
+        _ => Err(ManagedError::InvalidStore),
+    }
+}
+
 /// One locked `auth.json`.
 struct AuthFile {
     lease: FileLease,
@@ -324,11 +334,7 @@ impl AuthFile {
             }
             Err(error) => return Err(file_error(error)),
         };
-        let text = unwrap_record(&bytes).unwrap_or_else(|| bytes.clone());
-        match serde_json::from_slice::<Value>(&text) {
-            Ok(Value::Object(doc)) => Ok((doc, Some(bytes))),
-            _ => Err(ManagedError::InvalidStore),
-        }
+        Ok((document(&bytes)?, Some(bytes)))
     }
     async fn write(&mut self, doc: &Doc) -> Result<()> {
         let mut bytes = serde_json::to_vec_pretty(doc).map_err(|_| ManagedError::InvalidStore)?;
@@ -457,7 +463,71 @@ impl Store {
         })
     }
 
+    /// Reads the account file without its lease. Writes are atomic replaces,
+    /// so a fresh grant needs neither the cross-process marker nor its fsync;
+    /// any error sends the caller down the leased path.
+    async fn read_current(&self) -> Option<Doc> {
+        let path = self.files.path(self.root, AUTH_FILE).ok()?;
+        let bytes = self
+            .files
+            .read(&path, &CancellationToken::new())
+            .await
+            .ok()?;
+        document(&bytes).ok()
+    }
+
+    /// The account snapshot when the record needs no rewrite, read without
+    /// the lease. An unknown account, a legacy grant or a dropped client
+    /// secret still takes the leased path that normalizes it.
+    async fn current_status(&self) -> Option<Result<AccountSnapshot>> {
+        let doc = self.read_current().await?;
+        let Ok(Parsed { tokens, state }) = parse(&doc, true) else {
+            return None;
+        };
+        state.as_ref()?;
+        if tokens.is_some_and(|tokens| tokens.0.contains_key("clientSecret")) {
+            return None;
+        }
+        Some(snapshot(&doc))
+    }
+
+    /// The grant already stored when it is usable without a token request.
+    /// `None` takes the lease: the file is absent or unreadable, the grant is
+    /// inside the freshness window, the rejected grant is still current, or
+    /// normalization would rewrite the record first.
+    async fn current(&self, rejected: Option<&Grant>) -> Result<Option<Grant>> {
+        let Some(doc) = self.read_current().await else {
+            return Ok(None);
+        };
+        let Ok(Parsed {
+            tokens: Some(tokens),
+            state: Some(state),
+        }) = parse(&doc, true)
+        else {
+            return Ok(None);
+        };
+        if tokens.0.contains_key("clientSecret") {
+            return Ok(None);
+        }
+        let fresh = safe_integer(tokens.0.get("expires")).unwrap_or(0) > now() + FRESH_MS;
+        let reuse = match rejected {
+            Some(rejected) => !same_grant(&state, rejected),
+            None => fresh,
+        };
+        if !reuse {
+            return Ok(None);
+        }
+        Ok(Some(Grant {
+            tokens,
+            account: snapshot(&doc)?,
+            revision: state.revision,
+        }))
+    }
+
     pub async fn status(&self) -> Result<AccountSnapshot> {
+        if let Some(status) = self.current_status().await {
+            return status;
+        }
         let mut file = self.open(None).await?;
         let (mut doc, _) = file.read().await?;
         file.normalize(&mut doc).await?;
@@ -556,6 +626,9 @@ impl Store {
     /// rejection of `rejected` when no newer grant replaced it. A rotated grant
     /// is persisted before the account lock is released.
     pub async fn resolve(&self, rejected: Option<&Grant>) -> Result<Grant> {
+        if let Some(grant) = self.current(rejected).await? {
+            return Ok(grant);
+        }
         let mut file = self.open(None).await?;
         let (mut doc, _) = file.read().await?;
         file.normalize(&mut doc).await?;

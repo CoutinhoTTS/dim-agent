@@ -35,6 +35,11 @@ fn declarations(root: &Path) -> Result<String> {
             "dim_agent_runtime::SessionConfig",
             "import('./plugin.js').SessionConfig",
         )
+        .declared("std::num::NonZeroU64", "number | bigint")
+        .declared(
+            "dim_agent_types::TimelinePosition",
+            "{ branch_id: string; sequence: number | bigint }",
+        )
         .declarations(root.join("crates/dim-app-server"))
 }
 
