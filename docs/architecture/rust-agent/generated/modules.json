@@ -8054,7 +8054,7 @@
       "references": [
         "path HistoryRenderer",
         "path context_configuration",
-        "path crate::history::FoldRead::new",
+        "path crate::history::FoldRead::timeline",
         "path crate::history::project_batch",
         "path crate::history::read_context",
         "use crate::history::HistoryRenderer",
@@ -14563,7 +14563,6 @@
       "from": "dim_agent_runtime::agent",
       "to": "dim_agent_runtime::core::timeline",
       "references": [
-        "path ContextHistory",
         "path TailLock::freeze",
         "path crate::core::unix_millis",
         "use crate::core::TailLock"
@@ -14837,7 +14836,6 @@
       "from": "dim_agent_runtime::branch",
       "to": "dim_agent_runtime::core::timeline",
       "references": [
-        "path ContextHistory",
         "path Timeline"
       ]
     },

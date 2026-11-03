@@ -2,7 +2,8 @@ use dim_agent_capabilities::{
     adapters::{DefaultPrepareModelPlugin, EchoModel, MockTools},
     defaults,
     history::{
-        HistoryEntry, HistoryRenderer, project_context_history, project_history, summary_message,
+        HistoryEntry, HistoryRenderer, project_context_history, project_history, read_context_in,
+        replay_context, summary_message,
     },
     host::*,
 };

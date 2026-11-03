@@ -80,7 +80,7 @@ pub(crate) struct ContextPage {
 /// instead of a page that re-selects what it folded. The fold switches to this
 /// branch as soon as a page reaches it, and a page then costs what it returns.
 pub(crate) struct FoldRead<'a> {
-    timeline: &'a Timeline,
+    reads: ContextReads<'a>,
     /// The event the chain read begins at; `None` at the chain's start.
     begin: Option<String>,
     own: String,
@@ -92,50 +92,122 @@ pub(crate) struct FoldRead<'a> {
     sequence: Option<u64>,
     /// The last position the fold may read.
     through: u64,
+    /// Whether the fold also reads this branch's facts written above the
+    /// published head.
+    tail: bool,
 }
 
 impl<'a> FoldRead<'a> {
-    pub(crate) fn new(timeline: &'a Timeline, begin: Option<String>, through: u64) -> Self {
+    fn new(reads: ContextReads<'a>, begin: Option<String>, through: u64) -> Self {
         Self {
-            own: timeline.branch_id(),
-            timeline,
+            own: reads.branch(),
+            reads,
             begin,
             last: None,
             sequence: None,
             through,
+            tail: false,
         }
+    }
+
+    /// A fold of this branch's Timeline.
+    pub(crate) fn timeline(timeline: &'a Timeline, begin: Option<String>, through: u64) -> Self {
+        Self::new(ContextReads::Timeline(timeline), begin, through)
+    }
+
+    /// A fold of this branch from `sequence` on: a checkpoint records the
+    /// position of its resume, which is where a read begins when no event
+    /// carries the id the checkpoint names.
+    pub(crate) fn from_sequence(timeline: &'a Timeline, sequence: u64, through: u64) -> Self {
+        Self {
+            sequence: Some(sequence),
+            ..Self::new(ContextReads::Timeline(timeline), None, through)
+        }
+    }
+
+    /// A fold through the Session facade, for callers that do not hold the
+    /// branch's Timeline.
+    pub(crate) fn in_session(
+        session: &'a Session,
+        branch: &'a str,
+        begin: Option<String>,
+        through: u64,
+    ) -> Self {
+        Self::new(ContextReads::Session(session, branch), begin, through)
+    }
+
+    /// Also reads this branch's own facts written above the published head, up
+    /// to the fold's bound ([ADR 020 D3](../../../docs/adr/020-timeline-read-convergence.md)).
+    /// A Session facade has no such read, so a fold through it stays at the
+    /// published head.
+    pub(crate) fn tail(mut self) -> Self {
+        self.tail = true;
+        self
     }
 
     /// The next page of up to `limit` facts, or `None` when the fold has read
     /// everything at or below `through`. A page shorter than `limit` ends the
-    /// fold after it.
+    /// fold after it, so a page that a read began at an event the last page
+    /// already held is filled on from the next event.
     pub(crate) async fn next(
         &mut self,
         limit: u64,
     ) -> dim_agent_runtime::Result<Option<ContextPage>> {
-        let query = match self.sequence {
-            Some(sequence) => context_branch(sequence, limit),
-            None => context_chain(self.begin.as_deref(), 0, limit),
+        let mut page = ContextPage {
+            events: Vec::new(),
+            positions: Vec::new(),
         };
-        let Some(mut page) = bounded(self.timeline.query(query).await?, &self.own, self.through)
-        else {
-            return Ok(None);
-        };
-        if self.last.as_ref() == page.positions.first() {
-            page.events.remove(0);
-            page.positions.remove(0);
+        loop {
+            let repeated = u64::from(self.last.is_some());
+            let asked = limit - page.events.len() as u64 + repeated;
+            let query = match self.sequence {
+                Some(sequence) => context_branch(sequence, asked),
+                None => context_chain(self.begin.as_deref(), 0, asked),
+            };
+            let reply = match &self.reads {
+                ContextReads::Timeline(timeline)
+                    if self.tail && self.through > timeline.sequence() =>
+                {
+                    let tail = timeline.query_with_tail(query).await?;
+                    TimelineQueryReply {
+                        events: tail.events,
+                        positions: tail.positions,
+                    }
+                }
+                reads => reads.query(query).await?,
+            };
+            let Some(mut read) = bounded(reply, &self.own, self.through) else {
+                break;
+            };
+            let exhausted = (read.events.len() as u64) < asked;
+            if self.last.as_ref() == read.positions.first() {
+                read.events.remove(0);
+                read.positions.remove(0);
+            }
+            let Some(last) = read.positions.last().cloned() else {
+                break;
+            };
+            if last.branch_id == self.own {
+                self.sequence = Some(last.sequence + 1);
+                self.last = None;
+            } else {
+                self.begin = read.events.last().map(|event| event.id.clone());
+                self.last = Some(last);
+            }
+            page.events.extend(read.events);
+            page.positions.extend(read.positions);
+            if exhausted || page.events.len() as u64 >= limit {
+                break;
+            }
         }
-        let Some(last) = page.positions.last().cloned() else {
-            return Ok(None);
-        };
-        if last.branch_id == self.own {
-            self.sequence = Some(last.sequence + 1);
-        } else {
-            self.begin = page.events.last().map(|event| event.id.clone());
-            self.last = Some(last);
-        }
-        Ok(Some(page))
+        Ok((!page.events.is_empty()).then_some(page))
     }
+}
+
+/// Whether a read could not begin at the resume its checkpoint names: the
+/// store holds no event with that id, so no fact lies after it.
+fn resume_unread(context: &ContextHistory) -> bool {
+    context.checkpoint.is_some() && context.events.is_empty()
 }
 
 /// The facts a fold keeps from a reply: no fact above `through` on the read's
@@ -374,7 +446,7 @@ impl HistoryRenderer {
             }
             None => (None, None),
         };
-        let mut read = FoldRead::new(timeline, begin, through);
+        let mut read = FoldRead::timeline(timeline, begin, through);
         loop {
             let Some(page) = read.next(batch).await? else {
                 break;
@@ -418,45 +490,121 @@ impl HistoryRenderer {
 
     /// The context at `through` alone, for readers that inspect events instead
     /// of rendering them. A checkpoint is validated by rendering it once and
-    /// discarding that render; without a checkpoint no render is made, and a
-    /// checkpoint that does not render falls back to the full replay.
+    /// discarding that render; without one no render is made, and a checkpoint
+    /// that does not apply is a cache miss that yields the full replay.
     pub async fn context(
         &self,
         timeline: &Timeline,
         through: u64,
     ) -> dim_agent_runtime::Result<ContextHistory> {
-        let context = timeline
-            .context_with_checkpoint(through, self.checkpoint_interpreter, self.decode_checkpoint)
-            .await?;
-        if context.checkpoint.is_some() && (self.render)(&context).is_err() {
-            return timeline.context(through).await;
+        let context = self.read_context_at(timeline, through).await?;
+        if self.checkpoint_applies(&context) {
+            return Ok(context);
         }
-        Ok(context)
+        self.replay_context(timeline, through).await
+    }
+
+    /// The context at `through` from its facts alone: no checkpoint is
+    /// selected, so the fold begins at the chain's start.
+    pub async fn replay_context(
+        &self,
+        timeline: &Timeline,
+        through: u64,
+    ) -> dim_agent_runtime::Result<ContextHistory> {
+        self.fold(timeline, through, None).await
     }
 
     /// The context at `through` with its rendering, for callers that use it. A
     /// read renders once: the render that validates a checkpoint is the one
     /// returned, and without a checkpoint the context is rendered here too. A
-    /// checkpoint that does not render is a cache miss and yields the full
+    /// checkpoint that does not apply is a cache miss and yields the full
     /// replay with its rendering.
     pub async fn rendered_context(
         &self,
         timeline: &Timeline,
         through: u64,
     ) -> dim_agent_runtime::Result<(ContextHistory, Vec<HistoryEntry>)> {
-        let context = timeline
-            .context_with_checkpoint(through, self.checkpoint_interpreter, self.decode_checkpoint)
-            .await?;
+        let context = self.read_context_at(timeline, through).await?;
+        if resume_unread(&context) {
+            return self.replayed(timeline, through).await;
+        }
         match (self.render)(&context) {
             Ok(history) => Ok((context, history)),
-            Err(_) if context.checkpoint.is_some() => {
-                let context = timeline.context(through).await?;
-                let history =
-                    (self.render)(&context).map_err(|error| AgentError::fault("History", error))?;
-                Ok((context, history))
-            }
+            Err(_) if context.checkpoint.is_some() => self.replayed(timeline, through).await,
             Err(error) => Err(AgentError::fault("History", error)),
         }
+    }
+
+    /// The context at `through` from the checkpoint that applies, if one does.
+    async fn read_context_at(
+        &self,
+        timeline: &Timeline,
+        through: u64,
+    ) -> dim_agent_runtime::Result<ContextHistory> {
+        let checkpoint = timeline
+            .checkpoint(through, self.checkpoint_interpreter, self.decode_checkpoint)
+            .await?;
+        self.fold(timeline, through, checkpoint).await
+    }
+
+    /// Whether the checkpoint this read selected applies: it names no resume,
+    /// or the facts after its resume were read and its state renders. An
+    /// interpreter's cache is disposable; the facts it stands for are not.
+    fn checkpoint_applies(&self, context: &ContextHistory) -> bool {
+        context.checkpoint.is_none()
+            || (!context.events.is_empty() && (self.render)(context).is_ok())
+    }
+
+    /// The context at `through` from the chain's start with its rendering.
+    async fn replayed(
+        &self,
+        timeline: &Timeline,
+        through: u64,
+    ) -> dim_agent_runtime::Result<(ContextHistory, Vec<HistoryEntry>)> {
+        let context = self.replay_context(timeline, through).await?;
+        let history =
+            (self.render)(&context).map_err(|error| AgentError::fault("History", error))?;
+        Ok((context, history))
+    }
+
+    /// The facts from where a checkpoint resumes, or from the chain's start
+    /// without one, in pages the projection folds.
+    ///
+    /// A resume on this branch is read from its sequence; one in an ancestor is
+    /// read from the event the checkpoint names, the only start a chain read
+    /// accepts, and an event the store holds no id for leaves the fold empty.
+    async fn fold(
+        &self,
+        timeline: &Timeline,
+        through: u64,
+        checkpoint: Option<ProjectionCheckpoint>,
+    ) -> dim_agent_runtime::Result<ContextHistory> {
+        let through = timeline.bound(through)?;
+        let resume = checkpoint.as_ref().map(|checkpoint| &checkpoint.resume);
+        let mut read = match resume {
+            Some(resume) if resume.branch_id == timeline.branch_id() => {
+                FoldRead::from_sequence(timeline, resume.sequence, through)
+            }
+            Some(resume) => FoldRead::timeline(timeline, Some(resume.event_id.clone()), through),
+            None => FoldRead::timeline(timeline, None, through),
+        }
+        .tail();
+        let mut events = Vec::new();
+        let mut positions = Vec::new();
+        while let Some(page) = read.next(FOLD_PAGE).await? {
+            events.extend(page.events);
+            positions.extend(page.positions);
+        }
+        Ok(ContextHistory {
+            checkpoint,
+            ancestry: timeline
+                .ancestors()
+                .into_iter()
+                .map(|(branch, _)| branch)
+                .collect(),
+            events,
+            positions,
+        })
     }
 
     /// Streams the branch chain in pages and returns only the projection. A
@@ -500,7 +648,7 @@ impl HistoryRenderer {
         let mut cut_in_effect: Option<(Option<usize>, u64)> = None;
         let mut compaction_cut: Option<dim_agent_types::TimelinePosition> = None;
         let mut cuts: Vec<(String, dim_agent_types::TimelinePosition)> = Vec::new();
-        let mut read = FoldRead::new(timeline, begin, through);
+        let mut read = FoldRead::timeline(timeline, begin, through);
         loop {
             let Some(page) = read.next(batch).await? else {
                 break;
@@ -624,6 +772,52 @@ pub async fn read_context(
     through: u64,
 ) -> dim_agent_runtime::Result<ContextHistory> {
     HistoryRenderer::default().context(timeline, through).await
+}
+
+/// Read the context at `through` from its facts alone, selecting no
+/// checkpoint: the fold begins at the chain's start.
+pub async fn replay_context(
+    timeline: &Timeline,
+    through: u64,
+) -> dim_agent_runtime::Result<ContextHistory> {
+    HistoryRenderer::default()
+        .replay_context(timeline, through)
+        .await
+}
+
+/// [`replay_context`] through the Session facade, for callers that do not hold
+/// the branch's Timeline. A Session exposes no recovery snapshot, so the fold
+/// begins at the chain's start, and the branches it covered are the ones the
+/// reply placed facts in.
+pub async fn read_context_in(
+    session: &Session,
+    branch: &str,
+    through: u64,
+) -> dim_agent_runtime::Result<ContextHistory> {
+    if through > session.sequence(branch)? {
+        return Err(AgentError::InvalidInput(format!(
+            "future timeline sequence {through}"
+        )));
+    }
+    let mut read = FoldRead::in_session(session, branch, None, through);
+    let mut events = Vec::new();
+    let mut positions: Vec<TimelinePosition> = Vec::new();
+    while let Some(page) = read.next(FOLD_PAGE).await? {
+        events.extend(page.events);
+        positions.extend(page.positions);
+    }
+    let mut ancestry: Vec<String> = Vec::new();
+    for position in &positions {
+        if ancestry.last() != Some(&position.branch_id) {
+            ancestry.push(position.branch_id.clone());
+        }
+    }
+    Ok(ContextHistory {
+        checkpoint: None,
+        ancestry,
+        events,
+        positions,
+    })
 }
 
 /// One message an input or the projection places, with the in-effect
@@ -1199,17 +1393,17 @@ pub fn fold_output_parts(parts: &mut Vec<MessagePart>, kind: &EventKind) -> Resu
     Ok(())
 }
 
-/// The event limit one page of a cut check asks for.
-const BOUNDARY_PAGE: u64 = 256;
+/// The event limit one page of a context fold asks for.
+const FOLD_PAGE: u64 = 256;
 
-/// The paged read a cut check folds: one branch's Timeline, or that branch
+/// The paged read a context fold takes: one branch's Timeline, or that branch
 /// through the Session facade.
-enum CutReads<'a> {
+enum ContextReads<'a> {
     Timeline(&'a Timeline),
     Session(&'a Session, &'a str),
 }
 
-impl CutReads<'_> {
+impl ContextReads<'_> {
     /// The cut ends an atomic batch, as it must for a branch prefix: batch
     /// structure is the store's check, not a query (ADR 020 D4).
     async fn batch_end(&self, through: u64) -> dim_agent_runtime::Result<()> {
@@ -1292,7 +1486,7 @@ impl CutReads<'_> {
         from: u64,
         through: u64,
     ) -> dim_agent_runtime::Result<Option<ContextPage>> {
-        let reply = self.query(context_branch(from, BOUNDARY_PAGE)).await?;
+        let reply = self.query(context_branch(from, FOLD_PAGE)).await?;
         Ok(bounded(reply, &self.branch(), through))
     }
     fn branch(&self) -> String {
@@ -1306,7 +1500,7 @@ impl CutReads<'_> {
 /// Folds one branch's context pages from `start` to `through`. The inner error
 /// is the projection's: the pages alone cannot be folded from that start.
 async fn folded(
-    reads: &CutReads<'_>,
+    reads: &ContextReads<'_>,
     start: u64,
     through: u64,
 ) -> dim_agent_runtime::Result<Result<ProjectionCheckpointState, String>> {
@@ -1320,7 +1514,7 @@ async fn folded(
             Ok((_, folded)) => state = Some(folded),
             Err(error) => return Ok(Err(error)),
         }
-        if (page.events.len() as u64) < BOUNDARY_PAGE {
+        if (page.events.len() as u64) < FOLD_PAGE {
             break;
         }
         from = page.positions.last().map_or(from, |last| last.sequence + 1);
@@ -1329,7 +1523,7 @@ async fn folded(
 }
 
 async fn boundary_at(
-    reads: CutReads<'_>,
+    reads: ContextReads<'_>,
     through: u64,
 ) -> dim_agent_runtime::Result<Result<(), String>> {
     if through > reads.head()? {
@@ -1371,7 +1565,7 @@ pub async fn validate_context_boundary_at(
     timeline: &Timeline,
     through: u64,
 ) -> dim_agent_runtime::Result<Result<(), String>> {
-    boundary_at(CutReads::Timeline(timeline), through).await
+    boundary_at(ContextReads::Timeline(timeline), through).await
 }
 
 /// [`validate_context_boundary_at`] through the Session facade, for callers
@@ -1381,7 +1575,7 @@ pub async fn validate_context_boundary_in(
     branch: &str,
     through: u64,
 ) -> dim_agent_runtime::Result<Result<(), String>> {
-    boundary_at(CutReads::Session(session, branch), through).await
+    boundary_at(ContextReads::Session(session, branch), through).await
 }
 
 fn assistant(

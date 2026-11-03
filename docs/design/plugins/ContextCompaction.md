@@ -355,7 +355,7 @@ still travels; it just cannot be named if it must shrink.
 **Snapshot anchoring without business content (#130).** Today, Timeline core and both stores
 read the content of `context/compaction` to anchor projection snapshots:
 
-- `Timeline::context_with_checkpoint`
+- `Timeline::checkpoint`
   ([timeline.rs](../../../crates/dim-agent-runtime/src/core/timeline.rs)) requires
   `EventKind::ContextCompaction`, compares `data.through`, and matches `Completed { cursor }`
   against `checkpoint.state.compacted_through`.
@@ -372,7 +372,7 @@ would make every change to the compaction record touch core code. F1 moves the c
 
 | Part | Checks after F1 |
 | --- | --- |
-| Timeline (`context_with_checkpoint`) and both stores | Structure only: the anchor event exists at the snapshot's sequence with the snapshot's event id, the interpreter tag matches, and the sequence is within the cut (plus the existing resume-position checks on the decoded checkpoint). No `EventKind` or outcome matching, and no business kind or status in SQL |
+| Timeline (`checkpoint`) and both stores | Structure only: the anchor event exists at the snapshot's sequence with the snapshot's event id, the interpreter tag matches, and the sequence is within the cut (plus the existing resume-position checks on the decoded checkpoint). No `EventKind` or outcome matching, and no business kind or status in SQL |
 | Snapshot owner (`HistoryRenderer`, whose snapshots ContextPolicy saves) | Anchor validity, through the interpreter callback Timeline already calls. The callback now also receives the anchor event: `decode: fn(&RecoverySnapshot, &AgentEvent) -> Option<ProjectionCheckpoint>`. It accepts only a completed `context/compaction` whose `retain_from` matches its state and whose `through` precedes the snapshot. `None` is a cache miss, as today |
 | Saving | The owner saves snapshots only at its own completed compaction, as it does today. The stores no longer enforce the kind |
 
@@ -1258,7 +1258,7 @@ Internal Rust changes:
 - `CompactionCheckpoint {retain_from, replacement}` and `HistoryEntry.source`.
 - `history.rs` cut validation and the cursor lookup become event-based. The snapshot state stores
   `retain_from` (interpreter version bump).
-- Snapshot anchoring (#130): `Timeline::context_with_checkpoint` keeps only structural checks,
+- Snapshot anchoring (#130): `Timeline::checkpoint` keeps only structural checks,
   and its `decode` callback becomes `fn(&RecoverySnapshot, &AgentEvent)`.
   `MemoryTimelineStore::save_snapshot` and the SQLite store's save and lookup drop the
   compaction kind and status checks.

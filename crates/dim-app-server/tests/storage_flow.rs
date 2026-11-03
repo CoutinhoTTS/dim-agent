@@ -1,5 +1,5 @@
 use dim_agent_capabilities::file_storage::FileStoragePlugin;
-use dim_agent_capabilities::history::{HistoryRenderer, read_context};
+use dim_agent_capabilities::history::{HistoryRenderer, read_context, replay_context};
 use dim_agent_runtime::{
     AgentBuilder, AgentConfig, AgentError, MemoryTimelineStore, SessionConfig, StoredEvent,
     Timeline, TimelineKey, TimelineStore, TimelineTrace, TraceStep, testing::MinimalHost,
@@ -287,6 +287,29 @@ fn insert_documented_records(connection: &Connection, tables: &[&str]) {
                 .unwrap();
         }
     }
+}
+
+/// The documented example predates the two context switches (v31): a store
+/// that holds it has them set from each row's kind, as the upgrade writes them.
+fn write_documented_context_switches(connection: &Connection) {
+    let keys = |list: &[&str]| {
+        list.iter()
+            .map(|key| format!("'{key}'"))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    connection
+        .execute_batch(&format!(
+            "UPDATE timeline_events SET context_render=1 WHERE kind IN ({});",
+            keys(dim_agent_types::CONTEXT_RENDER_KEYS)
+        ))
+        .unwrap();
+    connection
+        .execute_batch(&format!(
+            "UPDATE timeline_events SET context_state=1 WHERE kind IN ({});",
+            keys(dim_agent_types::CONTEXT_STATE_KEYS)
+        ))
+        .unwrap();
 }
 
 /// The v13 schema exactly as v13 daemons wrote it, frozen here so that tests
@@ -594,6 +617,7 @@ async fn documented_native_records_restore_with_legacy_snapshot_bypassed() {
         .execute("INSERT INTO agent_store_format VALUES (?1)", [STORE_FORMAT])
         .unwrap();
     insert_documented_records(&connection, BUSINESS_TABLES);
+    write_documented_context_switches(&connection);
     drop(connection);
 
     assert_eq!(store.branches("s1").await.unwrap().len(), 2);
@@ -605,7 +629,7 @@ async fn documented_native_records_restore_with_legacy_snapshot_bypassed() {
     )
     .await
     .unwrap();
-    let generated = projection_checkpoint(&main.context(2).await.unwrap(), "e2").unwrap();
+    let generated = projection_checkpoint(&replay_context(&main, 2).await.unwrap(), "e2").unwrap();
     let saved = store
         .latest_snapshot(&key("s1", "main"), 7, "dim/context-projection/v1")
         .await
@@ -1284,7 +1308,7 @@ async fn a_cut_check_starts_at_the_last_completed_compaction() {
     .unwrap();
     for at in [4, 8, 12, 14] {
         let expected = dim_agent_capabilities::history::validate_context_boundary(
-            &timeline.context(at).await.unwrap(),
+            &replay_context(&timeline, at).await.unwrap(),
         );
         assert_eq!(
             dim_agent_capabilities::history::validate_context_boundary_at(&timeline, at)
@@ -1377,7 +1401,7 @@ async fn a_cut_on_another_branch_replays_the_segment() {
     .unwrap();
     for at in [3, 4] {
         let expected = dim_agent_capabilities::history::validate_context_boundary(
-            &timeline.context(at).await.unwrap(),
+            &replay_context(&timeline, at).await.unwrap(),
         );
         assert!(expected.is_err(), "the output is open at {at}");
         assert_eq!(
@@ -2410,8 +2434,11 @@ async fn reads_rebuild_lists_from_where_they_start_in_bounded_holds() {
     .await
     .unwrap();
     let retain_from = format!("event-{}", 3 * (TURNS - 2) - 2);
-    let checkpoint =
-        projection_checkpoint(&timeline.context(through).await.unwrap(), &retain_from).unwrap();
+    let checkpoint = projection_checkpoint(
+        &replay_context(&timeline, through).await.unwrap(),
+        &retain_from,
+    )
+    .unwrap();
     dim_agent_runtime::core::close_timeline(&timeline)
         .await
         .unwrap();
@@ -3919,24 +3946,7 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
         .collect();
     insert_documented_records(&connection, &kept);
     if from >= 31 {
-        let keys = |list: &[&str]| {
-            list.iter()
-                .map(|key| format!("'{key}'"))
-                .collect::<Vec<_>>()
-                .join(",")
-        };
-        connection
-            .execute_batch(&format!(
-                "UPDATE timeline_events SET context_render=1 WHERE kind IN ({});",
-                keys(dim_agent_types::CONTEXT_RENDER_KEYS)
-            ))
-            .unwrap();
-        connection
-            .execute_batch(&format!(
-                "UPDATE timeline_events SET context_state=1 WHERE kind IN ({});",
-                keys(dim_agent_types::CONTEXT_STATE_KEYS)
-            ))
-            .unwrap();
+        write_documented_context_switches(&connection);
     }
     if from >= 27 {
         connection
@@ -4821,7 +4831,7 @@ async fn a_v3_snapshot_is_bypassed_and_left_as_stored() {
     )
     .await
     .unwrap();
-    let full = timeline.context(3).await.unwrap();
+    let full = replay_context(&timeline, 3).await.unwrap();
     let recovered = read_context(&timeline, 3).await.unwrap();
     assert!(recovered.checkpoint.is_none());
     assert_eq!(
@@ -4915,7 +4925,8 @@ async fn a_resume_inside_a_merged_output_row_restores_the_full_context() {
     )
     .await
     .unwrap();
-    let checkpoint = projection_checkpoint(&timeline.context(5).await.unwrap(), "event-3").unwrap();
+    let checkpoint =
+        projection_checkpoint(&replay_context(&timeline, 5).await.unwrap(), "event-3").unwrap();
     assert_eq!(
         (
             checkpoint.resume.sequence,
@@ -4955,7 +4966,7 @@ async fn a_resume_inside_a_merged_output_row_restores_the_full_context() {
     )
     .await
     .unwrap();
-    let full = timeline.context(6).await.unwrap();
+    let full = replay_context(&timeline, 6).await.unwrap();
     let recovered = read_context(&timeline, 6).await.unwrap();
     assert!(recovered.checkpoint.is_some());
     assert_eq!(
@@ -5032,7 +5043,8 @@ async fn damaged_snapshot_cannot_silently_remove_retained_output_after_restart()
     )
     .await
     .unwrap();
-    let checkpoint = projection_checkpoint(&timeline.context(5).await.unwrap(), "event-3").unwrap();
+    let checkpoint =
+        projection_checkpoint(&replay_context(&timeline, 5).await.unwrap(), "event-3").unwrap();
     assert_eq!(checkpoint.resume.sequence, 5);
     assert!(!checkpoint.state.output.is_empty());
     let compaction = completed("event-3", "summary", 5);
@@ -5085,7 +5097,7 @@ async fn damaged_snapshot_cannot_silently_remove_retained_output_after_restart()
         )
         .await
         .unwrap();
-        let full = timeline.context(6).await.unwrap();
+        let full = replay_context(&timeline, 6).await.unwrap();
         let recovered = read_context(&timeline, 6).await.unwrap();
         let expected = vec![
             summary_message("summary"),
@@ -5288,7 +5300,7 @@ async fn recovery_ignores_disposable_snapshots_but_preserves_and_validates_facts
         )
         .await
         .unwrap();
-        let full = timeline.context(3).await.unwrap();
+        let full = replay_context(&timeline, 3).await.unwrap();
         assert!(full.checkpoint.is_none());
         let accelerated = read_context(&timeline, 3).await.unwrap();
         assert!(accelerated.checkpoint.is_none());
@@ -5479,7 +5491,8 @@ async fn nested_branches_read_fixed_ancestor_checkpoints_after_their_parents_clo
     )
     .await
     .unwrap();
-    let checkpoint = projection_checkpoint(&prefix.context(3).await.unwrap(), "event-3").unwrap();
+    let checkpoint =
+        projection_checkpoint(&replay_context(&prefix, 3).await.unwrap(), "event-3").unwrap();
     append(
         &store,
         key("nested", "main"),
@@ -6326,7 +6339,7 @@ async fn native_continuation_survives_sqlite_checkpoint_request_and_child_restor
         .await
         .unwrap();
         let checkpoint =
-            projection_checkpoint(&timeline.context(6).await.unwrap(), "event-3").unwrap();
+            projection_checkpoint(&replay_context(&timeline, 6).await.unwrap(), "event-3").unwrap();
         assert_eq!(checkpoint.state.output, content);
         let compaction = completed("event-3", "summary", 6);
         append(

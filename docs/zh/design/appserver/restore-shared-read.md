@@ -90,6 +90,8 @@ v17
 - **`h` 之前的 `S` 相同。** Timeline 以最后存储的序号 `h` 构建；没有追加时 `committed()` 就是 `h`。重启前留有未完成的工作时，部分能力在 `apply` 中追加结算终态（ToolExecutor、ContextPreparation、ModelProvider、InputQueue 欠写的决定、BackgroundExec 的唤醒输入；[单树装配](../../../architecture/rust-agent/single-tree.md#能力重载协议)“装载：失败判定”），于是后面几波的读者固定的 `S` 更大。并非每个读者都读到 `committed()`：ToolBinding 和 Prompt 的发布读到 `sequence()`，即已发布序号，终态尚未发布时它小于 `committed()`；Prompt 的采用读到 `branch/resume` 事件；上表逐一列出。这些位置都不小于 `h`，所以每个读者的范围都以同一段 `1..=h` 开头，只在打开期间写入的短尾上不同。
 - **热窗口还是存储。** 构建时热窗口为空，已发布序号就是 `h`，所以 `1..=h` 来自存储。打开期间追加的事件进入热窗口（Dispatcher 在 `TimelineContext::start` 之前不运行），写入任务提交后它们也在存储中。Dispatcher 自己只读热窗口。
 
+上表中点名 `read_context` 的行自 #942 起由事件查询的页满足，不再经过副本：`Timeline::query` 与 `query_with_tail` 直接读取存储的页，上下文投影经它们折叠（`history::read_context`，从检查点的 `resume` 或从祖先链起点）。副本服务剩下仍按区间读取的读取——`local`、`history`、检查点选取的锚点读取（`Timeline::checkpoint`）以及它们在 `Dispatcher`、`Branch`、`Session` 上的包装。
+
 ### 2.3 倍数
 
 上表的每个读者都各自解码 `1..=h`。v17 下每次这样的读取约等于一次全量读取，所以有 `n` 个读者的分支打开期间，除校验和树的扫描外还要做 `n` 次全量解码。plain 与 tools 配置中 `n` 是 10（apply 中 9 个，`branch/resume` 时 1 个），所以一次恢复要解码 12 次历史；产品装配每多一个重建的能力就多一次。成本主要在解码：#193 的剖析中，折叠本身在 10,000 条事件时最多 21 ms。
@@ -102,7 +104,7 @@ v17
 | --- | --- | --- |
 | Timeline 是每个分支的时间总线；能力经 Dispatcher 消费它，并通过读取它来重建 | [时间总线](../../../architecture/rust-agent/time-bus.md)、[timeline-storage §1](../../../architecture/rust-agent/timeline-storage.md#1-结构与所有权) | 副本位于 Timeline 的读取函数之后。Dispatcher、热窗口和订阅都不动 |
 | 重建：在重建闸门内固定 `S = Timeline::committed()`，读取 `local(..=S)`（本分支事件，不含祖先前缀）；读取覆盖旧代写出、尚未发布的终态，不等待持久化或 Dispatcher | [单树装配，能力重载协议](../../../architecture/rust-agent/single-tree.md#能力重载协议)“装载：重建” | 能力以同样的 `S` 调用同样的函数，拿到同样的事件。副本只覆盖 Timeline 存在之前就已存储的 `1..=h`；`h` 之后的一切，包括未发布的终态，照现在的方式从热窗口和存储读取 |
-| `local`、`history`、`context`、`context_with_checkpoint`、`committed` 的签名与语义 | [timeline-storage §4](../../../architecture/rust-agent/timeline-storage.md#4-读取) | 不变，包括错误。`through` 照旧检查。切片按序号选取，所以正好是存储对该区间的读取所返回的事件；切片只在通过存储的终点检查（下一行）后才提供 |
+| `local`、`history`、`committed` 与检查点选取的签名与语义 | [timeline-storage §4](../../../architecture/rust-agent/timeline-storage.md#4-读取) | 不变，包括错误。`through` 照旧检查。切片按序号选取，所以正好是存储对该区间的读取所返回的事件；切片只在通过存储的终点检查（下一行）后才提供 |
 | 区间起点可以位于原子批次内部；终点必须是批次边界，否则读取以 `InvalidInput` 失败 | [timeline-storage §4](../../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描)“分段读取”行；`TimelineStore::read`（[timeline_store.rs](../../../../crates/dim-agent-runtime/src/timeline_store.rs)） | 现在由存储用 `StoredEvent.batch_end` 检查终点，而恢复后的热窗口里没有 `1..=h` 的任何记录。副本保存填充读到的每条事件的批次终点，并在提供每个切片（本分支或祖先）之前对其终点做同样的检查（§4.3） |
 | 事件分配序号后即是事实；先后只看序号 | [时间总线 §1、§2](../../../architecture/rust-agent/time-bus.md#2-事件是总线上带序号的事实) | 副本依赖这一点：`1..=h` 的事件及其批次终点不会改变，所以之后取的、经过终点检查的切片等于之后做的读取 |
 | 只共享不可变事实；不推送重放；不做能力快照；不共享能力状态 | [时间总线 §2](../../../architecture/rust-agent/time-bus.md#2-事件是总线上带序号的事实)（每份状态只有一个所有者，只依据自己消费到的事件决定）；[timeline-storage §4](../../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描)（不为优化增加业务状态） | 副本保存的是实时分发交给每个订阅者的 `Arc<AgentEvent>`（`Committed(Arc<AgentEvent>)`），每条带着存储随它返回的批次终点，不含任何能力状态。每个读者自己调用读取，折叠进自己的状态 |
@@ -141,7 +143,7 @@ Timeline 只持有打开期间的弱引用，所以打开期间随阶段变化�
 
 ### 4.3 服务一次读取
 
-Timeline 的每次已提交历史读取都经过同一条内部路径，它把请求拆成热窗口部分和存储部分；`local`、`history`、`context`、`context_with_checkpoint` 以及 `Dispatcher`、`Branch`、`Session` 上的包装都走到这里。只有存储部分改变。每次对已存储区间的读取，无论本分支还是祖先，都经过下面两个接缝之一，两者执行同样的终点检查：
+Timeline 的每次以区间读取已存储事件的已提交历史读取都经过同一条内部路径，它把请求拆成热窗口部分和存储部分；`local`、`history`、检查点选取的锚点读取以及 `Dispatcher`、`Branch`、`Session` 上的包装都走到这里。事件查询不属于这条路径：它直接读取存储的页。只有存储部分改变。每次对已存储区间的读取，无论本分支还是祖先，都经过下面两个接缝之一，两者执行同样的终点检查：
 
 ```text
 本分支的存储部分 a..=b          （b <= 已发布序号，同现在）
@@ -152,18 +154,18 @@ Timeline 的每次已提交历史读取都经过同一条内部路径，它把�
   其他区间，本分支部分未填充 ........................ store.read(a..=b)               同现在
 
 祖先部分 [(branch, a..=b), ...]
-  来自：history 和 context 的祖先段；history 的单段捷径（只有一个祖先段，例如新子分支的
-  history(Some(0))）；context_with_checkpoint 的锚点读取，锚点在祖先上时
+  来自：history 的祖先段；history 的单段捷径（只有一个祖先段，例如新子分支的
+  history(Some(0))）；检查点选取的锚点读取，锚点在祖先上时
   不在打开期间，或区间超出祖先链 ...................... store.read / read_segments    同现在
   每个祖先，各自 1..=cut ........... 填充祖先链一次 ─┐
   其他组合，祖先链已填充 ............................─┴─> 每段一个切片
   其他组合，祖先链未填充 ............................ store.read / read_segments    同现在
 ```
 
-- **每次存储读取。** 本分支接缝服务对本分支已存储事件的每次读取：`local`、`history` 和 `context` 的本分支段，以及锚点在本分支上时 `context_with_checkpoint` 的锚点读取（`records(branch, snapshot.sequence, snapshot.sequence)`，锚点行位于原子批次内部时改为读取该段）。祖先接缝服务对祖先的每次读取：`history` 和 `context` 的祖先段、`history_records` 的单段捷径（只有一段时经按分支的读取而不是 `read_segments` 读取；新子分支的 `history(Some(0))` 就是这样的读取），以及锚点在祖先上时的锚点读取。Timeline 中没有其他读取已存储事件的路径。
+- **每次存储读取。** 本分支接缝服务对本分支已存储事件的每次读取：`local`、`history` 的本分支段，以及锚点在本分支上时检查点选取的锚点读取（`records(branch, snapshot.sequence, snapshot.sequence)`，锚点行位于原子批次内部时改为读取该段）。祖先接缝服务对祖先的每次读取：`history` 的祖先段、`history_records` 的单段捷径（只有一段时经按分支的读取而不是 `read_segments` 读取；新子分支的 `history(Some(0))` 就是这样的读取），以及锚点在祖先上时的锚点读取。Timeline 中没有其他读取已存储事件的路径。
 
 - **按序号切片。** 切片取序号落在区间内的条目（在 `event.sequence` 上二分查找），所以其中的事件就是存储对该区间的返回：每个序号一个事件，合并的输出行已拆成各自的事件。
-- **终点检查。** 提供切片 `a..=e` 之前（本分支部分的 `e` 是 `min(b, h)`，祖先段的 `e` 是该段的终点），先应用存储对区间的规则：起点可以位于原子批次内部，终点必须是批次边界。若 `e` 处条目的 `batch_end > e`，读取以 `AgentError::InvalidInput("sequence {e} is inside an atomic batch")` 失败，即两种存储（`MemoryTimelineStore` 与 SQLite 存储）返回的错误，不提供任何事件。若序号 1 和 2 是一个已持久化的批次且 `h >= 2`，无论副本是否已填充，`local(..=1)`、`history(Some(1))` 和 `context(1)` 都会失败，而 `local(..=2)` 返回事件 1 和 2，`local(2..=2)` 返回事件 2。`h` 是批次边界，所以 `b > h` 时缓存部分总能通过检查，`b` 由现有的 `h` 之后的读取检查。每个祖先切片都用同一个函数执行同样的检查：祖先段终止于它的截点，填充读取已经检查过截点，所以现有读者都不会让它失败，但没有切片会绕过它被提供。
+- **终点检查。** 提供切片 `a..=e` 之前（本分支部分的 `e` 是 `min(b, h)`，祖先段的 `e` 是该段的终点），先应用存储对区间的规则：起点可以位于原子批次内部，终点必须是批次边界。若 `e` 处条目的 `batch_end > e`，读取以 `AgentError::InvalidInput("sequence {e} is inside an atomic batch")` 失败，即两种存储（`MemoryTimelineStore` 与 SQLite 存储）返回的错误，不提供任何事件。若序号 1 和 2 是一个已持久化的批次且 `h >= 2`，无论副本是否已填充，`local(..=1)` 和 `history(Some(1))` 都会失败，而 `local(..=2)` 返回事件 1 和 2，`local(2..=2)` 返回事件 2。`h` 是批次边界，所以 `b > h` 时缓存部分总能通过检查，`b` 由现有的 `h` 之后的读取检查。每个祖先切片都用同一个函数执行同样的检查：祖先段终止于它的截点，填充读取已经检查过截点，所以现有读者都不会让它失败，但没有切片会绕过它被提供。
 - **`h` 之后。** `h` 之后的部分从不由副本提供，而是由现有代码从热窗口和存储读取，所以 `S` 更大的读者照现在的方式看到打开期间写入的终态。
 - **子区间。** `a > 1` 的 `local(a..=b)`、从 `resume` 起的检查点读取和检查点锚点读取，无论本分支还是祖先，在副本存在后是切片，之前是普通读取。它们从不填充副本：不从序号 1 开始的读取不会导致它之前的前缀被解码。
 - **不同的 `S`。** 读者各自固定自己的 `S`；副本只替换每个这样的区间开头那段已存储的前缀 `1..=h`。

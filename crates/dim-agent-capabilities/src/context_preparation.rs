@@ -545,7 +545,7 @@ impl ContextPreparation {
         let policy = self.policy.as_ref().ok_or_else(|| {
             ContextOpError::Model(HostError::failed("Context compaction is not available"))
         })?;
-        let through = self.timeline.committed();
+        let through = self.timeline.sequence();
         let facts = self
             .timeline
             .policy_facts(through, "")
@@ -636,8 +636,11 @@ impl ContextPreparation {
             return Ok(None);
         }
         let mut tail: Vec<(String, Vec<Arc<dim_agent_types::AgentEvent>>)> = Vec::new();
-        let mut read =
-            crate::history::FoldRead::new(&self.timeline, Some(call.event.id.clone()), through);
+        let mut read = crate::history::FoldRead::timeline(
+            &self.timeline,
+            Some(call.event.id.clone()),
+            through,
+        );
         loop {
             let Some(page) = read.next(256).await.map_err(ContextOpError::Read)? else {
                 break;

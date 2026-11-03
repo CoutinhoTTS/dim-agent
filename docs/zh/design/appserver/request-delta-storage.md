@@ -362,7 +362,7 @@ node body      = { parent: string | null, message: Message }                    
 
 锚定在 42 的快照记录 `resume` 30，即第一条保留的历史条目的事件。`resume` 不晚于该次压缩的 `through`（[timeline-storage §4](../../../architecture/rust-agent/timeline-storage.md#压缩检查点)、[history.rs](../../../../crates/dim-agent-capabilities/src/history.rs) 的 `projection_checkpoint`），所以 30 与 42 之间的请求行写入时还没有任何快照选定它，它们的列表一直回到 `u1`。
 
-检查点读取照旧从 30 开始。其中第一个请求行由遍历该行自己的列表还原：只读内容行，每次持锁至多加载 256 个节点。不读取在 30 之前结束的任何行，也不读取 30 之前的任何请求行，这正是 [timeline-storage §4](../../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描) 对 `context_with_checkpoint` 的约定。它加载的节点是该读取返回的请求的消息，v16 经这些行的引用加载的正是这些。之后的行（包括 43 处的新列表）从所保留的请求按序继续。
+检查点读取照旧从 30 开始。其中第一个请求行由遍历该行自己的列表还原：只读内容行，每次持锁至多加载 256 个节点。不读取在 30 之前结束的任何行，也不读取 30 之前的任何请求行，这正是 [timeline-storage §4](../../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描) 对检查点读取的约定。它加载的节点是该读取返回的请求的消息，v16 经这些行的引用加载的正是这些。之后的行（包括 43 处的新列表）从所保留的请求按序继续。
 
 ## 11. 格式 v17
 

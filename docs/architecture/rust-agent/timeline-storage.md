@@ -75,13 +75,16 @@
 
 | API | 语义 |
 | --- | --- |
-| `Timeline::context(through).await` | 祖先链起点起截至 `through` 的完整事实重放，不需要解释器或快照 |
-| `Timeline::context_with_checkpoint(through, interpreter, decode).await` | 选取 sequence 不大于 `through`、解释器相同的最近恢复快照，校验锚点事实后从其 `resume` 起读取；无可用快照时等同 `context` |
+| `Timeline::query(query).await` | 一次有界事件读取：范围、种类、上下文标志、事件 id、一条谓词、顺序与分页（[插件契约 §5.4](../../design/plugin-contract.md#54-事件查询)） |
+| `Timeline::query_with_tail(query).await` | 同一读取，加上本分支已写入、尚未发布的事实，并回报所用截止序号（[ADR 020](../../adr/020-timeline-read-convergence.md) D3） |
+| `Timeline::checkpoint(through, interpreter, decode).await` | 选取 sequence 不大于 `through`、解释器相同的最近恢复快照，校验锚点事实并把 `resume` 解析成链上位置 |
 | `Timeline::history(through).await` | 祖先链加本分支截至 `through` 的完整固定历史 |
 | `Timeline::local(range).await` | 本分支已写入事件的区间（默认终点 `committed()`），可分页 |
 | `Timeline::trace(sequence).await` | 该事件的 before 轨迹 |
 
-`through` 不得超过已写入位置，也不得位于原子批次内部。区间在热窗口内时直接取自内存；否则已发布部分读取 `TimelineStore`，其后尚未发布的部分取自热窗口（热窗口保留全部未分发事件，未发布事件一定在其中）。`Branch` 与 `Session` 的同名读取以已发布位置为上限。
+上下文投影的折叠在投影的所有者（`dim-agent-capabilities` 的 `history`）：`read_context` 先取 `Timeline::checkpoint` 选出的快照，再从 `resume` 起用事件查询分页折叠携带上下文标志的事实，没有可用快照时从祖先链起点折叠，快照不可用（状态渲染失败，或按 id 找不到 resume 事件）时回退为完整事实重放；`replay_context` 是同一折叠而不选快照。
+
+`through` 不得超过已写入位置（`Timeline::bound` 检查）。区间读取的终点须为原子批次边界，事件查询的页可以落在批次内部。区间在热窗口内时直接取自内存；否则已发布部分读取 `TimelineStore`，其后尚未发布的部分取自热窗口（热窗口保留全部未分发事件，未发布事件一定在其中）。`Branch` 与 `Session` 的同名读取以已发布位置为上限；事件查询由服务自己按各段截点或已发布位置设界。
 
 ### 有界读取与恢复扫描
 
@@ -89,8 +92,7 @@
 
 | 路径 | 读取边界 | 资源与校验 |
 | --- | --- | --- |
-| `context(through)` | 完整祖先链和本分支前缀 | 按段读取，每段释放读连接 |
-| `context_with_checkpoint(through, ..)` | 最近有效快照的 `resume` 起的祖先链和本分支后缀 | 不扫描快照恢复位置之前的请求正文 |
+| `read_context(through)` | 最近有效快照的 `resume` 起的祖先链和本分支后缀；没有快照时是完整前缀 | 分页读取，页按事件计数、不与原子批次对齐，每页释放读连接；不扫描快照恢复位置之前的请求正文 |
 | `local(range)`、`trace(sequence)` | 指定区间或命中事件的物理行 | 合并行完整解码后按逻辑序号过滤；trace 只返回指定事件的轨迹 |
 | 分段读取 | 固定水位，按键 seek；内部读段可切开原子批次，`TimelineStore::read/read_segments` 的最终区间终点须为批次边界 | 每段结束释放读连接；合并行完整解码后截取，不在锁内解码无限历史 |
 | 不读请求正文的分页 | `read_page_without_request_bodies`：历史分页、摘要、协作与流式投影；批次边界与 `read_page` 相同 | 不还原 `context/prepare`、`model/call` 的请求，也不加载其内容行，只校验记录种类与引用形状（[请求增量存储 §7.5](../../design/appserver/request-delta-storage.md#75-不使用请求正文的读取)）；使用请求的读取与首次恢复仍完整校验 |
@@ -123,7 +125,7 @@ fork 与 Session 删除在复制连接上分块提交（事件与快照每 256 �
 | `state` | 投影在 `resume` 之前的状态：`retain_from` 锚点、prompt 条目与 revision、已投递的上下文基线、已提交但未采用的输入、最新 `context/configured`、未闭合的输出与工具 |
 
 - 写入：ContextPolicy 在 completed 事实被采用后构建快照，`Timeline::save_snapshot` 等锚点发布后才写缓存；构建或保存失败只记录告警，不回滚事实、不重做模型工作。
-- 读取：`context_with_checkpoint` 按解释器选候选，校验锚点 ID、sequence、completed 种类、游标，并按 `resume.event_id` 定位后校验 resume 位于固定祖先链和 source through 之内（按 ID 查不到时用记录的位置）；解码失败、摘要不符、越界或孤立快照一律忽略并回退完整事实重放。默认解释器有两个读取入口：`HistoryRenderer::rendered_context` 返回上下文与其渲染，校验检查点的那次渲染就是调用方使用的渲染，没有检查点时也在这里渲染一次；`HistoryRenderer::context` 只返回上下文，有检查点时渲染一次用于校验并丢弃结果，没有检查点时不渲染。两者的检查点渲染失败都回退完整重放（`rendered_context` 渲染该重放，`context` 不渲染）；读取必需事实的错误不被吞掉，`history::read_context` 与 ContextPolicy 的预算校验走 `context`。
+- 读取：`Timeline::checkpoint` 按解释器选候选，校验锚点 ID、sequence、completed 种类、游标，并按 `resume.event_id` 定位后校验 resume 位于固定祖先链和 source through 之内（按 ID 查不到时用记录的位置）；解码失败、摘要不符、越界或孤立快照一律忽略并回退完整事实重放。默认解释器有两个读取入口：`HistoryRenderer::rendered_context` 返回上下文与其渲染，校验检查点的那次渲染就是调用方使用的渲染，没有检查点时也在这里渲染一次；`HistoryRenderer::context` 只返回上下文，有检查点时渲染一次用于校验并丢弃结果，没有检查点时不渲染。两者的检查点渲染失败——或按 id 找不到 resume 事件、折叠为空——都回退完整重放（`rendered_context` 渲染该重放，`context` 不渲染）；读取必需事实的错误不被吞掉，`history::read_context` 与 ContextPolicy 的预算校验走 `context`。
 - 投影从 `state` 开始重放 `resume` 起的事件，并丢弃游标及其之前的条目。编码与摘要规则见[存储格式](../../design/appserver/native-storage-format.md#可丢弃恢复快照)。
 
 ### 使用方

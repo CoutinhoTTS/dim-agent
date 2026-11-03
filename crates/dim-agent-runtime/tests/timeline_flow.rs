@@ -283,10 +283,6 @@ async fn history_has_no_byte_quota_and_atomic_cuts_stay_fixed() {
         timeline.local(..=batch[0].sequence).await,
         Err(AgentError::InvalidInput(_))
     ));
-    assert!(matches!(
-        timeline.context(batch[0].sequence).await,
-        Err(AgentError::InvalidInput(_))
-    ));
     assert_eq!(
         timeline
             .history(Some(batch[1].sequence))
@@ -574,10 +570,10 @@ async fn before_keys_accept_a_domain_wildcard() {
     assert_eq!(other.tags, None);
 }
 
-/// A checkpointed read reads the anchor as one row and never a range that
+/// A checkpoint selection reads the anchor as one row and never a range that
 /// spans it to the cut, so the tail is not decoded twice.
 #[tokio::test]
-async fn a_checkpointed_read_decodes_one_anchor_event() {
+async fn a_checkpoint_selection_decodes_one_anchor_event() {
     let store = Arc::new(Reads::default());
     store
         .memory
@@ -621,12 +617,11 @@ async fn a_checkpointed_read_decodes_one_anchor_event() {
     let through = reader.committed();
     assert_eq!(through, 1051);
     store.segments.lock().unwrap().clear();
-    let context = reader
-        .context_with_checkpoint(through, "test/anchor", checkpoint_resume)
+    let checkpoint = reader
+        .checkpoint(through, "test/anchor", checkpoint_resume)
         .await
         .unwrap();
-    assert!(context.checkpoint.is_some());
-    assert_eq!(context.events.len(), (through - 39) as usize);
+    assert!(checkpoint.is_some());
     let segments = store.segments.lock().unwrap();
     assert_eq!(
         segments
@@ -643,6 +638,7 @@ async fn a_checkpointed_read_decodes_one_anchor_event() {
     );
 }
 
+/// A live branch serves the anchor from its hot window: the anchor check makes
 /// A live branch serves the anchor from its hot window: the anchor check makes
 /// no store read, and the checkpoint is used.
 #[tokio::test]
@@ -690,16 +686,15 @@ async fn a_checkpoint_anchored_in_the_hot_window_is_used() {
     let through = branch.committed();
     assert_eq!(through, 1051);
     store.segments.lock().unwrap().clear();
-    let context = branch
-        .context_with_checkpoint(through, "test/anchor", checkpoint_resume)
+    let checkpoint = branch
+        .checkpoint(through, "test/anchor", checkpoint_resume)
         .await
         .unwrap();
-    assert!(context.checkpoint.is_some(), "the checkpoint is used");
-    assert_eq!(context.events.len(), (through - 39) as usize);
+    assert!(checkpoint.is_some(), "the checkpoint is used");
     assert_eq!(
         *store.segments.lock().unwrap(),
-        [("main".to_string(), 40..=through)],
-        "the anchor comes from the hot window; only the context read reaches the store"
+        [],
+        "the anchor comes from the hot window: the selection reads no segment"
     );
 }
 
@@ -741,19 +736,17 @@ async fn a_checkpoint_anchored_inside_an_atomic_batch_is_still_used() {
     let reader = Timeline::restore(Ctx::root().unwrap(), key, vec![], store.clone())
         .await
         .unwrap();
-    let context = reader
-        .context_with_checkpoint(52, "test/anchor", checkpoint_resume)
+    let checkpoint = reader
+        .checkpoint(52, "test/anchor", checkpoint_resume)
         .await
-        .unwrap();
-    assert!(
-        context.checkpoint.is_some(),
-        "a mid-batch anchor still selects its checkpoint"
-    );
-    assert_eq!(context.events.len(), 13);
+        .unwrap()
+        .expect("a mid-batch anchor still selects its checkpoint");
+    assert_eq!(checkpoint.resume.sequence, 40);
 }
 
-/// The resume event the checkpoint names by id is where the read begins; the
-/// position stored beside it is only used when the store holds no such id.
+/// The resume event the checkpoint names by id is the position the read
+/// begins at; the position stored beside it is only used when the store holds
+/// no such id.
 #[tokio::test]
 async fn a_checkpoint_resumes_at_the_event_its_id_names() {
     let store = Arc::new(Reads::default());
@@ -798,19 +791,18 @@ async fn a_checkpoint_resumes_at_the_event_its_id_names() {
         .await
         .unwrap();
     let through = reader.committed();
-    let context = reader
-        .context_with_checkpoint(through, "test/anchor", checkpoint_resume_by_id)
+    let checkpoint = reader
+        .checkpoint(through, "test/anchor", checkpoint_resume_by_id)
         .await
-        .unwrap();
-    assert!(context.checkpoint.is_some());
+        .unwrap()
+        .expect("the checkpoint is usable");
     assert_eq!(
-        context.events.first().map(|event| event.id.as_str()),
-        Some(resume.id.as_str()),
-        "the read begins at the event the id names, not at the stored position"
-    );
-    assert_eq!(
-        context.events.len(),
-        (through - resume.sequence + 1) as usize
+        (
+            checkpoint.resume.event_id.as_str(),
+            checkpoint.resume.sequence
+        ),
+        (resume.id.as_str(), resume.sequence),
+        "the resume event the id names is resolved, not the stored position"
     );
 }
 
@@ -858,13 +850,12 @@ async fn a_resume_id_the_store_does_not_hold_keeps_the_recorded_position() {
         .await
         .unwrap();
     let through = reader.committed();
-    let context = reader
-        .context_with_checkpoint(through, "test/anchor", checkpoint_resume_by_id)
+    let checkpoint = reader
+        .checkpoint(through, "test/anchor", checkpoint_resume_by_id)
         .await
-        .unwrap();
-    assert!(context.checkpoint.is_some());
-    assert_eq!(context.events.first().map(|event| event.sequence), Some(40));
-    assert_eq!(context.events.len(), (through - 39) as usize);
+        .unwrap()
+        .expect("the checkpoint is usable");
+    assert_eq!(checkpoint.resume.sequence, 40);
 }
 
 #[tokio::test]

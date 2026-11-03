@@ -171,7 +171,6 @@ async fn batch_reads(timeline: &Timeline) -> BatchReads {
     vec![
         sequences(timeline.local(..=1).await),
         sequences(timeline.history(Some(1)).await),
-        sequences(timeline.context(1).await.map(|context| context.events)),
         sequences(timeline.local(..=2).await),
         sequences(timeline.local(2..=2).await),
     ]
@@ -564,13 +563,7 @@ async fn restore_settles_interrupted_creates_and_keeps_failed_directories_inacti
         "{:?}",
         AgentError::InvalidInput("sequence 1 is inside an atomic batch".into())
     ));
-    let batch = vec![
-        inside.clone(),
-        inside.clone(),
-        inside,
-        Ok(vec![1, 2]),
-        Ok(vec![2]),
-    ];
+    let batch = vec![inside.clone(), inside, Ok(vec![1, 2]), Ok(vec![2])];
     for _ in 0..2 {
         let agent = MinimalHost::start(&builder).await.unwrap();
         let session = soon(agent.restore_session("saved".into())).await.unwrap();

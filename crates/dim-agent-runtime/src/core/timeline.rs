@@ -506,9 +506,13 @@ impl Timeline {
         })
     }
     fn through(&self, through: Option<u64>) -> Result<u64> {
-        let committed = self.committed();
-        let through = through.unwrap_or(committed);
-        if through > committed {
+        through.map_or_else(|| Ok(self.committed()), |through| self.bound(through))
+    }
+    /// The last sequence a read may take: `through`, which may not pass the
+    /// sequence this branch has assigned.
+    #[service(skip)]
+    pub fn bound(&self, through: u64) -> Result<u64> {
+        if through > self.committed() {
             return Err(AgentError::InvalidInput(format!(
                 "future timeline sequence {through}"
             )));
@@ -1115,11 +1119,6 @@ impl Timeline {
             .collect())
     }
 
-    /// Full fact replay; no interpreter or snapshot is required.
-    #[service(skip)]
-    pub async fn context(&self, through: u64) -> Result<ContextHistory> {
-        self.context_from(through, None).await
-    }
     /// The policy-relevant events at `through`, filtered by the store.
     #[service(skip)]
     pub async fn policy_facts(&self, through: u64, turn_id: &str) -> Result<PolicyFacts> {
@@ -1363,68 +1362,6 @@ impl Timeline {
             offset: 0,
         };
         Ok(self.query(query).await?.positions.into_iter().next())
-    }
-    /// Select an interpreter-compatible cache before decoding or trimming facts.
-    /// Invalid caches are disposable; failures reading required facts are not.
-    #[service(skip)]
-    pub async fn context_with_checkpoint(
-        &self,
-        through: u64,
-        interpreter: &str,
-        decode: fn(&RecoverySnapshot, &AgentEvent) -> Option<ProjectionCheckpoint>,
-    ) -> Result<ContextHistory> {
-        let checkpoint = self.checkpoint(through, interpreter, decode).await?;
-        self.context_from(through, checkpoint).await
-    }
-    async fn context_from(
-        &self,
-        through: u64,
-        checkpoint: Option<ProjectionCheckpoint>,
-    ) -> Result<ContextHistory> {
-        let through = self.through(Some(through))?;
-        let segments = self
-            .0
-            .ancestors
-            .iter()
-            .cloned()
-            .chain(std::iter::once((self.0.key.branch_id.clone(), through)));
-        let resume = checkpoint.as_ref().map(|checkpoint| &checkpoint.resume);
-        let mut active = resume.is_none();
-        let ranges: Vec<_> = segments
-            .filter_map(|(branch, cut)| {
-                let start = match &resume {
-                    Some(position) if !active && position.branch_id == branch => {
-                        active = true;
-                        position.sequence
-                    }
-                    _ => 1,
-                };
-                (active && cut > 0).then_some((branch, start, cut))
-            })
-            .collect();
-        let records = self.history_records(ranges.clone()).await?;
-        let mut events = Vec::new();
-        let mut positions = Vec::new();
-        for ((branch, _, _), records) in ranges.into_iter().zip(records) {
-            for event in records {
-                positions.push(TimelinePosition {
-                    branch_id: branch.clone(),
-                    sequence: event.sequence,
-                });
-                events.push(event);
-            }
-        }
-        Ok(ContextHistory {
-            checkpoint,
-            ancestry: self
-                .0
-                .ancestors
-                .iter()
-                .map(|(branch, _)| branch.clone())
-                .collect(),
-            events,
-            positions,
-        })
     }
     /// Waits for the anchor's durable publication, then writes only the cache.
     /// The owner tracks this future along with its other preparation work.
