@@ -29,6 +29,8 @@
   "params": {
     "agent_timeout_multiplier": 1.0,
     "harbor_version": "0.18.0",
+    "k": 3,
+    "model_name": "deepseek/deepseek-flash",
     "n_concurrent_trials": 5,
     "timeout_multiplier": 1.0,
     "verifier_no_proxy": "localhost,127.0.0.1,::1,host.docker.internal",

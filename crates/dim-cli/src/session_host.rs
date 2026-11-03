@@ -1656,11 +1656,19 @@ impl Worker {
                     return Ok(());
                 }
                 let model = self.model.clone();
-                match configure::run(&mut self.client, &self.session_id, model.as_ref(), &text)
-                    .await
-                {
-                    Ok(report) => self.report(report.lines.join("\n"), false),
-                    Err(error) => self.report(error.to_string(), true),
+                let result =
+                    configure::run(&mut self.client, &self.session_id, model.as_ref(), &text).await;
+                if matches!(text.as_str(), "/effort" | "/reasoning") {
+                    self.send(Update::EffortChoices(
+                        result
+                            .map(|report| report.effort.expect("bare effort query has choices"))
+                            .map_err(|error| error.to_string()),
+                    ));
+                } else {
+                    match result {
+                        Ok(report) => self.report(report.lines.join("\n"), false),
+                        Err(error) => self.report(error.to_string(), true),
+                    }
                 }
             }
             Command::SelectModel {
@@ -4205,6 +4213,7 @@ async fn repository_workspaces(workspace: &str) -> Vec<String> {
     let read = async {
         let path = std::path::Path::new(workspace);
         let root = git_output(path, &["rev-parse", "--show-toplevel"]).await?;
+        let root = String::from_utf8(root).ok()?;
         let root = std::path::PathBuf::from(root.trim());
         let root = std::fs::canonicalize(&root).unwrap_or(root);
         let relative = path.strip_prefix(&root).ok()?;
@@ -4219,7 +4228,7 @@ async fn repository_workspaces(workspace: &str) -> Vec<String> {
 }
 
 /// One git read from the workspace; a failed read is no answer.
-async fn git_output(workspace: &std::path::Path, args: &[&str]) -> Option<String> {
+async fn git_output(workspace: &std::path::Path, args: &[&str]) -> Option<Vec<u8>> {
     let output = tokio::process::Command::new("git")
         .current_dir(workspace)
         .args(args)
@@ -4229,26 +4238,21 @@ async fn git_output(workspace: &std::path::Path, args: &[&str]) -> Option<String
         .output()
         .await
         .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    output.status.success().then_some(output.stdout)
 }
 
 /// The listed worktrees, each joined with the workspace's relative directory.
-fn worktree_workspaces(list: &str, relative: &std::path::Path, workspace: &str) -> Vec<String> {
+fn worktree_workspaces(list: &[u8], relative: &std::path::Path, workspace: &str) -> Vec<String> {
     let mut workspaces = vec![workspace.to_owned()];
-    let mut entry: Option<&str> = None;
+    let mut entry: Option<&[u8]> = None;
     let mut bare = false;
-    for field in list.split('\0') {
+    for field in list.split(|byte| *byte == 0) {
         if field.is_empty() {
-            if let Some(path) = entry.take()
+            if let Some(path) = entry.take().and_then(|path| std::str::from_utf8(path).ok())
                 && !bare
             {
                 let path = std::path::Path::new(path);
                 let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-                // A stored Session's workspace is UTF-8, so a worktree whose
-                // path is not cannot be one.
                 let joined = path.join(relative);
                 if let Some(joined) = joined.to_str()
                     && !workspaces.iter().any(|workspace| workspace == joined)
@@ -4257,9 +4261,9 @@ fn worktree_workspaces(list: &str, relative: &std::path::Path, workspace: &str) 
                 }
             }
             bare = false;
-        } else if let Some(path) = field.strip_prefix("worktree ") {
+        } else if let Some(path) = field.strip_prefix(b"worktree ") {
             entry = Some(path);
-        } else if field == "bare" {
+        } else if field == b"bare" {
             bare = true;
         }
     }

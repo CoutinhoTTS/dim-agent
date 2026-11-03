@@ -443,7 +443,7 @@ pub async fn apply(
         },
         Area::Scheduled => match scheduler::apply(client, &request.action).await {
             Ok(scheduler::Answer::Jobs { catalog, note }) => ManagementResult::View {
-                view: Box::new(scheduler::view(&catalog, &actions, named(workspace))),
+                view: Box::new(scheduler::view(&catalog, &actions, workspace)),
                 note,
             },
             Ok(scheduler::Answer::Detail(detail)) => ManagementResult::Detail(detail),
@@ -457,9 +457,8 @@ pub async fn apply(
             Err(scheduler::Failure::Conflict { message, catalog }) => {
                 ManagementResult::Refused(ManagementRefusal::Conflict {
                     message,
-                    view: catalog.map(|catalog| {
-                        Box::new(scheduler::view(&catalog, &actions, named(workspace)))
-                    }),
+                    view: catalog
+                        .map(|catalog| Box::new(scheduler::view(&catalog, &actions, workspace))),
                 })
             }
         },

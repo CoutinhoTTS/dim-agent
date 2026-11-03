@@ -443,7 +443,11 @@ pub async fn catalog(client: &mut Client) -> Result<Catalog, String> {
 }
 
 /// The jobs as entries, with the kinds the daemon can serve.
-pub(super) fn view(catalog: &Catalog, available: &[ActionKind], cwd: &str) -> ManagementView {
+pub(super) fn view(
+    catalog: &Catalog,
+    available: &[ActionKind],
+    cwd: Option<&str>,
+) -> ManagementView {
     let mut groups = Groups::default();
     for job in &catalog.jobs {
         let mut states = Vec::new();
@@ -472,7 +476,7 @@ pub(super) fn view(catalog: &Catalog, available: &[ActionKind], cwd: &str) -> Ma
         title: None,
         revision: None,
         document: None,
-        create: Some(create(cwd)),
+        create: cwd.map(create),
         actions: super::area_kinds(available),
         groups: groups.into_vec(),
         issues: Vec::new(),

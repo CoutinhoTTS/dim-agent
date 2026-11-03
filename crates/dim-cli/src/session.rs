@@ -290,7 +290,7 @@ pub async fn chat(
         } else {
             "workspace"
         },
-        options.workspace().as_str(),
+        options.launch_dir().display(),
         session_id
     ))?;
     let policy = match (selected, options.permission) {

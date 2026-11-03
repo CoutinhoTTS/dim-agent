@@ -907,6 +907,14 @@ impl TimelineStore for BarrierStore {
     ) -> BoxFuture<'a, Result<Option<RecoverySnapshot>>> {
         self.inner.latest_snapshot(k, s, interpreter)
     }
+    fn query<'a>(
+        &'a self,
+        k: &'a TimelineKey,
+        query: &'a dim_agent_runtime::TimelineQuery,
+        through: u64,
+    ) -> BoxFuture<'a, Result<dim_agent_runtime::TimelineQueryPage>> {
+        self.inner.query(k, query, through)
+    }
     fn append(&self, k: TimelineKey, e: Vec<StoredEvent>, publish: PublishCallback) -> Result<()> {
         let mode = self.mode.clone();
         self.inner.append(

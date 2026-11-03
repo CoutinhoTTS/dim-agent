@@ -348,12 +348,11 @@ impl Area {
     }
 
     /// Whether a request for this area names the workspace: the areas that
-    /// read or write this project's own files. The Scheduler's jobs are the
-    /// host's, but a new job's document takes its `cwd` from the workspace.
+    /// read or write this project's own files.
     pub fn names_workspace(&self) -> bool {
         matches!(
             self,
-            Self::Skills | Self::Hooks | Self::Mcp | Self::Scheduled | Self::Workflow
+            Self::Skills | Self::Hooks | Self::Mcp | Self::Workflow
         )
     }
 }
@@ -1072,6 +1071,7 @@ pub enum Update {
         result: Result<(), String>,
     },
     Models(Result<ModelList, String>),
+    EffortChoices(Result<crate::configure::EffortChoices, String>),
     /// A catalog `models()` asked `provider.refresh` to fill holds models
     /// now: a picker that is still open reads the list again.
     ModelsRefilled,

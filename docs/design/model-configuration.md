@@ -310,6 +310,32 @@ and show supported choices from the existing `provider.catalog` response, withou
 mutation or a new query method. Bare `/agent` uses existing `agent.list` IDs, names
 and descriptions; selection uses an exact ID. Empty/unavailable choices are explicit.
 
+In both native TUI modes, bare `/effort` (alias `/reasoning`) opens an inline
+single-choice dialog in place of the composer, using the AskUser prompt's border
+and numbered rows. It lists only the adopted model's advertised efforts, including
+the model's declared reasoning-off option. The effective effort is marked
+current and initially focused; an absent preference is shown as Model default,
+without inventing an effective value. ↑/↓ or 1–9 move the selection, Enter applies
+it through the same command as `/effort VALUE`, and Esc closes without a write.
+Loading, an empty choice list and catalog errors are visible in the dialog and
+remain cancellable. A selection from a different adopted model is not applied;
+the user reopens `/effort` for that model. The dialog does not save model defaults
+or answer a pending AskUser question; that question resumes when it closes.
+The line client still prints choices, and explicit-value forms are unchanged.
+
+```text
+╭─ Reasoning effort ────────────────────────────────╮
+│ relay / reasoner                                  │
+│ Current: medium                                   │
+│                                                   │
+│   1 ( ) low                                       │
+│ › 2 (•) medium                                    │
+│   3 ( ) high                                      │
+│   4 ( ) none                                      │
+│ ↑↓ move · 1-9 select · Enter apply · Esc cancel     │
+╰───────────────────────────────────────────────────╯
+```
+
 ```text
 > /effort high
 Reasoning effort configuration adopted: high
@@ -329,8 +355,8 @@ Enter submits a command; errors keep the prompt and Session. Ctrl+C/EOF keep the
 existing behavior for turns. Ctrl+C during configuration waits for its accepted
 operation's result before another line; the reply may describe an already adopted
 change. Further interrupts keep waiting and are consumed before returning to the
-editor rather than clearing or exiting the next draft. Lines wrap at terminal width and use existing escaping. No
-overlay, fullscreen UI, input queue or typeahead change. Command text does not
+editor rather than clearing or exiting the next draft. Lines wrap at terminal width and use existing escaping. The
+line client has no dialog, input queue or typeahead change. Command text does not
 become model input; headless prompt/stdin content keeps its literal meaning.
 
 ## Impact and verification

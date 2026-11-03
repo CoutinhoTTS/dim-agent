@@ -15,31 +15,54 @@ contract records the native platform acceptance evidence and outstanding checks.
 ## Transcript detail settings
 
 In both scrollback and fullscreen TUI, `/settings` exposes independent
-`Tool details` and `Thinking details` switches. Enter, Left/Right or Space
-toggles the selected switch and saves it immediately in the CLI home.
-Both switches default to collapsed.
-Saved preferences are preserved independently for both switches.
+`Tool details` and `Thinking details` settings. Enter, Left/Right or Space
+cycles Tool details through collapsed, summary and expanded, and toggles
+Thinking details between collapsed and expanded. Changes save immediately in
+the CLI home. Both settings default to collapsed; saved preferences, including
+the old boolean tool preference, are preserved independently.
 
 ```text
 Settings · Interface
-  Tool details       collapsed
+  Tool details       summary
   Thinking details   collapsed
 ```
 
-`/tools` changes tool details only, retaining its existing control of compaction
-details. Thinking details controls both streaming and completed thoughts,
+Collapsed tool groups retain their existing header and member cards. Summary
+adds one row per call, in call order, naming its tool and input target or command,
+without output, diffs or script bodies. Each row truncates to one terminal row;
+a multiline command shows its first nonblank line followed by `…`. Expanded
+retains the full tool details. Clicking a tool header cycles the same three forms
+for that group only. A member's summary row still opens its conversation.
+
+`/tools` cycles the three tool forms, retaining its control of compaction details:
+only expanded shows a compaction's summary body. Thinking details controls both streaming and completed thoughts,
 including the line side panel. Changing either setting updates its retained
 history and live content without changing the other setting. Scrollback already
 written to the terminal remains append-only; fullscreen redraws retained history.
 
 ## Command menu
 
-In both scrollback and fullscreen TUI, group commands by category and sort
-categories and command names alphabetically by their canonical English identifiers.
-Search relevance takes priority; equally ranked matches use the same category/name order.
+In both scrollback and fullscreen TUI, list commands in a fixed task order:
+Session, model and permissions, extensions and automation, view, then app.
+Within each category use the following order, not alphabetical or recent-use order:
+
+| Category | Commands in order |
+| --- | --- |
+| `session` | `/new`, `/resume`, `/timeline`, `/goal`, `/tasks`, `/lines`, `/branch`, `/fork`, `/compact`, `/usage`, `/rename`, `/web` |
+| `model` | `/models`, `/agent`, `/effort`, `/fast`, `/permissions`, `/connect`, `/login` |
+| `extensions` | `/skills`, `/mcp`, `/plugins`, `/hooks`, `/scheduled`, `/workflow`, `/workflow:save`, `/reload-skills`, `/runtime` |
+| `view` | `/theme`, `/language`, `/tools`, `/tui` |
+| `app` | `/settings`, `/keys`, `/exit` |
+
+`/fast` is listed only when the model advertises service tiers.
+Search relevance takes priority; equally ranked matches keep this task order.
+The order is independent of the interface language. Opening `/` selects `/new`;
+`/exit` is last in the unfiltered command list.
 Exit requires its exact name or alias before dispatch: choosing an
 incomplete match fills the command name and keeps the composer open. Exact typed
 commands, including hidden commands, retain their own dispatch behavior.
+Menu selection can still complete rather than dispatch an exact name: commands
+with inline arguments and `/goal` fill the composer for a separate submission.
 The command menu lists `/permissions` as the permission entry. `/approvals` and `/approval`
 remain compatibility aliases when typed directly. Run, queue and steer keys are
 omitted from the menu. The menu only lists slash commands: the view actions for
@@ -47,7 +70,8 @@ picking an earlier message and scrolling to the top or bottom are also omitted;
 `Tab`, `Home` and `End` retain their bindings.
 
 The menu fits the available terminal columns and rows in both modes. Command
-names take priority over descriptions and shortcut labels; a shortcut that
+names take priority over category labels, descriptions and shortcut labels;
+category labels shorten when needed to preserve command names. A shortcut that
 would crowd out its command name is omitted from the row, without changing
 the binding. On short screens, fewer commands are shown and the window follows
 the selection. Scrollback keeps the command draft visible above the menu and
@@ -90,12 +114,15 @@ Natural height                                      Short budget, 5 rows
 
 ```text
 Commands
-  app     /exit        exit
-  app     /keys        show the key bindings
-  model   /permissions   file access, tool approval, process isolation and command rules
-  session /rename      rename this session
+  session /new         start a new session
+  session /resume      resume a previous session
+  session /timeline    jump to a message of the shown line
+  session /goal        follow or change the shown line's goal
+  session /tasks       view command output or interrupt a member
+  session /lines       follow, talk to and end this session's lines
 
-/ + Enter          -> /exit (completion only)
+/ + Enter          -> start a new session
+/ex + Enter        -> /exit (completion only)
 /exit + Enter      -> exit
 /permissions + Enter -> permission controls
 ```
@@ -104,10 +131,10 @@ Commands
 Fullscreen, 8 rows             Scrollback, 8 rows
 +- Command Palette -------+
 | >                       |   +- input -----------------+
-| app /exit               |   | > /                     |
+| session /new            |   | > /                     |
 +-------------------------+   +-------------------------+
                               +-------------------------+
-+- input -----------------+   | app /exit               |
++- input -----------------+   | session /new            |
 |                         |   +-------------------------+
 +-------------------------+   AGENT
 ```
@@ -197,9 +224,24 @@ registers. The methods, the marker blocks and the rule that reads the goal belon
 this section owns what the native clients do with them. The command is listed in the palette as a
 `session` command, like `/compact`.
 
+In both TUI modes, selecting `/goal` with Enter or Tab only fills `/goal ` in the
+composer and closes the palette. It does not dispatch until the user submits the
+draft. Submitting without arguments prints usage for Dim's supported forms,
+followed by the current goal and status, or that the shown line has no goal.
+The line-mode prompt prints the same help and state for bare `/goal`.
+
+```text
+palette: goal + Enter -> /goal |          (completion only)
+/goal fix build + Enter -> set/edit goal
+/goal + Space + Enter   -> usage + current goal
+
+Usage: /goal [OBJECTIVE | set OBJECTIVE | edit OBJECTIVE | pause | resume | clear]
+No goal on main.
+```
+
 | Form | Call |
 | --- | --- |
-| `/goal` | none: the goal in force on the shown line, or that it has none |
+| `/goal` | none: usage, then the goal in force on the shown line, or that it has none |
 | `/goal OBJECTIVE` | `session.goal.edit` while the goal is active or paused, `session.goal.set` otherwise |
 | `/goal set OBJECTIVE` | `session.goal.set` |
 | `/goal edit OBJECTIVE` | `session.goal.edit` |
@@ -227,7 +269,7 @@ A `/pursue` form is Pursuit's later option (§10) and is not part of this contra
 A.3's rule: the latest live `goal:objective` block is the objective, the latest live `goal:status`
 block is the status, `clear` retires both, `edit` keeps the judge, and an input the InputQueue
 deleted leaves the fold. It adds no query method and asks Goal no question. `/goal` with no
-arguments prints that fold. Before it picks between `set` and `edit` the client reads the line up
+arguments prints usage before that fold. Before it picks between `set` and `edit` the client reads the line up
 to its published head, and after a write it reads again before printing: the state shown and the
 method chosen come from the events, never from a guess taken from the reply. The fold starts over
 at the line's own opening — its
@@ -245,6 +287,7 @@ a `/goal` that writes sends Goal's own change input, and Goal decides what follo
 
 ```text
 > /goal
+Usage: /goal [OBJECTIVE | set OBJECTIVE | edit OBJECTIVE | pause | resume | clear]
 No goal on main.
 
 > /goal Make the CLI tests pass
@@ -260,6 +303,7 @@ Goal paused on main · paused (user)
   Keep the CLI tests green
 
 > /goal
+Usage: /goal [OBJECTIVE | set OBJECTIVE | edit OBJECTIVE | pause | resume | clear]
 Goal on main · paused (user)
   Keep the CLI tests green
 
@@ -271,11 +315,13 @@ Goal resumed on main · active
 Goal cleared on main.
 ```
 
-The first line names the call that ran, the line the goal belongs to and the status in force;
+Bare `/goal` starts with usage; its state report follows. A writing form starts with
+the state report, naming the call that ran, the line the goal belongs to and the status in force;
 `edited` is the form that found a goal and changed only its objective. `evaluator judge` follows
 the status when Pursuit's judge is on the goal. A paused status names its reason: `user`,
 `interrupted`, `limit`, `turn failed` or `evaluation failed`. The objective follows, one line per
-line of it. A cleared goal and a line without one print one line.
+line of it. Clearing a goal prints one confirmation line. Bare `/goal` on a line without a goal
+prints two lines: usage, then the no-goal notice.
 
 The line client and both terminal UI modes print these lines; in the terminal UI they are one
 report in the transcript, so earlier reports stay readable above later ones. The status area
@@ -413,10 +459,10 @@ daemon already reports it.
 
 ### Menu entry
 
-`/runtime` is a slash command in category `app`, so the menu lists it between `/keys` and
-`/settings`; it needs no Session (`Needs::Nothing`) and takes no inline argument, because the panel
-carries the actions. The typed subforms below are accepted when typed, not offered as menu
-completions.
+`/runtime` is a slash command in category `extensions`; its position follows the
+[command menu order](#command-menu). It needs no Session (`Needs::Nothing`) and takes no inline
+argument, because the panel carries the actions. The typed subforms below are accepted when typed,
+not offered as menu completions.
 
 ### Keys
 
@@ -910,6 +956,10 @@ Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close
 
 `dimcode models PROVIDER remove MODEL` removes without the panel's confirmation, and `dimcode
 models PROVIDER inspect MODEL` prints the lines the detail shows.
+
+Bare `/effort` and `/reasoning` open the current model's inline effort picker in both TUI
+modes; explicit-value forms and the line client keep their command behavior. The selection
+contract is owned by [model configuration](model-configuration.md#scrollback-interaction).
 
 ### The Workflow area
 

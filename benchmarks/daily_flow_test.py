@@ -209,7 +209,9 @@ class DailyFlowTest(unittest.TestCase):
              unscored: int = 0, fetch_error: str | None = None,
              dirty: bool = False, no_model: bool = False,
              verifier_proxy: str | None = None,
-             verifier_no_proxy: str | None = None) -> int:
+             verifier_no_proxy: str | None = None,
+             with_sidecar: bool = False,
+             sidecar_k: int | None = None) -> int:
         if dirty:
             (self.tooling / "benchmarks" / "scratch.py").write_text("edit\n")
         k = {"daily": 1, "checkpoint": 3, "baseline": 3}[run_type]
@@ -252,6 +254,9 @@ class DailyFlowTest(unittest.TestCase):
             The model identity comes back beside the job, because that is what
             the real fetch does — run_l2 captures it from the endpoint and rsync
             brings it along. `no_model` is the case where it does not.
+            `with_sidecar` also brings back the job config run_l2 wrote beside
+            the results, which is what makes the frozen params measured rather
+            than asserted.
             """
             self.fetched.append(run_id)
             if fetch_error is not None:
@@ -260,6 +265,18 @@ class DailyFlowTest(unittest.TestCase):
             if harbor.exists():
                 shutil.rmtree(harbor)
             write_harbor_job(harbor, k, unscored=unscored)
+            if with_sidecar:
+                config_text = '{"model": "glm-5.3"}'
+                (Path(out) / f"{run_id}-job.json").write_text(json.dumps({
+                    "n_attempts": k if sidecar_k is None else sidecar_k,
+                    "timeout_multiplier": 1.0,
+                    "agent_timeout_multiplier": 1.0,
+                    "n_concurrent_trials": 5,
+                    "agents": [{
+                        "model_name": "icecn/glm-5.3",
+                        "env": {"DIM_EVAL_MODEL_CONFIG_JSON": config_text},
+                    }],
+                }))
             if not no_model:
                 (Path(out) / f"{run_id}-model.json").write_text(
                     json.dumps(MODEL_IDENTITY))
@@ -426,9 +443,21 @@ class DailyFlowTest(unittest.TestCase):
             (out / "harbor").mkdir()
             (out / "harbor" / "result.json").write_text("{}")
             partial = subprocess.CompletedProcess([], 23, stdout="Permission denied\n")
-            with mock.patch("subprocess.run", return_value=partial):
+            with mock.patch("subprocess.run", return_value=partial) as rsync:
                 self.assertIsNone(
                     daily_run.fetch_results("host", "/remote", "run", out))
+            # Three fetches leave the eval machine: the job directory, the
+            # model identity, and the job config the frozen params are read
+            # from. The last two travel individually because they sit beside
+            # the job, not inside it — a fetch that forgets one silently
+            # degrades what a baseline can record.
+            sources = []
+            for call in rsync.call_args_list:
+                remote = next(part for part in call.args[0]
+                              if part.startswith("host:"))
+                sources.append(remote.rstrip("/").rsplit("/", 1)[-1])
+            self.assertEqual(sources,
+                             ["run", "run-model.json", "run-job.json"])
 
     def test_fetch_fails_when_rsync_left_no_job(self) -> None:
         """Exit 23 without result.json is still a failed fetch: there is
@@ -1048,6 +1077,42 @@ class DailyFlowTest(unittest.TestCase):
         # The identity that came back beside the results. Without it in here,
         # the guard in run_l2 has nothing to hold a later endpoint to.
         self.assertEqual(frozen["model"], MODEL_IDENTITY)
+
+    def test_the_baseline_records_what_the_job_config_ran_with(self) -> None:
+        """The params a baseline freezes should be read off the job config
+        harbor executed, not asserted by the caller.
+
+        Before this, `settle` passed only the six fields the CLI could name, so
+        every baseline omitted k, the agent model name and the model-config
+        digest — the one record of the sampling/reasoning settings the run
+        actually used — and someone hand-backfilled them from the wrong run.
+        """
+        self.state.write_text(json.dumps({"last_l2_head": self.base}))
+        self.assertEqual(self._run(run_type="baseline", with_sidecar=True), 0)
+
+        frozen = json.loads(
+            (self.baselines / f"{self.pin}.json").read_text())
+        params = frozen["params"]
+        self.assertEqual(params["k"], 3)
+        self.assertEqual(params["model_name"], "icecn/glm-5.3")
+        self.assertEqual(
+            params["model_config_sha256"],
+            hashlib.sha256(b'{"model": "glm-5.3"}').hexdigest())
+        # The sidecar names no harbor version; the CLI-supplied one survives.
+        self.assertEqual(params["harbor_version"], "0.18.0")
+        self.assertEqual(params["n_concurrent_trials"], 5)
+
+    def test_a_sidecar_disagreeing_about_k_does_not_freeze_two_claims(self) -> None:
+        """The top-level k is what build and compare read, and it is the k the
+        run was driven with. A sidecar naming another count is not this run's
+        config; recording both would let a reader pick the convenient one."""
+        self.state.write_text(json.dumps({"last_l2_head": self.base}))
+        self.assertEqual(self._run(run_type="baseline", with_sidecar=True,
+                                   sidecar_k=2), 0)
+        params = json.loads(
+            (self.baselines / f"{self.pin}.json").read_text())["params"]
+        self.assertNotIn("k", params)
+        self.assertEqual(params["model_name"], "icecn/glm-5.3")
 
     def test_verifier_proxy_is_recorded_and_a_different_condition_is_invalid(self) -> None:
         """The proxy is a condition of the measurement, not an implementation detail.

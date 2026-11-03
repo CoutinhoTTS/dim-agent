@@ -26,8 +26,19 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "line {id}" => "ライン {id}",
         "jump to a message of the shown line" => "表示中のラインのメッセージへ移動",
         "Timeline" => "タイムライン",
-        "Enter jump · e edit · q quote · b branch · f fork · Esc close" => {
-            "Enter 移動 · e 編集 · q 引用 · b ブランチ · f フォーク · Esc 閉じる"
+        "Enter actions · Esc close" => "Enter 操作 · Esc 閉じる",
+        "Timeline actions" => "タイムライン操作",
+        "↑↓ select · Enter confirm · Esc cancel" => "↑↓ 選択 · Enter 確認 · Esc キャンセル",
+        "Jump to message" => "メッセージへ移動",
+        "Edit as a new draft" => "新しい下書きとして編集",
+        "Quote message" => "メッセージを引用",
+        "Create branch from here" => "ここからブランチを作成",
+        "Before this message" => "このメッセージの前",
+        "Fork session" => "セッションをフォーク",
+        "1. Create fork" => "1. フォークを作成",
+        "2. Cancel" => "2. キャンセル",
+        "Creates a new session; the current session stays unchanged." => {
+            "新しいセッションを作成します。現在のセッションは変更されません。"
         }
         "No messages yet." => "メッセージはまだありません。",
         "Already on screen above; /tui jumps to it" => "すでに上に表示中。/tui で移動できます",
@@ -51,11 +62,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "e edit · b branch · f fork" => "e 編集 · b ブランチ · f フォーク",
         "e edit" => "e 編集",
-        "Fork the session before “{message}”? (y/N)" => {
-            "「{message}」の前でセッションをフォークしますか？(y/N)"
+        "Fork the session before “{message}”?" => {
+            "「{message}」の前でセッションをフォークしますか？"
         }
-        "Fork the session after the last turn? (y/N)" => {
-            "最後のターンの後でセッションをフォークしますか？(y/N)"
+        "Fork the session after the last turn?" => {
+            "最後のターンの後でセッションをフォークしますか？"
         }
         "⑂ new line from {id} · Esc cancel" => "⑂ {id} から新しいライン · Esc キャンセル",
         "A fork copies main; b opens a line here" => {
@@ -281,6 +292,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "run" => "実行",
         "view" => "表示",
         "model" => "モデル",
+        "extensions" => "拡張",
         "app" => "アプリ",
         "skill" => "スキル",
         // composer/commands.rs: descriptions
@@ -301,9 +313,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "先頭へスクロール",
         "scroll to the bottom" => "末尾へスクロール",
         "pick an earlier message to edit or quote" => "過去のメッセージを編集・引用",
-        "collapse or expand tool details and compaction summaries" => {
-            "ツール詳細と圧縮サマリーの開閉"
-        }
+        "cycle tool details and compaction summaries" => "ツール詳細と圧縮サマリーの表示を順に切替",
         "switch between fullscreen and scrollback" => "全画面/スクロールバック切替",
         "switch theme" => "テーマを切替",
         "switch language" => "言語を切替",

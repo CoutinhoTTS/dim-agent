@@ -66,6 +66,77 @@ async fn compact_after_small_turns(
     unreachable!()
 }
 
+/// The cut window drops only turn starts the retention rule cannot keep: the
+/// first turn start whose kept tail fits `0.25 × B` stays a legal cut, even
+/// when every entry before it is larger than that share and later turns
+/// follow it (ContextCompaction §5.3).
+#[tokio::test]
+async fn a_cut_on_the_retention_window_boundary_stays_a_legal_cut() {
+    let agent = MinimalHost::start(&builder_with_context(
+        Arc::new(EchoModel),
+        HistoryRenderer::default(),
+        Context {
+            threshold: Some(3_000.),
+            ..Context::default()
+        },
+    ))
+    .await
+    .unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    session
+        .submit("x".repeat(1_200), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let mut events = Vec::new();
+    for index in 0.. {
+        assert!(index < 30, "no automatic compaction");
+        session
+            .submit(format!("small {index}"), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        events = session.history("main", None).await.unwrap();
+        if events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                EventKind::ContextCompaction(ContextCompactionData {
+                    outcome: ContextCompactionResult::Completed { .. },
+                    ..
+                })
+            )
+        }) {
+            break;
+        }
+    }
+    let starts: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
+        .collect();
+    assert!(
+        starts.len() > 2,
+        "a later turn start must follow the cut for the window to matter"
+    );
+    let cut = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextCompaction(ContextCompactionData {
+                outcome: ContextCompactionResult::Completed { retain_from, .. },
+                ..
+            }) => Some(retain_from.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        cut, starts[1].id,
+        "the second turn's start keeps the tail the rule allows"
+    );
+    agent.close().await.unwrap();
+}
+
 fn first_call_after_compaction(events: &[Arc<AgentEvent>]) -> Arc<ModelRequest> {
     let compaction = events
         .iter()
@@ -694,6 +765,145 @@ async fn a_child_branch_regrows_from_its_own_history() {
     assert!(
         (3_000.0..=4_032.0).contains(&budget),
         "the estimate reaches the threshold within the input budget: {budget}"
+    );
+    agent.close().await.unwrap();
+}
+/// Echoes until a request built on a compaction summary arrives, then reports
+/// an exhausted output budget once, so the retry has to reuse that compaction.
+struct BudgetAfterSummary(AtomicUsize);
+impl ModelDriver for BudgetAfterSummary {
+    fn invoke(
+        &self,
+        request: Arc<ModelRequest>,
+        connection: ModelConnection,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ModelStream> {
+        let summarized = request.messages.first().is_some_and(|message| {
+            matches!(&message.content, MessageContent::Text(text) if text.contains("<dim-summary>"))
+        });
+        if summarized && self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Box::pin(async {
+                Err(HostError::Failed {
+                    kind: HostErrorKind::Other,
+                    message: "Provider output budget exhausted".into(),
+                    model: None,
+                    presentation: None,
+                    budget: Some(ProviderOutputBudgetFacts {
+                        input_tokens: 800.,
+                        context_window: 1000.,
+                        requested_max_tokens: 400.,
+                        allowed_max_tokens: 200.,
+                        ratio: 1.,
+                    }),
+                })
+            });
+        }
+        EchoModel.invoke(request, connection, cancel)
+    }
+}
+
+/// A budget-recovery retry reuses the threshold compaction of its source even
+/// when that cut is an earlier turn start, which the streamed order does not
+/// carry: the retry prepares from the compacted request, not from the branch's
+/// history (ContextCompaction §5.3, §5.6, #914).
+#[tokio::test]
+async fn a_budget_retry_reuses_a_cut_before_the_latest_turn_start() {
+    let agent = MinimalHost::start(&builder_with_context(
+        Arc::new(BudgetAfterSummary(AtomicUsize::new(0))),
+        HistoryRenderer::default(),
+        Context {
+            threshold: Some(3_000.),
+            ..Context::default()
+        },
+    ))
+    .await
+    .unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    session
+        .submit("x".repeat(1_200), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    for index in 0..12 {
+        session
+            .submit(format!("small {index}"), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+    }
+    let events = session.history("main", None).await.unwrap();
+    let first = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextCompaction(ContextCompactionData {
+                outcome:
+                    ContextCompactionResult::Completed {
+                        retain_from,
+                        diagnostics,
+                        ..
+                    },
+                through,
+                ..
+            }) => Some((
+                event.sequence,
+                *through,
+                retain_from.clone(),
+                diagnostics.clone(),
+            )),
+            _ => None,
+        })
+        .expect("a threshold compaction");
+    let cut = events
+        .iter()
+        .position(|event| event.id == first.2)
+        .expect("the cut is an event");
+    let later = events[cut..]
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
+        .count();
+    assert!(
+        later > 0,
+        "the cut is an earlier turn start, not the latest: {later} later starts"
+    );
+    let projected = first
+        .3
+        .estimated_output_tokens
+        .expect("the compaction projected a request");
+
+    let retry = events
+        .iter()
+        .filter(|event| event.sequence > first.0)
+        .find_map(|event| match &event.kind {
+            EventKind::ContextPrepare(data) if data.recovery.is_some() => Some(data),
+            _ => None,
+        })
+        .expect("a budget-recovery retry");
+    assert_eq!(
+        retry.through, first.1,
+        "the retry prepares at the compaction's boundary"
+    );
+    let estimate = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextBudget(data) if data.request_id == retry.request_id => {
+                Some(data.estimated_input_tokens)
+            }
+            _ => None,
+        })
+        .expect("the retry's budget");
+    assert_eq!(
+        estimate, projected,
+        "the retry estimated the compacted request, not the branch's history"
+    );
+    assert!(
+        events.iter().any(
+            |event| matches!(&event.kind, EventKind::ContextCompactionStart(data)
+                if event.sequence > first.0
+                    && data.trigger == CompactionTrigger::ProviderOutputBudgetExhausted)
+        ),
+        "the retry's own recovery step"
     );
     agent.close().await.unwrap();
 }

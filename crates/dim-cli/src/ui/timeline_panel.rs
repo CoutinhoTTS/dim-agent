@@ -3,12 +3,16 @@
 
 use crate::model::view::{RowKind, ViewRow, ViewSnapshot};
 use crate::sanitize::safe;
+use crate::ui::i18n::t;
 use crate::ui::list_panel::{Event, Item, ListPanel};
 use crate::ui::prompts::Effect;
+use crate::ui::render::panel::{visible_width, wrap_words};
 use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
+use crate::ui::text::truncate_cells;
 use crate::ui::theme::Palette;
+use crate::ui::theme::ansi::fg;
 
-const HINT: &str = "Enter jump · e edit · q quote · b branch · f fork · Esc close";
+const HINT: &str = "Enter actions · Esc close";
 
 /// What a key on a timeline row asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +55,7 @@ pub struct TimelinePanel {
     projection_id: u64,
     focus: String,
     list: ListPanel,
+    actions: Option<ListPanel>,
 }
 
 impl TimelinePanel {
@@ -62,13 +67,14 @@ impl TimelinePanel {
             // Letters act on the selected message, so typing does not filter.
             list: ListPanel::new(
                 "Timeline",
-                HINT,
+                t(HINT),
                 "",
                 "No messages yet.",
                 "No messages yet.",
                 false,
             )
             .without_filter(),
+            actions: None,
         };
         panel.set_rows(snapshot);
         panel
@@ -103,12 +109,30 @@ impl TimelinePanel {
                 )
             })
             .collect();
-        let preselect = selected.or(newest);
+        let preselect = selected.clone().or(newest);
         self.list.set_items(Ok(items), preselect.as_deref());
+        if self.list.selected_id() != selected {
+            self.actions = None;
+        }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
         let action = match key.code {
+            KeyCode::Char('1') if self.actions.is_some() && key.mods == Modifiers::NONE => {
+                Some(TimelineAction::Jump)
+            }
+            KeyCode::Char('2') if self.actions.is_some() && key.mods == Modifiers::NONE => {
+                Some(TimelineAction::Edit)
+            }
+            KeyCode::Char('3') if self.actions.is_some() && key.mods == Modifiers::NONE => {
+                Some(TimelineAction::Quote)
+            }
+            KeyCode::Char('4') if self.actions.is_some() && key.mods == Modifiers::NONE => {
+                Some(TimelineAction::Branch)
+            }
+            KeyCode::Char('5') if self.actions.is_some() && key.mods == Modifiers::NONE => {
+                Some(TimelineAction::Fork)
+            }
             KeyCode::Char('e') if key.mods == Modifiers::NONE => Some(TimelineAction::Edit),
             KeyCode::Char('q') if key.mods == Modifiers::NONE => Some(TimelineAction::Quote),
             KeyCode::Char('b') if key.mods == Modifiers::NONE => Some(TimelineAction::Branch),
@@ -121,21 +145,84 @@ impl TimelinePanel {
                 None => Effect::None,
             };
         }
+        if let Some(actions) = &mut self.actions {
+            return match actions.handle_key(key) {
+                Event::Close => {
+                    self.actions = None;
+                    Effect::None
+                }
+                Event::Pick(action) => Effect::Timeline {
+                    row_id: self.list.selected_id().unwrap(),
+                    action: match action.as_str() {
+                        "jump" => TimelineAction::Jump,
+                        "edit" => TimelineAction::Edit,
+                        "quote" => TimelineAction::Quote,
+                        "branch" => TimelineAction::Branch,
+                        "fork" => TimelineAction::Fork,
+                        _ => unreachable!(),
+                    },
+                },
+                Event::None | Event::Refresh => Effect::None,
+            };
+        }
         match self.list.handle_key(key) {
             Event::None | Event::Refresh => Effect::None,
             Event::Close => Effect::Close,
-            Event::Pick(row_id) => Effect::Timeline {
-                row_id,
-                action: TimelineAction::Jump,
-            },
+            Event::Pick(_) => {
+                let mut actions = ListPanel::new(
+                    "Timeline actions",
+                    format!("↑↓/Enter · {}", t("Esc back")),
+                    "",
+                    "",
+                    "",
+                    false,
+                )
+                .without_filter();
+                actions.set_items(
+                    Ok(vec![
+                        Item::new("jump", format!("1. {}", t("Jump to message")), ""),
+                        Item::new("edit", format!("2. {}", t("Edit as a new draft")), ""),
+                        Item::new("quote", format!("3. {}", t("Quote message")), ""),
+                        Item::new("branch", format!("4. {}", t("Create branch from here")), ""),
+                        Item::new("fork", format!("5. {}", t("Fork session")), ""),
+                    ]),
+                    Some("jump"),
+                );
+                self.actions = Some(actions);
+                Effect::None
+            }
         }
     }
 
     pub fn cursor(&self, width: usize) -> Option<(usize, usize)> {
-        self.list.cursor(width)
+        self.actions.as_ref().unwrap_or(&self.list).cursor(width)
     }
 
     pub fn render(&self, width: usize, rows: usize, p: &Palette) -> Vec<String> {
+        if let Some(actions) = &self.actions {
+            let inner = width.saturating_sub(4).max(1);
+            let mut footer = Vec::new();
+            if let Some(action) = actions.selected_item() {
+                if visible_width(&action.label) > inner.saturating_sub(2) {
+                    footer.extend(
+                        wrap_words(&action.label, inner)
+                            .iter()
+                            .map(|line| fg(line, &p.text)),
+                    );
+                }
+                if action.id == "fork" {
+                    footer.extend(
+                        wrap_words(t("Before this message"), inner)
+                            .iter()
+                            .map(|line| fg(line, &p.muted)),
+                    );
+                }
+            }
+            if let Some(message) = self.list.selected_item() {
+                footer.push(fg(&truncate_cells(&message.label, inner), &p.text));
+            }
+            return actions.render_with_footer(width, rows, p, &footer);
+        }
         self.list.render(width, rows, p)
     }
 }
@@ -208,6 +295,7 @@ mod tests {
     #[test]
     fn opens_on_the_newest_message_and_letters_act_on_the_selection() {
         let mut panel = TimelinePanel::new(&snapshot());
+        assert_eq!(panel.handle_key(key(KeyCode::Enter)), Effect::None);
         assert_eq!(
             panel.handle_key(key(KeyCode::Enter)),
             Effect::Timeline {
@@ -215,6 +303,7 @@ mod tests {
                 action: TimelineAction::Jump,
             }
         );
+        panel.handle_key(key(KeyCode::Esc));
         panel.handle_key(key(KeyCode::Up));
         for (letter, action) in [
             ('e', TimelineAction::Edit),

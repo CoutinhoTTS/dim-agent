@@ -1857,6 +1857,19 @@ fn noninteractive_outside_read_is_denied_by_the_ordinary_approval_answer() {
 #[test]
 fn resume_advances_filtered_history_positions_and_does_not_reprint_old_output() {
     let home = Home::new();
+    let launch = {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            home.0
+                .join(std::ffi::OsString::from_vec(b"launch-\xff".to_vec()))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            home.0.join("launch")
+        }
+    };
+    fs::create_dir(&launch).unwrap();
     let daemon = home.daemon(|wire| {
         let hello = wire.read("hello");
         wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
@@ -1876,6 +1889,7 @@ fn resume_advances_filtered_history_positions_and_does_not_reprint_old_output() 
     });
     let output = wait(
         home.command()
+            .current_dir(&launch)
             .args(["exec", "resume", "session", "--prompt", "continue"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1889,6 +1903,26 @@ fn resume_advances_filtered_history_positions_and_does_not_reprint_old_output() 
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "new output\n");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn exec_refuses_a_non_utf8_workspace_before_connecting() {
+    use std::os::unix::ffi::OsStringExt;
+    let home = Home::new();
+    let launch = home
+        .0
+        .join(std::ffi::OsString::from_vec(b"launch-\xff".to_vec()));
+    fs::create_dir(&launch).unwrap();
+    let output = home
+        .command()
+        .current_dir(&launch)
+        .args(["exec", "-p", "start"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("must be valid UTF-8"));
+    assert!(!home.0.join("rust/daemon.sock").exists());
 }
 
 #[test]
@@ -4536,6 +4570,95 @@ fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
         "{}",
         terminal.transcript
     );
+}
+
+#[test]
+fn tui_effort_dialog_selects_the_current_models_effort_and_cancels_without_writing() {
+    fn catalog(wire: &mut Wire) {
+        let request = wire.read("provider.catalog");
+        assert_eq!(request["params"], json!({"providerId":"test"}));
+        let mut capabilities = serde_json::to_value(
+            dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384),
+        )
+        .unwrap();
+        capabilities["reasoning"] = json!(true);
+        wire.reply(
+            &request,
+            json!({"catalog":{"models":[
+                {"id":"other","capabilities":capabilities,"metadata":{"reasoning":{
+                    "supported":true,"effortOptions":["invalid-neighbor"]}}},
+                {"id":"model","capabilities":capabilities,"metadata":{"reasoning":{
+                    "supported":true,"effortOptions":["low","high"],
+                    "off":{"kind":"enable_thinking","value":false}}}}
+            ]}}),
+        );
+    }
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let daemon = home.daemon(|wire| {
+            wire.hello(&[]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history");
+            wire.reply(
+                &history,
+                json!({"events":[configured_event(4, "model", json!({"reasoningEffort":"high"}))],
+                "through":8,"nextAfter":8,"done":true}),
+            );
+            wire.no_context();
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            catalog(wire);
+            catalog(wire);
+            let selected = wire.read("session.model.update");
+            assert_eq!(
+                selected["params"],
+                json!({"sessionId":"session","branchId":"main",
+                "modelPreferences":{"reasoningEffort":"high"}})
+            );
+            wire.reply(&selected, json!({"outcome":"unchanged"}));
+            catalog(wire);
+            catalog(wire);
+            catalog(wire);
+            let selected = wire.read("session.model.update");
+            assert_eq!(
+                selected["params"],
+                json!({"sessionId":"session","branchId":"main",
+                "modelPreferences":{"reasoningEffort":"none"}})
+            );
+            wire.reply(&selected, json!({"outcome":"adopted"}));
+            wire.hold();
+        });
+        let mut command = home.command();
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("test / model · high");
+        terminal.write(b"/effort\r");
+        terminal.until("Current: high");
+        terminal.until("2 (•) high");
+        terminal.write(b"\r");
+        terminal.until("Reasoning effort configuration unchanged: high");
+        terminal.write(b"/effort\r");
+        terminal.until("Current: high");
+        terminal.write(b"\x1b");
+        terminal.until(if fullscreen {
+            "test / model · high"
+        } else {
+            "Ask anything..."
+        });
+        terminal.write(b"/reasoning\r");
+        terminal.until("Current: high");
+        terminal.until("3 ( ) none");
+        assert!(!terminal.transcript.contains("invalid-neighbor"));
+        terminal.write(b"3\r");
+        terminal.until("Reasoning effort configuration adopted: none");
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
 }
 
 #[test]
@@ -7455,7 +7578,7 @@ fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
     terminal.until("test / model");
     // `/new` goes home; the message starts the Session the UI moves to.
     terminal.write(b"/new\r");
-    terminal.until("new session");
+    terminal.until("─ new session ─");
     terminal.write(b"hello\r");
     terminal.until("The App Server closed this interface: another terminal took over");
     terminal.until("Bye!");
@@ -8472,7 +8595,16 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
     started.send(()).unwrap();
     terminal.until("Context compacted ▸");
     terminal.write(b"/tools\r");
+    terminal.until("Context compacted ▸");
+    terminal.until("test / model");
+    assert!(
+        !terminal.transcript.contains("The parser is half done."),
+        "summary tool form keeps the compaction body closed"
+    );
+    terminal.write(b"/tools\r");
     terminal.until("The parser is half done.");
+    terminal.write(b"/tools\r");
+    terminal.until("Context compacted ▸");
     terminal.write(b"/tools\r");
     terminal.until("Context compacted ▸");
     terminal.write(b"/tools\r");
@@ -8797,6 +8929,14 @@ fn tui_rebuilds_compaction_rows_from_history_on_resume() {
     command.args(["--resume", "session"]);
     let mut terminal = Terminal::launch_tui(command);
     terminal.until("Context compacted ▸");
+    terminal.until("test / model");
+    terminal.write(b"/tools\r");
+    terminal.until("Context compacted ▸");
+    terminal.until("test / model");
+    assert!(
+        !terminal.transcript.contains("Restored summary text."),
+        "summary tool form keeps the restored compaction body closed"
+    );
     terminal.write(b"/tools\r");
     terminal.until("Restored summary text.");
     terminal.write(b"/exit\r");
