@@ -127,9 +127,47 @@ flowchart LR
 
 Two things the graph shows. The `Agent` facade reaches the store port without the Timeline service (`local_page`), and the TimelineTree part and the App Server reach a store without it as well, so deleting reads from `Timeline` alone leaves these routes into the same rows: the `Branch` and `Agent` facades (§1.2), the Dispatcher exports (§1.3), `Agent::local_page`, the TimelineTree part's own `TimelineStore::read_page`, and the `SessionStore` reads of the App Server (§1.4).
 
-## 2. What the query expresses
+## 2. What each consumer needs
 
-The request is scope, from_event or from_sequence, kinds, flags, event_id, one predicate, order_by, direction, limit and offset. Which of the reads in §1 it replaces has not been verified read by read; the plans on #963-#972 are the only source so far, and each migration re-checks its own reads before it starts.
+Each row was read from the consumer's source: what it takes from the Timeline, how it reads today, and whether it needs to read that way. The request the query takes is scope, from_event or from_sequence, kinds, flags, event_id, one predicate, order_by, direction, limit and offset.
+
+| Consumer | What it needs | How it reads today | Does it need that read |
+| --- | --- | --- | --- |
+| Permission rebuild (`permission.rs:522`) | The last `permission/changed` among the ancestors; each event overwrites the policy, so only the last counts | All ancestor events of that kind, folded | One event: chain, that kind, descending, limit 1 |
+| File reads (`file_reads.rs:136`) | The latest completed compaction after `established`, and whether its `retain_from` lies after that point | `local(established+1..=committed())`, then a search | One compaction event and one by-id position. The upper bound is `committed()`, so it reads events that may not be published yet |
+| Manual compaction wait (`context_methods.rs:81`) | One `context/compaction` whose `command` equals a value | `local(after+1..=head)`, then `find` | Branch, kind, `command` equality, from `after+1`, limit 1 |
+| Compaction policy reuse (`context_policy.rs:531`) | The compaction and budget facts already written for this prepare, matched on `turn_id` | `local(through+1..)`, then a filter | Kind, start and `turn_id` are expressible; `through` equality on the compaction stays with the caller. Whether these facts are published when read is not verified |
+| Branch resume (`timeline_tree.rs:566`) | `branch/create-failed`, `branch/create`, `branch/ended`, folded into sets | `local(..=head)`, the whole branch | Three kinds, not the whole branch |
+| Collaboration result fetch (`collaboration.rs:1080`) | One event whose id is known | A `results` table for the sequence, then `local(seq..=seq)`, then `find` | A by-id read; the `results` table exists for this read only |
+| Session summary (`agents.rs:1003`) | The first `SUMMARY_SCAN_LIMIT` events and the one at `through` | `local_page` and `local(through..=through)` | Not verified: what it computes from them was not read |
+| Replay `follow` (`dispatcher.rs:194`) | Rebuild a part's own state from the branch's events up to `S = committed()` | `local(..=S)`, whole | Depends on the part: seven rebuild from kinds they do not subscribe to, and some need only a few kinds |
+| Submission index at restore (`timeline.rs:309`) | The `submission_id` of every restored input | `local(1..=restored_sequence)` | One kind, `input/message` |
+| Committed input (`timeline_context.rs:411`) | The event at a known sequence | `local(seq..=seq).pop()` | A point read |
+| Goal inheritance (`goal/branch.ts:205`) | The last inherited input carrying the objective or status marker | The branch's own event id, then `history(at)` over the whole chain, filtered in TypeScript | The last matching `input/message` on the chain. The marker is inside `blocks`, which the one-equality predicate cannot reach |
+| Budget input lookup (`context_preparation.rs:682`) | One input by id | `event_by_id` | A by-id read |
+| Compaction cut position (`history.rs:163`) | Where the event named by `retain_from` sits in the chain | `event_position` | An id to a position; the reply carries positions |
+| Cut validation (`history.rs:981`) | Whether a sequence ends an atomic batch | `local(through..=through)`; the store errors inside a batch | No event content, only batch structure; the query cannot give it |
+| Recall (`recall.rs:184`) | Newest-first events of several kinds, folded, stopping once the answer is reached | `page_cursor` and `page` | Descending paging with an early stop |
+| Collaboration rebuild (`collaboration.rs:2726`) | Approval inputs not yet handled, and every `collaboration/result` with its sequence | `local(..=committed())`, walked twice | Four kinds, not the whole branch. It reads to `committed()` |
+| Peer session read (`collaboration.rs:1106`) | A page of another session's events from `after`, plus calls fetched by id | `SessionStore::read_page`, `read_events` | Paging and by-id. The App Server reading another session, not a part reading its own Timeline |
+| Branch tool default start (`timeline_tree.rs:2291`) | The `model/start` before this turn's first `tool-use`, minus one | `parent.local(..)`, whole parent | Two events, matched on `turn_id` and `request_id`. The predicate is one equality, so one match stays with the caller |
+| Fork check and prefix (`agents.rs:1446`) | Whether the cut is legal, and the context before it | `validate_context_boundary_in` and `context` | Folding the prefix is the projection's job; the batch check is as above |
+| History window (`connection/tree.rs:197`) | The newest turn's start and a descending page inside the window | `turn_window` and `read_page_before` | Descending paging, plus the newest `turn/start` |
+| History page (`connection/tree.rs:227`) | A page from `after` for a client | `local_page` | Paging; that the page ends on a batch is a protocol rule |
+
+### 2.1 Five kinds of need
+
+1. **One or two specific events**: permission, file reads, manual compaction, collaboration result, committed input, budget lookup, goal inheritance, branch tool default start. Most read a range and pick from it.
+2. **One or a few kinds, then folded**: branch resume, submission index, collaboration rebuild, recall, context folding.
+3. **Rebuild a part's own state**: the replay, in eleven parts. Some need a few kinds, some the whole prefix.
+4. **An id turned into a position**: compaction cut position.
+5. **Batch structure**: cut validation and the page edge of the history protocol. These are storage rows, not event content.
+
+### 2.2 Where the query falls short
+
+- One equality: goal's marker sits inside `blocks`; the branch tool start needs two conditions.
+- Reading up to the committed position: replay, collaboration rebuild, file reads. Each reads facts it wrote itself.
+- Batch structure: cut validation.
 
 ## 3. What it does not express
 
@@ -146,6 +184,7 @@ The request is scope, from_event or from_sequence, kinds, flags, event_id, one p
 2. Does the cut validation need to know a batch end now that a page may end inside a batch?
 3. Does the checkpoint store the resume event id so a chain read can start by `from_event`?
 4. The reads in §1.4 bypass the service. Which migration owns them?
+5. Proposed exits, not decided: `Branch` and `Agent` keep one `query` that only forwards, with no `history`, `local`, `context` or `page`; the Dispatcher has no reads, and goal takes the Timeline service; the App Server keeps one store read for sessions that are not loaded, with the same page shape as `query`. goal's binding to the Timeline service has not been verified.
 
 ## 5. Order of work
 
