@@ -390,21 +390,42 @@ impl TimelineContext {
     }
     /// The committed input with submission id `id`, once it is published.
     pub(crate) async fn lookup(&self, id: &str) -> Result<Option<Arc<AgentEvent>>> {
-        let Some(sequence) = self.timeline.submission(id)? else {
+        let Some(input) = self.timeline.submission(id)? else {
             return Ok(None);
         };
         let _ = self
             .timeline
             .watch()
-            .wait_for(|&(published, closed)| published >= sequence || closed)
+            .wait_for(|&(published, closed)| published >= input.sequence || closed)
             .await;
-        if self.timeline.sequence() < sequence {
+        if self.timeline.sequence() < input.sequence {
             return Err(self
                 .timeline
                 .failure()
                 .unwrap_or_else(|| AgentError::Closed(self.id().into())));
         }
-        self.committed_input(sequence).await.map(Some)
+        self.timeline
+            .query(TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                from_event: None,
+                from_sequence: None,
+                order_by: TimelineQueryOrderBy::Sequence,
+                direction: TimelineQueryDirection::Ascending,
+                kinds: Vec::new(),
+                flags: Vec::new(),
+                event_id: Some(input.id),
+                predicate: None,
+                limit: std::num::NonZeroU64::MIN,
+                offset: 0,
+            })
+            .await?
+            .events
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                AgentError::Storage(format!("committed input {} is missing", input.sequence))
+            })
+            .map(Some)
     }
     async fn committed_input(&self, sequence: u64) -> Result<Arc<AgentEvent>> {
         self.timeline

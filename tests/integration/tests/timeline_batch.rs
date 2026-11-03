@@ -31,15 +31,11 @@ async fn batch_is_registered_and_published_as_one_snapshot_unit() {
         .await
         .unwrap();
     let ctx = Ctx::root().unwrap();
-    let timeline = Timeline::new(
-        ctx.clone(),
-        TimelineKey {
-            session_id: "test".into(),
-            branch_id: "main".into(),
-        },
-        vec![],
-        store,
-    );
+    let key = TimelineKey {
+        session_id: "test".into(),
+        branch_id: "main".into(),
+    };
+    let timeline = Timeline::new(ctx.clone(), key.clone(), vec![], store.clone());
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = calls.clone();
     let _before = timeline
@@ -80,8 +76,8 @@ async fn batch_is_registered_and_published_as_one_snapshot_unit() {
     );
     assert_eq!(text(&events[0]), "first:3");
     assert_eq!(text(&events[1]), "second:4");
-    assert_eq!(timeline.trace(1).await.unwrap().unwrap().steps.len(), 1);
-    assert_eq!(timeline.trace(2).await.unwrap().unwrap().steps.len(), 1);
+    assert_eq!(store.trace(&key, 1).await.unwrap().unwrap().steps.len(), 1);
+    assert_eq!(store.trace(&key, 2).await.unwrap().unwrap().steps.len(), 1);
     assert!(timeline.history(Some(1)).await.is_err());
     assert!(timeline.local(..=1).await.is_err());
     assert_eq!(timeline.history(Some(2)).await.unwrap(), events);

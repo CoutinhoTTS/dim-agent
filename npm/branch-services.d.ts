@@ -316,17 +316,6 @@ export interface TimelineQueryReply {
   positions: ({ branch_id: string; sequence: number | bigint })[]
 }
 
-export interface TraceStep {
-  handler: string
-  result?: { type: string; name: string; data: unknown; tags?: string[]; context_render?: boolean; context_state?: boolean } | null
-}
-
-export interface TimelineTrace {
-  event_id: string
-  original: { type: string; name: string; data: unknown; tags?: string[]; context_render?: boolean; context_state?: boolean }
-  steps: TraceStep[]
-}
-
 export interface Timeline {
   branchId(): Promise<string>
   ancestors(): Promise<[string, number | bigint][]>
@@ -372,8 +361,6 @@ export interface Timeline {
    * @throws {AgentErrorThrown}
    */
   storedContextPage(after: number | bigint, limit: number | bigint, through: number | bigint): Promise<import('./plugin.js').BranchEvent[]>
-  /** @throws {AgentErrorThrown} */
-  trace(sequence: number | bigint): Promise<TimelineTrace | null>
 }
 
 /** The scope a part is registered for. */

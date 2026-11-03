@@ -1282,25 +1282,6 @@ async fn a_cut_check_starts_at_the_last_completed_compaction() {
     )
     .await
     .unwrap();
-    assert_eq!(
-        store
-            .last_compaction_cut(&key("session", "main"), 14)
-            .await
-            .unwrap(),
-        Some(dim_agent_runtime::CompactionCut {
-            retain_from: "event-8".into(),
-            sequence: 9,
-        }),
-        "a cancelled compaction after the completed one is not a cut"
-    );
-    assert_eq!(
-        store
-            .last_compaction_cut(&key("session", "main"), 8)
-            .await
-            .unwrap(),
-        None
-    );
-    assert_eq!(timeline.compaction_cut(14).await.unwrap(), Some(8));
     for at in [4, 8, 12, 14] {
         let expected = dim_agent_capabilities::history::validate_context_boundary(
             &timeline.context(at).await.unwrap(),
@@ -1394,7 +1375,6 @@ async fn a_cut_on_another_branch_replays_the_segment() {
     )
     .await
     .unwrap();
-    assert_eq!(timeline.compaction_cut(4).await.unwrap(), None);
     for at in [3, 4] {
         let expected = dim_agent_capabilities::history::validate_context_boundary(
             &timeline.context(at).await.unwrap(),
@@ -7218,9 +7198,14 @@ async fn streamed_context_reads_complete_batches_across_the_window() {
     let renderer = HistoryRenderer::default();
     let streamed = renderer.rendered_stream(&timeline, 257, 256).await.unwrap();
     for limit in 1..=3 {
-        let page = timeline.stored_page(254, limit, 257).await.unwrap();
+        let page = store
+            .read_page_without_request_bodies(&key("session", "main"), 254, limit, 257)
+            .await
+            .unwrap();
         assert_eq!(
-            page.iter().map(|event| event.sequence).collect::<Vec<_>>(),
+            page.iter()
+                .map(|record| record.event.sequence)
+                .collect::<Vec<_>>(),
             vec![255, 256, 257],
             "a page whose limit would end inside the atomic batch reads it whole: {limit}"
         );

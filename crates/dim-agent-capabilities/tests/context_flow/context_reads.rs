@@ -4,15 +4,17 @@ use std::ops::RangeInclusive;
 
 type DeferredPublication = (Vec<StoredEvent>, PublishCallback, Result<()>);
 
-/// A memory store that counts whole-branch reads, records the range of every
-/// event read and can fail, pause or defer chosen calls.
+/// A memory store that counts whole-branch reads and by-id queries, records
+/// the range of every event read and can fail, pause or defer chosen calls.
 #[derive(Default)]
 pub(super) struct CountContextReads {
     memory: MemoryTimelineStore,
     /// Reads that asked for the whole branch: a `read` or `read_segments`
-    /// range with an open end, which the policy path issues to find an event's
-    /// position. The streaming path reads bounded batches and never does.
+    /// range with an open end. No path issues one.
     reads: AtomicUsize,
+    /// By-id queries: the policy path looks up a compaction cut's position,
+    /// and the streaming path does not.
+    pub(super) positions: AtomicUsize,
     attempts: AtomicUsize,
     earliest_read: std::sync::atomic::AtomicU64,
     /// Each segment of every `read` and `read_segments`, in call order.
@@ -402,6 +404,9 @@ impl TimelineStore for CountContextReads {
         from: u64,
         through: u64,
     ) -> dim_agent_runtime::BoxFuture<'a, Result<dim_agent_runtime::TimelineQueryPage>> {
+        if query.event_id.is_some() {
+            self.positions.fetch_add(1, Ordering::SeqCst);
+        }
         self.memory.query(key, query, from, through)
     }
 }
@@ -770,21 +775,31 @@ async fn each_model_step_reads_full_context_for_policy_and_streams_otherwise() {
             .unwrap();
         for input in ["x".repeat(1_500), "next".into(), "third".into()] {
             let before = store.reads.load(Ordering::SeqCst);
+            let positions = store.positions.load(Ordering::SeqCst);
             session
                 .submit(input, InputMode::Queue, "main")
                 .await
                 .unwrap();
             session.idle("main").await.unwrap();
-            // With a compaction policy in force every model step reads the
-            // whole branch to locate the compaction it finds; without one the
-            // context is only ever streamed in bounded batches.
+            // With a compaction policy in force every model step looks up the
+            // position of the compaction it finds; without one the context is
+            // only ever streamed in bounded batches. Neither reads the whole
+            // branch.
             let reads = store.reads.load(Ordering::SeqCst) - before;
+            assert_eq!(
+                reads, 0,
+                "policy={policy}; a model step read the whole branch"
+            );
+            let positions = store.positions.load(Ordering::SeqCst) - positions;
             if policy {
-                assert!(reads >= 1, "policy=true; a model step read no full context");
+                assert!(
+                    positions >= 1,
+                    "policy=true; a model step looked up no cut position"
+                );
             } else {
                 assert_eq!(
-                    reads, 0,
-                    "policy=false; the streaming path read the full context"
+                    positions, 0,
+                    "policy=false; the streaming path looked up a cut position"
                 );
             }
         }
@@ -1907,7 +1922,6 @@ async fn a_malformed_compaction_cut_replays_the_segment_and_keeps_the_verdict() 
             expected.is_err(),
             "the full prefix leaves the model output open at {at}"
         );
-        assert_eq!(timeline.compaction_cut(at).await.unwrap(), None, "{at}");
         assert_eq!(
             dim_agent_capabilities::history::validate_context_boundary_at(&timeline, at)
                 .await
