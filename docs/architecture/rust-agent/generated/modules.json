@@ -2059,7 +2059,8 @@
         "assert",
         "assert_eq",
         "format",
-        "json"
+        "json",
+        "panic"
       ]
     },
     {
@@ -20122,6 +20123,8 @@
       "to": "dim_app_server::mcp::config",
       "references": [
         "path McpSecretEntry",
+        "path McpServerSettings::Remote",
+        "path McpServerSettings::Stdio",
         "path McpSettings",
         "path McpSettings::from_file",
         "path decode_entry"
@@ -20218,6 +20221,7 @@
         "path McpSettings::default",
         "path RemoteTransport::Http",
         "path RemoteTransport::Sse",
+        "path config::decode_entry",
         "path config::strip_secret",
         "use super::config",
         "use super::config::BearerAuth",
@@ -38949,6 +38953,10 @@
     {
       "module": "dim_app_server::mcp::config",
       "path": "D::Error"
+    },
+    {
+      "module": "dim_app_server::mcp::config",
+      "path": "D::Error::custom"
     },
     {
       "module": "dim_app_server::mcp::config",

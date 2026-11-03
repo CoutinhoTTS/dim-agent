@@ -1131,6 +1131,7 @@ async fn write(
     }
     let removed = match change {
         McpChange::Put(configuration) => {
+            let configuration = configuration.canonical(&id).map_err(McpError::InvalidEntry)?;
             document.insert(id.clone(), configuration);
             None
         }

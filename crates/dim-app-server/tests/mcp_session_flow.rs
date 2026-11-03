@@ -1747,6 +1747,40 @@ async fn an_unpublished_session_never_starts_discovery() {
     env.close().await;
 }
 
+/// #951: an optional member written as `null` is absent, so an entry that
+/// loaded before the per-entry decoder still loads and serves tools.
+#[tokio::test]
+async fn null_optional_members_from_a_file_load_and_run() {
+    let env = Env::with_config(
+        |_, _| {},
+        |_, home| {
+            json!({"mcpServers":{"docs":{
+                "type": null,
+                "command": "node",
+                "args": [PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp-reconnect.cjs"), "normal"],
+                "cwd": home,
+                "headers": null,
+                "enabled": null,
+                "auth": null,
+                "oauth": null
+            }}})
+        },
+    )
+    .await;
+    let session = env.session(false, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    env.turn(
+        &session,
+        Action::Call {
+            pause: false,
+            name: None,
+        },
+    )
+    .await;
+    assert!(results(&session).await.last().unwrap().contains("ok"));
+    env.close().await;
+}
+
 #[tokio::test]
 async fn a_shadowed_user_server_closes_its_unused_connection() {
     let env = Env::new().await;

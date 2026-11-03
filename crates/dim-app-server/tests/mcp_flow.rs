@@ -664,7 +664,12 @@ async fn directory_preserves_scope_and_cas_through_plugin_management() {
     );
     assert_eq!(persisted["extension"], json!({"preserve":17}));
 
-    let invalid = serde_json::from_value(json!({"command":""})).unwrap();
+    let mut invalid =
+        serde_json::from_value::<McpServerSettings>(json!({"command": "valid"})).unwrap();
+    let McpServerSettings::Stdio { command, .. } = &mut invalid else {
+        panic!("an untyped command is stdio");
+    };
+    command.clear();
     assert!(matches!(
         mcp.update(
             SettingsScope::User,
@@ -674,7 +679,7 @@ async fn directory_preserves_scope_and_cas_through_plugin_management() {
             &cancel
         )
         .await,
-        Err(McpError::Settings(SettingsError::Document(_)))
+        Err(McpError::InvalidEntry(_))
     ));
     assert_eq!(
         mcp.catalog(None, &cancel).await.unwrap().user_revision,
