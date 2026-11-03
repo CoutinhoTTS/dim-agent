@@ -206,7 +206,7 @@ A part reads facts through its branch's `timeline` service with one bounded quer
 | Element | What it says |
 | --- | --- |
 | Scope | This branch, or the branch chain: each ancestor up to its cut, root first, then this branch to its head |
-| Position | A sequence range whose ends are inclusive, or a cursor. Either form may name an upper end — the range's end, or the sequence the cursor may read through — and either may leave it out: absent, the read covers each branch's own coverage — an ancestor to its cut, the read branch to its published head; named, it is an inclusive bound applied to each branch's own sequence space and clamped to that branch's cut, so it never hides an ancestor fact. A named upper end must end an atomic batch; a range's start may fall inside one |
+| Position | A sequence range whose ends are inclusive, or a cursor. A range's end may be left out, and so may a cursor's through: absent, the read covers each branch's own coverage — an ancestor to its cut, the read branch to its published head — and a descending cursor read with no through runs down to the first sequence. A bound taken from above must end an atomic batch and is clamped to the branch's cut, so it never hides an ancestor fact: a range's end, and a cursor's through in an ascending read. A bound taken from below may fall inside one: a range's start, and a cursor's through in a descending read |
 | Kinds and flags | The event kinds it accepts (`domain/name`), and the envelope's context flags (§5.1) it selects on |
 | Event id | An equality on the event id: one id selects that event, so a caller reads one event or looks up its position without paging |
 | Predicate | One equality against one JSON scalar. The path is a sequence of field names inside the event's data joined by dots, with no array indexing and no wildcards |
@@ -239,7 +239,7 @@ whole prefix reads pages and folds them itself.
 | Input | Result |
 | --- | --- |
 | A position past the published head | Invalid input. The head is the scope's: a branch read compares against that branch's published head, a chain read against its coverage, the largest ancestor cut or the read branch's head, so a read branch with little local history still reaches its ancestors, and only a bound past every branch's coverage is invalid |
-| A range end or a named cursor through inside an atomic batch | Invalid input |
+| A range end, or a cursor's through in an ascending read, inside an atomic batch | Invalid input |
 | A cursor that does not name an atomic batch boundary | Invalid input |
 | A cursor that names a branch the read's scope does not cover | Invalid input |
 | A kind or a data path the store does not know | No rows; not an error |
