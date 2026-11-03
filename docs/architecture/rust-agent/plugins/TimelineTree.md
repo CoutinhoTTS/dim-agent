@@ -33,7 +33,11 @@ ending line. `TreeCommands::end`
 checks only the target: it exists, it is open, and it is not `main`; a line
 that ended writes nothing and answers `branch_ended`. `info` answers for an
 ended line too, and `page` reads an open or ended line from the store at its
-head. Candidate branches remain private until opening
+head. Each line's node publishes the sequence of its latest `turn/end`, which
+the line's BranchLine waits on for the parent block (design
+[§7.1.1](../../../design/timeline-branches.md#711-the-parent-block-branchparent)). `TreeCommands` also
+answers whether a line's parent has new activity past a sequence, through the
+one event query ([ADR 019](../../../adr/019-event-query.md)). Candidate branches remain private until opening
 receipts/dispatch fences and initial input acceptance succeed. Creation retains
 its fixed ancestry cut even if a waiter disappears. One opening budget requests
 cancellation; rollback and accepted host work must still settle. Cleanup closes
@@ -83,8 +87,9 @@ identity, and releases pending child reservations when the parent unloads.
 ### Events and lifetime
 
 Consumes `branch/create` and `branch/end` (with the next turn end of a line
-that ended through a tool call); tree-owned work produces the opening, failure
-and end facts (see TimelineTree). The handler registers creation, not a long-running build future.
+that ended through a tool call), and reports every `turn/end` to the tree,
+which publishes it for the line's children; tree-owned work produces the
+opening, failure and end facts (see TimelineTree). The handler registers creation, not a long-running build future.
 Cleanup cancels pending reservations for this parent and settles their waiters.
 No independent worker or persistent tree is owned here. Reload does not by
 itself replay arbitrary old create events; recovery belongs to TimelineTree.

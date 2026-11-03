@@ -6,15 +6,15 @@
 
 **分支**是同一个 agent 在一个 Session 里的一条行为线。Session 是一个主体，也就是"我"：它的身份、它与用户的交互面、它的能力和它的工作区。分支是这个主体的一条行为线。
 
-子分支从父分支的历史中某个切点开始。切点之前的每个事件也是子分支自己的历史，这些行不会改变。切点之后，子分支只读自己的事件（[timeline.rs](../../../crates/dim-agent-runtime/src/core/timeline.rs)）。
+子分支从父分支的历史中某个切点开始。切点之前的每个事件也是子分支自己的历史，这些行不会改变。切点之后，子分支读自己的事件，并通过 `branch` 工具读它被切出来的那条线（§6）。
 
 分支之间共享事实，不共享上下文：
 
 - 每条线用自己的事实组装自己的上下文。
 - 每条线各自压缩。
-- 一条线影响另一条线，只能向那条线的 Timeline 写输入。
+- 一条线影响另一条线，向那条线的 Timeline 写输入；它了解另一条线，靠自己对那条线的读取。
 
-父子关系记录历史的来源，也是分支之间唯一可以通信的关系。它不表示控制，也不表示欠对方一个结果。
+父子关系记录历史的来源，也是分支之间唯一可以通信和读取的关系。它不表示控制，也不表示欠对方一个结果。
 
 对 #427 的回答：
 
@@ -59,20 +59,21 @@
 ## 4. 树与角色
 
 - **深度。** 架构上分支可以有任意深度。`session.branch_create` 接受任意父分支；Goal 接受任意 `branchId`，所以开在子分支下的评审者是孙分支。
-- **亲缘。** 父子是分支之间唯一可以通信的关系。父分支和它的每个子分支互相写输入；兄弟分支、更远的亲属之间不通信（§6）。这条规则约束的是一条线作用于另一条线，在这里就是 `branch` 工具。能力按自己的决定行事，属于能力影响分支，不受这条规则限制（[设计规则 §2](../../architecture/rust-agent/principles.md#2-作用域的含义)）。例如 Goal 写入评审结果，或插件在任意切点开线。
+- **亲缘。** 父子是分支之间唯一可以通信的关系。父分支和它的每个子分支互相写输入，一条线还会读它被切出来的那条线（§6）。兄弟分支、更远的亲属之间既不发消息也不读。这条规则约束的是一条线作用于另一条线，在这里就是 `branch` 工具。能力按自己的决定行事，属于能力影响分支，不受这条规则限制（[设计规则 §2](../../architecture/rust-agent/principles.md#2-作用域的含义)）。例如 Goal 写入评审结果，或插件在任意切点开线。
 - **agent 的工具。** `branch` 工具只能从 `main` 开线。`main` 是根线，没有父分支。用工具开出的线是叶子，不能再开线。所以 agent 只有一个协调者 `main`，每条工具线都和 `main` 对话。
 - **来源。** 每条线都有来源，记在父分支的 `branch/create` 里：
   - **工具线**由 `branch` 工具开出。
   - **host 线**由插件（`TreeCommands.create`）或客户端（`session.branch_create`）开出。它的协议归创建者。
 
   来源可以从 `TimelineInfo.source` 读到，由 `TreeCommands.list` 和 `info` 返回，`main` 上没有（§5）。host 线的来源是 `{kind: "host", operation_id}`：开线一方的不透明标签，核心从不解释它。开线一方按自己的 operation id 约定找到自己的线，例如 Goal 的 `goal:evaluate:` 前缀。客户端开的线带的是 App Server 的 id。
-- **工具的作用范围。** 工具的 `message`、`read`、`end` 动作只作用于工具线。host 线不在 main 的名册上，工具不给它发消息，也不结束它。
+- **工具的作用范围。** 工具的 `read` 动作读调用方被切出来的那条线，`main` 读它开的工具线；host 线同样读它被切出来的那条线。`message` 和 `end` 只在 `main` 与它开的工具线之间生效。host 线不在 main 的名册上，工具不给它发消息，也不结束它。
+- **父线块。** 一条线的 BranchLine 在父线结束一轮、且父线在 `max(读取游标, 上次告知的头部, 开启点)` 之后有新活动时，在这条线自己身上写一个带 key 的 `<dim-branch-parent>` 块（§7.1.1、§12.1）。块只报位置，是状态而不是请求；内容仍留在读取返回的页里。
 
 | 线 | 用工具开线 | 用工具发消息 | 用工具读 | 由谁结束（按约定） |
 | --- | --- | --- | --- | --- |
 | `main` | 能 | 它的工具线 | 它的工具线，未结束或已结束都可以 | 永不结束；Session 关闭不算结束 |
-| 工具线 | 不能（工具结果拒绝） | `main`，即它的父分支 | — | 它自己（`end`）、用户，或祖先结束时连带 |
-| host 线 | 不能 | —（按创建者的协议） | — | 它的创建者（Goal 结束它的评审者，[Pursuit §13](plugins/Pursuit.md#13-结束评审者随-427)）、用户，或祖先结束时连带 |
+| 工具线 | 不能（工具结果拒绝） | `main`，即它的父分支 | 它的父分支，未结束或已结束都可以 | 它自己（`end`）、用户，或祖先结束时连带 |
+| host 线 | 不能 | —（按创建者的协议） | 它的父分支，未结束或已结束都可以 | 它的创建者（Goal 结束它的评审者，[Pursuit §13](plugins/Pursuit.md#13-结束评审者随-427)）、用户，或祖先结束时连带 |
 
 谁结束哪条线，是调用方之间的约定。运行时只检查目标：它存在、未结束、不是 `main`（§10）。
 
@@ -112,8 +113,13 @@ BranchLine 注入 `B:Dispatcher`、`B:TimelineIdentity`、`B:BranchLifecycle` �
 这两个模式和用词与 Collaboration 的消息相同（`append`、`steer`），含义也相同，因为两者用的都是 InputQueue 的模式。
 
 - **标记。** `<dim-branch-message from="C" to="P">`。接收方凭这个标记把消息和用户的话区分开。RPC 只接收操作者内容、不接收块，所以客户端无法伪造消息。
-- **允许的两端。** `main` 和它每条未结束的工具线之间，双向都可以。其他任何组合都由工具结果拒绝，什么也不写：兄弟分支、host 线、已结束的线。
-- **读取。** `read {branch, after?, limit?}` 让 `main` 读它的一条工具线，未结束或已结束都可以。它经 `TreeCommands.page` 从存储读取已提交的完整批次，按 Collaboration 的 `read` 渲染成员页面的方式呈现：输入、文本、工具调用与结果、每轮结束，带 `nextCursor`。线不读 `main`。切点之后一条线对 `main` 的了解，就是 `main` 发给它的内容，所以由 `main` 决定每条线需要知道什么，也不会有哪条线把另一条线的整个事件流拉进自己的上下文。
+- **允许的两端。** 消息：`main` 和它每条未结束的工具线之间，双向都可以。读取：一条线读它被切出来的那条线，这一对两端都可以（工具线读 `main`，`main` 读它的工具线，host 线读开出它的那条线）。其他任何组合都由工具结果拒绝，什么也不写：兄弟分支、工具线读 host 线、host 线收发消息、已结束的线。拒绝码仍是 `branch_not_kin` 和 `branch_not_tool_line`；`main` 仍然绝不通过工具读 host 线。
+- **读取。** `read {branch, after?, limit?}` 返回目标已提交历史的一页，未结束或已结束都可以，经 `TreeCommands.page` 从存储读取，按 Collaboration 的 `read` 渲染成员页面的方式呈现：输入、文本、工具调用与结果、每轮结束，带 `nextCursor`。目标是调用方被切出来的那条线；在 `main` 上则是它开的工具线。两个方向共用一条游标规则：
+  - 不带 `after` 时，读取从调用方上一次成功读取该线的位置继续：最后一次返回了页的读取的 `nextCursor`。此前没有读过时，一条线第一次读父线从它的切点开始，`main` 第一次读一条线从该线的第一个事件开始。
+  - 显式 `after` 从该点读取。读父线时，低于切点的值会抬到切点，因为切点之前的事件已经是这条线自己的历史。`main` 的值原样使用，所以 `after: 0` 会从一条线的开头重读。
+  - 每次成功读取都把游标移到它的 `nextCursor`，显式 `after` 的读取也一样；以最后一次为准。游标是调用方自己那条线的事实：BranchLine 从调用方自己的 `step/tool-use` 和 `step/tool-result` 折叠得到，所以重载和压缩都能重建它。
+  - 一页可能在目标某一轮的中间结束：它读到目标已发布的头部，下一次读取从这一页之后继续。
+- **知道何时读。** 读取是按需的，所以一条线还需要知道父线动了。带 key 的 `<dim-branch-parent>` 块（§4、§7.1.1）给出父线的头部和这条线的游标；线据此决定读哪些页。块从不携带内容，读这个块也不是在读父线。
 - **不设上限。** 线的数量、消息数、steer 数都不设上限。消息往复由提示词规则（§12）、某条线自行结束，或用户（中断或结束）来终止。为什么这样是安全的，以及需要时由谁负责限制，见 §6.1。
 - **空闲通知。** 一条工具线的一轮结束时，这条线上的 BranchLine 给 `main` 写一条 steer（`<dim-branch-idle>`，§12.1），除非下列之一成立：
   - 这一轮已经给 `main` 发过 steer 消息；
@@ -164,9 +170,9 @@ BranchLine 注入 `B:Dispatcher`、`B:TimelineIdentity`、`B:BranchLifecycle` �
 
 ## 7. 身份与上下文
 
-### 7.1 一个 key：`branch:line`
+### 7.1 带 key 的状态：`branch:line` 与 `branch:parent`
 
-每条线都用同一个 key `branch:line` 下的块，回答"我是哪条线，哪些线是我的"。这个 key 在每条线上都一样。
+每条线都用同一个 key `branch:line` 下的块，回答"我是哪条线，哪些线是我的"。这个 key 在每条线上都一样。一条线还为自己被切出来的那条线保留一个带 key 的块 `branch:parent`（§7.1.1）。
 
 - **子分支上：它的身份。** TimelineTree 在每个子分支上写入，无论工具线还是 host 线。它是子分支开启 Queue 输入的第一个块，key 为 `branch:line`，写明：
   - 子分支的 id、父分支和切点；
@@ -190,6 +196,27 @@ key 与模式互不相关（[history.rs](../../../crates/dim-agent-capabilities/
 - Append 可能在开启输入之后才提交（[Goal §3.4](plugins/Goal.md#34-新分支清除继承的目标)）。
 - 在 `branch/start` 时还不知道目的。
 
+### 7.1.1 父线块 `branch:parent`
+
+读取是按需的，所以一条线还需要知道它被切出来的那条线动了。这条线上的 BranchLine 观察父线的轮次结束，在自己 Timeline 上写一条带 key 的 Append，`branch:parent`。这是这条线自己的事实，从不属于父线：没有哪个部件折叠另一条线的事件。
+
+- **信号。** TimelineTree 本来就分派每条线的 `turn/end`；线自己的节点发布它最新一次轮次结束的序号。子分支的 BranchLine 等待父线的信号和自己的写队列，任一变化排入一次决定。没有部件为此读取父线的历史。
+- **条件。** 只有以下条件全部成立时才写这个块：
+  1. 这条线的角色是工具线或 host 线，且这条线不在结束；
+  2. 这条线上没有更早的 `branch:parent` 输入仍被持有，即已提交、尚未消费；
+  3. 父线在 `from = max(A, told, opened)` 之后有新活动：`A` 是这条线对父线的读取游标（还没读过时是它的切点），`told` 是这条线上最新一个 `branch:parent` 块报告的头部（没有时为 0），`opened` 是这条线的 `branch/create` 事件在父线上的序号，每个切点都不高于它。线存在之前发生的活动不算新闻，需要时线自己去读。
+- **什么算新活动。** 只有两类事件算：操作者输入，即带 `user` 内容的 `input/message`；以及工具调用。创建调用的 `step/tool-use` 写在 `opened` 之前，所以从不会被算进去。其他都不单独算：父线的文本、它的轮次结束、只有块的输入（名册、来自各线的消息）、以及创建调用的结果。规则是：父线行动时、或操作者告诉父线事情时，线被告知；只为开启它的那一轮（它的创建调用结果、文本和轮次结束）则从不告知，否则每条线都会白白读一次父线，并学会忽略这个块。
+- **检查方式。** 父线的事实通过唯一的事件查询读取（[ADR 019](../adr/019-event-query.md)）：该分支的 `input/message` 和 `step/tool-use` 事件，从新到旧分页，直到有一个符合条件，或读取到达 `from`。不折叠任何其他线的事件。
+- **写入。** 一条带 key 的 Append，key 为 `branch:parent`，经 `TreeCommands.input` 写在这条线自己身上，属性是父线的 id、`head` 和 `after`。同一 key 的后一个块会在带 key 的基线里取代前一个。写完之后折叠记下新头部和新输入，所以队列里的第二次决定不会再写。
+- **随后发生什么。** 运行中的线在下一次模型请求时拿到这个块。空闲的线不会被唤醒：这个块在它下一轮的第一个请求里、先于开启那一轮的输入被消费，这是有文档记录的 Append 规则（[session access](contracts/session-access.md)、[Loop](../../architecture/rust-agent/plugins/Loop.md)）。重载不写任何东西；重启最多写当时已经该写的那个块。`main` 拿不到块：它上面没有东西。
+- **被否决的替代方案。**
+  - 在线自己一轮结束时写，错过了这个变化存在的场景：线结束一轮，父线继续，随后用户或父线来找这条线。那一轮不携带块。
+  - 在线一轮开始时或它的请求之间写，是在请求准备好之后才响应事件；一条已提交的 Append 可能落在它本该服务的那次请求之后，而且需要 Loop 里的钩子。
+  - `main` 给每条线推摘要或 steer，重复了线自己可以读到的内容，还会唤醒空闲的线。
+  - 新的事件类型或存储格式改动没有必要：一条原始的带 key 输入已经承载这份状态。
+
+  这个块只说明位置，不携带内容；内容留在读取返回的页里。
+
 ### 7.2 压缩
 
 压缩按线进行。一次压缩是压缩方自己 Timeline 上的一条 `context/compaction` 事实。
@@ -200,9 +227,12 @@ key 与模式互不相关（[history.rs](../../../crates/dim-agent-capabilities/
 带 key 的基线会重放 `retain_from` 之前每个 key 最新的有效块。因此：
 
 - `main` 压缩时，它的名册会重放；
-- 子分支压缩时，它的身份会重放。
+- 子分支压缩时，它的身份会重放；
+- 一条线压缩时，它最新的 `branch:parent` 块会重放，所以这个块能活过这条线自己的压缩。
 
-只用一个 key，每条线的基线里对"我是哪条线"恰好只有一个答案，继承来的答案也不会比这条线自己的答案活得更久。消息不带 key：压缩之后，它们像其他输入一样留在摘要或保留的轮次里。
+压缩不删除任何行：这条线对读取游标和最新块的折叠，在重放时从同样的事件重建。
+
+`branch:line` 这个 key 让每条线的基线里对"我是哪条线"恰好只有一个答案，继承来的答案也不会比这条线自己的答案活得更久。消息不带 key：压缩之后，它们像其他输入一样留在摘要或保留的轮次里。
 
 ### 7.3 缓存前缀
 
@@ -214,6 +244,7 @@ key 与模式互不相关（[history.rs](../../../crates/dim-agent-capabilities/
 - 协议只缓存显式标记内容时，请求会给这份前缀打上缓存断点：最多两个，System 末尾一个，最后一条用户或工具结果消息的最后一个块一个，且只在各自条件成立时才放置（[Anthropic 提示缓存断点](../../../crates/dim-agent-aimux/README.md#anthropic-提示缓存断点)）。
 - 身份块是子分支自己的第一个事件，紧跟在继承的前缀之后。所以子分支的第一次请求能复用父分支到切点为止的前缀。
 - 名册更新是追加在 `main` 历史末尾的 Append。
+- 父线块是追加在这条线自己历史末尾的 Append，所以它们从不移动任何线继承的前缀。
 
 ### 7.4 Goal 与 Pursuit
 
@@ -322,7 +353,7 @@ WorkspaceTools 不变。
 | --- | --- | --- | --- | --- |
 | `create` | `prompt`、`at?` | `main` | 开一条切在 `at` 的工具线（默认与现在相同：在本次请求的模型开始之前） | `Line created: C` |
 | `message` | `to`、`content`、`mode?`（`append` \| `steer`） | `main` → 它未结束的工具线；工具线 → 它的父分支 | 在 `to` 上写一条 `input/message` | `Sent to C.` |
-| `read` | `branch`、`after?`、`limit?`（1–200） | `main`，读它的工具线 | 从存储读一页 | 这一页的 JSON：items、`nextCursor`、`done` |
+| `read` | `branch`、`after?`、`limit?`（1–200） | `main`，读它的工具线；一条线，读它被切出来的那条线 | 从存储读一页；不给 `after` 时从调用方的游标开始（§6） | 这一页的 JSON：items、`nextCursor`、`done` |
 | `end` | `content` | 工具线，对它自己 | 先给父分支发最终消息（steer），再调用 `TreeCommands.end(C, source)`，`source` 就是这次调用 | `Line C is ending; your final message was sent to P.` |
 
 输入 schema 为 `{action, prompt?, at?, to?, content?, mode?, branch?, after?, limit?}`，`action` 必填，`additionalProperties: false`。
@@ -332,7 +363,7 @@ WorkspaceTools 不变。
 | 情形 | 文本 | 代码 |
 | --- | --- | --- |
 | 不在 `main` 上 `create` | `Only main opens lines. Tell main if more parallel work is needed.` | `branch_not_main` |
-| 在亲缘之外 `message` 或 `read` | `You can message only the lines you opened and the line that opened you.` | `branch_not_kin` |
+| 在亲缘之外 `message` 或 `read` | `You can message or read only the lines you opened and the line you were cut from.` | `branch_not_kin` |
 | 对 host 线 `message` 或 `read` | `Line C was not opened with this tool; it follows its own protocol.` | `branch_not_tool_line` |
 | 向已结束的线发消息，或与结束发生竞争 | `Line C has ended. Read it to see what it did.` | `branch_ended` |
 | 在 `main` 或 host 线上 `end` | `Only a line opened with create can end itself.` | `branch_cannot_end` |
@@ -347,15 +378,16 @@ WorkspaceTools 不变。
 
 | 写入 | 位置、key | 模式 | 文本 |
 | --- | --- | --- | --- |
-| 身份，工具线 | `C`，开启输入的第一个块，`branch:line` | Queue | `<dim-branch-line branch="C" parent="P" source="tool">` / `You are line C of this session. Line P opened you at this point of its history to work in parallel with it. You are the same agent as P: everything above is your own history, and you continue from here on your own line. P keeps working on its line; you do not see its work after this point, and it sees yours only through what you send it. Messages above that were addressed to P, such as its list of open lines, are P's, not yours.` / 空行 / `Your purpose, as P wrote it:` / `<prompt>` / 空行 / `How you work with P:` / `- Work on this purpose only. You cannot open lines; if more parallel work is needed, tell P.` / `- Tell P with the branch tool (message, to "P"). Use mode "steer" for what P must act on now: a finding that changes its work or another line's, a blocking question, a conflict. Use "append" for progress P should see at its next step. Do not repeat what P already knows: when several steps give the same result, send one message for the run of them, and say only what changes what P does or what it cannot see for itself.` / `- You share the workspace with P and its other lines. Change only the files P gave you; before changing any other file, tell P which. If edit or write fails because the file was modified after it was last read, another line may have changed the file: read it again and tell P before you continue.` / `- The user can talk to you directly. Answer the user, and ask with ask_user when only the user can decide.` / `- When your purpose is done, or cannot be done, call the branch tool with action "end" and content saying what you found, did, changed and left undone. If you already told P that in a message, your end content carries only what is new. That is your last action; P receives it.` / `</dim-branch-line>` |
-| 身份，host 线 | `C`，开启输入的第一个块，`branch:line`。创建者的 prompt 是这条输入的 `user` | Queue | `<dim-branch-line branch="C" parent="P" source="host">` / `You are line C of this session, opened from line P at this point of its history. You are the same agent as P: everything above is your own history, and you continue from here on your own line, in parallel with P. You do not see P's work after this point. Messages above that were addressed to P are P's, not yours. The message after this one says what this line is for.` / `</dim-branch-line>` |
-| 名册 | `P`，`branch:line` | Append | `<dim-branch-lines branch="main">` / `Lines you opened that are still open. Each is you, working in parallel from the point you opened it; it does not see your work after that point unless you message it.` / `- C1: <目的的第一行，最多 120 个字符>` / … / ``They message you when they find something, need you, or end. Use the branch tool to message or read them, and the `wait` tool to wait for them; end the wait when your lines have nothing left to tell you.`` / `</dim-branch-lines>` |
+| 身份，工具线 | `C`，开启输入的第一个块，`branch:line` | Queue | `<dim-branch-line branch="C" parent="P" source="tool">` / `You are line C of this session. Line P opened you at this point of its history to work in parallel with it. You are the same agent as P: everything above is your own history, and you continue from here on your own line. P keeps working on its line; you can read its work after this point, and it can read yours. Messages above that were addressed to P, such as its list of open lines, are P's, not yours.` / 空行 / `Your purpose, as P wrote it:` / `<prompt>` / 空行 / `How you work with P:` / `- Work on this purpose only. You cannot open lines; if more parallel work is needed, tell P.` / `- Read P with the branch tool (action read, branch "P") when what P did or decided since your cut changes your work; the parent block reports when P has moved. Message P only for what it must act on: a decision that changes its work, a blocker only the user can settle, a conflict with another line, or a change to your purpose. Use mode "steer" for what P must act on now, "append" for what P should see at its next step. Do not send P a progress report it can read, and do not page through P's whole stream: read the page that answers your question, then act.` / `- You share the workspace with P and its other lines. Change only the files P gave you; before changing any other file, tell P which. If edit or write fails because the file was modified after it was last read, another line may have changed the file: read it again and tell P before you continue.` / `- The user can talk to you directly. Answer the user, and ask with ask_user when only the user can decide.` / `- When your purpose is done, or cannot be done, call the branch tool with action "end" and content saying what you found, did, changed and left undone. If you already told P that in a message, your end content carries only what is new. Read P once more before you end if the parent block says P has moved, so your last word still holds. That is your last action; P receives it.` / `</dim-branch-line>` |
+| 身份，host 线 | `C`，开启输入的第一个块，`branch:line`。创建者的 prompt 是这条输入的 `user` | Queue | `<dim-branch-line branch="C" parent="P" source="host">` / `You are line C of this session, opened from line P at this point of its history. You are the same agent as P: everything above is your own history, and you continue from here on your own line, in parallel with P. You can read P's work after this point. Messages above that were addressed to P are P's, not yours. The message after this one says what this line is for.` / `</dim-branch-line>` |
+| 名册 | `P`，`branch:line` | Append | `<dim-branch-lines branch="main">` / `Lines you opened that are still open. Each is you, working in parallel from the point you opened it; it can read your work after that point, and you can read its.` / `- C1: <目的的第一行，最多 120 个字符>` / … / ``They message you when they find something, need you, or end. Use the branch tool to message or read them, and the `wait` tool to wait for them; end the wait when your lines have nothing left to tell you.`` / `</dim-branch-lines>` |
 | 名册，没有未结束的线 | `P`，`branch:line` 退役 | Append | `<dim-branch-lines branch="main">` / `All lines you opened have ended.` / `</dim-branch-lines>` |
+| 父线块 | `C`，`branch:parent` | Append | `<dim-branch-parent branch="P" head="H" after="A">` / `Line P has new activity: it was at H when this was written, and you have read it to A. Read what is new with the branch tool (action read, branch "P"); with no after, the read continues from A. Read it when what P did changes what you do, and before your final message; do not page through all of P's work.` / `</dim-branch-parent>` |
 | 消息 | 接收方，无 key | `append` 或 `steer` | `<dim-branch-message from="C" to="P">` / `<content>` / `</dim-branch-message>` |
 | 最终消息 | `P`，无 key | Steer | `<dim-branch-message from="C" to="P" final="true">` / `<content>` / 空行 / `Line C ends with this message.` / `</dim-branch-message>` |
 | 空闲通知 | `P`，无 key | Steer | `<dim-branch-idle branch="C" status="completed\|failed\|cancelled">` / `Line C's turn ended (<status>) without a message to you, and C is waiting. Read it if you need its state; message it with mode "steer" to give it more work, or leave it.` / `</dim-branch-idle>` |
 | 结束通知 | `P`，无 key，与名册在同一条输入里；工具线除自己的 `end` 之外的任何结束 | Steer | `<dim-branch-ended branch="C">` / `Line C was ended from outside its own line, by the user or a host operation. It no longer receives messages; read it if you need what it did.` / `</dim-branch-ended>` |
-| 工具描述 | 每条线 | — | `Work with the other lines of this session. A line is you: it starts from your history at the point it is opened, then works in parallel on its own line. It is not a helper with its own memory, and it owes you no result; you and it keep each other informed while you work. On main you coordinate: answer a line's steer and act on what it asks for; leave a line's part to that line instead of redoing it.` / `- create (main only): open a line to work on prompt in parallel. Open one line per part that can go on at the same time as the rest — separate files, a separate question, or a second approach — instead of doing those parts one after another yourself; not for a single quick edit, nor when your next step needs its result. Write prompt as a brief to yourself: the purpose, what you already know that it needs, which files or area are its own, and when it should tell you or end. Returns the line's id.` / `- message: send content to a line you opened, or to the line that opened you. Mode "append" (default) reaches the receiver at its next step without interrupting it and does not wake an idle line. Use "steer" when the receiver must act now or is idle.` / `- read: show the recent activity of a line you opened, also after it ended. Pass nextCursor as after to continue.` / `- end: on a line opened with create, end your own line. content is your final message to the line that opened you: what you found, did, changed and left undone. It is your last action.` / `Lines talk only with the line that opened them and the lines they opened.` |
+| 工具描述 | 每条线 | — | `Work with the other lines of this session. A line is you: it starts from your history at the point it is opened, then works in parallel on its own line. It is not a helper with its own memory, and it owes you no result; you and it keep each other informed by reading each other's work and messaging what the other must act on. On main you coordinate: answer a line's steer and act on what it asks for; leave a line's part to that line instead of redoing it; read a line's work instead of waiting for a report.` / `- create (main only): open a line to work on prompt in parallel. Open one line per part that can go on at the same time as the rest — separate files, a separate question, or a second approach — instead of doing those parts one after another yourself; not for a single quick edit, nor when your next step needs its result. Write prompt as a brief to yourself: the purpose, what you already know that it needs, which files or area are its own, and when it should tell you or end. Returns the line's id.` / `- message: send content to a line you opened, or to the line that opened you. Send a decision, a blocker, or a conflict, not a progress report the receiver can read. Mode "append" (default) reaches the receiver at its next step without interrupting it and does not wake an idle line. Use "steer" when the receiver must act now or is idle.` / `- read: show a page of the activity of the line you were cut from, or of a line you opened, also after it ended. With no after, a read continues after your last read of that line: from your cut for the line you were cut from, and from its first event for a line you opened. Pass after to read from another point. Do not page through a whole line.` / `- end: on a line opened with create, end your own line. content is your final message to the line that opened you: what you found, did, changed and left undone. It is your last action.` / `A line reads the line it was cut from; main reads the lines it opened. Messages pass only between main and the lines it opened.` |
 
 这些文本取代代码里现有的委派措辞：`first_input` 里的 `dim-branch-task` 块（"That branch delegated this task to you"）和工具描述（"works on prompt as a task you delegate"）。各段文本的类别见 [§12.4](#124-文本及其类别)。
 
@@ -370,7 +402,9 @@ WorkspaceTools 不变。
 
 ### 12.3 评估场景
 
-场景放在仓库里，一个场景一个目录，目录里是 `scenario.json` 和它旁边的起始 `workspace/`：七个在 [`xtask/scenario-eval/timeline-branches/`](../../../xtask/scenario-eval/timeline-branches/) 下，各自声明 131,072 tokens 的窗口；`identity-after-compaction` 在 [`xtask/scenario-eval/timeline-branches-compact/`](../../../xtask/scenario-eval/timeline-branches-compact/) 下，声明 16,000，以便发生压缩。`budget.window` 是校验而不是设置：Session 声明的窗口与之不同时，这次运行在第一轮之前就失败，所以复跑需要模型声明正好这个窗口；没有声明窗口的模型回退到 128,000，同样失败。这些场景在本地用真实模型运行，结果在实现 PR 里报告。CI 只断言行为。
+场景放在仓库里，一个场景一个目录，目录里是 `scenario.json` 和它旁边的起始 `workspace/`：八个在 [`xtask/scenario-eval/timeline-branches/`](../../../xtask/scenario-eval/timeline-branches/) 下，各自声明 131,072 tokens 的窗口；`identity-after-compaction` 在 [`xtask/scenario-eval/timeline-branches-compact/`](../../../xtask/scenario-eval/timeline-branches-compact/) 下，声明 16,000，以便发生压缩。`budget.window` 是校验而不是设置：Session 声明的窗口与之不同时，这次运行在第一轮之前就失败，所以复跑需要模型声明正好这个窗口；没有声明窗口的模型回退到 128,000，同样失败。这些场景在本地用真实模型运行，结果在实现 PR 里报告。CI 只断言行为。
+
+`main-moved-on` 是父线块（§7.1.1）的场景：`main` 在切点之前有工作，开一条线，然后继续工作；这条线在回答或结束之前必须读取 `main` 在切点之后做的事，并且不能逐页读遍 `main` 的全部活动。它是 [§12.4](#124-文本及其类别) 父线块策略句的场景。
 
 `identity-after-compaction` 沿用 `redone-work` 的消息和 workspace，`flooding` 与 `never-ending` 共用同一个 workspace：这两对保持完全相同，改动其中一份而不同步另一份时，读取两个提交目录的无模型测试会失败。
 
@@ -379,6 +413,7 @@ WorkspaceTools 不变。
 | 线把自己当成 main | — | 它开线、把名册当成自己的，或去协调其他线 |
 | 重复劳动 | `timeline-branches/redone-work` | `main` 重做一条线正在做的事，或者两条线做同一件事 |
 | 过时的认识 | — | 一条线依据切点之后已经改变的文件或决定行事，却没有重新读取 |
+| 父线动了 | `timeline-branches/main-moved-on` | 一条线在回答或结束前没有读取父线在切点之后提交的活动，或者逐页读遍了父线的全部活动 |
 | 刷屏 | `timeline-branches/flooding` | append 或 steer 消息重复接收方已经知道的内容 |
 | 过度拆分 | `timeline-branches/over-splitting` | 为很短或必须按顺序做的步骤开线 |
 | 不结束 | `timeline-branches/never-ending` | 一条线已经做完，却不调用 `end` |
@@ -395,18 +430,20 @@ WorkspaceTools 不变。
 
 **协议。**
 
-- **标记名与属性。** `dim-branch-line` 带 `branch`、`parent` 和 `source`，key 为 `branch:line`；`dim-branch-lines` 带 `branch`；`dim-branch-message` 带 `from`、`to`，最终消息再带 `final`；`dim-branch-idle` 带 `branch` 和 `status`（`completed`、`failed` 或 `cancelled`）；`dim-branch-ended` 带 `branch`。模式用的是 InputQueue 的：身份是 Queue，名册是 Append，通知和最终消息是 Steer。
+- **标记名与属性。** `dim-branch-line` 带 `branch`、`parent` 和 `source`，key 为 `branch:line`；`dim-branch-lines` 带 `branch`；`dim-branch-parent` 带 `branch`、`head` 和 `after`，key 为 `branch:parent`；`dim-branch-message` 带 `from`、`to`，最终消息再带 `final`；`dim-branch-idle` 带 `branch` 和 `status`（`completed`、`failed` 或 `cancelled`）；`dim-branch-ended` 带 `branch`。模式用的是 InputQueue 的：身份是 Queue，名册和父线块是 Append，通知和最终消息是 Steer。
 - **身份块的事实句。** 工具线里，"You are line C of this session" 到 "are P's, not yours."，以及标签 "Your purpose, as P wrote it:"；host 线里，整句。标签后的 purpose 是创建者自己的话，按内容承载。
 - **名册的事实句。** "Lines you opened that are still open. Each is you …" 与 "All lines you opened have ended."；列出的每一条带线的 id 和目的的第一行。
+- **父线块的事实句。** "Line P has new activity: it was at H when this was written, and you have read it to A."、"Read what is new with the branch tool (action read, branch \"P\")" 中的动作与字段名，以及规则 "with no after, the read continues from A."。
 - **通知的事实句。** "Line C's turn ended (<status>) without a message to you, and C is waiting." 与 "Line C was ended from outside its own line, by the user or a host operation. It no longer receives messages"。
-- **branch 工具的动作与模式。** 动作 `create`、`message`、`read`、`end` 及各自做什么；`mode` 为 `append` 或 `steer` 及它对接收方的作用；每个动作接收的字段，`action` 必填且不接受别的字段；以及陈述保证的句子："Returns the line's id"、"Pass nextCursor as after to continue"、"It is your last action"、"Lines talk only with the line that opened them and the lines they opened."。
+- **branch 工具的动作与模式。** 动作 `create`、`message`、`read`、`end` 及各自做什么；`mode` 为 `append` 或 `steer` 及它对接收方的作用；每个动作接收的字段，`action` 必填且不接受别的字段；`read` 的目标规则及其游标规则（"With no after, a read continues after your last read of that line"）；以及陈述保证的句子："Returns the line's id"、"Pass after to read from another point"、"It is your last action"、"A line reads the line it was cut from; main reads the lines it opened. Messages pass only between main and the lines it opened."。
 - **结果与拒绝。** `Line created: C`、`Sent to C.`、页 `{items, nextCursor, done}`、`Line C is ending; your final message was sent to P.` 与 `Line C ends with this message.`；拒绝码 `branch_not_main`、`branch_not_kin`、`branch_not_tool_line`、`branch_ended`、`branch_cannot_end` 及各自的文本；以及 `Invalid branch arguments: …`。
-- **指南条目。** 每个条目标明它的标记是什么、承载谁的话或哪些事实，以及它是状态或信息、绝不是请求。`<dim-branch-line>` 的条目说明后出现的同名块会取代它，它归 TimelineTree——每段身份块都由它写——所以在任何执行配置下都在位。`<dim-branch-lines>`、`<dim-branch-idle>` 和 `<dim-branch-ended>` 的条目归 BranchLine，名册和两条通知都由它写；`<dim-branch-message>` 的条目与它们一起注册，因为 BranchLine 恰好在写消息的 BranchTool 所在之处加载。
+- **指南条目。** 每个条目标明它的标记是什么、承载谁的话或哪些事实，以及它是状态或信息、绝不是请求。`<dim-branch-line>` 的条目说明后出现的同名块会取代它，它归 TimelineTree——每段身份块都由它写——所以在任何执行配置下都在位。`<dim-branch-lines>`、`<dim-branch-idle>` 和 `<dim-branch-ended>` 的条目归 BranchLine，名册和两条通知都由它写；`<dim-branch-message>` 的条目与它们一起注册，因为 BranchLine 恰好在写消息的 BranchTool 所在之处加载。`<dim-branch-parent>` 的条目只在有父线的线上在位，因为只有这样的线收得到这个块：`main` 从不收到它，而组合一个永远不会出现的条目只会白白撑大 `main` 的指南。名册条目和消息条目在每条线上都在。
 
 **策略。**
 
-- **`main` 的协调文字。** `branch` 工具描述的指引：说明一条线是什么、以及对 `main` 而言协调意味着什么的开头段、`create` 关于何时开线与 brief 带什么的规则，以及 `message` 关于选模式的规则。[`BranchToolConfig.description`](../../../crates/dim-agent-capabilities/src/timeline_tree.rs) 只替换这段描述，不替换别的。它覆盖 [§12.2](#122-交给提示词层的事项429) 的第一项：`main` 怎样给一条线写说明、分配它的文件或区域（`create` 规则）；回应 steer（"answer a line's steer and act on what it asks for"）；不重做线上的工作（"leave a line's part to that line instead of redoing it"）。名册的收尾句 "They message you when they find something, need you, or end. Use the branch tool to message or read them, and the `wait` tool to wait for them; end the wait when your lines have nothing left to tell you." 也是 `main` 的协调文字，其中 "end the wait when your lines have nothing left to tell you" 覆盖结束 `main` 自己的等待；[`BranchToolConfig.roster_closing`](../../../crates/dim-agent-capabilities/src/timeline_tree.rs) 只替换这句，不替换别的。
-- **线的工作规则。** "How you work with P:" 的五条要点——目的、消息（含 "Do not repeat what P already knows"）、工作区、用户和结束——除了点明机制的从句："You cannot open lines"、动作名与模式名，以及 "the file was modified after it was last read"（`edit` 与 `write` 报告的那次失败）是协议，见上。它还没有工厂配置成员，在第一次为它评估候选的改动里获得成员。
+- **`main` 的协调文字。** `branch` 工具描述的指引：说明一条线是什么、以及对 `main` 而言协调意味着什么的开头段、`create` 关于何时开线与 brief 带什么的规则、`message` 关于选模式和发决定而不是进度报告的规则，以及 `read` 关于读线上的工作而不是等报告的规则。[`BranchToolConfig.description`](../../../crates/dim-agent-capabilities/src/timeline_tree.rs) 只替换这段描述，不替换别的。它覆盖 [§12.2](#122-交给提示词层的事项429) 的第一项：`main` 怎样给一条线写说明、分配它的文件或区域（`create` 规则）；回应 steer（"answer a line's steer and act on what it asks for"）；不重做线上的工作（"leave a line's part to that line instead of redoing it"）。名册的收尾句 "They message you when they find something, need you, or end. Use the branch tool to message or read them, and the `wait` tool to wait for them; end the wait when your lines have nothing left to tell you." 也是 `main` 的协调文字，其中 "end the wait when your lines have nothing left to tell you" 覆盖结束 `main` 自己的等待；[`BranchToolConfig.roster_closing`](../../../crates/dim-agent-capabilities/src/timeline_tree.rs) 只替换这句，不替换别的。
+- **线的工作规则。** "How you work with P:" 的五条要点——目的、读取与消息（含 "Do not send P a progress report it can read" 和 "do not page through P's whole stream"）、工作区、用户和结束（含 "Read P once more before you end if the parent block says P has moved"）——除了点明机制的从句："You cannot open lines"、动作名与模式名，以及 "the file was modified after it was last read"（`edit` 与 `write` 报告的那次失败）是协议，见上。它还没有工厂配置成员，在第一次为它评估候选的改动里获得成员。
+- **父线块的指引。** "Read it when what P did changes what you do, and before your final message; do not page through all of P's work."。它还没有工厂配置成员，在第一次为它评估候选的改动里获得成员。块的其余部分是协议，见上。
 - **通知的指引。** "Read it if you need its state; message it with mode \"steer\" to give it more work, or leave it." 与 "read it if you need what it did."。它还没有工厂配置成员，在第一次为它评估候选的改动里获得成员。
 
 策略文本的候选放在该文本的工厂配置成员上（[面向模型的提示词 §8.1](model-prompts.md#81-规则)），并让它替换的文本里的协议句逐字节不变。
@@ -417,8 +454,8 @@ WorkspaceTools 不变。
 
 | 功能 | 影响 |
 | --- | --- |
-| Goal | Goal 自己的规则不变。一条线的开启输入按 A5 是有来源的输入（§7.4），Goal 的冲突表记录了这一点。新线照旧清除继承的目标。Goal 的代码只随 Pursuit 修订改变：从 `info(自己的 id).source` 识别评审者、结束它的评审者，以及 `branch/ended` 这个 key（[Pursuit §13](plugins/Pursuit.md#13-结束评审者随-427)） |
-| Pursuit | 评审者得到 host 线的身份块。Goal 从线的来源识别它的评审者，并在评审了结之后结束它（[Pursuit §13](plugins/Pursuit.md#13-结束评审者随-427)） |
+| Goal | Goal 自己的规则不变。一条线的开启输入按 A5 是有来源的输入（§7.4），Goal 的冲突表记录了这一点。新线照旧清除继承的目标。一条线读取它被切出来的那条线，所以评审者能读到执行者在切点那一轮之后的工作；Goal 的折叠不变，因为评审者是在自己线上通过工具结果读取的。Goal 的代码只随 Pursuit 修订改变：从 `info(自己的 id).source` 识别评审者、结束它的评审者，以及 `branch/ended` 这个 key（[Pursuit §13](plugins/Pursuit.md#13-结束评审者随-427)） |
+| Pursuit | 评审者得到 host 线的身份块，并且能读到执行者在它的切点之后的工作（§6）；它决定的是评审，判定方式不变（[Pursuit §13](plugins/Pursuit.md#13-结束评审者随-427)） |
 | Fork、删除 | 不变。已结束的线按它的事实处理（§10） |
 | Session 关闭、空闲卸载 | 不算结束。各线恢复后仍未结束 |
 | 中断 | 一次轮次中断，或对某条线的停止，只结束一轮，从不结束一条线。对 `main` 的中断不影响它的线 |
@@ -463,10 +500,10 @@ WorkspaceTools 不变。
 
 | 模块 | 改动 | 原因 |
 | --- | --- | --- |
-| [设计规则 §2](../../architecture/rust-agent/principles.md#2-作用域的含义) | 改写：同一主体的多条线、共享事实、父子是唯一的通信关系、共用交互面。关系表一行改为"只在父子之间"；Session 一行加上"结束" | 现在的文本是"平等的线，父子只记录来源"，没有通信关系 |
-| TimelineTree | 对每种来源都在 `first_input` 里写身份块。新增 `TreeCommands.end(id, source)` 和 `TreeCommands.page(id, after, limit)`。`TimelineInfo.source`，依据父分支的 `branch/create` 填写（§5）。结束流程、线进入结束后拒绝输入、`branch/ended`、恢复规则、读已结束的线 | 它拥有线的生命周期和开启输入 |
-| TreeTimeline | 消费 `branch/end`，以及由工具调用发出的结束时这条线的下一次轮次结束，并转给 TimelineTree | 它现在就这样转 `branch/create` |
-| BranchTool | 按动作区分的工具，加上新的 BranchLine 分支部件 | 工具的各个动作，以及一条线对自己相关各线的视图 |
+| [设计规则 §2](../../architecture/rust-agent/principles.md#2-作用域的含义) | 改写：同一主体的多条线、共享事实、父子是唯一的通信和读取关系、共用交互面。关系表一行改为"只在父子之间"，读取父线已提交的事件经工具结果；Session 一行加上"结束" | 现在的文本是"平等的线，父子只记录来源"，没有通信关系 |
+| TimelineTree | 对每种来源都在 `first_input` 里写身份块。新增 `TreeCommands.end(id, source)` 和 `TreeCommands.page(id, after, limit)`。`TimelineInfo.source`，依据父分支的 `branch/create` 填写（§5）。结束流程、线进入结束后拒绝输入、`branch/ended`、恢复规则、读已结束的线。它的节点把这条线最新轮次结束的序号发布给它开出的线（§7.1.1） | 它拥有线的生命周期和开启输入 |
+| TreeTimeline | 消费 `branch/end`，以及由工具调用发出的结束时这条线的下一次轮次结束，并转给 TimelineTree。它把每一次 `turn/end` 报告给 TimelineTree，后者为这条线的子线发布 | 它现在就这样转 `branch/create` |
+| BranchTool | 按动作区分的工具，加上新的 BranchLine 分支部件。`read` 既能读调用方被切出来的那条线，在 `main` 上也能读它开的工具线，共用一条游标规则 | 工具的各个动作，以及一条线对自己相关各线的视图 |
 | Session 门面 | `Session::end_branch(id, source)`。在固定的头部从存储读已结束线的历史（`local_page`、`sequence`） | §17 |
 | App Server | `session.branch_end`（v3，host 来源，带生成的 `operation_id`；`session_execution` 打开、且连接的入口不是裸入口或守护进程 profile 未受保护时，`hello.features` 把它和其他会话方法一起列出）。对已结束的线，`session.history` 立即返回，截到它存储的头部。`ProductEvent::new` 在 v3 里带上两种事件，v1、v2 里不带 | 一个入口和一条读取路径，没有业务逻辑 |
 | dim-agent-types | 在 `EventKind` 和 v1 排除列表里加入 `branch/end` 和 `branch/ended`，并在契约测试中登记。冻结样本不变 | 两种核心事实（§16） |
@@ -483,7 +520,7 @@ WorkspaceTools 不变。
 - `TimelineInfo.source`，由 BranchLine 和 Goal 读取；
 - `branch` 工具的新输入。
 
-BranchLine 的服务只由同一插件里的工具读取。
+BranchLine 的服务只由同一插件里的工具读取。轮次结束信号是 crate 内部的，与 `TreeCommands.page`、`head` 并列：它不导出，TypeScript 绑定不变。
 
 ## 16. 格式
 
@@ -539,7 +576,7 @@ BranchLine 的服务只由同一插件里的工具读取。
 | 规则 | 本设计如何遵守 |
 | --- | --- |
 | §1 Capability 与 App Server 边界 | Capability：TreeTimeline（已有）和 BranchLine（新）。TimelineTree 和 BranchTool 的 Session 部件是普通部件。App Server 只增加一个入口和一条读取路径，没有业务代码 |
-| §2 作用域 | 线的生命周期仍归 Session（TimelineTree）。一条线对自己相关各线的视图是分支状态（BranchLine）。线之间只靠写输入互相影响，现在只限父子之间（§2 已改写）。能力影响分支不受这条规则约束（§4） |
+| §2 作用域 | 线的生命周期仍归 Session（TimelineTree）。一条线对自己相关各线的视图是分支状态（BranchLine）。线之间只靠写输入互相影响，只靠读取了解对方，现在只限父子之间（§2 已改写）。能力影响分支不受这条规则约束（§4） |
 | §4.1 指令事件 | 结束是 `branch/end`，由 TimelineTree 决定并写 `branch/ended`。消息是输入，由接收方的 InputQueue 和 Loop 决定。结束一条已结束的线、或被拒绝的消息，什么也不写，回复说明原因 |
 | §4.2 交接后不撤回 | 已提交的消息属于接收方。`branch/end` 不撤回 |
 | §4.3 before 回调 | 无 |
@@ -562,14 +599,17 @@ BranchLine 的服务只由同一插件里的工具读取。
 
 1. `main` 开两条线，名册列出这两条。每个子分支的身份覆盖它继承的名册。`main` 和某个子分支各自压缩后，带 key 的基线重放名册或身份。
 2. 子分支给 `main` 发一条 Append：它不唤醒 `main`，`main` 在下一次请求时看到。Steer 唤醒 `main` 的 `wait`，或在 `main` 空闲时开启新的一轮。来自 `main` 的 Steer 唤醒空闲的子分支。
-3. 下列操作被拒绝，什么也不写：给兄弟分支发消息、在子分支上 `create`、对 host 线 `message` 或 `read`、工具线 `read` `main`、在 `main` 上 `end`。
+3. 下列操作被拒绝，什么也不写：给兄弟分支发消息或读取、在子分支上 `create`、工具线读 host 线、对 host 线 `message`、`main` 读 host 线、在 `main` 上 `end`。
 4. 子分支的一轮没有发 steer 就结束时，`main` 收到一条带这一轮状态的空闲通知。这一轮 steer 过 `main`、调用了 `end`，或留下了待处理的驱动输入时，不写通知。
 5. 工具线结束自己：写入最终消息（steer）和带 `tool` 来源的 `branch/end`，在这一轮结束时关闭，然后在 `main` 上写 `branch/ended` 并更新名册，不写结束通知。之后的消息被拒绝（`branch_ended`）。工具的 `read` 和 `session.history` 都能返回已结束线的历史。
 6. 经 `session.branch_end` 由用户结束：`branch/end` 带 App Server id 的 `host` 来源，这条线当前这一轮被中断，`main` 以 steer 收到结束通知。`main` 不能被结束。再次结束返回 `branch_ended`。向已结束的线提交返回 `branch_ended`。
 7. 恢复：已结束的线不打开，它的后代也不打开。没有 `branch/ended` 的 `branch/end` 在重启时补写结果。
-8. Pursuit 的评审者得到 host 线的身份块，现有的 Pursuit 流程照常通过。
+8. Pursuit 的评审者得到 host 线的身份块，能读到执行者在它的切点之后的工作，现有的 Pursuit 流程照常通过。
 9. 两条线编辑同一个文件：后编辑的那条得到 `file_modified_since_read`（已有行为）。
 10. v1、v2 客户端看不到新事件。v3 历史包含它们，`hello.features` 列出 `session.branch_end`。
+11. 读取父线：一条线第一次读它被切出来的那条线时，从切点之后开始；低于切点的显式 `after` 会抬到切点；不带 `after` 的读取从调用方上一次的 `nextCursor` 继续，两个方向都一样，并且重载后仍然保留；`main` 的 `after: 0` 从一条线的开头重读。
+12. 父线块：空闲的线被告知父线动了而不会被开启一轮，块在它下一轮的第一个请求里、先于开启那一轮的输入；运行中的线在下一次模型请求时拿到它，且只拿一次；被持有的块不会被覆盖；被消费的块之后，新的头部带来新的块；已经读到头部的线不会被通知；只为开启这条线的那一轮不算活动，而之后的工具调用或操作者输入算；没有移动的重载不写任何东西，有到期块的重载写一个；结束中的线和 `main` 都拿不到；对这条线的一次压缩之后块会重放。
+13. 父线块在评审者线上不改变任何 Goal 决定：它是一条 Append 输入，第一个块不是 goal 标记，key 也不是 goal key，所以折叠的 `driving`、`lastOperator`、计数和结论都不变（`goal.test.mjs`）。
 
 Goal 流程，放在 `goal.test.mjs` 和 `transport_flow/goal.rs` 中（§7.4）：
 
