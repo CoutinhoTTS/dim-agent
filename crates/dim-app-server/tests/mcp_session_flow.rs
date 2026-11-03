@@ -17,7 +17,7 @@ use dim_agent_runtime::{testing::MinimalHost, *};
 use dim_agent_types::*;
 use dim_app_server::{
     mcp::{
-        self, McpAppError, McpChange, McpPlugin, McpPublication, McpService, McpSession,
+        self, McpAppError, McpChange, McpPlugin, McpPublication, McpService, McpSession, McpSource,
         McpSourceState,
     },
     settings::{SettingsPlugin, SettingsScope, SettingsService},
@@ -1778,6 +1778,133 @@ async fn null_optional_members_from_a_file_load_and_run() {
     )
     .await;
     assert!(results(&session).await.last().unwrap().contains("ok"));
+    env.close().await;
+}
+
+/// #951: a broken project entry is not a server, so the user's server for the
+/// same id keeps running and the catalog lists both rows.
+#[tokio::test]
+async fn a_broken_project_entry_shadows_no_user_server() {
+    let env = Env::new().await;
+    std::fs::write(
+        env.home.join("project/.mcp.json"),
+        json!({"mcpServers":{"docs":{"command":""}}}).to_string(),
+    )
+    .unwrap();
+    let catalog = env
+        .directory
+        .catalog(Some(1), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(catalog.servers["docs"].source, McpSource::User);
+    assert_eq!(
+        catalog
+            .invalid
+            .iter()
+            .find(|entry| entry.id == "docs")
+            .unwrap()
+            .source,
+        McpSource::Project(1)
+    );
+    let session = env.session(true, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    env.turn(
+        &session,
+        Action::Call {
+            pause: false,
+            name: None,
+        },
+    )
+    .await;
+    assert!(results(&session).await.last().unwrap().contains("one:8"));
+    env.close().await;
+}
+
+/// #951: the reverse: a broken user entry is not a server, so an enabled
+/// project entry with the same id runs and both rows are listed.
+#[tokio::test]
+async fn a_broken_user_entry_shadows_no_project_server() {
+    let env = Env::with_config(
+        |_, _| {},
+        |_, _| json!({"mcpServers":{"docs":{"command":""}}}),
+    )
+    .await;
+    env.update(
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::Put(serde_json::from_value(configuration(&env.url, "project")).unwrap()),
+    )
+    .await;
+    env.update(
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::SetEnabled(true),
+    )
+    .await;
+    let catalog = env
+        .directory
+        .catalog(Some(1), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(catalog.servers["docs"].source, McpSource::Project(1));
+    assert_eq!(
+        catalog
+            .invalid
+            .iter()
+            .find(|entry| entry.id == "docs")
+            .unwrap()
+            .source,
+        McpSource::User
+    );
+    let session = env.session(true, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    env.turn(
+        &session,
+        Action::Call {
+            pause: false,
+            name: None,
+        },
+    )
+    .await;
+    assert!(
+        results(&session)
+            .await
+            .last()
+            .unwrap()
+            .contains("project:8")
+    );
+    env.close().await;
+}
+
+/// #951: both sources hold a broken entry for one id, so the catalog lists
+/// two rows, one per source, and no server runs for that id.
+#[tokio::test]
+async fn two_broken_entries_with_one_id_list_two_rows() {
+    let env = Env::with_config(
+        |_, _| {},
+        |_, _| json!({"mcpServers":{"docs":{"command":""}}}),
+    )
+    .await;
+    std::fs::write(
+        env.home.join("project/.mcp.json"),
+        json!({"mcpServers":{"docs":{"type":"ws","url":"wss://docs.test"}}}).to_string(),
+    )
+    .unwrap();
+    let catalog = env
+        .directory
+        .catalog(Some(1), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(!catalog.servers.contains_key("docs"));
+    let rows: Vec<_> = catalog
+        .invalid
+        .iter()
+        .filter(|entry| entry.id == "docs")
+        .collect();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].source, McpSource::User);
+    assert_eq!(rows[1].source, McpSource::Project(1));
+    assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 0);
     env.close().await;
 }
 

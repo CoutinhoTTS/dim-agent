@@ -1754,7 +1754,8 @@ async fn entries_decode_one_by_one_and_writes_keep_every_other_entry_as_written(
         .iter()
         .map(|entry| entry.id.as_str())
         .collect();
-    assert_eq!(broken, ["leaky", "project-broken", "untyped", "ws"]);
+    // Rows are ordered by source in precedence order, then by id.
+    assert_eq!(broken, ["leaky", "untyped", "ws", "project-broken"]);
     let ws = catalog
         .invalid
         .iter()

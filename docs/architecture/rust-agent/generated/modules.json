@@ -20350,10 +20350,12 @@
         "path McpSource::Project",
         "path McpSource::User",
         "path Result",
+        "path sources_in_precedence",
         "use super::McpConnection",
         "use super::McpError",
         "use super::McpSource",
-        "use super::Result"
+        "use super::Result",
+        "use super::sources_in_precedence"
       ]
     },
     {

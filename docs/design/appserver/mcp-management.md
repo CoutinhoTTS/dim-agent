@@ -316,14 +316,18 @@ overlay or project document fails the save instead of passing the guard.
 A `mcpServers` document is decoded entry by entry. An entry that does not decode is not a server:
 it stays in the document exactly as written, every other entry loads, and the catalog reports it
 in an `invalid` list beside `servers`, so a client that predates the list still reads every valid
-row and shows nothing about the broken ones. The entry's error names its id and field and states
-the expected kind; it never repeats a value, because a wrongly typed header or argument can hold
-a credential. `ws` and an entry with a `url` but no `type` say the transport must be `http` or
+row and shows nothing about the broken ones. A broken entry shadows nothing: when a
+lower-precedence source holds a valid entry for the same id, the catalog lists that entry as the
+server with its own source, beside the broken row. The entry's error names its id and field and
+states the expected kind; it never repeats a value, because a wrongly typed header or argument can
+hold a credential. `ws` and an entry with a `url` but no `type` say the transport must be `http` or
 `sse`; `streamable-http` decodes as `http`. An optional member set to `null` is absent, as it was
 before this rule; the required `command` and `url` are not optional and reject `null`. A non-JSON
 file and a non-object `mcpServers` still fail the whole document, with the decoder's line and
 column and no value. An entry id that is empty or only whitespace fails the whole document too,
 because no management call can name it; the error says an entry id is empty and quotes no value.
+Every broken entry is its own row in its own source; two sources that hold a broken entry for one
+id list two rows and no server.
 
 The write rule follows from the same value: each entry is held as read beside the entry decoded
 from it, and a write serialises from typed values only the entry it changed. Every other entry,
