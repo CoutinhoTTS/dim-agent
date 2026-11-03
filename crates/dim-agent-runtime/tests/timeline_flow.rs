@@ -1479,6 +1479,14 @@ async fn a_read_begins_at_the_sequence_or_event_it_names() {
         "a descending read begins at the sequence and goes back"
     );
 
+    let mut absent = branch_query(Branch);
+    absent.from_event = Some("absent".into());
+    let page = main.query(absent).await.unwrap();
+    assert!(
+        page.events.is_empty(),
+        "a read that begins at no event selects nothing"
+    );
+
     let mut both = branch_query(Branch);
     both.from_event = Some("main-4".into());
     both.from_sequence = Some(4);

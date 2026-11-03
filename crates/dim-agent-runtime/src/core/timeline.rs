@@ -802,6 +802,12 @@ impl Timeline {
             }
             (Some(_), Some(_)) => unreachable!("validate rejects two anchors"),
         };
+        if query.from_event.is_some() && anchor.is_none() {
+            return Ok(TimelineQueryReply {
+                events: Vec::new(),
+                positions: Vec::new(),
+            });
+        }
         let anchor_index = match &anchor {
             Some((Some(branch), _)) => Some(
                 clips
