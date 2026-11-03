@@ -680,7 +680,10 @@ fn tool_result(
         }
     }
     if inside {
-        Ok(ToolResultOutput::Content { value: result })
+        Ok(ToolResultOutput::Content {
+            value: result,
+            is_error: is_error.then_some(true),
+        })
     } else if is_error {
         Ok(ToolResultOutput::ErrorText {
             value: text,
