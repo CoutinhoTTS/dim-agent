@@ -687,10 +687,11 @@ impl Worker {
     }
 
     /// The catalog `cwd` for `scope`: one workspace, the repository's set, or
-    /// none.
+    /// none. A path that is not UTF-8 goes out as its lossy string, the one
+    /// the summaries fallback filters with.
     fn scope_cwd(&self, scope: &SessionsScope) -> Option<serde_json::Value> {
         match scope {
-            SessionsScope::Workspace => Some(json!(self.options.cwd)),
+            SessionsScope::Workspace => Some(json!(self.options.cwd.to_string_lossy())),
             SessionsScope::Repository(workspaces) => Some(json!(workspaces)),
             SessionsScope::All => None,
         }
@@ -789,8 +790,10 @@ impl Worker {
 
     /// `session.create` parameters: the workspace and, when one is chosen,
     /// the permission preset, which the Session's branches and members inherit.
+    /// A path that is not UTF-8 goes out as its lossy string, as the catalog
+    /// scope sends it.
     fn create_params(&self) -> serde_json::Value {
-        let mut params = json!({"cwd": self.options.cwd});
+        let mut params = json!({"cwd": self.options.cwd.to_string_lossy()});
         if let Some(policy) = permission::creation_policy(&self.options) {
             params["permissionPolicy"] = policy;
         }
