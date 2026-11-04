@@ -460,6 +460,28 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_agent_capabilities::environment_clients",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities",
+      "file": "crates/dim-agent-capabilities/src/environment_clients.rs",
+      "unexpandedMacros": [
+        "format",
+        "tokio::select",
+        "tracing::warn",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_agent_capabilities::environment_clients::tests",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::environment_clients",
+      "file": "crates/dim-agent-capabilities/src/environment_clients.rs",
+      "unexpandedMacros": [
+        "assert_eq",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::exec_stop",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -472,6 +494,31 @@
       "parent": "dim_agent_capabilities",
       "file": "crates/dim-agent-capabilities/src/execution_settings.rs",
       "unexpandedMacros": []
+    },
+    {
+      "id": "dim_agent_capabilities::execution_settings::prompt",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::execution_settings",
+      "file": "crates/dim-agent-capabilities/src/execution_settings/prompt.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "tokio::select",
+        "tracing::warn",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_agent_capabilities::execution_settings::prompt::tests",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::execution_settings::prompt",
+      "file": "crates/dim-agent-capabilities/src/execution_settings/prompt.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "json",
+        "panic"
+      ]
     },
     {
       "id": "dim_agent_capabilities::file_access",
@@ -7278,6 +7325,14 @@
     },
     {
       "from": "dim_agent_capabilities",
+      "to": "dim_agent_capabilities::environment_clients",
+      "references": [
+        "mod environment_clients",
+        "path environment_clients::SessionClientsHost"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::exec_stop",
       "references": [
         "mod exec_stop",
@@ -8990,11 +9045,253 @@
       ]
     },
     {
+      "from": "dim_agent_capabilities::environment_clients",
+      "to": "dim_agent_capabilities::branch_input",
+      "references": [
+        "path append_own",
+        "use crate::branch_input::append_own"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::environment_clients",
+      "to": "dim_agent_capabilities::context_block",
+      "references": [
+        "path context_block::text",
+        "use crate::context_block"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::environment_clients",
+      "to": "dim_agent_capabilities::environment_clients::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::environment_clients",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path BranchLifecycle",
+        "path BranchPhase::Closing",
+        "path SessionIdentity",
+        "use dim_agent_runtime::BranchLifecycle",
+        "use dim_agent_runtime::BranchPhase",
+        "use dim_agent_runtime::SessionIdentity"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::environment_clients",
+      "to": "dim_agent_runtime::core::timeline",
+      "references": [
+        "path Timeline",
+        "use dim_agent_runtime::Timeline"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::environment_clients",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::environment_clients",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::environment_clients",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path PartRegistry",
+        "path PartScope::Branch",
+        "use dim_agent_runtime::PartRegistry",
+        "use dim_agent_runtime::PartScope"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::environment_clients",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path InputMessageData",
+        "path InputMessageData::default"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::environment_clients",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path kind"
+      ]
+    },
+    {
       "from": "dim_agent_capabilities::exec_stop",
       "to": "dim_agent_types::events",
       "references": [
         "path ExecEndedData",
         "use dim_agent_types::ExecEndedData"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings",
+      "to": "dim_agent_capabilities::execution_settings::prompt",
+      "references": [
+        "mod prompt"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_capabilities::branch_input",
+      "references": [
+        "path append_own",
+        "use crate::branch_input::append_own"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_capabilities::execution_settings",
+      "references": [
+        "path ExecutionSettings",
+        "path ExecutionSettingsHost",
+        "path SOURCE",
+        "use super::ExecutionSettings",
+        "use super::ExecutionSettingsHost",
+        "use super::SOURCE"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_capabilities::execution_settings::prompt::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path ToolExecutionContext",
+        "path crate::host::HostFuture",
+        "use crate::host::ToolExecutionContext"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path SettingsChanged",
+        "path settings_changes",
+        "use crate::settings::SettingsChanged",
+        "use crate::settings::settings_changes"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_capabilities::tool_registry",
+      "references": [
+        "path ToolContribution",
+        "path ToolHandler",
+        "path ToolRegistry",
+        "use crate::tool_registry::ToolContribution",
+        "use crate::tool_registry::ToolHandler",
+        "use crate::tool_registry::ToolRegistry"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path BranchLifecycle",
+        "path BranchPhase::Closing",
+        "use dim_agent_runtime::BranchLifecycle",
+        "use dim_agent_runtime::BranchPhase"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_runtime::core::timeline",
+      "references": [
+        "path Timeline",
+        "use dim_agent_runtime::Timeline"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path PartRegistry",
+        "path PartScope::Branch",
+        "path PartScope::Session",
+        "use dim_agent_runtime::PartRegistry",
+        "use dim_agent_runtime::PartScope"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path InputMessageData",
+        "path InputMessageData::default"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolCall",
+        "path ToolDefinition",
+        "path ToolResult",
+        "path ToolResult::error",
+        "path ToolResult::text",
+        "path ToolSource::Extension"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt::tests",
+      "to": "dim_agent_capabilities::execution_settings",
+      "references": [
+        "path ExecutionSettings",
+        "path ExecutionSettingsHost::fixed"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt::tests",
+      "to": "dim_agent_capabilities::execution_settings::prompt",
+      "references": [
+        "path SettingsHandler",
+        "path TOOL"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt::tests",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ToolContent::Text"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt::tests",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolCall"
       ]
     },
     {
@@ -19560,6 +19857,20 @@
     },
     {
       "from": "dim_app_server::connection",
+      "to": "dim_agent_capabilities::environment_clients",
+      "references": [
+        "path dim_agent_capabilities::environment_clients::ClientChannel",
+        "path dim_agent_capabilities::environment_clients::ClientChannel::Unknown",
+        "path dim_agent_capabilities::environment_clients::ClientPresence",
+        "path dim_agent_capabilities::environment_clients::ClientsChanged",
+        "path dim_agent_capabilities::environment_clients::SessionClientsHost",
+        "path dim_agent_capabilities::environment_clients::SessionClientsSource",
+        "path dim_agent_capabilities::environment_clients::clients_changes",
+        "path dim_agent_capabilities::environment_clients::register_parts"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection",
       "to": "dim_agent_capabilities::host",
       "references": [
         "path dim_agent_capabilities::host::HostError",
@@ -19668,6 +19979,13 @@
       "references": [
         "path Names",
         "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path dim_agent_runtime::PartRegistry"
       ]
     },
     {
@@ -20471,6 +20789,13 @@
     },
     {
       "from": "dim_app_server::execution_settings",
+      "to": "dim_agent_capabilities::execution_settings::prompt",
+      "references": [
+        "path dim_agent_capabilities::execution_settings::prompt::register_parts"
+      ]
+    },
+    {
+      "from": "dim_app_server::execution_settings",
       "to": "dim_agent_capabilities::host_platform",
       "references": [
         "path HostPlatform",
@@ -20506,6 +20831,14 @@
       "references": [
         "path Names",
         "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::execution_settings",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path PartRegistry",
+        "use dim_agent_runtime::PartRegistry"
       ]
     },
     {
@@ -26079,6 +26412,18 @@
     },
     {
       "from": "dim_app_server::transport",
+      "to": "dim_agent_capabilities::environment_clients",
+      "references": [
+        "path ClientChannel::declared",
+        "path DeclaredClientKind::Cli",
+        "path DeclaredClientKind::Other",
+        "path DeclaredClientKind::Web",
+        "use dim_agent_capabilities::environment_clients::ClientChannel",
+        "use dim_agent_capabilities::environment_clients::DeclaredClientKind"
+      ]
+    },
+    {
+      "from": "dim_app_server::transport",
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path RpcError::app",
@@ -26111,12 +26456,14 @@
       "from": "dim_app_server::transport",
       "to": "dim_app_server::connection",
       "references": [
+        "path ClientIdentity",
         "path Connection::new",
         "path ConnectionHub",
         "path Entry",
         "path Entry::Bare",
         "path Entry::Local",
         "path Entry::Web",
+        "use crate::connection::ClientIdentity",
         "use crate::connection::Connection",
         "use crate::connection::ConnectionHub",
         "use crate::connection::Entry"
@@ -26143,6 +26490,9 @@
       "to": "dim_app_server::protocol",
       "references": [
         "path Call::Hello",
+        "path ClientKind::Cli",
+        "path ClientKind::Other",
+        "path ClientKind::Web",
         "path HelloResult",
         "path LOCAL_EXECUTION_METHODS",
         "path Outbound::Error",
@@ -40787,6 +41137,10 @@
     {
       "module": "dim_app_server::collaboration_model_policy",
       "path": "D::Error"
+    },
+    {
+      "module": "dim_app_server::connection",
+      "path": "ClientChannel::Tui"
     },
     {
       "module": "dim_app_server::managed_oauth",
