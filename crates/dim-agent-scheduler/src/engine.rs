@@ -11,14 +11,12 @@ use chrono::{DateTime, Duration, Utc};
 use dim_agent_capabilities::settings::SettingsScope;
 use dim_agent_types::{AgentEvent, EventKind, PermissionPolicy, PermissionPreset, TurnOutcome};
 use dim_app_server::settings::SettingsError;
-use rutis::Ctx;
-use rutis_bridge::session::call_service;
+use rutis_bridge::session::{HostDispatch, settle};
 use serde_json::{Value, json};
 use std::{collections::HashSet, sync::Arc, time::Duration as StdDuration};
 use tokio_util::sync::CancellationToken;
 
 const POLL: StdDuration = StdDuration::from_secs(1);
-const SESSIONS: &str = "sessions";
 
 const MANUAL: &str = "manual";
 /// Terminal runs kept per job, newest first (A.7).
@@ -353,7 +351,7 @@ async fn report(shared: &Arc<Shared>, run: Run) -> Result<(), SchedulerError> {
         "rawBlocks": [{"text": text}],
         "content": [],
     });
-    let failure = match sessions(&shared.ctx, "input", args).await {
+    let failure = match sessions(shared.sessions.as_ref(), "input", args).await {
         Err(_) => "bridge_error".to_owned(),
         Ok(Err(code)) => code,
         Ok(Ok(_)) => return Ok(()),
@@ -446,7 +444,13 @@ async fn prune_once(shared: &Arc<Shared>) -> Result<bool, SchedulerError> {
         .collect();
     let mut pending = false;
     for session_id in deletions {
-        match sessions(&shared.ctx, "delete", json!({"sessionId": session_id})).await {
+        match sessions(
+            shared.sessions.as_ref(),
+            "delete",
+            json!({"sessionId": session_id}),
+        )
+        .await
+        {
             Ok(Ok(_)) => {}
             _ => {
                 pending = true;
@@ -552,7 +556,7 @@ async fn lookup_input(
 ) -> Result<Option<(String, u64)>, String> {
     let args = json!({"sessionId": session_id, "branchId": "main", "submissionId": submission_id});
     loop {
-        match sessions(&shared.ctx, "lookup", args.clone()).await {
+        match sessions(shared.sessions.as_ref(), "lookup", args.clone()).await {
             Ok(Ok(value)) => {
                 return match value["status"].as_str() {
                     Some("accepted") => {
@@ -578,9 +582,18 @@ async fn lookup_input(
 
 /// A `sessions` call. The outer error is a transport failure, whose outcome
 /// is unknown; the inner error is the service's own code.
-async fn sessions(ctx: &Ctx, method: &str, args: Value) -> Result<Result<Value, String>, String> {
-    let envelope: Value = call_service(ctx, SESSIONS, method, (args,))
+async fn sessions(
+    service: &dyn HostDispatch,
+    method: &str,
+    args: Value,
+) -> Result<Result<Value, String>, String> {
+    let call = service
+        .invoke(method, json!([args]).into())
+        .map_err(|error| error.to_string())?;
+    let envelope = settle(call)
         .await
+        .map_err(|error| error.to_string())?
+        .json()
         .map_err(|error| error.to_string())?;
     if envelope["ok"] == json!(true) {
         Ok(Ok(envelope["value"].clone()))
@@ -701,7 +714,7 @@ async fn launch(
     {
         args["starter"] = json!({"sessionId": session_id, "branchId": branch_id});
     }
-    let launched = match sessions(&shared.ctx, "launch", args).await {
+    let launched = match sessions(shared.sessions.as_ref(), "launch", args).await {
         Err(_) => {
             finish(
                 shared,
@@ -886,7 +899,7 @@ async fn drive(shared: &Arc<Shared>, job: &Job, run: &Run) -> Result<(), Schedul
         "rawBlocks": [{"text": marker}],
         "content": [{"type": "text", "text": job.prompt}],
     });
-    let (input_id, start) = match sessions(&shared.ctx, "input", input).await {
+    let (input_id, start) = match sessions(shared.sessions.as_ref(), "input", input).await {
         Ok(Ok(receipt)) => match (receipt["inputId"].as_str(), receipt["sequence"].as_u64()) {
             (Some(input_id), Some(sequence)) => (input_id.to_owned(), sequence),
             _ => {
@@ -975,7 +988,7 @@ async fn track(
             if let Some(through) = cutoff {
                 args["through"] = json!(through);
             }
-            let page = match sessions(&shared.ctx, "history", args).await {
+            let page = match sessions(shared.sessions.as_ref(), "history", args).await {
                 Ok(Ok(value)) => value,
                 Ok(Err(code)) if !is_reloading(&code) => {
                     return finish(shared, run_id, RunState::Failed, code).await;
@@ -1042,7 +1055,7 @@ async fn track(
             }
             if !consumed {
                 let withdrawn = sessions(
-                    &shared.ctx,
+                    shared.sessions.as_ref(),
                     "withdraw",
                     json!({"sessionId": session_id, "branchId": "main", "inputId": input_id,
                         "reason": "scheduled run timed out"}),
@@ -1061,7 +1074,7 @@ async fn track(
                 }
             } else if matches!(
                 sessions(
-                    &shared.ctx,
+                    shared.sessions.as_ref(),
                     "stop",
                     json!({"sessionId": session_id, "branchId": "main", "reason": "scheduled run timed out"}),
                 )

@@ -90,7 +90,7 @@ The row fields below are the dependency, method-kind and Settings contract that 
 | `id` | `Scheduler` |
 | `name` | `Scheduler` |
 | `config` | `{}` |
-| `inject` | `settings`, `pluginFiles`, `managementMethods`, `sessionPermissions`, `partRegistry`; `sessions` by host-dispatch name (§1.1) |
+| `inject` | `settings`, `pluginFiles`, `managementMethods`, `sessionPermissions`, `partRegistry`, `sessions` |
 | `provides` | `scheduleJobs`; apply registers `schedule` with `managementMethods` and the `SchedulerSession` part with `partRegistry` |
 | `settings` | The complete `schedule` source in §7.1, including its schema |
 

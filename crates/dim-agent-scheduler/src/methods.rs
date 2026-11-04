@@ -22,6 +22,7 @@ use dim_app_server::{
 };
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
+use rutis_bridge::session::{HostDispatch, host_key};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::HashSet, sync::Arc};
@@ -37,6 +38,7 @@ pub struct SchedulerPlugin {
     files: Key<PluginFileTransactions>,
     methods: Key<ManagementMethods>,
     permissions: Key<SessionPermissions>,
+    sessions: Key<dyn HostDispatch>,
     parts: Key<PartRegistry>,
     texts: Arc<crate::SchedulerTexts>,
 }
@@ -48,6 +50,7 @@ impl SchedulerPlugin {
             files: names.key()?,
             methods: names.key()?,
             permissions: names.key()?,
+            sessions: host_key("sessions"),
             parts: names.key()?,
             texts,
         })
@@ -64,6 +67,7 @@ impl DynPlugin for SchedulerPlugin {
             self.files.erase(),
             self.methods.erase(),
             self.permissions.erase(),
+            self.sessions.erase(),
             self.parts.erase(),
         ]
     }
@@ -73,9 +77,10 @@ impl DynPlugin for SchedulerPlugin {
             let files = ctx.require_at(&self.files)?;
             let methods = ctx.require_at(&self.methods)?;
             let permissions = ctx.require_at(&self.permissions)?;
+            let sessions = ctx.require_at(&self.sessions)?;
             settings.register::<ScheduleDocument>(ctx)?;
             let shared = Arc::new(Shared {
-                ctx: ctx.clone(),
+                sessions,
                 settings,
                 files,
                 permissions,
@@ -153,7 +158,7 @@ impl DynPlugin for SchedulerPlugin {
 }
 
 pub(crate) struct Shared {
-    pub(crate) ctx: Ctx,
+    pub(crate) sessions: Arc<dyn HostDispatch>,
     pub(crate) settings: Arc<SettingsService>,
     pub(crate) files: Arc<PluginFileTransactions>,
     pub(crate) permissions: Arc<SessionPermissions>,
