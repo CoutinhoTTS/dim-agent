@@ -1195,6 +1195,297 @@ async fn a_restart_completes_an_interrupted_descendants_end_first() {
     soon(agent.close()).await.unwrap();
 }
 
+/// A memory store that records every `query` and refuses a restore's range
+/// reads (`read`, `read_page`, `read_segments`), so a test can assert that a
+/// restored line is read by selections alone.
+struct CountQueries {
+    memory: Arc<MemoryTimelineStore>,
+    queries: Mutex<Vec<(String, Vec<String>)>>,
+    reads: AtomicUsize,
+}
+impl CountQueries {
+    fn new(memory: Arc<MemoryTimelineStore>) -> Self {
+        Self {
+            memory,
+            queries: Mutex::new(Vec::new()),
+            reads: AtomicUsize::new(0),
+        }
+    }
+    /// The pages `branch` was read with while selecting exactly `kinds`.
+    fn pages(&self, branch: &str, kinds: &[&str]) -> usize {
+        self.queries
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(line, selected)| {
+                line == branch
+                    && selected.len() == kinds.len()
+                    && selected
+                        .iter()
+                        .map(String::as_str)
+                        .eq(kinds.iter().copied())
+            })
+            .count()
+    }
+    fn range_reads(&self) -> usize {
+        self.reads.load(Ordering::SeqCst)
+    }
+    fn refused<T>(&self) -> Result<T> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        Err(AgentError::Storage("a restore read a stored range".into()))
+    }
+}
+impl TimelineStore for CountQueries {
+    fn create_session<'a>(
+        &'a self,
+        id: &'a str,
+        config: &'a SessionConfig,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<()>> {
+        self.memory.create_session(id, config)
+    }
+    fn rollback_session<'a>(&'a self, id: &'a str) -> dim_agent_runtime::BoxFuture<'a, Result<()>> {
+        self.memory.rollback_session(id)
+    }
+    fn release_session<'a>(&'a self, id: &'a str) -> dim_agent_runtime::BoxFuture<'a, Result<()>> {
+        self.memory.release_session(id)
+    }
+    fn session_config<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<Option<SessionConfig>>> {
+        self.memory.session_config(id)
+    }
+    fn branches<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<Vec<StoredBranch>>> {
+        self.memory.branches(id)
+    }
+    fn head<'a>(&'a self, key: &'a TimelineKey) -> dim_agent_runtime::BoxFuture<'a, Result<u64>> {
+        self.memory.head(key)
+    }
+    fn append(
+        &self,
+        key: TimelineKey,
+        events: Vec<StoredEvent>,
+        publish: PublishCallback,
+    ) -> Result<()> {
+        self.memory.append(key, events, publish)
+    }
+    fn batch_end<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<()>> {
+        self.memory.batch_end(key, sequence)
+    }
+    fn read<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        range: std::ops::RangeInclusive<u64>,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<Vec<StoredEvent>>> {
+        let _ = (key, range);
+        Box::pin(async move { self.refused() })
+    }
+    fn read_page<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        after: u64,
+        limit: usize,
+        through: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<Vec<StoredEvent>>> {
+        let _ = (key, after, limit, through);
+        Box::pin(async move { self.refused() })
+    }
+    fn read_segments<'a>(
+        &'a self,
+        session_id: &'a str,
+        segments: Vec<(String, std::ops::RangeInclusive<u64>)>,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<Vec<Vec<StoredEvent>>>> {
+        let _ = (session_id, segments);
+        Box::pin(async move { self.refused() })
+    }
+    fn trace<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<Option<TimelineTrace>>> {
+        self.memory.trace(key, sequence)
+    }
+    fn save_snapshot<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        snapshot: RecoverySnapshot,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<()>> {
+        self.memory.save_snapshot(key, snapshot)
+    }
+    fn latest_snapshot<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        through: u64,
+        interpreter: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<Option<RecoverySnapshot>>> {
+        self.memory.latest_snapshot(key, through, interpreter)
+    }
+    fn query<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        query: &'a TimelineQuery,
+        from: u64,
+        through: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<TimelineQueryPage>> {
+        self.queries
+            .lock()
+            .unwrap()
+            .push((key.branch_id.clone(), query.kinds.clone()));
+        self.memory.query(key, query, from, through)
+    }
+}
+
+/// #1064: a restore resolves a line's own end from one selection page over the
+/// whole line, and reads no stored range. `A` has an end its parent never
+/// recorded (the restore must complete it from `branch/end`); `B` has none and
+/// is long enough that a window grown 32, 256, 2048 … would need four pages
+/// and four round trips to answer the same question.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restore_reads_a_line_end_in_one_page_and_no_range() {
+    let store = Arc::new(MemoryTimelineStore::default());
+    store
+        .create_session("saved", &SessionConfig::default())
+        .await
+        .unwrap();
+    let root = || rutis::Ctx::root().unwrap();
+    let key = |branch: &str| TimelineKey {
+        session_id: "saved".into(),
+        branch_id: branch.into(),
+    };
+    let source = BranchSource::Host {
+        operation_id: "op:restore".into(),
+    };
+    let main = Timeline::new(root(), key("main"), vec![], store.clone());
+    let create_a = main
+        .append(
+            EventKind::BranchCreate(BranchCreateData {
+                at: BranchCreateAt::Create {},
+                source: source.clone(),
+                branch: "A".into(),
+                prompt: "a".into(),
+            })
+            .into(),
+        )
+        .unwrap();
+    let a = Timeline::new(
+        root(),
+        key("A"),
+        vec![("main".into(), create_a.sequence)],
+        store.clone(),
+    );
+    a.append(
+        EventKind::BranchStart(BranchStartData {
+            parent: Some("main".into()),
+            create_event: Some(create_a.sequence),
+        })
+        .into(),
+    )
+    .unwrap();
+    a.append(
+        EventKind::InputMessage(InputMessageData::text("work on a", Some(InputMode::Queue))).into(),
+    )
+    .unwrap();
+    let a_end = a
+        .append(
+            EventKind::BranchEnd(BranchEndData {
+                source: source.clone(),
+                ancestor: None,
+            })
+            .into(),
+        )
+        .unwrap();
+    let create_b = main
+        .append(
+            EventKind::BranchCreate(BranchCreateData {
+                at: BranchCreateAt::Create {},
+                source: source.clone(),
+                branch: "B".into(),
+                prompt: "b".into(),
+            })
+            .into(),
+        )
+        .unwrap();
+    let b = Timeline::new(
+        root(),
+        key("B"),
+        vec![("main".into(), create_b.sequence)],
+        store.clone(),
+    );
+    b.append(
+        EventKind::BranchStart(BranchStartData {
+            parent: Some("main".into()),
+            create_event: Some(create_b.sequence),
+        })
+        .into(),
+    )
+    .unwrap();
+    b.append(
+        EventKind::InputMessage(InputMessageData::text("work on b", Some(InputMode::Queue))).into(),
+    )
+    .unwrap();
+    for index in 0..4_000 {
+        b.append(
+            EventKind::TurnEnd(TurnEndData {
+                turn_id: format!("pad-{index}"),
+                outcome: TurnOutcome::Completed {
+                    reason: "padding".into(),
+                },
+            })
+            .into(),
+        )
+        .unwrap();
+    }
+    for timeline in [&b, &a, &main] {
+        dim_agent_runtime::core::close_timeline(timeline)
+            .await
+            .unwrap();
+    }
+
+    let counting = Arc::new(CountQueries::new(store));
+    let builder = builder_with_store(&Arc::new(Probe::default()), counting.clone());
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = soon(agent.restore_session("saved".into())).await.unwrap();
+    soon(session.idle("main")).await.unwrap();
+
+    assert_eq!(counting.range_reads(), 0, "a restore reads no stored range");
+    assert_eq!(
+        session.ended_head("A"),
+        Some(a_end.sequence),
+        "the interrupted end is resolved from the line itself"
+    );
+    let results: Vec<BranchEndedData> = chain_events(&session, "main", ..)
+        .await
+        .unwrap()
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::BranchEnded(data) if data.branch == "A" => Some(data.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        results,
+        [BranchEndedData {
+            branch: "A".into(),
+            end_event: a_end.sequence,
+            source: source.clone(),
+            ancestor: None,
+        }]
+    );
+    let pages = counting.pages("B", &["branch/end"]);
+    assert!(
+        pages <= 2,
+        "a line with no end costs one page, whatever its length; the restore asked {pages} times"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
 struct SettleOnActivation {
     child: String,
     source: BranchSource,
