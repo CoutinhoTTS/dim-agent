@@ -17,10 +17,9 @@ fn event(sequence: u64, id: &str, kind: &str, name: &str, data: Value) -> Value 
 
 fn detached_eof(wire: &mut Wire) {
     loop {
-        let mut line = String::new();
-        if wire.0.read_line(&mut line).unwrap() == 0 {
+        let Some(line) = wire.trailing_request() else {
             return;
-        }
+        };
         let request: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(
             request["method"], "session.detach",
@@ -32,8 +31,8 @@ fn detached_eof(wire: &mut Wire) {
 
 fn accept_native(listener: &UnixListener) -> Wire {
     let (stream, _) = listener.accept().unwrap();
-    stream.set_read_timeout(Some(PATIENCE)).unwrap();
-    Wire(BufReader::new(stream))
+    stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
+    Wire::new(stream)
 }
 
 /// A title request carries no tools, only the system text and the input
@@ -777,13 +776,6 @@ fn acp_stdio_slow_output_fails_explicitly_without_stopping_native_execution() {
     );
     daemon.join().unwrap();
 }
-
-/// Bounds a peer frame that never arrives, so a broken path fails instead of
-/// hanging; it is not a step's budget. The frame is due when the CLI and the
-/// fixture's daemon reach it, and a debug CLI starting on a loaded machine can
-/// take tens of seconds, so ten times the 30 s step budget keeps machine load
-/// out of the result (#807).
-const HANG_GUARD: Duration = Duration::from_secs(300);
 
 struct Peer {
     child: Child,
