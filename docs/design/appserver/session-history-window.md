@@ -326,18 +326,10 @@ batch edges, which the query does not carry ([ADR 020](../../adr/020-timeline-re
 
 ### 5.3 Where the reads live
 
-The anchors are the branch's Timeline service, which `Connection::history`
+The anchors use the branch's Timeline service, which `Connection::history`
 already has the loaded Session for. The backward page is a persistence read of
-the Session's own branch, next to the store reads the App Server already has
-for Collaboration and summaries: `read_page`
-([storage/timeline.rs:1010](../../../crates/dim-app-server/src/storage/timeline.rs#L1010)),
-`read_events`
-([storage/timeline.rs:1257](../../../crates/dim-app-server/src/storage/timeline.rs#L1257))
-and `read_tool_use_starts`
-([storage/timeline.rs:1293](../../../crates/dim-app-server/src/storage/timeline.rs#L1293)),
-reached from `Connection::history` through `AgentIndex`, as
-`read_tool_use_starts` is
-([agents.rs:670](../../../crates/dim-app-server/src/agents.rs#L670)). The window
+the Session's own branch through `AgentIndex`. Collaboration peer reads use an
+acquired Session's query, while summaries retain their metadata reads. The window
 requires the native store: a host without one (`ServerConfig.database_path:
 None`) advertises no `session.history.latestTurn` and answers a window request
 `invalid`, as `session.catalog` is advertised only with a database path. No
