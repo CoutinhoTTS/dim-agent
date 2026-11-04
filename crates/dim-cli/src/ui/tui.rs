@@ -960,7 +960,7 @@ struct App {
     /// ([`Self::command_entry_open`]).
     command_entry: bool,
     /// The workspace's git branch for the banner and composer.
-    branch: String,
+    branch: Option<String>,
     git_head: Option<PathBuf>,
     git_checked: Instant,
     /// The shell-mode command running, at most one.
@@ -1287,7 +1287,7 @@ impl App {
             runs: Runs::default(),
             palette_stash: None,
             command_entry: false,
-            branch: branch.unwrap_or_else(|| t("Not available").into()),
+            branch,
             git_head,
             git_checked: Instant::now(),
             shell: None,
@@ -1696,9 +1696,9 @@ impl App {
         if now.duration_since(self.git_checked) >= GIT_BRANCH_POLL {
             self.git_checked = now;
             if let Some(branch) = self.git_head.as_deref().and_then(git_branch)
-                && branch != self.branch
+                && self.branch.as_ref() != Some(&branch)
             {
-                self.branch = branch;
+                self.branch = Some(branch);
                 changed = true;
             }
         }
@@ -2931,7 +2931,7 @@ impl App {
                 &[("id", &line_name(lines, &draft.parent))],
             );
         }
-        let workspace = workspace_label(&self.branch);
+        let workspace = workspace_label(self.branch.as_deref());
         match &self.snapshot {
             Some(snapshot) if !snapshot.focus.is_empty() && snapshot.focus != "main" => {
                 format!(
@@ -4293,7 +4293,11 @@ impl App {
         let width = cols.saturating_sub(2 + MARGIN).max(1);
         let mut frame = Frame::default();
         if !self.banner_committed {
-            let text = banner(cols, &self.palette, &self.branch);
+            let text = banner(
+                cols,
+                &self.palette,
+                self.branch.as_deref().unwrap_or(t("Not available")),
+            );
             self.record(Block::Banner);
             frame.commits.push(text);
             self.banner_committed = true;
@@ -5589,7 +5593,11 @@ impl App {
     fn render_source(&self, source: &Block, cols: usize) -> String {
         let width = cols.saturating_sub(2 + MARGIN).max(1);
         match source {
-            Block::Banner => banner(cols, &self.palette, &self.branch),
+            Block::Banner => banner(
+                cols,
+                &self.palette,
+                self.branch.as_deref().unwrap_or(t("Not available")),
+            ),
             block => chunk(&render_block(block, width, &self.palette, &self.markdown)),
         }
     }
@@ -6190,11 +6198,15 @@ fn line_name(lines: &[LineView], line: &str) -> String {
 
 /// The working directory, `~` for the home, and the git branch: what the
 /// prompt box writes in its bottom border.
-fn workspace_label(branch: &str) -> String {
+fn workspace_label(branch: Option<&str>) -> String {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
-    format!("{} ({branch})", crate::ui::tilde(&cwd))
+    let cwd = crate::ui::tilde(&cwd);
+    match branch {
+        Some(branch) => format!("{cwd} ({branch})"),
+        None => cwd,
+    }
 }
 
 fn git_head(cwd: &str) -> Option<PathBuf> {
@@ -7155,6 +7167,35 @@ mod tests {
     #[test]
     fn composer_tracks_git_switches_in_repositories_and_worktrees() {
         let root = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        for fullscreen in [false, true] {
+            let mut app = App::new(
+                Box::new(Idle),
+                MarkdownRenderer::new(&theme),
+                theme.palette.clone(),
+                root.path().join("home"),
+                root.path().to_string_lossy().into_owned(),
+            );
+            app.fullscreen = fullscreen;
+            let frame = app.frame((160, 30));
+            let bytes = if fullscreen {
+                FullScreen::new((160, 30), true).render(&frame, (160, 30), &app.palette, &app)
+            } else {
+                Screen::new((160, 30), true).render(&frame, (160, 30))
+            };
+            let mut emu = crate::ui::render::testterm::Emu::new(160, 30);
+            emu.feed(&bytes);
+            let cwd = crate::ui::tilde(&std::env::current_dir().unwrap().display().to_string());
+            let row = emu
+                .rows_text()
+                .into_iter()
+                .find(|row| row.contains(&cwd))
+                .expect("the composer shows the working directory without Git");
+            assert!(
+                !row.contains(&format!("{cwd} (")),
+                "a workspace without Git must show only its path: {row}"
+            );
+        }
         let repo = root.path().join("repo");
         let linked = root.path().join("linked");
         std::fs::create_dir(&repo).unwrap();
@@ -7200,7 +7241,6 @@ mod tests {
         );
         let nested = repo.join("nested");
         std::fs::create_dir(&nested).unwrap();
-        let theme = test_theme();
         let mut apps = Vec::new();
         for (cwd, expected) in [(&nested, "original"), (&linked, "linked-original")] {
             for fullscreen in [false, true] {
