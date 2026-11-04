@@ -507,13 +507,16 @@ lookups and parsing behind them. Phase 3 (§15) removes the repetition of whole 
 
 A paging or projection read returns what an event says without rebuilding the requests stored with `context/prepare`
 and `model/call`: the request in such a record keeps the empty message list and the absent `tools` and `system` that
-its row holds, and no content row it references is loaded, hashed or checked. These readers never look at those requests:
-history paging discards both kinds, `session.summaries` reads only input text and the last event's time, the context
-projection projects input and output facts, and collaboration reads tool calls, results and turn outcomes. The readers that still page
-through `TimelineStore::read_page_without_request_bodies` are the collaboration read of a peer Session and the App
-Server's page read of a line this process does not hold or that has ended; its default is `read_page`, and a store
-may implement it with no request walk at all. A history page of a loaded line reads through the branch's query, which
-rebuilds the requests of the rows it returns ([ADR 020](../adr/020-timeline-read-convergence.md) D6). Every read that uses a request (`local`, `history`, `context`, `trace`,
+its row holds, and no content row it references is loaded, hashed or checked.
+The readers that asked for it — history paging, `session.summaries`, the context
+projection and collaboration — now page through the branch's query, which
+rebuilds the requests of the rows it returns
+([ADR 020](../adr/020-timeline-read-convergence.md) D6), and none of them reads
+stored facts without the Session that owns them
+([ADR 021](../adr/021-reads-follow-the-state-owner.md) D3). The port keeps
+`TimelineStore::read_page_without_request_bodies` for a caller that serves
+stored facts directly, with `read_page` as its default; the App Server no longer
+has such a caller. Every read that uses a request (`local`, `history`, `context`, `trace`,
 `validate_session`, export) still rebuilds and checks each one as §7.1–§8 state.
 
 - The read still checks that each record and each draft of its trace has the references its kind requires, and no

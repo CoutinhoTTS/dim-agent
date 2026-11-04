@@ -17,7 +17,6 @@ use dim_app_server::storage::{
 use rusqlite::{Connection, params};
 use rutis::host::CtxHost;
 use std::{
-    collections::HashMap,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -2659,20 +2658,6 @@ async fn paging_reads_do_not_rebuild_request_bodies() {
         vec![1, 2, 3]
     );
     assert_eq!(store.take_node_loads(), NodeLoads::default());
-    let sessions =
-        dim_app_server::storage::SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
-    let page = sessions
-        .read_page_before("paging", "main", 4, 8, 3, 1)
-        .await
-        .unwrap();
-    assert_eq!(
-        page.iter()
-            .map(|record| record.event.sequence)
-            .collect::<Vec<_>>(),
-        vec![1, 2, 3],
-        "the reverse history page does not rebuild the damaged request"
-    );
-    drop(sessions);
     drop(connection);
     agent.close().await.unwrap();
     store.close().await.unwrap();
@@ -5976,7 +5961,7 @@ async fn reads_share_bounded_content_across_pages_and_still_check_every_load() {
 }
 
 #[tokio::test]
-async fn directory_history_pages_keep_a_fixed_head_and_resolve_prior_tool_calls() {
+async fn directory_history_pages_keep_a_fixed_head() {
     let database = Database::new();
     let db = SqliteStorage::open(database.0.clone()).unwrap();
     let sessions =
@@ -6062,13 +6047,6 @@ async fn directory_history_pages_keep_a_fixed_head_and_resolve_prior_tool_calls(
             .unwrap()
             .is_empty()
     );
-    let call = sessions
-        .read_events("paged", &["event-1".to_owned()])
-        .await
-        .unwrap()
-        .remove("event-1")
-        .unwrap();
-    assert!(matches!(&call.kind, EventKind::ToolCall(data) if data.calls[0].name == "echo"));
     let connection = Connection::open(&database.0).unwrap();
     let plan = connection
         .prepare("EXPLAIN QUERY PLAN SELECT sequence, last_sequence, kind, body FROM timeline_events WHERE session_id = ?1 AND branch_id = ?2 AND sequence >= coalesce((SELECT max(sequence) FROM timeline_events WHERE session_id = ?1 AND branch_id = ?2 AND sequence <= ?3), ?3) AND sequence <= ?4 AND last_sequence >= ?3 ORDER BY sequence")
@@ -6081,80 +6059,6 @@ async fn directory_history_pages_keep_a_fixed_head_and_resolve_prior_tool_calls(
     assert!(plan.contains("sequence>? AND sequence<?"), "{plan}");
     assert!(!plan.contains("timeline_events_by_end"), "{plan}");
     assert!(!plan.contains("TEMP B-TREE"), "{plan}");
-    drop(connection);
-    drop(store);
-    drop(sessions);
-    db.close().await.unwrap();
-}
-
-/// A call's `step/tool-use-start` is found by request and call id through its
-/// index, however far it is from the result closing the call.
-#[tokio::test]
-async fn tool_use_starts_are_found_by_request_and_call_id() {
-    let database = Database::new();
-    let db = SqliteStorage::open(database.0.clone()).unwrap();
-    let sessions =
-        dim_app_server::storage::SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
-    let store = sessions.timeline_store();
-    store
-        .create_session("starts", &SessionConfig::default())
-        .await
-        .unwrap();
-    let start = |sequence, request_id: &str, call_id: &str, name: &str| {
-        record(
-            sequence,
-            EventKind::ToolUseStart(ToolUseStartData {
-                turn_id: "turn".into(),
-                request_id: request_id.into(),
-                call_id: call_id.into(),
-                name: name.into(),
-            }),
-        )
-    };
-    let mut records = vec![
-        start(1, "request", "call", "echo"),
-        start(2, "other", "call", "wait"),
-    ];
-    records.extend((3..=600).map(|sequence| text(sequence, "delta")));
-    let (done, wait) = tokio::sync::oneshot::channel();
-    store
-        .append(
-            key("starts", "main"),
-            records,
-            Box::new(move |result| {
-                let _ = done.send(result);
-            }),
-        )
-        .unwrap();
-    wait.await.unwrap().unwrap();
-    let wanted = [
-        ("request".to_owned(), "call".to_owned()),
-        ("other".to_owned(), "call".to_owned()),
-        ("request".to_owned(), "missing".to_owned()),
-    ];
-    let names: HashMap<_, _> = sessions
-        .read_tool_use_starts("starts", &wanted)
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|(key, event)| match &event.kind {
-            EventKind::ToolUseStart(data) => (key, data.name.clone()),
-            kind => panic!("unexpected {}", kind.key()),
-        })
-        .collect();
-    let name = |request_id: &str, call_id: &str| {
-        names
-            .get(&(request_id.to_owned(), call_id.to_owned()))
-            .map(String::as_str)
-    };
-    assert_eq!(name("request", "call"), Some("echo"));
-    assert_eq!(name("other", "call"), Some("wait"));
-    assert_eq!(name("request", "missing"), None);
-    let connection = Connection::open(&database.0).unwrap();
-    let plan: String = connection.query_row(
-        "EXPLAIN QUERY PLAN SELECT sequence FROM timeline_events WHERE session_id='starts' AND branch_id='main' AND kind='step/tool-use-start' AND json_extract(body, '$.record.event.data.request_id')='request' AND json_extract(body, '$.record.event.data.call_id')='call'",
-        [], |row| row.get(3)).unwrap();
-    assert!(plan.contains("timeline_tool_use_starts"), "{plan}");
     drop(connection);
     drop(store);
     drop(sessions);
@@ -6755,64 +6659,6 @@ async fn a_v23_store_upgrades_in_place_once() {
     let connection = catalog_store(&database.0, 23);
     assert_eq!(schema(&connection), schema_of(23));
     upgrades_in_place_once(&database, connection, 23).await;
-}
-
-/// A batch of starts larger than one SQLite compound statement still reads
-/// whole: the store chunks the keys inside one read and merges the rows.
-#[tokio::test]
-async fn a_large_batch_of_tool_use_starts_is_read_in_chunks() {
-    let database = Database::new();
-    let db = SqliteStorage::open(database.0.clone()).unwrap();
-    let sessions =
-        dim_app_server::storage::SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
-    let store = sessions.timeline_store();
-    store
-        .create_session("many-starts", &SessionConfig::default())
-        .await
-        .unwrap();
-    let mut records: Vec<_> = (1..=520)
-        .map(|at| {
-            record(
-                at,
-                EventKind::ToolUseStart(ToolUseStartData {
-                    turn_id: "turn".into(),
-                    request_id: "request".into(),
-                    call_id: format!("call-{at}"),
-                    name: format!("tool-{at}"),
-                }),
-            )
-        })
-        .collect();
-    records.extend((521..=640).map(|sequence| text(sequence, "delta")));
-    let (done, wait) = tokio::sync::oneshot::channel();
-    store
-        .append(
-            key("many-starts", "main"),
-            records,
-            Box::new(move |result| {
-                let _ = done.send(result);
-            }),
-        )
-        .unwrap();
-    wait.await.unwrap().unwrap();
-    let wanted: Vec<(String, String)> = (1..=520)
-        .map(|at| ("request".to_owned(), format!("call-{at}")))
-        .collect();
-    let starts = sessions
-        .read_tool_use_starts("many-starts", &wanted)
-        .await
-        .unwrap();
-    assert_eq!(starts.len(), 520);
-    for at in 1..=520u64 {
-        let name = match &starts[&("request".to_owned(), format!("call-{at}"))].kind {
-            EventKind::ToolUseStart(data) => data.name.clone(),
-            kind => panic!("unexpected {}", kind.key()),
-        };
-        assert_eq!(name, format!("tool-{at}"));
-    }
-    drop(store);
-    drop(sessions);
-    db.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -7590,57 +7436,6 @@ async fn the_derived_indexes_are_created_at_open_without_a_format_step() {
     let (read, format) = SqliteStorage::open_read_only(database.0.clone()).unwrap();
     assert_eq!(format, STORE_FORMAT);
     read.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn a_history_window_read_rejects_a_through_inside_a_batch() {
-    let database = Database::new();
-    let db = SqliteStorage::open(database.0.clone()).unwrap();
-    let sessions =
-        dim_app_server::storage::SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
-    let store = sessions.timeline_store();
-    store
-        .create_session("session", &SessionConfig::default())
-        .await
-        .unwrap();
-    let mut first = text(1, "one");
-    first.batch_end = 2;
-    let (published, receiver) = tokio::sync::oneshot::channel();
-    store
-        .append(
-            key("session", "main"),
-            vec![first, text(2, "two")],
-            Box::new(move |result| {
-                let _ = published.send(result);
-            }),
-        )
-        .unwrap();
-    tokio::time::timeout(PUBLISHED, receiver)
-        .await
-        .expect("the writer did not publish the write")
-        .unwrap()
-        .unwrap();
-
-    assert!(matches!(
-        store.read(&key("session", "main"), 1..=1).await,
-        Err(AgentError::InvalidInput(message)) if message.contains("inside an atomic batch")
-    ));
-    assert!(matches!(
-        sessions.read_page_before("session", "main", 2, 10, 1, 1).await,
-        Err(AgentError::InvalidInput(message)) if message.contains("inside an atomic batch")
-    ));
-    assert_eq!(
-        sessions
-            .read_page_before("session", "main", 3, 10, 2, 1)
-            .await
-            .unwrap()
-            .len(),
-        2
-    );
-
-    drop(store);
-    drop(sessions);
-    db.close().await.unwrap();
 }
 
 /// A batch's edge is answered from the row that covers the sequence: an
