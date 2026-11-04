@@ -205,10 +205,14 @@ impl Connection {
                 }
             };
             let before = params.before.unwrap_or_else(|| through.saturating_add(1));
+            let read = if session.ended_head(branch).is_some() {
+                WindowRead::Ended(&tree)
+            } else {
+                WindowRead::Open(&session)
+            };
             return Ok(Reply::History(
-                window_reply(
-                    &session,
-                    &tree,
+                window_at(
+                    &read,
                     branch,
                     before,
                     limit,
@@ -526,28 +530,6 @@ impl WindowRead<'_> {
             Self::Ended(tree) => tree.batch_end(branch.to_owned(), sequence).await,
         }
     }
-}
-
-/// One window reply, read from the line's own Timeline while it is open and
-/// from the tree that owns its ended head. A line that ends while the read
-/// runs answers `BranchEnded`; the client retries, and the retry finds it
-/// ended.
-async fn window_reply(
-    session: &Session,
-    tree: &TreeCommands,
-    branch: &str,
-    before: u64,
-    limit: usize,
-    through: u64,
-    turn: crate::storage::TurnWindow,
-    version: u32,
-) -> Result<wire::HistoryResult, RpcError> {
-    let read = if session.ended_head(branch).is_some() {
-        WindowRead::Ended(tree)
-    } else {
-        WindowRead::Open(session)
-    };
-    window_at(&read, branch, before, limit, through, turn, version).await
 }
 
 async fn window_at(
