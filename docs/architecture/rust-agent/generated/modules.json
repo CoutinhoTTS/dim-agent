@@ -492,8 +492,21 @@
       "unexpandedMacros": [
         "format",
         "json",
+        "tokio::select",
         "tracing::warn",
         "vec"
+      ]
+    },
+    {
+      "id": "dim_agent_capabilities::execution_settings::prompt::tests",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::execution_settings::prompt",
+      "file": "crates/dim-agent-capabilities/src/execution_settings/prompt.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "json",
+        "panic"
       ]
     },
     {
@@ -9013,8 +9026,17 @@
       "references": [
         "path ExecutionSettings",
         "path ExecutionSettingsHost",
+        "path SOURCE",
         "use super::ExecutionSettings",
-        "use super::ExecutionSettingsHost"
+        "use super::ExecutionSettingsHost",
+        "use super::SOURCE"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_capabilities::execution_settings::prompt::tests",
+      "references": [
+        "mod tests"
       ]
     },
     {
@@ -9052,16 +9074,8 @@
       "from": "dim_agent_capabilities::execution_settings::prompt",
       "to": "dim_agent_runtime::config",
       "references": [
-        "path SessionIdentity",
-        "use dim_agent_runtime::SessionIdentity"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::execution_settings::prompt",
-      "to": "dim_agent_runtime::core::dispatcher",
-      "references": [
-        "path Dispatcher",
-        "use dim_agent_runtime::Dispatcher"
+        "path BranchLifecycle",
+        "use dim_agent_runtime::BranchLifecycle"
       ]
     },
     {
@@ -9116,6 +9130,36 @@
         "path ToolResult::error",
         "path ToolResult::text",
         "path ToolSource::Extension"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt::tests",
+      "to": "dim_agent_capabilities::execution_settings",
+      "references": [
+        "path ExecutionSettings",
+        "path ExecutionSettingsHost::fixed"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt::tests",
+      "to": "dim_agent_capabilities::execution_settings::prompt",
+      "references": [
+        "path SettingsHandler",
+        "path TOOL"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt::tests",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ToolContent::Text"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt::tests",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolCall"
       ]
     },
     {
