@@ -2074,10 +2074,17 @@ async fn respond_native(
         _ => unreachable!(),
     };
     let hold = endpoint.kind == "gemini" && !missing_terminal;
-    let body = Body::from_stream(async_stream::stream! {
-        yield Ok::<_, Infallible>(data);
-        if hold { std::future::pending::<()>().await; }
-    });
+    // The body carries its length unless the case holds the connection open: a
+    // client that stops reading at the stream's terminal frame then still
+    // leaves the connection reusable for its next request.
+    let body = if hold {
+        Body::from_stream(async_stream::stream! {
+            yield Ok::<_, Infallible>(data);
+            std::future::pending::<()>().await;
+        })
+    } else {
+        Body::from(data)
+    };
     Response::builder()
         .header("content-type", "text/event-stream")
         .body(body)
@@ -3866,4 +3873,105 @@ async fn gemini_terminal_chunk_finishes_while_the_body_stays_open() {
         matches!(outcome, Ok(true)),
         "the terminal chunk must finish the stream while the body stays open"
     );
+}
+
+/// A TCP proxy in front of a local stub that counts the client connections it
+/// accepts, so a test can tell a reused keep-alive connection from a new
+/// client.
+struct CountingProxy {
+    url: String,
+    accepted: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    join: tokio::task::JoinHandle<()>,
+}
+
+impl CountingProxy {
+    async fn start(target: std::net::SocketAddr) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = accepted.clone();
+        let join = tokio::spawn(async move {
+            loop {
+                let Ok((mut client, _)) = listener.accept().await else {
+                    return;
+                };
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let Ok(mut upstream) = tokio::net::TcpStream::connect(target).await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+                });
+            }
+        });
+        Self {
+            url,
+            accepted,
+            join,
+        }
+    }
+
+    fn accepted(&self) -> usize {
+        self.accepted.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// One request, drained to its end: what matters is the transport it used.
+async fn drain_request(host: &ModelHost, base_url: String, timeout_ms: Option<u64>) {
+    let connection = ModelConnection::Http(HttpModelConnection {
+        protocol: ModelProtocol::OpenaiChat,
+        base_url,
+        network: ModelNetwork {
+            timeout_ms,
+            ..ModelNetwork::default()
+        },
+        headers: Default::default(),
+        bearer: None,
+        api_key: Some("test-key".into()),
+        preset: None,
+    });
+    let request = ModelRequest::new("local", "test-model", vec![Message::text(Role::User, "hi")]);
+    let mut stream = host
+        .0
+        .invoke(Arc::new(request), connection, CancellationToken::new())
+        .await
+        .unwrap();
+    while let Some(chunk) = stream.next().await {
+        chunk.unwrap();
+    }
+}
+
+/// A connection whose base URL carries a query, or whose network names a
+/// timeout, keeps the driver's transport and its connection pool: two requests
+/// with each use the one accepted TCP connection the driver holds.
+#[tokio::test]
+async fn a_connection_reuses_one_tcp_connection_for_its_query_and_timeout() {
+    let server = NativeServer::start("openai-chat").await;
+    let target: std::net::SocketAddr = server
+        .url
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let proxy = CountingProxy::start(target).await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+
+    for _ in 0..2 {
+        drain_request(&host, format!("{}/v1?tenant=sandbox", proxy.url), None).await;
+    }
+    assert_eq!(proxy.accepted(), 1, "the query connection reuses its pool");
+    for _ in 0..2 {
+        drain_request(&host, format!("{}/v1", proxy.url), Some(5_000)).await;
+    }
+    assert_eq!(
+        proxy.accepted(),
+        1,
+        "the timeout connection reuses the driver's pool"
+    );
+    proxy.join.abort();
+    server.close().await;
 }

@@ -6332,7 +6332,6 @@
         "path ModelConnection::Local",
         "path ModelDriver",
         "path ModelNetwork",
-        "path ModelNetwork::default",
         "path ModelStream"
       ]
     },

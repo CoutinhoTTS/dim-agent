@@ -197,12 +197,24 @@ fn name_redirect_target(mut error: AiMuxError) -> AiMuxError {
     error
 }
 
-/// A transport carrying one connection's proxy and timeout.
-fn fetch(network: &ModelNetwork, query: Vec<(String, String)>) -> FetchFunction {
-    let transport = ReqwestFetch::new(ProxyConfig {
-        all_url: network.proxy.clone(),
-        ..ProxyConfig::default()
-    });
+/// A transport carrying one connection's proxy, timeout and query.
+///
+/// Without a proxy it is a clone of the driver's own transport, which shares
+/// its connection pool; only a proxy needs a client of its own. Taking the
+/// shared transport here keeps a query or a timeout from costing a new pool
+/// per request.
+fn fetch(
+    shared: &ReqwestFetch,
+    network: &ModelNetwork,
+    query: Vec<(String, String)>,
+) -> FetchFunction {
+    let transport = match &network.proxy {
+        Some(proxy) => ReqwestFetch::new(ProxyConfig {
+            all_url: Some(proxy.clone()),
+            ..ProxyConfig::default()
+        }),
+        None => shared.clone(),
+    };
     Arc::new(DimFetch {
         transport,
         timeout: network.timeout_ms.map(Duration::from_millis),
@@ -383,6 +395,9 @@ fn build_model(
 }
 
 pub(crate) struct AimuxDriver {
+    /// The transport every connection without a proxy reuses, so their
+    /// clients share one connection pool.
+    transport: ReqwestFetch,
     fetch: FetchFunction,
     generation: CancellationToken,
     tasks: TaskTracker,
@@ -390,8 +405,14 @@ pub(crate) struct AimuxDriver {
 }
 impl AimuxDriver {
     pub fn new(generation: CancellationToken) -> Result<Arc<Self>, HostError> {
+        let transport = ReqwestFetch::default();
         Ok(Arc::new(Self {
-            fetch: fetch(&ModelNetwork::default(), Vec::new()),
+            fetch: Arc::new(DimFetch {
+                transport: transport.clone(),
+                timeout: None,
+                query: Vec::new(),
+            }),
+            transport,
             generation,
             tasks: TaskTracker::new(),
             streams: Mutex::new(Vec::new()),
@@ -473,7 +494,7 @@ impl ModelDriver for AimuxDriver {
                 if network.proxy.is_none() && network.timeout_ms.is_none() && query.is_empty() {
                     self.fetch.clone()
                 } else {
-                    fetch(network, query)
+                    fetch(&self.transport, network, query)
                 };
             if preset == Some(OPENAI_CODEX_PRESET) && protocol != ModelProtocol::OpenaiResponses {
                 return Err(HostError::classified(
