@@ -11,7 +11,7 @@ use crate::{
     settings::{SettingsChanged, settings_changes},
     tool_registry::{ToolContribution, ToolHandler, ToolRegistry},
 };
-use dim_agent_runtime::{BranchLifecycle, Names, PartRegistry, PartScope, Timeline};
+use dim_agent_runtime::{BranchLifecycle, BranchPhase, Names, PartRegistry, PartScope, Timeline};
 use dim_agent_types::*;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::{Ctx, Error};
@@ -256,16 +256,33 @@ impl DynPlugin for SettingsSnapshotBranch {
                 let mut pending = true;
                 loop {
                     if pending {
-                        match host.0.read(lifecycle.child_token()).await {
+                        let read = tokio::select! {
+                            _ = phase.closing() => return,
+                            result = host.0.read(lifecycle.child_token()) => result,
+                        };
+                        match read {
                             Ok(settings) => {
                                 let current = snapshot(settings);
                                 if last.as_deref() == Some(current.as_str()) {
                                     pending = false;
-                                } else if append(&timeline, &current).is_ok() {
-                                    last = Some(current);
-                                    pending = false;
+                                } else if lifecycle.is_cancelled()
+                                    || phase.phase() >= BranchPhase::Closing
+                                {
+                                    return;
                                 } else {
-                                    pending = true;
+                                    match append(&timeline, &current) {
+                                        Ok(()) => {
+                                            last = Some(current);
+                                            pending = false;
+                                        }
+                                        Err(error) => {
+                                            tracing::warn!(
+                                                %error,
+                                                "execution settings were not appended"
+                                            );
+                                            pending = true;
+                                        }
+                                    }
                                 }
                             }
                             Err(error) => {
