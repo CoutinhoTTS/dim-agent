@@ -4012,7 +4012,7 @@ impl Worker {
             return;
         }
         *cursor = event.sequence;
-        self.discover_workflow(&event);
+        self.discover_workflow(branch_id, &event);
         if branch_id == "main"
             && let EventContent::Configuration(configuration) = &event.content
         {
