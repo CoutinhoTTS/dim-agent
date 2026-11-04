@@ -99,7 +99,7 @@ Release builds use the following [GitHub-hosted runner images](https://docs.gith
 | Windows ARM64 | `aarch64-pc-windows-msvc` | `windows-11-arm` |
 | Windows x64 | `x86_64-pc-windows-msvc` | `windows-2022` |
 
-The Ubuntu preflight generates the Rust distribution notices once with cargo-about 0.9.3 using the versioned checkout. All six targets download that artifact. Linux uses cargo-zigbuild and Zig on the target architecture to link for glibc 2.28. Windows uses native MSVC, clang-cl on ARM64, NASM on x64, and the Windows system tar to create ZIP archives. Actions installs Node from `.node-version` and Rust uses `rust-toolchain.toml`. Web and Release assembly run on hosted Ubuntu.
+The Ubuntu preflight generates the Rust distribution notices once with cargo-about 0.9.3 using the versioned checkout. All six targets download that artifact. Linux builds on each native host with GNU tools in a digest-pinned manylinux_2_28 container. The executable also runs in that glibc 2.28 environment. Windows uses native MSVC, clang-cl on ARM64, NASM on x64, and the Windows system tar to create ZIP archives. Actions installs Node from `.node-version` and Rust uses `rust-toolchain.toml`. Web and Release assembly run on hosted Ubuntu.
 
 The separate PR workflow uses self-hosted macOS ARM64, Windows x64 and Linux x64 runners. Register those runners with the [self-hosted OS and architecture labels](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/use-in-a-workflow). Keep PR runner credentials and private networks isolated as required by the [CI trust model](#ci-trust-model).
 
@@ -197,6 +197,8 @@ gh workflow run release.yml --ref main
 ```
 
 The preflight skips a commit that already has an alpha tag or matches the Web manifest of the current npm alpha. Otherwise it increments the highest alpha across the registry packages and Git tags, including versions reserved for GitHub Releases awaiting npm publication. All six hosted targets and the Web assembly use that source SHA and stamp the allocated version into the build checkouts. After assembly, CI reserves an annotated `vX.Y.Z-alpha.N` tag on that commit and creates the GitHub prerelease draft.
+
+To verify a release workflow change before merging, dispatch it from the feature branch with an existing alpha tag. This builds the tag with test OAuth client IDs, runs native version checks and collects all 17 attachments as run artifacts. Only a tag push or a dispatch from main can create the GitHub draft.
 
 An existing tag can also start its build on push or via `gh workflow run release.yml --ref main -f tag=vVERSION`. Its commit must be reachable from main. CI-generated alpha tags repeat the build-time stamp on recovery. Manually prepared tags must match the committed Cargo, npm wrapper and runtime versions. Every build checks out the resolved commit SHA. Six target jobs stage and pack their payloads. Assembly requires every target, matching toolchain/plugin provenance and valid artifact digests before creating a draft GitHub Release. Prerelease tags mark the draft as a prerelease. Release notes are generated from GitHub history and should be reviewed before publishing.
 

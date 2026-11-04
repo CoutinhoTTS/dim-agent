@@ -76,4 +76,4 @@ git diff --check
 - For an unchanged source/tag, resume its existing run, Release and original archives. A matching registry integrity may be skipped; different bytes or registry/authentication errors stop publication. Do not allocate a new version just because the publication job needs retrying.
 - Source changes need a new version and new tag. Never rebuild or substitute missing archives in an already published Release; prepare a complete new release.
 - After one-day build artifacts expire, rebuild all targets for the unchanged tag if no complete Release exists. An incomplete draft must be inspected and removed only when authorized before retrying; keep the tag.
-- For a hosted-runner workflow fix, merge the fix into main and dispatch release.yml from main with the existing tag. Check that the new run builds the original tag commit.
+- Verify hosted-runner workflow fixes by dispatching release.yml from the fix branch with the existing tag. Wait for all six builds and attachment assembly before merging. Then dispatch release.yml from main with the same tag. Check that the new run builds the original tag commit.
