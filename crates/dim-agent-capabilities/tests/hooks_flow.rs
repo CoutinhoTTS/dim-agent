@@ -3751,12 +3751,19 @@ async fn a_prompt_submit_hook_precedes_a_referenced_skill() {
         "---\nname: checkin\ndescription: Answers check-in questions\n---\n\nCHECKIN-BODY\n",
     )
     .unwrap();
+    let second = env.path("work/.agents/skills/second");
+    std::fs::create_dir_all(&second).unwrap();
+    std::fs::write(
+        second.join("SKILL.md"),
+        "---\nname: second\ndescription: Answers follow-ups\n---\n\nSECOND-BODY\n",
+    )
+    .unwrap();
     let stdin_path = env.path("prompt-stdin.json");
     let script = env.path("prompt-stdin.sh");
     std::fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncat > '{}'\nprintf '{{\"hookSpecificOutput\":{{\"additionalContext\":\"hook context\"}}}}'\n",
+            "#!/bin/sh\ncat > '{}'\nprintf '{{\"hookSpecificOutput\":{{\"additionalContext\":\"hook context $skill: second\"}}}}'\n",
             stdin_path.display()
         ),
     )
@@ -3810,11 +3817,56 @@ async fn a_prompt_submit_hook_precedes_a_referenced_skill() {
     };
     assert!(skill.starts_with("<dim-skill name=\"checkin\">"), "{skill}");
     assert!(skill.contains("CHECKIN-BODY"), "{skill}");
+    assert!(
+        user.content.iter().all(|block| match block {
+            ContentBlock::Text { text } => !text.contains("SECOND-BODY"),
+            _ => true,
+        }),
+        "a reference in the hook's context loads nothing: {user:?}"
+    );
     let seen: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&stdin_path).unwrap()).unwrap();
     assert_eq!(
         seen["prompt"], "$skill: checkin keep my words",
         "the hook sees the operator's text only"
+    );
+    // A queued input is steered with its recorded content, which carries the
+    // hook's context; the reference inside that context must not load.
+    let reply = withdraw(
+        &session,
+        serde_json::json!({"sessionId": session.id(), "branchId": "main",
+            "inputId": "unknown", "steer": serde_json::to_value(user).unwrap()}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply["status"], "notHeld", "{reply}");
+    let steered = reply["steer"]["inputId"].as_str().unwrap();
+    let event = branch_events(&session, "main", ..)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|event| event.id == steered)
+        .expect("the steered input was written");
+    let EventKind::InputMessage(data) = &event.kind else {
+        panic!("the input is an input message");
+    };
+    let user = data
+        .user
+        .as_ref()
+        .expect("the steered input keeps its user content");
+    assert!(
+        user.content.iter().any(|block| match block {
+            ContentBlock::Text { text } => text.starts_with("<dim-skill name=\"checkin\">"),
+            _ => false,
+        }),
+        "the operator's Skill stays loaded: {user:?}"
+    );
+    assert!(
+        user.content.iter().all(|block| match block {
+            ContentBlock::Text { text } => !text.contains("SECOND-BODY"),
+            _ => true,
+        }),
+        "a reference in the recorded hook context loads nothing: {user:?}"
     );
     env.close().await;
 }
