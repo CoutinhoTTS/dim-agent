@@ -15,12 +15,12 @@ flowchart LR
     Settings["Settings source goal"]
   end
   subgraph SESS["Session scope"]
-    GS["GoalPlugin: tool goal_update, sessionMethods session.goal"]:::new
+    GS["GoalSession: tool goal_update, sessionMethods session.goal"]:::new
     TR["ToolRegistry"]
     TC["TreeCommands"]
   end
   subgraph BR["Branch scope"]
-    GB["GoalBranchPlugin (goal: fold, decisions)"]:::new
+    GB["GoalBranch (goal: fold, decisions)"]:::new
     TL["Timeline + Dispatcher"]
     IQ["InputQueue and Loop"]
   end
@@ -110,7 +110,7 @@ Runtime-only: the fold and the set of write tasks in flight, keyed by the sequen
 sequenceDiagram
   participant CLI
   participant Rpc
-  participant GS as GoalPlugin (Session)
+  participant GS as GoalSession (Session)
   participant TL as Branch Timeline
   participant G as goal (branch)
   participant IQ as InputQueue and Loop
@@ -134,7 +134,7 @@ The method does not read the fold; it writes and replies with the sequence of it
 sequenceDiagram
   participant Model
   participant TE as ToolExecutor
-  participant GS as GoalPlugin (Session)
+  participant GS as GoalSession (Session)
   participant TL as Branch Timeline
   participant G as goal (branch)
   Model->>TE: goal_update completed, summary
@@ -380,7 +380,7 @@ Encoding: the objective, the summary and every attribute value are written with 
 
 | Write | Blocks (key use) | Mode | Text |
 | --- | --- | --- | --- |
-| `set` | 1: `goal:objective` live; 2: `goal:status` live | Queue | 1: `<dim-goal kind="goal" op="set" branch="B">`, with `judge="evaluator"` after `branch` when the goal is judged by an evaluator ([Pursuit](Pursuit.md) §3) / `Objective:` / `<objective>` / blank / `This is the user's standing goal for branch B. If you are on another line of this Session, the goal belongs to branch B: treat it as background, do not continue it, and do not call goal_update for it.` / `</dim-goal>`; 2: `<dim-goal kind="status" status="active" branch="B">` / `The goal for branch B is active. Keep working toward it across turns. When it is fully achieved, call goal_update with status "completed". If you cannot make progress without the user, call goal_update with status "blocked" and explain why.` / `</dim-goal>` |
+| `set` | 1: `goal:objective` live; 2: `goal:status` live | Queue | 1: `<dim-goal kind="goal" op="set" branch="B">`, with `judge="evaluator"` before `branch` when the goal is judged by an evaluator ([Pursuit](Pursuit.md) §3) / `Objective:` / `<objective>` / blank / `This is the user's standing goal for branch B. If you are on another line of this Session, the goal belongs to branch B: treat it as background, do not continue it, and do not call goal_update for it.` / `</dim-goal>`; 2: `<dim-goal kind="status" status="active" branch="B">` / `The goal for branch B is active. Keep working toward it across turns. When it is fully achieved, call goal_update with status "completed". If you cannot make progress without the user, call goal_update with status "blocked" and explain why.` / `</dim-goal>` |
 | `edit` | `goal:objective` live | Append | `op="edit"`; `Objective:` / `<objective>` / blank / `The user set the objective of the goal for branch B. This does not change its status.` |
 | `pause` (user) | `goal:status` live | Append | `op="pause" reason="user"`; `The user set the goal status for branch B to paused. Do not continue working toward a goal for branch B on your own; respond only to the user's latest input.` |
 | `resume` | `goal:status` live | Queue | `op="resume"`; `The user set the goal status for branch B to active. If branch B has a goal objective, keep working toward it across turns; when it is completed or blocked, call goal_update.` |

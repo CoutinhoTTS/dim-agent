@@ -2,7 +2,7 @@
 
 状态：提议中。范围：部件、App Server 或 TypeScript 插件从 Timeline 读取事件的全部方式，其中哪些会被事件查询（[ADR 019](../../adr/019-event-query.md)、[插件契约 §5.4](plugin-contract.md#54-the-event-query)）取代，以及还剩什么。本文是审计，加上 [ADR 020](../../adr/020-timeline-read-convergence.md) 提议的决策；决策在该 ADR 被接受后生效。语言：中文。English: [English](../../design/timeline-read-entries.md)。
 
-基线：`origin/main` 的 `514225777`。调用点不含测试和示例。下面每一行都是从源码读出来的，不是沿用早先的计划。
+基线：`origin/main` 的 `514225777`。调用点不含测试和示例。下面每一行都是在该基线上从源码读出来的，因此其中点名的 TypeScript 路径（含 Goal 的 `runtime/plugins/goal/branch.ts`）是移植前的快照。
 
 ## 1. 入口
 

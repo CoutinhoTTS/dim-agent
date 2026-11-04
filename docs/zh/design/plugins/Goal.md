@@ -15,12 +15,12 @@ flowchart LR
     Settings["Settings 来源 goal"]
   end
   subgraph SESS["Session 作用域"]
-    GS["GoalPlugin：工具 goal_update，sessionMethods session.goal"]:::new
+    GS["GoalSession：工具 goal_update，sessionMethods session.goal"]:::new
     TR["ToolRegistry"]
     TC["TreeCommands"]
   end
   subgraph BR["分支作用域"]
-    GB["GoalBranchPlugin（goal：折叠、决策）"]:::new
+    GB["GoalBranch（goal：折叠、决策）"]:::new
     TL["Timeline + Dispatcher"]
     IQ["InputQueue 与 Loop"]
   end
@@ -110,7 +110,7 @@ Goal 不拥有持久状态。分支 `B` 的目标是 `B` 从自己的开场事�
 sequenceDiagram
   participant CLI
   participant Rpc
-  participant GS as GoalPlugin（Session）
+  participant GS as GoalSession（Session）
   participant TL as 分支 Timeline
   participant G as goal（分支）
   participant IQ as InputQueue 与 Loop
@@ -134,7 +134,7 @@ sequenceDiagram
 sequenceDiagram
   participant Model as 模型
   participant TE as ToolExecutor
-  participant GS as GoalPlugin（Session）
+  participant GS as GoalSession（Session）
   participant TL as 分支 Timeline
   participant G as goal（分支）
   Model->>TE: goal_update completed，summary
@@ -372,7 +372,7 @@ Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的
 
 | 写入 | 块（key 用法） | 模式 | 文本 |
 | --- | --- | --- | --- |
-| `set` | 1：`goal:objective` live；2：`goal:status` live | Queue | 1：`<dim-goal kind="goal" op="set" branch="B">`，目标由评审者裁判时在 `branch` 之后带 `judge="evaluator"`（[Pursuit](Pursuit.md) §3）/ `Objective:` / `<objective>` / 空行 / `This is the user's standing goal for branch B. If you are on another line of this Session, the goal belongs to branch B: treat it as background, do not continue it, and do not call goal_update for it.` / `</dim-goal>`；2：`<dim-goal kind="status" status="active" branch="B">` / `The goal for branch B is active. Keep working toward it across turns. When it is fully achieved, call goal_update with status "completed". If you cannot make progress without the user, call goal_update with status "blocked" and explain why.` / `</dim-goal>` |
+| `set` | 1：`goal:objective` live；2：`goal:status` live | Queue | 1：`<dim-goal kind="goal" op="set" branch="B">`，目标由评审者裁判时在 `branch` 之前带 `judge="evaluator"`（[Pursuit](Pursuit.md) §3）/ `Objective:` / `<objective>` / 空行 / `This is the user's standing goal for branch B. If you are on another line of this Session, the goal belongs to branch B: treat it as background, do not continue it, and do not call goal_update for it.` / `</dim-goal>`；2：`<dim-goal kind="status" status="active" branch="B">` / `The goal for branch B is active. Keep working toward it across turns. When it is fully achieved, call goal_update with status "completed". If you cannot make progress without the user, call goal_update with status "blocked" and explain why.` / `</dim-goal>` |
 | `edit` | `goal:objective` live | Append | `op="edit"`；`Objective:` / `<objective>` / 空行 / `The user set the objective of the goal for branch B. This does not change its status.` |
 | `pause`（用户） | `goal:status` live | Append | `op="pause" reason="user"`；`The user set the goal status for branch B to paused. Do not continue working toward a goal for branch B on your own; respond only to the user's latest input.` |
 | `resume` | `goal:status` live | Queue | `op="resume"`；`The user set the goal status for branch B to active. If branch B has a goal objective, keep working toward it across turns; when it is completed or blocked, call goal_update.` |
