@@ -414,6 +414,56 @@ async fn calls_during_an_unload_wait_and_read_the_restored_session() {
     server.join().await.unwrap();
 }
 
+/// ADR 021 D3: a client `session.history` read of a Session the pass has
+/// unloaded acquires it and pages the same stored facts; the protocol has no
+/// branch that reads them without a Session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_history_read_acquires_an_unloaded_session() {
+    let store = Store::new();
+    let loads = Loads::default();
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_unloading(&store, &loads, GRACE).await;
+    client_session(&mut client, &agent, host_policy()).await;
+    let id = launch(&sessions).await;
+    sessions
+        .ok("input", text_input(&id, "test:read", "hello"))
+        .await;
+    let through = sessions.ok("idle", at(&id)).await["sequence"]
+        .as_u64()
+        .unwrap();
+    let history = json!({"sessionId":id,"branchId":"main","after":0,"limit":256,
+        "through":through});
+    let before = client.rpc("session.history", history.clone()).await;
+    assert_ok(&before);
+    unloaded(agent.get_session(&id).unwrap()).await;
+    loads.released(&id).await;
+    assert_eq!(loads.of(&id), (1, false));
+
+    let page = client.rpc("session.history", history).await;
+    assert_ok(&page);
+    assert_eq!(loads.of(&id), (2, true), "the read acquired the Session");
+    assert_eq!(
+        page["result"]["events"], before["result"]["events"],
+        "the restored Session pages the same facts"
+    );
+    assert!(
+        page["result"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["type"] == "input"
+                && event["data"]["user"]["content"][0]["text"] == "hello"),
+        "{page}"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 /// §13 item 9: an Agents index reload while a release is held under way, as
 /// in item 3. The reload waits for it; no Session is lost; the next
 /// generation unloads the lease-free Session the old pass never reached; and
