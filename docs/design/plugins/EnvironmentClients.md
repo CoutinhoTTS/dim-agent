@@ -187,3 +187,4 @@ No client change is required for the count. Line view is [ClientView](ClientView
 4. The remote channel's implementation when RemoteGateway P3 lands.
 5. Whether the count is read at the request boundary (#986) to remove the one-request lag.
 6. Whether the `ui.open` caller remains a separate client after its leaf attaches, or the two are one `tui`.
+7. Per-message input origin (which client sent a user message) is deferred: repeating an origin on every message is too redundant. Presence remains the connection snapshot only.
