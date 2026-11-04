@@ -425,6 +425,37 @@ fn field_enabled(
     }
 }
 
+/// The range an entry's `timeout` takes: one second to one day, in
+/// milliseconds.
+const MIN_TIMEOUT_MILLIS: u64 = 1_000;
+const MAX_TIMEOUT_MILLIS: u64 = 86_400_000;
+
+/// The members the decoder knows, for either transport. An overlay may not add
+/// one of these: an unknown name there is the user's extension field, but a
+/// known name would be written back as the entry's own member
+/// (`merge_secret`).
+const ENTRY_MEMBERS: &[&str] = &[
+    "type", "command", "args", "env", "cwd", "enabled", "timeout", "url", "headers", "auth",
+    "oauth",
+];
+
+fn field_timeout(
+    entry: &Map<String, Value>,
+    id: &str,
+) -> std::result::Result<Option<u64>, McpEntryError> {
+    const EXPECTED: &str = "an integer number of milliseconds from 1000 to 86400000";
+    let Some(value) = entry.get("timeout") else {
+        return Ok(None);
+    };
+    match value
+        .as_u64()
+        .filter(|millis| (MIN_TIMEOUT_MILLIS..=MAX_TIMEOUT_MILLIS).contains(millis))
+    {
+        Some(millis) => Ok(Some(millis)),
+        None => Err(entry_error(id, Some("timeout"), EXPECTED)),
+    }
+}
+
 fn decode_stdio(
     id: &str,
     entry: &Map<String, Value>,
@@ -456,6 +487,7 @@ fn decode_stdio(
         }
     };
     let enabled = field_enabled(entry, id)?;
+    let timeout = field_timeout(entry, id)?;
     for member in ["url", "headers", "auth", "oauth"] {
         if entry.get(member).is_some_and(|value| !value.is_null()) {
             return Err(entry_error(
@@ -465,12 +497,9 @@ fn decode_stdio(
             ));
         }
     }
-    let known = [
-        "type", "command", "args", "env", "cwd", "enabled", "url", "headers", "auth", "oauth",
-    ];
     let extra = entry
         .iter()
-        .filter(|(key, _)| !known.contains(&key.as_str()))
+        .filter(|(key, _)| !ENTRY_MEMBERS.contains(&key.as_str()))
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
     Ok(McpServerSettings::Stdio {
@@ -480,6 +509,7 @@ fn decode_stdio(
         env,
         cwd,
         enabled,
+        timeout,
         extra,
     })
 }
@@ -516,6 +546,7 @@ fn decode_remote(
         }
     }
     let enabled = field_enabled(entry, id)?;
+    let timeout = field_timeout(entry, id)?;
     for member in ["command", "args", "env", "cwd"] {
         if entry.get(member).is_some_and(|value| !value.is_null()) {
             return Err(entry_error(
@@ -525,12 +556,9 @@ fn decode_remote(
             ));
         }
     }
-    let known = [
-        "type", "url", "headers", "auth", "oauth", "enabled", "command", "args", "env", "cwd",
-    ];
     let extra = entry
         .iter()
-        .filter(|(key, _)| !known.contains(&key.as_str()))
+        .filter(|(key, _)| !ENTRY_MEMBERS.contains(&key.as_str()))
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
     Ok(McpServerSettings::Remote {
@@ -540,6 +568,7 @@ fn decode_remote(
         auth,
         oauth,
         enabled,
+        timeout,
         extra,
     })
 }
@@ -685,6 +714,10 @@ pub enum McpServerSettings {
         cwd: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         enabled: Option<bool>,
+        /// The entry's `tools/call` limit in milliseconds; absent means the
+        /// default.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timeout: Option<u64>,
         #[serde(flatten)]
         extra: BTreeMap<String, serde_json::Value>,
     },
@@ -700,6 +733,10 @@ pub enum McpServerSettings {
         oauth: Option<Box<McpOAuthSettings>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         enabled: Option<bool>,
+        /// The entry's `tools/call` limit in milliseconds; absent means the
+        /// default.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timeout: Option<u64>,
         #[serde(flatten)]
         extra: BTreeMap<String, serde_json::Value>,
     },
@@ -728,6 +765,14 @@ impl McpServerSettings {
     pub fn enabled(&self) -> bool {
         match self {
             Self::Stdio { enabled, .. } | Self::Remote { enabled, .. } => enabled.unwrap_or(true),
+        }
+    }
+
+    /// The entry's `tools/call` limit in milliseconds; absent means the
+    /// default.
+    pub fn timeout(&self) -> Option<u64> {
+        match self {
+            Self::Stdio { timeout, .. } | Self::Remote { timeout, .. } => *timeout,
         }
     }
 }
@@ -889,10 +934,21 @@ impl McpSecretEntry {
             return Err(SettingsError::Invalid("invalid MCP secret values"));
         }
         if let Some(url) = &self.url {
-            let parsed = url::Url::parse(url)
-                .map_err(|_| SettingsError::Invalid("invalid MCP secret URL"))?;
-            if parsed.scheme() != "http" && parsed.scheme() != "https" {
-                return Err(SettingsError::Invalid("invalid MCP secret URL"));
+            if has_reference(url) {
+                // A reference may hold the scheme itself, so only a literal
+                // scheme written before it can be checked.
+                if let Some(scheme) = literal_scheme(url)
+                    && !scheme.eq_ignore_ascii_case("http")
+                    && !scheme.eq_ignore_ascii_case("https")
+                {
+                    return Err(SettingsError::Invalid("invalid MCP secret URL"));
+                }
+            } else {
+                let parsed = url::Url::parse(url)
+                    .map_err(|_| SettingsError::Invalid("invalid MCP secret URL"))?;
+                if parsed.scheme() != "http" && parsed.scheme() != "https" {
+                    return Err(SettingsError::Invalid("invalid MCP secret URL"));
+                }
             }
         }
         if let Some(oauth) = &self.oauth {
@@ -930,7 +986,19 @@ impl McpSecretOAuth {
 }
 
 /// The safe part of a project entry, without the overlay-held members.
+///
+/// A reference is not a URL, so parsing and serializing it would change its
+/// spelling or reject the entry. With a reference, a value whose first `://`
+/// comes before any `/`, `?` or `#` keeps its scheme and authority as
+/// written, in the reference's own case, and everything the reference could
+/// hide (userinfo, path, query and fragment) is dropped. A reference without
+/// such a scheme keeps the text before any `?` or `#`.
+/// Without a reference the previous rule applies: a URL reduces to its
+/// origin, and unparseable text is returned as written.
 pub(crate) fn public_url(value: &str) -> String {
+    if has_reference(value) {
+        return reference_public_url(value);
+    }
     let Ok(url) = url::Url::parse(value) else {
         return value.to_owned();
     };
@@ -944,6 +1012,60 @@ pub(crate) fn public_url(value: &str) -> String {
     } else {
         value.to_owned()
     }
+}
+
+/// The endpoint a configuration view shows: a reference is kept as written;
+/// otherwise the URL is parsed and reduced to its origin, and a value that
+/// does not parse stays an error for the view.
+pub(crate) fn public_endpoint(value: &str) -> std::result::Result<String, url::ParseError> {
+    if has_reference(value) {
+        return Ok(reference_public_url(value));
+    }
+    Ok(url::Url::parse(value)?.origin().ascii_serialization())
+}
+
+/// The names a value still references after expansion. A reference the
+/// environment does not set keeps its text, so an expanded value names the
+/// variables the daemon could not fill in (D19).
+pub(crate) fn unresolved(value: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        let candidate = &rest[start + 2..];
+        let Some((name, _, used)) = reference(candidate) else {
+            rest = &rest[start + 1..];
+            continue;
+        };
+        names.insert(name.to_owned());
+        rest = &candidate[used..];
+    }
+    names
+}
+
+fn has_reference(value: &str) -> bool {
+    !unresolved(value).is_empty()
+}
+
+fn reference_public_url(value: &str) -> String {
+    let Some((scheme, rest)) = value.split_once("://") else {
+        return before_query_or_fragment(value);
+    };
+    // A `://` after a `/`, `?` or `#` belongs to the withheld text, not to
+    // the value's leading components.
+    if scheme.contains(['/', '?', '#']) {
+        return before_query_or_fragment(value);
+    }
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..end];
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    format!("{scheme}://{authority}")
+}
+
+fn before_query_or_fragment(value: &str) -> String {
+    let end = value.find(['?', '#']).unwrap_or(value.len());
+    value[..end].to_owned()
 }
 
 fn public_oauth(oauth: &McpOAuthSettings) -> Option<McpOAuthSettings> {
@@ -970,6 +1092,7 @@ pub(crate) fn split_entry(
             args,
             env,
             cwd,
+            timeout,
             extra,
             ..
         } => {
@@ -986,6 +1109,7 @@ pub(crate) fn split_entry(
                 env: BTreeMap::new(),
                 cwd: cwd.clone(),
                 enabled: None,
+                timeout: *timeout,
                 extra: BTreeMap::new(),
             };
             (skeleton, (!secret.is_empty()).then_some(secret))
@@ -996,6 +1120,7 @@ pub(crate) fn split_entry(
             headers,
             auth,
             oauth,
+            timeout,
             extra,
             ..
         } => {
@@ -1021,6 +1146,7 @@ pub(crate) fn split_entry(
                 auth: None,
                 oauth: oauth.as_deref().and_then(public_oauth).map(Box::new),
                 enabled: None,
+                timeout: *timeout,
                 extra: BTreeMap::new(),
             };
             (skeleton, (!secret.is_empty()).then_some(secret))
@@ -1052,7 +1178,13 @@ pub(crate) fn merge_secret(config: &mut McpServerSettings, secret: &McpSecretEnt
             if let Some(values) = &secret.env {
                 env.extend(values.clone());
             }
-            extra.extend(secret.extra.clone());
+            extra.extend(
+                secret
+                    .extra
+                    .iter()
+                    .filter(|(name, _)| !ENTRY_MEMBERS.contains(&name.as_str()))
+                    .map(|(name, value)| (name.clone(), value.clone())),
+            );
         }
         McpServerSettings::Remote {
             url,
@@ -1085,7 +1217,13 @@ pub(crate) fn merge_secret(config: &mut McpServerSettings, secret: &McpSecretEnt
                 }
                 oauth.extra.extend(secret_oauth.extra.clone());
             }
-            extra.extend(secret.extra.clone());
+            extra.extend(
+                secret
+                    .extra
+                    .iter()
+                    .filter(|(name, _)| !ENTRY_MEMBERS.contains(&name.as_str()))
+                    .map(|(name, value)| (name.clone(), value.clone())),
+            );
         }
     }
     Ok(())
@@ -1237,38 +1375,63 @@ pub struct McpPluginServers {
 pub struct McpPluginDocument {
     /// The plugin directory: a stdio entry's `cwd` is resolved against it.
     pub dir: PathBuf,
-    pub mcp_servers: BTreeMap<String, McpServerSettings>,
+    /// The registered document, decoded entry by entry like any other source.
+    #[serde(flatten)]
+    pub servers: McpSettings,
 }
 impl McpPluginServers {
     /// Every entry under its run id, with its effective configuration.
-    pub(crate) fn entries(self) -> impl Iterator<Item = (String, McpServerSettings)> {
-        self.plugins.into_iter().flat_map(|(plugin, document)| {
+    pub(crate) fn entries(self) -> BTreeMap<String, McpServerSettings> {
+        self.into_entries().0
+    }
+
+    /// Every decoded entry under its run id with its effective configuration,
+    /// and every broken entry under its run id with its error.
+    pub(crate) fn into_entries(
+        self,
+    ) -> (
+        BTreeMap<String, McpServerSettings>,
+        BTreeMap<String, McpEntryError>,
+    ) {
+        let mut servers = BTreeMap::new();
+        let mut invalid = BTreeMap::new();
+        for (plugin, document) in self.plugins {
             let dir = document.dir;
-            document
-                .mcp_servers
-                .into_iter()
-                .map(move |(id, mut config)| {
-                    if let McpServerSettings::Stdio { cwd, .. } = &mut config {
-                        let path = cwd.as_ref().map_or(dir.clone(), |cwd| dir.join(cwd));
-                        *cwd = Some(path.to_string_lossy().into_owned());
-                    }
-                    (format!("{plugin}:{id}"), config)
-                })
-        })
+            let (entries, broken) = document.servers.into_parts();
+            for (id, mut config) in entries {
+                if let McpServerSettings::Stdio { cwd, .. } = &mut config {
+                    let path = cwd.as_ref().map_or(dir.clone(), |cwd| dir.join(cwd));
+                    *cwd = Some(path.to_string_lossy().into_owned());
+                }
+                servers.insert(format!("{plugin}:{id}"), config);
+            }
+            for (id, error) in broken {
+                invalid.insert(format!("{plugin}:{id}"), error);
+            }
+        }
+        (servers, invalid)
     }
 
     /// One entry as its plugin registered it, before the plugin directory
-    /// resolves a stdio `cwd`.
-    pub(crate) fn declared(self, run_id: &str) -> Option<McpServerSettings> {
-        self.plugins
-            .into_iter()
-            .flat_map(|(plugin, document)| {
-                document
-                    .mcp_servers
-                    .into_iter()
-                    .map(move |(id, config)| (format!("{plugin}:{id}"), config))
-            })
-            .find_map(|(id, config)| (id == run_id).then_some(config))
+    /// resolves a stdio `cwd`. A broken entry answers its own error.
+    pub(crate) fn declared(
+        self,
+        run_id: &str,
+    ) -> std::result::Result<Option<McpServerSettings>, McpEntryError> {
+        for (plugin, document) in self.plugins {
+            let (entries, broken) = document.servers.into_parts();
+            for (id, config) in entries {
+                if format!("{plugin}:{id}") == run_id {
+                    return Ok(Some(config));
+                }
+            }
+            for (id, error) in broken {
+                if format!("{plugin}:{id}") == run_id {
+                    return Err(error);
+                }
+            }
+        }
+        Ok(None)
     }
 }
 impl BusinessDocument for McpPluginServers {
@@ -1283,12 +1446,8 @@ impl BusinessDocument for McpPluginServers {
             if plugin.trim().is_empty() || !document.dir.is_absolute() {
                 return Err(SettingsError::Invalid("invalid MCP plugin registration"));
             }
-            McpSettings {
-                mcp_servers: document.mcp_servers.clone(),
-                ..McpSettings::default()
-            }
-            .validate()?;
-            for config in document.mcp_servers.values() {
+            document.servers.validate()?;
+            for config in document.servers.entries().values() {
                 if let McpServerSettings::Stdio { cwd: Some(cwd), .. } = config
                     && !Path::new(cwd).components().all(|part| {
                         matches!(
@@ -1315,7 +1474,7 @@ impl McpPluginDocument {
     /// directory inside the canonical plugin directory.
     pub(crate) fn confine(&self) -> Result<()> {
         let dir = std::fs::canonicalize(&self.dir).map_err(|_| OUTSIDE_PLUGIN)?;
-        for config in self.mcp_servers.values() {
+        for config in self.servers.entries().values() {
             if let McpServerSettings::Stdio { cwd: Some(cwd), .. } = config {
                 match std::fs::canonicalize(dir.join(cwd)) {
                     Ok(resolved) if resolved.starts_with(&dir) && resolved.is_dir() => {}
@@ -1325,6 +1484,302 @@ impl McpPluginDocument {
         }
         Ok(())
     }
+}
+
+/// A configuration with environment references expanded, and the names the
+/// expansion read. The stored document is never changed.
+#[derive(Clone, PartialEq)]
+pub(crate) struct Expanded {
+    pub configuration: McpServerSettings,
+    pub referenced: BTreeSet<String>,
+    pub unset: BTreeSet<String>,
+}
+
+/// Who wrote one entry's fields, which decides what a shared document may
+/// expand.
+#[derive(Clone, Copy)]
+pub(crate) enum Origin<'a> {
+    /// The user's own document: every field expands.
+    User,
+    /// A plugin document: every guarded field is guarded, and `cwd` is
+    /// resolved inside the plugin directory at registration instead.
+    Plugin,
+    /// A workspace file, with the user overlay that supplied some members.
+    Workspace { overlay: Option<&'a McpSecretEntry> },
+}
+impl Origin<'_> {
+    fn guards_url(self) -> bool {
+        match self {
+            Self::User => false,
+            Self::Plugin => true,
+            Self::Workspace { overlay } => overlay.is_none_or(|overlay| overlay.url.is_none()),
+        }
+    }
+    fn guards_header(self, name: &str) -> bool {
+        match self {
+            Self::User => false,
+            Self::Plugin => true,
+            Self::Workspace { overlay } => overlay.is_none_or(|overlay| {
+                overlay
+                    .headers
+                    .as_ref()
+                    .is_none_or(|headers| !headers.contains_key(name))
+            }),
+        }
+    }
+    fn guards_auth(self) -> bool {
+        match self {
+            Self::User => false,
+            Self::Plugin => true,
+            Self::Workspace { overlay } => overlay.is_none_or(|overlay| overlay.auth.is_none()),
+        }
+    }
+    fn expands_cwd(self) -> bool {
+        !matches!(self, Self::Plugin)
+    }
+}
+
+/// Names whose values never expand into a guarded field of a shared MCP
+/// document, matched without regard to case.
+const PROTECTED_NAMES: &[&str] = &[
+    // Model providers.
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "AZURE_OPENAI_API_KEY",
+    "AZURE_API_KEY",
+    "GOOGLE_API_KEY",
+    "GEMINI_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "GROQ_API_KEY",
+    "MISTRAL_API_KEY",
+    "XAI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "TOGETHER_API_KEY",
+    "FIREWORKS_API_KEY",
+    "COHERE_API_KEY",
+    "PERPLEXITY_API_KEY",
+    "MOONSHOT_API_KEY",
+    "DASHSCOPE_API_KEY",
+    "MINIMAX_API_KEY",
+    "ARK_API_KEY",
+    "REPLICATE_API_TOKEN",
+    "HUGGINGFACE_API_TOKEN",
+    "HF_TOKEN",
+    // Cloud credentials.
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "AZURE_CLIENT_SECRET",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    // Proxies.
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    // Code hosting and package registries.
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GITLAB_TOKEN",
+    "BITBUCKET_TOKEN",
+    "NPM_TOKEN",
+    "NODE_AUTH_TOKEN",
+    "YARN_NPM_AUTH_TOKEN",
+    "CARGO_REGISTRY_TOKEN",
+    "CARGO_REGISTRIES_CRATES_IO_TOKEN",
+    "PYPI_API_TOKEN",
+    "TWINE_PASSWORD",
+    "DOCKER_AUTH_CONFIG",
+    "DOCKER_PASSWORD",
+];
+
+/// Whether `name` is protected: one of Dim's own names, the fixed list, or a
+/// name the daemon's credential owner reported.
+pub(crate) fn protected(name: &str, names: &BTreeSet<String>) -> bool {
+    let upper = name.to_ascii_uppercase();
+    upper == "DIM"
+        || upper == "DIMCODE"
+        || upper.starts_with("DIM_")
+        || upper.starts_with("DIMCODE_")
+        || PROTECTED_NAMES
+            .iter()
+            .any(|known| name.eq_ignore_ascii_case(known))
+        || names.iter().any(|known| known.eq_ignore_ascii_case(name))
+}
+
+/// Expands `${NAME}` and `${NAME:-default}` in the fields an entry runs with:
+/// `command`, each argument, each environment value, `cwd`, the remote `url`,
+/// each header value and the bearer token. Header and environment names,
+/// unknown members and OAuth settings are literal.
+///
+/// Only `${` followed by a name and `}` or `:-` is a reference; every other
+/// `$` is literal. A variable set to the empty string counts as set, an
+/// unset reference without a default keeps its text, and a default ends at
+/// the first `}` without nesting.
+///
+/// A guarded field expands a protected name to the empty string, ignoring its
+/// default; the name is still reported as referenced. The remote `url`, each
+/// header value and the bearer token are guarded by origin; stdio fields are
+/// not, because running a shared command already uses the user's authority.
+pub(crate) fn expand(
+    configuration: &McpServerSettings,
+    origin: Origin<'_>,
+    environment: &dyn Fn(&str) -> Option<String>,
+    protected_names: &BTreeSet<String>,
+) -> Expanded {
+    let mut scan = Scan::default();
+    let text = |scan: &mut Scan, value: &str, guarded: bool| {
+        scan.text(value, environment, guarded, protected_names)
+    };
+    let configuration = match configuration {
+        McpServerSettings::Stdio {
+            kind,
+            command,
+            args,
+            env,
+            cwd,
+            enabled,
+            timeout,
+            extra,
+        } => McpServerSettings::Stdio {
+            kind: kind.clone(),
+            command: text(&mut scan, command, false),
+            args: args
+                .iter()
+                .map(|argument| text(&mut scan, argument, false))
+                .collect(),
+            env: env
+                .iter()
+                .map(|(name, value)| (name.clone(), text(&mut scan, value, false)))
+                .collect(),
+            cwd: cwd.as_ref().map(|cwd| {
+                if origin.expands_cwd() {
+                    text(&mut scan, cwd, false)
+                } else {
+                    cwd.clone()
+                }
+            }),
+            enabled: *enabled,
+            timeout: *timeout,
+            extra: extra.clone(),
+        },
+        McpServerSettings::Remote {
+            kind,
+            url,
+            headers,
+            auth,
+            oauth,
+            enabled,
+            timeout,
+            extra,
+        } => McpServerSettings::Remote {
+            kind: kind.clone(),
+            url: text(&mut scan, url, origin.guards_url()),
+            headers: headers
+                .iter()
+                .map(|(name, value)| {
+                    let guarded = origin.guards_header(name);
+                    (name.clone(), text(&mut scan, value, guarded))
+                })
+                .collect(),
+            auth: auth
+                .as_ref()
+                .map(|BearerAuth::Bearer { token }| BearerAuth::Bearer {
+                    token: text(&mut scan, token, origin.guards_auth()),
+                }),
+            oauth: oauth.clone(),
+            enabled: *enabled,
+            timeout: *timeout,
+            extra: extra.clone(),
+        },
+    };
+    Expanded {
+        configuration,
+        referenced: scan.referenced,
+        unset: scan.unset,
+    }
+}
+
+#[derive(Default)]
+struct Scan {
+    referenced: BTreeSet<String>,
+    unset: BTreeSet<String>,
+}
+
+impl Scan {
+    fn text(
+        &mut self,
+        value: &str,
+        environment: &dyn Fn(&str) -> Option<String>,
+        guarded: bool,
+        protected_names: &BTreeSet<String>,
+    ) -> String {
+        let mut expanded = String::with_capacity(value.len());
+        let mut rest = value;
+        while let Some(start) = rest.find("${") {
+            expanded.push_str(&rest[..start]);
+            let candidate = &rest[start + 2..];
+            let Some((name, default, used)) = reference(candidate) else {
+                expanded.push('$');
+                rest = &rest[start + 1..];
+                continue;
+            };
+            self.referenced.insert(name.to_owned());
+            if guarded && protected(name, protected_names) {
+                rest = &candidate[used..];
+                continue;
+            }
+            if let Some(value) = environment(name) {
+                expanded.push_str(&value);
+            } else if let Some(default) = default {
+                expanded.push_str(default);
+            } else {
+                self.unset.insert(name.to_owned());
+                expanded.push_str(&rest[start..start + 2 + used]);
+            }
+            rest = &candidate[used..];
+        }
+        expanded.push_str(rest);
+        expanded
+    }
+}
+
+/// One reference after its `${`: the name, the default text after `:-`, and
+/// the bytes it occupies, closing brace included.
+fn reference(input: &str) -> Option<(&str, Option<&str>, usize)> {
+    let bytes = input.as_bytes();
+    let first = *bytes.first()?;
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return None;
+    }
+    let mut used = 1;
+    while used < bytes.len() && (bytes[used].is_ascii_alphanumeric() || bytes[used] == b'_') {
+        used += 1;
+    }
+    let name = &input[..used];
+    match bytes.get(used) {
+        Some(b'}') => Some((name, None, used + 1)),
+        Some(b':') if bytes.get(used + 1) == Some(&b'-') => {
+            let start = used + 2;
+            let close = input[start..].find('}')?;
+            Some((name, Some(&input[start..start + close]), start + close + 1))
+        }
+        _ => None,
+    }
+}
+
+/// The scheme written literally before the first reference of a value. A
+/// reference may hold the `://` itself, and then there is no literal scheme
+/// to check.
+fn literal_scheme(value: &str) -> Option<&str> {
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        if reference(&rest[start + 2..]).is_some() {
+            return rest[..start].split_once("://").map(|(scheme, _)| scheme);
+        }
+        rest = &rest[start + 1..];
+    }
+    None
 }
 
 /// The canonical workspace of an authorized project source, as the
@@ -1338,6 +1793,74 @@ pub(crate) fn workspace(settings: &SettingsService, scope: SettingsScope) -> Res
         .to_str()
         .map(str::to_owned)
         .ok_or(SettingsError::Invalid("project cwd must be UTF-8"))
+}
+
+/// What a connection's configuration needs besides the declared entry: the
+/// source it belongs to, the overlay to merge, who wrote each member, the
+/// user's project enablement, and the environment to expand from.
+pub(crate) struct Connection<'a> {
+    pub scope: Option<SettingsScope>,
+    pub id: &'a str,
+    pub secret: Option<&'a McpSecretEntry>,
+    pub origin: Origin<'a>,
+    pub enablement: &'a McpProjectEnablement,
+    pub environment: &'a dyn Fn(&str) -> Option<String>,
+    pub protected: &'a BTreeSet<String>,
+}
+
+/// The configuration a connection runs: merge the overlay into the declared
+/// entry, expand environment references, then apply the project workspace
+/// `cwd` and enablement. Every caller uses this one order, so a probe and a
+/// published connection see the same values.
+pub(crate) fn connected(
+    settings: &SettingsService,
+    configuration: McpServerSettings,
+    connection: Connection<'_>,
+) -> Result<Expanded> {
+    let Connection {
+        scope,
+        id,
+        secret,
+        origin,
+        enablement,
+        environment,
+        protected,
+    } = connection;
+    let mut configuration = configuration;
+    if let Some(secret) = secret {
+        merge_secret(&mut configuration, secret)?;
+    }
+    let expansion = expand(&configuration, origin, environment, protected);
+    let configuration = match scope {
+        Some(scope) => effective(settings, scope, id, expansion.configuration, enablement)?,
+        None => expansion.configuration,
+    };
+    Ok(Expanded {
+        configuration,
+        referenced: expansion.referenced,
+        unset: expansion.unset,
+    })
+}
+
+/// The declared entry as a management read shows it: the overlay merged and
+/// the project workspace `cwd` joined, with references kept as written so a
+/// client can edit them.
+pub(crate) fn viewed(
+    settings: &SettingsService,
+    scope: Option<SettingsScope>,
+    id: &str,
+    configuration: McpServerSettings,
+    secret: Option<&McpSecretEntry>,
+    enablement: &McpProjectEnablement,
+) -> Result<McpServerSettings> {
+    let mut configuration = configuration;
+    if let Some(secret) = secret {
+        merge_secret(&mut configuration, secret)?;
+    }
+    match scope {
+        Some(scope) => effective(settings, scope, id, configuration, enablement),
+        None => Ok(configuration),
+    }
 }
 
 /// The configuration an entry runs with. A project entry resolves its stdio
@@ -1410,6 +1933,26 @@ mod tests {
             ..Default::default()
         };
         assert!(record.validate().is_err());
+    }
+
+    #[test]
+    fn a_withheld_url_keeps_the_literal_scheme_check() {
+        let accepted = |url: &str| {
+            McpSecretEntry {
+                url: Some(url.to_owned()),
+                ..Default::default()
+            }
+            .validate()
+            .is_ok()
+        };
+        assert!(accepted("https://${MCP_952_HOST}/mcp"));
+        assert!(accepted("HTTPS://${MCP_952_HOST}/mcp"));
+        assert!(accepted("${MCP_952_SCHEME}://${MCP_952_HOST}/mcp"));
+        assert!(accepted("http://localhost:${MCP_952_PORT}/mcp"));
+        assert!(accepted("https://host/${MCP_952_PATH}"));
+        assert!(!accepted("ftp://${MCP_952_HOST}/mcp"));
+        assert!(!accepted("ftp://host/mcp"));
+        assert!(!accepted("not a url"));
     }
 
     #[test]
@@ -1620,5 +2163,489 @@ mod tests {
             assert!(text.contains("entry id is empty"), "{text}");
             assert!(!text.contains("command") && !text.contains('{'), "{text}");
         }
+    }
+
+    fn user_expand(
+        configuration: &McpServerSettings,
+        environment: &dyn Fn(&str) -> Option<String>,
+    ) -> Expanded {
+        expand(configuration, Origin::User, environment, &BTreeSet::new())
+    }
+
+    fn remote(url: &str, headers: &[(&str, &str)], token: Option<&str>) -> McpServerSettings {
+        McpServerSettings::Remote {
+            kind: RemoteTransport::Http,
+            url: url.to_owned(),
+            headers: headers
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect(),
+            auth: token.map(|token| BearerAuth::Bearer {
+                token: token.to_owned(),
+            }),
+            oauth: Some(Box::new(McpOAuthSettings {
+                client_id: Some("${OAUTH_CLIENT}".into()),
+                auth_server_metadata_url: Some("https://${OAUTH_HOST}/metadata".into()),
+                ..Default::default()
+            })),
+            enabled: None,
+            timeout: None,
+            extra: BTreeMap::from([("note".into(), json!("${EXTRA}"))]),
+        }
+    }
+
+    #[test]
+    fn expansion_expands_a_name_and_a_default_only_when_unset() {
+        let environment = |name: &str| match name {
+            "SET" => Some("value".to_owned()),
+            "EMPTY" => Some(String::new()),
+            _ => None,
+        };
+        let expanded = user_expand(
+            &remote(
+                "https://${SET}.test/${MISSING}",
+                &[("X-Value", "${EMPTY}${DEFAULTED:-fallback}")],
+                None,
+            ),
+            &environment,
+        );
+        let McpServerSettings::Remote { url, headers, .. } = &expanded.configuration else {
+            panic!("a remote entry stays remote");
+        };
+        assert_eq!(url, "https://value.test/${MISSING}");
+        assert_eq!(headers["X-Value"].as_str(), "fallback");
+        assert_eq!(
+            expanded.referenced,
+            BTreeSet::from([
+                "DEFAULTED".to_owned(),
+                "EMPTY".to_owned(),
+                "MISSING".to_owned(),
+                "SET".to_owned(),
+            ])
+        );
+        assert_eq!(expanded.unset, BTreeSet::from(["MISSING".to_owned()]));
+    }
+
+    #[test]
+    fn expansion_leaves_other_dollar_text_literal() {
+        for text in ["$A", "$$", "${1BAD}", "${A-B}", "${", "a${B"] {
+            let expanded = user_expand(&remote(text, &[], None), &|_| {
+                panic!("no reference is parsed from {text}")
+            });
+            let McpServerSettings::Remote { url, .. } = &expanded.configuration else {
+                panic!("a remote entry stays remote");
+            };
+            assert_eq!(url, text, "{text}");
+            assert!(expanded.referenced.is_empty(), "{text}");
+            assert!(expanded.unset.is_empty(), "{text}");
+        }
+
+        // There is no nesting: a default ends at the first `}`.
+        let expanded = user_expand(&remote("${A:-${B}}", &[], None), &|_| None);
+        let McpServerSettings::Remote { url, .. } = &expanded.configuration else {
+            panic!("a remote entry stays remote");
+        };
+        assert_eq!(url, "${B}");
+        assert_eq!(expanded.referenced, BTreeSet::from(["A".to_owned()]));
+        assert!(expanded.unset.is_empty());
+    }
+
+    #[test]
+    fn expansion_walks_exactly_the_listed_fields() {
+        let stdio = McpServerSettings::Stdio {
+            kind: Some(Stdio::Stdio),
+            command: "${CMD}".into(),
+            args: vec!["--flag=${FLAG}".into(), "${PLAIN}".into()],
+            env: BTreeMap::from([("ENV_NAME".into(), "${VALUE}".into())]),
+            cwd: Some("${DIR}".into()),
+            enabled: Some(true),
+            timeout: Some(1_000),
+            extra: BTreeMap::from([("note".into(), json!("${EXTRA}"))]),
+        };
+        let environment = |name: &str| match name {
+            "CMD" => Some("server".to_owned()),
+            "FLAG" => Some("on".to_owned()),
+            "VALUE" => Some("value".to_owned()),
+            "DIR" => Some("/tmp/work".to_owned()),
+            "URL" => Some("https://example.test/mcp".to_owned()),
+            "HEADER" => Some("header-value".to_owned()),
+            "TOKEN" => Some("token-value".to_owned()),
+            _ => None,
+        };
+        let expanded = user_expand(&stdio, &environment);
+        let McpServerSettings::Stdio {
+            kind,
+            command,
+            args,
+            env,
+            cwd,
+            enabled,
+            timeout,
+            extra,
+        } = &expanded.configuration
+        else {
+            panic!("a stdio entry stays stdio");
+        };
+        assert!(matches!(kind, Some(Stdio::Stdio)));
+        assert_eq!(command, "server");
+        assert_eq!(args, &["--flag=on".to_owned(), "${PLAIN}".to_owned()]);
+        assert_eq!(env["ENV_NAME"].as_str(), "value");
+        assert_eq!(cwd.as_deref(), Some("/tmp/work"));
+        assert_eq!(*enabled, Some(true));
+        assert_eq!(*timeout, Some(1_000));
+        assert_eq!(extra["note"], json!("${EXTRA}"));
+        assert_eq!(
+            expanded.referenced,
+            BTreeSet::from([
+                "CMD".to_owned(),
+                "DIR".to_owned(),
+                "FLAG".to_owned(),
+                "PLAIN".to_owned(),
+                "VALUE".to_owned(),
+            ])
+        );
+
+        let remote = remote(
+            "${URL}",
+            &[("X-Header", "${HEADER}")],
+            Some("Bearer ${TOKEN}"),
+        );
+        let expanded = user_expand(&remote, &environment);
+        let McpServerSettings::Remote {
+            url,
+            headers,
+            auth,
+            oauth,
+            extra,
+            ..
+        } = &expanded.configuration
+        else {
+            panic!("a remote entry stays remote");
+        };
+        assert_eq!(url, "https://example.test/mcp");
+        assert_eq!(headers["X-Header"].as_str(), "header-value");
+        assert!(matches!(
+            auth,
+            Some(BearerAuth::Bearer { token }) if token == "Bearer token-value"
+        ));
+        let oauth = oauth.as_deref().unwrap();
+        assert_eq!(oauth.client_id.as_deref(), Some("${OAUTH_CLIENT}"));
+        assert_eq!(
+            oauth.auth_server_metadata_url.as_deref(),
+            Some("https://${OAUTH_HOST}/metadata")
+        );
+        assert_eq!(extra["note"], json!("${EXTRA}"));
+        assert_eq!(
+            expanded.referenced,
+            BTreeSet::from(["HEADER".to_owned(), "TOKEN".to_owned(), "URL".to_owned()])
+        );
+    }
+
+    #[test]
+    fn expansion_reports_referenced_and_unset_names_once() {
+        let expanded = user_expand(
+            &remote("${B}/${A}/${B}/${D:-fallback}/${A}", &[], None),
+            &|name: &str| (name == "A").then(|| "a".to_owned()),
+        );
+        assert_eq!(
+            expanded.referenced,
+            BTreeSet::from(["A".to_owned(), "B".to_owned(), "D".to_owned()])
+        );
+        assert_eq!(expanded.unset, BTreeSet::from(["B".to_owned()]));
+    }
+
+    #[test]
+    fn expansion_does_not_change_a_stored_document() {
+        let source = json!({
+            "mcpServers": {
+                "docs": {
+                    "type": "http",
+                    "url": "https://${MCP_HOST}/mcp",
+                    "headers": {"Authorization": "Bearer ${MCP_TOKEN}"}
+                }
+            }
+        });
+        let document: McpSettings = serde_json::from_value(source.clone()).unwrap();
+        let before = serde_json::to_value(&document).unwrap();
+        let configuration = document.get("docs").unwrap();
+        let expanded = user_expand(configuration, &|_| Some("expanded".to_owned()));
+        assert!(
+            serde_json::to_value(&expanded.configuration).unwrap() != before["mcpServers"]["docs"]
+        );
+        assert_eq!(serde_json::to_value(&document).unwrap(), before);
+        assert_eq!(before, source);
+    }
+
+    #[test]
+    fn guarded_fields_empty_a_protected_name_and_ignore_its_default() {
+        let names = BTreeSet::from(["DYNAMIC_KEY".to_owned()]);
+        let environment = |_: &str| Some("secret".to_owned());
+        let entry = remote(
+            "${GITHUB_TOKEN:-fallback}",
+            &[("X-Key", "${HTTP_PROXY}"), ("X-Dynamic", "${dynamic_key}")],
+            Some("Bearer ${DIM_TOKEN}"),
+        );
+        for origin in [Origin::Plugin, Origin::Workspace { overlay: None }] {
+            let expanded = expand(&entry, origin, &environment, &names);
+            let McpServerSettings::Remote {
+                url, headers, auth, ..
+            } = &expanded.configuration
+            else {
+                panic!("a remote entry stays remote");
+            };
+            assert_eq!(url, "");
+            assert_eq!(headers["X-Key"].as_str(), "");
+            assert_eq!(headers["X-Dynamic"].as_str(), "");
+            assert!(matches!(
+                auth,
+                Some(BearerAuth::Bearer { token }) if token == "Bearer "
+            ));
+            assert_eq!(
+                expanded.referenced,
+                BTreeSet::from([
+                    "DIM_TOKEN".to_owned(),
+                    "GITHUB_TOKEN".to_owned(),
+                    "HTTP_PROXY".to_owned(),
+                    "dynamic_key".to_owned(),
+                ])
+            );
+            assert!(expanded.unset.is_empty());
+        }
+
+        // The user's own text expands the same names.
+        let expanded = expand(&entry, Origin::User, &environment, &names);
+        let McpServerSettings::Remote {
+            url, headers, auth, ..
+        } = &expanded.configuration
+        else {
+            panic!("a remote entry stays remote");
+        };
+        assert_eq!(url, "secret");
+        assert_eq!(headers["X-Key"].as_str(), "secret");
+        assert_eq!(headers["X-Dynamic"].as_str(), "secret");
+        assert!(matches!(
+            auth,
+            Some(BearerAuth::Bearer { token }) if token == "Bearer secret"
+        ));
+    }
+
+    #[test]
+    fn overlay_members_are_not_guarded() {
+        let environment = |name: &str| Some(format!("{name}-value"));
+        let overlay = McpSecretEntry {
+            url: Some("https://${GITHUB_TOKEN}/overlay".into()),
+            headers: Some(BTreeMap::from([(
+                "X-Overlay".to_owned(),
+                "${GITHUB_TOKEN}".to_owned(),
+            )])),
+            auth: Some(BearerAuth::Bearer {
+                token: "${GITHUB_TOKEN}".into(),
+            }),
+            ..Default::default()
+        };
+        let entry = remote(
+            "https://${GITHUB_TOKEN}/overlay",
+            &[
+                ("X-Overlay", "${GITHUB_TOKEN}"),
+                ("X-File", "${GITHUB_TOKEN}"),
+            ],
+            Some("Bearer ${GITHUB_TOKEN}"),
+        );
+        let expanded = expand(
+            &entry,
+            Origin::Workspace {
+                overlay: Some(&overlay),
+            },
+            &environment,
+            &BTreeSet::new(),
+        );
+        let McpServerSettings::Remote {
+            url, headers, auth, ..
+        } = &expanded.configuration
+        else {
+            panic!("a remote entry stays remote");
+        };
+        assert_eq!(url, "https://GITHUB_TOKEN-value/overlay");
+        assert_eq!(headers["X-Overlay"].as_str(), "GITHUB_TOKEN-value");
+        assert_eq!(headers["X-File"].as_str(), "");
+        assert!(matches!(
+            auth,
+            Some(BearerAuth::Bearer { token }) if token == "Bearer GITHUB_TOKEN-value"
+        ));
+    }
+
+    #[test]
+    fn plugin_entries_expand_stdio_and_keep_cwd_literal() {
+        let environment = |_: &str| Some("value".to_owned());
+        let entry = McpServerSettings::Stdio {
+            kind: None,
+            command: "${GITHUB_TOKEN}".into(),
+            args: vec!["--key=${GITHUB_TOKEN}".into()],
+            env: BTreeMap::from([("KEY".into(), "${GITHUB_TOKEN}".into())]),
+            cwd: Some("${GITHUB_TOKEN}".into()),
+            enabled: None,
+            timeout: None,
+            extra: BTreeMap::new(),
+        };
+        let expanded = expand(&entry, Origin::Plugin, &environment, &BTreeSet::new());
+        let McpServerSettings::Stdio {
+            command,
+            args,
+            env,
+            cwd,
+            ..
+        } = &expanded.configuration
+        else {
+            panic!("a stdio entry stays stdio");
+        };
+        assert_eq!(command, "value");
+        assert_eq!(args, &["--key=value".to_owned()]);
+        assert_eq!(env["KEY"].as_str(), "value");
+        assert_eq!(cwd.as_deref(), Some("${GITHUB_TOKEN}"));
+    }
+
+    #[test]
+    fn public_url_keeps_a_reference_as_written() {
+        // The authority keeps the reference's case; path, query and userinfo go.
+        assert_eq!(public_url("https://${MCP_HOST}/mcp"), "https://${MCP_HOST}");
+        assert_eq!(
+            public_url("https://${MCP_HOST}:8443/mcp?x=1#f"),
+            "https://${MCP_HOST}:8443"
+        );
+        assert_eq!(
+            public_url("https://user:made-cz-qvjbfw-9k2@${MCP_HOST}/mcp"),
+            "https://${MCP_HOST}"
+        );
+        // No authority: the text before any query or fragment stays.
+        assert_eq!(public_url("${MCP_URL}/mcp"), "${MCP_URL}/mcp");
+        assert_eq!(public_url("${MCP_URL}/mcp?x#y"), "${MCP_URL}/mcp");
+        // A `://` after a `/`, `?` or `#` is part of the withheld text, not the
+        // value's scheme, so the query never becomes public.
+        assert_eq!(
+            public_url("${BASE}/mcp?token=demo-key&next=https://callback.example/done"),
+            "${BASE}/mcp"
+        );
+        assert_eq!(public_url("${BASE}/mcp#frag?x=https://y"), "${BASE}/mcp");
+        // The scheme may be a reference itself; userinfo, path and query go.
+        assert_eq!(
+            public_url("${SCHEME}://user:secret@host/mcp?token=t"),
+            "${SCHEME}://host"
+        );
+        assert_eq!(
+            public_url("https://${HOST}/a?next=https://b"),
+            "https://${HOST}"
+        );
+
+        // Without a reference the previous rule is unchanged.
+        assert_eq!(
+            public_url("https://example.test/mcp"),
+            "https://example.test"
+        );
+        assert_eq!(
+            public_url("https://user:made-cz-qvjbfw-9k2@example.test/mcp?x=1"),
+            "https://example.test"
+        );
+        assert_eq!(public_url("not a url"), "not a url");
+    }
+
+    #[test]
+    fn a_timeout_is_an_integer_number_of_milliseconds_from_1000_to_86400000() {
+        let document = McpSettings::from_file(
+            br#"{"mcpServers":{
+                "stdio": {"command":"server","timeout":1000},
+                "remote": {"type":"http","url":"https://example.test/mcp","timeout":86400000}
+            }}"#,
+        )
+        .unwrap();
+        assert!(document.invalid_entries().is_empty());
+        assert_eq!(document.entries()["stdio"].timeout(), Some(1_000));
+        assert_eq!(document.entries()["remote"].timeout(), Some(86_400_000));
+        assert!(document.validate().is_ok());
+        assert_eq!(
+            serde_json::to_value(&document.entries()["stdio"]).unwrap(),
+            json!({"command": "server", "timeout": 1000})
+        );
+
+        for value in [
+            json!(999),
+            json!(86_400_001),
+            json!(1500.5),
+            json!("1000"),
+            json!(-1),
+            json!(null),
+        ] {
+            let document = McpSettings::from_value(json!({"mcpServers":{
+                "broken": {"command":"server","timeout": value},
+                "valid": {"command":"server","timeout":1000}
+            }}))
+            .unwrap();
+            let error = document.invalid_error("broken").unwrap();
+            assert_eq!(error.id, "broken");
+            assert_eq!(error.field.as_deref(), Some("timeout"), "{value}");
+            assert!(
+                error.expected.contains("1000") && error.expected.contains("86400000"),
+                "{}",
+                error.expected
+            );
+            assert!(!error.to_string().contains(&value.to_string()), "{value}");
+            assert_eq!(document.entries()["valid"].timeout(), Some(1_000));
+            assert!(!document.contains("broken"));
+        }
+    }
+
+    #[test]
+    fn a_timeout_belongs_to_the_public_skeleton_not_the_secret_overlay() {
+        let entry = |timeout| McpServerSettings::Remote {
+            kind: RemoteTransport::Http,
+            url: "https://example.test".into(),
+            headers: BTreeMap::new(),
+            auth: None,
+            oauth: None,
+            enabled: None,
+            timeout,
+            extra: BTreeMap::new(),
+        };
+        let (skeleton, secret) = split_entry(&entry(Some(1_000)));
+        assert_eq!(skeleton.timeout(), Some(1_000));
+        assert!(secret.is_none());
+
+        // An overlay `timeout` is an unknown member: it changes neither a
+        // declared value nor an undeclared one.
+        let overlay = McpSecretEntry {
+            extra: BTreeMap::from([("timeout".into(), json!(5_000))]),
+            ..Default::default()
+        };
+        let mut merged = skeleton;
+        merge_secret(&mut merged, &overlay).unwrap();
+        assert_eq!(merged.timeout(), Some(1_000));
+        let mut undeclared = entry(None);
+        merge_secret(&mut undeclared, &overlay).unwrap();
+        assert_eq!(undeclared.timeout(), None);
+        // A write drops the overlay member, so it never becomes the entry's
+        // own field.
+        strip_secret(&mut undeclared, &overlay);
+        let document = McpSettings::from_value(
+            json!({"mcpServers":{"id": serde_json::to_value(&undeclared).unwrap()}}),
+        )
+        .unwrap();
+        assert_eq!(document.entries()["id"].timeout(), None);
+    }
+
+    #[test]
+    fn the_fixed_protected_list_covers_provider_cloud_proxy_registry_and_dim_names() {
+        let none = BTreeSet::new();
+        for name in PROTECTED_NAMES {
+            assert!(protected(name, &none), "{name}");
+        }
+        assert!(protected("github_token", &none));
+        assert!(protected("DIM", &none));
+        assert!(protected("DIMCODE", &none));
+        assert!(protected("DIM_X", &none));
+        assert!(protected("dimcode_x", &none));
+        assert!(!protected("DIMENSION_X", &none));
+        assert!(!protected("MCP_HOST", &none));
+        let names = BTreeSet::from(["TEST_PROVIDER_KEY".to_owned()]);
+        assert!(protected("test_provider_key", &names));
+        assert!(!protected("OTHER_KEY", &names));
     }
 }

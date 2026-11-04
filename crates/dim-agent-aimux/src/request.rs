@@ -289,16 +289,10 @@ pub(crate) fn convert(
             .or_default()
             .insert("max_completion_tokens".into(), json!(max_tokens as u32));
     }
+    // Anthropic can only continue stored thinking when this request asks for
+    // thinking; with it off every stored thinking part is left out, exactly
+    // as a part without continuation data for this protocol would be.
     if *kind == ProviderKind::Anthropic
-        && options.prompt.iter().any(|message| {
-            matches!(
-                message,
-                LanguageModelMessage::Assistant { content, .. }
-                    if content
-                        .iter()
-                        .any(|part| matches!(part, AssistantPart::Reasoning(_)))
-            )
-        })
         && !options
             .provider_options
             .as_ref()
@@ -308,11 +302,19 @@ pub(crate) fn convert(
             .and_then(Value::as_str)
             .is_some_and(|kind| matches!(kind, "enabled" | "adaptive"))
     {
-        return Err(error(
-            request,
-            "config",
-            "Anthropic thinking continuation requires enabled or adaptive thinking",
-        ));
+        let mut dropped = 0;
+        for message in &mut options.prompt {
+            if let LanguageModelMessage::Assistant { content, .. } = message {
+                content.retain(|part| {
+                    let keep = !matches!(part, AssistantPart::Reasoning(_));
+                    dropped += usize::from(!keep);
+                    keep
+                });
+            }
+        }
+        for _ in 0..dropped {
+            warn_dropped(kind);
+        }
     }
     let call_id = request
         .metadata
@@ -770,8 +772,24 @@ fn error(request: &ModelRequest, path: &str, reason: &str) -> HostError {
     ))
 }
 
+/// The protocol a stored part's continuation data belongs to. The Chat
+/// protocols store none, so every metadata value there is another protocol's.
+fn metadata_protocol(metadata: &ContentMetadata) -> ProviderKind {
+    match metadata {
+        ContentMetadata::Bedrock { .. } | ContentMetadata::BedrockRedacted { .. } => {
+            ProviderKind::Bedrock
+        }
+        ContentMetadata::Anthropic { .. } | ContentMetadata::AnthropicRedacted { .. } => {
+            ProviderKind::Anthropic
+        }
+        ContentMetadata::Gemini { .. } => ProviderKind::Gemini,
+        ContentMetadata::XaiResponses { .. } => ProviderKind::XaiResponses,
+        ContentMetadata::OpenaiResponses { .. } => ProviderKind::OpenaiResponses,
+    }
+}
+
 /// Attaches the native continuation fields a stored part carries, and says
-/// whether the part belongs in the request. A thinking part without
+/// whether the part belongs in the request. A thinking part without usable
 /// continuation data for this protocol stays in the Timeline and in display,
 /// but is not sent back: the endpoint cannot continue it, and an empty or
 /// invented signature is rejected by a strict Anthropic implementation.
@@ -796,6 +814,9 @@ fn continuation(
         } => provider_metadata.as_ref(),
         _ => None,
     };
+    // Continuation data reaches only the protocol that produced it; data from
+    // another protocol is no data for this request.
+    let metadata = metadata.filter(|metadata| metadata_protocol(metadata) == *kind);
     let Some(metadata) = metadata else {
         if thinking
             && matches!(
@@ -803,17 +824,11 @@ fn continuation(
                 ProviderKind::Anthropic
                     | ProviderKind::OpenaiResponses
                     | ProviderKind::XaiResponses
+                    | ProviderKind::Bedrock
             )
         {
             warn_dropped(kind);
             return Ok(false);
-        }
-        if thinking && *kind == ProviderKind::Bedrock {
-            return Err(error(
-                request,
-                path,
-                "thinking requires native continuation metadata",
-            ));
         }
         return Ok(true);
     };
@@ -895,7 +910,7 @@ fn continuation(
             return Err(error(
                 request,
                 &format!("{path}.providerMetadata"),
-                "continuation metadata belongs to a different protocol or content kind",
+                "continuation metadata does not fit this content kind",
             ));
         }
     };
@@ -950,6 +965,6 @@ fn warn_dropped(kind: &ProviderKind) {
             ProviderKind::Gemini => "gemini",
             ProviderKind::Bedrock => "bedrock",
         },
-        "thinking without continuation data was left out of the request"
+        "thinking without usable continuation data was left out of the request"
     );
 }

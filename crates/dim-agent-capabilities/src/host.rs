@@ -552,6 +552,14 @@ pub trait ResolveModelSelection: Send + Sync + 'static {
 }
 pub struct ModelSelectionHost(pub Arc<dyn ResolveModelSelection>);
 
+/// The environment variable names the owner reads credentials from. The
+/// owner answers from its current state on every call, so a later owner can
+/// add a name without a consumer change.
+pub trait CredentialVariables: Send + Sync + 'static {
+    fn credential_variables(&self) -> std::collections::BTreeSet<String>;
+}
+pub struct CredentialVariablesHost(pub Arc<dyn CredentialVariables>);
+
 /// Enumerates the models the owner would serve: the same selectability rules as
 /// execution, one read, no live request. The caller passes its cancellation
 /// token; cancelling it cancels the read.

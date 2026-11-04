@@ -53,6 +53,14 @@ pub enum Configuration {
         cwd: Option<String>,
         #[serde(rename = "envNames")]
         env_names: Vec<String>,
+        /// The entry's `tools/call` limit in milliseconds; absent means the
+        /// default.
+        #[serde(default)]
+        timeout: Option<u64>,
+        #[serde(rename = "referencedVariables", default)]
+        referenced_variables: Vec<String>,
+        #[serde(rename = "unsetVariables", default)]
+        unset_variables: Vec<String>,
     },
     Http(Remote),
     Sse(Remote),
@@ -67,6 +75,14 @@ pub struct Remote {
     oauth_configured: bool,
     #[serde(default)]
     oauth: Option<OAuthView>,
+    /// The entry's `tools/call` limit in milliseconds; absent means the
+    /// default.
+    #[serde(default)]
+    timeout: Option<u64>,
+    #[serde(default)]
+    referenced_variables: Vec<String>,
+    #[serde(default)]
+    unset_variables: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,12 +115,13 @@ impl Configuration {
     /// The configuration lines below the list, as the projection reports
     /// them: no stored value a secret hides, and no value inferred.
     fn lines(&self) -> Vec<String> {
-        match self {
+        let mut lines = match self {
             Self::Stdio {
                 command,
                 args_count,
                 cwd,
                 env_names,
+                ..
             } => vec![
                 tf("Executable: {command}", &[("command", &safe_line(command))]),
                 tf(
@@ -164,7 +181,29 @@ impl Configuration {
                     ),
                 ]
             }
+        };
+        let (referenced, unset, timeout) = match self {
+            Self::Stdio {
+                referenced_variables,
+                unset_variables,
+                timeout,
+                ..
+            } => (referenced_variables, unset_variables, timeout),
+            Self::Http(remote) | Self::Sse(remote) => (
+                &remote.referenced_variables,
+                &remote.unset_variables,
+                &remote.timeout,
+            ),
+        };
+        if let Some(timeout) = timeout {
+            lines.push(tf(
+                "Tool call timeout: {millis} ms",
+                &[("millis", &timeout.to_string())],
+            ));
         }
+        lines.push(tf("Variables: {names}", &[("names", &names(referenced))]));
+        lines.push(tf("Unset variables: {names}", &[("names", &names(unset))]));
+        lines
     }
 }
 
@@ -218,6 +257,13 @@ pub struct Patch {
         skip_serializing_if = "Option::is_none"
     )]
     bearer: Option<BearerPatch>,
+    /// A present `null` clears the entry's limit.
+    #[serde(
+        default,
+        deserialize_with = "nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    timeout: Option<Option<u64>>,
     #[serde(
         default,
         deserialize_with = "non_null",
@@ -550,13 +596,27 @@ pub async fn editable(client: &mut Client, cwd: &str, server: &Server) -> Result
 /// placeholder would be written literally.
 pub fn seed(configuration: &Value) -> Result<Value, String> {
     Ok(match Configuration::decode(configuration)? {
-        Configuration::Stdio { command, cwd, .. } => json!({
-            "command": command,
-            "cwd": cwd.unwrap_or_default(),
-            "env": {},
-        }),
+        Configuration::Stdio {
+            command,
+            cwd,
+            timeout,
+            ..
+        } => {
+            let mut document = json!({
+                "command": command,
+                "cwd": cwd.unwrap_or_default(),
+                "env": {},
+            });
+            if let Some(timeout) = timeout {
+                document["timeout"] = json!(timeout);
+            }
+            document
+        }
         Configuration::Http(remote) | Configuration::Sse(remote) => {
             let mut document = json!({"headers": {}});
+            if let Some(timeout) = remote.timeout {
+                document["timeout"] = json!(timeout);
+            }
             if let Some(oauth) = remote.oauth {
                 let mut set = serde_json::Map::new();
                 set.insert("action".into(), json!("set"));
@@ -1329,5 +1389,42 @@ fn names(values: &[String]) -> String {
             .map(|value| safe_line(value))
             .collect::<Vec<_>>()
             .join(", ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn variables_are_names_only_in_the_detail_lines() {
+        let configuration = Configuration::decode(&json!({
+            "type": "http",
+            "endpoint": "https://example.test",
+            "headerNames": ["X-Key"],
+            "authConfigured": false,
+            "oauthConfigured": false,
+            "oauth": null,
+            "referencedVariables": ["MCP_HOST", "MCP_TOKEN"],
+            "unsetVariables": ["MCP_TOKEN"]
+        }))
+        .unwrap();
+        let lines = configuration.lines();
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Variables") && line.contains("MCP_HOST, MCP_TOKEN"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Unset variables") && line.contains("MCP_TOKEN"))
+        );
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.contains("made-up-token-value"))
+        );
     }
 }

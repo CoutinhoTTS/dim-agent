@@ -113,9 +113,9 @@
 //!
 //! A source checkout installs those packages first: `npm ci --prefix
 //! runtime --ignore-scripts` for the rutis runtime, and `npm ci --prefix
-//! runtime/plugins/<name> --ignore-scripts` for `goal`,
-//! `workflow` and `scheduler`, the default plugins that ship a
-//! `package.json` (`plugin-authoring` ships only a Skill).
+//! runtime/plugins/<name> --ignore-scripts` for `workflow`, the default
+//! plugin that ships a `package.json` (`plugin-authoring` ships only a
+//! Skill).
 //!
 //! A candidate for a TypeScript plugin's text replaces a member of that
 //! plugin's factory configuration, which is its manifest `config`: the
@@ -277,6 +277,12 @@ enum TextMember {
     /// member inside the manifest's `config`. The harness patches that
     /// plugin's row, so both arms run the same plugin code (model-prompts
     /// §8.1).
+    ///
+    /// The `eval-tests` text-injector fixture is its only constructor: no
+    /// shipped text is a TypeScript plugin member any more. The attribute is
+    /// unconditional because the fixture is a test target: with the feature
+    /// on, the bin target still never constructs the variant.
+    #[allow(dead_code)]
     Plugin {
         plugin: &'static str,
         member: &'static str,
@@ -307,17 +313,11 @@ const TEXTS: &[(&str, TextMember)] = &[
     ),
     (
         "goal/objective",
-        TextMember::Plugin {
-            plugin: "goal",
-            member: "texts.objective",
-        },
+        TextMember::Rust(|overrides, text| overrides.goal_objective = Some(text)),
     ),
     (
         "goal/continuation",
-        TextMember::Plugin {
-            plugin: "goal",
-            member: "texts.continuation",
-        },
+        TextMember::Rust(|overrides, text| overrides.goal_continuation = Some(text)),
     ),
 ];
 
@@ -3573,35 +3573,20 @@ mod tests {
         assert_eq!(roster.roster_closing.as_deref(), Some("candidate"));
     }
 
-    /// Goal's two texts are its manifest `config` members, patched into the
-    /// plugin's row by name; two pairs of one plugin are two members of one
-    /// configuration, not two configurations (Goal A.5.1, model-prompts §8.1).
+    /// Goal's two texts are members of its native crate's policy sentences,
+    /// applied through the same injection (Goal A.5.1, model-prompts §8.1).
     #[test]
-    fn the_goal_texts_are_manifest_config_members() {
-        for (id, member) in [
-            ("goal/objective", "objective"),
-            ("goal/continuation", "continuation"),
-        ] {
-            let overrides = overrides(&pairs(&[(id, "candidate")])).unwrap();
-            assert_eq!(
-                overrides.plugin_configs["goal"]["texts"][member],
-                json!("candidate"),
-                "{id}"
-            );
-        }
+    fn the_goal_texts_are_native_policy_members() {
+        let objective = overrides(&pairs(&[("goal/objective", "candidate")])).unwrap();
+        assert_eq!(objective.goal_objective.as_deref(), Some("candidate"));
+        assert_eq!(objective.goal_continuation, None);
         let both = overrides(&pairs(&[
             ("goal/objective", "first"),
             ("goal/continuation", "second"),
         ]))
         .unwrap();
-        assert_eq!(
-            both.plugin_configs["goal"]["texts"]["objective"],
-            json!("first")
-        );
-        assert_eq!(
-            both.plugin_configs["goal"]["texts"]["continuation"],
-            json!("second")
-        );
+        assert_eq!(both.goal_objective.as_deref(), Some("first"));
+        assert_eq!(both.goal_continuation.as_deref(), Some("second"));
     }
 
     /// A scenario's steers are the operator's: they go out in Steer mode, so
