@@ -24,7 +24,6 @@ pub struct StatusState {
     /// `None` when the block names an operation no status change defines: the
     /// state then holds no status, as the shipped package folded it.
     pub status: Option<Status>,
-    pub reason: Option<String>,
     pub summary: Option<String>,
 }
 
@@ -88,7 +87,7 @@ impl ConclusionKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Conclusion {
-    pub evaluation: String,
+    pub evaluation: u64,
     pub evaluator: String,
     pub result: ConclusionKind,
     pub text: String,
@@ -155,7 +154,7 @@ pub fn conclusion_of(text: &str) -> Option<Conclusion> {
         return None;
     }
     Some(Conclusion {
-        evaluation: evaluation.to_string(),
+        evaluation,
         evaluator: evaluator.clone(),
         result,
         text: text::body(text, "Evaluator report:"),
@@ -177,22 +176,17 @@ fn status_of(attrs: &Marker, text: &str) -> StatusState {
     if attrs.get("kind").map(String::as_str) == Some("status") {
         return StatusState {
             status: Some(Status::Active),
-            reason: None,
             summary: None,
         };
     }
-    let (status, reason, summary) = match attrs.get("op").map(String::as_str) {
-        Some("pause") => (Some(Status::Paused), attrs.get("reason").cloned(), None),
-        Some("resume") => (Some(Status::Active), None, None),
-        Some("completed") => (Some(Status::Completed), None, text::value(text, "Result:")),
-        Some("blocked") => (Some(Status::Blocked), None, text::value(text, "Blocker:")),
-        _ => (None, None, None),
+    let (status, summary) = match attrs.get("op").map(String::as_str) {
+        Some("pause") => (Some(Status::Paused), None),
+        Some("resume") => (Some(Status::Active), None),
+        Some("completed") => (Some(Status::Completed), text::value(text, "Result:")),
+        Some("blocked") => (Some(Status::Blocked), text::value(text, "Blocker:")),
+        _ => (None, None),
     };
-    StatusState {
-        status,
-        reason,
-        summary,
-    }
+    StatusState { status, summary }
 }
 
 /// One branch's goal state: the fold of its consumed local events (§2).
@@ -344,13 +338,13 @@ impl Fold {
         {
             self.continuations.push(sequence);
         }
-        let conclusion = first_text.and_then(conclusion_of);
-        if let Some(conclusion) = &conclusion
-            && let Some(evaluation) = sequence_of(&conclusion.evaluation)
-            && self.evaluations.get(&evaluation) == Some(&conclusion.evaluator)
-            && !self.conclusions.contains_key(&evaluation)
-        {
-            self.conclusions.insert(evaluation, sequence);
+        if let Some(conclusion) = first_text.and_then(conclusion_of) {
+            let evaluation = conclusion.evaluation;
+            if self.evaluations.get(&evaluation) == Some(&conclusion.evaluator)
+                && !self.conclusions.contains_key(&evaluation)
+            {
+                self.conclusions.insert(evaluation, sequence);
+            }
         }
         for raw in &data.blocks {
             let InputBlock::Raw {
@@ -529,7 +523,7 @@ pub fn decide_conclusion(
     sequence: u64,
     conclusion: &Conclusion,
 ) -> Option<ConclusionAction> {
-    let evaluation = sequence_of(&conclusion.evaluation)?;
+    let evaluation = conclusion.evaluation;
     if fold.conclusions.get(&evaluation).copied() != Some(sequence) {
         return None;
     }

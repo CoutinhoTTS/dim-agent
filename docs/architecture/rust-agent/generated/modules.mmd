@@ -538,24 +538,25 @@ flowchart LR
   m534["dim_goal::branch"]
   m535["dim_goal::fold"]
   m536["dim_goal::session"]
-  m537["dim_goal::text"]
-  m538["dim_migration"]
-  m539["dim_migration::accounts"]
-  m540["dim_migration::archives"]
-  m541["dim_migration::engine"]
-  m542["dim_migration::inventory"]
-  m543["dim_migration::ledger"]
-  m544["dim_migration::native"]
-  m545["dim_migration::native::tests"]
-  m546["dim_migration::providers"]
-  m547["dim_migration::scheduler"]
-  m548["dim_migration::settings"]
-  m549["dim_migration::settings::permissions"]
-  m550["dim_migration::settings::skills"]
-  m551["dim_migration::settings::web"]
-  m552["dim_migration::source"]
-  m553["dim_migration::terminal"]
-  m554["dim_session_title"]
+  m537["dim_goal::session::tests"]
+  m538["dim_goal::text"]
+  m539["dim_migration"]
+  m540["dim_migration::accounts"]
+  m541["dim_migration::archives"]
+  m542["dim_migration::engine"]
+  m543["dim_migration::inventory"]
+  m544["dim_migration::ledger"]
+  m545["dim_migration::native"]
+  m546["dim_migration::native::tests"]
+  m547["dim_migration::providers"]
+  m548["dim_migration::scheduler"]
+  m549["dim_migration::settings"]
+  m550["dim_migration::settings::permissions"]
+  m551["dim_migration::settings::skills"]
+  m552["dim_migration::settings::web"]
+  m553["dim_migration::source"]
+  m554["dim_migration::terminal"]
+  m555["dim_session_title"]
   m0 --> m1
   m0 -.-> m2
   m0 -.-> m3
@@ -2746,9 +2747,9 @@ flowchart LR
   m316 --> m332
   m316 --> m497
   m316 --> m521
-  m316 --> m538
-  m316 --> m552
+  m316 --> m539
   m316 --> m553
+  m316 --> m554
   m317 -.-> m318
   m317 -.-> m319
   m317 -.-> m321
@@ -3647,7 +3648,7 @@ flowchart LR
   m533 --> m534
   m533 -.-> m535
   m533 --> m536
-  m533 --> m537
+  m533 --> m538
   m534 --> m80
   m534 --> m95
   m534 --> m119
@@ -3660,9 +3661,9 @@ flowchart LR
   m534 --> m149
   m534 --> m242
   m534 --> m535
-  m534 --> m537
+  m534 --> m538
   m535 --> m149
-  m535 --> m537
+  m535 --> m538
   m536 --> m53
   m536 --> m62
   m536 --> m69
@@ -3670,115 +3671,117 @@ flowchart LR
   m536 --> m99
   m536 --> m129
   m536 --> m160
-  m536 --> m537
-  m537 --> m149
-  m538 --> m43
-  m538 -.-> m539
-  m538 -.-> m540
-  m538 --> m541
-  m538 --> m542
-  m538 --> m543
-  m538 -.-> m544
-  m538 -.-> m546
-  m538 -.-> m547
-  m538 -.-> m548
-  m538 --> m552
-  m538 -.-> m553
+  m536 -.-> m537
+  m536 --> m538
+  m537 --> m536
+  m538 --> m149
   m539 --> m43
-  m539 --> m124
-  m539 --> m145
-  m539 --> m538
-  m539 --> m541
+  m539 -.-> m540
+  m539 -.-> m541
+  m539 --> m542
+  m539 --> m543
   m539 --> m544
-  m539 --> m552
-  m540 --> m538
-  m540 --> m552
-  m541 --> m147
-  m541 --> m538
+  m539 -.-> m545
+  m539 -.-> m547
+  m539 -.-> m548
+  m539 -.-> m549
+  m539 --> m553
+  m539 -.-> m554
+  m540 --> m43
+  m540 --> m124
+  m540 --> m145
+  m540 --> m539
+  m540 --> m542
+  m540 --> m545
+  m540 --> m553
   m541 --> m539
-  m541 --> m540
-  m541 --> m542
-  m541 --> m544
-  m541 --> m546
-  m541 --> m547
-  m541 --> m548
-  m541 --> m552
-  m542 --> m43
-  m542 --> m538
+  m541 --> m553
+  m542 --> m147
+  m542 --> m539
+  m542 --> m540
   m542 --> m541
-  m542 --> m552
+  m542 --> m543
+  m542 --> m545
+  m542 --> m547
+  m542 --> m548
+  m542 --> m549
+  m542 --> m553
   m543 --> m43
-  m543 --> m538
-  m543 --> m552
+  m543 --> m539
+  m543 --> m542
+  m543 --> m553
   m544 --> m43
-  m544 --> m119
-  m544 --> m120
-  m544 --> m124
-  m544 --> m138
-  m544 --> m147
-  m544 --> m149
-  m544 --> m154
-  m544 --> m156
-  m544 --> m157
-  m544 --> m160
-  m544 --> m198
-  m544 --> m223
-  m544 --> m250
-  m544 --> m258
-  m544 --> m538
-  m544 -.-> m545
-  m544 --> m552
-  m545 --> m544
-  m546 --> m211
-  m546 --> m224
-  m546 --> m228
-  m546 --> m538
-  m546 --> m541
-  m546 --> m544
-  m546 --> m552
-  m547 --> m538
-  m547 --> m541
-  m547 --> m544
-  m547 --> m552
-  m548 --> m43
-  m548 --> m198
-  m548 --> m538
-  m548 --> m541
-  m548 --> m544
-  m548 --> m549
-  m548 --> m550
-  m548 --> m551
-  m548 --> m552
-  m549 --> m156
-  m549 --> m538
-  m549 --> m544
-  m549 --> m548
+  m544 --> m539
+  m544 --> m553
+  m545 --> m43
+  m545 --> m119
+  m545 --> m120
+  m545 --> m124
+  m545 --> m138
+  m545 --> m147
+  m545 --> m149
+  m545 --> m154
+  m545 --> m156
+  m545 --> m157
+  m545 --> m160
+  m545 --> m198
+  m545 --> m223
+  m545 --> m250
+  m545 --> m258
+  m545 --> m539
+  m545 -.-> m546
+  m545 --> m553
+  m546 --> m545
+  m547 --> m211
+  m547 --> m224
+  m547 --> m228
+  m547 --> m539
+  m547 --> m542
+  m547 --> m545
+  m547 --> m553
+  m548 --> m539
+  m548 --> m542
+  m548 --> m545
+  m548 --> m553
+  m549 --> m43
+  m549 --> m198
+  m549 --> m539
+  m549 --> m542
+  m549 --> m545
+  m549 --> m550
+  m549 --> m551
   m549 --> m552
-  m550 --> m538
-  m550 --> m544
-  m550 --> m548
-  m551 --> m538
-  m551 --> m541
-  m551 --> m544
-  m551 --> m548
-  m551 --> m552
-  m552 --> m43
-  m552 --> m147
-  m552 --> m157
-  m552 --> m538
-  m553 --> m538
-  m554 --> m53
-  m554 --> m62
-  m554 --> m78
-  m554 --> m80
-  m554 --> m117
-  m554 --> m119
-  m554 --> m129
-  m554 --> m131
-  m554 --> m147
-  m554 --> m149
-  m554 --> m157
-  m554 --> m242
-  m554 --> m243
-  m554 --> m256
-  m554 --> m259
+  m549 --> m553
+  m550 --> m156
+  m550 --> m539
+  m550 --> m545
+  m550 --> m549
+  m550 --> m553
+  m551 --> m539
+  m551 --> m545
+  m551 --> m549
+  m552 --> m539
+  m552 --> m542
+  m552 --> m545
+  m552 --> m549
+  m552 --> m553
+  m553 --> m43
+  m553 --> m147
+  m553 --> m157
+  m553 --> m539
+  m554 --> m539
+  m555 --> m53
+  m555 --> m62
+  m555 --> m78
+  m555 --> m80
+  m555 --> m117
+  m555 --> m119
+  m555 --> m129
+  m555 --> m131
+  m555 --> m147
+  m555 --> m149
+  m555 --> m157
+  m555 --> m242
+  m555 --> m243
+  m555 --> m256
+  m555 --> m259

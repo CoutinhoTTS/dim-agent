@@ -14,7 +14,7 @@ use dim_agent_runtime::{
 use dim_agent_types::{
     AgentEvent, BranchSource, EventKind, InputBlock, InterruptScope, TurnEndData, TurnOutcome,
 };
-use dim_app_server::settings::{SettingsError, SettingsScope, SettingsService};
+use dim_app_server::settings::{SettingsScope, SettingsService};
 use rutis::Ctx;
 use rutis::host::{CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde::Deserialize;
@@ -261,8 +261,8 @@ impl Owner {
         });
     }
 
-    /// The continuation limit. A refused or unreadable document logs its code
-    /// and leaves the turn without a decision.
+    /// The continuation limit. A refused or unreadable document is logged and
+    /// leaves the turn without a decision.
     async fn limit(&self) -> Option<u64> {
         match self
             .settings
@@ -277,7 +277,7 @@ impl Owner {
                 }
             },
             Err(error) => {
-                tracing::warn!(code = settings_code(&error), "Goal settings read failed");
+                tracing::warn!(%error, "Goal settings read failed");
                 None
             }
         }
@@ -767,8 +767,8 @@ impl Owner {
                 let Some(action) = action else {
                     return Ok(());
                 };
-                let evaluation =
-                    fold::sequence_of(&conclusion.evaluation).expect("a validated conclusion");
+                let evaluation = conclusion.evaluation;
+                let named = evaluation.to_string();
                 match action {
                     ConclusionAction::Failed => {
                         owner
@@ -788,12 +788,7 @@ impl Owner {
                             .tree
                             .input(
                                 owner.branch_id.clone(),
-                                text::evaluated(
-                                    &owner.branch_id,
-                                    "completed",
-                                    &conclusion.evaluation,
-                                    &text,
-                                ),
+                                text::evaluated(&owner.branch_id, "completed", &named, &text),
                             )
                             .await?;
                     }
@@ -802,12 +797,7 @@ impl Owner {
                             .tree
                             .input(
                                 owner.branch_id.clone(),
-                                text::evaluated(
-                                    &owner.branch_id,
-                                    "blocked",
-                                    &conclusion.evaluation,
-                                    &text,
-                                ),
+                                text::evaluated(&owner.branch_id, "blocked", &named, &text),
                             )
                             .await?;
                     }
@@ -836,7 +826,7 @@ impl Owner {
                                 count,
                                 limit,
                                 evaluation,
-                                &conclusion.evaluation,
+                                &named,
                             ),
                             Decision::Pause { reason } => {
                                 text::automatic_pause(&owner.branch_id, reason, evaluation)
@@ -979,23 +969,5 @@ fn result_name(result: fold::ConclusionKind) -> &'static str {
         fold::ConclusionKind::Continue => "continue",
         fold::ConclusionKind::Blocked => "blocked",
         fold::ConclusionKind::Failed => "failed",
-    }
-}
-
-/// The code a failed Settings read logs: the variant's name as the settings
-/// contract spells it.
-fn settings_code(error: &SettingsError) -> &'static str {
-    match error {
-        SettingsError::Storage(_) => "storage",
-        SettingsError::Invalid(_) => "invalid",
-        SettingsError::UnknownSource => "unknown_source",
-        SettingsError::InvalidScope(_) => "invalid_scope",
-        SettingsError::Document(_) => "document",
-        SettingsError::UserOnlyField(_) => "user_only_field",
-        SettingsError::Conflict => "conflict",
-        SettingsError::Closed => "closed",
-        SettingsError::Cancelled => "cancelled",
-        SettingsError::Persistence => "persistence",
-        SettingsError::Worker(_) => "worker",
     }
 }

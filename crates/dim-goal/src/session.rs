@@ -113,11 +113,7 @@ impl Owner {
     /// A change method writes one input and replies with its sequence; it
     /// validates only its own parameters and never reads the fold.
     async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
-        let branch = match params.get("branchId") {
-            None | Some(Value::Null) => "main".to_owned(),
-            Some(Value::String(branch)) if !branch.is_empty() => branch.clone(),
-            Some(_) => return Err(RpcError::invalid("branchId must be a non-empty string")),
-        };
+        let branch = branch_of(&params)?;
         let op = method
             .strip_prefix("session.goal.")
             .ok_or_else(|| RpcError::invalid(format!("unknown method {method}")))?;
@@ -166,6 +162,16 @@ impl Owner {
     }
 }
 
+/// The branch a change names: `main` when the call omits `branchId`, else a
+/// non-empty string. A present `null` is not an omitted member.
+fn branch_of(params: &Value) -> Result<String, RpcError> {
+    match params.get("branchId") {
+        None => Ok("main".to_owned()),
+        Some(Value::String(branch)) if !branch.is_empty() => Ok(branch.clone()),
+        Some(_) => Err(RpcError::invalid("branchId must be a non-empty string")),
+    }
+}
+
 fn text_value(value: Option<&Value>, limit: usize) -> Option<String> {
     let value = value?.as_str()?;
     let length = value.chars().count();
@@ -206,5 +212,30 @@ impl ToolHandler for GoalUpdate {
                 Err(error) => Ok(ToolResult::error(error.to_string())),
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::branch_of;
+    use serde_json::json;
+
+    #[test]
+    fn a_change_names_main_only_when_branch_id_is_absent() {
+        assert_eq!(branch_of(&json!({})).unwrap(), "main");
+        assert_eq!(branch_of(&json!({"branchId": "line"})).unwrap(), "line");
+        for params in [
+            json!({"branchId": null}),
+            json!({"branchId": ""}),
+            json!({"branchId": 7}),
+            json!({"branchId": ["main"]}),
+        ] {
+            let error = branch_of(&params).expect_err("a non-string branchId is refused");
+            assert_eq!(
+                error.data.as_ref().map(|data| data.app_error.as_str()),
+                Some("invalid_params"),
+                "{params}"
+            );
+        }
     }
 }

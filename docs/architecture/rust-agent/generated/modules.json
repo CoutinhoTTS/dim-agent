@@ -5535,6 +5535,16 @@
       ]
     },
     {
+      "id": "dim_goal::session::tests",
+      "crate": "dim_goal",
+      "parent": "dim_goal::session",
+      "file": "crates/dim-goal/src/session.rs",
+      "unexpandedMacros": [
+        "assert_eq",
+        "json"
+      ]
+    },
+    {
       "id": "dim_goal::text",
       "crate": "dim_goal",
       "parent": "dim_goal",
@@ -38735,20 +38745,7 @@
       "from": "dim_goal::branch",
       "to": "dim_app_server::settings",
       "references": [
-        "path SettingsError",
-        "path SettingsError::Cancelled",
-        "path SettingsError::Closed",
-        "path SettingsError::Conflict",
-        "path SettingsError::Document",
-        "path SettingsError::Invalid",
-        "path SettingsError::InvalidScope",
-        "path SettingsError::Persistence",
-        "path SettingsError::Storage",
-        "path SettingsError::UnknownSource",
-        "path SettingsError::UserOnlyField",
-        "path SettingsError::Worker",
         "path SettingsService",
-        "use dim_app_server::settings::SettingsError",
         "use dim_app_server::settings::SettingsService"
       ]
     },
@@ -38781,7 +38778,6 @@
         "path fold::evaluation_operation",
         "path fold::is_opening",
         "path fold::reply_conclusion",
-        "path fold::sequence_of",
         "path fold::truncate",
         "use crate::fold",
         "use crate::fold::Conclusion",
@@ -38957,6 +38953,13 @@
     },
     {
       "from": "dim_goal::session",
+      "to": "dim_goal::session::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_goal::session",
       "to": "dim_goal::text",
       "references": [
         "path GoalTexts",
@@ -38978,6 +38981,14 @@
         "use crate::text::GoalTexts",
         "use crate::text::OBJECTIVE_LIMIT",
         "use crate::text::SUMMARY_LIMIT"
+      ]
+    },
+    {
+      "from": "dim_goal::session::tests",
+      "to": "dim_goal::session",
+      "references": [
+        "path branch_of",
+        "use super::branch_of"
       ]
     },
     {
