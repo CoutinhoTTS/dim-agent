@@ -277,6 +277,7 @@
         "concat",
         "format",
         "json",
+        "matches",
         "panic",
         "vec"
       ]
@@ -6681,6 +6682,7 @@
       "references": [
         "path ContentBlock::Image",
         "path ContentBlock::Text",
+        "path ContentMetadata",
         "path ContentMetadata::Anthropic",
         "path ContentMetadata::AnthropicRedacted",
         "path ContentMetadata::Bedrock",
@@ -6818,6 +6820,7 @@
       "from": "dim_agent_aimux::request::tests",
       "to": "dim_agent_aimux::request",
       "references": [
+        "path PreparedRequest",
         "path convert",
         "path error"
       ]
