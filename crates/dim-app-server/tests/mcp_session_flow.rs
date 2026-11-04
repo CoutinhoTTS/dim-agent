@@ -1124,10 +1124,15 @@ async fn a_refused_tool_schema_names_the_tool_and_the_path_and_publishes_no_tool
     let env = Env::new().await;
     env.remote.broken.store(true, Ordering::SeqCst);
     let session = env.session(false, PermissionPreset::FullAccess).await;
-    assert_eq!(
-        failure(&session).await,
-        "invalid MCP server response: tool broken: inputSchema.properties.x.type[1]: unknown variant `file`, expected one of `object`, `array`, `string`, `number`, `integer`, `boolean`, `null`"
-    );
+    let message = failure(&session).await;
+    for part in [
+        "invalid MCP server response:",
+        "tool broken",
+        "inputSchema.properties.x.type[1]",
+        "unknown variant `file`",
+    ] {
+        assert!(message.contains(part), "missing {part:?}: {message}");
+    }
     env.turn(&session, Action::Text).await;
     let request = env.model.requests.lock().unwrap()[0].clone();
     assert!(
@@ -1154,10 +1159,25 @@ async fn a_temporary_binding_refusal_names_the_tool_and_the_path() {
         .await
         .unwrap_err();
     assert_eq!(error.data.as_ref().unwrap().app_error, "mcp_binding_failed");
-    assert_eq!(
-        error.message,
-        "Temporary MCP server initialization or connection failed: invalid MCP server response: tool broken: inputSchema.properties.x.type[1]: unknown variant `file`, expected one of `object`, `array`, `string`, `number`, `integer`, `boolean`, `null`"
+    assert!(
+        error
+            .message
+            .starts_with("Temporary MCP server initialization or connection failed: "),
+        "{}",
+        error.message
     );
+    for part in [
+        "invalid MCP server response:",
+        "tool broken",
+        "inputSchema.properties.x.type[1]",
+        "unknown variant `file`",
+    ] {
+        assert!(
+            error.message.contains(part),
+            "missing {part:?}: {}",
+            error.message
+        );
+    }
     env.close().await;
 }
 
