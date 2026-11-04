@@ -226,7 +226,7 @@ Withdrawn ([#24](https://github.com/arcships/dim/issues/24)): a caller withdraws
 | `launch` | async | `LaunchRequest` | `{sessionId, policy}` | `rejected`, `agent_unknown`, `session_closed`, `branch_missing` (the starter), `branch_ended` (the starter), `reloading`, `failed` |
 | `input` | async | `InputWrite` | `{inputId, sequence}` | `rejected`, `ambiguous`, `session_closed`, `branch_missing`, `branch_ended`, `reloading`, `publication_unknown`, `failed` |
 | `lookup` | async | `{sessionId, branchId, submissionId}` | `LookupReply` | `ambiguous`, `session_closed`, `branch_missing`, `branch_ended`, `reloading` |
-| `history` | async | `HistoryRequest` | `HistoryPage` | `rejected`, `future_sequence`, `session_closed`, `branch_missing`, `reloading` |
+| `history` | async | `HistoryRequest` | `HistoryPage` | `rejected`, `future_sequence`, `session_closed`, `branch_missing`, `branch_ended` (retry), `reloading` |
 | `withdraw` | async | `WithdrawRequest` | `WithdrawReply` | `rejected`, `session_closed`, `branch_missing`, `branch_ended`, `reloading`, `publication_unknown` |
 | `stop` | async | `{sessionId, branchId, reason?}` | `{sequence}` | `session_closed`, `branch_missing`, `branch_ended`, `reloading` |
 | `idle` | async | `{sessionId, branchId}` | `{sequence}` | `session_closed`, `branch_missing`, `branch_ended`, `reloading` |

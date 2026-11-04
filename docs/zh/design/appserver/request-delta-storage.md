@@ -321,7 +321,7 @@ node body      = { parent: string | null, message: Message }                    
 
 ### 7.5 不使用请求正文的读取
 
-分页或投影读取只返回事件所说的内容，不还原 `context/prepare` 与 `model/call` 存储的请求：这类记录中的请求保持其行所持有的空消息列表、缺席的 `tools` 与缺席的 `system`，它引用的内容行一律不加载、不校验 hash、不校验种类。曾需要它的读取——历史分页、`session.summaries`、上下文投影与协作——现在都经过该分支的 query 分页，它会还原所返回行的请求（[ADR 020](../adr/020-timeline-read-convergence.md) D6），并且都不再脱离拥有这些事实的 Session 去读存储（[ADR 021](../adr/021-reads-follow-the-state-owner.md) D3）。端口保留 `TimelineStore::read_page_without_request_bodies`，供直接提供存储事实的调用方使用，默认实现就是 `read_page`；App Server 不再有这样的调用方。使用请求的读取（`local`、`history`、`context`、`trace`、`validate_session`、导出）仍按 §7.1–§8 逐个还原并校验。
+分页或投影读取只返回事件所说的内容，不还原 `context/prepare` 与 `model/call` 存储的请求：这类记录中的请求保持其行所持有的空消息列表、缺席的 `tools` 与缺席的 `system`，它引用的内容行一律不加载、不校验 hash、不校验种类。曾需要它的读取——历史分页、`session.summaries`、上下文投影与协作——现在都经过该分支的 query 分页，它会还原所返回行的请求（[ADR 020](../adr/020-timeline-read-convergence.md) D6），并且都不再脱离拥有这些事实的 Session 去读存储（[ADR 021](../adr/021-reads-follow-the-state-owner.md) D3）。端口只保留一个页读 `TimelineStore::read_page`，它会还原所返回行的请求；不读正文的变体已删除，因为不再有调用方绕过 Session 去提供存储事实。使用请求的读取（`local`、`history`、`context`、`trace`、`validate_session`、导出）仍按 §7.1–§8 逐个还原并校验。
 
 - 读取仍校验每条记录及其 before 轨迹的每个草稿是否带有其种类要求的引用，以及非请求记录是否没有引用；但它从不跟随这些引用。
 - 因此损坏的节点不会让分页读取失败，因为该读取本来就不会加载它。恢复和每个使用请求的读取仍会在它上面失败，列表损坏的 Session 在恢复时仍被拒绝（§8）。
