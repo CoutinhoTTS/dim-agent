@@ -2505,3 +2505,70 @@ async fn a_moved_reference_url_is_split_between_the_skeleton_and_the_overlay() {
     }
     fixture.close().await;
 }
+
+/// #953: a stored plugin document decodes entry by entry. One out-of-range
+/// timeout is invalid on its own, its plugin's other entries load, and a
+/// re-registration replaces the document and heals it.
+#[tokio::test]
+async fn a_stored_plugin_document_decodes_entry_by_entry() {
+    let fixture = Fixture::new().await;
+    let cancel = CancellationToken::new();
+    let dir = fixture.home.join("plugin-dir");
+    fs::create_dir_all(&dir).unwrap();
+    let stored = json!({
+        "plugins": {
+            "demo": {
+                "dir": dir,
+                "mcpServers": {
+                    "good": {"command": "good-server"},
+                    "bad": {"command": "bad-server", "timeout": 500}
+                }
+            }
+        }
+    });
+    fs::write(
+        fixture.home.join("mcp-plugins.json"),
+        serde_json::to_vec(&stored).unwrap(),
+    )
+    .unwrap();
+
+    let catalog = fixture.mcp.catalog(None, &cancel).await.unwrap();
+    assert!(
+        catalog.servers.contains_key("demo:good"),
+        "the plugin's valid entry keeps loading"
+    );
+    let bad = catalog
+        .invalid
+        .iter()
+        .find(|entry| entry.id == "demo:bad")
+        .expect("the broken plugin entry is listed as invalid");
+    assert_eq!(bad.source, McpSource::Plugins);
+    assert_eq!(bad.error.field.as_deref(), Some("timeout"));
+    assert_eq!(
+        bad.error.expected,
+        "an integer number of milliseconds from 1000 to 86400000"
+    );
+
+    fixture
+        .mcp
+        .register_plugin(
+            "demo".into(),
+            dir,
+            json!({"mcpServers": {
+                "good": {"command": "good-server"},
+                "bad": {"command": "bad-server", "timeout": 5000}
+            }}),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let catalog = fixture.mcp.catalog(None, &cancel).await.unwrap();
+    assert!(catalog.servers.contains_key("demo:good"));
+    assert!(catalog.servers.contains_key("demo:bad"));
+    assert!(
+        catalog.invalid.iter().all(|entry| entry.id != "demo:bad"),
+        "the re-registration healed the entry"
+    );
+
+    fixture.close().await;
+}

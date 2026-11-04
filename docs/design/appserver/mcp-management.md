@@ -345,7 +345,10 @@ enter the new one; a record that changed after that read is kept. A move reads i
 usual: a broken source id answers its error, and a broken destination id is `mcp_move_conflict`.
 Plugin content keeps its existing contract: a plugin registers its MCP document as one unit, and
 a document with a broken entry is refused for that plugin with the entry's error, because dim
-does not manage a plugin entry on its own.
+does not manage a plugin entry on its own. The stored plugin document decodes entry by entry like
+any other source, so one entry that no longer decodes is reported as invalid under its
+`<plugin>:<server>` id while the plugin's other entries keep loading, and the plugin's next
+registration replaces the whole document and heals it.
 
 Rejected: refuse the whole document on one broken entry, the behavior this design replaces. One
 typo then hides every server and makes every edit fail, and the client offers no way to correct

@@ -437,13 +437,12 @@ impl McpService {
             // A plugin registers its MCP content as one unit, and dim does
             // not manage a plugin entry on its own. Refuse the document
             // with the first broken entry's error rather than drop it.
-            let (servers, invalid) = document.into_parts();
-            if let Some(error) = invalid.into_values().next() {
+            if let Some(error) = document.invalid_entries().values().next() {
                 return Err(SettingsError::Document(error.to_string()));
             }
             let registration = McpPluginDocument {
                 dir,
-                mcp_servers: servers,
+                servers: document,
             };
             McpPluginServers {
                 plugins: BTreeMap::from([(plugin.clone(), registration.clone())]),
@@ -589,7 +588,11 @@ impl McpService {
                     let plugins = settings
                         .read::<McpPluginServers>(SettingsScope::User, &cancel)
                         .await?;
-                    for (id, configuration) in plugins.document.entries() {
+                    let (entries, broken) = plugins.document.into_entries();
+                    for (id, error) in broken {
+                        invalid.insert((source, id), error);
+                    }
+                    for (id, configuration) in entries {
                         let expansion = config::connected(
                             &settings,
                             configuration.clone(),
@@ -718,9 +721,9 @@ impl McpService {
                     .read::<McpPluginServers>(SettingsScope::User, &cancel)
                     .await?
                     .document
-                    .entries()
-                    .find(|(entry, _)| *entry == id)
-                    .map(|(_, configuration)| configuration)
+                    .into_entries()
+                    .0
+                    .remove(&id)
                     .ok_or(McpError::UnknownServer)?;
                 let expansion = config::connected(
                     &settings,
@@ -817,12 +820,16 @@ impl McpService {
         let protected = self.protected();
         self.run(cancel, move |settings, cancel| async move {
             let Some(scope) = source.scope() else {
-                let configuration = settings
+                let configuration = match settings
                     .read::<McpPluginServers>(SettingsScope::User, &cancel)
                     .await?
                     .document
                     .declared(&id)
-                    .ok_or(McpError::UnknownServer)?;
+                {
+                    Ok(Some(configuration)) => configuration,
+                    Ok(None) => return Err(McpError::UnknownServer),
+                    Err(error) => return Err(McpError::InvalidEntry(error)),
+                };
                 let expansion = config::connected(
                     &settings,
                     configuration.clone(),

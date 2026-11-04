@@ -1359,38 +1359,63 @@ pub struct McpPluginServers {
 pub struct McpPluginDocument {
     /// The plugin directory: a stdio entry's `cwd` is resolved against it.
     pub dir: PathBuf,
-    pub mcp_servers: BTreeMap<String, McpServerSettings>,
+    /// The registered document, decoded entry by entry like any other source.
+    #[serde(flatten)]
+    pub servers: McpSettings,
 }
 impl McpPluginServers {
     /// Every entry under its run id, with its effective configuration.
-    pub(crate) fn entries(self) -> impl Iterator<Item = (String, McpServerSettings)> {
-        self.plugins.into_iter().flat_map(|(plugin, document)| {
+    pub(crate) fn entries(self) -> BTreeMap<String, McpServerSettings> {
+        self.into_entries().0
+    }
+
+    /// Every decoded entry under its run id with its effective configuration,
+    /// and every broken entry under its run id with its error.
+    pub(crate) fn into_entries(
+        self,
+    ) -> (
+        BTreeMap<String, McpServerSettings>,
+        BTreeMap<String, McpEntryError>,
+    ) {
+        let mut servers = BTreeMap::new();
+        let mut invalid = BTreeMap::new();
+        for (plugin, document) in self.plugins {
             let dir = document.dir;
-            document
-                .mcp_servers
-                .into_iter()
-                .map(move |(id, mut config)| {
-                    if let McpServerSettings::Stdio { cwd, .. } = &mut config {
-                        let path = cwd.as_ref().map_or(dir.clone(), |cwd| dir.join(cwd));
-                        *cwd = Some(path.to_string_lossy().into_owned());
-                    }
-                    (format!("{plugin}:{id}"), config)
-                })
-        })
+            let (entries, broken) = document.servers.into_parts();
+            for (id, mut config) in entries {
+                if let McpServerSettings::Stdio { cwd, .. } = &mut config {
+                    let path = cwd.as_ref().map_or(dir.clone(), |cwd| dir.join(cwd));
+                    *cwd = Some(path.to_string_lossy().into_owned());
+                }
+                servers.insert(format!("{plugin}:{id}"), config);
+            }
+            for (id, error) in broken {
+                invalid.insert(format!("{plugin}:{id}"), error);
+            }
+        }
+        (servers, invalid)
     }
 
     /// One entry as its plugin registered it, before the plugin directory
-    /// resolves a stdio `cwd`.
-    pub(crate) fn declared(self, run_id: &str) -> Option<McpServerSettings> {
-        self.plugins
-            .into_iter()
-            .flat_map(|(plugin, document)| {
-                document
-                    .mcp_servers
-                    .into_iter()
-                    .map(move |(id, config)| (format!("{plugin}:{id}"), config))
-            })
-            .find_map(|(id, config)| (id == run_id).then_some(config))
+    /// resolves a stdio `cwd`. A broken entry answers its own error.
+    pub(crate) fn declared(
+        self,
+        run_id: &str,
+    ) -> std::result::Result<Option<McpServerSettings>, McpEntryError> {
+        for (plugin, document) in self.plugins {
+            let (entries, broken) = document.servers.into_parts();
+            for (id, config) in entries {
+                if format!("{plugin}:{id}") == run_id {
+                    return Ok(Some(config));
+                }
+            }
+            for (id, error) in broken {
+                if format!("{plugin}:{id}") == run_id {
+                    return Err(error);
+                }
+            }
+        }
+        Ok(None)
     }
 }
 impl BusinessDocument for McpPluginServers {
@@ -1405,12 +1430,8 @@ impl BusinessDocument for McpPluginServers {
             if plugin.trim().is_empty() || !document.dir.is_absolute() {
                 return Err(SettingsError::Invalid("invalid MCP plugin registration"));
             }
-            McpSettings {
-                mcp_servers: document.mcp_servers.clone(),
-                ..McpSettings::default()
-            }
-            .validate()?;
-            for config in document.mcp_servers.values() {
+            document.servers.validate()?;
+            for config in document.servers.entries().values() {
                 if let McpServerSettings::Stdio { cwd: Some(cwd), .. } = config
                     && !Path::new(cwd).components().all(|part| {
                         matches!(
@@ -1437,7 +1458,7 @@ impl McpPluginDocument {
     /// directory inside the canonical plugin directory.
     pub(crate) fn confine(&self) -> Result<()> {
         let dir = std::fs::canonicalize(&self.dir).map_err(|_| OUTSIDE_PLUGIN)?;
-        for config in self.mcp_servers.values() {
+        for config in self.servers.entries().values() {
             if let McpServerSettings::Stdio { cwd: Some(cwd), .. } = config {
                 match std::fs::canonicalize(dir.join(cwd)) {
                     Ok(resolved) if resolved.starts_with(&dir) && resolved.is_dir() => {}
