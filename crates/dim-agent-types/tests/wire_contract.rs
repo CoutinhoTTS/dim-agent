@@ -390,6 +390,65 @@ fn tool_effects_round_trip_and_refuse_an_unknown_kind() {
     );
 }
 
+/// The read pages and the compaction digest show an effect by the same rule:
+/// a command keeps its first 200 characters, a longer one is cut there and
+/// marked with `…`, and a path stays verbatim (#1033).
+#[test]
+fn a_shortened_effect_cuts_a_command_at_two_hundred_characters() {
+    assert_eq!(
+        ToolEffect::CommandRun {
+            command: "c".repeat(200),
+            exit_code: None,
+            signal: None,
+        }
+        .shortened(),
+        ToolEffect::CommandRun {
+            command: "c".repeat(200),
+            exit_code: None,
+            signal: None,
+        },
+        "a 200-character command is unchanged"
+    );
+    for (exit_code, signal) in [(Some(0), None), (None, Some("SIGTERM".into()))] {
+        let cut = ToolEffect::CommandRun {
+            command: format!("{}tail", "c".repeat(200)),
+            exit_code,
+            signal: signal.clone(),
+        }
+        .shortened();
+        assert_eq!(
+            cut,
+            ToolEffect::CommandRun {
+                command: format!("{}…", "c".repeat(200)),
+                exit_code,
+                signal,
+            },
+            "a longer command keeps exactly 200 characters plus the cut mark"
+        );
+    }
+    let cut = ToolEffect::CommandRun {
+        command: format!("{}tail", "中".repeat(200)),
+        exit_code: None,
+        signal: None,
+    }
+    .shortened();
+    assert_eq!(
+        cut,
+        ToolEffect::CommandRun {
+            command: format!("{}…", "中".repeat(200)),
+            exit_code: None,
+            signal: None,
+        },
+        "a multibyte command is cut on a character boundary"
+    );
+    let path = format!("/work/dim/src/{}", "x".repeat(400));
+    assert_eq!(
+        ToolEffect::FileWritten { path: path.clone() }.shortened(),
+        ToolEffect::FileWritten { path },
+        "a path stays verbatim, whatever its length"
+    );
+}
+
 #[test]
 fn a_v1_connection_receives_a_tool_result_without_its_effects() {
     let event = AgentEvent {

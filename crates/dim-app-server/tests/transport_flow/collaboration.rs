@@ -5,7 +5,7 @@ use dim_agent_runtime::testing::{branch_events, chain_events, timeline_events};
 use dim_agent_runtime::{Agent, CollaborationRole, Session, TimelineQueryScope};
 use dim_agent_types::{
     AgentEvent, CollaborationDelivery, CollaborationOutcome, ContentBlock, EventKind, InputBlock,
-    InputMessageData, MessageContent, ToolContent,
+    InputMessageData, MessageContent, ToolContent, ToolEffect,
 };
 use rutis::host::{BoxFuture, CtxHost};
 use std::ops::RangeInclusive;
@@ -2146,6 +2146,52 @@ impl ToolDriver for GateTools {
     }
 }
 
+/// Mock tools plus `touch`, whose result declares the effects its input
+/// names, the way a workspace tool declares its own result (session
+/// boundary A.6).
+struct EffectTools;
+impl ToolDriver for EffectTools {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        let mut tools = MockTools.definitions();
+        tools.push(dim_agent_capabilities::tool_registry::definition(
+            "touch",
+            "Declare the file or the command the input names.",
+            json!({"type": "object", "additionalProperties": false, "properties": {
+                "path": {"type": "string"}, "command": {"type": "string"}}}),
+        ));
+        tools
+    }
+    fn execute(
+        &self,
+        call: ToolCall,
+        context: ToolExecutionContext,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ToolResult> {
+        if call.name != "touch" {
+            let mock: &'static MockTools = &MockTools;
+            return mock.execute(call, context, cancel);
+        }
+        Box::pin(async move {
+            let mut effects = Vec::new();
+            if let Some(path) = call.input.get("path").and_then(Value::as_str) {
+                effects.push(ToolEffect::FileWritten {
+                    path: path.to_owned(),
+                });
+            }
+            if let Some(command) = call.input.get("command").and_then(Value::as_str) {
+                effects.push(ToolEffect::CommandRun {
+                    command: command.to_owned(),
+                    exit_code: Some(0),
+                    signal: None,
+                });
+            }
+            let mut result = ToolResult::text("touched");
+            result.effects = (!effects.is_empty()).then_some(effects);
+            Ok(result)
+        })
+    }
+}
+
 /// Messages to a working member join its running turn at the next tool
 /// result; a request's work spans the member's turns until it is idle and
 /// returns the last turn's output. `read` pages through a Timeline.
@@ -3041,6 +3087,103 @@ async fn undispatched_results_name_calls_from_their_starts() {
         earlier.iter().all(|event| event["name"] == "echo"),
         "reused call ids in a later request must not rename earlier results"
     );
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A member's page carries the effects its tool results declared: the path
+/// verbatim, a command cut at 200 characters with the cut marked, and no
+/// `effects` member when the result declared none; the `tool_call` items are
+/// unchanged (#1033).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_page_carries_the_effects_its_tool_results_declared() {
+    let (server, agent) = launch_with_agent(Arc::new(EffectTools), ServerConfig::default()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let lead = leader(
+        &mut client,
+        json!({"allowedTools": ["echo", "wait", "agent", "touch"]}),
+    )
+    .await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    let path = "/work/src/parse.py";
+    let command = format!("cargo test --locked {}", "x".repeat(200));
+    say(
+        &mut client,
+        &lead,
+        tool(
+            json!({"action": "request",
+            "prompt": format!("tool:touch {{\"path\":\"{path}\"}}"),
+            "profile": {"name": "helper", "description": "", "systemPrompt": "", "tools": ["touch"]}}),
+        ),
+        "queue",
+    )
+    .await;
+    let started = poll("temporary request", async || {
+        let timeline = events(&lead_session).await;
+        (!results(&timeline).is_empty()).then(|| last_ok(&timeline))
+    })
+    .await;
+    let temporary = started["agentId"].as_str().unwrap().to_owned();
+    let member = started["sessionId"].as_str().unwrap().to_owned();
+    say(
+        &mut client,
+        &member,
+        format!("tool:touch {{\"command\":\"{command}\"}}"),
+        "queue",
+    )
+    .await;
+    idle(&mut client, &member).await;
+    say(
+        &mut client,
+        &member,
+        r#"tool:touch {"note":"neither"}"#.to_string(),
+        "queue",
+    )
+    .await;
+    idle(&mut client, &member).await;
+    say(
+        &mut client,
+        &lead,
+        tool(
+            json!({"action": "read", "agentId": temporary, "sessionId": member,
+            "after": 0, "limit": 200}),
+        ),
+        "queue",
+    )
+    .await;
+    idle(&mut client, &lead).await;
+    let page = last_ok(&events(&lead_session).await);
+    let items = page["events"].as_array().expect("page items");
+    let results: Vec<&Value> = items
+        .iter()
+        .filter(|item| item["type"] == "tool_result" && item["name"] == "touch")
+        .collect();
+    assert_eq!(results.len(), 3, "{page}");
+    assert_eq!(
+        results[0]["effects"],
+        json!([{"kind": "fileWritten", "path": path}]),
+        "{page}"
+    );
+    let command_effect = &results[1]["effects"][0];
+    assert_eq!(command_effect["kind"], "commandRun");
+    let shortened = command_effect["command"].as_str().expect("command");
+    assert_eq!(shortened.chars().count(), 201, "{page}");
+    assert_eq!(
+        shortened.strip_suffix('…').expect("the cut is marked"),
+        &command[..200],
+        "{page}"
+    );
+    assert_eq!(command_effect["exitCode"], 0);
+    assert!(results[2].get("effects").is_none(), "{page}");
+    let calls: Vec<&Value> = items
+        .iter()
+        .filter(|item| item["type"] == "tool_call")
+        .collect();
+    assert!(calls.len() >= 3, "{page}");
+    for call in calls {
+        let keys: Vec<&String> = call.as_object().expect("call item").keys().collect();
+        assert_eq!(keys, ["sequence", "type", "callId", "name"], "{call}");
+    }
     server.shutdown();
     server.join().await.unwrap();
 }

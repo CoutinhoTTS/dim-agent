@@ -1308,9 +1308,13 @@ impl CollaborationSession {
                                 .map(|call| &call.name),
                             None => started.get(&(data.request_id.clone(), result.call_id.clone())),
                         };
-                        items.push(json!({"sequence": event.sequence, "type": "tool_result",
+                        let mut item = json!({"sequence": event.sequence, "type": "tool_result",
                             "callId": result.call_id, "name": name,
-                            "status": if result.result.is_error == Some(true) { "error" } else { "ok" }}));
+                            "status": if result.result.is_error == Some(true) { "error" } else { "ok" }});
+                        if let Some(effects) = result.result.shortened_effects() {
+                            item["effects"] = json!(effects);
+                        }
+                        items.push(item);
                     }
                 }
                 EventKind::TurnEnd(data) => {

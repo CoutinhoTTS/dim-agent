@@ -6,7 +6,8 @@ use dim_agent_capabilities::{
         CompactionInput, CompactionStrategy, CompactionStrategyHost, ContextModel,
         ContextModelHost, HostError, HostFuture, IdentityContext, ModelChunk, ModelConnection,
         ModelDriver, ModelHost, ModelStopReason, ModelStream, PrepareContextHost,
-        ResolveContextModel, StrategyDiagnostics, StrategyOutcome, ToolHost,
+        ResolveContextModel, StrategyDiagnostics, StrategyOutcome, ToolDriver,
+        ToolExecutionContext, ToolHost,
     },
     timeline_tree::{BranchToolConfig, TreeCommands},
     workspace_tools::{file_reads::FileReads, files::FileTools},
@@ -555,6 +556,20 @@ fn builder_with_store(probe: &Arc<Probe>, store: Arc<dyn TimelineStore>) -> Agen
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder.timeline_store(store);
     mock_hosts(&mut builder);
+    defaults::install(&mut builder);
+    probe_features(&mut builder, probe);
+    builder
+}
+/// [`builder_with`](builder_with) with `tools` in place of [`MockTools`].
+fn builder_with_tools(probe: &Arc<Probe>, tools: Arc<dyn ToolDriver>) -> AgentBuilder {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
+    defaults::mock_model_hosts_with_model(
+        &mut builder,
+        HistoryRenderer::default(),
+        Arc::new(FlowModel),
+    );
+    defaults::tool_host(&mut builder, tools);
     defaults::install(&mut builder);
     probe_features(&mut builder, probe);
     builder
@@ -3995,6 +4010,131 @@ async fn a_first_parent_read_starts_after_the_cut() {
         page["nextCursor"].as_u64().unwrap() >= *sequences.last().unwrap(),
         "the cursor covers the page: {page}"
     );
+    soon(agent.close()).await.unwrap();
+}
+
+/// A tool whose result declares the effects its input names, the way a
+/// workspace tool declares its own result (session boundary A.6).
+struct EffectTools;
+impl ToolDriver for EffectTools {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            risk: Some("session".into()),
+            ..dim_agent_capabilities::tool_registry::definition(
+                "touch",
+                "Declare the file or the command the input names.",
+                serde_json::json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "path": {"type": "string"},
+                        "command": {"type": "string"},
+                    }
+                }),
+            )
+        }]
+    }
+    fn execute(
+        &self,
+        call: ToolCall,
+        _: ToolExecutionContext,
+        _: CancellationToken,
+    ) -> HostFuture<'_, ToolResult> {
+        Box::pin(async move {
+            let mut effects = Vec::new();
+            if let Some(path) = call.input.get("path").and_then(serde_json::Value::as_str) {
+                effects.push(ToolEffect::FileWritten {
+                    path: path.to_owned(),
+                });
+            }
+            if let Some(command) = call
+                .input
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+            {
+                effects.push(ToolEffect::CommandRun {
+                    command: command.to_owned(),
+                    exit_code: Some(0),
+                    signal: None,
+                });
+            }
+            let mut result = ToolResult::text("touched");
+            result.effects = (!effects.is_empty()).then_some(effects);
+            Ok(result)
+        })
+    }
+}
+
+/// A page carries the effects its parent's tool results declared: the path
+/// verbatim, a command cut at 200 characters with the cut marked, and no
+/// `effects` member when the result declared none; the `tool_call` items are
+/// unchanged (#1033).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parent_read_carries_the_effects_its_tool_results_declared() {
+    let probe = Arc::new(Probe::default());
+    let agent = MinimalHost::start(&builder_with_tools(&probe, Arc::new(EffectTools)))
+        .await
+        .unwrap();
+    let session = soon(agent.create_session(SessionConfig {
+        tools: Some(vec![
+            "echo".into(),
+            "wait".into(),
+            "branch".into(),
+            "touch".into(),
+        ]),
+        ..SessionConfig::default()
+    }))
+    .await
+    .unwrap();
+    soon(session.submit("BEFORE-THE-CUT".into(), InputMode::Queue, "main"))
+        .await
+        .unwrap();
+    soon(session.idle("main")).await.unwrap();
+    let child = open_line(&session, "check the parser").await;
+    let path = "/work/src/parse.py";
+    let command = format!("cargo test --locked {}", "x".repeat(200));
+    for call in [
+        format!(r#"tool:touch {{"path":"{path}"}}"#),
+        format!(r#"tool:touch {{"command":"{command}"}}"#),
+        r#"tool:touch {"note":"neither"}"#.to_string(),
+    ] {
+        soon(session.submit(call, InputMode::Queue, "main"))
+            .await
+            .unwrap();
+        soon(session.idle("main")).await.unwrap();
+    }
+    let page = page_of(&tool_call(&session, &child, r#"{"action":"read","branch":"main"}"#).await);
+    let items = page["items"].as_array().expect("page items");
+    let results: Vec<&serde_json::Value> = items
+        .iter()
+        .filter(|item| item["type"] == "tool_result" && item["name"] == "touch")
+        .collect();
+    assert_eq!(results.len(), 3, "{page}");
+    assert_eq!(
+        results[0]["effects"],
+        serde_json::json!([{"kind": "fileWritten", "path": path}]),
+        "{page}"
+    );
+    let command_effect = &results[1]["effects"][0];
+    assert_eq!(command_effect["kind"], "commandRun");
+    let shortened = command_effect["command"].as_str().expect("command");
+    assert_eq!(shortened.chars().count(), 201, "{page}");
+    assert_eq!(
+        shortened.strip_suffix('…').expect("the cut is marked"),
+        &command[..200],
+        "{page}"
+    );
+    assert_eq!(command_effect["exitCode"], 0);
+    assert!(results[2].get("effects").is_none(), "{page}");
+    let calls: Vec<&serde_json::Value> = items
+        .iter()
+        .filter(|item| item["type"] == "tool_call")
+        .collect();
+    assert!(calls.len() >= 3, "{page}");
+    for call in calls {
+        let keys: Vec<&String> = call.as_object().expect("call item").keys().collect();
+        assert_eq!(keys, ["sequence", "type", "callId", "name"], "{call}");
+    }
     soon(agent.close()).await.unwrap();
 }
 

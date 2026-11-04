@@ -38,9 +38,6 @@ const DIGEST_SHARE: f64 = 0.05;
 /// Facts one page of the compaction-reuse read keeps.
 const REUSE_PAGE: u64 = 64;
 
-/// Characters of a command the digest keeps before the cut is marked (§5.10).
-const DIGEST_COMMAND_CHARS: usize = 200;
-
 /// Turn starts one page of a cut order keeps.
 const CUT_PAGE: u64 = 64;
 
@@ -1695,7 +1692,7 @@ fn digest_entries(
             };
             for result in &data.results {
                 for effect in result.result.effects.iter().flatten() {
-                    let entry = shortened(effect);
+                    let entry = effect.shortened();
                     let key = digest_key(&entry);
                     if let Some(index) = entries
                         .iter()
@@ -1733,30 +1730,6 @@ fn digest_entries(
             entries = entries.split_off(high);
         }
         (dropped || !entries.is_empty()).then_some(DigestEntries { entries, dropped })
-    }
-}
-
-/// A command keeps its first `DIGEST_COMMAND_CHARS` characters, counted
-/// before escaping; a longer one is cut there and marked with `…`. A path
-/// stays verbatim, an exact identifier (§5.10).
-fn shortened(effect: &ToolEffect) -> ToolEffect {
-    match effect {
-        ToolEffect::CommandRun {
-            command,
-            exit_code,
-            signal,
-        } => {
-            let command = match command.char_indices().nth(DIGEST_COMMAND_CHARS) {
-                Some((index, _)) => format!("{}…", &command[..index]),
-                None => command.clone(),
-            };
-            ToolEffect::CommandRun {
-                command,
-                exit_code: *exit_code,
-                signal: signal.clone(),
-            }
-        }
-        other => other.clone(),
     }
 }
 
