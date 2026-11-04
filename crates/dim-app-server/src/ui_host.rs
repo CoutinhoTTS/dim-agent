@@ -494,7 +494,6 @@ impl UiHost {
         reason: Option<String>,
     ) -> Result<(), RpcError> {
         let instance = self.forget(ui_id).ok_or_else(ui_unknown)?;
-        hub.notify_clients(&instance.session_id);
         if let Some(connection) = instance
             .connection
             .as_deref()
@@ -505,6 +504,7 @@ impl UiHost {
         if let Some(view) = instance.leaf.and_then(|leaf| leaf.view) {
             let _ = view.dispose().await;
         }
+        hub.notify_clients(&instance.session_id);
         Ok(())
     }
 
