@@ -1162,6 +1162,8 @@ async fn a_cross_origin_redirect_is_not_followed_and_names_its_target() {
     tokio::time::timeout(Duration::from_secs(15), async {
         let other = RedirectServer::serving().await;
         let moved = format!("{}/chat/completions", other.url);
+        // A 301 or 302 to another origin says the origin is the reason, not
+        // the method change; a 307 says it too.
         let server = RedirectServer::start(StatusCode::TEMPORARY_REDIRECT, &moved).await;
         let error = redirect_failure(&server.url, "cross-origin-secret").await;
         let message = error.to_string();
@@ -1169,6 +1171,14 @@ async fn a_cross_origin_redirect_is_not_followed_and_names_its_target() {
         assert!(message.contains("HTTP 307"), "{message}");
         assert!(message.contains("different origin"), "{message}");
         assert!(!message.contains("cross-origin-secret"), "{message}");
+        assert!(other.hits().is_empty(), "the other origin was contacted");
+        server.close().await;
+        let server = RedirectServer::start(StatusCode::FOUND, &moved).await;
+        let error = redirect_failure(&server.url, "cross-origin-secret").await;
+        let message = error.to_string();
+        assert!(message.contains(&moved), "{message}");
+        assert!(message.contains("HTTP 302"), "{message}");
+        assert!(message.contains("different origin"), "{message}");
         assert!(other.hits().is_empty(), "the other origin was contacted");
         server.close().await;
         other.close().await;

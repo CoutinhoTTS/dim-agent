@@ -182,14 +182,16 @@ fn name_redirect_target(mut error: AiMuxError) -> AiMuxError {
     else {
         return error;
     };
-    let reason = if !matches!(status, 307 | 308) {
-        "the request would be re-sent as a GET without its body; update the provider URL to the target"
-    } else if url::Url::parse(&detail.url)
+    // The origin is the reason a cross-origin target is refused whatever the
+    // status; only a same-origin 301 or 302 is refused for the method change.
+    let reason = if url::Url::parse(&detail.url)
         .ok()
         .zip(url::Url::parse(&target).ok())
         .is_some_and(|(base, target)| base.origin() != target.origin())
     {
         "the target is a different origin"
+    } else if !matches!(status, 307 | 308) {
+        "the request would be re-sent as a GET without its body; update the provider URL to the target"
     } else {
         "the redirect limit was reached"
     };
