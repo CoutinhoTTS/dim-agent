@@ -105,7 +105,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$STAMP" == true ]]; then node scripts/alpha-version.mjs "$RELEASE_VERSION"; fi
-          cargo install cargo-about --version 0.9.3 --locked
+          cargo install cargo-about --version 0.9.3 --features cli --locked
           cargo fetch --locked
           mkdir -p staging
           node scripts/rust-notices.mjs staging/rust-notices.txt
