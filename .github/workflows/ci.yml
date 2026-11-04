@@ -199,6 +199,7 @@ jobs:
     timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
       RUSTC_WRAPPER: ""
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
