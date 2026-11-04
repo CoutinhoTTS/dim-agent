@@ -3117,7 +3117,7 @@ async fn collaboration_facts_publish_to_tree_protocols_only() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stored_member_can_unload_be_read_without_loading_and_work_again() {
+async fn stored_member_read_acquires_it_and_it_can_unload_and_work_again() {
     let directory = std::env::temp_dir().join(format!("dim-team-store-{}", uuid::Uuid::new_v4()));
     let (server, agent) = launch_with_agent(
         Arc::new(MockTools),
@@ -3192,8 +3192,8 @@ async fn stored_member_can_unload_be_read_without_loading_and_work_again() {
     let read = last_ok(&events(&session).await);
     assert!(!read["events"].as_array().unwrap().is_empty());
     assert!(
-        agent.get_session(&member).is_none(),
-        "history reads do not load a member"
+        agent.get_session(&member).is_some(),
+        "history reads acquire the member"
     );
     say(
         &mut client,
@@ -3970,8 +3970,8 @@ async fn passes(client: &mut Client, agent: &Agent) {
 /// grace; when the member ends its work the result is recorded as
 /// completed, the woken leader turn runs, and both Sessions unload. The
 /// relation outlives the unload: the leader's next request to the member
-/// restores both and reaches the same member. The leader's `read` of the
-/// member, repeated while the Sessions unload, never fails or omits an event.
+/// restores both and reaches the same member. Each peer read acquires the
+/// member; after reads stop it unloads, and the next read restores its facts.
 /// Nothing keeps a released instance of either alive.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_idle_unload_pass_keeps_a_leader_with_an_open_request() {
@@ -4036,27 +4036,30 @@ async fn the_idle_unload_pass_keeps_a_leader_with_an_open_request() {
 
     let read = tool(json!({"action": "read", "agentId": holder, "sessionId": member}));
     let mut reads = vec![];
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            let gone = agent.get_session(&member).is_none();
-            say(&mut client, &lead, read.clone(), "queue").await;
-            let lead_session = agent.get_session(&lead).unwrap();
-            idle(&mut client, &lead).await;
-            reads.push(last_ok(&events(&lead_session).await));
-            if gone {
-                break;
-            }
-        }
-    })
-    .await
-    .expect("deadline: the member unloads");
+    for _ in 0..3 {
+        say(&mut client, &lead, read.clone(), "queue").await;
+        let lead_session = agent.get_session(&lead).unwrap();
+        idle(&mut client, &lead).await;
+        reads.push(last_ok(&events(&lead_session).await));
+    }
+    unloaded(agent.get_session(&member).unwrap()).await;
+    say(&mut client, &lead, read, "queue").await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    idle(&mut client, &lead).await;
+    reads.push(last_ok(&events(&lead_session).await));
+    drop(lead_session);
+    assert!(
+        agent.get_session(&member).is_some(),
+        "the read restores the member"
+    );
     let first = &reads[0];
     assert!(
         first.to_string().contains("Echo: again"),
         "the read holds the second request: {first}"
     );
     for read in &reads {
-        assert_eq!(read, first);
+        assert_eq!(read["events"], first["events"]);
+        assert!(read["nextCursor"].as_u64().unwrap() >= first["nextCursor"].as_u64().unwrap());
     }
     loads.released(&member).await;
     super::deletion::eventually("the leader unloads", || agent.get_session(&lead).is_none()).await;

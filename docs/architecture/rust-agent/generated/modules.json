@@ -17649,7 +17649,6 @@
       "references": [
         "path TimelineKey",
         "path dim_agent_runtime::StoredEvent",
-        "path dim_agent_runtime::TimelineKey",
         "use dim_agent_runtime::TimelineKey"
       ]
     },
@@ -17674,7 +17673,6 @@
         "path EventKind::InputDeleted",
         "path EventKind::InputMessage",
         "path EventKind::StopInterrupt",
-        "path EventKind::ToolUseStart",
         "path EventKind::TurnEnd",
         "path EventKind::TurnStart",
         "path dim_agent_types::AgentEvent",
@@ -18938,6 +18936,7 @@
       "references": [
         "path AgentError",
         "path AgentError::Closed",
+        "path AgentError::InvalidInput",
         "path AgentError::fault",
         "path dim_agent_runtime::Result",
         "use dim_agent_runtime::AgentError"
@@ -18972,6 +18971,7 @@
       "references": [
         "path TimelineQuery",
         "path TimelineQueryDirection::Ascending",
+        "path TimelineQueryDirection::Descending",
         "path TimelineQueryOrderBy::Sequence",
         "path TimelineQueryScope::Branch",
         "path rebuild_facts",
@@ -19048,6 +19048,7 @@
         "path TurnOutcome::Cancelled",
         "path TurnOutcome::Completed",
         "path TurnOutcome::Failed",
+        "path dim_agent_types::AgentEvent",
         "path events"
       ]
     },
@@ -19119,7 +19120,6 @@
         "path AgentIndex",
         "path SessionRestored",
         "path UnloadedSessionDeleted",
-        "path crate::agents::AgentIndex",
         "path crate::agents::SessionUse",
         "path crate::agents::session_config",
         "use crate::agents::AgentIndex",
