@@ -1681,6 +1681,17 @@
       ]
     },
     {
+      "id": "dim_agent_scheduler::wakeup_pass",
+      "crate": "dim_agent_scheduler",
+      "parent": "dim_agent_scheduler",
+      "file": "crates/dim-agent-scheduler/src/../tests/support/wakeup_pass.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "json"
+      ]
+    },
+    {
       "id": "dim_agent_scheduler::wakeups",
       "crate": "dim_agent_scheduler",
       "parent": "dim_agent_scheduler",
@@ -16637,6 +16648,13 @@
     },
     {
       "from": "dim_agent_scheduler",
+      "to": "dim_agent_scheduler::wakeup_pass",
+      "references": [
+        "mod wakeup_pass"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler",
       "to": "dim_agent_scheduler::wakeups",
       "references": [
         "mod wakeups",
@@ -17225,6 +17243,18 @@
       ]
     },
     {
+      "from": "dim_agent_scheduler::wakeup_pass",
+      "to": "dim_agent_scheduler::support",
+      "references": [
+        "path support::Script::default",
+        "path support::connect",
+        "path support::create_session",
+        "path support::home",
+        "path support::start",
+        "use crate::support"
+      ]
+    },
+    {
       "from": "dim_agent_scheduler::wakeups",
       "to": "dim_agent_scheduler::document",
       "references": [
@@ -17263,6 +17293,13 @@
         "path SchedulerError::invalid_data",
         "path SchedulerError::new",
         "use crate::runs::SchedulerError"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::wakeups",
+      "to": "dim_agent_scheduler::wakeup_pass",
+      "references": [
+        "path crate::wakeup_pass::pause"
       ]
     },
     {

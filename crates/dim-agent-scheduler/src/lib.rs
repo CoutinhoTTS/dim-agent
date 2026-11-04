@@ -19,6 +19,9 @@ mod binding_flow;
 #[cfg(test)]
 #[path = "../tests/support/mod.rs"]
 mod support;
+#[cfg(test)]
+#[path = "../tests/support/wakeup_pass.rs"]
+mod wakeup_pass;
 
 use dim_agent_runtime::AgentBuilder;
 use rutis::host::DynPlugin;

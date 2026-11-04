@@ -288,9 +288,18 @@ impl Wakeups {
     /// [`RETENTION_AFTER_TERMINAL`] is removed. A fire is only the input
     /// write through the public `sessions.input`; there is no launch, stop
     /// or withdraw (§10). The pass reads the file once, takes one clock
-    /// reading, writes at most once, and holds the wakeup lock only around
-    /// the settle batch, never across a `sessions` call.
+    /// reading, and writes at most once.
+    ///
+    /// The whole pass holds `shared.wakeups` — the snapshot read, every
+    /// input write and the settle batch — so a cancel and a pass are one
+    /// serial order at the record level: a cancel that takes the lock first
+    /// is observed by the read (the record is already terminal, so no input
+    /// is written), and a cancel that takes it after the pass reports the
+    /// settled state and writes nothing (§10.3's boundary at the write).
+    /// Nothing this pass awaits takes that lock again: `sessions.input` only
+    /// queues an input on the target Session.
     pub async fn evaluate(&self) -> Result<(), SchedulerError> {
+        let _hold = self.shared.wakeups.lock().await;
         let now = Utc::now();
         let snapshot = read(&self.shared.files).await?;
         let grace = Duration::seconds(GRACE_SECONDS);
@@ -323,12 +332,6 @@ impl Wakeups {
             })
             .map(|wakeup| wakeup.wakeup_id.clone())
             .collect();
-        // The input writes happen before any settle and without the wakeup
-        // lock. The settle batch below is the one transition that can race a
-        // cancel, and each settle only fires a record that is still
-        // `scheduled`, so a cancel that settles first keeps the record
-        // cancelled any way the two interleave (§10.3's boundary at the
-        // write).
         let mut outcomes: Vec<(String, WakeupState)> = Vec::new();
         for wakeup in due {
             let session_id = wakeup.session_id.clone();
@@ -346,7 +349,16 @@ impl Wakeups {
                 "content": [{"type": "text", "text": wakeup.prompt}],
             });
             match sessions(self.shared.sessions.as_ref(), "input", input).await {
-                Ok(Ok(_)) => outcomes.push((wakeup.wakeup_id, WakeupState::Fired)),
+                Ok(Ok(_)) => {
+                    let wakeup_id = wakeup.wakeup_id;
+                    outcomes.push((wakeup_id.clone(), WakeupState::Fired));
+                    // The test seam holds the pass after the input write and
+                    // before the settle write, which is where a cancel must
+                    // wait for the lock (§10.3); it does nothing in a build
+                    // without tests.
+                    #[cfg(test)]
+                    crate::wakeup_pass::pause(&wakeup_id).await;
+                }
                 Ok(Err(code)) if matches!(code.as_str(), "session_closed" | "branch_missing") => {
                     outcomes.push((wakeup.wakeup_id, WakeupState::Cancelled))
                 }
@@ -360,7 +372,6 @@ impl Wakeups {
         if outcomes.is_empty() && stale.is_empty() && prune.is_empty() {
             return Ok(());
         }
-        let _hold = self.shared.wakeups.lock().await;
         update(&self.shared.files, move |wakeups| {
             let mut changed = false;
             for (wakeup_id, state) in &outcomes {
@@ -392,8 +403,12 @@ impl Wakeups {
                 changed = true;
             }
             if !prune.is_empty() {
+                // One hash per pass, not one linear scan per record: this runs
+                // on the lock a cancel waits for and rewrites the whole file.
+                let pruned: std::collections::HashSet<&str> =
+                    prune.iter().map(String::as_str).collect();
                 let before = wakeups.len();
-                wakeups.retain(|wakeup| !prune.contains(&wakeup.wakeup_id));
+                wakeups.retain(|wakeup| !pruned.contains(wakeup.wakeup_id.as_str()));
                 changed |= wakeups.len() != before;
             }
             Ok((changed, ()))
