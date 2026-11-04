@@ -116,7 +116,13 @@ async fn assert_deliveries(client: &mut Client, runs: &[Value]) {
             .as_array()
             .unwrap()
             .iter()
-            .filter(|event| event["type"] == "input" && event["name"] == "message")
+            .filter(|event| {
+                event["type"] == "input"
+                    && event["name"] == "message"
+                    && event["data"]["submission_id"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with("scheduler:"))
+            })
             .collect();
         let submitted: Vec<_> = runs
             .iter()

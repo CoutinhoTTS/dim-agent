@@ -3,7 +3,7 @@
 //! catches a browser callback. Commands that print or prompt are in
 //! `mcp_command` (line client) and `session_host` (TUI).
 
-use crate::{Result, args::Options, client::Client, sanitize::safe_line};
+use crate::{Result, client::Client, sanitize::safe_line};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -33,6 +33,7 @@ pub struct Invalid {
     pub error: String,
 }
 #[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Server {
     pub id: String,
     /// `user`, `project` or `plugin`.
@@ -40,6 +41,12 @@ pub struct Server {
     pub enabled: bool,
     pub transport: String,
     pub auth: Option<Auth>,
+    /// Names only, sorted. A daemon older than this field reports none.
+    #[serde(default)]
+    pub referenced_variables: Vec<String>,
+    /// Names only, sorted. A daemon older than this field reports none.
+    #[serde(default)]
+    pub unset_variables: Vec<String>,
 }
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -56,13 +63,8 @@ pub struct Application {
 }
 
 /// What `mcp list` prints: the rows on stdout, then the notes on stderr.
-pub async fn catalog_report(
-    client: &mut Client,
-    options: &Options,
-) -> Result<(Vec<String>, Vec<String>)> {
-    let catalog: Catalog = client
-        .typed("mcp.catalog", json!({"cwd": options.workspace().as_str()}))
-        .await?;
+pub async fn catalog_report(client: &mut Client, cwd: &str) -> Result<(Vec<String>, Vec<String>)> {
+    let catalog: Catalog = client.typed("mcp.catalog", json!({"cwd": cwd})).await?;
     let mut rows = Vec::new();
     for server in catalog.servers {
         rows.push(format!(
@@ -91,6 +93,18 @@ pub async fn catalog_report(
                 safe_line(&scopes.join(", "))
             ));
         }
+        if !server.referenced_variables.is_empty() {
+            rows.push(format!(
+                "  Variables: {}",
+                safe_line(&server.referenced_variables.join(", "))
+            ));
+        }
+        if !server.unset_variables.is_empty() {
+            rows.push(format!(
+                "  Unset variables: {}",
+                safe_line(&server.unset_variables.join(", "))
+            ));
+        }
     }
     for entry in catalog.invalid {
         rows.push(format!(
@@ -105,7 +119,7 @@ pub async fn catalog_report(
         vec!["No MCP server is configured.".to_owned()]
     } else {
         vec![
-            "Columns: ID, source, transport, enablement, authorization.\nAn enabled entry runs its command or endpoint. Project entries start disabled until you run mcp enable ID.\nSign in with mcp login ID; sign out with mcp logout ID.\nA row with `invalid` where its transport belongs did not decode; fix or remove it.".to_owned(),
+            "Columns: ID, source, transport, enablement, authorization.\nAn enabled entry runs its command or endpoint. Project entries start disabled until you run mcp enable ID.\nSign in with mcp login ID; sign out with mcp logout ID.\nA row with `invalid` where its transport belongs did not decode; fix or remove it.\nVariables and unset variables are names only, never values.".to_owned(),
         ]
     };
     for (source, application) in [

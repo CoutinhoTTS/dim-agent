@@ -355,7 +355,13 @@ async fn eight_first_reuse_runs_input_once_and_later_follow_the_settings_binding
         }
         let inputs: Vec<_> = events
             .iter()
-            .filter(|event| event["type"] == "input" && event["name"] == "message")
+            .filter(|event| {
+                event["type"] == "input"
+                    && event["name"] == "message"
+                    && event["data"]["submission_id"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with("scheduler:"))
+            })
             .collect();
         let session_runs: Vec<_> = runs
             .iter()

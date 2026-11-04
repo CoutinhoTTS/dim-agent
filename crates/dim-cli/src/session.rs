@@ -1,4 +1,4 @@
-use crate::wire::{Event, Progress};
+use crate::wire::{Attached, Created, Event, Progress};
 use crate::{
     Result,
     args::{Action, Options},
@@ -13,7 +13,7 @@ use crate::{
     permission, permission_command,
     question::line::Questions,
 };
-use dim_agent_types::{ApprovalCallData, ContentBlock, ModelId, PermissionPolicy, UserInput};
+use dim_agent_types::{ApprovalCallData, ContentBlock, PermissionPolicy, UserInput};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -21,13 +21,6 @@ use std::{
     future::{Future, pending},
     io::Write,
 };
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Created {
-    session_id: String,
-    model: ModelId,
-}
 
 enum Submission {
     Message(UserInput),
@@ -232,28 +225,14 @@ pub async fn chat(
     let session_id = if let Some(id) = &options.resume {
         id.clone()
     } else {
-        let mut params = json!({"cwd": options.workspace().as_str()});
-        options.creation_startup(&mut params);
-        let mut preferences = options.creation_preferences(None);
-        let mut target = None;
-        if let (Some(provider), Some(model)) = (&options.provider, &options.model) {
-            preferences = options.creation_preferences(
-                crate::session_host::saved_model_preferences(client, provider, model).await?,
-            );
-            target = Some((provider.clone(), model.clone()));
-        }
-        if let Some(preferences) = &preferences {
-            params["modelPreferences"] = preferences.clone();
-        }
-        if let Some(preset) = options.permission {
-            params["permissionPolicy"] = json!({"preset":preset});
-        }
+        let params = crate::session_create_from_options(client, options).await?;
+        let preferences = params.get("modelPreferences").cloned();
         let created: Created = match client.typed("session.create", params).await {
             Ok(created) => created,
             Err(error) => {
                 let error = crate::model_adoption_error(
                     client,
-                    target.as_ref().map(|(p, m)| (p.as_str(), m.as_str())),
+                    options.provider.as_deref().zip(options.model.as_deref()),
                     error,
                     preferences.as_ref().filter(|_| options.effort.is_none()),
                 )
@@ -314,16 +293,17 @@ pub async fn chat(
         Some(Err(error)) => display.record(&format!("permission: unavailable ({error})"))?,
         None => {}
     }
-    client
-        .rpc("session.attach", json!({"sessionId":session_id}))
+    let attached: Attached = client
+        .typed("session.attach", json!({"sessionId":session_id}))
         .await?;
+    let session_cwd = attached.cwd;
     if options.resume.is_some() {
         crate::session_host::adopt_startup(client, options, &session_id).await?;
     }
     let mut questions = Questions::default();
     let result = async {
         display.muted = !interactive;
-        display.cursor = read_history(client, &session_id, 0, |value| {
+        display.cursor = read_history(client, &session_id, 0, &mut |value| {
             questions.history("main", &value);
             if options.json { Ok(()) } else { display.event(serde_json::from_value(value)?, true) }
         }).await?;
@@ -355,7 +335,8 @@ pub async fn chat(
                 Some("/mcp") => {
                     let text = text.as_deref().expect("plain MCP command");
                     drop(interrupts);
-                    let result = crate::mcp_command::command(client, options, reader, &session_id, text).await;
+                    let cwd = session_cwd.as_deref().unwrap_or_else(|| options.workspace().as_str());
+                    let result = crate::mcp_command::command(client, cwd, reader, &session_id, text).await;
                     #[cfg(unix)]
                     { interrupts = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?; }
                     #[cfg(windows)]
@@ -504,11 +485,28 @@ pub async fn chat(
     }
 }
 
+/// What a paged history read feeds: the read's fixed watermark, then each
+/// event in order.
+pub trait HistorySink {
+    /// The read's fixed watermark, before the first page's events. A sink that
+    /// writes it in a fixed position needs it; the others ignore it.
+    fn watermark(&mut self, _through: u64) -> Result<()> {
+        Ok(())
+    }
+    fn event(&mut self, event: Value) -> Result<()>;
+}
+
+impl<F: FnMut(Value) -> Result<()>> HistorySink for F {
+    fn event(&mut self, event: Value) -> Result<()> {
+        self(event)
+    }
+}
+
 pub async fn read_history(
     client: &mut Client,
     session_id: &str,
     mut after: u64,
-    mut consume: impl FnMut(Value) -> Result<()>,
+    sink: &mut impl HistorySink,
 ) -> Result<u64> {
     let mut through = None;
     loop {
@@ -519,9 +517,12 @@ pub async fn read_history(
         }
         let page: History = client.typed("session.history", params).await?;
         let next = page.next(after, through)?;
-        through = Some(page.through);
+        if through.is_none() {
+            sink.watermark(page.through)?;
+            through = Some(page.through);
+        }
         for event in page.events {
-            consume(event)?;
+            sink.event(event)?;
         }
         match next {
             Some(next) => after = next,
@@ -537,7 +538,7 @@ async fn configure(
     display: &mut Display,
 ) -> Result<()> {
     if !text.starts_with("/agent") {
-        display.cursor = read_history(client, session_id, display.cursor, |value| {
+        display.cursor = read_history(client, session_id, display.cursor, &mut |value| {
             display.event(serde_json::from_value(value)?, true)
         })
         .await?;
@@ -548,7 +549,7 @@ async fn configure(
         display.record(line)?;
     }
     if report.changed {
-        display.cursor = read_history(client, session_id, display.cursor, |value| {
+        display.cursor = read_history(client, session_id, display.cursor, &mut |value| {
             display.event(serde_json::from_value(value)?, true)
         })
         .await?;
