@@ -279,8 +279,10 @@ enum TextMember {
     /// §8.1).
     ///
     /// The `eval-tests` text-injector fixture is its only constructor: no
-    /// shipped text is a TypeScript plugin member any more.
-    #[cfg_attr(not(feature = "eval-tests"), allow(dead_code))]
+    /// shipped text is a TypeScript plugin member any more. The attribute is
+    /// unconditional because the fixture is a test target: with the feature
+    /// on, the bin target still never constructs the variant.
+    #[allow(dead_code)]
     Plugin {
         plugin: &'static str,
         member: &'static str,
