@@ -2111,3 +2111,96 @@ async fn a_broken_project_entry_does_not_hide_the_user_entry_with_the_same_id() 
 
     fixture.close().await;
 }
+
+/// #1014: a member dim does not read is unknown and goes back as written, and
+/// `$generation` stays reserved: the entry that carries it reads as broken,
+/// beside the entries that load.
+#[tokio::test]
+async fn unread_entry_members_are_kept_and_a_reserved_generation_is_broken() {
+    let fixture = Fixture::new().await;
+    let cancel = CancellationToken::new();
+    let user_path = fixture.home.join("mcp.json");
+    let user_file = json!({
+        "mcpServers": {
+            "legacy": {
+                "command": "legacy-server",
+                "transport": "stdio",
+                "metadata": "x",
+                "args": ["--flag"]
+            },
+            "collision": {"command": "server", "$generation": "g"}
+        }
+    });
+    fs::write(&user_path, serde_json::to_vec(&user_file).unwrap()).unwrap();
+
+    let catalog = fixture.mcp.catalog(None, &cancel).await.unwrap();
+    assert!(
+        catalog.servers.contains_key("legacy"),
+        "a member dim does not read keeps the entry: {:?}",
+        catalog
+            .invalid
+            .iter()
+            .map(|entry| entry.error.to_string())
+            .collect::<Vec<_>>()
+    );
+    let collision = catalog
+        .invalid
+        .iter()
+        .find(|entry| entry.id == "collision")
+        .expect("the reserved member is the entry's error");
+    assert_eq!(collision.error.field.as_deref(), Some("$generation"));
+    assert!(
+        !catalog.invalid.iter().any(|entry| entry.id == "legacy"),
+        "the reserved member breaks only its own entry"
+    );
+
+    // Read the entry, edit another member, and write it back.
+    let revision = fixture
+        .settings
+        .read::<McpSettings>(SettingsScope::User, &cancel)
+        .await
+        .unwrap()
+        .revision;
+    let mut editable = fixture
+        .mcp
+        .editable(McpSource::User, "legacy".into(), &cancel)
+        .await
+        .unwrap();
+    let McpServerSettings::Stdio { args, .. } = &mut editable.configuration else {
+        panic!("the fixture entry is stdio");
+    };
+    args.push("--edited".into());
+    fixture
+        .mcp
+        .update(
+            SettingsScope::User,
+            revision,
+            "legacy".into(),
+            McpChange::Put(editable.configuration),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+    let persisted: Value = serde_json::from_slice(&fs::read(&user_path).unwrap()).unwrap();
+    assert_eq!(persisted["mcpServers"]["legacy"]["transport"], "stdio");
+    assert_eq!(persisted["mcpServers"]["legacy"]["metadata"], "x");
+    assert_eq!(
+        persisted["mcpServers"]["legacy"]["args"],
+        json!(["--flag", "--edited"])
+    );
+    assert_eq!(
+        persisted["mcpServers"]["collision"],
+        user_file["mcpServers"]["collision"]
+    );
+
+    // The read back returns the stored text of both unknown members.
+    let catalog = fixture.mcp.catalog(None, &cancel).await.unwrap();
+    let McpServerSettings::Stdio { extra, .. } = &catalog.servers["legacy"].configuration else {
+        panic!("the edited entry is stdio");
+    };
+    assert_eq!(extra["transport"], json!("stdio"));
+    assert_eq!(extra["metadata"], json!("x"));
+
+    fixture.close().await;
+}
