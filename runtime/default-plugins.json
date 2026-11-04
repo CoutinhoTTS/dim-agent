@@ -1,6 +1,5 @@
 {
   "plugins": {
-    "workflow": "plugins/workflow",
     "plugin-authoring": "plugins/plugin-authoring"
   },
   "locked": ["PluginManager", "Rpc", "Transport"],

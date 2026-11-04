@@ -851,26 +851,82 @@ async fn running(client: &mut Client, names: &[&str]) -> Value {
     }
 }
 
-/// Acceptance 1 and 10: the default configuration file loads the default
-/// plugins, and a default plugin's Settings source is there while it runs.
+/// Acceptance 1 and 10: the default configuration loads no process plugin,
+/// and Workflow runs only once it is installed and enabled, with its
+/// Settings source there while it runs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_default_plugins_load_and_their_settings_follow_them() {
+async fn node_workflow_runs_only_when_enabled_and_its_settings_follow_it() {
     let home = home();
     let mut config = config(&home);
+    let workflow_settings = home.join("workflow.json");
+    let workflow_runs = home.join("workflow/runs.json");
+    let settings_bytes = b"{\"definitions\":{},\"projectEnabled\":{}}\n";
+    let runs_bytes = br#"{"version":1,"text":"{\"version\":2,\"runs\":[]}"}"#;
+    std::fs::create_dir_all(workflow_runs.parent().unwrap()).unwrap();
+    std::fs::write(&workflow_settings, settings_bytes).unwrap();
+    std::fs::write(&workflow_runs, runs_bytes).unwrap();
     let mut parts = fixture();
     parts.rows.clear();
+    let workflow = parts.anchor.parent().unwrap().join("plugins/workflow");
     config.plugin_defaults = Some(parts.anchor.with_file_name("default-plugins.json"));
     config.session_typescript = Some(parts);
-    let (server, _requests, _) = start(config).await;
+    let (server, _requests, _) = start(config.clone()).await;
     let mut client = Client::new_version(&server, false, 3).await;
-    let defaults = ["workflow"];
-    let list = running(&mut client, &defaults).await;
-    for name in defaults {
-        assert_eq!(item(&list, name)["use"], "default", "{list}");
-    }
+    // No process plugin runs by default: `web` and `Agents` are built in,
+    // and Workflow is absent until it is installed.
+    let list = call(&mut client, "plugin.list", json!({})).await;
     assert_eq!(item(&list, "web")["use"], "builtin", "{list}");
     assert_eq!(item(&list, "Agents")["use"], "builtin", "{list}");
+    assert!(
+        list["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["name"] != "workflow"),
+        "{list}"
+    );
+    let absent = client.rpc("workflow.status", json!({})).await;
+    assert_eq!(absent["error"]["code"], -32601, "{absent}");
+    assert_eq!(std::fs::read(&workflow_settings).unwrap(), settings_bytes);
+    assert_eq!(std::fs::read(&workflow_runs).unwrap(), runs_bytes);
+
+    // Installed without being enabled, Workflow stays absent across a
+    // restart and leaves its files alone.
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.install",
+            json!({"source":{"path":workflow},"enable":false}),
+        )
+        .await,
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    let (server, _requests, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert!(item(&list, "workflow")["use"].is_null(), "{list}");
+    let absent = client.rpc("workflow.status", json!({})).await;
+    assert_eq!(absent["error"]["code"], -32601, "{absent}");
+    assert_eq!(std::fs::read(&workflow_settings).unwrap(), settings_bytes);
+    assert_eq!(std::fs::read(&workflow_runs).unwrap(), runs_bytes);
+
+    // Enabling the installed plugin runs it, and its Settings source
+    // follows it.
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.enable",
+            json!({"name":"workflow","use":"workflow"}),
+        )
+        .await,
+    );
+    let list = running(&mut client, &["workflow"]).await;
+    assert_eq!(item(&list, "workflow")["use"], "workflow", "{list}");
+    assert_ok(&call(&mut client, "workflow.status", json!({})).await);
 
     let read = json!({"source": "workflow", "scope": "user"});
     assert_ok(&call(&mut client, "settings.read", read.clone()).await);
@@ -881,7 +937,7 @@ async fn node_default_plugins_load_and_their_settings_follow_them() {
     running(&mut client, &["workflow"]).await;
     assert_ok(&call(&mut client, "settings.read", read).await);
 
-    // §6 `config`: the default plugin's Settings source through the `plugin` tool.
+    // §6 `config`: the enabled plugin's Settings source through the `plugin` tool.
     select_fixture_model(&mut client).await;
     let tools = json!(["plugin"]);
     let mut params = create(tools.clone());

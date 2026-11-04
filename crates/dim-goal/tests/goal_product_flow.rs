@@ -952,7 +952,7 @@ async fn goal_evaluator_judge_creates_an_evaluator_and_completes_on_done() {
     let line_events = session
         .session_service::<TreeCommands>()
         .unwrap()
-        .page(child.to_owned(), 0, 256)
+        .page(child.to_owned(), 0, 256, head)
         .await
         .unwrap();
     assert_eq!(

@@ -1085,7 +1085,9 @@ disabled because only the toggle or `dimcode mcp enable|disable` turns it on. An
 round trip would erase them.
 
 The edit document is the patch: an omitted field keeps its stored value, a present value replaces
-it, and `env` or `headers` changes only the keys it names. The seed names the command and working
+it, and `env` or `headers` changes only the keys it names. It may also state `timeout`, the
+entry's tool-call limit in milliseconds from 1000 to 86400000; `null` clears it and the ten-minute
+default applies ([MCP management §D20](appserver/mcp-management.md#d20-a-tool-call-waits-as-long-as-its-entry-allows)). The seed names the command and working
 directory, empty `env` and `headers`, and a configured OAuth's reported fields; it never names a
 stored argument, environment value, header value, bearer token or URL, because those are withheld
 or wholesale-replaced. The document carries no transport, since the stored entry's transport is
@@ -1103,6 +1105,8 @@ stored.
 ```json
 {"url": "https://mcp.example.com/mcp", "headers": {"X-Key": "value"}}
 ```
+
+A definition states `timeout` the same way, and the inspection shows a stated one.
 
 Add writes `mcp.save` with the catalog's source revision — `userRevision`, or `projectRevision`
 for a source of `project` — and refuses an id the catalog already lists, since a save would replace

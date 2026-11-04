@@ -242,12 +242,14 @@ In CI, set the `DIM_OAUTH_CLIENT_ID_CN` and `DIM_OAUTH_CLIENT_ID_GLOBAL` reposit
 ```text
 bin/dimcode[.exe]              # the CLI; runs its daemon as `dimcode app-server`
 default-plugins.json          # the default configuration file, passed as `--defaults`
-plugins/<name>/               # the default plugins with their production node_modules
+plugins/<name>/               # the default plugins; plugin-authoring has no production node_modules
 LICENSE
 NOTICE
 licenses/                     # Rust dependency texts and vendored notices
 release-manifest.json         # `account` records whether this is the account build
 ```
+
+Workflow is excluded from the default manifest and from development, alpha and release payloads, including its production dependencies. Its TypeScript source remains available for [explicit installation](../../runtime/plugins/workflow/README.md#loading); external packaging and distribution are tracked in [#1091](https://github.com/arcships/dim/issues/1091).
 
 The alpha publisher stages the plugin tree once on the build host and gives every platform the same copy, as `publish-alpha.mjs` does, so it runs `stage-plugins.mjs --portable`. That refuses, before installing anything, a listed plugin whose `package-lock.json` names a package with `os`, `cpu` or `libc`: one shared tree cannot carry another platform's package. `release.yml` stages on each platform's own runner and does not pass the flag.
 

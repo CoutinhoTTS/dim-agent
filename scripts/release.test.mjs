@@ -25,6 +25,23 @@ const installName=(directory)=>{
   return match?match[1]:path.basename(directory);
 };
 
+/** A checkout whose default list names `plugins`, each one carrying a package. */
+function packageCheckout(temporary,plugins) {
+  const checkout=path.join(temporary,'checkout');
+  mkdirSync(path.join(checkout,'scripts'),{recursive:true});
+  mkdirSync(path.join(checkout,'runtime'),{recursive:true});
+  cpSync(path.join(root,'scripts/stage-plugins.mjs'),path.join(checkout,'scripts/stage-plugins.mjs'));
+  writeFileSync(path.join(checkout,'runtime/default-plugins.json'),`${JSON.stringify({plugins})}\n`);
+  for (const [name,relative] of Object.entries(plugins)) {
+    const plugin=path.join(checkout,'runtime',relative);
+    mkdirSync(plugin,{recursive:true});
+    writeFileSync(path.join(plugin,'package.json'),`{"name":"${name}"}\n`);
+    writeFileSync(path.join(plugin,'package-lock.json'),`${JSON.stringify({name,lockfileVersion:3,packages:{'':{name}}})}\n`);
+    writeFileSync(path.join(plugin,'index.ts'),'export {};\n');
+  }
+  return path.join(checkout,'scripts/stage-plugins.mjs');
+}
+
 /** Temporary directories a stage holds for one plugin. */
 const leftovers=(output,relative,kind)=>{
   const parent=path.dirname(path.join(output,relative));
@@ -92,7 +109,30 @@ test('workflow actions use immutable commits',()=>{
   }
 });
 
-test('staging the default plugins update is incremental and never leaves a half stage', {skip:process.platform==='win32'}, (t)=>{
+test('the default list stages only its content plugin and runs no npm ci', {skip:process.platform==='win32'}, (t)=>{
+  const temporary=fixture(t);
+  const bin=path.join(temporary,'bin');
+  mkdirSync(bin);
+  const log=path.join(temporary,'npm.log');
+  writeFileSync(path.join(bin,'npm'),`#!/bin/bash\nprintf '%s\\n' "$PWD" >> "${log}"\nmkdir -p "$PWD/node_modules"\nexit 0\n`,{mode:0o755});
+  const env={PATH:`${bin}:${process.env.PATH}`};
+  const output=path.join(temporary,'staged');
+  const first=run('stage-plugins.mjs',[output,'--update'],env);
+  assert.equal(first.status,0,first.stderr);
+  assert.match(first.stdout,/npm ci: none/);
+  assert.equal(existsSync(log),false,'no default plugin needs npm ci');
+  const record=JSON.parse(readFileSync(path.join(output,'.stage-plugins.json'),'utf8'));
+  assert.equal(record.schemaVersion,1);
+  assert.deepEqual(Object.keys(record.plugins),['plugin-authoring']);
+  for (const name of ['goal','workflow']) {
+    assert.equal(existsSync(path.join(output,'plugins',name)),false,name);
+  }
+  assert(existsSync(path.join(output,'plugins/plugin-authoring/dim-plugin.json')));
+  const defaults=JSON.parse(readFileSync(path.join(output,'default-plugins.json')));
+  assert.deepEqual(Object.keys(defaults.plugins),['plugin-authoring']);
+});
+
+test('staging a package plugin update is incremental and never leaves a half stage', {skip:process.platform==='win32'}, (t)=>{
   const temporary=fixture(t);
   const bin=path.join(temporary,'bin');
   mkdirSync(bin);
@@ -100,75 +140,60 @@ test('staging the default plugins update is incremental and never leaves a half 
   const npm=(status)=>writeFileSync(path.join(bin,'npm'),`#!/bin/bash\nprintf '%s\\n' "$PWD" >> "${log}"\nmkdir -p "$PWD/node_modules"\nexit ${status}\n`,{mode:0o755});
   npm(0);
   const env={PATH:`${bin}:${process.env.PATH}`};
+  const script=packageCheckout(temporary,{first:'plugins/first',second:'plugins/second'});
   const output=path.join(temporary,'staged');
   const record=path.join(output,'.stage-plugins.json');
   const readRecord=()=>JSON.parse(readFileSync(record,'utf8'));
   const installs=()=>existsSync(log)?readFileSync(log,'utf8').trim().split('\n').filter(Boolean):[];
-  const update=()=>run('stage-plugins.mjs',[output,'--update'],env);
+  const update=()=>spawnSync(process.execPath,[script,output,'--update'],{encoding:'utf8',env:{...process.env,...env}});
   const first=update();
   assert.equal(first.status,0,first.stderr);
-  assert.match(first.stdout,/npm ci: workflow/);
-  assert.deepEqual(installs().map(installName).sort(),['workflow']);
+  assert.match(first.stdout,/npm ci: first, second/);
+  assert.deepEqual(installs().map(installName),['first','second']);
   assert.equal(readRecord().schemaVersion,1);
-  assert.deepEqual(Object.keys(readRecord().plugins).sort(),['plugin-authoring','workflow']);
+  assert.deepEqual(Object.keys(readRecord().plugins).sort(),['first','second']);
   const second=update();
   assert.equal(second.status,0,second.stderr);
   assert.match(second.stdout,/npm ci: none/);
-  assert.equal(installs().length,1);
-  const sourceFile=path.join(output,'plugins/workflow/index.ts');
+  assert.equal(installs().length,2);
+  const sourceFile=path.join(output,'plugins/first/index.ts');
   const original=readFileSync(sourceFile,'utf8');
   rmSync(sourceFile);
   assert.equal(update().status,0);
   assert.equal(readFileSync(sourceFile,'utf8'),original);
   const changed=readRecord();
-  changed.plugins.workflow.hash='stale';
+  changed.plugins.first.hash='stale';
   writeFileSync(record,`${JSON.stringify(changed)}\n`);
   const reinstalled=update();
   assert.equal(reinstalled.status,0,reinstalled.stderr);
-  assert.equal(installs().length,2);
-  assert.equal(installName(installs().at(-1)),'workflow');
-  const removed=readRecord();
-  removed.plugins.retired={hash:null,dir:'plugins/retired'};
-  writeFileSync(record,`${JSON.stringify(removed)}\n`);
-  mkdirSync(path.join(output,'plugins/retired'),{recursive:true});
-  writeFileSync(path.join(output,'plugins/retired/index.ts'),'export {}');
+  assert.equal(installs().length,3);
+  assert.equal(installName(installs().at(-1)),'first');
+  writeFileSync(path.join(temporary,'checkout/runtime/default-plugins.json'),`${JSON.stringify({plugins:{first:'plugins/first'}})}\n`);
   assert.equal(update().status,0);
-  assert.equal(existsSync(path.join(output,'plugins/retired')),false);
-  assert.equal(readRecord().plugins.retired,undefined);
-  writeFileSync(path.join(output,'plugins/workflow/marker'),'kept');
+  assert.equal(existsSync(path.join(output,'plugins/second')),false);
+  assert.equal(readRecord().plugins.second,undefined);
+  writeFileSync(path.join(output,'plugins/first/marker'),'kept');
   const failing=readRecord();
-  failing.plugins.workflow.hash='stale again';
+  failing.plugins.first.hash='stale again';
   writeFileSync(record,`${JSON.stringify(failing)}\n`);
   npm(1);
   const failed=update();
   assert.notEqual(failed.status,0);
-  assert.match(failed.stderr,/Cannot stage workflow/);
-  assert.equal(readFileSync(path.join(output,'plugins/workflow/marker'),'utf8'),'kept');
-  assert.deepEqual(leftovers(output,'plugins/workflow','partial'),[]);
-  assert.equal(readRecord().plugins.workflow.hash,'stale again');
+  assert.match(failed.stderr,/Cannot stage first/);
+  assert.equal(readFileSync(path.join(output,'plugins/first/marker'),'utf8'),'kept');
+  assert.deepEqual(leftovers(output,'plugins/first','partial'),[]);
+  assert.equal(readRecord().plugins.first.hash,'stale again');
 });
 
 test('the record follows the disk when an update fails part-way', {skip:process.platform==='win32'}, (t)=>{
   const temporary=fixture(t);
-  const checkout=path.join(temporary,'checkout');
-  mkdirSync(path.join(checkout,'scripts'),{recursive:true});
-  cpSync(path.join(root,'scripts/stage-plugins.mjs'),path.join(checkout,'scripts/stage-plugins.mjs'));
-  mkdirSync(path.join(checkout,'runtime'),{recursive:true});
-  const writeDefaults=(plugins)=>writeFileSync(path.join(checkout,'runtime/default-plugins.json'),`${JSON.stringify({plugins})}\n`);
-  writeDefaults({first:'plugins/first',second:'plugins/second'});
-  for (const name of ['first','second']) {
-    mkdirSync(path.join(checkout,'runtime/plugins',name),{recursive:true});
-    writeFileSync(path.join(checkout,'runtime/plugins',name,'package.json'),`{"name":"${name}"}\n`);
-    writeFileSync(path.join(checkout,'runtime/plugins',name,'package-lock.json'),`${JSON.stringify({name,lockfileVersion:3,packages:{'':{name}}})}\n`);
-    writeFileSync(path.join(checkout,'runtime/plugins',name,'index.ts'),'export {};\n');
-  }
+  const script=packageCheckout(temporary,{first:'plugins/first',second:'plugins/second'});
   const bin=path.join(temporary,'bin');
   mkdirSync(bin);
   const log=path.join(temporary,'npm.log');
   const fail=path.join(temporary,'fail-second');
   writeFileSync(path.join(bin,'npm'),`#!/bin/bash\nprintf '%s\\n' "$PWD" >> "${log}"\nmkdir -p "$PWD/node_modules"\ncase "$PWD" in *second*) [ -e "${fail}" ] && exit 1 ;; esac\nexit 0\n`,{mode:0o755});
   const env={PATH:`${bin}:${process.env.PATH}`};
-  const script=path.join(checkout,'scripts/stage-plugins.mjs');
   const output=path.join(temporary,'staged');
   const record=path.join(output,'.stage-plugins.json');
   const readRecord=()=>JSON.parse(readFileSync(record,'utf8'));
@@ -205,27 +230,28 @@ test('a failed swap leaves the live plugin whole until its replacement lands', {
   const log=path.join(temporary,'npm.log');
   writeFileSync(path.join(bin,'npm'),`#!/bin/bash\nprintf '%s\\n' "$PWD" >> "${log}"\nmkdir -p "$PWD/node_modules"\nexit 0\n`,{mode:0o755});
   const env={PATH:`${bin}:${process.env.PATH}`};
+  const script=packageCheckout(temporary,{first:'plugins/first'});
   const output=path.join(temporary,'staged');
-  const first=run('stage-plugins.mjs',[output,'--update'],env);
+  const first=spawnSync(process.execPath,[script,output,'--update'],{encoding:'utf8',env:{...process.env,...env}});
   assert.equal(first.status,0,first.stderr);
-  const live=path.join(output,'plugins/workflow');
+  const live=path.join(output,'plugins/first');
   const modules=path.join(live,'node_modules');
   assert(existsSync(modules));
   const record=path.join(output,'.stage-plugins.json');
   const recordBefore=readFileSync(record,'utf8');
   const source=readFileSync(path.join(live,'index.ts'),'utf8');
-  const {updateStage}=await import(pathToFileURL(path.join(root,'scripts/stage-plugins.mjs')).href);
+  const {updateStage}=await import(pathToFileURL(script).href);
   assert.throws(()=>updateStage(output,{
     rename:(from,to)=>{
       if(to===live&&from.includes('.partial')) throw new Error('injected rename failure');
       renameSync(from,to);
     },
-  }),/Cannot stage workflow/);
+  }),/Cannot stage first/);
   assert(existsSync(modules),'the live dependencies stay in place');
   assert.equal(readFileSync(path.join(live,'index.ts'),'utf8'),source);
   assert.equal(readFileSync(record,'utf8'),recordBefore);
-  assert.deepEqual([...leftovers(output,'plugins/workflow','partial'),...leftovers(output,'plugins/workflow','previous')],[]);
-  const next=run('stage-plugins.mjs',[output,'--update'],env);
+  assert.deepEqual([...leftovers(output,'plugins/first','partial'),...leftovers(output,'plugins/first','previous')],[]);
+  const next=spawnSync(process.execPath,[script,output,'--update'],{encoding:'utf8',env:{...process.env,...env}});
   assert.equal(next.status,0,next.stderr);
   assert.match(next.stdout,/npm ci: none/);
 });
@@ -237,22 +263,23 @@ test('an update recovers the stage a killed run left behind', {skip:process.plat
   const log=path.join(temporary,'npm.log');
   writeFileSync(path.join(bin,'npm'),`#!/bin/bash\nprintf '%s\\n' "$PWD" >> "${log}"\nmkdir -p "$PWD/node_modules"\nexit 0\n`,{mode:0o755});
   const env={PATH:`${bin}:${process.env.PATH}`};
+  const script=packageCheckout(temporary,{first:'plugins/first'});
   const output=path.join(temporary,'staged');
-  assert.equal(run('stage-plugins.mjs',[output,'--update'],env).status,0);
-  const live=path.join(output,'plugins/workflow');
+  assert.equal(spawnSync(process.execPath,[script,output,'--update'],{encoding:'utf8',env:{...process.env,...env}}).status,0);
+  const live=path.join(output,'plugins/first');
   renameSync(live,`${live}.previous.999999`);
   mkdirSync(`${live}.partial.999999`);
   writeFileSync(path.join(`${live}.partial.999999`,'leftover'),'x');
   const record=path.join(output,'.stage-plugins.json');
   const recordBefore=readFileSync(record,'utf8');
   const installed=readFileSync(log,'utf8').trim().split('\n').filter(Boolean).length;
-  const recovered=run('stage-plugins.mjs',[output,'--update'],env);
+  const recovered=spawnSync(process.execPath,[script,output,'--update'],{encoding:'utf8',env:{...process.env,...env}});
   assert.equal(recovered.status,0,recovered.stderr);
   assert.match(recovered.stdout,/npm ci: none/);
   assert(existsSync(path.join(live,'index.ts')));
   assert(existsSync(path.join(live,'node_modules')));
   assert.equal(readFileSync(log,'utf8').trim().split('\n').filter(Boolean).length,installed);
-  assert.deepEqual([...leftovers(output,'plugins/workflow','partial'),...leftovers(output,'plugins/workflow','previous')],[]);
+  assert.deepEqual([...leftovers(output,'plugins/first','partial'),...leftovers(output,'plugins/first','previous')],[]);
   assert.equal(readFileSync(record,'utf8'),recordBefore);
 });
 
@@ -266,7 +293,7 @@ test('two concurrent updates serialize on the stage lock', {skip:process.platfor
   writeFileSync(path.join(bin,'npm'),`#!/bin/bash\nprintf '%s\\n' "$PWD" >> "${log}"\nif [ ! -e "${ready}" ]; then\n  : > "${ready}"\n  for i in $(seq 1 1500); do [ -e "${release}" ] && break; sleep 0.02; done\nfi\nmkdir -p "$PWD/node_modules"\nexit 0\n`,{mode:0o755});
   const env={...process.env,PATH:`${bin}:${process.env.PATH}`};
   const output=path.join(temporary,'staged');
-  const script=path.join(root,'scripts/stage-plugins.mjs');
+  const script=packageCheckout(temporary,{first:'plugins/first'});
   const start=()=>{
     const child=spawn(process.execPath,[script,output,'--update'],{env});
     const result={out:'',err:'',status:null};
@@ -293,13 +320,10 @@ test('two concurrent updates serialize on the stage lock', {skip:process.platfor
   assert.match(secondRun.out,/npm ci: none/);
   const record=JSON.parse(readFileSync(path.join(output,'.stage-plugins.json')));
   assert.equal(record.schemaVersion,1);
-  assert.deepEqual(Object.keys(record.plugins).sort(),['plugin-authoring','workflow']);
-  for (const name of ['workflow']) {
-    assert(existsSync(path.join(output,'plugins',name,'node_modules')),name);
-    assert.match(record.plugins[name].hash,/^[0-9a-f]{64}$/);
-  }
-  assert.equal(record.plugins['plugin-authoring'].hash,null);
-  assert.deepEqual([...leftovers(output,'plugins/workflow','partial'),...leftovers(output,'plugins/workflow','previous')],[]);
+  assert.deepEqual(Object.keys(record.plugins),['first']);
+  assert(existsSync(path.join(output,'plugins/first/node_modules')));
+  assert.match(record.plugins.first.hash,/^[0-9a-f]{64}$/);
+  assert.deepEqual([...leftovers(output,'plugins/first','partial'),...leftovers(output,'plugins/first','previous')],[]);
 });
 
 test('a lock whose owner is gone is taken over', {skip:process.platform==='win32'}, (t)=>{
@@ -329,7 +353,7 @@ test('a lock with no owner is taken over without waiting', {skip:process.platfor
   const {updateStage}=await import(pathToFileURL(path.join(root,'scripts/stage-plugins.mjs')).href);
   updateStage(output,{waitMilliseconds:400,pollMilliseconds:50});
   assert.equal(existsSync(lock),false);
-  assert(existsSync(path.join(output,'plugins/workflow/index.ts')));
+  assert(existsSync(path.join(output,'plugins/plugin-authoring/dim-plugin.json')));
 });
 
 test('a lock owned by this process is stale', {skip:process.platform==='win32'}, async (t)=>{
@@ -351,7 +375,7 @@ test('temporaries of a live run survive and are removed once it has exited', {sk
   const update=()=>run('stage-plugins.mjs',[output,'--update'],env);
   assert.equal(update().status,0);
   const child=sleeper(t);
-  const partial=`${path.join(output,'plugins/workflow')}.partial.${child.pid}`;
+  const partial=`${path.join(output,'plugins/plugin-authoring')}.partial.${child.pid}`;
   const recordTemporary=path.join(output,`.stage-plugins.json.tmp.${child.pid}`);
   mkdirSync(partial,{recursive:true});
   writeFileSync(path.join(partial,'live.txt'),'live');
@@ -455,7 +479,7 @@ test('a recorded directory outside the stage is refused before anything changes'
   assert.match(refused.stderr,/retired/);
   assert.match(refused.stderr,/outside/);
   assert.equal(readFileSync(path.join(outside,'keep.txt'),'utf8'),'kept');
-  assert(existsSync(path.join(output,'plugins/workflow/index.ts')));
+  assert(existsSync(path.join(output,'plugins/plugin-authoring/dim-plugin.json')));
   assert.equal(readFileSync(record,'utf8'),before);
 });
 
@@ -476,7 +500,7 @@ test('a recorded stage root is refused before anything changes', {skip:process.p
   assert.notEqual(refused.status,0);
   assert.match(refused.stderr,/retired/);
   assert.equal(readFileSync(record,'utf8'),before);
-  assert(existsSync(path.join(output,'plugins/workflow/index.ts')));
+  assert(existsSync(path.join(output,'plugins/plugin-authoring/dim-plugin.json')));
 });
 
 test('a recorded parent directory does not remove the plugins inside it', {skip:process.platform==='win32'}, (t)=>{
@@ -493,9 +517,7 @@ test('a recorded parent directory does not remove the plugins inside it', {skip:
   writeFileSync(record,`${JSON.stringify(data)}\n`);
   const updated=run('stage-plugins.mjs',[output,'--update'],env);
   assert.equal(updated.status,0,updated.stderr);
-  for (const name of ['workflow']) {
-    assert(existsSync(path.join(output,'plugins',name,'index.ts')),name);
-  }
+  assert(existsSync(path.join(output,'plugins/plugin-authoring/dim-plugin.json')));
   const after=JSON.parse(readFileSync(record));
   assert.equal('retired' in after.plugins,false);
 });
@@ -526,7 +548,9 @@ test('the current default plugins pass the portable check', {skip:process.platfo
   const output=path.join(temporary,'staged');
   const staged=run('stage-plugins.mjs',[output,'--portable'],{PATH:`${bin}:${process.env.PATH}`});
   assert.equal(staged.status,0,staged.stderr);
-  assert(existsSync(path.join(output,'default-plugins.json')));
+  const defaults=JSON.parse(readFileSync(path.join(output,'default-plugins.json')));
+  assert.deepEqual(Object.keys(defaults.plugins),['plugin-authoring']);
+  assert.deepEqual(readdirSync(path.join(output,'plugins')),['plugin-authoring']);
 });
 
 test('stages public native payload, packs it and rejects modified content', {skip:process.platform==='win32'}, (t)=>{
@@ -575,10 +599,12 @@ test('stages the default plugins beside bin/ in the native archive and the npm p
   assert.match(noPlugins.stderr,/--plugins/);
   assert.equal(existsSync(path.join(temporary,'no-plugins')),false);
   const plugins=path.join(temporary,'plugins');
-  mkdirSync(path.join(plugins,'plugins/goal/node_modules/@arcships/rutis'),{recursive:true});
-  writeFileSync(path.join(plugins,'default-plugins.json'),'{"plugins":{"goal":"plugins/goal"}}');
-  writeFileSync(path.join(plugins,'plugins/goal/index.ts'),'export {}');
-  writeFileSync(path.join(plugins,'plugins/goal/node_modules/@arcships/rutis/package.json'),'{}');
+  const npmBin=path.join(temporary,'npm-bin');
+  mkdirSync(npmBin);
+  writeFileSync(path.join(npmBin,'npm'),'#!/bin/bash\nmkdir -p "$PWD/node_modules/@arcships/rutis"\nexit 0\n',{mode:0o755});
+  const selected=run('stage-plugins.mjs',[plugins],{PATH:`${npmBin}:${process.env.PATH}`});
+  assert.equal(selected.status,0,selected.stderr);
+  assert.deepEqual(readdirSync(path.join(plugins,'plugins')),['plugin-authoring']);
   assert.notEqual(run('stage-release.mjs',[bin,path.join(temporary,'empty'),version,commit,'--plugins',bin]).status,0);
   const stage=path.join(temporary,'stage');
   assert.notEqual(run('stage-release.mjs',[bin,stage,version,commit,'--plugins',plugins]).status,0);
@@ -589,14 +615,22 @@ test('stages the default plugins beside bin/ in the native archive and the npm p
   const staged=run('stage-release.mjs',[bin,stage,version,commit,'--plugins',plugins,'--rust-notices',stubRustNotices(temporary)]);
   assert.equal(staged.status,0,staged.stderr);
   const manifest=JSON.parse(readFileSync(path.join(stage,'release-manifest.json')));
-  for (const file of ['default-plugins.json','plugins/goal/index.ts','plugins/goal/node_modules/@arcships/rutis/package.json']) assert(manifest.files[file],file);
+  const defaults=JSON.parse(readFileSync(path.join(stage,'default-plugins.json'))).plugins;
+  assert.deepEqual(Object.keys(defaults),['plugin-authoring']);
+  for (const file of ['default-plugins.json','plugins/plugin-authoring/dim-plugin.json','plugins/plugin-authoring/skills/plugin-authoring/SKILL.md']) assert(manifest.files[file],file);
   const packed=run('pack-release.mjs',[stage,path.join(temporary,'packed')]);
   assert.equal(packed.status,0,packed.stderr);
   const packedManifest=JSON.parse(readFileSync(path.join(temporary,'packed/release-manifest.json')));
   const npm=path.join(temporary,'packed',packedManifest.npmPackages[0].file);
   const native=path.join(temporary,'packed',packedManifest.nativeArchives[0].file);
-  assert(entries(npm).includes('package/plugins/goal/node_modules/@arcships/rutis/package.json'));
+  assert(entries(npm).includes('package/plugins/plugin-authoring/skills/plugin-authoring/SKILL.md'));
   assert(entries(native).includes(`dimcode-${manifest.platform}/default-plugins.json`));
+  for (const archive of [native,npm]) {
+    for (const name of ['goal','workflow']) {
+      assert.equal(entries(archive).some(file=>file.includes(`/plugins/${name}/`)),false,name);
+    }
+    assert(entries(archive).some(file=>file.includes('/plugins/plugin-authoring/')));
+  }
   const metadata=spawnSync('tar',['-xOzf',npm,'package/package.json'],{encoding:'utf8'});
   assert.deepEqual(JSON.parse(metadata.stdout).files.slice(-2),['default-plugins.json','plugins']);
 });
