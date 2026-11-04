@@ -384,6 +384,7 @@ impl LanguageModel for XaiResponsesModel {
                     has_function_call = true;
                     let call_id = part.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
                     let name = part.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    let item_id = part.get("id").and_then(|v| v.as_str()).unwrap_or("");
                     let arguments = part.get("arguments").and_then(|v| v.as_str()).unwrap_or("");
                     let input = arguments.to_string();
                     content.push(GenerateContent::ToolCall(RawToolCall {
@@ -392,7 +393,9 @@ impl LanguageModel for XaiResponsesModel {
                         input,
                         provider_executed: None,
                         dynamic: None,
-                        provider_metadata: None,
+                        provider_metadata: (!item_id.is_empty()).then(|| {
+                            crate::xai::options::xai_metadata(json!({ "itemId": item_id }))
+                        }),
                     }));
                 }
                 "reasoning" => {
@@ -580,6 +583,9 @@ struct XaiResponsesStream {
     metadata_emitted: bool,
     /// Open text blocks.
     content_blocks: Vec<String>,
+    /// Text blocks a delta or an `output_item.done` part has already filled,
+    /// keyed by `text-{item_id}:{content_index}`.
+    text_blocks_seen: std::collections::HashSet<String>,
     seen_tool_calls: std::collections::HashSet<String>,
     active_reasoning: HashMap<String, ()>,
     /// Ongoing function calls: output_index -> (tool_call_id, tool_name).
@@ -587,6 +593,38 @@ struct XaiResponsesStream {
     /// Set by an `error` event: later chunks are ignored, the stream still
     /// finishes.
     finished: bool,
+}
+
+/// Open the text block of one `output_text` content part, closing the
+/// previous part's block of the same message first: a message's parts stream
+/// one after the other and the strict stream accepts one open block.
+fn start_text_block(
+    item_id: &str,
+    content_index: u64,
+    content_blocks: &mut Vec<String>,
+    text_blocks_seen: &mut std::collections::HashSet<String>,
+    controller: &mut Controller,
+) -> String {
+    let prefix = format!("text-{item_id}:");
+    let previous: Vec<String> = content_blocks
+        .iter()
+        .filter(|block| block.starts_with(&prefix))
+        .cloned()
+        .collect();
+    for block in previous {
+        content_blocks.retain(|open| open != &block);
+        controller.text_end(block);
+    }
+    let block_id = format!("text-{item_id}:{content_index}");
+    content_blocks.push(block_id.clone());
+    text_blocks_seen.insert(block_id.clone());
+    controller.enqueue(StreamPart::TextStart {
+        id: block_id.clone(),
+        provider_metadata: Some(crate::xai::options::xai_metadata(
+            json!({ "itemId": item_id, "contentIndex": content_index }),
+        )),
+    });
+    block_id
 }
 
 impl Transformer for XaiResponsesStream {
@@ -651,6 +689,7 @@ impl XaiResponsesStream {
             ref mut has_function_call,
             ref mut metadata_emitted,
             ref mut content_blocks,
+            ref mut text_blocks_seen,
             ref mut seen_tool_calls,
             ref mut active_reasoning,
             ref mut ongoing_tool_calls,
@@ -771,13 +810,28 @@ impl XaiResponsesStream {
                 // ── output_text.delta ──
                 if event_type == "response.output_text.delta" {
                     let item_id = parsed.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
+                    let content_index = parsed
+                        .get("content_index")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
                     let delta = parsed.get("delta").and_then(|v| v.as_str()).unwrap_or("");
-                    let block_id = format!("text-{item_id}");
-                    if !content_blocks.contains(&block_id) {
-                        content_blocks.push(block_id.clone());
-                        controller.text_start(block_id.clone());
+                    let block_id = format!("text-{item_id}:{content_index}");
+                    if !text_blocks_seen.contains(&block_id) {
+                        start_text_block(
+                            item_id,
+                            content_index,
+                            content_blocks,
+                            text_blocks_seen,
+                            controller,
+                        );
                     }
-                    controller.text_delta(block_id, delta.to_string());
+                    controller.enqueue(StreamPart::TextDelta {
+                        id: block_id,
+                        delta: delta.to_string(),
+                        provider_metadata: Some(crate::xai::options::xai_metadata(
+                            json!({ "itemId": item_id, "contentIndex": content_index }),
+                        )),
+                    });
                     return;
                 }
 
@@ -1146,16 +1200,28 @@ impl XaiResponsesStream {
                             .and_then(|v| v.as_array())
                             .cloned()
                             .unwrap_or_default();
-                        for cp in &content_parts {
+                        let part_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        for (content_index, cp) in content_parts.iter().enumerate() {
                             if let Some(text) = cp.get("text").and_then(|v| v.as_str())
                                 && !text.is_empty()
                             {
-                                let part_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                                let block_id = format!("text-{part_id}");
-                                if !content_blocks.contains(&block_id) {
-                                    content_blocks.push(block_id.clone());
-                                    controller.text_start(block_id.clone());
-                                    controller.text_delta(block_id, text.to_string());
+                                let block_id = format!("text-{part_id}:{content_index}");
+                                if !text_blocks_seen.contains(&block_id) {
+                                    let content_index = content_index as u64;
+                                    let block_id = start_text_block(
+                                        part_id,
+                                        content_index,
+                                        content_blocks,
+                                        text_blocks_seen,
+                                        controller,
+                                    );
+                                    controller.enqueue(StreamPart::TextDelta {
+                                        id: block_id,
+                                        delta: text.to_string(),
+                                        provider_metadata: Some(crate::xai::options::xai_metadata(
+                                            json!({ "itemId": part_id, "contentIndex": content_index }),
+                                        )),
+                                    });
                                 }
                             }
                             if let Some(annotations) =
@@ -1189,11 +1255,22 @@ impl XaiResponsesStream {
                     if item_type == "function_call" {
                         let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
                         let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        let item_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        let item_metadata = (!item_id.is_empty()).then(|| {
+                            crate::xai::options::xai_metadata(json!({ "itemId": item_id }))
+                        });
 
                         if event_type == "response.output_item.added" {
                             ongoing_tool_calls
                                 .insert(output_index, (call_id.to_string(), name.to_string()));
-                            controller.tool_input_start(call_id.to_string(), name.to_string());
+                            controller.enqueue(StreamPart::ToolInputStart {
+                                id: call_id.to_string(),
+                                tool_name: name.to_string(),
+                                provider_executed: None,
+                                dynamic: None,
+                                title: None,
+                                provider_metadata: item_metadata,
+                            });
                         } else {
                             // output_item.done
                             *has_function_call = true;
@@ -1208,7 +1285,7 @@ impl XaiResponsesStream {
                                 input,
                                 provider_executed: None,
                                 dynamic: None,
-                                provider_metadata: None,
+                                provider_metadata: item_metadata,
                             }));
                         }
                     }

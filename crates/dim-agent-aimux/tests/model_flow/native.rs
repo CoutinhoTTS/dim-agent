@@ -584,6 +584,143 @@ async fn xai_native_continuation_roundtrips_and_owner_releases_streams() {
 }
 
 #[tokio::test]
+async fn xai_responses_content_parts_keep_their_blocks() {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+    let server = MockServer::start().await;
+    let frames = [
+        json!({"type":"response.created","response":{"id":"resp-parts","created_at":1,"model":"test-model"}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1"}}),
+        json!({"type":"response.output_text.delta","item_id":"msg_1","content_index":0,"delta":"before"}),
+        json!({"type":"response.output_text.delta","item_id":"msg_1","content_index":1,"delta":"after"}),
+        json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_1","content":[
+            {"type":"output_text","text":"before"},
+            {"type":"output_text","text":"after"},
+            {"type":"output_text","text":"only-in-done"}
+        ]}}),
+        json!({"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":3,"output_tokens":3}}}),
+    ]
+    .into_iter()
+    .map(|frame| format!("data: {frame}\n\n"))
+    .collect::<String>();
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(frames),
+        )
+        .mount(&server)
+        .await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let request = ModelRequest::new("xai", "alias", vec![Message::text(Role::User, "start")]);
+    let mut output = host
+        .0
+        .invoke(
+            Arc::new(request),
+            ModelConnection::Http(HttpModelConnection {
+                protocol: ModelProtocol::XaiResponses,
+                base_url: format!("{}?tenant=native", server.uri()),
+                network: Default::default(),
+                headers: std::collections::HashMap::new(),
+                bearer: Some("fixture-key".into()),
+                api_key: None,
+                preset: None,
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let mut parts = None;
+    while let Some(chunk) = output.next().await {
+        if let ModelChunk::Content(value) = chunk.unwrap() {
+            parts = Some(value);
+        }
+    }
+    let parts = parts.expect("native content must be emitted");
+    let texts: Vec<&str> = parts
+        .iter()
+        .filter_map(|part| match part {
+            MessagePart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, ["before", "after", "only-in-done"]);
+    let request = ModelRequest::new(
+        "xai",
+        "alias",
+        vec![
+            Message::text(Role::User, "start"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![
+                    MessagePart::Text {
+                        text: "before".into(),
+                        start_time: None,
+                        end_time: None,
+                        provider_metadata: Some(ContentMetadata::XaiResponses {
+                            item_id: "msg_1".into(),
+                            encrypted_content: None,
+                        }),
+                    },
+                    MessagePart::Text {
+                        text: "after".into(),
+                        start_time: None,
+                        end_time: None,
+                        provider_metadata: Some(ContentMetadata::XaiResponses {
+                            item_id: "msg_1".into(),
+                            encrypted_content: None,
+                        }),
+                    },
+                ]),
+            },
+        ],
+    );
+    let mut output = host
+        .0
+        .invoke(
+            Arc::new(request),
+            ModelConnection::Http(HttpModelConnection {
+                protocol: ModelProtocol::XaiResponses,
+                base_url: format!("{}?tenant=native", server.uri()),
+                network: Default::default(),
+                headers: std::collections::HashMap::new(),
+                bearer: Some("fixture-key".into()),
+                api_key: None,
+                preset: None,
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    while let Some(chunk) = output.next().await {
+        chunk.unwrap();
+    }
+    let sent = server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&sent[1].body).unwrap();
+    let messages: Vec<&Value> = body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|part| part["role"] == "assistant")
+        .collect();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["id"], "msg_1");
+    assert_eq!(
+        messages[0]["content"],
+        json!([
+            {"type": "output_text", "text": "before"},
+            {"type": "output_text", "text": "after"},
+        ])
+    );
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn explicit_preferences_reach_chat_and_responses_for_model_aliases() {
     for (kind, protocol) in [
         ("openai-chat", ModelProtocol::OpenaiChat),

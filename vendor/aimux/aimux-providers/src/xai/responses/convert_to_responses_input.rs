@@ -1,6 +1,8 @@
 //! Prompt to the Responses `input` array (`convert-to-xai-responses-input.ts`),
 //! with the image `detail` option of `xai-file-part-options.ts`.
 
+use std::collections::HashMap;
+
 use aimux_core::error::AiMuxError;
 use aimux_core::language_model_message::{
     AssistantPart, FilePart, LanguageModelMessage, LanguageModelPrompt, ReasoningPart, TextPart,
@@ -86,6 +88,9 @@ pub fn convert_to_xai_responses_input(
                 input.push(json!({ "role": "user", "content": content_parts }));
             }
             LanguageModelMessage::Assistant { content, .. } => {
+                // Text parts of one message item become one input item,
+                // keyed by the item id carried in the provider options.
+                let mut text_items: HashMap<String, usize> = HashMap::new();
                 for part in content {
                     match part {
                         AssistantPart::Text(TextPart {
@@ -98,11 +103,23 @@ pub fn convert_to_xai_responses_input(
                                 .and_then(|x| x.get("itemId"))
                                 .and_then(|v| v.as_str())
                                 .map(std::string::ToString::to_string);
-                            let mut msg_obj = json!({ "role": "assistant", "content": text });
                             if let Some(id) = id {
-                                msg_obj["id"] = json!(id);
+                                if let Some(&index) = text_items.get(&id) {
+                                    input[index]["content"]
+                                        .as_array_mut()
+                                        .expect("text item content is an array")
+                                        .push(json!({ "type": "output_text", "text": text }));
+                                } else {
+                                    text_items.insert(id.clone(), input.len());
+                                    input.push(json!({
+                                        "role": "assistant",
+                                        "id": id,
+                                        "content": [{ "type": "output_text", "text": text }],
+                                    }));
+                                }
+                            } else {
+                                input.push(json!({ "role": "assistant", "content": text }));
                             }
-                            input.push(msg_obj);
                         }
                         AssistantPart::ToolCall(ToolCallPart {
                             tool_call_id,
