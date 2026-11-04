@@ -1,0 +1,131 @@
+name: Publish alpha npm packages
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published alpha GitHub Release tag (vX.Y.Z-alpha.N)
+        required: true
+        type: string
+      publish:
+        description: Publish with npm OIDC on a GitHub-hosted runner
+        default: false
+        type: boolean
+permissions:
+  contents: read
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: github.repository == 'arcships/dim' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 15
+    outputs:
+      sha: ${{ steps.release.outputs.sha }}
+      id: ${{ steps.release.outputs.id }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Download and verify the original alpha packages
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-alpha\.(0|[1-9][0-9]*)$ ]]
+          mkdir -p staging
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > staging/github-release.json
+          jq -e --arg tag "$RELEASE_TAG" '.draft == false and .prerelease == true and .published_at != null and .tag_name == $tag' staging/github-release.json > /dev/null
+          source_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs%2Ftags%2F$RELEASE_TAG" --jq .sha)
+          [[ "$source_sha" =~ ^[a-f0-9]{40}$ ]]
+          git merge-base --is-ancestor "$source_sha" origin/main
+          {
+            echo "sha=$source_sha"
+            echo "id=$(jq -er .id staging/github-release.json)"
+          } >> "$GITHUB_OUTPUT"
+          gh release download "$RELEASE_TAG" --dir staging/npm --pattern '*.tgz' --pattern release-manifest.json
+          node scripts/publish-npm.mjs staging/npm "${RELEASE_TAG#v}" "$source_sha" --check-release staging/github-release.json
+      - name: Report publication status
+        env:
+          PUBLISH_REQUESTED: ${{ inputs.publish }}
+          PUBLISH_ENABLED: ${{ vars.NPM_ALPHA_PUBLISH_ENABLED }}
+        shell: bash
+        run: |
+          if [[ "$PUBLISH_REQUESTED" != true || "$PUBLISH_ENABLED" != true ]]; then
+            echo 'Validated only. npm publication requires publish=true and NPM_ALPHA_PUBLISH_ENABLED=true.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ "$PUBLISH_REQUESTED" == true && "$PUBLISH_ENABLED" != true ]]; then
+            echo 'npm publication is disabled: configure the trusted publishers before enabling NPM_ALPHA_PUBLISH_ENABLED.' >&2
+            exit 1
+          fi
+  publish:
+    needs: verify
+    if: inputs.publish && vars.NPM_ALPHA_PUBLISH_ENABLED == 'true' && github.repository == 'arcships/dim' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: npm-release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: .node-version
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Check npm trusted publishing support
+        shell: bash
+        run: |
+          npm_version=$(npm --version)
+          NPM_VERSION="$npm_version" node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          const [major, minor, patch] = process.env.NPM_VERSION.split('.').map(Number);
+          assert(major > 11 || (major === 11 && (minor > 5 || (minor === 5 && patch >= 1))), 'npm 11.5.1 or newer is required for OIDC');
+          NODE
+      - name: Recheck the Release and publish dependencies before dimcode-alpha
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ needs.verify.outputs.id }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_SHA: ${{ needs.verify.outputs.sha }}
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-alpha\.(0|[1-9][0-9]*)$ ]]
+          mkdir -p staging
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > staging/github-release.json
+          jq -e '.prerelease == true' staging/github-release.json > /dev/null
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/commits/refs%2Ftags%2F$RELEASE_TAG" --jq .sha)" == "$SOURCE_SHA" ]]
+          gh release download "$RELEASE_TAG" --dir staging/npm --pattern '*.tgz' --pattern release-manifest.json
+          node scripts/publish-npm.mjs staging/npm "${RELEASE_TAG#v}" "$SOURCE_SHA" --publish staging/github-release.json
+      - name: Record published Release provenance
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          const manifest = JSON.parse(readFileSync('staging/npm/release-manifest.json'));
+          const release = JSON.parse(readFileSync('staging/github-release.json'));
+          writeFileSync('npm-publication.json', JSON.stringify({ ...manifest, releaseId: release.id, releaseTag: process.env.RELEASE_TAG }));
+          NODE
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: npm-publication
+          path: npm-publication.json
+          if-no-files-found: error
+          retention-days: 1

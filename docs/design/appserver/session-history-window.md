@@ -326,8 +326,10 @@ batch edges, which the query does not carry ([ADR 020](../../adr/020-timeline-re
 
 ### 5.3 Where the reads live
 
-The anchors are the branch's Timeline service, which `Connection::history`
-already has the loaded Session for. The backward page is a persistence read of
+The anchors are queried through the Session's tree service: it forwards an open
+line to its Timeline and reads an ended line at the fixed head it owns. A line
+ending during a history read therefore keeps the same anchor selection. The
+backward page is a persistence read of
 the Session's own branch, next to the store reads the App Server already has
 for Collaboration and summaries: `read_page`
 ([storage/timeline.rs:1010](../../../crates/dim-app-server/src/storage/timeline.rs#L1010)),

@@ -2,7 +2,7 @@ use crate::config::{ModelConfigFile, ProviderKind};
 use dim_agent_capabilities::context_model::window_facts;
 use dim_agent_capabilities::host::{ContextModel, HostError, HostFuture, ResolveContextModel};
 use dim_agent_runtime::ModelId;
-use dim_agent_types::{ModelConfig, ModelRequest};
+use dim_agent_types::{ModelCapabilities, ModelCapabilitySnapshot, ModelConfig, ModelRequest};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -163,6 +163,38 @@ impl AimuxModels {
             .values()
             .flat_map(|models| models.values())
             .filter_map(|model| model.api_key_env.clone())
+            .collect()
+    }
+
+    /// The models this configuration serves, by provider and then model id:
+    /// what the `selectableModels` read answers. The file declares the two
+    /// limits and no other capability, so every entry carries the text
+    /// defaults and those limits.
+    pub(crate) fn selectable(&self) -> Vec<ModelCapabilitySnapshot> {
+        let mut entries: Vec<(&str, &str, &Model)> = self
+            .providers
+            .iter()
+            .flat_map(|(provider, models)| {
+                models
+                    .iter()
+                    .map(move |(model, entry)| (provider.as_str(), model.as_str(), entry))
+            })
+            .collect();
+        entries.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        entries
+            .into_iter()
+            .map(|(provider_id, model_id, model)| ModelCapabilitySnapshot {
+                target: ModelId {
+                    provider_id: provider_id.to_owned(),
+                    model_id: model_id.to_owned(),
+                },
+                capabilities: ModelCapabilities::with_limits(
+                    model.context_window,
+                    model.max_output_tokens,
+                ),
+                reasoning: None,
+                service_tier: None,
+            })
             .collect()
     }
 

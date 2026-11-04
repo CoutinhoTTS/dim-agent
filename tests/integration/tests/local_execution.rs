@@ -1909,9 +1909,10 @@ async fn wait_publishes_and_accepts_its_exact_timeout_boundaries() {
 async fn wait_ends_on_the_matching_completion_not_on_the_input_that_started_the_turn() {
     let harness = Harness::new(platform(&[]).await, Hook::None).await;
     let session = harness.session().await;
+    let first = harness.cwd.join("first-ready");
     harness.model.push(&[(
         "exec",
-        json!({"command": "sleep 1; echo one", "runInBackground": true}),
+        json!({"command": format!("while [ ! -f '{}' ]; do sleep 0.01; done; echo one", first.display()), "runInBackground": true}),
     )]);
     harness
         .run(
@@ -1919,6 +1920,11 @@ async fn wait_ends_on_the_matching_completion_not_on_the_input_that_started_the_
             &[("wait", json!({"taskId": "$TASK", "timeoutMs": 20000}))],
         )
         .await;
+    until(&session, "matching wait started", |events| {
+        count(events, "step/tool-call") == 2
+    })
+    .await;
+    std::fs::write(first, "").unwrap();
     let events = until(&session, "wait", |events| wait_texts(events).len() == 1).await;
     let task = task_of(&results(&events)[0]);
     assert_eq!(
@@ -1927,9 +1933,10 @@ async fn wait_ends_on_the_matching_completion_not_on_the_input_that_started_the_
     );
     session.idle("main").await.unwrap();
 
+    let second = harness.cwd.join("second-ready");
     harness.model.push(&[(
         "exec",
-        json!({"command": "echo two", "runInBackground": true}),
+        json!({"command": format!("while [ ! -f '{}' ]; do sleep 0.01; done; echo two", second.display()), "runInBackground": true}),
     )]);
     harness
         .run(
@@ -1937,6 +1944,11 @@ async fn wait_ends_on_the_matching_completion_not_on_the_input_that_started_the_
             &[("wait", json!({"taskId": "exec-other", "timeoutMs": 1500}))],
         )
         .await;
+    until(&session, "nonmatching wait started", |events| {
+        count(events, "step/tool-call") == 4
+    })
+    .await;
+    std::fs::write(second, "").unwrap();
     let events = until(&session, "timeout", |events| wait_texts(events).len() == 2).await;
     assert_eq!(wait_texts(&events)[1], "wait ended: timeout");
     session.close().await.unwrap();
