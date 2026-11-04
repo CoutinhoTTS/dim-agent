@@ -785,6 +785,9 @@ impl FullScreen {
             screen.push(clip(row, cols).0);
         }
         screen.truncate(rows);
+        for row in &mut screen {
+            *row = scrub(row).into_owned();
+        }
 
         let mut cursor = frame.cursor.and_then(|(row, column)| {
             let row = (row as usize).checked_sub(split + dock_skip)?;
@@ -829,7 +832,7 @@ impl FullScreen {
             }
             push_move(&mut out, 0, i as u16);
             out.extend_from_slice(ERASE_LINE);
-            out.extend_from_slice(scrub(&row).as_bytes());
+            out.extend_from_slice(row.as_bytes());
             out.extend_from_slice(b"\x1b[0m");
             self.painted[i] = Some(row);
             self.cursor_at = None;
@@ -1405,10 +1408,13 @@ fn overlay_origin(
 fn composite(base: &str, row: &str, x: usize, cols: usize) -> String {
     let plain = strip_escapes(base);
     let width = clip(row, usize::MAX).1;
+    let row = scrub(row);
     format!(
-        "\x1b[2m{}\x1b[0m{row}\x1b[0m\x1b[2m{}",
+        "\x1b[?7l\x1b[2m{}\x1b[{}G{}\x1b[{}G\x1b[0m{row}\x1b[?7h",
         cells(&plain, 0, x),
-        cells(&plain, x + width, cols)
+        x + width + 1,
+        cells(&plain, x + width, cols),
+        x + 1,
     )
 }
 
@@ -1886,6 +1892,38 @@ mod tests {
             row: 0,
         };
         assert_eq!(screen.mouse(wheel, &doc), MouseOutcome::Overlay(1));
+    }
+
+    #[test]
+    fn an_overlay_stays_in_place_over_emoji_with_legacy_terminal_widths() {
+        let (mut screen, mut emu) = setup();
+        let mut doc = Doc::new();
+        doc.say(&[
+            "🇯🇵 0123456789ABC right",
+            "👍🏽 0123456789ABC right",
+            "👨‍👩‍👧‍👦 0123456789ABC right",
+            "unchanged",
+            "behind the box",
+        ]);
+        let mut f = frame(&[], &DOCK);
+        draw(&mut screen, &mut emu, &f, &doc);
+        let before = emu.rows_text();
+        f.overlay = Some(Overlay {
+            rows: vec!["┌──┐".into(), "│> │".into(), "└──┘".into()],
+            cursor: Some((1, 2)),
+        });
+        draw(&mut screen, &mut emu, &f, &doc);
+        for (y, border) in [(1, "┌──┐"), (2, "│> │"), (3, "└──┘")] {
+            assert_eq!(emu.screen[y][13..17].iter().collect::<String>(), border);
+            assert_eq!(emu.screen[y][17..22].iter().collect::<String>(), "right");
+        }
+        assert_eq!((emu.cy, emu.cx), (2, 15));
+        assert_eq!(emu.row(4), "unchanged");
+        assert_eq!(emu.row(5), "behind the box");
+        assert!(draw(&mut screen, &mut emu, &f, &doc).is_empty());
+        f.overlay = None;
+        draw(&mut screen, &mut emu, &f, &doc);
+        assert_eq!(emu.rows_text(), before);
     }
 
     #[test]
