@@ -428,7 +428,7 @@ C4、SessionTitle、Scheduler 和 Workflow 不需要改动。不向 rutis 提需
 `Session::closed()`、`agent.list` 中的已装载数、某次调用的回复）并设超时，从不只靠 sleep。
 
 1. **#126 的测量场景。** 一个测试插件经 `sessions` 启动 50 个 Session，每个运行一次输入、`idle` 和 `history` 分页，然后释放。宽限期之后全部卸载：
-   `agent.list` 显示没有已装载的 Session，而 `session.summaries` 列出全部 50 个，其历史可以完整读取。之后对其中一个调用 `sessions.input` 会恢复它，并运行其 turn。
+   `agent.list` 显示没有已装载的 Session，而 `session.summaries` 从元数据列出全部 50 个；读取某个 Session 的历史会 acquire 它，只装载这一个。之后对其中一个调用 `sessions.input` 会恢复它，并运行其 turn。
    实现 PR 还要给出前后的 `xtask measure` 数据、已装载数和任务数。
 2. **一次运行之内不恢复。** 在一次运行中（`input`、`idle`、三页 `history`），调用之间不恢复 Session：`main` 上没有新增 `branch/resume`。
 3. **卸载期间的 acquire。** 一个测试 Session 部件把自己的卸载扣住，直到测试放行，于是在释放进行中时 `sessions.history` 和 Rpc 的 `session.history`
