@@ -475,7 +475,7 @@ The coordination text for `main` is judged with [§12.3](#123-evaluation-scenari
 - `x`, then `y`, ends the selected line, refused on `main`.
 - Questions and approvals carry the line's label, so two lines asking for the same thing are told apart (`(branch NAME)` on a question, `Permission on branch NAME` on an approval).
 - A message between `main` and a line reads as sent on the sender (its `branch` tool call) and as received on the receiver (`◂ from C`).
-- Switching the shown line starts another transcript under a boundary row (`line C`), as a session switch does, because terminal scrollback is append-only. The line's own transcript folds from its events while it is shown or not, so opening a line reads no history.
+- Switching the shown line starts another transcript under a boundary row (`line C`), as a session switch does, because terminal scrollback is append-only. Discovery retains task inventory and branch-history state, not a full transcript for every line. The first open, through `/lines` or a side view, retains that line's transcript and reads its history from `after:0` through the [existing task-history queue](background-task-list.md#2-discover-and-fold-tasks), including when discovery previously failed. An initial read already in progress from `after:0` can serve that open. Later opens reuse the retained transcript, which continues folding live events even while another line is shown.
 
 The panel is separate from the tasks panel, which lists background commands, members and Workflow runs: its `x` stops a task, and an end is permanent, so the two do not share keys.
 
