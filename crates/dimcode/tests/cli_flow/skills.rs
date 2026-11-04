@@ -49,7 +49,9 @@ fn skill_discovery_reports_failures_and_a_failed_reload_keeps_the_palette() {
         wire.no_context();
         wire.hold();
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut command = home.command();
+    command.env_remove("TMUX");
+    let mut terminal = Terminal::launch_tui(command);
     terminal.until("Skills unavailable: Skill source is unavailable");
     terminal.write(b"/reload-skills\r");
     terminal.write(b"/comm");
