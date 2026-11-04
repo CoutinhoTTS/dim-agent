@@ -488,6 +488,11 @@ impl AgentIndex {
     pub(crate) fn idle_admitted(&self) -> Arc<tokio::sync::Notify> {
         self.idle_admitted.clone()
     }
+    /// How many uses Session `id` has right now. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub(crate) fn uses(&self, id: &str) -> usize {
+        self.directory.inner.lock().expect("agent index").uses(id)
+    }
     pub fn default_host(&self) -> Option<Arc<AgentHost>> {
         self.host(Some(self.default_agent_id()))
     }

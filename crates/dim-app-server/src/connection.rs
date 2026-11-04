@@ -69,6 +69,9 @@ pub(crate) struct Connection {
     pub shutdown_reply: Mutex<Option<RequestId>>,
     ids: Mutex<HashMap<RequestId, Option<CancellationToken>>>,
     attachments: Mutex<HashMap<String, Attachment>>,
+    /// Serializes attach, detach and finish so one retirement per connection
+    /// is in flight and the window an attachment lives in is private.
+    transitions: tokio::sync::Mutex<()>,
     next_attachment: AtomicU64,
     subscriptions: TaskTracker,
 }
@@ -104,6 +107,7 @@ impl Connection {
             hub,
             ids: Mutex::new(HashMap::new()),
             attachments: Mutex::new(HashMap::new()),
+            transitions: tokio::sync::Mutex::new(()),
             next_attachment: AtomicU64::new(1),
             subscriptions: TaskTracker::new(),
         });
@@ -141,17 +145,28 @@ impl Connection {
         }
         self.hub.ui.release(&self.id);
         self.hub.ui.finished(&self.id);
-        let sessions: Vec<String> = self
-            .attachments
-            .lock()
-            .expect("attachments")
-            .keys()
-            .cloned()
-            .collect();
-        self.attachments.lock().expect("attachments").clear();
+        // Every attachment settles before the connection's task tracker is
+        // closed: a detached connection leaves no listener, task or usage
+        // behind for the Session's next attach.
+        let _transition = self.transitions.lock().await;
+        let (sessions, attachments): (Vec<String>, Vec<Attachment>) = {
+            let mut attachments = self.attachments.lock().expect("attachments");
+            let sessions = attachments.keys().cloned().collect();
+            (
+                sessions,
+                attachments
+                    .drain()
+                    .map(|(_, attachment)| attachment)
+                    .collect(),
+            )
+        };
         for session in sessions {
             self.hub.notify_clients(&session);
         }
+        for attachment in attachments {
+            attachment.retire().await;
+        }
+        drop(_transition);
         self.subscriptions.close();
         self.subscriptions.wait().await;
         self.hub
@@ -888,12 +903,20 @@ impl Connection {
                     .map(Err);
             }
             Call::Detach(params) => {
-                self.attachments
+                // The attachment settles before the reply: its listener,
+                // tasks and usage are gone when the client learns the detach
+                // happened, so a count read now is the count after the work.
+                let _transition = self.transitions.lock().await;
+                let retired = self
+                    .attachments
                     .lock()
                     .expect("attachments")
                     .remove(&params.session_id);
                 self.hub.ui.detach(&self.id, &params.session_id);
                 self.hub.notify_clients(&params.session_id);
+                if let Some(retired) = retired {
+                    retired.retire().await;
+                }
                 Ok(Reply::empty())
             }
             Call::Submit(params) => self.submit(rpc, params).await,
@@ -1724,6 +1747,19 @@ impl ConnectionHub {
             .filter_map(Weak::upgrade)
             .filter(|conn| conn.is_attached(session))
             .count()
+    }
+    /// Subscription tasks the live connections still track. A detach or
+    /// finish awaits its attachment, so a settled connection reads its
+    /// baseline here. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub(crate) fn live_subscriptions(&self) -> usize {
+        self.connections
+            .lock()
+            .expect("connection index")
+            .values()
+            .filter_map(Weak::upgrade)
+            .map(|connection| connection.subscriptions.len())
+            .sum()
     }
     fn set_client_emitter(&self, ctx: rutis::Ctx) {
         *self.client_emitter.lock().expect("client emitter") = Some(ctx);

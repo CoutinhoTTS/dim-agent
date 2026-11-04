@@ -260,6 +260,23 @@ impl RunningServer {
             .get::<AgentIndex>()
             .map(|index| index.idle_admitted())
     }
+    /// Subscription tasks the server's live connections still track: zero
+    /// once every attach, detach and finish has settled. Feature `testing`
+    /// only.
+    #[cfg(feature = "testing")]
+    pub fn live_subscriptions(&self) -> usize {
+        self.root
+            .get::<crate::connection::ConnectionHub>()
+            .map_or(0, |hub| hub.live_subscriptions())
+    }
+    /// How many uses Session `session_id` has right now. Feature `testing`
+    /// only.
+    #[cfg(feature = "testing")]
+    pub fn uses(&self, session_id: &str) -> usize {
+        self.root
+            .get::<AgentIndex>()
+            .map_or(0, |index| index.uses(session_id))
+    }
     pub async fn join(mut self) -> Result<ShutdownReason> {
         self.task.take().expect("server task").await?
     }

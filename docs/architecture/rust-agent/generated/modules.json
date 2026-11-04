@@ -2049,6 +2049,7 @@
       "unexpandedMacros": [
         "matches",
         "tokio::select",
+        "tracing::warn",
         "vec"
       ]
     },
@@ -17781,6 +17782,7 @@
         "path ConnectionHub",
         "path ConnectionPlugin::new",
         "path RpcPlugin::new",
+        "path crate::connection::ConnectionHub",
         "use connection::ConnectionHub",
         "use connection::ConnectionPlugin",
         "use connection::RpcPlugin"
