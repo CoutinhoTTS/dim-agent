@@ -6809,5 +6809,33 @@ async fn a_chain_read_continues_past_a_page_that_ended_in_an_ancestor() {
             "a page of {page} reads the same chain"
         );
     }
+    let end = 3;
+    assert!(
+        head > end,
+        "the ancestor reaches past the range end: {head}"
+    );
+    let bounded = chain_events(&session, &child, ..=end).await.unwrap();
+    let opening = bounded
+        .iter()
+        .rposition(|event| matches!(event.kind, EventKind::BranchStart(_)))
+        .expect("the chain holds the branch's opening");
+    assert_eq!(
+        bounded[opening..]
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        (1..=end).collect::<Vec<_>>(),
+        "the range holds the branch's first facts"
+    );
+    for page in 1..=bounded.len() as u64 {
+        let paged = chain_events_paged(&session, &child, ..=end, page)
+            .await
+            .unwrap();
+        assert_eq!(
+            paged.iter().map(|event| &event.id).collect::<Vec<_>>(),
+            bounded.iter().map(|event| &event.id).collect::<Vec<_>>(),
+            "a page of {page} reads the chain to the range end"
+        );
+    }
     soon(agent.close()).await.unwrap();
 }

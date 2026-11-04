@@ -395,9 +395,12 @@ async fn read<R: std::ops::RangeBounds<u64> + Send>(
             None => break,
         }
         if end.is_some_and(|end| {
-            events
-                .last()
-                .is_some_and(|(_, event)| event.sequence >= end)
+            events.last().is_some_and(|(position, _)| {
+                // The end bounds the queried branch: a page that ends on an
+                // ancestor continues, since its sequence says nothing about
+                // the branch reaching the end.
+                position.branch_id == own && position.sequence >= end
+            })
         }) {
             break;
         }

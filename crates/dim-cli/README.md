@@ -157,9 +157,10 @@ acceptance evidence; cross-compilation alone does not establish platform behavio
 Use `dimcode session export SESSION_ID --format markdown|json [--output PATH]`
 for a fixed prefix of main-branch history. Without `--output`, it writes to stdout.
 Exports include main only; Markdown labels child branch requests and failures
-without fetching child histories. Files are created new, never overwritten, and
-use mode 0600 on Unix or the inherited ACL on Windows. A write error can leave a
-partial new file. Relative paths use the CLI process cwd; `~` is literal.
+without fetching child histories. The output file is opened before the read and removed when the read or a write
+fails, so a failed export leaves no file; a killed run can leave a partial one.
+Files are created new, never overwritten, and use mode 0600 on Unix or the
+inherited ACL on Windows. Relative paths use the CLI process cwd; `~` is literal.
 
 `dimcode session rename SESSION TITLE` sets the Session's manual title with
 `session.rename` and prints the title the server returns;

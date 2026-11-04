@@ -3,9 +3,11 @@
 //! the recorder to each request and closes the recording when the stream ends.
 use aimux_core::recording::{
     HttpExchange, JsonlRecorder, OutcomeRecord, OutcomeStatus, ProviderRecord, Recorder,
-    RecordingContext, RecordingError, ResponseRecord, init_recording, recorder,
+    RecordingContext, RecordingError, ResponseRecord, ScopedStream, init_recording, recorder,
 };
-use std::{path::Path, sync::Arc};
+use aimux_core::shared::SharedProviderOptions;
+use futures_util::Stream;
+use std::{future::Future, path::Path, sync::Arc};
 
 struct StartupRecorder(Arc<dyn Recorder>);
 
@@ -39,6 +41,23 @@ fn redact_option_headers(value: &mut serde_json::Value) {
     }
 }
 
+/// The same redaction for the typed provider options of a call.
+fn redact_provider_options(options: &mut SharedProviderOptions) {
+    for namespace in options.values_mut() {
+        for (name, value) in namespace.iter_mut() {
+            if name.eq_ignore_ascii_case("headers") {
+                if let Some(headers) = value.as_object_mut() {
+                    for value in headers.values_mut() {
+                        *value = "[REDACTED]".into();
+                    }
+                }
+            } else {
+                redact_option_headers(value);
+            }
+        }
+    }
+}
+
 impl Recorder for StartupRecorder {
     fn record_input(
         &self,
@@ -54,9 +73,7 @@ impl Recorder for StartupRecorder {
             }
         }
         if let Some(providers) = &mut options.provider_options {
-            for value in providers.values_mut() {
-                redact_option_headers(value);
-            }
+            redact_provider_options(providers);
         }
         self.0.record_input(call_id, &options, provider, model_id);
     }
@@ -64,11 +81,7 @@ impl Recorder for StartupRecorder {
         self.0.record_session(call_id, session_id, step);
     }
     fn record_provider(&self, call_id: &str, snapshot: &ProviderRecord) {
-        let mut snapshot = snapshot.clone();
-        if let Some(options) = &mut snapshot.provider_options {
-            redact_option_headers(options);
-        }
-        self.0.record_provider(call_id, &snapshot);
+        self.0.record_provider(call_id, snapshot);
     }
     fn record_exchange(&self, call_id: &str, exchange: &HttpExchange) {
         let mut exchange = exchange.clone();
@@ -110,6 +123,7 @@ impl Recorder for StartupRecorder {
 pub(crate) struct Capture {
     pub(crate) recorder: Arc<dyn Recorder>,
     pub(crate) call_id: String,
+    context: RecordingContext,
 }
 
 impl Capture {
@@ -121,6 +135,17 @@ impl Capture {
     ) {
         self.recorder
             .record_input(&self.call_id, options, provider, model_id);
+    }
+
+    /// The provider call runs inside the recording scope, so the HTTP layer
+    /// records the exchange under this call id.
+    pub(crate) fn scope<F: Future>(&self, future: F) -> impl Future<Output = F::Output> {
+        RecordingContext::scope(Some(self.context.clone()), future)
+    }
+
+    /// The stream is polled inside the recording scope for the same reason.
+    pub(crate) fn scope_stream<S: Stream + Unpin>(&self, stream: S) -> ScopedStream<S> {
+        RecordingContext::scope_stream(Some(self.context.clone()), stream)
     }
 
     /// The terminal a request writes when it ends before its stream installs
@@ -179,18 +204,17 @@ impl Drop for Pending {
 }
 
 /// Binds the request to the recorder that is on now, if any.
-pub(crate) fn capture(
-    call_id: String,
-    options: &mut aimux_core::options::CallOptions,
-    startup: bool,
-) -> Option<Capture> {
+pub(crate) fn capture(call_id: String, startup: bool) -> Option<Capture> {
     let mut recorder = recorder()?;
     if startup {
         recorder = Arc::new(StartupRecorder(recorder));
     }
-    options.call_id = Some(call_id.clone());
-    options.recording_context = Some(RecordingContext::new(call_id.clone(), recorder.clone()));
-    Some(Capture { recorder, call_id })
+    let context = RecordingContext::new(call_id.clone(), recorder.clone());
+    Some(Capture {
+        recorder,
+        call_id,
+        context,
+    })
 }
 
 /// Writes every request's wire exchanges under `directory`, or stops when

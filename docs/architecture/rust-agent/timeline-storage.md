@@ -100,7 +100,7 @@
 
 fork 与 Session 删除在复制连接上分块提交（事件与快照每 256 个逻辑序号、内容每 1024 个哈希），每块之间让写入轮取得写锁。fork 先以只读连接分段解析源事件引用并求出内容闭包，最后才在插入 `agent_sessions` 的事务中发布整个 fork；删除先在一个事务中移除使 Session 可见的行，再分块删除事件、快照与内容。两者都不改变持久化格式，见[存储格式](../../design/appserver/native-storage-format.md#sqlite-运行参数与空间回收)。
 
-协作 `read_page` 的 `after` 和固定水位必须为批次边界；页长是目标值，末批超出时完整返回。内部读段可切开批次，但不把内部段尾作为业务游标。反向 `session.history` 仍为独立协议草案。
+协作的 Session 查询分页以批次边界作为 `after` 和固定水位；页长是目标值，末批超出时完整返回。内部读段可切开批次，但不把内部段尾作为业务游标。反向 `session.history` 仍为独立协议草案。
 
 已装载实例采用发布水位，未装载记录采用已提交 head。公开的 `query` 以请求的界为上限，业务分页调用方必须传有界区间。当前范围读取每段 256 个逻辑序号，恢复校验每段 64 条物理行；查询索引及跨行规则见[存储格式](../../design/appserver/native-storage-format.md#分页查询)。
 
@@ -138,7 +138,8 @@ fork 与 Session 删除在复制连接上分块提交（事件与快照每 256 �
 | Prompt 与配置发布 | `history::read_context` |
 | 能力重载重建 | 事件查询（`Dispatcher::consume` 给出截点） |
 | TimelineTree 建分支 | `history::read_context(at)` 校验截点并得到子分支的祖先链 |
-| 协作读取、App Server 历史、导出 | 已装载的线走 `Branch::query`；本进程未装载或已结束的线走 `TimelineStore` 的页读取 |
+| 协作读取 | 取得并持有对端 Session，通过其 query 选择所消费的事件种类 |
+| App Server 历史、导出 | 已装载的线走 `Branch::query`；本进程未装载或已结束的线走 `TimelineStore` 的页读取 |
 
 - 每个模型步骤两次上下文历史读取，有有效快照时每次不超过最近一次压缩之后的历史；ContextPolicy 另读一次同准备的尾段，稳态下为空。
 - Dispatcher handler 内不等待冷读取；需要历史的工作在能力自有任务中读取，完成后再提交事件。

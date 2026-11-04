@@ -185,8 +185,8 @@
       "unexpandedMacros": [
         "format",
         "matches",
-        "serde_json::json",
-        "tokio::select"
+        "tokio::select",
+        "unreachable"
       ]
     },
     {
@@ -228,7 +228,6 @@
         "json",
         "matches",
         "tracing::warn",
-        "unreachable",
         "vec"
       ]
     },
@@ -278,6 +277,7 @@
         "concat",
         "format",
         "json",
+        "matches",
         "panic",
         "vec"
       ]
@@ -291,8 +291,7 @@
         "async_stream::stream",
         "format",
         "matches",
-        "tracing::debug",
-        "unreachable"
+        "tracing::debug"
       ]
     },
     {
@@ -3206,7 +3205,7 @@
       "unexpandedMacros": [
         "eprintln",
         "format",
-        "json"
+        "write"
       ]
     },
     {
@@ -6389,6 +6388,7 @@
       "references": [
         "path stream",
         "path stream::convert",
+        "path stream::error",
         "use crate::stream"
       ]
     },
@@ -6396,13 +6396,13 @@
       "from": "dim_agent_aimux::driver",
       "to": "dim_agent_capabilities::host",
       "references": [
+        "path BedrockAuth::Bearer",
+        "path BedrockAuth::SigV4",
         "path HostError",
         "path HostError::Cancelled",
         "path HostError::classified",
         "path HostErrorKind::InvalidRequest",
         "path HostErrorKind::OwnerClosed",
-        "path HostErrorKind::Transport",
-        "path HostErrorKind::Unsupported",
         "path HostFuture",
         "path ModelChunk",
         "path ModelConnection",
@@ -6411,7 +6411,6 @@
         "path ModelConnection::Local",
         "path ModelDriver",
         "path ModelNetwork",
-        "path ModelNetwork::default",
         "path ModelStream"
       ]
     },
@@ -6419,11 +6418,17 @@
       "from": "dim_agent_aimux::driver",
       "to": "dim_agent_types::model",
       "references": [
+        "path ModelProtocol",
         "path ModelProtocol::Anthropic",
         "path ModelProtocol::Bedrock",
         "path ModelProtocol::Gemini",
+        "path ModelProtocol::OpenaiChat",
+        "path ModelProtocol::OpenaiCompatible",
         "path ModelProtocol::OpenaiResponses",
+        "path ModelProtocol::Xai",
+        "path ModelProtocol::XaiResponses",
         "path ModelRequest",
+        "path model",
         "use dim_agent_types::ModelRequest"
       ]
     },
@@ -6433,6 +6438,13 @@
       "references": [
         "path ModelConfigFile",
         "use crate::config::ModelConfigFile"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::models",
+      "to": "dim_agent_aimux::driver",
+      "references": [
+        "path crate::driver::compatible_preset"
       ]
     },
     {
@@ -6637,8 +6649,7 @@
       "from": "dim_agent_aimux::request",
       "to": "dim_agent_aimux::request::native",
       "references": [
-        "mod native",
-        "path native"
+        "mod native"
       ]
     },
     {
@@ -6671,6 +6682,7 @@
       "references": [
         "path ContentBlock::Image",
         "path ContentBlock::Text",
+        "path ContentMetadata",
         "path ContentMetadata::Anthropic",
         "path ContentMetadata::AnthropicRedacted",
         "path ContentMetadata::Bedrock",
@@ -6681,6 +6693,7 @@
         "path ImageSource",
         "path ImageSourceType::Base64",
         "path ImageSourceType::Url",
+        "path MessageContent",
         "path MessageContent::Parts",
         "path MessageContent::Text",
         "path MessagePart",
@@ -6714,7 +6727,10 @@
         "path ProviderKind::Anthropic",
         "path ProviderKind::Bedrock",
         "path ProviderKind::Gemini",
+        "path ProviderKind::OpenaiChat",
+        "path ProviderKind::OpenaiCompatible",
         "path ProviderKind::OpenaiResponses",
+        "path ProviderKind::Xai",
         "path ProviderKind::XaiResponses",
         "path SystemPrompt::Parts",
         "path SystemPrompt::Text",
@@ -6804,6 +6820,7 @@
       "from": "dim_agent_aimux::request::tests",
       "to": "dim_agent_aimux::request",
       "references": [
+        "path PreparedRequest",
         "path convert",
         "path error"
       ]
@@ -6821,7 +6838,6 @@
         "path ProviderKind::OpenaiChat",
         "path ProviderKind::OpenaiCompatible",
         "path ProviderKind::OpenaiResponses",
-        "path ProviderKind::Xai",
         "path ProviderKind::XaiResponses",
         "path SystemPrompt::Parts",
         "path SystemPrompt::Text"
@@ -6846,7 +6862,8 @@
       "from": "dim_agent_aimux::stream",
       "to": "dim_agent_aimux::stream::content",
       "references": [
-        "mod content"
+        "mod content",
+        "path content::metadata"
       ]
     },
     {
@@ -6886,7 +6903,8 @@
       "from": "dim_agent_aimux::stream",
       "to": "dim_agent_types::content",
       "references": [
-        "use dim_agent_types::ContentMetadata",
+        "path dim_agent_types::ContentMetadata",
+        "path dim_agent_types::ContentMetadata::Bedrock",
         "use dim_agent_types::MessagePart"
       ]
     },
@@ -6895,6 +6913,7 @@
       "to": "dim_agent_types::model",
       "references": [
         "path ModelProtocol",
+        "path ModelProtocol::Bedrock",
         "path Usage",
         "use dim_agent_capabilities::host::ModelProtocol",
         "use dim_agent_types::Usage"
@@ -17600,7 +17619,6 @@
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError",
-        "path AgentError::BranchEnded",
         "path AgentError::Build",
         "path AgentError::Closed",
         "path AgentError::InvalidInput",
@@ -17676,7 +17694,6 @@
         "path EventKind::InputDeleted",
         "path EventKind::InputMessage",
         "path EventKind::StopInterrupt",
-        "path EventKind::ToolUseStart",
         "path EventKind::TurnEnd",
         "path EventKind::TurnStart",
         "path dim_agent_types::AgentEvent",
@@ -18940,6 +18957,7 @@
       "references": [
         "path AgentError",
         "path AgentError::Closed",
+        "path AgentError::InvalidInput",
         "path AgentError::fault",
         "path dim_agent_runtime::Result",
         "use dim_agent_runtime::AgentError"
@@ -18974,6 +18992,7 @@
       "references": [
         "path TimelineQuery",
         "path TimelineQueryDirection::Ascending",
+        "path TimelineQueryDirection::Descending",
         "path TimelineQueryOrderBy::Sequence",
         "path TimelineQueryScope::Branch",
         "path rebuild_facts",
@@ -19050,6 +19069,7 @@
         "path TurnOutcome::Cancelled",
         "path TurnOutcome::Completed",
         "path TurnOutcome::Failed",
+        "path dim_agent_types::AgentEvent",
         "path events"
       ]
     },
@@ -19121,7 +19141,6 @@
         "path AgentIndex",
         "path SessionRestored",
         "path UnloadedSessionDeleted",
-        "path crate::agents::AgentIndex",
         "path crate::agents::SessionUse",
         "path crate::agents::session_config",
         "use crate::agents::AgentIndex",
@@ -20120,7 +20139,8 @@
       "from": "dim_app_server::connection::tree",
       "to": "dim_agent_capabilities::timeline_tree",
       "references": [
-        "path dim_agent_capabilities::timeline_tree::TreeCommands"
+        "path TreeCommands",
+        "use dim_agent_capabilities::timeline_tree::TreeCommands"
       ]
     },
     {
@@ -20157,6 +20177,7 @@
         "path TimelineQueryDirection::Descending",
         "path TimelineQueryOrderBy::Sequence",
         "path TimelineQueryScope::Branch",
+        "path dim_agent_runtime::TimelineQueryReply",
         "use dim_agent_runtime::TimelineQuery"
       ]
     },
@@ -25712,7 +25733,6 @@
         "path EventKind::Text",
         "path EventKind::Thinking",
         "path SessionForkedData",
-        "path dim_agent_types::AgentEvent",
         "path dim_agent_types::InputMessageData::text",
         "use dim_agent_types::AgentEvent",
         "use dim_agent_types::BranchCreateAt",
@@ -27420,8 +27440,10 @@
       "from": "dim_cli::export",
       "to": "dim_cli::session",
       "references": [
+        "path HistorySink",
         "path session::read_history",
-        "use crate::session"
+        "use crate::session",
+        "use crate::session::HistorySink"
       ]
     },
     {
@@ -39750,6 +39772,10 @@
     {
       "module": "dim_acp::lody",
       "path": "OptionValue::Text"
+    },
+    {
+      "module": "dim_agent_aimux::recording",
+      "path": "F::Output"
     },
     {
       "module": "dim_agent_capabilities::file_storage::windows",

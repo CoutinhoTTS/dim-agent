@@ -3479,7 +3479,7 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
             "zenmux",
             "plain",
             "/v1/chat/completions",
-            "max_tokens",
+            "max_completion_tokens",
             None,
         ),
         (
@@ -3726,10 +3726,11 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
                 assert_eq!(sent.body["include"], json!(["reasoning.encrypted_content"]));
             }
         } else {
-            assert_eq!(sent.body["reasoning_effort"], "low");
+            assert_eq!(sent.body["reasoning_effort"], "low", "{driver}/{model_id}");
             assert_eq!(
                 sent.body.get("service_tier").and_then(Value::as_str),
-                (!xai).then_some("priority")
+                (!xai).then_some("priority"),
+                "{driver}/{model_id}"
             );
         }
     }

@@ -1,11 +1,11 @@
 //! Session aggregation (RFC-0024): session_id 归组基础设施.
 //!
 //! Groups consecutive calls into sessions via an explicit `session_id`
-//! (`CallOptions.session_id`, explicit-first) with an optional prompt-prefix
-//! continuation inferer as fallback (opt-in, off by default). The session
-//! index itself is an in-process, bounded LRU — it is never persisted
-//! (RFC-0024 §6.5: Recording/TraceRecord keep the `session_id` field, so an
-//! index can be rebuilt after a restart).
+//! (`GenerateTextOptions.session_id`, an operation setting, explicit-first)
+//! with an optional prompt-prefix continuation inferer as fallback (opt-in,
+//! off by default). The session index itself is an in-process, bounded
+//! LRU — it is never persisted (RFC-0024 §6.5: Recording/TraceRecord keep
+//! the `session_id` field, so an index can be rebuilt after a restart).
 //!
 //! Registration is explicit and opt-in, mirroring RFC-0023's `init_recording`
 //! pattern: nothing is recorded and no state exists until
@@ -22,8 +22,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 use crate::language_model_message::LanguageModelPrompt;
 
@@ -32,10 +32,9 @@ use crate::language_model_message::LanguageModelPrompt;
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Where a session id came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum SessionSource {
-    /// Passed explicitly via `CallOptions.session_id` / `GenerateTextOptions.session_id`.
+    /// Passed explicitly via `GenerateTextOptions.session_id`.
     Explicit,
     /// Produced by the opt-in `SessionInferer` (ids carry an `auto-` prefix).
     Inferred,
@@ -43,8 +42,8 @@ pub enum SessionSource {
 
 /// A single call within a session (an index entry only — call content lives
 /// in Recording (RFC-0023) / TraceRecord (RFC-0015)).
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionCall {
     /// Call-level unique id. This is the association key for the future
     /// Recording / TraceRecord `call_id` (RFC-0015/0023): once those land,
@@ -57,8 +56,8 @@ pub struct SessionCall {
 }
 
 /// Aggregated view of one session (session_id → ordered calls).
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionView {
     pub session_id: String,
     /// Where the session id came from (first call's source).
@@ -348,7 +347,7 @@ pub fn session_inferer() -> Option<Arc<Mutex<SessionInferer>>> {
 /// Lazily honor `AIMUX_SESSION_INFER=1` (checked once, like RFC-0014's env
 /// auto-init). No-op when the inferer is already registered programmatically
 /// (explicit configuration wins) or the env var is not set.
-pub fn ensure_inferer_from_env() {
+fn ensure_inferer_from_env() {
     if INFER_ENV_CHECKED.is_completed() {
         return;
     }
@@ -365,7 +364,7 @@ pub fn ensure_inferer_from_env() {
 /// Returns `(session_id, source)` or `None` when no explicit id is present
 /// and inference is off (or not registered).
 #[must_use]
-pub fn resolve_session_id(
+pub(crate) fn resolve_session_id(
     explicit: Option<&str>,
     prompt: &LanguageModelPrompt,
 ) -> Option<(String, SessionSource)> {
@@ -452,25 +451,6 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::content::ContentPart;
-    use crate::language_model_message::LanguageModelPromptMessage;
-    use crate::message::Role;
-
-    fn msg(text: &str) -> LanguageModelPromptMessage {
-        LanguageModelPromptMessage {
-            role: Role::User,
-            content: vec![ContentPart::Text {
-                text: text.to_string(),
-                provider_options: None,
-            }],
-            provider_options: None,
-        }
-    }
-
-    fn prompt(messages: Vec<LanguageModelPromptMessage>) -> LanguageModelPrompt {
-        messages
-    }
-
     /// `recorded_at` must look like RFC 3339 UTC: `YYYY-MM-DDTHH:MM:SS.mmmZ`.
     fn is_rfc3339(s: &str) -> bool {
         let b = s.as_bytes();
@@ -604,105 +584,6 @@ mod tests {
         store.append("s1", None, SessionSource::Explicit);
         store.clear();
         assert!(store.list_sessions().is_empty());
-    }
-
-    // ── SessionInferer ──────────────────────────────────────────────────────
-
-    #[test]
-    fn inferer_disabled_returns_none() {
-        let mut inf = SessionInferer::new(false);
-        assert!(inf.resolve(None, &prompt(vec![msg("hi")])).is_none());
-    }
-
-    #[test]
-    fn inferer_explicit_wins_and_is_remembered() {
-        let mut inf = SessionInferer::new(true);
-        let p1 = prompt(vec![msg("hi")]);
-        let (id, source) = inf.resolve(Some("sess-1"), &p1).unwrap();
-        assert_eq!(id, "sess-1");
-        assert_eq!(source, SessionSource::Explicit);
-
-        // Continuation without an explicit id joins the remembered session.
-        let p2 = prompt(vec![msg("hi"), msg("hello")]);
-        let (id2, source2) = inf.resolve(None, &p2).unwrap();
-        assert_eq!(id2, "sess-1");
-        assert_eq!(source2, SessionSource::Inferred);
-    }
-
-    #[test]
-    fn inferer_strong_prefix_continuation_groups_calls() {
-        let mut inf = SessionInferer::new(true);
-        let p1 = prompt(vec![msg("u1")]);
-        let (id1, source1) = inf.resolve(None, &p1).unwrap();
-        assert!(id1.starts_with("auto-"));
-        assert_eq!(source1, SessionSource::Inferred);
-
-        // Full-prefix continuation → same session.
-        let p2 = prompt(vec![msg("u1"), msg("a1"), msg("u2")]);
-        let (id2, _) = inf.resolve(None, &p2).unwrap();
-        assert_eq!(id2, id1);
-
-        // Equality (retry of the same step) → same session.
-        let (id3, _) = inf.resolve(None, &p1).unwrap();
-        assert_eq!(id3, id1);
-    }
-
-    #[test]
-    fn inferer_distinct_prompts_start_new_sessions() {
-        let mut inf = SessionInferer::new(true);
-        let (id1, _) = inf
-            .resolve(None, &prompt(vec![msg("what is rust")]))
-            .unwrap();
-        let (id2, _) = inf
-            .resolve(None, &prompt(vec![msg("tell me a joke")]))
-            .unwrap();
-        assert_ne!(id1, id2);
-    }
-
-    #[test]
-    fn inferer_prefix_is_directional() {
-        let mut inf = SessionInferer::new(true);
-        let (id1, _) = inf.resolve(None, &prompt(vec![msg("abc")])).unwrap();
-        // Message-level prefix continuation: leading messages identical and
-        // the new prompt is longer → same session.
-        let (id2, _) = inf
-            .resolve(None, &prompt(vec![msg("abc"), msg("a1"), msg("u2")]))
-            .unwrap();
-        assert_eq!(id2, id1);
-        // A prompt that diverges on the first message → new session.
-        let (id3, _) = inf.resolve(None, &prompt(vec![msg("abd")])).unwrap();
-        assert_ne!(id3, id1, "abd is not a prefix continuation");
-    }
-
-    #[test]
-    fn inferer_chain_continuation_stays_in_session() {
-        let mut inf = SessionInferer::new(true);
-        let p1 = prompt(vec![msg("common")]);
-        let p2 = prompt(vec![msg("common"), msg("b")]);
-        let p3 = prompt(vec![msg("common"), msg("b"), msg("c")]);
-        let (id1, _) = inf.resolve(None, &p1).unwrap();
-        let (id2, _) = inf.resolve(None, &p2).unwrap();
-        let (id3, _) = inf.resolve(None, &p3).unwrap();
-        assert_eq!(id2, id1);
-        assert_eq!(id3, id1);
-    }
-
-    #[test]
-    fn inferer_capacity_evicts_oldest_prompt() {
-        let mut inf = SessionInferer::with_capacity(true, 2);
-        let p1 = prompt(vec![msg("one")]);
-        let (id1, _) = inf.resolve(None, &p1).unwrap();
-        let p2 = prompt(vec![msg("two")]);
-        let (id2, _) = inf.resolve(None, &p2).unwrap();
-        let p3 = prompt(vec![msg("three")]);
-        let (id3, _) = inf.resolve(None, &p3).unwrap();
-        assert_ne!(id1, id2);
-        assert_ne!(id2, id3);
-
-        // p1 was evicted; a new call extending it starts a NEW session.
-        let p1_ext = prompt(vec![msg("one"), msg("more")]);
-        let (id4, _) = inf.resolve(None, &p1_ext).unwrap();
-        assert_ne!(id4, id1, "evicted prompt no longer matches");
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────

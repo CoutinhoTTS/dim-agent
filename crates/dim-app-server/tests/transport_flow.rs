@@ -80,6 +80,9 @@ mod product_protocol;
 #[path = "transport_flow/model_startup.rs"]
 mod model_startup;
 
+#[path = "transport_flow/model_switch.rs"]
+mod model_switch;
+
 #[path = "transport_flow/summaries.rs"]
 mod summaries;
 

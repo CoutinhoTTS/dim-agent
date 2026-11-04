@@ -56,6 +56,14 @@ A branch's `Timeline` exists from the moment its Session is loaded until the lin
 
 `session.history` and the in-process `sessions.history` acquire the Session, so a client read and the scheduler's run tracking both work on a loaded Session. `session.attach` is not a prerequisite and does not change which read serves the page.
 
+A Collaboration peer read authorizes the peer, acquires its Session and holds
+that lease through the page and supplemental call lookups. Outcome collection
+uses the member Session already held by its request. Both use bounded queries
+for the event kinds they consume; unused stored model-request bodies need not
+be rebuilt. Page cursors still count every fact and end on complete batches,
+including pages whose selected event set is empty. Text remains separated
+across omitted non-text facts.
+
 A line that ended keeps its identity in `TimelineTree`: the ended head, the end record and the creation source. That state outlives the line's `Timeline`, which is why the tree, not the App Server, serves its page.
 
 A read fetches from storage one page at a time: a page is consumed and dropped before the next is fetched, and the page size belongs to the caller. This bounds what a read takes from the store, not what a consumer keeps. The query contract lets a consumer fold a prefix from pages (plugin contract §5.4), and an export materializes what it writes.
