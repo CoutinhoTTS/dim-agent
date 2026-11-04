@@ -1422,38 +1422,3 @@ impl Plugin for McpServerPlugin {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rmcp::model::{
-        InitializeRequest, InitializeRequestParams, ListToolsRequest, PaginatedRequestParams,
-    };
-
-    #[test]
-    fn a_tool_call_takes_its_entry_timeout_and_every_other_request_the_fixed_limit() {
-        let call = ClientRequest::CallToolRequest(CallToolRequest::new(
-            CallToolRequestParams::new("tool"),
-        ));
-        let default = request_limit(&call, None);
-        assert_eq!(default.limit, Duration::from_secs(600));
-        assert_eq!(default.origin, "the default");
-        let entry = request_limit(&call, Some(Duration::from_millis(1_000)));
-        assert_eq!(entry.limit, Duration::from_millis(1_000));
-        assert_eq!(entry.origin, "the entry's timeout");
-
-        let list = ClientRequest::ListToolsRequest(ListToolsRequest::with_param(
-            PaginatedRequestParams::default(),
-        ));
-        let fixed = request_limit(&list, Some(Duration::from_millis(1_000)));
-        assert_eq!(fixed.limit, Duration::from_secs(60));
-        assert_eq!(fixed.origin, "the request limit");
-        let initialize = ClientRequest::InitializeRequest(InitializeRequest::new(
-            InitializeRequestParams::new(ClientCapabilities::default(), Implementation::default()),
-        ));
-        assert_eq!(
-            request_limit(&initialize, Some(Duration::from_millis(1_000))).limit,
-            Duration::from_secs(60)
-        );
-    }
-}

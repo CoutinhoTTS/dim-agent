@@ -2252,15 +2252,6 @@
       ]
     },
     {
-      "id": "dim_app_server::mcp::server::tests",
-      "crate": "dim_app_server",
-      "parent": "dim_app_server::mcp::server",
-      "file": "crates/dim-app-server/src/mcp/server.rs",
-      "unexpandedMacros": [
-        "assert_eq"
-      ]
-    },
-    {
       "id": "dim_app_server::mcp::session",
       "crate": "dim_app_server",
       "parent": "dim_app_server::mcp",
@@ -21866,13 +21857,6 @@
       ]
     },
     {
-      "from": "dim_app_server::mcp::server",
-      "to": "dim_app_server::mcp::server::tests",
-      "references": [
-        "mod tests"
-      ]
-    },
-    {
       "from": "dim_app_server::mcp::server::sse",
       "to": "dim_app_server::mcp::server",
       "references": [
@@ -21905,13 +21889,6 @@
         "use super::DIAGNOSTIC_BYTES",
         "use super::McpServerError",
         "use super::Result"
-      ]
-    },
-    {
-      "from": "dim_app_server::mcp::server::tests",
-      "to": "dim_app_server::mcp::server",
-      "references": [
-        "path request_limit"
       ]
     },
     {
