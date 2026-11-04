@@ -96,7 +96,9 @@ pub struct Conclusion {
 impl Conclusion {
     /// The result a `done` or `blocked` conclusion states, without its prefix.
     pub fn result_text(&self) -> String {
-        self.text[self.result.prefix().len()..].trim().to_owned()
+        let prefix = self.result.prefix().encode_utf16().count();
+        let units: Vec<u16> = self.text.encode_utf16().skip(prefix).collect();
+        String::from_utf16_lossy(&units).trim().to_owned()
     }
 }
 
@@ -549,4 +551,53 @@ pub fn decide_evaluated_continuation(fold: &Fold, limit: u64) -> Option<Decision
     Some(Decision::Continuation {
         count: fold.count() + 1,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Conclusion, conclusion_of};
+    use crate::text;
+    use dim_agent_types::InputBlock;
+
+    fn report(result: &str, body: &str) -> Conclusion {
+        let input = text::conclusion("main", "evaluator", "1", result, body);
+        let [InputBlock::Raw { text, .. }] = &input.blocks[..] else {
+            panic!("a report is one raw block");
+        };
+        conclusion_of(text).expect("a report parses")
+    }
+
+    #[test]
+    fn an_empty_report_body_states_no_result() {
+        assert_eq!(report("done", "").result_text(), "");
+    }
+
+    #[test]
+    fn a_report_without_a_body_line_states_no_result() {
+        let text = "<dim-goal kind=\"report\" result=\"done\" evaluation=\"1\" \
+                    evaluator=\"evaluator\" branch=\"main\">\nEvaluator report:\n</dim-goal>";
+        let conclusion = conclusion_of(text).expect("a report parses");
+        assert_eq!(conclusion.result_text(), "");
+    }
+
+    #[test]
+    fn a_report_body_shorter_than_the_prefix_states_no_result() {
+        assert_eq!(report("done", "ok").result_text(), "");
+        assert_eq!(report("blocked", "short").result_text(), "");
+    }
+
+    #[test]
+    fn a_report_body_naming_another_kind_keeps_the_attribute_prefix() {
+        assert_eq!(
+            report("done", "BLOCKED: gated by policy").result_text(),
+            "ED: gated by policy"
+        );
+    }
+
+    #[test]
+    fn a_non_ascii_report_body_slices_utf16_code_units() {
+        assert_eq!(report("done", "已完成并验证").result_text(), "证");
+        assert_eq!(report("done", "😀abcd").result_text(), "d");
+        assert_eq!(report("blocked", "完成").result_text(), "");
+    }
 }

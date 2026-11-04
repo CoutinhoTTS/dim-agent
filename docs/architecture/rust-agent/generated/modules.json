@@ -5525,6 +5525,16 @@
       ]
     },
     {
+      "id": "dim_goal::fold::tests",
+      "crate": "dim_goal",
+      "parent": "dim_goal::fold",
+      "file": "crates/dim-goal/src/fold.rs",
+      "unexpandedMacros": [
+        "assert_eq",
+        "panic"
+      ]
+    },
+    {
       "id": "dim_goal::session",
       "crate": "dim_goal",
       "parent": "dim_goal",
@@ -38877,6 +38887,13 @@
     },
     {
       "from": "dim_goal::fold",
+      "to": "dim_goal::fold::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_goal::fold",
       "to": "dim_goal::text",
       "references": [
         "path Judge",
@@ -38895,6 +38912,33 @@
         "use crate::text::Marker",
         "use crate::text::OBJECTIVE_KEY",
         "use crate::text::STATUS_KEY"
+      ]
+    },
+    {
+      "from": "dim_goal::fold::tests",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path InputBlock::Raw",
+        "use dim_agent_types::InputBlock"
+      ]
+    },
+    {
+      "from": "dim_goal::fold::tests",
+      "to": "dim_goal::fold",
+      "references": [
+        "path Conclusion",
+        "path conclusion_of",
+        "use super::Conclusion",
+        "use super::conclusion_of"
+      ]
+    },
+    {
+      "from": "dim_goal::fold::tests",
+      "to": "dim_goal::text",
+      "references": [
+        "path text",
+        "path text::conclusion",
+        "use crate::text"
       ]
     },
     {

@@ -561,7 +561,7 @@ pub fn body(text: &str, label: &str) -> String {
     let (Some(start), Some(end)) = (text.find(&marker), text.rfind("\n</dim-goal>")) else {
         return String::new();
     };
-    if end < start {
+    if end < start + marker.len() {
         return String::new();
     }
     unescape(&text[start + marker.len()..end])
