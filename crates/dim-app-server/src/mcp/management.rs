@@ -683,7 +683,6 @@ pub(super) fn provide(
                         let p: SelectionScope = params(value)?;
                         let project = project(&settings, p.cwd, &stopping).await?;
                         let catalog = directory.catalog(project, &stopping).await.map_err(error)?;
-                        let credentials = catalog.credentials;
                         let states = auth.states(&stopping).await;
                         return reply(McpCatalogResult {
                             user_revision: catalog.user_revision,
@@ -696,8 +695,9 @@ pub(super) fn provide(
                                 .servers
                                 .into_iter()
                                 .map(|(id, entry)| McpCatalogEntry {
-                                    auth: credentials
-                                        .get(&id)
+                                    auth: entry
+                                        .credential
+                                        .as_ref()
                                         .and_then(|key| states.get(key))
                                         .map(|state| match state {
                                             AuthState::Required => McpAuthStatus {

@@ -1702,3 +1702,43 @@ async fn oauth_discovery_uses_the_expanded_url() {
     daemon.close().await;
     servers.stop.cancel();
 }
+
+/// #952: a project stdio entry that shadows a user OAuth entry carries no
+/// sign-in status; the status belongs to the winning entry, not the id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_shadowing_entry_does_not_show_the_shadowed_sign_in_status() {
+    let servers = Servers::start().await;
+    let (resource, authority) = (servers.resource.clone(), servers.authority.clone());
+    let daemon = Daemon::start(&[("docs", json!({"type":"http","url":resource.url()}))]).await;
+    std::fs::write(
+        daemon.work.join(".mcp.json"),
+        json!({"mcpServers":{"docs":{"type":"stdio","command":"shadow-server"}}}).to_string(),
+    )
+    .unwrap();
+    let mut client = daemon.client().await;
+
+    client
+        .sign_in(&authority, user("docs"), "code-shadow-secret")
+        .await;
+    assert_eq!(
+        client.catalog_auth(json!({}), "docs").await,
+        json!({"status":"authorized"})
+    );
+
+    let catalog = client.ok("mcp.catalog", json!({"cwd":daemon.work})).await;
+    let row = catalog["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|server| server["id"] == "docs")
+        .unwrap();
+    assert_eq!(row["source"], "project");
+    assert_eq!(row["transport"], "stdio");
+    assert!(
+        row["auth"].is_null(),
+        "the shadowed user entry's sign-in status leaked onto the winning entry: {row}"
+    );
+
+    daemon.close().await;
+    servers.stop.cancel();
+}
