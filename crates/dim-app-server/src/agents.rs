@@ -811,38 +811,41 @@ impl AgentIndex {
         id: &str,
         event_ids: &[String],
     ) -> dim_agent_runtime::Result<HashMap<String, Arc<dim_agent_types::AgentEvent>>> {
-        if let Some(store) = &self.session_store {
-            return store.read_events(id, event_ids).await;
-        }
-        let (_, session) = self
-            .session(id)
-            .ok_or_else(|| AgentError::Closed(id.into()))?;
-        let mut found = HashMap::with_capacity(event_ids.len());
-        for event_id in event_ids {
-            let reply = session
-                .query(
-                    "main",
-                    TimelineQuery {
-                        scope: TimelineQueryScope::Branch,
-                        include_publishing: false,
-                        from_event: None,
-                        from_sequence: None,
-                        order_by: TimelineQueryOrderBy::Sequence,
-                        direction: TimelineQueryDirection::Ascending,
-                        kinds: Vec::new(),
-                        flags: Vec::new(),
-                        event_id: Some(event_id.clone()),
-                        predicate: None,
-                        limit: NonZeroU64::MIN,
-                        offset: 0,
-                    },
-                )
-                .await?;
-            if let Some(event) = reply.events.into_iter().next() {
-                found.insert(event.id.clone(), event);
+        if let Some((_, session)) = self.session(id)
+            && !session.is_unloading()
+        {
+            let mut found = HashMap::with_capacity(event_ids.len());
+            for event_id in event_ids {
+                let reply = session
+                    .query(
+                        "main",
+                        TimelineQuery {
+                            scope: TimelineQueryScope::Branch,
+                            include_publishing: false,
+                            from_event: None,
+                            from_sequence: None,
+                            order_by: TimelineQueryOrderBy::Sequence,
+                            direction: TimelineQueryDirection::Ascending,
+                            kinds: Vec::new(),
+                            flags: Vec::new(),
+                            event_id: Some(event_id.clone()),
+                            predicate: None,
+                            limit: NonZeroU64::MIN,
+                            offset: 0,
+                        },
+                    )
+                    .await?;
+                if let Some(event) = reply.events.into_iter().next() {
+                    found.insert(event.id.clone(), event);
+                }
             }
+            return Ok(found);
         }
-        Ok(found)
+        self.session_store
+            .as_ref()
+            .ok_or_else(|| AgentError::Closed(id.into()))?
+            .read_events(id, event_ids)
+            .await
     }
     /// The main-branch `step/tool-use-start` of each `(request_id, call_id)`
     /// in one read; calls the store does not hold are absent.
@@ -852,50 +855,53 @@ impl AgentIndex {
         keys: &[(String, String)],
     ) -> dim_agent_runtime::Result<HashMap<(String, String), Arc<dim_agent_types::AgentEvent>>>
     {
-        if let Some(store) = &self.session_store {
-            return store.read_tool_use_starts(id, keys).await;
-        }
-        let (_, session) = self
-            .session(id)
-            .ok_or_else(|| AgentError::Closed(id.into()))?;
-        let mut starts = HashMap::with_capacity(keys.len());
-        let mut query = TimelineQuery {
-            scope: TimelineQueryScope::Branch,
-            include_publishing: false,
-            from_event: None,
-            from_sequence: Some(1),
-            order_by: TimelineQueryOrderBy::Sequence,
-            direction: TimelineQueryDirection::Ascending,
-            kinds: vec!["step/tool-use-start".into()],
-            flags: Vec::new(),
-            event_id: None,
-            predicate: None,
-            limit: NonZeroU64::new(Self::TOOL_USE_START_PAGE)
-                .expect("a page keeps at least one tool use"),
-            offset: 0,
-        };
-        loop {
-            let reply = session.query("main", query.clone()).await?;
-            let short = (reply.events.len() as u64) < Self::TOOL_USE_START_PAGE;
-            let last = reply.positions.last().map(|position| position.sequence);
-            for event in reply.events {
-                let EventKind::ToolUseStart(start) = &event.kind else {
-                    continue;
-                };
-                let key = (start.request_id.clone(), start.call_id.clone());
-                if keys.contains(&key) {
-                    starts.insert(key, event);
+        if let Some((_, session)) = self.session(id)
+            && !session.is_unloading()
+        {
+            let mut starts = HashMap::with_capacity(keys.len());
+            let mut query = TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                include_publishing: false,
+                from_event: None,
+                from_sequence: Some(1),
+                order_by: TimelineQueryOrderBy::Sequence,
+                direction: TimelineQueryDirection::Ascending,
+                kinds: vec!["step/tool-use-start".into()],
+                flags: Vec::new(),
+                event_id: None,
+                predicate: None,
+                limit: NonZeroU64::new(Self::TOOL_USE_START_PAGE)
+                    .expect("a page keeps at least one tool use"),
+                offset: 0,
+            };
+            loop {
+                let reply = session.query("main", query.clone()).await?;
+                let short = (reply.events.len() as u64) < Self::TOOL_USE_START_PAGE;
+                let last = reply.positions.last().map(|position| position.sequence);
+                for event in reply.events {
+                    let EventKind::ToolUseStart(start) = &event.kind else {
+                        continue;
+                    };
+                    let key = (start.request_id.clone(), start.call_id.clone());
+                    if keys.contains(&key) {
+                        starts.insert(key, event);
+                    }
+                }
+                if short || starts.len() == keys.len() {
+                    break;
+                }
+                match last {
+                    Some(last) => query.from_sequence = Some(last + 1),
+                    None => break,
                 }
             }
-            if short || starts.len() == keys.len() {
-                break;
-            }
-            match last {
-                Some(last) => query.from_sequence = Some(last + 1),
-                None => break,
-            }
+            return Ok(starts);
         }
-        Ok(starts)
+        self.session_store
+            .as_ref()
+            .ok_or_else(|| AgentError::Closed(id.into()))?
+            .read_tool_use_starts(id, keys)
+            .await
     }
     /// The error a history window answers without the native Session store.
     fn no_history_store() -> AgentError {

@@ -377,12 +377,27 @@ impl TimelineTree {
             session_id: self.session_id.clone(),
             branch_id: branch.into(),
         };
+        let query = TimelineQuery {
+            scope: dim_agent_runtime::TimelineQueryScope::Branch,
+            include_publishing: false,
+            from_event: None,
+            from_sequence: Some(1),
+            order_by: TimelineQueryOrderBy::Sequence,
+            direction: TimelineQueryDirection::Descending,
+            kinds: vec!["branch/ended".into()],
+            flags: Vec::new(),
+            event_id: None,
+            predicate: None,
+            limit: NonZeroU64::new(head).expect("non-empty stored head"),
+            offset: 0,
+        };
         Ok(self
             .store
-            .read(&key, 1..=head)
+            .query(&key, &query, 1, head)
             .await?
+            .events
             .into_iter()
-            .filter_map(|record| match &record.event.kind {
+            .filter_map(|event| match &event.kind {
                 EventKind::BranchEnded(data) => Some(data.branch.clone()),
                 _ => None,
             })
@@ -1008,15 +1023,25 @@ impl TimelineTree {
         let mut window = LINE_PAGE;
         loop {
             let from = head.saturating_sub(window.saturating_sub(1)).max(1);
-            let records = self.store.read(&key, from..=head).await?;
-            if let Some(found) = records
-                .iter()
-                .rev()
-                .find_map(|record| match &record.event.kind {
-                    EventKind::BranchEnd(data) => Some((record.event.sequence, data.clone())),
-                    _ => None,
-                })
-            {
+            let query = TimelineQuery {
+                scope: dim_agent_runtime::TimelineQueryScope::Branch,
+                include_publishing: false,
+                from_event: None,
+                from_sequence: Some(from),
+                order_by: TimelineQueryOrderBy::Sequence,
+                direction: TimelineQueryDirection::Descending,
+                kinds: vec!["branch/end".into()],
+                flags: Vec::new(),
+                event_id: None,
+                predicate: None,
+                limit: NonZeroU64::new(window).expect("non-zero query window"),
+                offset: 0,
+            };
+            let records = self.store.query(&key, &query, from, head).await?.events;
+            if let Some(found) = records.into_iter().find_map(|event| match event.kind {
+                EventKind::BranchEnd(ref data) => Some((event.sequence, data.clone())),
+                _ => None,
+            }) {
                 return Ok(Some(found));
             }
             if from == 1 {
@@ -1035,13 +1060,30 @@ impl TimelineTree {
             session_id: self.session_id.clone(),
             branch_id: parent.into(),
         };
+        let query = TimelineQuery {
+            scope: dim_agent_runtime::TimelineQueryScope::Branch,
+            include_publishing: false,
+            from_event: None,
+            from_sequence: Some(anchor),
+            order_by: TimelineQueryOrderBy::Sequence,
+            direction: TimelineQueryDirection::Ascending,
+            kinds: vec!["branch/create".into()],
+            flags: Vec::new(),
+            event_id: None,
+            predicate: None,
+            limit: NonZeroU64::MIN,
+            offset: 0,
+        };
         Ok(self
             .store
-            .read(&key, anchor..=anchor)
+            .query(&key, &query, anchor, anchor)
             .await?
+            .events
             .into_iter()
-            .find_map(|record| match &record.event.kind {
-                EventKind::BranchCreate(data) if data.branch == child => Some(data.source.clone()),
+            .find_map(|event| match event.kind {
+                EventKind::BranchCreate(ref data) if data.branch == child => {
+                    Some(data.source.clone())
+                }
                 _ => None,
             }))
     }
