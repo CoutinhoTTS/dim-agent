@@ -1,6 +1,4 @@
-#[path = "mod.rs"]
-mod support;
-
+use crate::support;
 use dim_client::Client;
 use serde_json::{Value, json};
 use std::{
