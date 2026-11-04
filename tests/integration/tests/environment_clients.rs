@@ -76,6 +76,8 @@ async fn presence_is_appended_and_unchanged_counts_do_not_duplicate() {
     let session = env.session(&cwd, "").await.unwrap();
 
     run(&session, "hello").await;
+    until_block(&session, "1 client connection attached:").await;
+    run(&session, "hello again").await;
     let text = request_text(requests(&session).await.last().unwrap());
     assert!(text.contains("1 client connection attached:"), "{text}");
     assert!(text.contains("- tui \"eric@laptop\" (claimed)"), "{text}");

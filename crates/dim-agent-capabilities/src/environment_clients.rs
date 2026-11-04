@@ -145,7 +145,11 @@ fn label(label: &str) -> Option<String> {
         .take(64)
         .collect::<String>();
     let clean = clean.trim();
-    (!clean.is_empty()).then(|| context_block::text(clean))
+    (!clean.is_empty()).then(|| {
+        context_block::text(clean)
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+    })
 }
 
 fn snapshot(presences: &[ClientPresence]) -> String {

@@ -18,7 +18,7 @@ use dim_agent_capabilities::methods::RpcError;
 use rutis::host::FiberView;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicU64, Ordering},
@@ -69,6 +69,10 @@ impl Instance {
 pub(crate) struct UiHost {
     leaves: UiLeaves,
     instances: Mutex<HashMap<String, Instance>>,
+    /// Leaf connections whose registration is gone but whose RPC connection
+    /// is still attached; presence must not report them under their declared
+    /// channel during that window.
+    disposing: Mutex<HashSet<String>>,
     generations: AtomicU64,
     /// Leaf disposals started outside a caller that awaits them (a session
     /// that ended, a leaf that did not attach); `close_all` waits for them.
@@ -81,6 +85,7 @@ impl UiHost {
         Arc::new_cyclic(|this| Self {
             leaves,
             instances: Mutex::new(HashMap::new()),
+            disposing: Mutex::new(HashSet::new()),
             generations: AtomicU64::new(0),
             closing: TaskTracker::new(),
             this: this.clone(),
@@ -100,6 +105,18 @@ impl UiHost {
             .expect("ui registry")
             .values()
             .any(|instance| instance.connection.as_deref() == Some(connection_id))
+    }
+    pub(crate) fn is_disposing(&self, connection_id: &str) -> bool {
+        self.disposing
+            .lock()
+            .expect("disposing ui connections")
+            .contains(connection_id)
+    }
+    pub(crate) fn finished(&self, connection_id: &str) {
+        self.disposing
+            .lock()
+            .expect("disposing ui connections")
+            .remove(connection_id);
     }
 
     /// Opens a session with the leaf at `address` and returns the token its
@@ -494,6 +511,14 @@ impl UiHost {
         reason: Option<String>,
     ) -> Result<(), RpcError> {
         let instance = self.forget(ui_id).ok_or_else(ui_unknown)?;
+        if instance.leaf.is_some()
+            && let Some(connection) = instance.connection.as_deref()
+        {
+            self.disposing
+                .lock()
+                .expect("disposing ui connections")
+                .insert(connection.to_owned());
+        }
         if let Some(connection) = instance
             .connection
             .as_deref()
