@@ -2302,8 +2302,7 @@ async fn migration_continuation_preserves_tool_pairs_revert_and_retry_boundaries
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_migration_configuration_is_consumed_by_unchanged_web_and_scheduler() {
+async fn migration_configuration_is_consumed_by_unchanged_web_and_the_native_scheduler() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::set_permissions(
         directory.path(),
@@ -2351,15 +2350,11 @@ async fn node_migration_configuration_is_consumed_by_unchanged_web_and_scheduler
     let choices: Value =
         serde_json::from_slice(&std::fs::read(target.join("plugins.json")).unwrap()).unwrap();
     assert_eq!(choices["names"]["web"]["off"], true);
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .unwrap();
-    let defaults = target.join("defaults.json");
-    std::fs::write(&defaults,json!({"plugins":{"scheduler":repository.join("runtime/plugins/scheduler")},"locked":["PluginManager","Rpc","Transport"]}).to_string()).unwrap();
+    std::fs::create_dir_all(target.join("scheduler")).unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
     defaults::mock_hosts(&mut builder);
+    dim_agent_scheduler::install(&mut builder);
     let server = serve(
         builder,
         ServerConfig {
@@ -2367,17 +2362,6 @@ async fn node_migration_configuration_is_consumed_by_unchanged_web_and_scheduler
             database_path: Some(target.join("rust/dimcode.sqlite")),
             product_home: Some(target),
             unix_path: Some(directory.path().join("native.sock")),
-            plugin_defaults: Some(defaults),
-            session_typescript: Some(
-                dim_app_server::session_typescript::SessionTypeScriptConfig {
-                    node: std::env::var_os("DIM_TEST_NODE").unwrap().into(),
-                    js_runtime: std::env::var_os("DIM_TEST_JS_RUNTIME").unwrap().into(),
-                    anchor: repository.join("runtime/package.json"),
-                    python: None,
-                    acquire: None,
-                    rows: vec![],
-                },
-            ),
             ..Default::default()
         },
     )
