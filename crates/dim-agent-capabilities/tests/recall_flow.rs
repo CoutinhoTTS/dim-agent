@@ -1092,7 +1092,7 @@ fn roster(open: &[(&str, &str)], ended: Option<&str>) -> EventKind {
                 "dim-branch-lines",
                 &[("branch", "main")],
                 &format!(
-                    "Lines you opened that are still open. Each is you, working in parallel from the point you opened it; it does not see your work after that point unless you message it.\n{listed}\nThey message you when they find something, need you, or end. Use the branch tool to message or read them, and the `wait` tool to wait for them; end the wait when your lines have nothing left to tell you."
+                    "Lines you opened that are still open. Each is you, working in parallel from the point you opened it; it can read your work after that point, and you can read its.\n{listed}\nThey message you when they find something, need you, or end. Use the branch tool to message or read them, and the `wait` tool to wait for them; end the wait when your lines have nothing left to tell you."
                 ),
             ),
             key,
@@ -2935,6 +2935,10 @@ struct PageReads {
     injected: std::sync::Mutex<Option<String>>,
     /// The kinds the first page named.
     kinds: std::sync::Mutex<Vec<String>>,
+    /// The branch the pinned call reads. Pages of another branch are another
+    /// reader's, such as a line's BranchLine reading its parent's activity
+    /// through the same query.
+    read_branch: std::sync::Mutex<Option<String>>,
     /// The ids the pages returned in read order, while the pinned call runs.
     read: std::sync::Mutex<Option<Vec<String>>>,
 }
@@ -3019,9 +3023,13 @@ impl TimelineStore for PageReads {
             };
             if pinned.is_some() {
                 *self.kinds.lock().unwrap() = query.kinds.clone();
+                *self.read_branch.lock().unwrap() = Some(key.branch_id.clone());
                 *self.read.lock().unwrap() = Some(Vec::new());
             }
-            if let Some(ids) = self.read.lock().unwrap().as_mut()
+            let recording =
+                self.read_branch.lock().unwrap().as_deref() == Some(key.branch_id.as_str());
+            if recording
+                && let Some(ids) = self.read.lock().unwrap().as_mut()
                 && query.direction == TimelineQueryDirection::Descending
                 && !query.kinds.is_empty()
             {
@@ -3068,6 +3076,7 @@ impl PageReads {
         *self.inject.lock().unwrap() = Some((session.clone(), branch.to_owned()));
         *self.injected.lock().unwrap() = None;
         self.kinds.lock().unwrap().clear();
+        *self.read_branch.lock().unwrap() = None;
         *self.read.lock().unwrap() = None;
     }
     fn injected(&self) -> Option<String> {

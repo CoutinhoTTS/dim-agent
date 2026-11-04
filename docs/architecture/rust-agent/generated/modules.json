@@ -1068,6 +1068,7 @@
       "parent": "dim_agent_capabilities::timeline_tree",
       "file": "crates/dim-agent-capabilities/src/timeline_tree.rs",
       "unexpandedMacros": [
+        "assert",
         "assert_eq",
         "format",
         "json",
@@ -12999,14 +13000,17 @@
       "references": [
         "path TimelineQuery",
         "path TimelineQueryDirection::Ascending",
+        "path TimelineQueryDirection::Descending",
         "path TimelineQueryOrderBy::Sequence",
         "path TimelineQueryPredicate",
+        "path TimelineQueryReply",
         "path TimelineQueryScope::Branch",
         "path rebuild_facts",
         "use dim_agent_runtime::TimelineQuery",
         "use dim_agent_runtime::TimelineQueryDirection",
         "use dim_agent_runtime::TimelineQueryOrderBy",
         "use dim_agent_runtime::TimelineQueryPredicate",
+        "use dim_agent_runtime::TimelineQueryReply",
         "use dim_agent_runtime::TimelineQueryScope",
         "use dim_agent_runtime::rebuild_facts"
       ]
@@ -13103,6 +13107,13 @@
     },
     {
       "from": "dim_agent_capabilities::timeline_tree::tests",
+      "to": "dim_agent_capabilities::context_block",
+      "references": [
+        "path crate::context_block::element"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::timeline_tree::tests",
       "to": "dim_agent_capabilities::timeline_tree",
       "references": [
         "path BranchLine::fold",
@@ -13117,10 +13128,19 @@
       "references": [
         "path AgentEvent",
         "path EventKind",
+        "path EventKind::InputMessage",
         "path EventKind::ToolResult",
         "path EventKind::ToolUse",
+        "path EventKind::TurnEnd",
+        "path InputMessageData",
+        "path InputMessageData::default",
+        "path InputMessageData::text",
+        "path InputMode::Append",
+        "path InputMode::Queue",
         "path ToolResultData",
-        "path ToolUseData"
+        "path ToolUseData",
+        "path TurnEndData",
+        "path TurnOutcome::Completed"
       ]
     },
     {
@@ -13128,6 +13148,8 @@
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolCall",
+        "path ToolResult::error",
+        "path ToolResult::text",
         "path kind"
       ]
     },
@@ -20177,6 +20199,13 @@
         "path RpcError::reloading",
         "path RpcError::wire",
         "path params"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection::tree",
+      "to": "dim_agent_capabilities::timeline_tree",
+      "references": [
+        "path dim_agent_capabilities::timeline_tree::TreeCommands"
       ]
     },
     {
@@ -40348,6 +40377,18 @@
     {
       "module": "dim_agent_capabilities::skills::session",
       "path": "char::is_whitespace"
+    },
+    {
+      "module": "dim_agent_capabilities::timeline_tree",
+      "path": "Wake::Lost"
+    },
+    {
+      "module": "dim_agent_capabilities::timeline_tree",
+      "path": "Wake::Parent"
+    },
+    {
+      "module": "dim_agent_capabilities::timeline_tree",
+      "path": "Wake::Queued"
     },
     {
       "module": "dim_agent_capabilities::workspace_tools::files",

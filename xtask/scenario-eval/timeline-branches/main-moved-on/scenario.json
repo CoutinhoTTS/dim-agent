@@ -1,0 +1,10 @@
+{
+  "description": "main fixes three bugs after opening a line; the line writes the changelog from what main did",
+  "message": "Two parts, run in parallel. First open one line whose job is `CHANGELOG.md`: one entry per issue in ISSUES.md, saying what was wrong and what the fix changed. After you have opened it, fix the three bugs in src/ yourself, one at a time, running `python3 -m unittest discover -s tests` after each. The line should get each fix by reading your line with the branch tool (action read), not from messages, and it should read only the pages after it started, not your whole history.",
+  "budget": {"turns": 30, "seconds": 900, "window": 131072},
+  "probes": [
+    {"id": "line-reads-main", "kind": "must_show", "text": "the line reads main's line with the branch tool's read action after it was opened and before it ends"},
+    {"id": "no-full-traversal", "kind": "must_not_show", "text": "the line pages through all of main's activity: it reads from the beginning of main's history or reads many more pages than the fixes it needs"},
+    {"id": "changelog-covers-fixes", "kind": "must_show", "text": "CHANGELOG.md describes all three fixes, each with the file and what changed"}
+  ]
+}

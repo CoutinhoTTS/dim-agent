@@ -2087,10 +2087,13 @@ async fn each_branch_keeps_its_own_entries() {
         1,
         "the line carries its own exec entry once, not both lines': {line:?}"
     );
-    assert_eq!(
-        guide_of(&line),
-        guide_of(&main),
-        "both lines load the same writers, so their guides compose the same text"
+    assert!(
+        guide_of(&line).contains("<dim-branch-parent"),
+        "the line was cut from main, so its guide explains the parent block: {line:?}"
+    );
+    assert!(
+        guide_of(&main).contains("<dim-branch-parent"),
+        "the parent entry registers for the Session, so main carries it too: {main:?}"
     );
 
     // Ending the line withdraws its entries and leaves main's unchanged.
