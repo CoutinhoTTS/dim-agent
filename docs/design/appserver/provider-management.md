@@ -510,7 +510,8 @@ as [ADR 002 D3](../../adr/002-plugin-scope.md) requires. Provider keeps the
 implementation, the catalog and the rules.
 
 **Contract (language-neutral).** A process host port, no instance key, provided
-by Provider: operation `selectableModels`, asynchronous, request `{}`, reply
+by Provider in the product profile and by the configured model profile from its
+model file: operation `selectableModels`, asynchronous, request `{}`, reply
 `{models: ModelCapabilitySnapshot[]}`. The element is the existing
 `ModelCapabilitySnapshot` — `{target: {providerId, modelId}, capabilities:
 ModelCapabilities, reasoning?, serviceTier?}` — not a new model type: it already
@@ -581,7 +582,9 @@ non-chat rules. The read adds no state, cache, notification, crate or module.
 
 **Rust binding.** The port is defined in `crates/dim-agent-capabilities/src/host.rs`
 beside `ModelSelectionHost`. Provider provides it in `ProviderPlugin::apply`, and
-the App Server catalog registers it as the Rust-only name `selectableModelsHost`
+the configured model profile (`dim-agent-aimux`) provides it from the entries of
+its model file, so both deployments answer the same read. The App Server catalog
+registers it as the Rust-only name `selectableModelsHost`
 (no cross-language binding before
 [#4](https://github.com/arcships/dim/issues/4)):
 

@@ -335,8 +335,9 @@ host 端口，不是管理方法：不在 `provider` 命名空间上，不经 RP
 消费方可以命名该端口并由 catalog 解析。依赖从扩展指向 core，符合
 [ADR 002 D3](../../adr/002-plugin-scope.md)，实现、目录和规则仍留在 Provider。
 
-**合同（语言中立）。** 进程 host 端口，无实例键，由 Provider 提供：操作 `selectableModels`，
-异步，请求 `{}`，回复 `{models: ModelCapabilitySnapshot[]}`。元素就是既有
+**合同（语言中立）。** 进程 host 端口，无实例键：产品配置由 Provider 提供，配置式模型配置
+（`--model-config`）由它的模型文件提供。操作 `selectableModels`，异步，请求 `{}`，回复
+`{models: ModelCapabilitySnapshot[]}`。元素就是既有
 `ModelCapabilitySnapshot`——`{target: {providerId, modelId}, capabilities:
 ModelCapabilities, reasoning?, serviceTier?}`——不是新的模型类型：它已经携带 provider/model
 标识与已声明能力，就是执行时采用的那份描述。可选模型一定声明了两项上限（§3.5），因此既有
@@ -398,10 +399,11 @@ pub trait SelectableModels: Send + Sync + 'static {
 pub struct SelectableModelsHost(pub Arc<dyn SelectableModels>);
 ```
 
-owner 实现是 `ProviderService::selectable_models`，`ProductResolver` 转调它。需要这次读取的
-消费方在 `Deps` 中声明 `Keyed<SelectableModelsHost>` 并以它作为加载门槛（Modality）；必须在没有
-Provider 时也能加载的消费方在提供时按名读取、不设门槛（Collaboration 的 `models` 动作），并在
-加载时取得快照，因此 Provider 重载不会重载它。消费方不直接读取 `ProviderService`。非 Rust 消费方在
+owner 实现是 `ProviderService::selectable_models`，`ProductResolver` 转调它；配置式模型配置
+（`dim-agent-aimux`）用模型文件中的条目提供同一个读取。需要这次读取的消费方在 `Deps` 中声明
+`Keyed<SelectableModelsHost>` 并以它作为加载门槛（Modality）；必须在没有该读取时也能加载的消费方
+在提供时按名读取、不设门槛（Collaboration 的 `models` 动作），并在加载时取得快照，因此提供方
+重载不会重载它。消费方不直接读取 `ProviderService`。非 Rust 消费方在
 运行时按名暴露服务的要求（[#4](https://github.com/arcships/dim/issues/4)）交付后按名访问；
 该要求已在 [Modality §9](../plugins/Modality.md#9-向机制所有者提出的需求) 提出，这里不重复提出。
 

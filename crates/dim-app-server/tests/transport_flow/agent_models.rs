@@ -184,3 +184,75 @@ async fn a_deployment_without_the_selectable_read_offers_no_models_action() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+/// The `--model-config` profile: aimux owns the catalog and provides the
+/// same read, so the action and the bullet appear there too.
+fn configured_models() -> Arc<dim_agent_aimux::AimuxModels> {
+    let file: dim_agent_aimux::config::ModelConfigFile = serde_json::from_value(json!({
+        "defaultModel": {"providerId":"local","modelId":"main"},
+        "providers": [{
+            "id": "local",
+            "kind": "openai-compatible",
+            "apiKeyEnv": null,
+            "baseUrl": "http://127.0.0.1:1/v1",
+            "compatible": null,
+            "models": [{
+                "id": "main",
+                "contextWindow": 128000,
+                "maxOutputTokens": 16384,
+                "config": {"maxTokens": 16384}
+            }]
+        }]
+    }))
+    .unwrap();
+    Arc::new(dim_agent_aimux::AimuxModels::from_config(file).unwrap())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_configured_model_profile_lists_its_models() {
+    let home = std::fs::canonicalize(std::env::temp_dir())
+        .unwrap()
+        .join(format!("dm-agent-models-config-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let (server, _requests, _release, mut recorded) =
+        super::session_typescript::start_recording(ServerConfig {
+            model_catalog: Some(configured_models()),
+            target_home: Some(home.clone()),
+            session_defaults: dim_agent_runtime::SessionConfig {
+                model: dim_agent_types::ModelSelection {
+                    provider_id: "local".into(),
+                    model_id: "main".into(),
+                    capability_snapshot: None,
+                    config: None,
+                    metadata: None,
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let id = create_session(&mut client).await;
+    let session = server.agent().unwrap().get_session(&id).unwrap();
+
+    submit(&mut client, &id).await;
+    let declared = declaration(&mut recorded).await;
+    assert!(actions(&declared).iter().any(|action| action == "models"));
+    let listed = result(&session).await;
+    assert_ne!(listed.is_error, Some(true), "{listed:?}");
+    assert_eq!(
+        listed.structured_content.unwrap()["models"],
+        json!([{
+            "providerId": "local",
+            "modelId": "main",
+            "contextWindow": 128_000,
+            "maxOutputTokens": 16_384,
+            "vision": false,
+            "reasoning": false,
+        }])
+    );
+
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}

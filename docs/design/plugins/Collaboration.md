@@ -144,15 +144,16 @@ no availability rule of its own and caches nothing, so a model the user disables
 disappears from the next call.
 
 **Availability.** The Session part reads the port when it mounts, and the deployment either has it
-or does not: a profile without Provider lists no models, and there the leader's declaration offers
-no `models` action, because naming one would promise a read that cannot answer, and the built-in
-leader text carries the bullet only when the action is offered. The member declaration never
+or does not: the product profile provides it through Provider, the configured model profile from
+its model file, and any other profile lists no models, where the leader's declaration offers no
+`models` action, because naming one would promise a read that cannot answer; the built-in leader
+text carries the bullet only when the action is offered. The member declaration never
 carries the action: a member cannot delegate. A factory that replaces the leader description is one
 whole text and states the action itself, as it does for every other action (§3).
 
-The read stays optional rather than a dependency that gates the part: a deployment without
-Provider is a supported profile, and Collaboration must load there too, so the part reads the port
-once when it mounts instead of waiting for it. That read is a snapshot: a Provider reload does not
+The read stays optional rather than a dependency that gates the part: a deployment that provides
+no such read is a supported profile, and Collaboration must load there too, so the part reads the
+port once when it mounts instead of waiting for it. That read is a snapshot: a Provider reload does not
 reload this part, and a later call answers with the owner's own error until the Session or its part
 reloads.
 
