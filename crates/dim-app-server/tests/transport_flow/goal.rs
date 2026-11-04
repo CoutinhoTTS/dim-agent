@@ -9,8 +9,8 @@ use dim_agent_capabilities::{
     adapters::DefaultPrepareModelPlugin,
     history::HistoryRenderer,
     host::{
-        CompactionStrategyHost, ContextModelHost, IdentityContext, ModelChunk, ModelConnection,
-        ModelDriver, ModelHost, ModelStopReason, ModelStream, PrepareContextHost,
+        CompactionStrategyHost, ContextModelHost, HostError, IdentityContext, ModelChunk,
+        ModelConnection, ModelDriver, ModelHost, ModelStopReason, ModelStream, PrepareContextHost,
     },
 };
 use dim_agent_runtime::testing::{branch_events, chain_events};
@@ -71,9 +71,10 @@ async fn goal(client: &mut Client, method: &str, params: Value) -> Value {
 /// Goal's blocks on `branch`, in order: each input's first `<dim-goal>`
 /// marker line, and the input's sequence.
 async fn goal_writes(session: &dim_agent_runtime::Session, branch: &str) -> Vec<(u64, String)> {
-    branch_events(session, branch, ..)
-        .await
-        .unwrap()
+    let Ok(events) = branch_events(session, branch, ..).await else {
+        return Vec::new();
+    };
+    events
         .iter()
         .filter_map(|event| match &event.kind {
             EventKind::InputMessage(data) => data.blocks.first().and_then(|block| {
@@ -141,6 +142,322 @@ async fn goal_block(session: &dim_agent_runtime::Session, branch: &str, needle: 
         })
         .unwrap_or_else(|| panic!("no Goal block with {needle}"))
 }
+
+/// The raw blocks of the last Goal input on `branch` whose marker line
+/// contains `needle`, in order.
+async fn goal_blocks(
+    session: &dim_agent_runtime::Session,
+    branch: &str,
+    needle: &str,
+) -> Vec<String> {
+    let Ok(events) = branch_events(session, branch, ..).await else {
+        panic!("no Goal input with {needle}")
+    };
+    events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::InputMessage(data) => data.blocks.first().and_then(|block| {
+                let dim_agent_types::InputBlock::Raw { text, .. } = block;
+                (text.starts_with("<dim-goal ") && text.lines().next().unwrap().contains(needle))
+                    .then(|| {
+                        data.blocks
+                            .iter()
+                            .map(|block| {
+                                let dim_agent_types::InputBlock::Raw { text, .. } = block;
+                                text.clone()
+                            })
+                            .collect()
+                    })
+            }),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no Goal input with {needle}"))
+}
+
+/// The last model request on `branch`, as the model received it.
+async fn last_request(session: &dim_agent_runtime::Session, branch: &str) -> Arc<ModelRequest> {
+    chain_events(session, branch, ..)
+        .await
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => Some(data.request.clone()),
+            _ => None,
+        })
+        .expect("a model call")
+}
+
+/// Every tool result text on `branch`, with whether it was an error.
+async fn tool_texts(session: &dim_agent_runtime::Session, branch: &str) -> Vec<(String, bool)> {
+    branch_events(session, branch, ..)
+        .await
+        .unwrap()
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ToolResult(data) => Some(&data.results),
+            _ => None,
+        })
+        .flatten()
+        .map(|result| {
+            let text = match &result.result.content {
+                dim_agent_types::ToolContent::Text(text) => text.clone(),
+                dim_agent_types::ToolContent::Blocks(blocks) => {
+                    serde_json::to_string(blocks).unwrap()
+                }
+            };
+            (text, result.result.is_error == Some(true))
+        })
+        .collect()
+}
+
+/// Waits until a tool result with exactly `text` is on `branch`.
+async fn wait_tool_text(session: &dim_agent_runtime::Session, branch: &str, text: &str) {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if tool_texts(session, branch)
+                .await
+                .iter()
+                .any(|(got, _)| got == text)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no tool result {text:?} on {branch}"));
+}
+
+/// The `goal_update` tool's declaration, as the model receives it.
+async fn assert_goal_tool(session: &dim_agent_runtime::Session, branch: &str) {
+    let request = last_request(session, branch).await;
+    let tools = request.tools.as_deref().expect("a request with tools");
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name == "goal_update")
+        .unwrap_or_else(|| panic!("goal_update is offered: {tools:#?}"));
+    assert_eq!(
+        tool.description,
+        "Report that the current goal is completed or blocked."
+    );
+    assert_eq!(
+        serde_json::to_value(&tool.input_schema).unwrap(),
+        json!({
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["completed", "blocked"]},
+                "summary": {"type": "string", "minLength": 1, "maxLength": 2000},
+            },
+            "required": ["status", "summary"],
+            "additionalProperties": false,
+        }),
+        "the goal_update schema"
+    );
+    assert_eq!(tool.source, dim_agent_types::ToolSource::Extension);
+    assert_eq!(tool.risk.as_deref(), Some("session"));
+}
+
+/// A.5's encoding, for expected values written as raw text.
+fn escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// The two blocks a `set` writes.
+fn set_blocks(branch: &str, objective: &str) -> (String, String) {
+    (
+        format!(
+            "<dim-goal kind=\"goal\" op=\"set\" branch=\"{branch}\">\nObjective:\n{}\n\n\
+             This is the user's standing goal for branch {branch}. If you are on another line of this Session, the goal belongs to branch {branch}: treat it as background, do not continue it, and do not call goal_update for it.\n\
+             </dim-goal>",
+            escape(objective)
+        ),
+        active_status(branch),
+    )
+}
+
+/// [`set_blocks`] under the evaluator judge.
+fn set_blocks_judged(branch: &str, objective: &str) -> (String, String) {
+    let (objective_block, status) = set_blocks(branch, objective);
+    (
+        objective_block.replace("op=\"set\" ", "op=\"set\" judge=\"evaluator\" "),
+        status,
+    )
+}
+
+fn active_status(branch: &str) -> String {
+    format!(
+        "<dim-goal kind=\"status\" status=\"active\" branch=\"{branch}\">\n\
+         The goal for branch {branch} is active. Keep working toward it across turns. When it is fully achieved, call goal_update with status \"completed\". If you cannot make progress without the user, call goal_update with status \"blocked\" and explain why.\n\
+         </dim-goal>"
+    )
+}
+
+fn edit_block(branch: &str, objective: &str) -> String {
+    format!(
+        "<dim-goal kind=\"goal\" op=\"edit\" branch=\"{branch}\">\nObjective:\n{}\n\n\
+         The user set the objective of the goal for branch {branch}. This does not change its status.\n\
+         </dim-goal>",
+        escape(objective)
+    )
+}
+
+fn user_pause_block(branch: &str) -> String {
+    format!(
+        "<dim-goal kind=\"goal\" op=\"pause\" reason=\"user\" branch=\"{branch}\">\n\
+         The user set the goal status for branch {branch} to paused. Do not continue working toward a goal for branch {branch} on your own; respond only to the user's latest input.\n\
+         </dim-goal>"
+    )
+}
+
+fn resume_block(branch: &str) -> String {
+    format!(
+        "<dim-goal kind=\"goal\" op=\"resume\" branch=\"{branch}\">\n\
+         The user set the goal status for branch {branch} to active. If branch {branch} has a goal objective, keep working toward it across turns; when it is completed or blocked, call goal_update.\n\
+         </dim-goal>"
+    )
+}
+
+/// The two blocks a `clear` writes; `after` is the opening it answers.
+fn clear_blocks(branch: &str, after: Option<u64>) -> (String, String) {
+    let (marker, body) = match after {
+        Some(after) => (
+            format!(
+                "kind=\"goal\" op=\"clear\" reason=\"new_branch\" after=\"{after}\" branch=\"{branch}\""
+            ),
+            format!(
+                "Any goal above belongs to another branch, not to branch {branch}. Disregard it; branch {branch} has no goal."
+            ),
+        ),
+        None => (
+            format!("kind=\"goal\" op=\"clear\" branch=\"{branch}\""),
+            "The previous goal was cleared by the user. Disregard it.".into(),
+        ),
+    };
+    (
+        format!("<dim-goal {marker}>\n{body}\n</dim-goal>"),
+        format!(
+            "<dim-goal kind=\"status\" status=\"cleared\" branch=\"{branch}\">\n\
+             The goal for branch {branch} has no status.\n\
+             </dim-goal>"
+        ),
+    )
+}
+
+fn report_block(branch: &str, status: &str, summary: &str) -> String {
+    let label = if status == "completed" {
+        "Result:"
+    } else {
+        "Blocker:"
+    };
+    format!(
+        "<dim-goal kind=\"goal\" op=\"{status}\" branch=\"{branch}\">\n{label}\n{}\n\n\
+         goal_update set the goal status for branch {branch} to {status}. Do not continue working toward a goal for branch {branch} on your own.\n\
+         </dim-goal>",
+        escape(summary)
+    )
+}
+
+fn continuation_block(branch: &str, count: usize, limit: u64, after: u64) -> String {
+    format!(
+        "<dim-goal kind=\"continuation\" count=\"{count}\" limit=\"{limit}\" after=\"{after}\" branch=\"{branch}\">\n\
+         Continue working toward the active goal for branch {branch}. If it is completed or blocked, call goal_update. If you are on another line of this Session, the goal belongs to branch {branch}: do not call goal_update for it.\n\
+         </dim-goal>"
+    )
+}
+
+fn pause_block(branch: &str, reason: &str, phrase: &str, after: u64) -> String {
+    format!(
+        "<dim-goal kind=\"goal\" op=\"pause\" reason=\"{reason}\" after=\"{after}\" branch=\"{branch}\">\n\
+         The goal is paused ({phrase}). Do not continue working toward it on your own; respond only to the user's latest input.\n\
+         </dim-goal>"
+    )
+}
+
+fn evaluate_again_block(branch: &str, after: u64) -> String {
+    format!(
+        "<dim-goal kind=\"evaluate-again\" after=\"{after}\" branch=\"{branch}\">\n\
+         Your reply did not end with a conclusion. End your reply with exactly one of DONE:, CONTINUE: or BLOCKED: as described above.\n\
+         </dim-goal>"
+    )
+}
+
+fn conclusion_block(
+    branch: &str,
+    evaluator: &str,
+    evaluation: &str,
+    result: &str,
+    text: &str,
+) -> String {
+    format!(
+        "<dim-goal kind=\"report\" result=\"{result}\" evaluation=\"{evaluation}\" evaluator=\"{evaluator}\" branch=\"{branch}\">\n\
+         Evaluator report:\n{}\n\
+         </dim-goal>",
+        escape(text)
+    )
+}
+
+fn evaluated_block(branch: &str, op: &str, evaluation: &str, text: &str) -> String {
+    let (label, sentence) = if op == "completed" {
+        (
+            "Result:",
+            format!(
+                "An evaluator verified that the goal for branch {branch} is completed. Do not continue working toward it on your own."
+            ),
+        )
+    } else {
+        (
+            "Blocker:",
+            format!(
+                "An evaluator found that the goal for branch {branch} cannot proceed without the user. Do not continue working toward it on your own."
+            ),
+        )
+    };
+    format!(
+        "<dim-goal kind=\"goal\" op=\"{op}\" by=\"evaluator\" evaluation=\"{evaluation}\" branch=\"{branch}\">\n{label}\n{}\n\n{sentence}\n\
+         </dim-goal>",
+        escape(text)
+    )
+}
+
+fn evaluated_continuation_block(
+    branch: &str,
+    count: usize,
+    limit: u64,
+    after: u64,
+    evaluation: &str,
+) -> String {
+    format!(
+        "<dim-goal kind=\"continuation\" count=\"{count}\" limit=\"{limit}\" after=\"{after}\" evaluation=\"{evaluation}\" branch=\"{branch}\">\n\
+         An evaluator checked your report that the goal for branch {branch} is completed and found it is not achieved yet. Its report above lists items that are at least still missing; the list may be incomplete. Assess yourself how far the goal still is, then continue working toward it. When you think it is achieved, call goal_update with status \"completed\" again.\n\
+         </dim-goal>"
+    )
+}
+
+/// The evaluator prompt (Pursuit §5): the first Queue input of its branch.
+fn evaluator_prompt(branch: &str, evaluation: &str, objective: &str, summary: &str) -> String {
+    format!(
+        "<dim-goal kind=\"evaluate\" branch=\"{}\" evaluation=\"{evaluation}\">\n\
+         You are an evaluator. Branch {branch} reported that its goal is completed. Only you decide whether it is. Do not continue the work, do not change files or settings, and do not call goal_update.\n\
+         \n\
+         Objective:\n{}\n\
+         \n\
+         Reported result:\n{}\n\
+         \n\
+         Verify the facts yourself by reading files and running checks; do not rely on the report or on earlier messages. End your reply with exactly one of:\n\
+         DONE: <the verified result>\n\
+         CONTINUE: followed by the items that are at least still missing, one per line, each with its evidence\n\
+         BLOCKED: <what only the user can provide>",
+        escape(branch),
+        escape(objective),
+        escape(summary)
+    )
+}
+
 /// Text with `<`, `&`, quotes, an entity-like run and a blank line.
 const SPECIAL: &str = "ship <it> & \"now\"\n\nthen &amp; done";
 
@@ -192,6 +509,34 @@ async fn node_goal_continues_to_the_limit_and_stops_on_completion() {
         writes[3].contains(r#"op="pause" reason="limit""#),
         "{writes:#?}"
     );
+    // Every model-facing text, byte for byte (C2). The three turns are the
+    // set's, and the two continuations'.
+    let ends = turn_ends(&session, "main").await;
+    assert_eq!(ends.len(), 3, "three turns: {ends:?}");
+    let (set_objective, set_status) = set_blocks("main", "ship <it>");
+    assert_eq!(
+        goal_blocks(&session, "main", r#"op="set""#).await,
+        vec![set_objective, set_status],
+        "the set input's two blocks"
+    );
+    assert_eq!(
+        goal_block(&session, "main", r#"count="1""#).await,
+        continuation_block("main", 1, 2, ends[0])
+    );
+    assert_eq!(
+        goal_block(&session, "main", r#"count="2""#).await,
+        continuation_block("main", 2, 2, ends[1])
+    );
+    assert_eq!(
+        goal_block(&session, "main", r#"reason="limit""#).await,
+        pause_block(
+            "main",
+            "limit",
+            "the automatic continuation limit was reached",
+            ends[2]
+        )
+    );
+    assert_goal_tool(&session, "main").await;
 
     // A child branch cut after the goal starts with none: Goal retires the
     // inherited keys once (§3.4, Appendix D 7).
@@ -213,6 +558,19 @@ async fn node_goal_continues_to_the_limit_and_stops_on_completion() {
     let child_writes = goal_writes(&session, &child).await;
     assert_eq!(child_writes.len(), 1, "{child_writes:#?}");
     assert_eq!(goal_writes(&session, "main").await.len(), 4);
+    let opening = branch_events(&session, &child, ..)
+        .await
+        .unwrap()
+        .iter()
+        .find(|event| matches!(event.kind, EventKind::BranchStart(_)))
+        .expect("the child's branch/start")
+        .sequence;
+    let (clear_objective, clear_status) = clear_blocks(&child, Some(opening));
+    assert_eq!(
+        goal_blocks(&session, &child, r#"reason="new_branch""#).await,
+        vec![clear_objective, clear_status],
+        "the new-branch clear's two blocks"
+    );
 
     // Completion (Appendix D 1): the model's goal_update records `completed`
     // and no continuation follows it.
@@ -238,6 +596,18 @@ async fn node_goal_continues_to_the_limit_and_stops_on_completion() {
     );
     wait_for(&session, "main", r#"op="completed""#).await;
     idle(&mut client, &id, "main").await;
+    let (finish_set, finish_status) = set_blocks("main", "finish");
+    assert_eq!(
+        goal_blocks(&session, "main", r#"op="set""#).await,
+        vec![finish_set, finish_status],
+        "the second session's set"
+    );
+    assert_eq!(
+        goal_block(&session, "main", r#"op="completed""#).await,
+        report_block("main", "completed", SPECIAL),
+        "the completed report"
+    );
+    wait_tool_text(&session, "main", "goal_update recorded: completed.").await;
     let completed_block = goal_block(&session, "main", r#"op="completed""#).await;
     assert!(!completed_block.contains("<it>"), "{completed_block}");
     assert_eq!(block_value(&completed_block, "Result:"), SPECIAL);
@@ -285,6 +655,43 @@ async fn node_goal_continues_to_the_limit_and_stops_on_completion() {
         assert_ok(&goal(&mut client, method, json!({"sessionId":id})).await);
     }
     wait_for(&session, "main", r#"op="clear""#).await;
+    idle(&mut client, &id, "main").await;
+    assert_eq!(
+        goal_block(&session, "main", r#"op="pause" reason="user""#).await,
+        user_pause_block("main")
+    );
+    assert_eq!(
+        goal_block(&session, "main", r#"op="resume""#).await,
+        resume_block("main")
+    );
+    let (clear_objective, clear_status) = clear_blocks("main", None);
+    assert_eq!(
+        goal_blocks(&session, "main", r#"op="clear""#).await,
+        vec![clear_objective, clear_status],
+        "the user's clear"
+    );
+
+    // The tool's rejection text, and a `blocked` report.
+    submit(
+        &mut client,
+        &id,
+        r#"tool:goal_update {"status":"nope","summary":"x"}"#,
+    )
+    .await;
+    wait_tool_text(
+        &session,
+        "main",
+        "goal_update needs status \"completed\" or \"blocked\" and a summary of 1 to 2000 characters.",
+    )
+    .await;
+    submit_report(&mut client, &id, "blocked", "needs credentials").await;
+    wait_for(&session, "main", r#"op="blocked""#).await;
+    idle(&mut client, &id, "main").await;
+    assert_eq!(
+        goal_block(&session, "main", r#"op="blocked""#).await,
+        report_block("main", "blocked", "needs credentials")
+    );
+    wait_tool_text(&session, "main", "goal_update recorded: blocked.").await;
     let after: Vec<String> = goal_writes(&session, "main")
         .await
         .into_iter()
@@ -392,6 +799,10 @@ async fn node_goal_restore_refolds_without_repeating_decisions() {
     );
     wait_for(&session, "main", r#"op="edit""#).await;
     idle(&mut client, &id, "main").await;
+    assert_eq!(
+        goal_block(&session, "main", r#"op="edit""#).await,
+        edit_block("main", &edited)
+    );
     let before = goal_writes(&session, "main").await;
     assert_eq!(before.len(), 4, "{before:#?}");
     drop(client);
@@ -523,6 +934,21 @@ async fn node_goal_pending_input_and_interrupts() {
             .any(|line| line.contains(r#"kind="continuation" count="1""#)),
         "{writes:#?}"
     );
+    let (continuation, _) = writes
+        .iter()
+        .find(|(_, line)| line.contains(r#"count="1""#))
+        .expect("the first continuation")
+        .clone();
+    let deciding = ends
+        .iter()
+        .rev()
+        .find(|end| **end < continuation)
+        .copied()
+        .expect("the deciding turn");
+    assert_eq!(
+        goal_block(&session, "main", r#"count="1""#).await,
+        continuation_block("main", 1, 1, deciding)
+    );
 
     // Appendix D 3: an interrupt after the goal starts pauses it, and no
     // continuation follows.
@@ -550,6 +976,23 @@ async fn node_goal_pending_input_and_interrupts() {
     );
     wait_for(&session, "main", r#"reason="interrupted""#).await;
     idle(&mut client, &id, "main").await;
+    let interrupt = branch_events(&session, "main", ..)
+        .await
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|event| matches!(event.kind, EventKind::StopInterrupt(_)))
+        .expect("the interrupt")
+        .sequence;
+    assert_eq!(
+        goal_block(&session, "main", r#"reason="interrupted""#).await,
+        pause_block(
+            "main",
+            "interrupted",
+            "the user interrupted the turn",
+            interrupt
+        )
+    );
     let writes = goal_writes(&session, "main").await;
     assert!(
         writes
@@ -663,6 +1106,12 @@ async fn node_goal_settings_resume_unload_and_fork() {
     assert!(
         own[0].contains(&format!(r#"reason="new_branch" after="{opening}""#)),
         "{own:#?}"
+    );
+    let (fork_clear, fork_status) = clear_blocks("main", Some(opening));
+    assert_eq!(
+        goal_blocks(&forked, "main", r#"reason="new_branch""#).await,
+        vec![fork_clear, fork_status],
+        "the fork's new-branch clear"
     );
     assert!(
         goal_writes(&session, "main")
@@ -883,10 +1332,11 @@ async fn node_goal_on_a_line_behaves_as_on_main() {
         .await,
     );
     wait_for(&session, &child, r#"op="set""#).await;
-    assert!(
-        goal_block(&session, &child, r#"op="set""#)
-            .await
-            .contains("line objective")
+    let (line_set, line_status) = set_blocks(&child, "line objective");
+    assert_eq!(
+        goal_blocks(&session, &child, r#"op="set""#).await,
+        vec![line_set, line_status],
+        "the line's set"
     );
     wait_for(&session, &child, r#"count="1""#).await;
     idle(&mut client, &id, &child).await;
@@ -929,6 +1379,17 @@ async fn node_goal_on_a_line_behaves_as_on_main() {
         reset.contains(&format!(r#"count="{expected}""#)),
         "the continuation after the operator input counts {expected}: {reset}"
     );
+    let after = reset
+        .split("after=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .and_then(|value| value.parse::<u64>().ok())
+        .expect("the continuation's after");
+    assert_eq!(
+        goal_block(&session, &child, &format!(r#"count="{expected}""#)).await,
+        continuation_block(&child, expected, 1000, after),
+        "the line's continuation"
+    );
     assert!(goal_writes(&session, "main").await.is_empty());
     assert_ok(
         &goal(
@@ -940,6 +1401,10 @@ async fn node_goal_on_a_line_behaves_as_on_main() {
     );
     wait_for(&session, &child, r#"op="pause""#).await;
     idle(&mut client, &id, &child).await;
+    assert_eq!(
+        goal_block(&session, &child, r#"op="pause""#).await,
+        user_pause_block(&child)
+    );
     server.shutdown();
     server.join().await.unwrap();
     cleanup(&home);
@@ -967,6 +1432,13 @@ async fn node_goal_evaluator_judge_creates_an_evaluator_and_completes_on_done() 
             json!({"sessionId":id,"objective":"make the tests pass","judge":"evaluator"}),
         )
         .await,
+    );
+    wait_for(&session, "main", r#"op="set""#).await;
+    let (judged_set, judged_status) = set_blocks_judged("main", "make the tests pass");
+    assert_eq!(
+        goal_blocks(&session, "main", r#"op="set""#).await,
+        vec![judged_set, judged_status],
+        "the judged set"
     );
     submit_report(&mut client, &id, "completed", "all tests pass").await;
     wait_event(&session, "main", |kind| {
@@ -1006,25 +1478,33 @@ async fn node_goal_evaluator_judge_creates_an_evaluator_and_completes_on_done() 
     );
     let child = &creation.branch;
     let prompt = first_user_text(&session, child).await;
-    let marker = format!(r#"<dim-goal kind="evaluate" branch="main" evaluation="{evaluation}">"#);
-    assert!(prompt.starts_with(&marker), "{prompt}");
-    assert!(
-        prompt.contains("Objective:\nmake the tests pass"),
-        "{prompt}"
-    );
-    assert!(
-        prompt.contains("Reported result:\nall tests pass"),
-        "{prompt}"
+    assert_eq!(
+        prompt,
+        evaluator_prompt(
+            "main",
+            &evaluation.to_string(),
+            "make the tests pass",
+            "all tests pass"
+        ),
+        "the evaluator's prompt"
     );
     wait_for(&session, "main", r#"by="evaluator""#).await;
     idle(&mut client, &id, "main").await;
     let done = goal_block(&session, "main", r#"by="evaluator""#).await;
-    assert!(done.contains(r#"op="completed""#), "{done}");
-    assert_eq!(block_value(&done, "Result:"), "all tests pass");
+    assert_eq!(
+        done,
+        evaluated_block(
+            "main",
+            "completed",
+            &evaluation.to_string(),
+            "all tests pass"
+        ),
+        "the evaluator's completion"
+    );
     // The conclusion it decides on is one input of one block, and that
     // block's marker is the report of this evaluation and evaluator
     // (Pursuit §5).
-    let (blocks, marker) = branch_events(&session, "main", ..)
+    let blocks = branch_events(&session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -1032,18 +1512,35 @@ async fn node_goal_evaluator_judge_creates_an_evaluator_and_completes_on_done() 
             EventKind::InputMessage(data) => data.blocks.first().and_then(|block| {
                 let dim_agent_types::InputBlock::Raw { text, .. } = block;
                 text.starts_with(r#"<dim-goal kind="report""#)
-                    .then(|| (data.blocks.len(), text.lines().next().unwrap().to_owned()))
+                    .then_some(data.blocks.len())
             }),
             _ => None,
         })
         .expect("the evaluator's conclusion input");
     assert_eq!(blocks, 1, "the conclusion input carries the report alone");
+    let conclusion = branch_events(&session, "main", ..)
+        .await
+        .unwrap()
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::InputMessage(data) => data.blocks.first().and_then(|block| {
+                let dim_agent_types::InputBlock::Raw { text, .. } = block;
+                text.starts_with(r#"<dim-goal kind="report""#)
+                    .then(|| text.clone())
+            }),
+            _ => None,
+        })
+        .expect("the evaluator's conclusion input");
     assert_eq!(
-        marker,
-        format!(
-            r#"<dim-goal kind="report" result="done" evaluation="{evaluation}" evaluator="{child}" branch="main">"#
+        conclusion,
+        conclusion_block(
+            "main",
+            child,
+            &evaluation.to_string(),
+            "done",
+            "DONE: all tests pass"
         ),
-        "the conclusion marker"
+        "the conclusion input"
     );
     let writes = goal_writes(&session, "main").await;
     assert!(
@@ -1197,6 +1694,363 @@ async fn node_goal_evaluator_restart_writes_no_second_result() {
             .count()
             == 1,
         "{writes:#?}"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    cleanup(&home);
+}
+
+/// Answers the evaluator's first turn without a conclusion and its second
+/// with CONTINUE; echoes otherwise.
+#[derive(Default)]
+struct RevisingModel {
+    evaluator_turns: std::sync::atomic::AtomicUsize,
+}
+impl ModelDriver for RevisingModel {
+    fn invoke(
+        &self,
+        request: Arc<ModelRequest>,
+        connection: ModelConnection,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ModelStream> {
+        if !is_evaluator(&request) {
+            return dim_agent_capabilities::adapters::EchoModel.invoke(request, connection, cancel);
+        }
+        let turn = self
+            .evaluator_turns
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let text = if turn == 0 {
+            "I read the tests.".to_owned()
+        } else {
+            "Still missing.\nCONTINUE:\n- tests still fail".to_owned()
+        };
+        Box::pin(async move {
+            Ok(Box::pin(futures_util::stream::iter(vec![
+                Ok(ModelChunk::MessageStart {
+                    message_id: "evaluation".into(),
+                }),
+                Ok(ModelChunk::Text(text)),
+                Ok(ModelChunk::TextEnd),
+                Ok(ModelChunk::MessageStop {
+                    message_id: "evaluation".into(),
+                    reason: ModelStopReason::EndTurn,
+                }),
+            ])) as ModelStream)
+        })
+    }
+}
+
+/// Answers the evaluator's turn with BLOCKED; echoes otherwise.
+struct BlockedModel;
+impl ModelDriver for BlockedModel {
+    fn invoke(
+        &self,
+        request: Arc<ModelRequest>,
+        connection: ModelConnection,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ModelStream> {
+        if !is_evaluator(&request) {
+            return dim_agent_capabilities::adapters::EchoModel.invoke(request, connection, cancel);
+        }
+        Box::pin(async move {
+            Ok(Box::pin(futures_util::stream::iter(vec![
+                Ok(ModelChunk::MessageStart {
+                    message_id: "evaluation".into(),
+                }),
+                Ok(ModelChunk::Text(
+                    "Blocked on credentials.\nBLOCKED: need credentials".into(),
+                )),
+                Ok(ModelChunk::TextEnd),
+                Ok(ModelChunk::MessageStop {
+                    message_id: "evaluation".into(),
+                    reason: ModelStopReason::EndTurn,
+                }),
+            ])) as ModelStream)
+        })
+    }
+}
+
+/// Fails the evaluator's turn; echoes every other request.
+struct FailingEvaluator;
+impl ModelDriver for FailingEvaluator {
+    fn invoke(
+        &self,
+        request: Arc<ModelRequest>,
+        connection: ModelConnection,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ModelStream> {
+        if !is_evaluator(&request) {
+            return dim_agent_capabilities::adapters::EchoModel.invoke(request, connection, cancel);
+        }
+        Box::pin(async move { Err(HostError::failed("fixture evaluator failure")) })
+    }
+}
+
+/// Fails a turn whose last operator text is `fail`; echoes otherwise.
+struct FailingModel;
+impl ModelDriver for FailingModel {
+    fn invoke(
+        &self,
+        request: Arc<ModelRequest>,
+        connection: ModelConnection,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ModelStream> {
+        let fails = request.messages.iter().rev().find_map(|message| {
+            (message.role == dim_agent_types::Role::User).then(|| match &message.content {
+                MessageContent::Text(text) => text.contains("fail"),
+                _ => false,
+            })
+        });
+        if fails != Some(true) {
+            return dim_agent_capabilities::adapters::EchoModel.invoke(request, connection, cancel);
+        }
+        Box::pin(async move { Err(HostError::failed("fixture failure")) })
+    }
+}
+
+/// The evaluation a `branch/create` on `branch` names.
+async fn evaluation_of(session: &dim_agent_runtime::Session, branch: &str) -> String {
+    let creates = branch_creates(session, branch).await;
+    let creation = &creates.first().expect("the evaluator's creation").1;
+    let BranchSource::Host { operation_id } = &creation.source else {
+        panic!("a host creation: {creation:#?}")
+    };
+    operation_id
+        .strip_prefix("goal:evaluate:")
+        .expect("Goal's operation id")
+        .to_owned()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_goal_evaluator_asks_again_and_continues() {
+    let home = product_home();
+    let (server, agent) = launch_goal_with(
+        &home,
+        AgentBuilder::new(AgentConfig::default()),
+        Arc::new(RevisingModel::default()),
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    select_model(&mut client).await;
+    set_limit(&mut client, 5).await;
+    let id = new_session(&mut client).await;
+    let session = agent.get_session(&id).unwrap();
+    assert_ok(
+        &goal(
+            &mut client,
+            "set",
+            json!({"sessionId":id,"objective":"make the tests pass","judge":"evaluator"}),
+        )
+        .await,
+    );
+    submit_report(&mut client, &id, "completed", "all tests pass").await;
+    wait_event(&session, "main", |kind| {
+        matches!(kind, EventKind::BranchCreate(_))
+    })
+    .await;
+    let evaluation = evaluation_of(&session, "main").await;
+    let child = branch_creates(&session, "main").await[0].1.branch.clone();
+
+    // The first evaluator turn ends without a conclusion: Goal asks again on
+    // the evaluator's own line.
+    wait_for(&session, &child, r#"kind="evaluate-again""#).await;
+    let first_end = turn_ends(&session, &child).await[0];
+    assert_eq!(
+        goal_block(&session, &child, r#"kind="evaluate-again""#).await,
+        evaluate_again_block(&child, first_end),
+        "the evaluator's follow-up"
+    );
+
+    // The second ends with CONTINUE: its report decides the evaluation, and
+    // the working branch continues.
+    let needle = format!(r#"evaluation="{evaluation}""#);
+    wait_for(&session, "main", &needle).await;
+    idle(&mut client, &id, "main").await;
+    assert_eq!(
+        goal_block(&session, "main", r#"kind="report""#).await,
+        conclusion_block(
+            "main",
+            &child,
+            &evaluation,
+            "continue",
+            "CONTINUE:\n- tests still fail"
+        ),
+        "the CONTINUE report"
+    );
+    let continuation = goal_block(&session, "main", &needle).await;
+    let count = continuation
+        .split("count=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .and_then(|value| value.parse::<usize>().ok())
+        .expect("the continuation's count");
+    let after = continuation
+        .split("after=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .and_then(|value| value.parse::<u64>().ok())
+        .expect("the continuation's after");
+    assert_eq!(
+        continuation,
+        evaluated_continuation_block("main", count, 5, after, &evaluation),
+        "the evaluator's continuation"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    cleanup(&home);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_goal_evaluator_blocks_or_fails_the_evaluation() {
+    // An evaluator that reports BLOCKED completes the goal as blocked.
+    let home = product_home();
+    let (server, agent) = launch_goal_with(
+        &home,
+        AgentBuilder::new(AgentConfig::default()),
+        Arc::new(BlockedModel),
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    select_model(&mut client).await;
+    set_limit(&mut client, 5).await;
+    let id = new_session(&mut client).await;
+    let session = agent.get_session(&id).unwrap();
+    assert_ok(
+        &goal(
+            &mut client,
+            "set",
+            json!({"sessionId":id,"objective":"ship it","judge":"evaluator"}),
+        )
+        .await,
+    );
+    submit_report(&mut client, &id, "completed", "done").await;
+    wait_event(&session, "main", |kind| {
+        matches!(kind, EventKind::BranchCreate(_))
+    })
+    .await;
+    let evaluation = evaluation_of(&session, "main").await;
+    let child = branch_creates(&session, "main").await[0].1.branch.clone();
+    wait_for(&session, "main", r#"by="evaluator""#).await;
+    idle(&mut client, &id, "main").await;
+    assert_eq!(
+        goal_block(&session, "main", r#"by="evaluator""#).await,
+        evaluated_block("main", "blocked", &evaluation, "need credentials"),
+        "the evaluator's block"
+    );
+    assert_eq!(
+        goal_block(&session, "main", r#"kind="report""#).await,
+        conclusion_block(
+            "main",
+            &child,
+            &evaluation,
+            "blocked",
+            "BLOCKED: need credentials"
+        ),
+        "the BLOCKED report"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    cleanup(&home);
+
+    // An evaluator whose turn fails pauses the goal with `evaluation_failed`.
+    let home = product_home();
+    let (server, agent) = launch_goal_with(
+        &home,
+        AgentBuilder::new(AgentConfig::default()),
+        Arc::new(FailingEvaluator),
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    select_model(&mut client).await;
+    set_limit(&mut client, 5).await;
+    let id = new_session(&mut client).await;
+    let session = agent.get_session(&id).unwrap();
+    assert_ok(
+        &goal(
+            &mut client,
+            "set",
+            json!({"sessionId":id,"objective":"ship it","judge":"evaluator"}),
+        )
+        .await,
+    );
+    submit_report(&mut client, &id, "completed", "done").await;
+    wait_event(&session, "main", |kind| {
+        matches!(kind, EventKind::BranchCreate(_))
+    })
+    .await;
+    let evaluation = evaluation_of(&session, "main").await;
+    let child = branch_creates(&session, "main").await[0].1.branch.clone();
+    wait_for(&session, "main", r#"reason="evaluation_failed""#).await;
+    idle(&mut client, &id, "main").await;
+    let after = evaluation.parse::<u64>().expect("a sequence");
+    assert_eq!(
+        goal_block(&session, "main", r#"reason="evaluation_failed""#).await,
+        pause_block(
+            "main",
+            "evaluation_failed",
+            "the evaluator could not check the result",
+            after
+        ),
+        "the failed evaluation"
+    );
+    assert_eq!(
+        goal_block(&session, "main", r#"kind="report""#).await,
+        conclusion_block(
+            "main",
+            &child,
+            &evaluation,
+            "failed",
+            "the evaluator's turn did not complete"
+        ),
+        "the evaluator's failure report"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    cleanup(&home);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_goal_turn_failure_pauses_the_goal() {
+    let home = product_home();
+    let (server, agent) = launch_goal_with(
+        &home,
+        AgentBuilder::new(AgentConfig::default()),
+        Arc::new(FailingModel),
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    select_model(&mut client).await;
+    set_limit(&mut client, 5).await;
+    let id = new_session(&mut client).await;
+    let session = agent.get_session(&id).unwrap();
+    submit(&mut client, &id, r#"tool:wait {"millis":1500}"#).await;
+    wait_event(&session, "main", |kind| {
+        matches!(kind, EventKind::ToolCall(_))
+    })
+    .await;
+    assert_ok(
+        &goal(
+            &mut client,
+            "set",
+            json!({"sessionId":id,"objective":"ship"}),
+        )
+        .await,
+    );
+    submit(&mut client, &id, "now fail").await;
+    wait_for(&session, "main", r#"reason="turn_failed""#).await;
+    idle(&mut client, &id, "main").await;
+    let failed = turn_ends(&session, "main")
+        .await
+        .last()
+        .copied()
+        .expect("a turn end");
+    assert_eq!(
+        goal_block(&session, "main", r#"reason="turn_failed""#).await,
+        pause_block("main", "turn_failed", "the last turn failed", failed),
+        "the failed turn's pause"
     );
     server.shutdown();
     server.join().await.unwrap();
