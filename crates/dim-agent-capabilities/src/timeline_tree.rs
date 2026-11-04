@@ -1089,11 +1089,12 @@ impl TimelineTree {
         };
         // A line holds at most one `branch/end` (the write path refuses a
         // second on an ended line), so one page over the whole line is enough.
+        // The bound is the caller's `1..=head`; the query carries no anchor.
         let query = TimelineQuery {
             scope: dim_agent_runtime::TimelineQueryScope::Branch,
             include_publishing: false,
             from_event: None,
-            from_sequence: Some(1),
+            from_sequence: None,
             order_by: TimelineQueryOrderBy::Sequence,
             direction: TimelineQueryDirection::Descending,
             kinds: vec!["branch/end".into()],
