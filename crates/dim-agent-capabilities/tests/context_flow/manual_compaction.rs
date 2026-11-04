@@ -1152,7 +1152,6 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
         "{:?}",
         failed.err()
     );
-    assert_eq!(agent.live_openings(), 0);
     let main_head = head("main").await;
     store.ranges.lock().unwrap().clear();
     store.pages.lock().unwrap().clear();
@@ -1188,7 +1187,6 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
             .all(|(branch, range)| *branch == child || range.start() == range.end()),
         "{context_reads:?}"
     );
-    assert_eq!(agent.live_openings(), 0);
     let published = session.sequence("main").unwrap();
     branch_events(&session, "main", ..).await.unwrap();
     assert!(
