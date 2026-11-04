@@ -25490,6 +25490,14 @@
     },
     {
       "from": "dim_app_server::settings_methods",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path Empty",
+        "use crate::protocol::Empty"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings_methods",
       "to": "dim_app_server::settings",
       "references": [
         "path SettingsError",
@@ -25510,11 +25518,15 @@
       "to": "dim_app_server::settings::declared",
       "references": [
         "path Read",
+        "path SourceDeclaration",
         "path Update",
         "path Writer::Client",
+        "path holds_write_only",
         "use crate::settings::Read",
+        "use crate::settings::SourceDeclaration",
         "use crate::settings::Update",
-        "use crate::settings::Writer"
+        "use crate::settings::Writer",
+        "use crate::settings::holds_write_only"
       ]
     },
     {
