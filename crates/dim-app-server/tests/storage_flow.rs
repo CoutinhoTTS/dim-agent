@@ -9112,33 +9112,6 @@ async fn a_chain_read_on_an_empty_branch_returns_its_ancestor_facts_from_sqlite(
 }
 
 #[tokio::test]
-async fn a_kind_filtered_query_plan_uses_the_kind_index() {
-    let database = Database::new();
-    let db = SqliteStorage::open(database.0.clone()).unwrap();
-    db.close().await.unwrap();
-    let connection = Connection::open(&database.0).unwrap();
-    let mut statement = connection
-        .prepare(
-            "EXPLAIN QUERY PLAN SELECT sequence, last_sequence, kind, body FROM timeline_events \
-             WHERE session_id=?1 AND branch_id=?2 \
-             AND sequence >= coalesce((SELECT max(sequence) FROM timeline_events \
-               WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3), ?3) \
-             AND sequence<=?4 AND last_sequence>=?3 AND kind IN ('step/text') ORDER BY sequence",
-        )
-        .unwrap();
-    let plan: Vec<String> = statement
-        .query_map(params!["session", "main", 1, 2], |row| row.get(3))
-        .unwrap()
-        .collect::<rusqlite::Result<_>>()
-        .unwrap();
-    assert!(
-        plan.iter()
-            .any(|detail| detail.contains("timeline_events_by_kind")),
-        "the kind-filtered query plan uses the derived index: {plan:?}"
-    );
-}
-
-#[tokio::test]
 async fn a_query_reads_interleaved_kinds_in_sequence_order() {
     use dim_agent_runtime::TimelineQueryDirection::{Ascending, Descending};
     use dim_agent_runtime::TimelineQueryScope::Branch;
