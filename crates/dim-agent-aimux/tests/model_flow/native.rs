@@ -3589,6 +3589,138 @@ async fn gemini_signed_text_parts_keep_their_blocks() {
     );
 }
 
+/// Gemini signs the text it follows: the tag's two recorded streams carry the
+/// text in unsigned chunks and the `thoughtSignature` in a last, empty chunk,
+/// so that signature belongs to the text before it and is replayed with it.
+/// The streams are `fixtures/google-text.chunks.txt` and
+/// `fixtures/google-reasoning.chunks.txt` under `vendor/aimux`; the tag's
+/// tests at `aimux-providers/src/google/tests/language_model.rs:4429` and
+/// `:4546` stream them and snapshot the result.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gemini_signature_after_unsigned_text_signs_that_text_and_replays() {
+    use std::sync::Mutex;
+
+    #[derive(Clone, Default)]
+    struct Endpoint {
+        requests: Arc<Mutex<Vec<(Uri, Value)>>>,
+    }
+    async fn respond(
+        State(endpoint): State<Endpoint>,
+        uri: Uri,
+        Json(request): Json<Value>,
+    ) -> Response {
+        let turn = {
+            let mut requests = endpoint.requests.lock().unwrap();
+            requests.push((uri, request));
+            requests.len()
+        };
+        let chunks = if turn == 1 {
+            vec![
+                json!({"candidates":[{"content":{"role":"model","parts":[{"text":"first token "}]},"index":0}]}),
+                json!({"candidates":[{"content":{"role":"model","parts":[{"text":"second token"}]},"index":0}]}),
+                json!({"candidates":[{"content":{"role":"model","parts":[{"text":"","thoughtSignature":"signature-after-text"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2,"totalTokenCount":3}}),
+            ]
+        } else {
+            vec![
+                json!({"candidates":[{"content":{"role":"model","parts":[{"text":"finished"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}),
+            ]
+        };
+        Response::builder()
+            .status(200)
+            .header("content-type", "text/event-stream")
+            .body(Body::from(sse(chunks)))
+            .unwrap()
+    }
+
+    let endpoint = Endpoint::default();
+    let router = Router::new()
+        .route("/v1beta/{*path}", post(respond))
+        .with_state(endpoint.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/v1beta", listener.local_addr().unwrap());
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    let join = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(stop.cancelled_owned())
+            .await
+            .unwrap();
+    });
+    let models = Arc::new(
+        AimuxModels::from_config(
+            serde_json::from_value(json!({
+                "defaultModel":{"providerId":"local","modelId":"test-model"},
+                "providers":[{"id":"local","kind":"gemini","baseUrl":url,"headers":{"x-goog-api-key":"test-key"},"models":[{"id":"test-model","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":4096}}]}]
+            }))
+            .unwrap(),
+        )
+        .unwrap(),
+    );
+    let agent = model_agent(models, None).await;
+    let session = agent.create_session(session_config()).await.unwrap();
+    session
+        .submit("first".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    assert!(
+        matches!(
+            events.last().unwrap().kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Completed { .. },
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    let content = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelContent(data) => Some(data.content.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    // The empty signed chunk signs the open block; it does not start one.
+    assert_eq!(content.len(), 1, "{content:?}");
+    assert!(
+        matches!(
+            &content[0],
+            MessagePart::Text {
+                text,
+                provider_metadata: Some(ContentMetadata::Gemini { thought_signature }),
+                ..
+            } if text == "first token second token" && thought_signature == "signature-after-text"
+        ),
+        "{content:?}"
+    );
+    session
+        .submit("second".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let requests = endpoint.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2, "{}", requests.len());
+    let parts = requests[1].1["contents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "model")
+        .unwrap()["parts"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        parts,
+        vec![json!({"text":"first token second token","thoughtSignature":"signature-after-text"})],
+        "{}",
+        requests[1].1
+    );
+    drop(session);
+    cancel.cancel();
+    join.await.unwrap();
+}
+
 /// Responses text blocks split by content part, and a function call keeps its
 /// item id (vendored patch for arcships/aimux#468).
 #[tokio::test]
