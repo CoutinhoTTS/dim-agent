@@ -9,7 +9,7 @@ use dim_agent_capabilities::timeline_tree::TreeCommands;
 use dim_agent_runtime::{
     AgentError, BoxFuture, BranchLifecycle, BranchOptions, Dispatcher, Names, SessionLifecycle,
     Timeline, TimelineIdentity, TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
-    TimelineQueryPredicate, TimelineQueryScope,
+    TimelineQueryPredicate, TimelineQueryScope, rebuild_facts,
 };
 use dim_agent_types::{
     AgentEvent, BranchSource, EventKind, InputBlock, InterruptScope, TurnEndData, TurnOutcome,
@@ -45,8 +45,6 @@ const KEYS: &[&str] = &[
 
 /// Inherited `input/message` facts one page of the new-branch check keeps.
 const INHERITED_PAGE: u64 = 64;
-/// Facts one page of the rebuild reads.
-const REBUILD_PAGE: u64 = 256;
 /// Facts one page of the reply read keeps.
 const REPLY_PAGE: u64 = 256;
 
@@ -284,31 +282,15 @@ impl Owner {
     }
 
     /// Folds this branch's facts through the cutoff of one read, unpublished
-    /// tail included, and releases only what lies above it (A.6).
+    /// tail included, and releases only what lies above it (A.6). The read
+    /// selects `KEYS`, the kinds the fold consumes, never the whole branch
+    /// (ADR 020 D3).
     async fn rebuild(self: &Arc<Self>) -> Result<u64, AgentError> {
-        let mut from = None;
-        let through;
-        loop {
-            let reply = self
-                .timeline
-                .query(read_page(
-                    TimelineQueryScope::Branch,
-                    from,
-                    REBUILD_PAGE,
-                    true,
-                ))
-                .await?;
-            for event in &reply.events {
-                self.ingest(event, false);
-            }
-            match reply.events.last().map(|event| event.sequence) {
-                Some(last) if (reply.events.len() as u64) >= REBUILD_PAGE => from = Some(last + 1),
-                _ => {
-                    through = reply.through;
-                    break;
-                }
-            }
+        let reply = rebuild_facts(&self.timeline, KEYS).await?;
+        for event in &reply.events {
+            self.ingest(event, false);
         }
+        let through = reply.through;
         // The decisions the previous generation owed are taken once, before
         // any live event.
         self.decide_end();

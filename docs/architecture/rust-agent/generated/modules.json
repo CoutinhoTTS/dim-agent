@@ -39448,12 +39448,13 @@
         "path TimelineQueryPredicate",
         "path TimelineQueryScope",
         "path TimelineQueryScope::Branch",
-        "path TimelineQueryScope::Chain",
+        "path rebuild_facts",
         "use dim_agent_runtime::TimelineQuery",
         "use dim_agent_runtime::TimelineQueryDirection",
         "use dim_agent_runtime::TimelineQueryOrderBy",
         "use dim_agent_runtime::TimelineQueryPredicate",
-        "use dim_agent_runtime::TimelineQueryScope"
+        "use dim_agent_runtime::TimelineQueryScope",
+        "use dim_agent_runtime::rebuild_facts"
       ]
     },
     {
