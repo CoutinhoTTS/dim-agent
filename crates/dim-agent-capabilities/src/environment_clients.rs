@@ -11,11 +11,11 @@ use crate::{
     prompt_sources::sha256_version,
 };
 use dim_agent_runtime::{
-    AgentBuilder, ConfigureControl, ConfigureUpdate, Feature, Names, PromptSourceTarget,
+    ConfigureControl, ConfigureUpdate, Names, PartRegistry, PartScope, PromptSourceTarget,
     SessionIdentity,
 };
 use dim_agent_types::*;
-use rutis::Ctx;
+use rutis::{Ctx, Error};
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use std::{collections::BTreeMap, sync::Arc};
 use tokio_util::sync::CancellationToken;
@@ -113,20 +113,19 @@ pub trait SessionClientsSource: Send + Sync + 'static {
 /// registries; an assembly without it does not install this feature.
 pub struct SessionClientsHost(pub Arc<dyn SessionClientsSource>);
 
-/// The feature's parts. The App Server daemon profile installs it after it
-/// has provided `SessionClientsHost`.
-pub fn feature() -> Feature {
-    Feature::new("EnvironmentClients")
-        .session("EnvironmentClients", |names| {
-            Ok(Box::new(ClientsPlugin::new(names)?))
-        })
-        .branch("EnvironmentClientsBranch", |names| {
-            Ok(Box::new(ClientsBranchPlugin::new(names)?))
-        })
-}
+/// The Session and branch plugins this capability registers.
+pub const SESSION_PART: &str = "EnvironmentClients";
+pub const BRANCH_PART: &str = "EnvironmentClientsBranch";
 
-pub fn install(builder: &mut AgentBuilder) {
-    builder.require_feature(feature());
+/// Registers the presence plugins on behalf of the process plugin that owns
+/// `ctx` and provides `SessionClientsHost`.
+pub fn register_parts(ctx: &Ctx, parts: &Arc<PartRegistry>) -> Result<(), Error> {
+    parts.register(ctx, PartScope::Session, SESSION_PART, |mount| {
+        Ok(Some(Box::new(ClientsPlugin::new(mount.names)?)))
+    })?;
+    parts.register(ctx, PartScope::Branch, BRANCH_PART, |mount| {
+        Ok(Some(Box::new(ClientsBranchPlugin::new(mount.names)?)))
+    })
 }
 
 /// The body: counts only, no labels, ids, times or departure history.

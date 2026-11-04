@@ -409,6 +409,32 @@ impl Default for Options {
 }
 
 /// The product profile: PromptSources and Skills with scripted hosts.
+struct EnvironmentPartsPlugin {
+    parts: Key<PartRegistry>,
+}
+impl EnvironmentPartsPlugin {
+    fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            parts: names.key()?,
+        })
+    }
+}
+impl DynPlugin for EnvironmentPartsPlugin {
+    fn name(&self) -> &str {
+        "EnvironmentParts"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.parts.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a rutis::Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let parts = ctx.require_at(&self.parts)?;
+            dim_agent_capabilities::environment_clients::register_parts(ctx, &parts)?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
 pub async fn env(dirs: &Dirs, options: Options) -> Env {
     let mut host = platform(&dirs.home);
     host.timezone = Some(options.timezone.into());
@@ -445,7 +471,7 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
         std::time::Duration::from_millis(10),
     );
     if options.clients.is_some() {
-        dim_agent_capabilities::environment_clients::install(&mut builder);
+        builder.plugin(|names| Ok(Box::new(EnvironmentPartsPlugin::new(names)?)));
     }
     if options.execution.is_some() {
         dim_agent_capabilities::environment_settings::install(&mut builder);

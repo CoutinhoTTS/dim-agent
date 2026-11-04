@@ -105,6 +105,7 @@ flowchart LR
   p3 -->|"dim_app_server::control::ServerControl"| p38
   p8 -->|"dim_app_server::methods::ManagementMethods"| p38
   p2 -->|"rutis_loader::loader::Loader"| p38
+  p40 -->|"dim_agent_runtime::parts::PartRegistry"| p37
   p3 -->|"dim_app_server::control::ServerControl"| p37
   p36 -->|"dim_app_server::ui_host::UiHost"| p37
   p40 -->|"dim_agent_runtime::parts::PartRegistry"| p35
