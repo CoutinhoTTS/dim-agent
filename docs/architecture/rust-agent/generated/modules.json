@@ -467,6 +467,7 @@
       "unexpandedMacros": [
         "format",
         "tokio::select",
+        "tracing::warn",
         "vec"
       ]
     },
@@ -8971,8 +8972,10 @@
       "to": "dim_agent_runtime::config",
       "references": [
         "path BranchLifecycle",
+        "path BranchPhase::Closing",
         "path SessionIdentity",
         "use dim_agent_runtime::BranchLifecycle",
+        "use dim_agent_runtime::BranchPhase",
         "use dim_agent_runtime::SessionIdentity"
       ]
     },
