@@ -19,11 +19,12 @@ and is served by `Connection::history`
    value beyond the branch's dispatched position fails `invalid`; the call then
    waits until the branch dispatches up to `through`.
 2. It reads the page through `AgentIndex::history_page`
-   ([agents.rs](../../../crates/dim-app-server/src/agents.rs)): a loaded line
-   pages through the branch's query and the store's `batch_end`, a line that
-   has ended through `TreeCommands.page`, and a line the process does not hold
-   through the App Server's page read
-   ([storage/timeline.rs](../../../crates/dim-app-server/src/storage/timeline.rs)).
+   ([agents.rs](../../../crates/dim-app-server/src/agents.rs)): the call acquires
+   the Session first, so a Session that unloaded is loaded again before the
+   read; a live line pages through the branch's query and the store's
+   `batch_end`, and a line that has ended goes through `TreeCommands.page` at
+   its fixed head. The client protocol has no page read of stored facts for a
+   Session the process does not hold (ADR 021 D3).
    `after` and `through` must end a batch. `limit` is required and must be positive; the v3
    method sets no upper bound today, and clients send 256 or 512. A page takes
    `limit` events and then runs to the end of that batch, so it can exceed
