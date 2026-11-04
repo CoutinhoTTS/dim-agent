@@ -12934,14 +12934,17 @@
       "references": [
         "path TimelineQuery",
         "path TimelineQueryDirection::Ascending",
+        "path TimelineQueryDirection::Descending",
         "path TimelineQueryOrderBy::Sequence",
         "path TimelineQueryPredicate",
+        "path TimelineQueryReply",
         "path TimelineQueryScope::Branch",
         "path rebuild_facts",
         "use dim_agent_runtime::TimelineQuery",
         "use dim_agent_runtime::TimelineQueryDirection",
         "use dim_agent_runtime::TimelineQueryOrderBy",
         "use dim_agent_runtime::TimelineQueryPredicate",
+        "use dim_agent_runtime::TimelineQueryReply",
         "use dim_agent_runtime::TimelineQueryScope",
         "use dim_agent_runtime::rebuild_facts"
       ]
@@ -20112,6 +20115,13 @@
         "path RpcError::reloading",
         "path RpcError::wire",
         "path params"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection::tree",
+      "to": "dim_agent_capabilities::timeline_tree",
+      "references": [
+        "path dim_agent_capabilities::timeline_tree::TreeCommands"
       ]
     },
     {

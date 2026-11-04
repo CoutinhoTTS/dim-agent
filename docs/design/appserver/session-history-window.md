@@ -326,10 +326,12 @@ batch edges, which the query does not carry ([ADR 020](../../adr/020-timeline-re
 
 ### 5.3 Where the reads live
 
-The anchors use the branch's Timeline service, which `Connection::history`
-already has the loaded Session for. The backward page is a persistence read of
-the Session's own branch through `AgentIndex`. Collaboration peer reads use an
-acquired Session's query, while summaries retain their metadata reads. The window
+The anchors are queried through the Session's tree service: it forwards an open
+line to its Timeline and reads an ended line at the fixed head it owns. A line
+ending during a history read therefore keeps the same anchor selection. The
+backward page is a persistence read of the Session's own branch through
+`AgentIndex`. Collaboration peer reads use an acquired Session's query, while
+summaries retain their metadata reads. The window
 requires the native store: a host without one (`ServerConfig.database_path:
 None`) advertises no `session.history.latestTurn` and answers a window request
 `invalid`, as `session.catalog` is advertised only with a database path. No

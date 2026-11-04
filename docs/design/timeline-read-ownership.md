@@ -25,6 +25,11 @@ It does not restate the query contract ([plugin contract §5.4](plugin-contract.
 
 A caller does not choose a read because it is cheaper; it reads through the object that owns the state. When no such object exists, the read is the ended line's row or the export, and says so.
 
+The tree's query selects one line's own facts with the event query's anchors,
+filters, ordering and paging. It forwards to the line's Timeline while open and
+uses its fixed ended head otherwise. Chain scope is invalid; an ended line has
+no publishing tail. The history window uses this read to select its anchors.
+
 ## 3. Read paths
 
 ```mermaid
@@ -113,6 +118,7 @@ Session::query(...) / Branch::query(...)   // forward, published bound
 
 // ended line
 TreeCommands::page(id: String, after: u64, limit: u64) -> Result<Vec<Arc<AgentEvent>>>
+TreeCommands::query(id: String, query: TimelineQuery) -> Result<TimelineQueryReply>
 
 // branches and metadata
 TimelineStore::branches(session_id) -> Result<Vec<StoredBranch>>
