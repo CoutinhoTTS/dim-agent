@@ -71,10 +71,7 @@ impl AimuxModels {
                         "compatible.preset requires openai-compatible",
                     ));
                 }
-                if !aimux_providers::provider_names()
-                    .iter()
-                    .any(|name| *name == preset)
-                {
+                if !crate::driver::compatible_preset(preset) {
                     return Err(HostError::failed(format!(
                         "Unknown compatible preset: {preset}"
                     )));

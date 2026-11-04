@@ -25,7 +25,18 @@ use std::{
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 const OPENAI_CODEX_PRESET: &str = "openai-codex";
+/// The vendor packages the compatible protocol builds by name: their
+/// provider-option namespace is mapped in [`request::reasoning`], and neither
+/// has a registry row. Every other accepted name is a registry row.
+const COMPATIBLE_PACKAGES: [&str; 2] = ["deepseek", "xai"];
 const MAX_REDIRECTS: usize = 10;
+
+/// Whether `name` is a preset the compatible protocol builds: a registry row,
+/// or a package whose options dim maps by name. Any other package name, such
+/// as `anthropic`, is refused rather than built as a generic Chat endpoint.
+pub(crate) fn compatible_preset(name: &str) -> bool {
+    COMPATIBLE_PACKAGES.contains(&name) || aimux_providers::preset::lookup(name).is_some()
+}
 /// Names a redirect the transport refused, which the error text then reports:
 /// the helper layer above the transport follows any `3xx` that carries a
 /// `Location`, so a refused one must not carry it.

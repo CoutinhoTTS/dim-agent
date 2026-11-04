@@ -6364,6 +6364,13 @@
     },
     {
       "from": "dim_agent_aimux::models",
+      "to": "dim_agent_aimux::driver",
+      "references": [
+        "path crate::driver::compatible_preset"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::models",
       "to": "dim_agent_aimux::request",
       "references": [
         "path crate::request::convert"

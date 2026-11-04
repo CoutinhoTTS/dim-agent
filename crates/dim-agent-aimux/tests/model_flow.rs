@@ -442,6 +442,36 @@ fn a_model_entry_without_window_facts_fails_loading_and_names_the_model() {
     }
 }
 
+#[test]
+fn a_compatible_preset_is_one_the_adapter_builds() {
+    let configuration = |preset: &str| {
+        serde_json::from_value::<ModelConfigFile>(json!({
+            "defaultModel": {"providerId": "local", "modelId": "test-model"},
+            "providers": [{"id": "local", "kind": "openai-compatible",
+                "baseUrl": "http://127.0.0.1:9/v1",
+                "compatible": {"preset": preset},
+                "models": [{"id": "test-model", "contextWindow": 128_000,
+                    "maxOutputTokens": 4096, "config": {"maxTokens": 4096}}]}]
+        }))
+        .unwrap()
+    };
+    // A vendor package the adapter does not handle would be built as a generic
+    // Chat endpoint with none of its own request rules.
+    let error = AimuxModels::from_config(configuration("anthropic"))
+        .expect_err("anthropic is not a compatible preset");
+    assert!(
+        error
+            .to_string()
+            .contains("Unknown compatible preset: anthropic"),
+        "{error}"
+    );
+    // The registry rows and the packages the adapter maps by name load.
+    for preset in ["deepseek", "xai", "moonshotai", "aihubmix", "zenmux"] {
+        AimuxModels::from_config(configuration(preset))
+            .unwrap_or_else(|error| panic!("{preset}: {error}"));
+    }
+}
+
 struct OverrideRequest {
     remove_tools: bool,
     timeline: rutis::host::Key<Timeline>,
