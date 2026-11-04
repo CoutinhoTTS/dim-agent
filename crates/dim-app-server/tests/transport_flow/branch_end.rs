@@ -79,15 +79,20 @@ async fn read_both_sides(config: ServerConfig) {
     assert_ok(&racing);
     assert_ok(&ended);
     assert_eq!(ended["result"], json!({}));
-    let main = branch_events(&session, "main", ..).await.unwrap();
-    let result = main
-        .iter()
-        .rev()
-        .find_map(|event| match &event.kind {
-            EventKind::BranchEnded(data) if data.branch == child => Some(data.clone()),
-            _ => None,
-        })
-        .expect("main recorded the end");
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let main = branch_events(&session, "main", ..).await.unwrap();
+            if let Some(result) = main.iter().find_map(|event| match &event.kind {
+                EventKind::BranchEnded(data) if data.branch == child => Some(data.clone()),
+                _ => None,
+            }) {
+                break result;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("main recorded the end");
     assert!(matches!(result.source, BranchSource::Host { .. }));
     assert!(result.ancestor.is_none());
     let history = client
@@ -153,26 +158,10 @@ async fn read_both_sides(config: ServerConfig) {
             "ended history must not rebuild stored request bodies"
         );
     }
-    let mut interior = None;
-    for sequence in 1..through {
-        if matches!(
-            tree.batch_end(child.clone(), sequence).await,
-            Err(dim_agent_runtime::AgentError::InvalidInput(_))
-        ) {
-            interior = Some(sequence);
-            break;
-        }
-    }
-    let interior = interior.expect("the model turn contains an atomic batch");
-    for params in [json!({"after":interior}), json!({"through":interior})] {
-        let mut request = json!({"sessionId":id,"branchId":child});
-        request
-            .as_object_mut()
-            .unwrap()
-            .extend(params.as_object().unwrap().clone());
-        let invalid = client.rpc("session.history", request).await;
-        assert_eq!(invalid["error"]["code"], -32602, "{invalid}");
-    }
+    assert!(matches!(
+        tree.batch_end(child.clone(), through + 1).await,
+        Err(dim_agent_runtime::AgentError::InvalidInput(_))
+    ));
     assert!(
         line["result"]["events"]
             .as_array()

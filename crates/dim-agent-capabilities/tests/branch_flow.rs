@@ -1913,6 +1913,37 @@ async fn a_host_line_opens_with_its_identity_block_and_the_creator_prompt() {
         input.user.as_ref().map(|user| user.content.as_slice()),
         Some([ContentBlock::Text { text }]) if text == "what this line is for"
     ));
+    let timeline = probe.child_timeline.lock().unwrap().clone().unwrap();
+    let input = |text: &str| {
+        EventKind::InputMessage(InputMessageData::text(text, Some(InputMode::Append))).into()
+    };
+    let batch = timeline
+        .append_batch_registered(vec![input("first"), input("second")], |_| Ok(()))
+        .unwrap();
+    session
+        .end_branch(
+            &child,
+            BranchSource::Host {
+                operation_id: "end-batch".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let tree = session.session_service::<TreeCommands>().unwrap();
+    assert!(matches!(
+        tree.batch_end(child.clone(), batch[0].sequence).await,
+        Err(AgentError::InvalidInput(_))
+    ));
+    tree.batch_end(child.clone(), batch[1].sequence)
+        .await
+        .unwrap();
+    let page = tree.page(child, batch[0].sequence - 1, 1).await.unwrap();
+    assert_eq!(
+        page.len(),
+        2,
+        "the ended line returns the whole atomic batch"
+    );
+    assert_eq!(page[1].id, batch[1].id);
     soon(agent.close()).await.unwrap();
 }
 
