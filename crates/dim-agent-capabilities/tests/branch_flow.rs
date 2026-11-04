@@ -4757,16 +4757,6 @@ impl TimelineStore for RefuseQueries {
     ) -> dim_agent_runtime::BoxFuture<'a, Result<Option<RecoverySnapshot>>> {
         self.memory.latest_snapshot(key, through, interpreter)
     }
-    fn read_page_without_request_bodies<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        after: u64,
-        limit: usize,
-        through: u64,
-    ) -> dim_agent_runtime::BoxFuture<'a, Result<Vec<StoredEvent>>> {
-        self.memory
-            .read_page_without_request_bodies(key, after, limit, through)
-    }
     fn query<'a>(
         &'a self,
         key: &'a TimelineKey,

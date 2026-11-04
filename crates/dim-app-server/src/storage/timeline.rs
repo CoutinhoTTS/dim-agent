@@ -2913,18 +2913,6 @@ impl TimelineStore for SqliteTimelineStore {
                 .await
         })
     }
-    fn read_page_without_request_bodies<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        after: u64,
-        limit: usize,
-        through: u64,
-    ) -> BoxFuture<'a, Result<Vec<StoredEvent>>> {
-        Box::pin(async move {
-            self.page(key, after, limit, through, RequestBodies::Unused)
-                .await
-        })
-    }
     fn query<'a>(
         &'a self,
         key: &'a TimelineKey,

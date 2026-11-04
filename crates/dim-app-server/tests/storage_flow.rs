@@ -1861,7 +1861,7 @@ async fn branch_end_events_restore_unchanged_and_the_line_stays_ended() {
     assert!(!session.branches().iter().any(|line| line.id == "child"));
     assert_eq!(session.sequence("child").unwrap(), 2);
     let line = store
-        .read_page_without_request_bodies(&key("session", "child"), 0, 8, 2)
+        .read_page(&key("session", "child"), 0, 8, 2)
         .await
         .unwrap()
         .into_iter()
@@ -2608,24 +2608,6 @@ async fn paging_reads_do_not_rebuild_request_bodies() {
     session.idle("main").await.unwrap();
     store.take_node_loads();
 
-    let page = store
-        .read_page_without_request_bodies(&main, 0, 8, 3)
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|record| record.event)
-        .collect::<Vec<_>>();
-    assert_eq!(page.len(), 3);
-    assert_eq!(
-        store.take_node_loads(),
-        NodeLoads::default(),
-        "a paging read loaded request content"
-    );
-    assert!(
-        matches!(&page[1].kind, EventKind::ModelCall(data) if data.request.messages.is_empty()),
-        "a paging read left a stored request as its record holds it"
-    );
-
     let rebuilt = store.read_page(&main, 0, 8, 3).await.unwrap();
     assert_eq!(rebuilt[1].event, model_call(2, messages).event);
     assert_eq!(store.take_node_loads().loads, 6);
@@ -2646,18 +2628,6 @@ async fn paging_reads_do_not_rebuild_request_bodies() {
         ),
         "a read that uses the requests checks their content"
     );
-    let page = store
-        .read_page_without_request_bodies(&main, 0, 8, 3)
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|record| record.event)
-        .collect::<Vec<_>>();
-    assert_eq!(
-        page.iter().map(|event| event.sequence).collect::<Vec<_>>(),
-        vec![1, 2, 3]
-    );
-    assert_eq!(store.take_node_loads(), NodeLoads::default());
     drop(connection);
     agent.close().await.unwrap();
     store.close().await.unwrap();
@@ -7085,7 +7055,7 @@ async fn a_history_page_that_would_end_inside_a_batch_reads_it_whole() {
     append(&store, key("session", "main"), batch).await.unwrap();
     for limit in 1..=3 {
         let page = store
-            .read_page_without_request_bodies(&key("session", "main"), 254, limit, 257)
+            .read_page(&key("session", "main"), 254, limit, 257)
             .await
             .unwrap();
         assert_eq!(
