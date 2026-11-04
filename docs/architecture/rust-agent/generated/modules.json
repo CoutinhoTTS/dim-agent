@@ -31870,6 +31870,7 @@
       "references": [
         "path Mentions",
         "path Mentions::new",
+        "path Mentions::new_with_home",
         "path Trigger",
         "path home",
         "path trigger"
