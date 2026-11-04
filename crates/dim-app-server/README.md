@@ -157,6 +157,16 @@ not the user source.
 - `mcp.disconnect` takes `source`, `id` and optional `cwd`, without a revision; it does not edit
   persisted intent.
 
+A document decodes entry by entry: an entry that does not decode is kept as written and reported
+in the catalog's `invalid` list (`[{id, source, error}]`), while every valid entry loads. Its error
+names the id and the field and states the expected kind, never a value. A broken entry takes no
+`mcp-secrets` overlay and cannot be updated, enabled, tested or inspected: `mcp.remove` deletes it
+and `mcp.save` replaces it with a valid definition, deleting the project record the broken entry
+kept. Every write puts each entry it did not change
+back exactly as it was read. A file that is not JSON and a non-object `mcpServers` still fail the
+whole document, with the decoder's line and column and no value. A client that predates `invalid`
+still reads every valid `servers` row and shows nothing about the broken entries.
+
 Edits are source-local. No atomic user/project scope migration is offered; the Web editor fixes
 the selected entry's source rather than copying secrets into another scope. OAuth sign-in,
 confidential-client input and attempt cancellation follow the [OAuth contract](../../docs/design/appserver/mcp-oauth.md#9-interfaces).

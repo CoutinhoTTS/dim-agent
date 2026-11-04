@@ -522,6 +522,8 @@ Reset 要求确认后把两个布尔值都写为 false。Off 可保留无效的�
 
 客户端有一组封闭的动作种类。每种在每个面板里都只有一个键，键提示按表格顺序列出该领域提供的种类，加上所选条目提供的种类。
 
+针对单个条目的动作同时携带条目 id 和其所在行报告的来源。同一个 id 出现在不同来源时是两行，各自可以被选中和操作；适配器按动作携带的来源执行，不在目录里按 id 找来源。所有者不报告来源的领域不带来源，其 id 本身唯一。
+
 | 种类 | 键 | 做什么 |
 | --- | --- | --- |
 | toggle | Enter 或 Space | 启用或停用该条目，与[执行设置](#执行设置)一致。 |
@@ -715,6 +717,8 @@ inspect 读取 `workflow.status {}`，把保留的运行过滤到该条目的名
 
 MCP 不新增种类。它的条目就是生效目录——各服务器按 id 合并，project 最后——按 `user`、`project`、`plugin` 的顺序分组，组内按 id 排列；条目的标签和 id 都是服务器的 id。面板与 `dimcode mcp` 用 toggle、edit、reload、add、remove、run 与 inspect，经 `mcp.catalog`、`mcp.configuration`、`mcp.update`、`mcp.save`、`mcp.remove`、`mcp.set_enabled`、`mcp.test` 与 `mcp.inspect`（[MCP 管理](appserver/mcp-management.md)）。
 
+每个按 `ID` 点名一个已存条目的 `dimcode mcp` 命令都接受可选的 `--source SOURCE`，取值就是 `mcp list` 打印的来源名：`user`、`project`、`plugin`。同一个解析函数把 `(catalog, id, source)` 解析成唯一一个条目，有效或损坏的都算。给了来源时就是该来源的条目，没有则拒绝并指出该来源；不给来源时，只有一个来源列出该 id 才是那个条目，多个来源列出则拒绝，并指出这些来源和该选项。客户端从不自己挑一个。面板用同一个解析函数，来源取动作所在行的来源；`mcp list` 本就打印每个 id 所在的来源。
+
 toggle 以 `mcp.catalog` 紧接写入前报告的 revision 写该来源的启用状态，所以比较并交换只覆盖这段窗口；它只作用于一个 id，不会覆盖来源中别处的改动。用户条目的启用状态是本地记录；项目条目一开始是停用的，只有 toggle 或 `dimcode mcp enable|disable` 会启用它。edit 先读 `mcp.configuration` 取得条目的 revision 与文档，再写 `mcp.update`，绝不用 `mcp.save`：save 接收完整配置，而读取会隐藏机密，往返一次就会把它们抹掉。
 
 编辑文档就是 patch：省略的字段保留已存值，给出的值替换它，`env` 或 `headers` 只改动它点名的键。种子文档给出命令与工作目录、空的 `env` 与 `headers`，以及已配置 OAuth 的已报告字段；它从不给出已存参数、环境变量值、请求头值、Bearer 令牌或 URL，因为这些要么被隐藏，要么整体替换。文档不带 transport，因为已存条目的 transport 是固定的。stdio 的 patch 点名命令、工作目录与要改动的环境变量键：
@@ -861,15 +865,15 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 | `/workflow:save` | 在新建编辑器中打开 Workflow 面板。 |
 | `dimcode mcp list` | 经 `mcp.catalog` 列出生效目录（[MCP 领域](#mcp-领域)）：每个条目的 id、来源、transport、启用状态与授权，然后是各来源 application 的错误。 |
 | `dimcode mcp add PATH` | 以面板的新建文档（`-` 表示 stdin）经 `mcp.save` 创建条目，带 `mcp.catalog` 报告的来源 revision；目录已列出的 id 会被拒绝。 |
-| `dimcode mcp edit ID` | 用 `$VISUAL`、`$EDITOR` 或平台默认编辑器打开条目的 `mcp.update` patch，并以 `mcp.configuration` 报告的 revision 写回；内容没有变化时不写入。 |
-| `dimcode mcp set ID PATH` | 从 `PATH`（`-` 表示 stdin）读取 patch 并写入，用写入前紧邻读到的 revision。 |
-| `dimcode mcp remove ID` | 不经确认，经 `mcp.remove` 以来源 revision 删除单个条目：命令行上的 id 就是意图。 |
-| `dimcode mcp test ID` | 经 `mcp.test` 运行已存条目一次，并打印临时连接发现的工具；不保存任何内容。 |
-| `dimcode mcp inspect ID` | 经 `mcp.inspect` 打印生效配置与会话连接，不联系服务器。 |
-| `dimcode mcp disconnect ID` | 经 `mcp.disconnect` 关闭条目的活动连接；它不写配置，条目下次使用时重新连接。 |
-| `dimcode mcp login\|logout\|enable\|disable ID` | 行为保持不变：浏览器或设备签到、退出，以及两个 `/mcp` 客户端共用的启用/停用。 |
+| `dimcode mcp edit ID [--source SOURCE]` | 用 `$VISUAL`、`$EDITOR` 或平台默认编辑器打开条目的 `mcp.update` patch，并以 `mcp.configuration` 报告的 revision 写回；内容没有变化时不写入。 |
+| `dimcode mcp set ID [--source SOURCE] PATH` | 从 `PATH`（`-` 表示 stdin）读取 patch 并写入，用写入前紧邻读到的 revision。 |
+| `dimcode mcp remove ID [--source SOURCE]` | 不经确认，经 `mcp.remove` 以来源 revision 删除单个条目：命令行上的 id 就是意图。 |
+| `dimcode mcp test ID [--source SOURCE]` | 经 `mcp.test` 运行已存条目一次，并打印临时连接发现的工具；不保存任何内容。 |
+| `dimcode mcp inspect ID [--source SOURCE]` | 经 `mcp.inspect` 打印生效配置与会话连接，不联系服务器。 |
+| `dimcode mcp disconnect ID [--source SOURCE]` | 经 `mcp.disconnect` 关闭条目的活动连接；它不写配置，条目下次使用时重新连接。 |
+| `dimcode mcp login\|logout\|enable\|disable ID [--source SOURCE]` | 行为保持不变：浏览器或设备签到、退出，以及两个 `/mcp` 客户端共用的启用/停用。 |
 | `/mcp` | 打开会话所在工作区的 MCP 面板（[管理界面](#管理界面)）：每个服务器一个条目，按 `user`、`project`、`plugin` 分组，带 toggle、edit、add、remove、test 与 inspect 种类。 |
-| `/mcp list\|login\|callback\|logout\|disconnect\|enable\|disable` | 行命令，行为不变：`list` 打印目录与会话的服务器状态，`disconnect` 关闭一个条目的活动连接，其余用于签到、完成回调、退出或切换启用状态。 |
+| `/mcp list\|login\|callback\|logout\|disconnect\|enable\|disable` | 行命令：`list` 打印目录与会话的服务器状态，`disconnect` 关闭一个条目的活动连接，其余用于签到、完成回调、退出或切换启用状态。凡是按 ID 指名一个已存条目的命令（`login`、`logout`、`disconnect`、`enable`、`disable`）都接受可选的 `--source SOURCE`，与 `dimcode mcp` 相同；多个 source 列出同一 id 时必须指定。 |
 
 | `dimcode permissions list` | 经 `permission.rules` 列出用户的命令规则：每条规则的决定、匹配方式与命令，然后是列说明以及 deny 的含义。 |
 | `dimcode permissions add PATH` | 从 `PATH`（`-` 表示 stdin）添加一条规则，经 `permission.rules` 与 `permission.set_rules` 写入：规则已存在时不写入；冲突时重新读取并重试，最多三次。 |

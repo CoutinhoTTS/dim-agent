@@ -669,6 +669,11 @@ opens the external editor on it first, and sends what it leaves with the run.
 The client has a closed set of action kinds. Each kind has one key in every panel, and the hint
 lists the area's kinds plus the selected entry's kinds, in the table's order.
 
+An action that names one entry carries the entry's id and the source its row reports. Two entries
+of one id in different sources are two rows, each selected and acted on on its own, and the
+adapter acts on the source the action names rather than searching its catalog for one. An area
+whose owner reports no source leaves the source out, and its ids are unique on their own.
+
 | Kind | Key | What it does |
 | --- | --- | --- |
 | toggle | Enter or Space | Enable or disable the entry, as in [Execution settings](#execution-settings). |
@@ -1113,6 +1118,14 @@ that entry. The create document is one entry with its source and the definition 
 }
 ```
 
+Every `dimcode mcp` command that names one stored entry by `ID` takes an optional
+`--source SOURCE`, whose values are the source names `mcp list` prints: `user`, `project` and
+`plugin`. One resolver turns `(catalog, id, source)` into one entry, valid or broken. With a
+source it is that source's entry, or a refusal that names the source; without one, an id a single
+source lists is that entry, and an id more than one source lists is refused, naming the sources and
+the flag. The client never picks one. The panel uses the same resolver with the source of the row
+the action came from, and `mcp list` already prints the source each id is in.
+
 The two remote forms replace `configuration` with
 `{"type": "http", "url": "https://mcp.example.com/mcp", "headers": {}, "enabled": false}` or the
 same with `"type": "sse"`, and add `"auth": {"type": "bearer", "token": "…"}` for a static
@@ -1282,15 +1295,15 @@ whole rule as one quoted argument, so global options stay unambiguous.
 | `/workflow:save` | Open the Workflow panel in its create editor. |
 | `dimcode mcp list` | List the effective catalog over `mcp.catalog` ([The MCP area](#the-mcp-area)): each entry's id, source, transport, enablement and authorization, then each source application's errors. |
 | `dimcode mcp add PATH` | Create an entry from the panel's create document, `-` for stdin, over `mcp.save` with the source revision `mcp.catalog` reported; an id the catalog already lists is refused. |
-| `dimcode mcp edit ID` | Open the entry's `mcp.update` patch in `$VISUAL`, `$EDITOR` or the platform default, and write it at the revision `mcp.configuration` reported; unchanged text writes nothing. |
-| `dimcode mcp set ID PATH` | The same write from a file, or from stdin for `-`, with the revision read immediately before the write. |
-| `dimcode mcp remove ID` | Delete one entry over `mcp.remove` at its source revision, without a prompt: the id on the command line is the intent. |
-| `dimcode mcp test ID` | Run the stored entry once over `mcp.test` and print the tools the temporary connection found; nothing is saved. |
-| `dimcode mcp inspect ID` | Print the effective configuration and the Session's connections over `mcp.inspect`, without contacting the server. |
-| `dimcode mcp disconnect ID` | Close the entry's live connections over `mcp.disconnect`; it writes no configuration, and the entry reconnects on next use. |
-| `dimcode mcp login\|logout\|enable\|disable ID` | Keep their behavior: browser or device sign-in, sign-out, and the enablement both `/mcp` clients share. |
+| `dimcode mcp edit ID [--source SOURCE]` | Open the entry's `mcp.update` patch in `$VISUAL`, `$EDITOR` or the platform default, and write it at the revision `mcp.configuration` reported; unchanged text writes nothing. |
+| `dimcode mcp set ID [--source SOURCE] PATH` | The same write from a file, or from stdin for `-`, with the revision read immediately before the write. |
+| `dimcode mcp remove ID [--source SOURCE]` | Delete one entry over `mcp.remove` at its source revision, without a prompt: the id on the command line is the intent. |
+| `dimcode mcp test ID [--source SOURCE]` | Run the stored entry once over `mcp.test` and print the tools the temporary connection found; nothing is saved. |
+| `dimcode mcp inspect ID [--source SOURCE]` | Print the effective configuration and the Session's connections over `mcp.inspect`, without contacting the server. |
+| `dimcode mcp disconnect ID [--source SOURCE]` | Close the entry's live connections over `mcp.disconnect`; it writes no configuration, and the entry reconnects on next use. |
+| `dimcode mcp login\|logout\|enable\|disable ID [--source SOURCE]` | Keep their behavior: browser or device sign-in, sign-out, and the enablement both `/mcp` clients share. |
 | `/mcp` | Open the MCP panel of the Session's workspace ([management surfaces](#management-surfaces)): an entry per server, grouped `user`, `project` and `plugin`, with the toggle, edit, add, remove, test and inspect kinds. |
-| `/mcp list\|login\|callback\|logout\|disconnect\|enable\|disable` | The line commands, unchanged: `list` prints the catalog and the Session's server states, `disconnect` closes one entry's live connections, and the rest sign in, complete a callback, sign out or toggle. |
+| `/mcp list\|login\|callback\|logout\|disconnect\|enable\|disable` | The line commands: `list` prints the catalog and the Session's server states, `disconnect` closes one entry's live connections, and the rest sign in, complete a callback, sign out or toggle. Every command that names one stored entry (`login`, `logout`, `disconnect`, `enable`, `disable`) takes an optional `--source SOURCE`, as `dimcode mcp` does; an id more than one source lists requires it. |
 
 | `dimcode permissions list` | List the user's command rules over `permission.rules`: each rule's decision, match and command, then the columns and what deny means. |
 | `dimcode permissions add PATH` | Add one rule from `PATH`, or from stdin for `-`, over `permission.rules` and `permission.set_rules`: an equal rule writes nothing; a conflict re-reads and retries, at most three attempts. |

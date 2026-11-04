@@ -495,7 +495,7 @@ async fn native_import_plain_v13_cas_failure_and_restart() {
                 .await
                 .unwrap();
             assert_eq!(compat.revision, "native:user/mcp:7");
-            assert!(compat.document.mcp_servers.is_empty());
+            assert!(compat.document.entries().is_empty());
             assert_eq!(compat.document.extra["extension"], "v13");
             assert_eq!(
                 db.query_row(
