@@ -223,6 +223,7 @@ async fn the_configured_model_profile_lists_its_models() {
     submit(&mut client, &id).await;
     let declared = declaration(&mut recorded).await;
     assert!(actions(&declared).iter().any(|action| action == "models"));
+    assert!(declared.description.contains("- models:"));
     let listed = result(&session).await;
     assert_ne!(listed.is_error, Some(true), "{listed:?}");
     assert_eq!(

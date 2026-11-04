@@ -41,7 +41,7 @@ Provider 拥有进程配置、目录、覆盖、偏好、校验、安全投影�
 | --- | --- |
 | `managementMethods`，process，命名空间 `provider` | 本地 v3 Desktop/CLI 和受信任进程调用者；§3 沿既有命名空间扩展 |
 | Provider 模块边界 `stored_selection`（Rust） | Migration 等原生数据边界消费方；§3.7 增加一个基于已准入记录的无副作用函数，不是 RPC、host 端口或管理方法 |
-| Provider host 端口 `SelectableModelsHost`（core `dim-agent-capabilities`），由 Provider 提供 | 按模型能力路由的进程内 owner（Modality）与 `agent` 工具的 `models` 动作；§3.6 增加一次读取，不是管理方法或 RPC 方法 |
+| Provider host 端口 `SelectableModelsHost`（core `dim-agent-capabilities`），由该配置的模型拥有方提供（Provider，或配置式模型文件） | 按模型能力路由的进程内 owner（Modality）与 `agent` 工具的 `models` 动作；§3.6 增加一次读取，不是管理方法或 RPC 方法 |
 | `account`、`account.codex`、`account.grok` | 复用账号调用，不新增账号方法、事件或 managed host capability |
 | `ProviderConnectionResolver`、`ModelSelectionHost` | Provider 沿现有类型处理目录和路由，不增加 core 端口 |
 | `auxiliaryModel.complete` | S4 由调用者显式选模型的合同不变 |
@@ -325,15 +325,17 @@ Session 保留已采用的能力快照。模型变为未声明的 Session 仍可
 
 ### 3.6 供进程 owner 读取的可选模型
 
-按模型能力路由工作的进程 owner 不能自留一份 Provider 可用性规则。Provider 只提供一次
-无副作用的读取，返回它会服务的模型，以及路由决策需要的标识和已声明能力。这次读取是进程
-host 端口，不是管理方法：不在 `provider` 命名空间上，不经 RPC 提供，也不改变 `provider.catalog`。
+按模型能力路由工作的进程 owner 不能自留一份它路由到的模型的可用性规则。下面的端口在每个
+配置里有一个提供方——产品配置是 Provider，配置式模型配置（`dim-agent-aimux`）是它的模型文件
+——各自提供一次无副作用的读取，返回它会服务的模型，以及路由决策需要的标识和已声明能力。本节
+定义端口与 Provider 的规则；配置式配置的规则归它自己的页面。这次读取是进程 host 端口，不是
+管理方法：不在 `provider` 命名空间上，不经 RPC 提供，也不改变 `provider.catalog`。
 
 **为什么是端口而不是 `ProviderService` 上的方法。** 消费方插件在自己的 crate 中，
 `xtask check` 拒绝依赖装配层 `dim-app-server`，因此消费方无法命名 `ProviderService`。
 端口及其数据类型放在 Provider 与消费方都依赖的 `dim-agent-capabilities`；注册为进程名后，
 消费方可以命名该端口并由 catalog 解析。依赖从扩展指向 core，符合
-[ADR 002 D3](../../adr/002-plugin-scope.md)，实现、目录和规则仍留在 Provider。
+[ADR 002 D3](../../adr/002-plugin-scope.md)，实现、目录和规则仍留在各自的提供方。
 
 **合同（语言中立）。** 进程 host 端口，无实例键：产品配置由 Provider 提供，配置式模型配置
 （`--model-config`）由它的模型文件提供。操作 `selectableModels`，异步，请求 `{}`，回复
@@ -344,7 +346,7 @@ ModelCapabilities, reasoning?, serviceTier?}`——不是新的模型类型：�
 `capability_snapshot` 转换不会失败。调用方传入自己的取消 token；取消它即取消本次读取并返回
 `Cancelled`。
 
-**应用的规则。** 候选 provider 与默认解析一致：托管包公布的每个账号 provider，以及
+**Provider 应用的规则。** 候选 provider 与默认解析一致：托管包公布的每个账号 provider，以及
 `provider.list` 返回的每个静态 provider。每个模型来自与 `provider.catalog` 相同的单 provider
 目录读取（`catalog_for`），所以捆绑替换、descriptor 覆盖、用户模型、路由、禁用和账号状态
 都是执行时看到的那一份。模型只有在既有 `ProviderCatalog::selectable` 接受时才出现：
@@ -355,6 +357,11 @@ ModelCapabilities, reasoning?, serviceTier?}`——不是新的模型类型：�
 意味着同一快照下 `select`、`configuration`、`apply_preferences`、每请求检查和
 `auxiliaryModel` 都会接受它。执行仍是权威：之后的写入可使其不可选，消费方把 ID 交回
 Provider，由后者重新检查。
+
+**配置式配置应用的规则。** 它的候选是模型文件里的每个 provider 与模型条目，按 provider、再按
+模型 id 排序。文件要求两个上限，因此每个条目都带这两项；文件不声明其它能力，条目按文本默认
+能力给出。这个配置没有账号、路由、停用或偏好输入，读取也不加这类测试：文件的校验与它的规则
+都归它自己的页面（[aimux](../../../crates/dim-agent-aimux/README.md)）。
 
 这次读取不是 [#560](https://github.com/arcships/dim/issues/560) 的校验合同。后者的合同在
 §3.7：它接收已准入的持久化静态记录和显式模型 ID，回答该选择能否执行；本次读取没有输入，
