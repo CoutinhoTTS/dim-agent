@@ -1579,7 +1579,7 @@ async fn nested_instances_preserve_optional_rows_and_cleanup_across_create_resto
         Ok(Box::new(AssemblyAnchor(send.clone())))
     })
     .unwrap();
-    let plugins = b.plugin_rows(&mut builtins).await.unwrap();
+    let plugins = b.plugin_rows(&mut builtins).await.unwrap().rows;
     let mut session_row = b.install(&mut builtins, []).await.unwrap();
     let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")

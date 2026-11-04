@@ -35,6 +35,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `modelSelectionHost` | process | Provider | Rust-only | — |
 | `openAICodexOAuthService` | process | OpenAICodexOAuth | Rust-only | — |
 | `partRegistry` | process | PartRegistry | yes | `registerDefinition` async |
+| `pluginFileTransactions` | process | PluginFiles | Rust-only | — |
 | `pluginFiles` | process | PluginFiles | yes | `open` async |
 | `pluginMounter` | process | rutis-loader | yes | — |
 | `promptSuggestionSettingsHost` | process | PromptSuggestionSettings | Rust-only | — |
