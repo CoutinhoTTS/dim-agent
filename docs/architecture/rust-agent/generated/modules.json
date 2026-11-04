@@ -15096,11 +15096,8 @@
       "from": "dim_agent_runtime::assembly",
       "to": "dim_agent_runtime::core::timeline",
       "references": [
-        "path OpeningCount",
-        "path OpeningCount::default",
         "path Timeline",
-        "path Timeline::branch",
-        "use crate::core::OpeningCount"
+        "path Timeline::branch"
       ]
     },
     {
@@ -15267,14 +15264,6 @@
     },
     {
       "from": "dim_agent_runtime::config",
-      "to": "dim_agent_runtime::core::timeline",
-      "references": [
-        "path Opening",
-        "use crate::core::Opening"
-      ]
-    },
-    {
-      "from": "dim_agent_runtime::config",
       "to": "dim_agent_runtime::error",
       "references": [
         "path crate::AgentError",
@@ -15413,14 +15402,6 @@
         "path Result",
         "use crate::AgentError",
         "use crate::Result"
-      ]
-    },
-    {
-      "from": "dim_agent_runtime::core::timeline",
-      "to": "dim_agent_runtime::config",
-      "references": [
-        "path BranchLifecycle",
-        "use crate::BranchLifecycle"
       ]
     },
     {
@@ -17670,7 +17651,6 @@
       "to": "dim_agent_runtime::timeline_store",
       "references": [
         "path TimelineKey",
-        "path dim_agent_runtime::StoredEvent",
         "use dim_agent_runtime::TimelineKey"
       ]
     },
@@ -20181,13 +20161,6 @@
     },
     {
       "from": "dim_app_server::connection::tree",
-      "to": "dim_agent_runtime::timeline_store",
-      "references": [
-        "path dim_agent_runtime::StoredEvent"
-      ]
-    },
-    {
-      "from": "dim_app_server::connection::tree",
       "to": "dim_agent_types::events",
       "references": [
         "path BranchSource::Host",
@@ -20196,6 +20169,7 @@
         "path InputMessageData::default",
         "path InputMode::Queue",
         "path UserInput",
+        "path dim_agent_types::AgentEvent",
         "use dim_agent_types::BranchSource",
         "use dim_agent_types::EventKind",
         "use dim_agent_types::InputMode"
@@ -20249,6 +20223,7 @@
       "references": [
         "path wire::CreateResult",
         "path wire::HistoryResult",
+        "path wire::ProductEvent",
         "path wire::ProductEvent::new",
         "use crate::tree_protocol"
       ]
@@ -25735,7 +25710,6 @@
         "path EventKind::SessionForked",
         "path EventKind::Text",
         "path EventKind::Thinking",
-        "path EventKind::ToolUseStart",
         "path SessionForkedData",
         "path dim_agent_types::AgentEvent",
         "path dim_agent_types::InputMessageData::text",
