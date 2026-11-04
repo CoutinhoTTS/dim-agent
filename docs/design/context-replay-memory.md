@@ -212,7 +212,7 @@ P3 已经覆盖冷重建：读取按批进行，不再一次物化整段历史�
 | P3 的内存 | 峰值 = 一批事件 + 投影；不保留历史；读取从快照的恢复位置或段首开始，只取参与投影的行，压缩之后的读取量随裁剪点而不是历史长度增长 |
 | policy facts | SQL 选择必须与默认 store 相同；按 ancestry 合并；`input/consumed` 引用的输入即使写在 turn 之前也要选中 |
 | policy 窗口 | cut 必须落在窗口内；跨 batch cut 在累计 history 上裁剪；找不到或损坏时报错 |
-| restore | `Dispatcher::follow` 仍为每个 consumer 读完整本地历史，restore peak 约 19.9MB；这是后续分页 replay 的工作，不影响 prepare |
+| restore | 重建按 `Dispatcher::consume` 给出的截点，用事件查询分页读取各自折叠的种类；restore peak 约 19.9MB 是分页前的测量 |
 | 代码页 | 产品二进制 `.text` 约 60MB；空 daemon RSS 29.7MB，单会话 50.8MB；代码页是 RSS 下限，不是 allocator 能解决 |
 | P1 的分配 | `HistoryEntry.message` 和 `ContextBaselineEntry.message` 共享 Arc；baseline 重复从 24.09 MB 降到共享 |
 | Provider body | aimux 实测 946 条消息/1.9 MB → 10.3 MB 峰值；不是 100 MB 大头。私有 provider 只提供租约/连接，执行走 aimux |
