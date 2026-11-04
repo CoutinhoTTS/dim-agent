@@ -128,7 +128,9 @@ impl Connection {
         )
     }
     pub fn label(&self) -> Option<String> {
-        self.client.get().and_then(|identity| identity.label.clone())
+        self.client
+            .get()
+            .and_then(|identity| identity.label.clone())
     }
     pub async fn finish(&self) {
         self.closed.cancel();

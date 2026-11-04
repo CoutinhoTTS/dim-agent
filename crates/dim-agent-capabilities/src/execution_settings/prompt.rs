@@ -135,9 +135,7 @@ impl SettingsHandler {
                     .as_array()
                     .and_then(|settings| settings.iter().find(|item| item["name"] == name))
                 else {
-                    return ToolResult::error(format!(
-                        "unknown setting {name}; call list"
-                    ));
+                    return ToolResult::error(format!("unknown setting {name}; call list"));
                 };
                 ToolResult::text(setting.to_string())
             }
@@ -153,9 +151,9 @@ impl SettingsHandler {
                 }
                 ToolResult::error(format!("not_writable: {name} is read-only"))
             }
-            other => ToolResult::error(format!(
-                "unknown settings op {other}; use list, get or set"
-            )),
+            other => {
+                ToolResult::error(format!("unknown settings op {other}; use list, get or set"))
+            }
         }
     }
 }
@@ -328,33 +326,28 @@ impl DynPlugin for SettingsSnapshotBranch {
             let turn_timeline = timeline.clone();
             let turn_last = last;
             let turn_dirty = dirty;
-            dispatcher.subscribe(
-                ctx,
-                "SettingsSnapshot",
-                &["turn/start"],
-                move |_| {
-                    if !turn_dirty.swap(false, Ordering::SeqCst) {
-                        return Box::pin(async { Ok(()) });
-                    }
-                    let host = turn_host.clone();
-                    let timeline = turn_timeline.clone();
-                    let last = turn_last.clone();
-                    Box::pin(async move {
-                        if let Ok(settings) = host.0.read(CancellationToken::new()).await {
-                            let current = snapshot(settings);
-                            let mut last = last.lock().expect("settings body");
-                            if last.as_deref() != Some(current.as_str()) {
-                                if let Err(error) = append(&timeline, &current) {
-                                    tracing::warn!(%error, "execution settings were not appended");
-                                } else {
-                                    *last = Some(current);
-                                }
+            dispatcher.subscribe(ctx, "SettingsSnapshot", &["turn/start"], move |_| {
+                if !turn_dirty.swap(false, Ordering::SeqCst) {
+                    return Box::pin(async { Ok(()) });
+                }
+                let host = turn_host.clone();
+                let timeline = turn_timeline.clone();
+                let last = turn_last.clone();
+                Box::pin(async move {
+                    if let Ok(settings) = host.0.read(CancellationToken::new()).await {
+                        let current = snapshot(settings);
+                        let mut last = last.lock().expect("settings body");
+                        if last.as_deref() != Some(current.as_str()) {
+                            if let Err(error) = append(&timeline, &current) {
+                                tracing::warn!(%error, "execution settings were not appended");
+                            } else {
+                                *last = Some(current);
                             }
                         }
-                        Ok(())
-                    })
-                },
-            )?;
+                    }
+                    Ok(())
+                })
+            })?;
             Ok(Effect::Done)
         })
     }
