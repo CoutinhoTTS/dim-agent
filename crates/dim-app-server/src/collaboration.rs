@@ -1311,18 +1311,8 @@ impl CollaborationSession {
                         let mut item = json!({"sequence": event.sequence, "type": "tool_result",
                             "callId": result.call_id, "name": name,
                             "status": if result.result.is_error == Some(true) { "error" } else { "ok" }});
-                        if let Some(effects) = result
-                            .result
-                            .effects
-                            .as_ref()
-                            .filter(|effects| !effects.is_empty())
-                        {
-                            item["effects"] = json!(
-                                effects
-                                    .iter()
-                                    .map(ToolEffect::shortened)
-                                    .collect::<Vec<_>>()
-                            );
+                        if let Some(effects) = result.result.shortened_effects() {
+                            item["effects"] = json!(effects);
                         }
                         items.push(item);
                     }
