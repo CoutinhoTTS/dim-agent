@@ -1163,3 +1163,78 @@ async fn a_parent_moved_block_on_an_evaluator_changes_no_goal_decision() {
     );
     env.close().await;
 }
+
+/// Pursuit 5: a change consumed while Goal checks whether its refused creation
+/// committed leaves the evaluation not current, so no pause follows it (A.4).
+#[tokio::test]
+async fn pursuit_5_a_change_consumed_while_the_creation_check_runs_writes_no_pause() {
+    let env = Env::start_gated().await;
+    let (entered, release) = env.gated().gate();
+    env.goal("set", json!({"objective": "ship it", "judge": "evaluator"}))
+        .await
+        .expect("set writes");
+    let set = env.wait_for("main", r#"op="set""#).await;
+    let end = env.turn("main", &[&set]);
+    let continuation = env
+        .wait_for(
+            "main",
+            &format!(
+                r#"kind="continuation" count="1" limit="20" after="{}""#,
+                end.sequence
+            ),
+        )
+        .await;
+    env.turn_start("main", "work");
+    env.consume("main", &continuation.id);
+    // The harness writes the model's call without its output end, so the turn
+    // end is inside an unfinished output: the branch point refuses the
+    // creation.
+    env.emit(
+        "main",
+        EventKind::ModelStart(dim_agent_types::StepData {
+            turn_id: "work".into(),
+            request_id: "r1".into(),
+        }),
+    );
+    env.tool(
+        "main",
+        json!({"status": "completed", "summary": "all tests pass"}),
+    )
+    .await;
+    env.end_turn("main", "work", "completed");
+
+    // While Goal's check for a committed creation waits, the user resumes the
+    // goal and the fold consumes it, so the evaluation is no longer current.
+    tokio::time::timeout(std::time::Duration::from_secs(15), entered)
+        .await
+        .expect("the creation check runs")
+        .expect("the gate signals");
+    let resume = env.emit(
+        "main",
+        message(
+            vec![raw(&texts::resume("main"), Some("goal:status"), false)],
+            InputMode::Queue,
+        ),
+    );
+    env.dispatched("main", resume.sequence).await;
+    release.send(()).expect("the creation check still waits");
+
+    let writes = env.settled("main").await;
+    let markers: Vec<&str> = writes.iter().map(|write| write.marker.as_str()).collect();
+    assert!(
+        writes
+            .iter()
+            .all(|write| !write.text.contains(r#"reason="evaluation_failed""#)),
+        "the consumed resume is not followed by a pause: {markers:?}"
+    );
+    assert_eq!(
+        writes.last().map(|write| write.text.clone()),
+        Some(texts::resume("main")),
+        "the resume is the branch's last goal write"
+    );
+    assert!(
+        env.creates("main").await.is_empty(),
+        "the creation was refused"
+    );
+    env.close().await;
+}

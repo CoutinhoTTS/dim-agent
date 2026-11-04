@@ -517,16 +517,16 @@ impl Owner {
                 .create(self.branch_id.clone(), after, options, cancelled)
                 .await
                 .is_err()
+                && !self.stopped()
+                && !self.created(after).await?
+                && self.state.lock().unwrap().fold.is_current(after)
             {
-                let current = self.state.lock().unwrap().fold.is_current(after);
-                if !self.stopped() && !self.created(after).await? && current {
-                    self.tree
-                        .input(
-                            self.branch_id.clone(),
-                            text::automatic_pause(&self.branch_id, "evaluation_failed", after),
-                        )
-                        .await?;
-                }
+                self.tree
+                    .input(
+                        self.branch_id.clone(),
+                        text::automatic_pause(&self.branch_id, "evaluation_failed", after),
+                    )
+                    .await?;
             }
             self.settle();
             return Ok(());

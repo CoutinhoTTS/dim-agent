@@ -16,10 +16,10 @@ use dim_agent_capabilities::{
 };
 use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::{
-    AgentBuilder, AgentConfig, AgentError, BoxFuture, BranchOptions, Feature, LoopSnapshot,
-    LoopState, MemoryTimelineStore, Names, PublishCallback, Session, SessionConfig, StoredBranch,
-    StoredEvent, Timeline, TimelineIdentity, TimelineKey, TimelineQuery, TimelineQueryPage,
-    TimelineStore, TimelineTrace,
+    AgentBuilder, AgentConfig, AgentError, BoxFuture, BranchOptions, Dispatcher, Feature,
+    LoopSnapshot, LoopState, MemoryTimelineStore, Names, PublishCallback, Session, SessionConfig,
+    StoredBranch, StoredEvent, Timeline, TimelineIdentity, TimelineKey, TimelineQuery,
+    TimelineQueryPage, TimelineStore, TimelineTrace,
 };
 use dim_agent_types::{
     AgentEvent, BranchSource, DeltaData, EventKind, InputBlock, InputMessageData, InputMode,
@@ -47,6 +47,7 @@ use tokio_util::sync::CancellationToken;
 pub struct Probe {
     timelines: Mutex<HashMap<String, Arc<Timeline>>>,
     commands: Mutex<HashMap<String, Arc<TreeCommands>>>,
+    dispatchers: Mutex<HashMap<String, Arc<Dispatcher>>>,
     tools: Mutex<Option<Arc<ToolRegistry>>>,
     guide: Mutex<Option<Arc<GuideEntries>>>,
     store: Mutex<Option<Arc<dyn TimelineStore>>>,
@@ -71,6 +72,14 @@ impl Probe {
             .get(branch)
             .cloned()
             .unwrap_or_else(|| panic!("branch {branch} has no TreeCommands"))
+    }
+    pub fn dispatcher(&self, branch: &str) -> Arc<Dispatcher> {
+        self.dispatchers
+            .lock()
+            .unwrap()
+            .get(branch)
+            .cloned()
+            .unwrap_or_else(|| panic!("branch {branch} has no Dispatcher"))
     }
     pub fn tools(&self) -> Arc<ToolRegistry> {
         self.tools.lock().unwrap().clone().expect("ToolRegistry")
@@ -123,6 +132,7 @@ struct ProbeBranch {
     probe: Arc<Probe>,
     timeline: Key<Timeline>,
     commands: Key<TreeCommands>,
+    dispatcher: Key<Dispatcher>,
     identity: Key<TimelineIdentity>,
 }
 impl ProbeBranch {
@@ -131,6 +141,7 @@ impl ProbeBranch {
             probe,
             timeline: names.key()?,
             commands: names.key()?,
+            dispatcher: names.key()?,
             identity: names.key()?,
         })
     }
@@ -143,6 +154,7 @@ impl DynPlugin for ProbeBranch {
         vec![
             self.timeline.erase(),
             self.commands.erase(),
+            self.dispatcher.erase(),
             self.identity.erase(),
         ]
     }
@@ -150,6 +162,7 @@ impl DynPlugin for ProbeBranch {
         Box::pin(async move {
             let timeline = ctx.require_at(&self.timeline)?;
             let commands = ctx.require_at(&self.commands)?;
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
             let identity = ctx.require_at(&self.identity)?;
             let mut timelines = self.probe.timelines.lock().unwrap();
             timelines.insert(identity.branch_id.clone(), timeline);
@@ -158,6 +171,11 @@ impl DynPlugin for ProbeBranch {
                 .lock()
                 .unwrap()
                 .insert(identity.branch_id.clone(), commands);
+            self.probe
+                .dispatchers
+                .lock()
+                .unwrap()
+                .insert(identity.branch_id.clone(), dispatcher);
             Ok(Effect::Done)
         })
     }
@@ -356,6 +374,130 @@ impl TimelineStore for RefusingStore {
     }
 }
 
+/// A store that holds Goal's creation check — its one `branch/create` query —
+/// until the case lets it go, so a case can commit a change and have the fold
+/// consume it while that check waits; every other call delegates to a memory
+/// store.
+#[derive(Default)]
+pub struct GatedStore {
+    memory: MemoryTimelineStore,
+    entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+
+impl GatedStore {
+    /// The case's ends of the gate: it waits on the first until the creation
+    /// check runs, then writes its change and lets the second go once the
+    /// Dispatcher consumed it.
+    pub fn gate(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, held) = tokio::sync::oneshot::channel();
+        *self.entered.lock().unwrap() = Some(entered);
+        *self.release.lock().unwrap() = Some(held);
+        (waiting, release)
+    }
+}
+
+impl TimelineStore for GatedStore {
+    fn create_session<'a>(
+        &'a self,
+        session_id: &'a str,
+        config: &'a SessionConfig,
+    ) -> BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.create_session(session_id, config)
+    }
+    fn rollback_session<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.rollback_session(session_id)
+    }
+    fn release_session<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.release_session(session_id)
+    }
+    fn session_config<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> BoxFuture<'a, dim_agent_runtime::Result<Option<SessionConfig>>> {
+        self.memory.session_config(session_id)
+    }
+    fn branches<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> BoxFuture<'a, dim_agent_runtime::Result<Vec<StoredBranch>>> {
+        self.memory.branches(session_id)
+    }
+    fn head<'a>(&'a self, key: &'a TimelineKey) -> BoxFuture<'a, dim_agent_runtime::Result<u64>> {
+        self.memory.head(key)
+    }
+    fn append(
+        &self,
+        key: TimelineKey,
+        events: Vec<StoredEvent>,
+        publish: PublishCallback,
+    ) -> dim_agent_runtime::Result<()> {
+        self.memory.append(key, events, publish)
+    }
+    fn batch_end<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.batch_end(key, sequence)
+    }
+    fn query<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        query: &'a TimelineQuery,
+        from: u64,
+        through: u64,
+    ) -> BoxFuture<'a, dim_agent_runtime::Result<TimelineQueryPage>> {
+        let creation_check = query.kinds == ["branch/create".to_owned()]
+            && query
+                .predicate
+                .as_ref()
+                .is_some_and(|predicate| predicate.path == "source.operation_id");
+        let armed = creation_check
+            .then(|| {
+                (
+                    self.entered.lock().unwrap().take(),
+                    self.release.lock().unwrap().take(),
+                )
+            })
+            .and_then(|(entered, release)| entered.zip(release));
+        let Some((entered, release)) = armed else {
+            return self.memory.query(key, query, from, through);
+        };
+        Box::pin(async move {
+            let _ = entered.send(());
+            let _ = release.await;
+            self.memory.query(key, query, from, through).await
+        })
+    }
+    fn read_segments<'a>(
+        &'a self,
+        session_id: &'a str,
+        segments: Vec<(String, RangeInclusive<u64>)>,
+    ) -> BoxFuture<'a, dim_agent_runtime::Result<Vec<Vec<StoredEvent>>>> {
+        self.memory.read_segments(session_id, segments)
+    }
+    fn trace<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> BoxFuture<'a, dim_agent_runtime::Result<Option<TimelineTrace>>> {
+        self.memory.trace(key, sequence)
+    }
+}
+
 /// One Session over the part harness, and the handles a case needs.
 pub struct Env {
     host: MinimalHost,
@@ -363,23 +505,36 @@ pub struct Env {
     pub probe: Arc<Probe>,
     home: PathBuf,
     refusing: Option<Arc<RefusingStore>>,
+    gated: Option<Arc<GatedStore>>,
 }
 
 impl Env {
     pub async fn start() -> Self {
-        Self::start_inner(None).await
+        Self::start_inner(None, None).await
     }
 
     /// [`Self::start`] on a store that can refuse one branch's queries.
     pub async fn start_refusing() -> Self {
-        Self::start_inner(Some(Arc::new(RefusingStore::default()))).await
+        Self::start_inner(Some(Arc::new(RefusingStore::default())), None).await
+    }
+
+    /// [`Self::start`] on a store that can hold Goal's creation check.
+    pub async fn start_gated() -> Self {
+        Self::start_inner(None, Some(Arc::new(GatedStore::default()))).await
     }
 
     pub fn refusing(&self) -> &RefusingStore {
         self.refusing.as_ref().expect("a refusing store")
     }
 
-    async fn start_inner(refusing: Option<Arc<RefusingStore>>) -> Self {
+    pub fn gated(&self) -> &GatedStore {
+        self.gated.as_ref().expect("a gated store")
+    }
+
+    async fn start_inner(
+        refusing: Option<Arc<RefusingStore>>,
+        gated: Option<Arc<GatedStore>>,
+    ) -> Self {
         let home = home();
         let probe = Arc::new(Probe::default());
         let mut builder = AgentBuilder::new(AgentConfig::default());
@@ -433,6 +588,9 @@ impl Env {
         if let Some(store) = &refusing {
             builder.timeline_store(store.clone());
         }
+        if let Some(store) = &gated {
+            builder.timeline_store(store.clone());
+        }
         let catalog = builder.catalog().clone();
         let build = Build::default();
         let names = Names::copy(&catalog, &build);
@@ -460,6 +618,7 @@ impl Env {
             probe,
             home,
             refusing,
+            gated,
         };
         env.await_parts().await;
         env
@@ -487,6 +646,23 @@ impl Env {
         self.timeline(branch)
             .append(kind.into())
             .unwrap_or_else(|error| panic!("append on {branch}: {error}"))
+    }
+
+    pub fn dispatcher(&self, branch: &str) -> Arc<Dispatcher> {
+        self.probe.dispatcher(branch)
+    }
+
+    /// Waits until the branch's Dispatcher delivered `sequence` to every
+    /// subscriber: the fold has consumed the fact.
+    pub async fn dispatched(&self, branch: &str, sequence: u64) {
+        let dispatcher = self.dispatcher(branch);
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while dispatcher.sequence() < sequence {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the Dispatcher consumes the change");
     }
 
     /// One `session.goal.*` call through the assembled SessionMethods.
@@ -549,6 +725,7 @@ impl Env {
             probe,
             home,
             refusing,
+            gated,
         } = self;
         let id = session.id().to_owned();
         session.close().await.expect("the Session closes");
@@ -563,6 +740,7 @@ impl Env {
             probe,
             home,
             refusing,
+            gated,
         };
         env.await_parts().await;
         env
@@ -602,6 +780,7 @@ impl Env {
             probe,
             home,
             refusing,
+            gated,
         } = self;
         session.close().await.expect("the Session closes");
         let session = host
@@ -615,6 +794,7 @@ impl Env {
             probe,
             home,
             refusing,
+            gated,
         };
         env.await_parts().await;
         env
