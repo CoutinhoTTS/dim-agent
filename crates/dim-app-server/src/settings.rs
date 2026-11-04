@@ -292,7 +292,6 @@ impl SettingsService {
             source: source.to_owned(),
             scope,
             revision: revision.to_owned(),
-            origin: None,
         });
     }
     /// The change is already committed; a refused announcement cannot undo it,

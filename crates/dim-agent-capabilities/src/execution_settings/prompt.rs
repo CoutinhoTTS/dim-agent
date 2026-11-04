@@ -4,30 +4,26 @@
 //! provides `ExecutionSettingsHost`. This module appends a snapshot of the
 //! effective switches and registers the single `settings` tool. It does not
 //! register a Prompt source.
-use super::{ExecutionSettings, ExecutionSettingsHost};
+use super::{ExecutionSettings, ExecutionSettingsHost, SOURCE};
 use crate::{
     branch_input::append_own,
     host::ToolExecutionContext,
     settings::{SettingsChanged, settings_changes},
     tool_registry::{ToolContribution, ToolHandler, ToolRegistry},
 };
-use dim_agent_runtime::{Dispatcher, Names, PartRegistry, PartScope, SessionIdentity, Timeline};
+use dim_agent_runtime::{BranchLifecycle, Names, PartRegistry, PartScope, Timeline};
 use dim_agent_types::*;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::{Ctx, Error};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::Arc;
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 /// The snapshot source name.
 pub const SNAPSHOT_SOURCE: &str = "dim/settings/execution";
-/// The Settings source whose committed writes wake the projection.
-const SETTINGS_SOURCE: &str = "execution";
 /// The tool name.
 const TOOL: &str = "settings";
 /// The Session plugin name.
@@ -106,25 +102,21 @@ fn settings_view(settings: ExecutionSettings) -> Value {
 struct Arguments {
     op: String,
     name: Option<String>,
-    value: Option<Value>,
 }
 
 struct SettingsHandler {
     host: Arc<ExecutionSettingsHost>,
 }
 impl SettingsHandler {
-    async fn answer(&self, call: &ToolCall) -> ToolResult {
+    async fn answer(&self, call: &ToolCall, cancel: CancellationToken) -> ToolResult {
         let arguments: Arguments = match serde_json::from_value(Value::Object(call.input.clone())) {
             Ok(arguments) => arguments,
             Err(error) => return ToolResult::error(format!("invalid settings arguments: {error}")),
         };
-        let settings = match self.host.0.read(CancellationToken::new()).await {
+        let settings = match self.host.0.read(cancel).await {
             Ok(settings) => settings,
             Err(error) => return ToolResult::error(format!("execution settings: {error}")),
         };
-        if arguments.op == "set" && arguments.value.is_none() {
-            return ToolResult::error("settings set requires value");
-        }
         match arguments.op.as_str() {
             "list" => ToolResult::text(settings_view(settings).to_string()),
             "get" => {
@@ -140,21 +132,7 @@ impl SettingsHandler {
                 };
                 ToolResult::text(setting.to_string())
             }
-            "set" => {
-                let Some(name) = arguments.name else {
-                    return ToolResult::error("settings set requires name");
-                };
-                if !settings_view(settings)["settings"]
-                    .as_array()
-                    .is_some_and(|settings| settings.iter().any(|item| item["name"] == name))
-                {
-                    return ToolResult::error(format!("unknown setting {name}; call list"));
-                }
-                ToolResult::error(format!("not_writable: {name} is read-only"))
-            }
-            other => {
-                ToolResult::error(format!("unknown settings op {other}; use list, get or set"))
-            }
+            other => ToolResult::error(format!("unknown settings op {other}; use list or get")),
         }
     }
 }
@@ -163,30 +141,27 @@ impl ToolHandler for SettingsHandler {
         &self,
         call: ToolCall,
         _: ToolExecutionContext,
-        _: CancellationToken,
+        cancel: CancellationToken,
     ) -> crate::host::HostFuture<'_, ToolResult> {
-        Box::pin(async move { Ok(self.answer(&call).await) })
+        Box::pin(async move { Ok(self.answer(&call, cancel).await) })
     }
 }
 
 fn definition() -> ToolDefinition {
     ToolDefinition {
         name: TOOL.into(),
-        description: "Read or change the user's settings. Call op=list first to see each setting's name, meaning, current value, type, and whether it is writable. op=get reads one setting. op=set changes a writable setting; read-only settings return not_writable. Never guess a setting name.".into(),
+        description: "Read the user's settings. Call op=list first to see each setting's name, meaning, current value, type, and whether it is writable. op=get reads one setting. Never guess a setting name.".into(),
         input_schema: serde_json::from_value(json!({
             "type": "object",
             "properties": {
                 "op": {
                     "type": "string",
-                    "enum": ["list", "get", "set"],
-                    "description": "list: show available settings. get: read one. set: change one."
+                    "enum": ["list", "get"],
+                    "description": "list: show available settings. get: read one."
                 },
                 "name": {
                     "type": "string",
                     "description": "A setting name returned by list."
-                },
-                "value": {
-                    "description": "The new value for set. list shows the required type."
                 }
             },
             "required": ["op"],
@@ -194,7 +169,7 @@ fn definition() -> ToolDefinition {
         }))
         .expect("valid settings schema"),
         source: ToolSource::Extension,
-        risk: None,
+        risk: Some("session".into()),
         metadata: None,
         file_changes: None,
     }
@@ -237,17 +212,15 @@ impl DynPlugin for SettingsTool {
 
 struct SettingsSnapshotBranch {
     host: Key<ExecutionSettingsHost>,
-    identity: Key<SessionIdentity>,
     timeline: Key<Timeline>,
-    dispatcher: Key<Dispatcher>,
+    phase: Key<BranchLifecycle>,
 }
 impl SettingsSnapshotBranch {
     fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
             host: names.key()?,
-            identity: names.key()?,
             timeline: names.key()?,
-            dispatcher: names.key()?,
+            phase: names.key()?,
         })
     }
 }
@@ -256,109 +229,59 @@ impl DynPlugin for SettingsSnapshotBranch {
         BRANCH_PART
     }
     fn injects(&self) -> Vec<TypeKey> {
-        vec![
-            self.host.erase(),
-            self.identity.erase(),
-            self.timeline.erase(),
-            self.dispatcher.erase(),
-        ]
+        vec![self.host.erase(), self.timeline.erase(), self.phase.erase()]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             let host = ctx.require_at(&self.host)?;
-            let identity = ctx.require_at(&self.identity)?;
             let timeline = ctx.require_at(&self.timeline)?;
-            let dispatcher = ctx.require_at(&self.dispatcher)?;
-            let last = Arc::new(Mutex::new(None));
-            let dirty = Arc::new(AtomicBool::new(false));
-
-            let initial = match host.0.read(CancellationToken::new()).await {
-                Ok(settings) => snapshot(settings),
-                Err(error) => {
-                    tracing::warn!(%error, "execution settings were not read");
-                    String::new()
-                }
-            };
-            if !initial.is_empty() {
-                if let Err(error) = append(&timeline, &initial) {
-                    tracing::warn!(%error, "execution settings were not appended");
-                }
-                *last.lock().expect("settings body") = Some(initial);
-            }
-
-            let session = identity.session_id.clone();
-            let tasks = TaskTracker::new();
-            let changed_host = host.clone();
-            let changed_timeline = timeline.clone();
-            let changed_last = last.clone();
-            let changed_dirty = dirty.clone();
-            let changed_tasks = tasks.clone();
+            let phase = ctx.require_at(&self.phase)?;
+            let wake = Arc::new(Notify::new());
+            let listener_wake = wake.clone();
             ctx.listen::<SettingsChanged>()
-                .name(settings_changes(SETTINGS_SOURCE))
-                .on(move |event, _| {
-                    let origin = event.origin.clone();
-                    let host = changed_host.clone();
-                    let timeline = changed_timeline.clone();
-                    let last = changed_last.clone();
-                    let dirty = changed_dirty.clone();
-                    let tasks = changed_tasks.clone();
-                    let session = session.clone();
-                    Box::pin(async move {
-                        if origin.as_deref() != Some(session.as_str()) {
-                            dirty.store(true, Ordering::SeqCst);
-                            return Ok(None);
-                        }
-                        tasks.spawn(async move {
-                            match host.0.read(CancellationToken::new()).await {
-                                Ok(settings) => {
-                                    let current = snapshot(settings);
-                                    let mut last = last.lock().expect("settings body");
-                                    if last.as_deref() != Some(current.as_str()) {
-                                        if let Err(error) = append(&timeline, &current) {
-                                            tracing::warn!(%error, "execution settings were not appended");
-                                        } else {
-                                            *last = Some(current);
-                                        }
-                                    }
-                                }
-                                Err(error) => tracing::warn!(%error, "execution settings were not read"),
-                            }
-                        });
-                        Ok(None)
-                    })
+                .name(settings_changes(SOURCE))
+                .on(move |_, _| {
+                    listener_wake.notify_one();
+                    Box::pin(async { Ok(None) })
                 })?;
 
-            let turn_host = host.clone();
-            let turn_timeline = timeline.clone();
-            let turn_last = last.clone();
-            let turn_dirty = dirty.clone();
-            let turn_tasks = tasks.clone();
-            dispatcher.subscribe(ctx, "SettingsSnapshot", &["turn/start"], move |_| {
-                let host = turn_host.clone();
-                let timeline = turn_timeline.clone();
-                let last = turn_last.clone();
-                let dirty = turn_dirty.clone();
-                let tasks = turn_tasks.clone();
-                Box::pin(async move {
-                    if !dirty.swap(false, Ordering::SeqCst) {
-                        return Ok(());
-                    }
-                    tasks.spawn(async move {
-                        if let Ok(settings) = host.0.read(CancellationToken::new()).await {
-                            let current = snapshot(settings);
-                            let mut last = last.lock().expect("settings body");
-                            if last.as_deref() != Some(current.as_str()) {
-                                if let Err(error) = append(&timeline, &current) {
-                                    tracing::warn!(%error, "execution settings were not appended");
+            let lifecycle = ctx.cancellation_token();
+            let tasks = TaskTracker::new();
+            tasks.spawn(async move {
+                tokio::select! {
+                    _ = lifecycle.cancelled() => return,
+                    active = phase.activated() => if !active { return },
+                }
+                let mut last = None;
+                let mut pending = true;
+                loop {
+                    if pending {
+                        match host.0.read(lifecycle.child_token()).await {
+                            Ok(settings) => {
+                                let current = snapshot(settings);
+                                if last.as_deref() == Some(current.as_str()) {
+                                    pending = false;
+                                } else if append(&timeline, &current).is_ok() {
+                                    last = Some(current);
+                                    pending = false;
                                 } else {
-                                    *last = Some(current);
+                                    pending = true;
                                 }
                             }
+                            Err(error) => {
+                                tracing::warn!(%error, "execution settings were not read");
+                                pending = true;
+                            }
                         }
-                    });
-                    Ok(())
-                })
-            })?;
+                    }
+                    tokio::select! {
+                        _ = lifecycle.cancelled() => return,
+                        _ = phase.closing() => return,
+                        _ = wake.notified() => pending = true,
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(1)), if pending => {}
+                    }
+                }
+            });
             ctx.effect(move || async move {
                 tasks.close();
                 tasks.wait().await;
@@ -366,5 +289,62 @@ impl DynPlugin for SettingsSnapshotBranch {
             })?;
             Ok(Effect::Done)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn call(input: Value) -> ToolCall {
+        ToolCall {
+            id: "call".into(),
+            name: TOOL.into(),
+            input: input.as_object().expect("object").clone(),
+        }
+    }
+
+    fn handler() -> SettingsHandler {
+        SettingsHandler {
+            host: Arc::new(ExecutionSettingsHost::fixed(ExecutionSettings {
+                sandbox: true,
+                network: false,
+            })),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_names_both_switches() {
+        let result = handler()
+            .answer(&call(json!({"op": "list"})), CancellationToken::new())
+            .await;
+        let ToolContent::Text(text) = result.content else {
+            panic!("text result");
+        };
+        assert!(text.contains("execution.sandbox"));
+        assert!(text.contains("execution.network"));
+        assert!(text.contains("\"writable\":false"));
+    }
+
+    #[tokio::test]
+    async fn get_returns_one_setting_and_rejects_unknown_names() {
+        let result = handler()
+            .answer(
+                &call(json!({"op": "get", "name": "execution.sandbox"})),
+                CancellationToken::new(),
+            )
+            .await;
+        let ToolContent::Text(text) = result.content else {
+            panic!("text result");
+        };
+        assert!(text.contains("\"value\":true"));
+
+        let result = handler()
+            .answer(
+                &call(json!({"op": "get", "name": "execution.nope"})),
+                CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(result.is_error, Some(true));
     }
 }

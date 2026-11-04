@@ -23,9 +23,6 @@ pub struct SettingsChanged {
     pub source: String,
     pub scope: SettingsScope,
     pub revision: String,
-    /// The Session that initiated the write, when one did.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin: Option<String>,
 }
 impl Event for SettingsChanged {
     const NAME: &'static str = "settings.changed";
