@@ -726,6 +726,12 @@ class DailyFlowTest(unittest.TestCase):
         import ledger_tools
 
         runs = {r.run_type: r for r in ledger_tools.Ledger(self.ledger).runs()}
+        # The baseline itself never compares, so it is `observed` too — the
+        # doc's promise about baseline records is pinned here, not just the
+        # checkpoint's.
+        self.assertEqual(runs["baseline"].outcome, "observed")
+        self.assertFalse(runs["baseline"].gate_armed)
+        self.assertTrue(runs["baseline"].measured)
         self.assertEqual(runs["checkpoint"].outcome, "observed")
         self.assertFalse(runs["checkpoint"].gate_armed)
         self.assertTrue(runs["checkpoint"].conclusive)
@@ -811,13 +817,20 @@ class DailyFlowTest(unittest.TestCase):
         make_corpus(tasks, "a", "b")
         self.state.write_text(json.dumps({"last_l2_head": self.base}))
         head = self._merge("feat", "a.txt", "a\n")
-        self.assertEqual(self._run(mode="visible", tasks_dir=tasks, job_tasks=1),
+        # The ghost name is what makes this test able to fail: one real task
+        # plus one outside the corpus means the job reports two tasks, so a
+        # version of the guard that counts reported tasks instead of the
+        # intersection prints covered 2/2 here and would not be caught.
+        self.assertEqual(self._run(mode="visible", tasks_dir=tasks, job_tasks=1,
+                                   extra_tasks=("terminal-bench/ghost",)),
                          daily_run.EXIT_INVALID)
         self.assertEqual(self._state_head(), self.base)
 
         problem = self._manifest_for(head)["l2"]["problems"][0]
         self.assertIn("covered 1/2 corpus task(s)", problem)
         self.assertIn("terminal-bench/b", problem)
+        self.assertIn("terminal-bench/ghost",
+                      self._manifest_for(head)["l2"]["problems"][1])
 
     def test_a_job_that_ran_tasks_outside_the_corpus_holds_the_window(self) -> None:
         """A job that reported a task the corpus never pinned cannot be trusted

@@ -795,8 +795,10 @@ ledger 记两种记录，因为判定的两个部分归属不同的单位：**L1
 | `infra_rate` | 本次运行的 infra 失败率。`measured` 为假时它是默认值 `0.0`，不是观测值 |
 
 **`observed` 是 conclusive 且 measured 的，但它什么都不决定。** 当门禁没有 armed 阻断判据
-（或根本没有比较对象，如 baseline）时，conclusive 的运行照样测量了、也照样完整，但「没破」
-无从谈起——`pass` 只在「有 armed 判据且未破」时可构造。因此：
+（baseline 运行天生没有比较对象）时，conclusive 的运行照样测量了、也照样完整，但「没破」
+无从谈起——`pass` 只在「有 armed 判据且未破」时可构造。注意边界：conclusive 的 checkpoint
+**没有可用参照**（缺 baseline 或 k 不匹配）时**不是** `observed`，而是 `invalid` /
+`no_reference`——「没得比」和「没武装」是两个不同的事实（见下）。因此：
 
 - clearance（clear 一个 merge）= `conclusive` 且 `outcome = pass` 且 `gate_armed = true`；
 - `observed` = `conclusive`、`measured`、`gate_armed = false`：进覆盖，不进 clearance。
@@ -817,14 +819,16 @@ infra 超限、**没有可比的 baseline**，都是「这次运行什么也没�
 |---|---|---|
 | `l2_failed` | harbor 非零退出 | 假 |
 | `settle_failed` | 结果取回来了但读不出分，或根本没取回来 | 假 |
-| `unscoreable` | 读出来了但不成立：缺 trial、trial 没被判、任务没跑满 k 次、infra 超限 | 假 |
+| `unscoreable` | 读出来了但不成立：缺 trial、trial 没被判、任务没跑满 k 次、infra 超限、job 只覆盖了部分语料任务或跑了语料之外的任务 | 假 |
 | `no_reference` | **测量是好的**，只是没有可比的参照 | 真 |
 
 `no_reference` 包括两种形态：没有该语料 pin 的 baseline，以及有一份但 k 与本次不同——不同
-k 之间判据无定义（3/3 的任务拿 0/1 去比会读成全通翻转），所以一条判据都不评估，
-`blocking_breaches` 因此为空。而空的违反列表正是 `pass` 的构成条件，所以这必须显式记成
-`invalid`：否则一次什么都没比的运行会被记成「L2 明确放行过」，窗口内每个 merge 都会进入
-漏放率的分母。
+k 之间判据无定义（3/3 的任务拿 0/1 去比会读成全通翻转），所以一条判据都不评估。它记成
+`invalid` 而不是落到 `observed`，因为两者是不同的事实：`observed` 说「比较发生了，门禁没
+武装」；`no_reference` 说「这次运行根本没有比较对象」——baseline 缺失或 k 不匹配都不是
+重跑能改变的，读记录的人需要知道这一行是「没得比」而不是「没武装」。这里曾写着的理由
+——「空的违反列表正是 `pass` 的构成条件，否则会被记成 L2 明确放行」——在 `observed`
+落地后已不成立：空 breach 列表如今的落点是 `observed`，而 `observed` 不进 clearance。
 
 **但 `no_reference` 必须保住 `measured`**，理由正好相反：它的窗口会推进，之后不会有任何
 运行再覆盖那批 merge。把它和前三种一样看待，整个「baseline 还没冻」期间的 merge 会永久

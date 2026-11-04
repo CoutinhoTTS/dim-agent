@@ -851,9 +851,12 @@ def settle(out: Path, run_id: str, run_type: RunType, k: int, pin: str,
 
     if existing is None:
         # Nothing to compare against is not the same as nothing wrong. Falling
-        # through would record a conclusive `pass` on the strength of no
-        # comparison at all, and every merge in the window would then enter the
-        # escape-rate denominator as one L2 affirmatively cleared.
+        # through would record `observed` — measured, silent on the gate, and
+        # indistinguishable from a run that compared under a disarmed one.
+        # "This run never compared" is a different fact, and the run record is
+        # the only place it survives the 30-day artifacts: `no_reference`
+        # keeps `measured` (the window advances, the merges stay covered)
+        # without claiming any verdict.
         summary["problems"].append(f"no baseline for corpus pin {pin[:12]}")
         return summary
 
@@ -890,13 +893,14 @@ def settle(out: Path, run_id: str, run_type: RunType, k: int, pin: str,
         "blocking_breaches": [c.name for c in comparison.blocking_breaches],
     }
     if not comparison.comparable and run_type.conclusive:
-        # Unequal k evaluates no criterion, so `blocking_breaches` is empty — and
-        # an empty breach list is what `pass` is made of. Without this the run
-        # recorded a conclusive pass having compared nothing, and every merge in
-        # the window entered the escape-rate denominator as one L2 affirmatively
-        # cleared. That is the same hole `existing is None` guards above, one
-        # level down: there the baseline is absent, here it is present and not
-        # commensurable.
+        # Unequal k evaluates no criterion — and the deltas it reports would be
+        # meaningless besides: a 3/3 task scored 0/1 reads as a full flip.
+        # Without this the run fell through to `observed`, which claims a
+        # comparable measurement a gate chose not to arm; these arms cannot be
+        # compared at all, so the missing precondition is recorded via
+        # `problems` (invalid/no_reference, still `measured`). That is the same
+        # hole `existing is None` guards above, one level down: there the
+        # baseline is absent, here it is present and not commensurable.
         #
         # `problems`, not `unscoreable`: this run measured fine. Running it again
         # produces the same mismatch, because what has to change is the baseline.
