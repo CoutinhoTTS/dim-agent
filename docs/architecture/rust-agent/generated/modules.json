@@ -1017,16 +1017,6 @@
       ]
     },
     {
-      "id": "dim_agent_capabilities::skills::session::tests",
-      "crate": "dim_agent_capabilities",
-      "parent": "dim_agent_capabilities::skills::session",
-      "file": "crates/dim-agent-capabilities/src/skills/session.rs",
-      "unexpandedMacros": [
-        "assert_eq",
-        "vec"
-      ]
-    },
-    {
       "id": "dim_agent_capabilities::steer",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -1538,6 +1528,69 @@
       "parent": "dim_agent_runtime",
       "file": "crates/dim-agent-runtime/src/timeline_store.rs",
       "unexpandedMacros": [
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_agent_scheduler",
+      "crate": "dim_agent_scheduler",
+      "parent": null,
+      "file": "crates/dim-agent-scheduler/src/lib.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_agent_scheduler::document",
+      "crate": "dim_agent_scheduler",
+      "parent": "dim_agent_scheduler",
+      "file": "crates/dim-agent-scheduler/src/document.rs",
+      "unexpandedMacros": [
+        "format"
+      ]
+    },
+    {
+      "id": "dim_agent_scheduler::engine",
+      "crate": "dim_agent_scheduler",
+      "parent": "dim_agent_scheduler",
+      "file": "crates/dim-agent-scheduler/src/engine.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches",
+        "tracing::warn"
+      ]
+    },
+    {
+      "id": "dim_agent_scheduler::methods",
+      "crate": "dim_agent_scheduler",
+      "parent": "dim_agent_scheduler",
+      "file": "crates/dim-agent-scheduler/src/methods.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches",
+        "tokio::select",
+        "tracing::warn",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_agent_scheduler::runs",
+      "crate": "dim_agent_scheduler",
+      "parent": "dim_agent_scheduler",
+      "file": "crates/dim-agent-scheduler/src/runs.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches"
+      ]
+    },
+    {
+      "id": "dim_agent_scheduler::session",
+      "crate": "dim_agent_scheduler",
+      "parent": "dim_agent_scheduler",
+      "file": "crates/dim-agent-scheduler/src/session.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
         "vec"
       ]
     },
@@ -12493,13 +12546,6 @@
     },
     {
       "from": "dim_agent_capabilities::skills::session",
-      "to": "dim_agent_capabilities::skills::session::tests",
-      "references": [
-        "mod tests"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::skills::session",
       "to": "dim_agent_capabilities::tool_registry",
       "references": [
         "path ToolContribution",
@@ -16029,6 +16075,483 @@
       ]
     },
     {
+      "from": "dim_agent_scheduler",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path AgentBuilder",
+        "use dim_agent_runtime::AgentBuilder"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path dim_agent_runtime::names::register"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler",
+      "to": "dim_agent_scheduler::document",
+      "references": [
+        "mod document",
+        "use document::ScheduleDocument"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler",
+      "to": "dim_agent_scheduler::engine",
+      "references": [
+        "mod engine",
+        "path engine::REPORT_GUIDANCE"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler",
+      "to": "dim_agent_scheduler::methods",
+      "references": [
+        "mod methods",
+        "path ScheduleJobs",
+        "path SchedulerPlugin::new",
+        "use methods::ScheduleJobs",
+        "use methods::SchedulerPlugin"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler",
+      "to": "dim_agent_scheduler::runs",
+      "references": [
+        "mod runs",
+        "use runs::RUNS_FILE",
+        "use runs::SchedulerError"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler",
+      "to": "dim_agent_scheduler::session",
+      "references": [
+        "mod session",
+        "path session::DESCRIPTION",
+        "use session::SchedulerSession"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::document",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path PermissionPolicy",
+        "path PermissionPreset",
+        "use dim_agent_types::PermissionPolicy",
+        "use dim_agent_types::PermissionPreset"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::document",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path BusinessDocument",
+        "path SettingsError",
+        "path SettingsError::Invalid",
+        "use dim_app_server::settings::BusinessDocument",
+        "use dim_app_server::settings::SettingsError"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::engine",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path SettingsScope::User",
+        "use dim_agent_capabilities::settings::SettingsScope"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::engine",
+      "to": "dim_agent_scheduler::document",
+      "references": [
+        "path Job",
+        "path Mode::Reuse",
+        "path Origin::Tool",
+        "path Origin::User",
+        "path canonical_instant",
+        "use crate::document::Job",
+        "use crate::document::Mode",
+        "use crate::document::Origin",
+        "use crate::document::Schedule",
+        "use crate::document::canonical_instant"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::engine",
+      "to": "dim_agent_scheduler::methods",
+      "references": [
+        "path Binding::Bound",
+        "path Binding::Changed",
+        "path Shared",
+        "path bind_job",
+        "path host_bound",
+        "path read_document",
+        "path session_policy",
+        "path window_after",
+        "use crate::methods::Binding",
+        "use crate::methods::Shared",
+        "use crate::methods::bind_job",
+        "use crate::methods::host_bound",
+        "use crate::methods::read_document",
+        "use crate::methods::session_policy",
+        "use crate::methods::window_after"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::engine",
+      "to": "dim_agent_scheduler::runs",
+      "references": [
+        "path ReportTo",
+        "path Run",
+        "path RunState",
+        "path RunState::Cancelled",
+        "path RunState::Completed",
+        "path RunState::Failed",
+        "path RunState::Launching",
+        "path RunState::Lost",
+        "path RunState::Missed",
+        "path RunState::Running",
+        "path RunState::Skipped",
+        "path RunState::Submitted",
+        "path RunState::TimedOut",
+        "path SchedulerError",
+        "path SchedulerError::invalid_data",
+        "path SchedulerError::new",
+        "path SessionOrigin",
+        "path SessionOrigin::Launch",
+        "path SessionOrigin::Reuse",
+        "path runs",
+        "path runs::read",
+        "path runs::update",
+        "path stamp",
+        "use crate::runs",
+        "use crate::runs::ReportTo",
+        "use crate::runs::Run",
+        "use crate::runs::RunState",
+        "use crate::runs::SchedulerError",
+        "use crate::runs::SessionOrigin",
+        "use crate::runs::stamp"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::engine",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path AgentEvent",
+        "path EventKind::InputApplied",
+        "path EventKind::InputConsumed",
+        "path EventKind::InputDeleted",
+        "path EventKind::StopInterrupt",
+        "path EventKind::TurnEnd",
+        "path TurnOutcome::Cancelled",
+        "path TurnOutcome::Completed",
+        "path TurnOutcome::Failed",
+        "use dim_agent_types::AgentEvent",
+        "use dim_agent_types::EventKind",
+        "use dim_agent_types::TurnOutcome"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::engine",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path PermissionPolicy",
+        "path PermissionPolicy::default",
+        "path PermissionPreset::ReadOnly",
+        "use dim_agent_types::PermissionPolicy",
+        "use dim_agent_types::PermissionPreset"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::engine",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path SettingsError::Conflict",
+        "use dim_app_server::settings::SettingsError"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::methods",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path Handler",
+        "path RpcError",
+        "path RpcError::service",
+        "path RpcError::unknown_method",
+        "path params",
+        "use dim_agent_capabilities::methods::Handler",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::params"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::methods",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path SettingsScope::User",
+        "use dim_agent_capabilities::settings::SettingsScope"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::methods",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::methods",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path PartRegistry",
+        "path PartScope::Session",
+        "use dim_agent_runtime::PartRegistry",
+        "use dim_agent_runtime::PartScope"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::methods",
+      "to": "dim_agent_scheduler",
+      "references": [
+        "path crate::SchedulerTexts"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::methods",
+      "to": "dim_agent_scheduler::document",
+      "references": [
+        "path DEFAULT_MAX_RUN_MINUTES",
+        "path Job",
+        "path Mode",
+        "path Mode::Create",
+        "path Mode::Reuse",
+        "path ModelSelection",
+        "path Origin",
+        "path Origin::Tool",
+        "path Origin::User",
+        "path Schedule",
+        "path ScheduleDocument",
+        "path canonical_instant",
+        "use crate::document::DEFAULT_MAX_RUN_MINUTES",
+        "use crate::document::Job",
+        "use crate::document::Mode",
+        "use crate::document::ModelSelection",
+        "use crate::document::Origin",
+        "use crate::document::Schedule",
+        "use crate::document::ScheduleDocument",
+        "use crate::document::canonical_instant"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::methods",
+      "to": "dim_agent_scheduler::engine",
+      "references": [
+        "path crate::engine::accept",
+        "path crate::engine::prune",
+        "path crate::engine::recover",
+        "path crate::engine::tick"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::methods",
+      "to": "dim_agent_scheduler::runs",
+      "references": [
+        "path Run",
+        "path SchedulerError",
+        "path SchedulerError::invalid_data",
+        "path SchedulerError::new",
+        "path runs",
+        "path runs::read",
+        "path stamp",
+        "use crate::runs",
+        "use crate::runs::Run",
+        "use crate::runs::SchedulerError",
+        "use crate::runs::stamp"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::methods",
+      "to": "dim_agent_scheduler::session",
+      "references": [
+        "path crate::SchedulerSession::new"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::methods",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path PermissionPolicy",
+        "path PermissionPreset",
+        "use dim_agent_types::PermissionPolicy",
+        "use dim_agent_types::PermissionPreset"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::methods",
+      "to": "dim_app_server::agents::sessions",
+      "references": [
+        "path SessionPermissions",
+        "path SessionRef",
+        "path SessionsError::BranchMissing",
+        "path SessionsError::SessionClosed",
+        "use dim_app_server::SessionPermissions",
+        "use dim_app_server::SessionRef",
+        "use dim_app_server::SessionsError"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::methods",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path ManagementMethods",
+        "use dim_app_server::methods::ManagementMethods"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::methods",
+      "to": "dim_app_server::plugin_files",
+      "references": [
+        "path PluginFileTransactions",
+        "use dim_app_server::plugin_files::PluginFileTransactions"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::methods",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path SettingsError",
+        "path SettingsError::Conflict",
+        "path SettingsError::Document",
+        "path SettingsError::Invalid",
+        "path SettingsService",
+        "path dim_app_server::settings::SettingsSnapshot",
+        "use dim_app_server::settings::SettingsError",
+        "use dim_app_server::settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::runs",
+      "to": "dim_agent_scheduler::document",
+      "references": [
+        "path canonical_instant",
+        "path format_instant",
+        "use crate::document::canonical_instant",
+        "use crate::document::format_instant"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::runs",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path PermissionPolicy",
+        "use dim_agent_types::PermissionPolicy"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::runs",
+      "to": "dim_app_server::plugin_files",
+      "references": [
+        "path PluginFileError",
+        "path PluginFileError::Closed",
+        "path PluginFileError::InvalidData",
+        "path PluginFileError::InvalidPath",
+        "path PluginFileError::Io",
+        "path PluginFileTransactions",
+        "use dim_app_server::plugin_files::PluginFileError",
+        "use dim_app_server::plugin_files::PluginFileTransactions"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::session",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostFuture",
+        "path ToolExecutionContext",
+        "use dim_agent_capabilities::host::HostFuture",
+        "use dim_agent_capabilities::host::ToolExecutionContext"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::session",
+      "to": "dim_agent_capabilities::prompt_guide",
+      "references": [
+        "path GuideEntries",
+        "path GuideEntry",
+        "path GuideScope::Session",
+        "use dim_agent_capabilities::prompt_guide::GuideEntries",
+        "use dim_agent_capabilities::prompt_guide::GuideEntry",
+        "use dim_agent_capabilities::prompt_guide::GuideScope"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::session",
+      "to": "dim_agent_capabilities::tool_registry",
+      "references": [
+        "path ToolContribution",
+        "path ToolHandler",
+        "path ToolRegistry",
+        "path definition",
+        "use dim_agent_capabilities::tool_registry::ToolContribution",
+        "use dim_agent_capabilities::tool_registry::ToolHandler",
+        "use dim_agent_capabilities::tool_registry::ToolRegistry",
+        "use dim_agent_capabilities::tool_registry::definition"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::session",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path CollaborationRole::Member",
+        "path SessionConfig",
+        "path SessionIdentity",
+        "use dim_agent_runtime::CollaborationRole",
+        "use dim_agent_runtime::SessionConfig",
+        "use dim_agent_runtime::SessionIdentity"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::session",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::session",
+      "to": "dim_agent_scheduler::methods",
+      "references": [
+        "path Caller",
+        "path ScheduleJobs",
+        "path ToolRequest",
+        "use crate::methods::Caller",
+        "use crate::methods::ScheduleJobs",
+        "use crate::methods::ToolRequest"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::session",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolCall",
+        "path ToolDefinition",
+        "path ToolResult",
+        "path ToolResult::error",
+        "path ToolResult::text",
+        "path ToolSource::Extension",
+        "use dim_agent_types::ToolCall",
+        "use dim_agent_types::ToolDefinition",
+        "use dim_agent_types::ToolResult",
+        "use dim_agent_types::ToolSource"
+      ]
+    },
+    {
       "from": "dim_agent_types",
       "to": "dim_agent_types::checkpoint",
       "references": [
@@ -16576,6 +17099,15 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::agents::sessions",
+      "references": [
+        "use agents::SessionPermissions",
+        "use agents::SessionRef",
+        "use agents::SessionsError"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::approval",
       "references": [
         "mod approval"
@@ -16792,6 +17324,7 @@
       "references": [
         "mod plugin_files",
         "path plugin_files",
+        "path plugin_files::PluginFileTransactions",
         "path plugin_files::PluginFilesPlugin::new"
       ]
     },
@@ -17196,7 +17729,9 @@
         "path SessionPermissions",
         "path sessions",
         "path sessions::SessionsService",
-        "use sessions::SessionPermissions"
+        "use sessions::SessionPermissions",
+        "use sessions::SessionRef",
+        "use sessions::SessionsError"
       ]
     },
     {
@@ -17425,12 +17960,7 @@
       "references": [
         "path PermissionPolicy",
         "path PermissionPolicy::default",
-        "path PermissionPreset",
-        "path PermissionPreset::FullAccess",
-        "path PermissionPreset::ReadOnly",
-        "path PermissionPreset::WorkspaceWrite",
-        "use dim_agent_types::PermissionPolicy",
-        "use dim_agent_types::PermissionPreset"
+        "use dim_agent_types::PermissionPolicy"
       ]
     },
     {
@@ -18034,6 +18564,7 @@
         "path ServerConfig",
         "path ShutdownReason::Forced",
         "path serve",
+        "path super::create_private_directory",
         "use crate::ServerConfig",
         "use crate::ShutdownReason",
         "use crate::serve"
@@ -21935,6 +22466,7 @@
       "to": "dim_agent_capabilities::file_storage",
       "references": [
         "path FileLease",
+        "path FilePath",
         "path FileStorage",
         "path FileStorageError",
         "path FileStorageError::Cancelled",
@@ -21944,6 +22476,7 @@
         "path FileStorageError::Locked",
         "path FileStorageError::Worker",
         "use dim_agent_capabilities::file_storage::FileLease",
+        "use dim_agent_capabilities::file_storage::FilePath",
         "use dim_agent_capabilities::file_storage::FileStorage",
         "use dim_agent_capabilities::file_storage::FileStorageError"
       ]

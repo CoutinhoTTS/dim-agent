@@ -159,7 +159,7 @@ async fn assemble(
     });
     prepare(root, &mut builtins)?;
     let mut rows = match builder.has_plugins() {
-        true => builder.plugin_rows(&mut builtins).await?,
+        true => builder.plugin_rows(&mut builtins).await?.rows,
         false => vec![],
     };
     let session_row = builder.install(&mut builtins, []).await?;

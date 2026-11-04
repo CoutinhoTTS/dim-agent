@@ -382,9 +382,7 @@ async fn node_configured_profile_runs_the_default_plugins() {
             .collect();
         let server = launch_configured(&directory, models, Some(parts), Some(defaults)).await;
         let mut client = Client::new_version(&server, false, 3).await;
-        // The process plugins the product profile's flow waits for; the file
-        // this profile loads names them too.
-        let process = ["goal", "workflow", "scheduler"];
+        let process = ["goal", "workflow"];
         for name in process {
             assert!(
                 names.iter().any(|listed| listed == name),

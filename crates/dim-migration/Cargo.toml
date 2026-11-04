@@ -30,6 +30,7 @@ unicode-width = "0.2"
 [dev-dependencies]
 dim-agent-runtime = { workspace = true, features = ["testing"] }
 dim-oauth = { path = "../dim-oauth" }
+dim-agent-scheduler = { path = "../dim-agent-scheduler" }
 tempfile = "3"
 dim-app-server = { workspace = true, features = ["testing"] }
 dim-client.workspace = true
