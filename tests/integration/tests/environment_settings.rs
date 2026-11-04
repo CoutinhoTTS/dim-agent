@@ -11,14 +11,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-fn changed(env: &Env, revision: &str) {
+fn changed(env: &Env, session: &Session, revision: &str, origin: bool) {
     env.root
         .emit(SettingsChanged {
             name: settings_changes("execution"),
             source: "execution".into(),
             scope: SettingsScope::User,
             revision: revision.into(),
-            origin: None,
+            origin: origin.then(|| session.id().to_owned()),
         })
         .unwrap();
 }
@@ -89,7 +89,7 @@ async fn execution_state_is_adopted_and_unchanged_values_do_not_duplicate() {
         sandbox: true,
         network: false,
     });
-    changed(&env, "1");
+    changed(&env, &session, "1", true);
     run(&session, "sandbox").await;
     until_block(&session, "Execution sandbox: on; network: off.").await;
     run(&session, "after").await;
@@ -110,7 +110,7 @@ async fn execution_state_is_adopted_and_unchanged_values_do_not_duplicate() {
         sandbox: true,
         network: true,
     });
-    changed(&env, "2");
+    changed(&env, &session, "2", false);
     run(&session, "network").await;
     until_block(&session, "Execution sandbox: on; network: on.").await;
     run(&session, "after-network").await;
@@ -121,7 +121,7 @@ async fn execution_state_is_adopted_and_unchanged_values_do_not_duplicate() {
     );
 
     execution.set(ExecutionSettings::default());
-    changed(&env, "3");
+    changed(&env, &session, "3", true);
     run(&session, "off").await;
     until_block(&session, "Execution sandbox: off.").await;
     run(&session, "after-off").await;
