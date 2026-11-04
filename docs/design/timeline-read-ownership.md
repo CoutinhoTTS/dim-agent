@@ -110,7 +110,7 @@ Timeline::query(TimelineQuery) -> Result<TimelineQueryReply>
 Session::query(...) / Branch::query(...)   // forward, published bound
 
 // ended line
-TreeCommands::page(id: String, after: u64, limit: u64) -> Result<Vec<Arc<AgentEvent>>>
+TreeCommands::page(id: String, after: u64, limit: usize, through: u64) -> Result<Vec<Arc<AgentEvent>>>
 
 // branches and metadata
 TimelineStore::branches(session_id) -> Result<Vec<StoredBranch>>

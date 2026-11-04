@@ -784,13 +784,7 @@ impl AgentIndex {
         if session.ended_head(branch).is_some() {
             return ended_page(&session, branch, after, limit, through).await;
         }
-        match session_history_page(&session, branch, after, limit, through).await {
-            Ok(page) => Ok(page),
-            Err(AgentError::BranchEnded(_)) => {
-                ended_page(&session, branch, after, limit, through).await
-            }
-            Err(error) => Err(error),
-        }
+        session_history_page(&session, branch, after, limit, through).await
     }
     /// The events of `event_ids` in one read; ids the Session does not hold
     /// are absent. Collaboration supplies ids from its `main`-branch page, so

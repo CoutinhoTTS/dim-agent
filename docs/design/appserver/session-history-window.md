@@ -304,7 +304,7 @@ Consequences:
 
 ### 5.2 Queries
 
-The anchors are selections over the loaded branch, so they are the Timeline
+The anchors are selections over the branch's facts, so they are the Timeline
 query ([plugin contract §5.4](../plugin-contract.md#54-the-event-query)) over
 this branch, each with the kind named and `through` as the start of its read:
 
@@ -329,14 +329,18 @@ returns events in ascending order, and the page is whole batches at both ends
 
 ### 5.3 Where the reads live
 
-The anchors and the page are the branch's Timeline service, which
-`Connection::history` already has the loaded Session for: each anchor is a kind
-selection and the page is a range selection, both through `Session::query`,
-with `Session::batch_end` for the page's ends. The App Server has no store read
-on this path. A window read requires a live line: its anchors and its page are
-the loaded branch's Timeline, and an ended line's Timeline is gone. An ended
-line's history is read forward through the tree's page (§1.1). The window also
-requires the native store: a host without one
+The anchors and the page are served by the owner of the line's facts: while the
+line is open, the branch's Timeline, which `Connection::history` already has the
+loaded Session for — each anchor is a kind selection and the page is a range
+selection, both through `Session::query`, with `Session::batch_end` for the
+page's ends. An ended line's Timeline is gone, so its anchors and its page are
+the tree's read at the fixed head it owns: `TreeCommands::query` for both
+directions and `TreeCommands::batch_end` for the page's ends
+([ADR 021](../../adr/021-reads-follow-the-state-owner.md) D2,
+[timeline read ownership §2](../timeline-read-ownership.md#2-owners-and-their-reads)).
+A line that ends while its window is read switches to the tree and answers from
+there; the waiting read then sees the end and the events up to the fixed head.
+The App Server has no store read on this path. The window requires the native store: a host without one
 (`ServerConfig.database_path: None`) advertises no
 `session.history.latestTurn` and answers a window request
 `invalid`, as `session.catalog` is advertised only with a database path. No

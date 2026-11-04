@@ -217,6 +217,22 @@ impl TreeCommands {
     fn head(&self, id: &str) -> Option<u64> {
         self.tree.upgrade()?.head(id)
     }
+    /// Checks that `sequence` ends an atomic batch of line `id`, forwarding to
+    /// its Timeline while open and reading the store once it ends. The check
+    /// stays out of the service surface because no other language reads batch
+    /// structure.
+    #[service(skip)]
+    pub async fn batch_end(
+        &self,
+        id: String,
+        sequence: u64,
+    ) -> std::result::Result<(), AgentError> {
+        self.tree
+            .upgrade()
+            .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?
+            .batch_end(&id, sequence)
+            .await
+    }
     /// A signal that changes when line `id` ends a turn; it carries that
     /// `turn/end`'s sequence.
     #[service(skip)]
@@ -914,6 +930,21 @@ impl TimelineTree {
             positions: page.positions,
             through,
         })
+    }
+    /// The batch-end check of one line, forwarding to its Timeline while open
+    /// and reading the store at the tree's key after it ends.
+    async fn batch_end(&self, id: &str, sequence: u64) -> Result<()> {
+        if let Some(context) = self.owned_context(id) {
+            return context.timeline().batch_end(sequence).await;
+        }
+        if self.ended_head(id).is_none() {
+            return Err(AgentError::UnknownBranch(id.into()));
+        }
+        let key = TimelineKey {
+            session_id: self.session_id.clone(),
+            branch_id: id.into(),
+        };
+        self.store.batch_end(&key, sequence).await
     }
     /// Whether `id` did anything after `from` up to `through` that a line it
     /// opened must see ([timeline branches §7.1.1](../../../docs/design/timeline-branches.md#711-the-parent-block-branchparent)):
