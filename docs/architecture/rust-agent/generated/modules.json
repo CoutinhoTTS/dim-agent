@@ -9130,7 +9130,9 @@
       "to": "dim_agent_runtime::config",
       "references": [
         "path BranchLifecycle",
-        "use dim_agent_runtime::BranchLifecycle"
+        "path BranchPhase::Closing",
+        "use dim_agent_runtime::BranchLifecycle",
+        "use dim_agent_runtime::BranchPhase"
       ]
     },
     {
