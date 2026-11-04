@@ -117,7 +117,10 @@ pub(crate) fn parse_chat_options(options: &JsonObject) -> Result<JsonObject, AiM
             "reasoningEffort" => {
                 one_of(&["none", "minimal", "low", "medium", "high", "xhigh", "max"])
             }
-            "serviceTier" => one_of(&["auto", "flex", "priority", "fast", "ultrafast", "default"]),
+            // Any tier string: the catalogue and the account entitlement name
+            // the tiers this product offers, and the server decides what one
+            // means, so a tier the tag does not list is still sent.
+            "serviceTier" => value.is_string(),
             "textVerbosity" => one_of(&["low", "medium", "high"]),
             "promptCacheRetention" => one_of(&["in_memory", "24h"]),
             "systemMessageMode" => one_of(&["system", "developer", "remove"]),

@@ -91,6 +91,28 @@ async fn send(options: CallOptions, provider: &str) -> Value {
     .unwrap()
 }
 
+/// One request as the OpenAI Chat model sends it to a server that only
+/// records it: the model the `openai-chat` protocol builds.
+async fn send_chat(options: CallOptions, model_id: &str) -> Value {
+    capture(
+        |url| {
+            Arc::new(
+                aimux_providers::openai::create_openai(
+                    aimux_providers::openai::OpenAIProviderSettings {
+                        base_url: Some(url),
+                        api_key: Some(String::new()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+                .chat(model_id),
+            )
+        },
+        options,
+    )
+    .await
+}
+
 /// One request as the model sends it to a server that only records it.
 async fn capture<F>(build: F, options: CallOptions) -> Value
 where
@@ -186,7 +208,7 @@ async fn final_request_replays_multimodal_tool_history_and_only_model_readable_r
             provider_options: None,
         }
     );
-    let body = send(prepared.options, "openai").await;
+    let body = send_chat(prepared.options, "gpt-4o").await;
     assert_eq!(
         body["messages"],
         json!([
@@ -216,6 +238,18 @@ async fn final_request_replays_multimodal_tool_history_and_only_model_readable_r
     assert_eq!(body["top_p"], 0.0);
     assert_eq!(body["top_k"], 1.0);
     assert_eq!(body["stop"], json!([]));
+    // Both Chat models replay the reasoning text main replayed.
+    let compatible = convert(&request, &ProviderKind::OpenaiCompatible, None).unwrap();
+    let body = send(compatible.options, "openai").await;
+    assert_eq!(body["messages"][3]["reasoning_content"], "plan");
+    let body = send_chat(
+        convert(&request, &ProviderKind::OpenaiChat, None)
+            .unwrap()
+            .options,
+        "gpt-4o",
+    )
+    .await;
+    assert_eq!(body["messages"][3]["reasoning_content"], "plan");
     for local in [
         "metadata",
         "session_id",
@@ -236,7 +270,7 @@ async fn omitted_settings_and_empty_values_keep_their_request_meaning() {
         request.system = Some(Arc::new(SystemPrompt::Parts(vec![])));
         request.messages.clear();
         let prepared = convert(&request, &ProviderKind::OpenaiChat, None).unwrap();
-        let body = send(prepared.options, "openai").await;
+        let body = send_chat(prepared.options, "gpt-4o").await;
         assert_eq!(body["messages"], json!([]));
         for key in [
             "tools",
@@ -258,11 +292,11 @@ async fn omitted_settings_and_empty_values_keep_their_request_meaning() {
         Role::User,
         "",
     ))];
-    let body = send(
+    let body = send_chat(
         convert(&request, &ProviderKind::OpenaiChat, None)
             .unwrap()
             .options,
-        "openai",
+        "gpt-4o",
     )
     .await;
     assert_eq!(
@@ -323,11 +357,11 @@ async fn reasoning_uses_selected_provider_fields_and_intent_precedence_on_the_wi
     let request = request(
         json!({"reasoning": {"effort": "low"}, "providerOptions": {"openai": {"reasoningEffort": "high", "serviceTier": "default"}, "openai-compatible": {"interleavedThinking": true}}}),
     );
-    let body = send(
+    let body = send_chat(
         convert(&request, &ProviderKind::OpenaiChat, Some("deepseek"))
             .unwrap()
             .options,
-        "openai",
+        "gpt-4o",
     )
     .await;
     assert_eq!(body["reasoning_effort"], "high");
@@ -425,7 +459,7 @@ async fn tool_name_compatibility_preserves_hash_recovery_and_rejects_wire_collis
         "alias_045e29d516c3"
     );
     assert_eq!(prepared.tool_names.original("unknown_tool"), "unknown_tool");
-    let body = send(prepared.options, "openai").await;
+    let body = send_chat(prepared.options, "gpt-4o").await;
     assert_eq!(
         body["tools"][0]["function"]["name"],
         "trigger_memory_catchup_045e29d516c3"

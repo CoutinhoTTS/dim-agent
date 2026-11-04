@@ -1145,6 +1145,180 @@ async fn codex_request_profile_is_isolated_to_responses() {
     server.close().await;
 }
 
+#[tokio::test]
+async fn openai_chat_protocols_send_reasoning_models_the_rules_they_accept() {
+    let server = NativeServer::start("openai-chat").await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    for protocol in [ModelProtocol::OpenaiChat, ModelProtocol::OpenaiCompatible] {
+        for model_id in ["gpt-4o", "gpt-5", "o3"] {
+            let mut request =
+                ModelRequest::new("local", model_id, vec![Message::text(Role::User, "hi")]);
+            request.system = Some(Arc::new(SystemPrompt::Text("system instructions".into())));
+            request.config = Some(ModelConfig {
+                max_tokens: Some(4096.0),
+                temperature: Some(0.25),
+                reasoning: Some(ProviderReasoningConfig {
+                    effort: Some("high".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            let connection = ModelConnection::Http(HttpModelConnection {
+                protocol,
+                base_url: server.url.clone(),
+                network: Default::default(),
+                headers: Default::default(),
+                bearer: Some("native-secret".into()),
+                api_key: None,
+                preset: None,
+            });
+            let mut stream = host
+                .0
+                .invoke(Arc::new(request), connection, CancellationToken::new())
+                .await
+                .unwrap();
+            while let Some(chunk) = stream.next().await {
+                chunk.unwrap();
+            }
+        }
+    }
+    // Two turns on gpt-5 over openai-chat: the second request replays the
+    // assistant's reasoning text with its tool call.
+    let mut first = ModelRequest::new("local", "gpt-5", vec![Message::text(Role::User, "hi")]);
+    first.system = Some(Arc::new(SystemPrompt::Text("system instructions".into())));
+    first.config = Some(ModelConfig {
+        max_tokens: Some(4096.0),
+        reasoning: Some(ProviderReasoningConfig {
+            effort: Some("high".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let connection = ModelConnection::Http(HttpModelConnection {
+        protocol: ModelProtocol::OpenaiChat,
+        base_url: server.url.clone(),
+        network: Default::default(),
+        headers: Default::default(),
+        bearer: Some("native-secret".into()),
+        api_key: None,
+        preset: None,
+    });
+    let mut stream = host
+        .0
+        .invoke(Arc::new(first), connection, CancellationToken::new())
+        .await
+        .unwrap();
+    while let Some(chunk) = stream.next().await {
+        chunk.unwrap();
+    }
+    // The second request carries the history from the first.
+    let history: ModelRequest = serde_json::from_value(json!({
+        "providerId": "local",
+        "modelId": "gpt-5",
+        "system": [{"type": "text", "text": "system instructions"}],
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "plan"},
+                {"type": "text", "text": "searching"},
+                {"type": "tool_use", "id": "call-1", "name": "search", "input": {"query": "recent"}}
+            ]},
+            {"role": "tool_result", "content": [{"type": "tool_result", "tool_use_id": "call-1", "content": [{"type": "text", "text": "done"}]}]},
+            {"role": "user", "content": "continue"}
+        ],
+        "config": {"maxTokens": 4096, "reasoning": {"effort": "high"}}
+    }))
+    .unwrap();
+    let connection = ModelConnection::Http(HttpModelConnection {
+        protocol: ModelProtocol::OpenaiChat,
+        base_url: server.url.clone(),
+        network: Default::default(),
+        headers: Default::default(),
+        bearer: Some("native-secret".into()),
+        api_key: None,
+        preset: None,
+    });
+    let mut stream = host
+        .0
+        .invoke(Arc::new(history), connection, CancellationToken::new())
+        .await
+        .unwrap();
+    while let Some(chunk) = stream.next().await {
+        chunk.unwrap();
+    }
+    let bodies: Vec<Value> = server
+        .endpoint
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(uri, _, body)| {
+            assert_eq!(uri.path(), "/v1/chat/completions");
+            body.clone()
+        })
+        .collect();
+    assert_eq!(bodies.len(), 8);
+    // A reasoning model takes the token key, the system role and the sampling
+    // parameters the OpenAI API accepts; every other model keeps `max_tokens`,
+    // `system` and the sampling values.
+    for (index, body) in bodies[..6].iter().enumerate() {
+        let model_id = ["gpt-4o", "gpt-5", "o3"][index % 3];
+        let protocol = if index < 3 {
+            "openai-chat"
+        } else {
+            "openai-compatible"
+        };
+        let expected = if index % 3 == 0 {
+            json!({
+                "model": model_id,
+                "max_tokens": 4096,
+                "temperature": 0.25,
+                "messages": [
+                    {"role": "system", "content": "system instructions"},
+                    {"role": "user", "content": "hi"}
+                ],
+                "stream": true,
+                "stream_options": {"include_usage": true},
+                "reasoning_effort": "high"
+            })
+        } else {
+            json!({
+                "model": model_id,
+                "max_completion_tokens": 4096,
+                "messages": [
+                    {"role": "developer", "content": "system instructions"},
+                    {"role": "user", "content": "hi"}
+                ],
+                "stream": true,
+                "stream_options": {"include_usage": true},
+                "reasoning_effort": "high"
+            })
+        };
+        assert_eq!(body, &expected, "{protocol} body {index}");
+    }
+    // The first turn of the pair sends the reasoning-model rules.
+    assert_eq!(bodies[6]["model"], "gpt-5");
+    assert_eq!(bodies[6]["max_completion_tokens"], 4096);
+    assert_eq!(
+        bodies[6]["messages"][0],
+        json!({"role": "developer", "content": "system instructions"})
+    );
+    // The second turn keeps the reasoning-model rules and replays the
+    // assistant's reasoning text with its tool call.
+    let body = &bodies[7];
+    assert_eq!(body["model"], "gpt-5");
+    assert_eq!(body["max_completion_tokens"], 4096);
+    assert!(body.get("max_tokens").is_none(), "{body}");
+    assert_eq!(
+        body["messages"][0],
+        json!({"role": "developer", "content": "system instructions"})
+    );
+    assert_eq!(body["messages"][2]["reasoning_content"], "plan", "{body}");
+    assert_eq!(body["messages"][2]["tool_calls"][0]["id"], "call-1");
+}
+
 #[derive(Clone)]
 struct NativeEndpoint {
     kind: &'static str,

@@ -1016,14 +1016,6 @@ pub(crate) fn build_request_body_with_chat_options(
     let is_reasoning_model = resolve_is_reasoning_model(provider_opts, &caps);
     let system_message_mode = resolve_system_message_mode(provider_opts, is_reasoning_model, &caps);
 
-    // OpenAI has no top_k.
-    if options.top_k.is_some() {
-        warnings.push(Warning::Unsupported {
-            feature: "topK".to_string(),
-            details: None,
-        });
-    }
-
     if system_message_mode == SystemMessageMode::Remove {
         for _ in options
             .prompt
@@ -1046,6 +1038,14 @@ pub(crate) fn build_request_body_with_chat_options(
     if stream {
         body["stream"] = json!(true);
         body["stream_options"] = json!({ "include_usage": true });
+    }
+
+    // OpenAI itself has no `top_k`, but dim sent it as a body field for every
+    // model id on this protocol before the upgrade, and compatible endpoints
+    // read it; the tag drops it with a warning, which a strict stream then
+    // fails the call on.
+    if let Some(top_k) = options.top_k {
+        body["top_k"] = json!(top_k);
     }
 
     apply_max_tokens(&mut body, options, provider_opts, is_reasoning_model);

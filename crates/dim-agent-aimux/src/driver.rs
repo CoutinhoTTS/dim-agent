@@ -233,14 +233,15 @@ fn build_model(
     let base_url = base_url.to_owned();
     match protocol {
         ModelProtocol::OpenaiChat => {
-            let provider = create_openai_compatible(OpenAICompatibleProviderSettings {
-                name: "openai".into(),
-                base_url,
-                api_key: None,
-                headers: None,
-                include_usage: Some(true),
+            // The tag's own OpenAI Chat model carries the request rules a
+            // reasoning model takes: the token key, the system role and the
+            // sampling parameters it rejects.
+            let provider = create_openai(OpenAIProviderSettings {
+                base_url: Some(base_url),
+                api_key: Some(String::new()),
+                headers: Some(no_credential("authorization")),
                 fetch: Some(fetch),
-                ..OpenAICompatibleProviderSettings::default()
+                ..OpenAIProviderSettings::default()
             })?;
             Ok(Arc::new(provider.chat(model_id)))
         }

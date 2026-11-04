@@ -331,23 +331,32 @@ pub(crate) fn convert(
     // The OpenAI-compatible Chat model consumes the fields of its generic
     // schema and passes any other namespace field to the request body, which
     // is how the wire keeps `top_k`: its own `topK` switch stays off for the
-    // generic endpoint.
-    if matches!(
-        kind,
-        ProviderKind::OpenaiChat | ProviderKind::OpenaiCompatible
-    ) && let Some(top_k) = options.top_k.take()
+    // generic endpoint. The OpenAI Chat model reads `top_k` from the request.
+    if *kind == ProviderKind::OpenaiCompatible
+        && let Some(top_k) = options.top_k.take()
     {
-        let namespace = match kind {
-            ProviderKind::OpenaiChat => "openai",
-            ProviderKind::OpenaiCompatible => preset.unwrap_or("openai"),
-            _ => unreachable!(),
-        };
         options
             .provider_options
             .get_or_insert_default()
-            .entry(namespace.into())
+            .entry(preset.unwrap_or("openai").into())
             .or_default()
             .insert("top_k".into(), json!(top_k));
+    }
+    // A model the tag classifies as a reasoning model takes the request rules
+    // main applied on both Chat protocols. The OpenAI Chat model applies the
+    // token key and the system role itself; the compatible one has no setting
+    // for the system role, so the prompt carries it.
+    if matches!(
+        kind,
+        ProviderKind::OpenaiChat | ProviderKind::OpenaiCompatible
+    ) {
+        let capabilities =
+            aimux_providers::openai::language_model_capabilities::get_model_capabilities(
+                &request.model_id,
+            );
+        if capabilities.is_reasoning_model {
+            reasoning_model_rules(&mut options, kind, preset, &capabilities);
+        }
     }
     // Same forwarding for the xAI Chat protocol's `max_completion_tokens`.
     if *kind == ProviderKind::Xai
@@ -403,6 +412,71 @@ pub(crate) fn convert(
         tool_names,
         recording,
     })
+}
+
+/// The request rules main applied to a model the tag classifies as a
+/// reasoning model, as far as the two Chat models cannot apply them
+/// themselves: no sampling value the model rejects, and, on the compatible
+/// model, the token key and the `developer` role.
+fn reasoning_model_rules(
+    options: &mut CallOptions,
+    kind: &ProviderKind,
+    preset: Option<&str>,
+    capabilities: &aimux_providers::openai::language_model_capabilities::ModelCapabilities,
+) {
+    let namespace = if *kind == ProviderKind::OpenaiChat {
+        "openai"
+    } else {
+        preset.unwrap_or("openai")
+    };
+    let effort = options
+        .provider_options
+        .as_ref()
+        .and_then(|options| options.get(namespace))
+        .and_then(|options| options.get("reasoningEffort"))
+        .and_then(Value::as_str);
+    // A reasoning model takes a sampling value only with reasoning turned off,
+    // and only where the model takes a non-reasoning parameter at all. The
+    // OpenAI Chat model would otherwise drop the value and warn, and a strict
+    // stream fails the call on that warning.
+    if !(effort == Some("none") && capabilities.supports_non_reasoning_parameters) {
+        options.temperature = None;
+        options.top_p = None;
+    }
+    if *kind == ProviderKind::OpenaiChat {
+        return;
+    }
+    // A registry row that names its own token key keeps it: the preset builds
+    // its model with that key. Anything else sends `max_completion_tokens`
+    // through the model's own namespace.
+    let row_key = preset
+        .and_then(aimux_providers::preset::lookup)
+        .and_then(|entry| entry.descriptor.max_tokens_key.as_deref());
+    if row_key.is_none()
+        && let Some(max_tokens) = options.max_output_tokens.take()
+    {
+        options
+            .provider_options
+            .get_or_insert_default()
+            .entry(namespace.into())
+            .or_default()
+            .insert("max_completion_tokens".into(), json!(max_tokens));
+    }
+    // The compatible model writes every system message with the `system` role
+    // and has no setting for another. It spreads a message's
+    // `openaiCompatible` metadata onto the wire message, which is where the
+    // role main sent travels.
+    for message in &mut options.prompt {
+        if let LanguageModelMessage::System {
+            provider_options, ..
+        } = message
+        {
+            *provider_options = Some(
+                provider_namespace("openaiCompatible", json!({"role": "developer"}))
+                    .expect("a message role is an object"),
+            );
+        }
+    }
 }
 
 /// One content part of a message, before its role decides the protocol type.

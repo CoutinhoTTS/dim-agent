@@ -227,7 +227,14 @@ pub(super) fn apply(
         }
         // The compatible Chat model forwards a namespace key it does not
         // consume to the request body, so the wire spelling is written here.
-        fields.insert("service_tier".into(), Value::String(tier.to_owned()));
+        // The OpenAI Chat model reads the camelCase setting and writes the
+        // same body field itself.
+        let key = if *kind == ProviderKind::OpenaiChat {
+            "serviceTier"
+        } else {
+            "service_tier"
+        };
+        fields.insert(key.into(), Value::String(tier.to_owned()));
     }
     for level in &levels {
         if let Some(thinking) = level.thinking
