@@ -3,6 +3,7 @@
 //! `replacement_parts` locates them (ContextCompaction §4.3).
 use super::*;
 use dim_agent_capabilities::history::summary_message;
+use dim_agent_runtime::testing::chain_events;
 
 /// Emits a `wait` call carrying `text` when the last message asks for the
 /// tool, at most twice: the wait holds the turn long enough for a steer to
@@ -62,7 +63,7 @@ async fn turn_with_steer(session: &dim_agent_runtime::Session, steer: &str) {
         .unwrap();
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(session, "main", ..).await.unwrap();
             if events
                 .iter()
                 .any(|event| matches!(event.kind, EventKind::ToolCall(_)))
@@ -185,7 +186,7 @@ async fn a_cut_inside_the_running_turn_pins_its_input_verbatim() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let (_, replacement, parts) = completed(&events);
     assert_eq!(replacement.len(), 2, "{replacement:?}");
     assert_eq!(replacement[0], summary_message("short"));
@@ -239,7 +240,7 @@ async fn a_steer_that_joined_the_turn_is_pinned_in_order() {
     let (agent, session) = tool_session(model, 3_000.).await;
     turn_with_steer(&session, "use the tool").await;
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let (_, replacement, parts) = completed(&events);
     assert_eq!(replacement.len(), 3, "{replacement:?}");
     assert_eq!(replacement[0], summary_message("short"));
@@ -263,6 +264,156 @@ async fn a_steer_that_joined_the_turn_is_pinned_in_order() {
     agent.close().await.unwrap();
 }
 
+/// Emits a `wait` call carrying its text the first time a request ends with an
+/// input asking to `run`, so each such turn runs one tool cycle and the request
+/// after it is large enough to compact. An input it already asked for echoes,
+/// so a compaction that pins it cannot ask again for ever.
+#[derive(Default)]
+struct WaitOnInput {
+    text: String,
+    asked: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+impl ModelDriver for WaitOnInput {
+    fn invoke(
+        &self,
+        request: Arc<ModelRequest>,
+        connection: ModelConnection,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ModelStream> {
+        let asked = match &request.messages.last().unwrap().content {
+            MessageContent::Text(text) if text.starts_with("run ") => {
+                self.asked.lock().unwrap().insert(text.clone())
+            }
+            _ => false,
+        };
+        let text = self.text.clone();
+        let request = request.clone();
+        Box::pin(async move {
+            if !asked {
+                return EchoModel.invoke(request, connection, cancel).await;
+            }
+            Ok(Box::pin(futures_util::stream::iter(vec![
+                Ok(ModelChunk::MessageStart {
+                    message_id: "tool".into(),
+                }),
+                Ok(ModelChunk::ToolStart {
+                    id: "wait-call".into(),
+                    name: "wait".into(),
+                }),
+                Ok(ModelChunk::ToolUse(ToolCall {
+                    id: "wait-call".into(),
+                    name: "wait".into(),
+                    input: serde_json::from_value(
+                        serde_json::json!({ "millis": 300, "text": text }),
+                    )
+                    .unwrap(),
+                })),
+                Ok(ModelChunk::MessageStop {
+                    message_id: "tool".into(),
+                    reason: ModelStopReason::ToolUse,
+                }),
+            ])) as ModelStream)
+        })
+    }
+}
+
+/// A queued input is written while the previous turn runs and consumed at the
+/// next turn's start, so its `input/message` sits before that turn's
+/// `turn/start`; a cut inside the turn still pins it (ContextCompaction §5.9).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_queued_input_consumed_at_the_next_turns_start_is_pinned() {
+    let model = Arc::new(WaitOnInput {
+        text: "t".repeat(4_000),
+        ..Default::default()
+    });
+    let agent = MinimalHost::start(&builder_with_context(
+        model,
+        HistoryRenderer::default(),
+        Context {
+            threshold: Some(3_000.),
+            ..Context::default()
+        },
+    ))
+    .await
+    .unwrap();
+    let session = agent
+        .create_session(SessionConfig {
+            tools: Some(vec!["wait".into()]),
+            permission_policy: dim_agent_runtime::PermissionPolicy {
+                preset: dim_agent_runtime::PermissionPreset::FullAccess,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    session
+        .submit("run one".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let events = chain_events(&session, "main", ..).await.unwrap();
+            if events
+                .iter()
+                .any(|event| matches!(event.kind, EventKind::ToolCall(_)))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the first turn runs");
+    session
+        .submit("run two".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let input = queued(&events, "run two");
+    let consumed = events
+        .iter()
+        .position(
+            |event| matches!(&event.kind, EventKind::InputConsumed(data) if data.input_id == input),
+        )
+        .expect("the second turn consumes the queued input");
+    let start = events[..consumed]
+        .iter()
+        .rposition(|event| matches!(event.kind, EventKind::TurnStart(_)))
+        .expect("the second turn started");
+    assert!(
+        events[start..consumed]
+            .iter()
+            .all(|event| !matches!(event.kind, EventKind::InputMessage(_))),
+        "the queued input's message precedes the turn's start"
+    );
+    let pinned = replacements(&events)
+        .into_iter()
+        .flatten()
+        .any(|message| serde_json::to_string(&message).unwrap().contains("run two"));
+    assert!(pinned, "a cut inside the turn pins the queued input");
+    agent.close().await.unwrap();
+}
+
+/// The event id of the `input/message` whose operator text is `text`.
+fn queued(events: &[Arc<AgentEvent>], text: &str) -> String {
+    events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::InputMessage(InputMessageData {
+                user: Some(user), ..
+            }) if user.content.iter().any(
+                |block| matches!(block, ContentBlock::Text { text: block } if block == text),
+            ) =>
+            {
+                Some(event.id.clone())
+            }
+            _ => None,
+        })
+        .expect("the queued input")
+}
+
 /// An input consumed at the cut stays in the kept tail and is not repeated
 /// in the replacement (ContextCompaction §5.9).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -274,7 +425,7 @@ async fn an_input_consumed_at_the_cut_is_not_duplicated() {
     let (agent, session) = tool_session(model, 3_000.).await;
     turn_with_steer(&session, "STEER-MARKER").await;
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let (_, replacement, parts) = completed(&events);
     assert_eq!(
         replacement,
@@ -343,7 +494,7 @@ async fn a_compaction_with_no_running_turn_pins_nothing() {
         .unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             if events.iter().any(|event| {
                 matches!(&event.kind,
                     EventKind::ContextCompaction(data) if data.command == Some(command))
@@ -355,7 +506,7 @@ async fn a_compaction_with_no_running_turn_pins_nothing() {
     })
     .await
     .unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let (data, replacement, parts) = completed(&events);
     assert_eq!(data.command, Some(command));
     assert_eq!(replacement, vec![summary_message("short")]);
@@ -481,7 +632,7 @@ async fn until(
 ) -> Vec<Arc<AgentEvent>> {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(session, "main", ..).await.unwrap();
             if done(&events) {
                 return events;
             }
@@ -505,7 +656,7 @@ async fn a_running_turns_pins_do_not_depend_on_a_snapshot() {
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         agent.close().await.unwrap();
         replacements(&events)
     };
@@ -549,7 +700,7 @@ async fn a_steer_after_a_compaction_is_pinned_after_the_carried_pin() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let all = replacements(&events);
     let second = all
         .iter()
@@ -602,7 +753,7 @@ async fn a_merged_pin_over_the_share_keeps_each_inputs_handle() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let all = replacements(&events);
     let second = all
         .iter()

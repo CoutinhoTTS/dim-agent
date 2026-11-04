@@ -34,21 +34,51 @@ impl Plugin for AimuxPlugin {
 /// execution capabilities are independent of this provider choice.
 pub struct ConfiguredModelsPlugin(pub Arc<AimuxModels>);
 impl Plugin for ConfiguredModelsPlugin {
-    type Deps = ();
+    /// The shared name and the run for auxiliary calls need the model host;
+    /// Aimux provides it and depends on nothing here.
+    type Deps = (Arc<ModelHost>,);
     fn name(&self) -> &str {
         "ConfiguredModels"
     }
-    async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
+    async fn apply(&self, ctx: &Ctx, (host,): Self::Deps) -> rutis::Result {
         ctx.provide_as::<AimuxModels>(self.0.clone())?;
         let resolver = Arc::new(ConfiguredConnection {
             models: self.0.clone(),
             generation: ctx.cancellation_token(),
         });
         ctx.provide(ProviderConnectionResolver(resolver.clone()))?;
-        ctx.provide(ModelSelectionHost(resolver))?;
+        ctx.provide(ModelSelectionHost(resolver.clone()))?;
+        ctx.provide(SelectableModelsHost(Arc::new(ConfiguredSelectable {
+            models: self.0.clone(),
+        })))?;
+        let auxiliary = Arc::new(crate::auxiliary::ConfiguredAuxiliary {
+            models: self.0.clone(),
+            connection: resolver,
+            host,
+        });
+        dim_agent_capabilities::auxiliary_model::provide(ctx, auxiliary)?;
         Ok(())
     }
 }
+/// The configured catalog's `selectableModels` read: the same entries
+/// execution resolves, listed by provider and model id.
+struct ConfiguredSelectable {
+    models: Arc<AimuxModels>,
+}
+impl SelectableModels for ConfiguredSelectable {
+    fn selectable(
+        &self,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, Vec<dim_agent_types::ModelCapabilitySnapshot>> {
+        Box::pin(async move {
+            if cancel.is_cancelled() {
+                return Err(HostError::Cancelled("selectable models cancelled".into()));
+            }
+            Ok(self.models.selectable())
+        })
+    }
+}
+
 struct ConfiguredConnection {
     models: Arc<AimuxModels>,
     generation: CancellationToken,

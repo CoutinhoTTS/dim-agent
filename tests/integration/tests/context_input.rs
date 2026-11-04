@@ -1,3 +1,4 @@
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::{AgentBuilder, AgentConfig, SessionConfig, testing::MinimalHost};
 use dim_agent_types::{EventKind, InputMessageData, InputMode};
 
@@ -30,8 +31,7 @@ async fn context_only_input_waits_for_the_next_user_turn() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let turns_before = session
-        .history("main", None)
+    let turns_before = chain_events(&session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -45,8 +45,7 @@ async fn context_only_input_waits_for_the_next_user_turn() {
     session.idle("main").await.unwrap();
     assert!(!session.state("main").unwrap().running);
     assert_eq!(
-        session
-            .history("main", None)
+        chain_events(&session, "main", ..)
             .await
             .unwrap()
             .iter()
@@ -60,7 +59,7 @@ async fn context_only_input_waits_for_the_next_user_turn() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert!(events.iter().any(
         |event| matches!(&event.kind, EventKind::InputConsumed(data) if data.input_id == context.id)
     ));
@@ -81,7 +80,7 @@ async fn context_only_input_after_a_stop_starts_no_turn() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert!(
         !events
             .iter()
@@ -96,7 +95,7 @@ async fn context_only_input_after_a_stop_starts_no_turn() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    assert!(session.history("main", None).await.unwrap().iter().any(
+    assert!(chain_events(&session, "main", ..).await.unwrap().iter().any(
         |event| matches!(&event.kind, EventKind::InputConsumed(data) if data.input_id == context.id)
     ));
     agent.close().await.unwrap();

@@ -8,14 +8,16 @@ the model the history of its own branch. Design:
 
 Owner: [recall.rs](../../../../crates/dim-agent-capabilities/src/recall.rs).
 Registers the Session `recall` tool. A call resolves the calling branch from
-`ToolExecutionContext.branch_id`, pins its published head with
-`Branch::sequence()`, and reads that history backwards in pages through
-`Branch::page_cursor` and `Branch::page`: the newest stored rows of the kinds
-the narrative folds, at or below the pinned head, continued until the answer is
-met. It does not fold while it pages: it stops when the collected pages reach
-the turn or the count the answer needs and folds them once; a search whose fold
-finds fewer matches than a page finishes the read and folds the whole chain once
-more, so a call folds at most twice. It answers from the collected suffix: the
+`ToolExecutionContext.branch_id` and reads that history backwards through
+`Branch::query`: the chain scope, descending, the kinds the narrative folds, one
+page of events per call, continued until the answer is met. A call reads the
+published head of its branch once, before the first page, and starts every page
+at that sequence, so the selection is fixed for the whole call: a fact published
+while the read runs is outside it, and the offsets stay on one contiguous suffix.
+It does not fold while it pages: it stops when the collected pages reach the turn
+or the count the answer needs and folds them once; a search whose fold finds
+fewer matches than a page finishes the read and folds the whole chain once more,
+so a call folds at most twice. It answers from the collected suffix: the
 turn index, one turn, one thing in full, or a search. The turn a page cuts is
 not told; everything after it is folded as the whole history folds it, so a page
 boundary changes what was read, never the answer.

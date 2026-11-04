@@ -1910,6 +1910,26 @@ impl App {
                 ));
             }
             Update::Switched { session_id, kind } => self.switch_session(session_id, kind),
+            Update::Skills(entries) => {
+                self.composer.set_skills(
+                    entries
+                        .into_iter()
+                        .filter(|entry| {
+                            // A name with whitespace cannot be referenced
+                            // (Skills §9), so it is not offered.
+                            entry.enabled
+                                && entry.shadowed_by.is_none()
+                                && !entry.name.chars().any(char::is_whitespace)
+                        })
+                        .map(|entry| crate::ui::composer::palette::Skill {
+                            name: entry.name,
+                            description: entry.description,
+                            display_name: None,
+                            display_description: None,
+                        })
+                        .collect(),
+                );
+            }
             Update::Sessions { id, paged, result } => {
                 if let Some(Prompt::Sessions(panel)) = &mut self.prompt {
                     panel.page(&id, paged, result);
@@ -3828,16 +3848,23 @@ impl App {
                     WriteTarget::Create => ManagementAction::Add { document },
                     WriteTarget::Area { revision } => ManagementAction::Save {
                         id: None,
+                        source: None,
                         expected_revision: revision.clone(),
                         document,
                     },
-                    WriteTarget::Entry { id, revision } => ManagementAction::Save {
+                    WriteTarget::Entry {
+                        id,
+                        source,
+                        revision,
+                    } => ManagementAction::Save {
                         id: Some(id.clone()),
+                        source: source.clone(),
                         expected_revision: revision.clone(),
                         document,
                     },
-                    WriteTarget::Run { id } => ManagementAction::Run {
+                    WriteTarget::Run { id, source } => ManagementAction::Run {
                         id: id.clone(),
+                        source: source.clone(),
                         document: Some(document),
                         seed: seed.clone(),
                     },
@@ -6529,6 +6556,7 @@ mod tests {
                             heading: "user".into(),
                             entries: vec![ManagementEntry {
                                 id: "cleanup".into(),
+                                source: None,
                                 label: "cleanup".into(),
                                 detail: vec!["Runs first.".into()],
                                 enabled: Some(true),
@@ -6825,6 +6853,7 @@ mod tests {
                 heading: "user".into(),
                 entries: vec![ManagementEntry {
                     id: "review-and-fix".into(),
+                    source: None,
                     label: "review-and-fix".into(),
                     detail: vec!["Runs the review first.".into()],
                     enabled: Some(true),
@@ -8780,6 +8809,61 @@ mod tests {
         }
     }
 
+    /// The palette lists the Session's enabled, unshadowed Skills, and a row
+    /// completes its marker without sending.
+    #[test]
+    fn the_palette_lists_enabled_unshadowed_skills() {
+        use crate::management::skills::Entry;
+        let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
+        let (mut app, sent, _home) = session_with_queue(false, &[]);
+        let entry = |name: &str, enabled: bool, shadowed_by: Option<&str>| Entry {
+            id: format!("user:{name}"),
+            source: Some("user".into()),
+            name: name.into(),
+            description: format!("About {name}"),
+            file_path: format!("/home/.agents/skills/{name}/SKILL.md"),
+            enabled,
+            shadowed_by: shadowed_by.map(str::to_owned),
+        };
+        app.apply(Update::Skills(vec![
+            entry("commit", true, None),
+            entry("deploy", false, None),
+            entry("shadowed", true, Some("user:shadowed")),
+            entry("two words", true, None),
+        ]));
+        typed(&mut app, "/comm");
+        assert!(matches!(app.handle(key(KeyCode::Enter)), Outcome::Continue));
+        assert_eq!(app.composer.text(), "$skill: commit ");
+        assert!(
+            sent.borrow().is_empty(),
+            "the marker is a draft, not a message"
+        );
+        app.composer.clear();
+        typed(&mut app, "/dep");
+        app.handle(key(KeyCode::Tab));
+        assert_eq!(
+            app.composer.text(),
+            "/dep",
+            "a disabled Skill is not offered"
+        );
+        app.composer.clear();
+        typed(&mut app, "/sha");
+        app.handle(key(KeyCode::Tab));
+        assert_eq!(
+            app.composer.text(),
+            "/sha",
+            "a shadowed Skill is not offered"
+        );
+        app.composer.clear();
+        typed(&mut app, "/two");
+        app.handle(key(KeyCode::Tab));
+        assert_eq!(
+            app.composer.text(),
+            "/two",
+            "a name with whitespace cannot be referenced and is not offered"
+        );
+    }
+
     /// A resumed session of `count` user messages `ask N`, each cut at `N`.
     fn resume_asks(drawn: &mut Drawn, count: usize) {
         drawn
@@ -9507,6 +9591,40 @@ mod tests {
         assert_eq!(drawn.app.composer.text(), "ask 2");
     }
 
+    /// Editing a message that loaded a Skill prefills the operator's own text,
+    /// so resending does not carry the block and load the Skill twice.
+    #[test]
+    fn editing_a_message_that_loaded_a_skill_prefills_the_operators_text_only() {
+        let mut drawn = Drawn::new((80, 40), None, true);
+        let mut projection = crate::projection::Projection::default();
+        let event: crate::wire::Event = serde_json::from_value(serde_json::json!({
+            "id": "input-1", "sequence": 1, "create_at": 1,
+            "type": "input", "name": "message",
+            "data": {"user": {"content": [
+                {"type": "text", "text": "check the build"},
+                {"type": "text", "text": "<dim-skill name=\"checkin\">\nSkill: checkin\nDescription: D\nFile: /x/SKILL.md\n\nInstructions:\nBODY\n</dim-skill>"},
+            ]}, "mode": "queue"},
+        }))
+        .unwrap();
+        projection.apply("main", &event);
+        let applied: crate::wire::Event = serde_json::from_value(serde_json::json!({
+            "id": "applied-1", "sequence": 2, "create_at": 2,
+            "type": "input", "name": "applied", "data": {"input_id": "input-1"},
+        }))
+        .unwrap();
+        projection.apply("main", &applied);
+        let mut snapshot = projection.snapshot();
+        snapshot.session_id = "s1".into();
+        snapshot.focus = "main".into();
+        snapshot.history_complete = true;
+        drawn.app.apply(Update::Snapshot(Box::new(snapshot)));
+        drawn.draw();
+        drawn.app.run_command("timeline", "");
+        drawn.key(KeyCode::Up);
+        drawn.key(KeyCode::Char('e'));
+        assert_eq!(drawn.app.composer.text(), "check the build");
+    }
+
     /// Entering fullscreen lays out only the shown Session's transcript,
     /// not what scrollback committed before it.
     #[test]
@@ -9819,6 +9937,7 @@ mod tests {
                 provider_id: "relay".into(),
                 model_id: "reasoner".into(),
                 model_preferences: None,
+                capability_snapshot: None,
             }));
             press(&mut app, KeyCode::Char(' '));
             let answer = selection(&app);
@@ -9873,6 +9992,7 @@ mod tests {
                         provider_id: "relay".into(),
                         model_id: "other".into(),
                         model_preferences: None,
+                        capability_snapshot: None,
                     }));
                 }
                 let before = sent.borrow().len();
@@ -9978,6 +10098,33 @@ mod tests {
                 _ => "other".into(),
             })
             .collect()
+    }
+
+    /// Tab in the palette only completes, so repeating it never runs a
+    /// command and never exits, in either layout.
+    #[test]
+    fn repeated_tab_in_the_palette_only_completes() {
+        let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
+        for fullscreen in [false, true] {
+            let (mut app, sent, _home) = session_with_queue(false, &[]);
+            app.fullscreen = fullscreen;
+            assert!(matches!(
+                app.handle(key(KeyCode::Char('/'))),
+                Outcome::Continue
+            ));
+            for _ in 0..3 {
+                assert!(matches!(app.handle(key(KeyCode::Tab)), Outcome::Continue));
+                assert_eq!(app.composer.text(), "/new");
+            }
+            assert!(sent.borrow().is_empty(), "Tab ran nothing");
+
+            let (mut app, sent, _home) = session_with_queue(false, &[]);
+            app.fullscreen = fullscreen;
+            typed(&mut app, "/ke");
+            assert!(matches!(app.handle(key(KeyCode::Tab)), Outcome::Continue));
+            assert_eq!(app.composer.text(), "/keys");
+            assert!(sent.borrow().is_empty(), "the key bindings did not open");
+        }
     }
 
     /// During a run Enter queues the draft, and Ctrl+S steers a draft that is
@@ -10662,6 +10809,7 @@ mod tests {
                     area: Area::Hooks,
                     action: ManagementAction::Save {
                         id: None,
+                        source: None,
                         expected_revision: "user:1".into(),
                         document: serde_json::json!({}),
                     },
@@ -10755,6 +10903,7 @@ mod tests {
                 area: Area::Scheduled,
                 action: ManagementAction::Run {
                     id: "job-1".into(),
+                    source: None,
                     document: None,
                     seed: None,
                 },
@@ -10830,6 +10979,7 @@ mod tests {
                         heading: "user".into(),
                         entries: vec![ManagementEntry {
                             id: "user:commit".into(),
+                            source: None,
                             label: "commit".into(),
                             detail: Vec::new(),
                             enabled: Some(true),
@@ -10850,6 +11000,7 @@ mod tests {
             area: Area::Skills,
             action: ManagementAction::Toggle {
                 id: "user:commit".into(),
+                source: None,
                 enabled: false,
             },
         };
@@ -10888,6 +11039,7 @@ mod tests {
         );
         let row = |id: &str, label: &str| ManagementEntry {
             id: id.into(),
+            source: None,
             label: label.into(),
             detail: Vec::new(),
             enabled: Some(true),
@@ -10925,6 +11077,7 @@ mod tests {
                 },
                 action: ManagementAction::Toggle {
                     id: "other".into(),
+                    source: None,
                     enabled: false,
                 },
             },
@@ -10968,6 +11121,7 @@ mod tests {
                 area: Area::Scheduled,
                 action: ManagementAction::Run {
                     id: "job-1".into(),
+                    source: None,
                     document: None,
                     seed: None,
                 },
@@ -11127,6 +11281,7 @@ mod tests {
                     area: Area::Skills,
                     action: ManagementAction::Run {
                         id: "job-1".into(),
+                        source: None,
                         document: Some(serde_json::json!({"target": "edited"})),
                         seed: Some(serde_json::json!({"target": "src"})),
                     },
@@ -11155,7 +11310,10 @@ mod tests {
             app.write_draft(
                 ManagementDraft {
                     area: Area::Skills,
-                    target: WriteTarget::Run { id: "job-1".into() },
+                    target: WriteTarget::Run {
+                        id: "job-1".into(),
+                        source: None,
+                    },
                     draft,
                     seed: Some(serde_json::json!({"target": "src"})),
                 },
@@ -11173,6 +11331,7 @@ mod tests {
                 area: Area::Skills,
                 action: ManagementAction::Run {
                     id,
+                    source,
                     document: Some(document),
                     seed: Some(seed),
                 },
@@ -11204,6 +11363,7 @@ mod tests {
                 &Area::Skills,
                 &WriteTarget::Entry {
                     id: "job-1".into(),
+                    source: None,
                     revision: "1".into(),
                 },
             )
@@ -11211,9 +11371,21 @@ mod tests {
             "an edit never reopens a run's draft"
         );
         let (target, kept, seed) = app
-            .kept_draft(&Area::Skills, &WriteTarget::Run { id: "job-1".into() })
+            .kept_draft(
+                &Area::Skills,
+                &WriteTarget::Run {
+                    id: "job-1".into(),
+                    source: None,
+                },
+            )
             .expect("the run key reopens the draft");
-        assert_eq!(target, WriteTarget::Run { id: "job-1".into() });
+        assert_eq!(
+            target,
+            WriteTarget::Run {
+                id: "job-1".into(),
+                source: None,
+            }
+        );
         assert_eq!(
             seed,
             Some(serde_json::json!({"target": "src"})),

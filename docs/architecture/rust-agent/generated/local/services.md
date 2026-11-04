@@ -63,6 +63,7 @@ flowchart LR
     p36["Attachments"]
   end
   p58 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p78
+  p58 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p78
   p51 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p77
   p58 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p77
   p58 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p77
@@ -140,6 +141,7 @@ flowchart LR
   p58 -->|"dim_agent_runtime::config::BranchLifecycle@main"| p63
   p58 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p63
   p58 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p63
+  p58 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p63
   p41 -->|"dim_agent_capabilities::prompt_guide::GuideEntries@session"| p62
   p33 -->|"dim_agent_runtime::config::SessionLifecycle@session"| p62
   p58 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p62
@@ -165,6 +167,7 @@ flowchart LR
   p33 -->|"dim_agent_runtime::assembly::TimelineFactory@session"| p51
   p33 -->|"dim_agent_runtime::config::SessionIdentity@session"| p51
   p33 -->|"dyn dim_agent_runtime::timeline_store::TimelineStore@session"| p51
+  p39 -->|"dim_agent_capabilities::input_queue::SubmitChecks@session"| p50
   p42 -->|"dim_agent_capabilities::prompt_registry::PromptRegistry@session"| p50
   p33 -->|"dim_agent_capabilities::skills::SkillsConfig@session"| p50
   p28 -->|"dim_agent_capabilities::skills::catalog::SkillsCatalog"| p50

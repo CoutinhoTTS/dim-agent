@@ -36,7 +36,7 @@ See [ADR 004](../../adr/004-loader-plugin-management.md).
 
 `SettingsPlugin` 不作为 `SessionScopePlugin` 的 `Deps` 依赖：Session 创建入口传入已校验的配置快照，既有 Session 的设置变更由受影响能力按业务合同更新（如 McpSession 观察目录修订）。普通配置写入不通过 rutis 重载重建 Session。
 
-Session 与分支装配通过 loader 的 `instance_rows` 查询本实例当前的行句柄，不构造全进程的行配置、Schema 与元数据副本；作用域交出的挂载器视图与挂载器挂上的部件另行交给创建。初次读取、必需部件就绪后的读取与最终清理成员读取均使用当前结果，包含加载过程中创建的嵌套实例；每次装配完成后持有自己的行句柄，关闭错误的归属与 mounter 部件清理沿用这些句柄。该查询不改变 loader 的就绪与生命周期规则。
+Session 与分支装配通过 loader 的 `instance_rows` 查询本实例当前的行句柄，不构造全进程的行配置、Schema 与元数据副本；作用域交出的挂载器视图与挂载器挂上的部件另行交给创建。实例创建返回且组行成为 Active 后读取一次，必需行由这份快照筛出；行报告失败的实例在回滚前只在该路径再读一次成员。必需部件就绪后再读取一次作为清理成员，包含加载过程中创建的嵌套实例，发布之后创建的实例不在其中。每次装配完成后持有自己的行句柄，关闭错误的归属与 mounter 部件清理沿用这些句柄。该查询不改变 loader 的就绪与生命周期规则。
 
 当前 `--database PATH` 装载 `SqliteStoragePlugin` 与 `SessionStorePlugin`，共用一个原生数据库，保存 Agent profile、Session 身份与 Timeline；启动只读目录，Session 按使用装载，未指定数据库时使用内存存储。`--home PATH` 使用 `<home>/dimcode.sqlite` 并授权该文件根；FileStorage 默认授权 `session_defaults.cwd`。SQL/JSON 格式见[原生存储格式](../../design/appserver/native-storage-format.md)。
 
@@ -144,7 +144,7 @@ loader 的 `create_instance` 仍先等待行 settled；异步 apply 一直不返
 | `ManagedProviderMethodsPlugin` | `account` 管理命名空间（`account.providers/status/recover/logout`、`account.login.*`、`account.usage`）；随产品 home 装配 | 向 `ManagementMethods` 注册 `account` | `ManagedProviders`、`ManagementMethods` |
 | `ProviderPlugin` | catalog、连接与选择管理、账号变更后的非秘密 binding | `ProviderService`、`ProviderConnectionResolver`、`ModelSelectionHost` | `SqliteStorage`、`ManagedProviders`、Codex/Grok 账号服务；可选秘密宿主 |
 | `AimuxPlugin`（进程级） | 共享 HTTP 资源、请求/流转换及取消桥接 | `ModelHost`：接收最终请求、已解析连接与取消信号的 request 对象 | 无业务服务依赖；不注入 Provider、ToolRegistry 或 Session |
-| `ConfiguredModelsPlugin` | `--model-config` 的开发模型目录与 resolver | 开发目录与 resolver | — |
+| `ConfiguredModelsPlugin` | `--model-config` 的开发模型目录、resolver 与 `auxiliaryModel` 操作 | 开发目录与 resolver、`AuxiliaryModelHost` 与具名 `auxiliaryModel` 绑定 | `ModelHost` |
 | `McpPublication` | Source selection, including project enablement from the user's record, and retirement across Session-owned instances; no root reconciliation | `Publication` | `SettingsService` |
 | `McpPlugin` | MCP 目录、连接租约与项目条目的用户启用记录；不拥有已配置行 | `McpService` | `SettingsService`、`Publication` |
 | `HostPlatformPlugin` | 平台与 exec shell 设置 | `HostPlatform` | `When<FileStorage>` |
@@ -202,7 +202,7 @@ Session 与 Timeline 在结构图中分别由 `SessionScopePlugin` 和 `BranchSc
 
 `SessionConfig.collaboration_role: Leader | Member` 是 Session 创建时确定的协作角色，缺省 `Leader`，创建后不变。只有 `CollaborationPlugin` 创建成员 Session 时写入 `Member`；`session.create` 不接受该字段。
 
-`agent` 工具按动作公布必填参数：`request` 需要 `prompt` 和 Agent/profile 目标，`cancel`、`close`、`read` 需要 `agentId + sessionId`，`message` 还需要 `content`，`inspect` 需要 `agentId`，`result` 需要 `resultId`；`list` 不需要目标。成员角色只公布 message/read/list。后台命令的 Task ID 由 `exec_stop` 处理，不是成员身份；无效参数不产生协作操作。
+`agent` 工具按动作公布必填参数：`request` 需要 `prompt` 和 Agent/profile 目标，`cancel`、`close`、`read` 需要 `agentId + sessionId`，`message` 还需要 `content`，`inspect` 需要 `agentId`，`result` 需要 `resultId`；`list` 与 `models` 只需要 `action`。成员角色只公布 message/read/list。后台命令的 Task ID 由 `exec_stop` 处理，不是成员身份；无效参数不产生协作操作。
 
 Collaboration 的成员工具审批在 `collaboration/approvals.rs` 内实现，沿用既有 Session 和分支部件。
 Session 部件注册决策工具与详情查询；成员分支按自己的 Dispatcher 进度观察 Approval，
@@ -364,12 +364,12 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 | 卸载 | 取消自身在途操作并提交终态：工具调用返回错误结果并在 `structuredContent.settlement` 标记重载结算，模型请求以 `Cancelled` 结束；不代其他能力提交事件 |
 | 重载结算 | Loop 收到带重载结算标记的工具结果、或原因为 `capability reloading` 的模型终态时，turn 以 `Failed` 结束，不再推进；新旧两代 Loop 相同 |
 | 装载：订阅 | 取得依赖后先注册 Dispatcher 订阅 |
-| 装载：重建 | 在能力的重建闸门内固定 `S = Timeline::committed()`，以 `local(..=S)` 读取本分支事件（不含祖先前缀）计算状态。旧代处理器和任务在其卸载完成前结束，读取覆盖旧代写出、尚未发布的终态，不等待持久化或 Dispatcher。重建与事件处理共用闸门，处理器跳过序号不大于 S 的事件；S 之后的事件只走实时消费 |
+| 装载：重建 | 在能力的重建闸门内用 `query`、界取已提交（`bound: committed`），按自己折叠的 kind 读取本分支已发布事件（不含祖先前缀）并加上尚未发布的尾部，读到的截点 `through` 就是本次读取的截点；旧代处理器和任务在其卸载完成前结束，读取覆盖旧代写出、尚未发布的终态，不等待持久化或 Dispatcher。重建与事件处理共用闸门，处理器跳过序号不大于读到的截点的事件；截点之后的事件只走实时消费 |
 | 装载：失败判定 | 读取到的已提交而没有终态的操作，由所属能力提交失败终态，不执行；未结束的 turn 在其在途操作全部有终态后以 `Failed` 结束，期间不再发起模型请求或派发工具调用 |
 | 历史投影 | turn 结束时仍未得到结果的工具提议，投影为未执行的错误结果 |
 | 已知代价 | 未随重载的上下文准备跨过重载时，已判失败的 turn 仍可能完成一次模型调用 |
 
-`Dispatcher::follow`（其他语言为 `dispatcher.consume`）把订阅与重建合为一次注册（[插件契约 §5.2](../../design/plugin-contract.md#52-consuming-facts)）：它先注册订阅，固定 `S`，把 `local(..=S)` 作为一次重放交给处理器；处理器在重放中计算状态、完成失败判定，S 之后的事件在重放处理完后才以实时事件交给同一处理器。手写的订阅、闸门与跳过仍然有效。
+`Dispatcher::consume` 把订阅与重建合为一次注册（[插件契约 §5.2](../../design/plugin-contract.md#52-consuming-facts)）：它先注册订阅并暂存匹配键的实时事件，然后调用重建；重建以分支 `timeline` 的 `query`（界为已提交）读取自己折叠的 kind、算出状态并返回读取的截点，截点之后的暂存事件与之后匹配的事件才按序号交给实时处理器。Dispatcher 不再读历史。其他语言用同一个名字 `consume`，处理函数与重建是各绑定里的函数；不重建的部件用 `listen`，只收实时事件。
 
 随上游重载的能力：
 

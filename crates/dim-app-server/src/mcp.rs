@@ -18,8 +18,8 @@ pub use session::{
 
 use crate::settings::{BusinessDocument, SettingsError, SettingsScope, SettingsService};
 use config::{
-    McpPluginDocument, McpPluginServers, McpProjectEnablement, McpSecretEntry, McpSecrets,
-    McpServerSettings, McpSettings,
+    McpEntryError, McpPluginDocument, McpPluginServers, McpProjectEnablement, McpSecretEntry,
+    McpSecrets, McpServerSettings, McpSettings,
 };
 use dim_agent_capabilities::file_storage::FileStorage;
 use dim_agent_runtime::Names;
@@ -44,6 +44,8 @@ pub enum McpError {
     InvalidId,
     #[error("MCP server is not configured in this source")]
     UnknownServer,
+    #[error("{0}")]
+    InvalidEntry(#[from] McpEntryError),
     #[error("MCP destination source already has this entry")]
     MoveConflict,
     #[error("MCP move is partial")]
@@ -95,6 +97,15 @@ impl From<SettingsScope> for McpSource {
             SettingsScope::Project(root) => Self::Project(root),
         }
     }
+}
+
+/// The sources in ascending precedence. The last source that holds a decoded
+/// entry for an id is that id's server; a broken entry holds none, so it
+/// shadows nothing.
+pub(crate) fn sources_in_precedence(project: Option<usize>) -> impl Iterator<Item = McpSource> {
+    [McpSource::User, McpSource::Plugins]
+        .into_iter()
+        .chain(project.map(McpSource::Project))
 }
 
 /// Server-side configuration, including secrets. Not a wire or logging type.
@@ -225,6 +236,15 @@ pub struct McpCatalog {
     pub user_revision: String,
     pub project_revision: Option<String>,
     pub servers: BTreeMap<String, McpServerEntry>,
+    /// Entries that did not decode, in the source that declares them.
+    pub invalid: Vec<McpInvalidEntry>,
+}
+
+/// One entry the catalog could not decode, with the entry's own error.
+pub struct McpInvalidEntry {
+    pub id: String,
+    pub source: McpSource,
+    pub error: McpEntryError,
 }
 
 pub enum McpChange {
@@ -378,21 +398,26 @@ impl McpService {
         document: serde_json::Value,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        let valid = serde_json::from_value::<McpSettings>(document)
-            .map_err(|_| SettingsError::Invalid("invalid MCP configuration"))
-            .and_then(|document| {
-                let registration = McpPluginDocument {
-                    dir,
-                    mcp_servers: document.mcp_servers,
-                };
-                McpPluginServers {
-                    plugins: BTreeMap::from([(plugin.clone(), registration.clone())]),
-                    extra: BTreeMap::new(),
-                }
-                .validate()
-                .and_then(|()| registration.confine())
-                .map(|()| registration)
-            });
+        let valid = McpSettings::from_value(document).and_then(|document| {
+            // A plugin registers its MCP content as one unit, and dim does
+            // not manage a plugin entry on its own. Refuse the document
+            // with the first broken entry's error rather than drop it.
+            let (servers, invalid) = document.into_parts();
+            if let Some(error) = invalid.into_values().next() {
+                return Err(SettingsError::Document(error.to_string()));
+            }
+            let registration = McpPluginDocument {
+                dir,
+                mcp_servers: servers,
+            };
+            McpPluginServers {
+                plugins: BTreeMap::from([(plugin.clone(), registration.clone())]),
+                extra: BTreeMap::new(),
+            }
+            .validate()
+            .and_then(|()| registration.confine())
+            .map(|()| registration)
+        });
         let result = match valid {
             Ok(registration) => {
                 self.set_plugin(plugin.clone(), Some(registration), cancel)
@@ -502,7 +527,9 @@ impl McpService {
                 user_revision: String::new(),
                 project_revision: None,
                 servers: BTreeMap::new(),
+                invalid: Vec::new(),
             };
+            let mut invalid: BTreeMap<(McpSource, String), McpEntryError> = BTreeMap::new();
             let enablement = match project {
                 Some(_) => settings
                     .read::<McpProjectEnablement>(SettingsScope::User, &cancel)
@@ -520,10 +547,7 @@ impl McpService {
                 }
                 None => McpSecrets::default(),
             };
-            for source in [McpSource::User, McpSource::Plugins]
-                .into_iter()
-                .chain(project.map(McpSource::Project))
-            {
+            for source in sources_in_precedence(project) {
                 let Some(scope) = source.scope() else {
                     let plugins = settings
                         .read::<McpPluginServers>(SettingsScope::User, &cancel)
@@ -551,7 +575,8 @@ impl McpService {
                     }
                 }
                 let document = snapshot.document;
-                for (id, mut configuration) in document.mcp_servers {
+                let (servers, invalid_entries) = document.into_parts();
+                for (id, mut configuration) in servers {
                     if let Some(workspace) = &workspace
                         && let Some(secret) = secrets.get(workspace, &id)
                     {
@@ -567,7 +592,14 @@ impl McpService {
                         },
                     );
                 }
+                for (id, error) in invalid_entries {
+                    invalid.insert((source, id.clone()), error);
+                }
             }
+            catalog.invalid = invalid
+                .into_iter()
+                .map(|((source, id), error)| McpInvalidEntry { id, source, error })
+                .collect();
             Ok(catalog)
         })
         .await
@@ -597,13 +629,14 @@ impl McpService {
                 });
             };
             let source = scope;
-            let configuration = settings
-                .read::<McpSettings>(source, &cancel)
-                .await?
-                .document
-                .mcp_servers
-                .remove(&id)
-                .ok_or(McpError::UnknownServer)?;
+            let snapshot = settings.read::<McpSettings>(source, &cancel).await?;
+            let document = snapshot.document;
+            let Some(configuration) = document.get(&id).cloned() else {
+                return match document.invalid_error(&id) {
+                    Some(error) => Err(McpError::InvalidEntry(error.clone())),
+                    None => Err(McpError::UnknownServer),
+                };
+            };
             let configuration = declared(&settings, source, &id, configuration, &cancel).await?;
             let enablement = enablement(&settings, source, &cancel).await;
             Ok(McpServerEntry {
@@ -646,12 +679,13 @@ impl McpService {
                     secret: None,
                 });
             };
-            let mut snapshot = settings.read::<McpSettings>(scope, &cancel).await?;
-            let mut configuration = snapshot
-                .document
-                .mcp_servers
-                .remove(&id)
-                .ok_or(McpError::UnknownServer)?;
+            let snapshot = settings.read::<McpSettings>(scope, &cancel).await?;
+            let Some(mut configuration) = snapshot.document.get(&id).cloned() else {
+                return match snapshot.document.invalid_error(&id) {
+                    Some(error) => Err(McpError::InvalidEntry(error.clone())),
+                    None => Err(McpError::UnknownServer),
+                };
+            };
             let secret = secret(&settings, scope, &id, &cancel).await?;
             if let Some(secret) = &secret {
                 config::merge_secret(&mut configuration, secret)?;
@@ -867,15 +901,17 @@ impl McpService {
             if from_snapshot.revision != expected_from || to_snapshot.revision != expected_to {
                 return Err(SettingsError::Conflict.into());
             }
-            if to_snapshot.document.mcp_servers.contains_key(&id) {
+            if to_snapshot.document.contains(&id)
+                || to_snapshot.document.invalid_error(&id).is_some()
+            {
                 return Err(McpError::MoveConflict);
             }
-            let mut entry = from_snapshot
-                .document
-                .mcp_servers
-                .get(&id)
-                .cloned()
-                .ok_or(McpError::UnknownServer)?;
+            let Some(mut entry) = from_snapshot.document.get(&id).cloned() else {
+                return match from_snapshot.document.invalid_error(&id) {
+                    Some(error) => Err(McpError::InvalidEntry(error.clone())),
+                    None => Err(McpError::UnknownServer),
+                };
+            };
             let from_secret = secret(&settings, from_scope, &id, &cancel).await?;
             if let Some(secret) = &from_secret {
                 config::merge_secret(&mut entry, secret)?;
@@ -883,7 +919,7 @@ impl McpService {
             let enablement = enablement(&settings, from_scope, &cancel).await;
             let mut entry = config::effective(&settings, from_scope, &id, entry, &enablement)?;
             let mut document = McpSettings::default();
-            document.mcp_servers.insert(id.clone(), entry.clone());
+            document.insert(id.clone(), entry.clone());
             document.validate()?;
 
             match to_scope {
@@ -892,7 +928,7 @@ impl McpService {
                     let (skeleton, to_secret) = config::split_entry(&entry);
                     set_project_enabled(&settings, to_scope, &id, false, &cancel).await?;
                     let mut destination = to_snapshot.document;
-                    destination.mcp_servers.insert(id.clone(), skeleton);
+                    destination.insert(id.clone(), skeleton);
                     settings
                         .update(to_scope, &to_snapshot.revision, destination, &cancel)
                         .await?;
@@ -908,7 +944,7 @@ impl McpService {
                         return Err(partial(error, into_project));
                     }
                     let mut source = from_snapshot.document;
-                    source.mcp_servers.remove(&id);
+                    source.remove(&id);
                     settings
                         .update(from_scope, &from_snapshot.revision, source, &cancel)
                         .await
@@ -921,7 +957,7 @@ impl McpService {
                     | McpServerSettings::Remote { enabled: field, .. }) = &mut entry;
                     *field = Some(enabled);
                     let mut destination = to_snapshot.document;
-                    destination.mcp_servers.insert(id.clone(), entry);
+                    destination.insert(id.clone(), entry);
                     settings
                         .update(to_scope, &to_snapshot.revision, destination, &cancel)
                         .await?;
@@ -936,7 +972,7 @@ impl McpService {
                         return Err(partial(error, into_project));
                     }
                     let mut source = from_snapshot.document;
-                    source.mcp_servers.remove(&id);
+                    source.remove(&id);
                     settings
                         .update(from_scope, &from_snapshot.revision, source, &cancel)
                         .await
@@ -1055,12 +1091,18 @@ async fn write(
 ) -> Result<WriteOutcome> {
     let project = matches!(source, SettingsScope::Project(_));
     if project && matches!(change, McpChange::SetEnabled(false)) {
+        // A disable does not need the project file, so an unreadable file
+        // still withdraws the record. A readable file names a broken entry,
+        // whose disable is refused.
+        let snapshot = settings.read::<McpSettings>(source, cancel).await;
+        if let Ok(snapshot) = &snapshot
+            && let Some(error) = snapshot.document.invalid_error(&id)
+        {
+            return Err(McpError::InvalidEntry(error.clone()));
+        }
         set_project_enabled(settings, source, &id, false, cancel).await?;
         return Ok(WriteOutcome {
-            revision: settings
-                .read::<McpSettings>(source, cancel)
-                .await
-                .map_or(expected, |snapshot| snapshot.revision),
+            revision: snapshot.map_or(expected, |snapshot| snapshot.revision),
             captured: None,
             entry_absent: false,
         });
@@ -1071,7 +1113,10 @@ async fn write(
     }
     let mut document = snapshot.document;
     if project && matches!(change, McpChange::SetEnabled(true)) {
-        if !document.mcp_servers.contains_key(&id) {
+        if let Some(error) = document.invalid_error(&id) {
+            return Err(McpError::InvalidEntry(error.clone()));
+        }
+        if !document.contains(&id) {
             return Err(McpError::UnknownServer);
         }
         set_project_enabled(settings, source, &id, true, cancel).await?;
@@ -1083,11 +1128,15 @@ async fn write(
     }
     let removed = match change {
         McpChange::Put(configuration) => {
-            document.mcp_servers.insert(id.clone(), configuration);
+            let configuration = configuration
+                .canonical(&id)
+                .map_err(McpError::InvalidEntry)?;
+            document.insert(id.clone(), configuration);
             None
         }
         McpChange::Remove => {
-            let present = document.mcp_servers.remove(&id).is_some();
+            let present = document.contains(&id) || document.invalid_error(&id).is_some();
+            document.remove(&id);
             // The record goes before the source is rewritten, and only once
             // the revision matched, so a stale remove withdraws nothing.
             if project && present {
@@ -1096,10 +1145,12 @@ async fn write(
             Some(present)
         }
         McpChange::SetEnabled(value) => {
-            let configuration = document
-                .mcp_servers
-                .get_mut(&id)
-                .ok_or(McpError::UnknownServer)?;
+            let Some(configuration) = document.configure_mut(&id) else {
+                return match document.invalid_error(&id) {
+                    Some(error) => Err(McpError::InvalidEntry(error.clone())),
+                    None => Err(McpError::UnknownServer),
+                };
+            };
             let (McpServerSettings::Stdio { enabled, .. }
             | McpServerSettings::Remote { enabled, .. }) = configuration;
             *enabled = Some(value);

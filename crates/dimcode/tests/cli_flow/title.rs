@@ -104,7 +104,7 @@ fn title_notice_after_the_first_message_updates_the_window_title() {
     let mut terminal = resume(&home);
     terminal.until("\u{1b}]0;DIM | first message words\u{7}");
     terminal.until("\u{1b}]0;DIM | Generated title\u{7}");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -133,7 +133,7 @@ fn resuming_a_titled_session_shows_its_title_and_never_its_first_message() {
         "the first message's topic must never be the window title: {}",
         terminal.transcript
     );
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -167,7 +167,7 @@ fn an_older_or_equal_title_revision_is_ignored() {
         "an equal revision must be ignored: {}",
         terminal.transcript
     );
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -223,7 +223,7 @@ fn stored_titles_are_trimmed_and_placeholders_are_no_title() {
             terminal.transcript
         );
     }
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -243,7 +243,7 @@ fn a_rename_from_another_client_updates_the_window_title() {
     let mut terminal = resume(&home);
     terminal.until("\u{1b}]0;DIM | Before rename\u{7}");
     terminal.until("\u{1b}]0;DIM | After rename\u{7}");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -266,7 +266,7 @@ fn a_cleared_title_falls_back_to_the_first_message() {
     terminal.until("\u{1b}]0;DIM | Before clear\u{7}");
     proceed.send(()).unwrap();
     terminal.until("\u{1b}]0;DIM | first message words\u{7}");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -282,7 +282,7 @@ fn new_returns_the_window_title_to_the_product() {
     terminal.until("\u{1b}]0;DIM | Stored title\u{7}");
     terminal.write(b"/new\r");
     terminal.until("\u{1b}]0;DIM\u{7}");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -313,7 +313,7 @@ fn a_title_notice_for_a_session_the_client_left_changes_nothing() {
         "a notice for the Session left behind must not change the title: {}",
         terminal.transcript
     );
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }

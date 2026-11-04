@@ -1,4 +1,5 @@
 use super::*;
+use dim_agent_runtime::testing::{branch_events, chain_events};
 
 /// A stored write grant lets the next write run without an approval prompt;
 /// removing it makes the next write ask again. Both write paths are relative
@@ -104,8 +105,7 @@ async fn a_session_grant_admits_the_next_write_until_it_is_removed() {
     });
     assert_ok(&client.rpc("session.submit", write).await);
     assert_ok(&client.rpc("session.idle", branch.clone()).await);
-    let result = session
-        .history("main", None)
+    let result = chain_events(&session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -179,8 +179,7 @@ async fn a_session_grant_admits_the_next_write_until_it_is_removed() {
             .await,
     );
     assert_ok(&client.rpc("session.idle", branch.clone()).await);
-    let result = session
-        .history("main", None)
+    let result = chain_events(&session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -208,8 +207,7 @@ async fn a_session_grant_admits_the_next_write_until_it_is_removed() {
 }
 
 async fn approval_requests(session: &dim_agent_runtime::Session) -> usize {
-    session
-        .local("main", ..)
+    branch_events(session, "main", ..)
         .await
         .unwrap()
         .iter()

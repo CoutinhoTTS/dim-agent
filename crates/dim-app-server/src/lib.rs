@@ -42,6 +42,7 @@ pub mod web;
 mod web_entry;
 
 use agents::{AgentIndex, AgentsPlugin};
+pub use agents::{SessionPermissions, SessionRef, SessionsError};
 use collaboration::CollaborationPlugin;
 use connection::{ConnectionHub, ConnectionPlugin, RpcPlugin};
 use control::{ServerControl, ServerControlPlugin};
@@ -480,25 +481,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     } else {
         None
     };
-    let plugin_root = match &config.plugin_files {
-        Some(root) => {
-            create_private_directory(root)?;
-            let root = std::fs::canonicalize(root)?;
-            let index = match config
-                .file_roots
-                .iter()
-                .position(|candidate| candidate == &root)
-            {
-                Some(index) => index,
-                None => {
-                    config.file_roots.push(root);
-                    config.file_roots.len() - 1
-                }
-            };
-            Some(index)
-        }
-        None => product_root,
-    };
     let execution_root = if config.local_execution() {
         let cwd = std::env::current_dir()?;
         let home = config
@@ -534,6 +516,41 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             );
         }
     }
+    // The plugin files root is `plugin_files` when an embedding host names it,
+    // else the product home, else the execution home the host was started with
+    // (`--home`); it never comes from `--database` or the working directory.
+    // PluginManager's home is the product home, else `--home`, so a host
+    // started with only a database file has no plugin files root and runs no
+    // PluginManager (PluginManager §2.1, process TypeScript §5.2).
+    let plugin_home = config
+        .product_home
+        .clone()
+        .or_else(|| config.target_home.clone());
+    let plugin_root = match &config.plugin_files {
+        Some(root) => {
+            create_private_directory(root)?;
+            let root = std::fs::canonicalize(root)?;
+            let index = match config
+                .file_roots
+                .iter()
+                .position(|candidate| candidate == &root)
+            {
+                Some(index) => index,
+                None => {
+                    config.file_roots.push(root);
+                    config.file_roots.len() - 1
+                }
+            };
+            Some(index)
+        }
+        None => plugin_home.as_ref().and_then(|home| {
+            config
+                .file_roots
+                .iter()
+                .position(|candidate| candidate == home)
+        }),
+    };
+    let plugin_files = plugin_root.map(|index| config.file_roots[index].clone());
     // SessionStore keeps Session files next to the native database, below
     // the database directory as a FileStorage root (session-files §3.1).
     let session_files_root = match &config.database_path {
@@ -681,7 +698,9 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             },
         )?);
         rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-            Ok(Box::new(provider::ProviderPlugin::new(names)?))
+            Ok(Box::new(provider::ProviderPlugin::with_session_lifecycle(
+                names,
+            )?))
         })?);
         rows.push(register_part(&mut builtins, builder.catalog(), |names| {
             Ok(Box::new(modality::ModalityPlugin::new(names)?))
@@ -798,20 +817,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             ))
         })?);
     }
-    let plugin_home = config
-        .product_home
-        .clone()
-        .or_else(|| config.target_home.clone());
     let plugins = match &plugin_home {
         Some(home) => Some(
             plugin_manager::State::read(
                 home,
-                plugin_root.and(
-                    config
-                        .plugin_files
-                        .as_deref()
-                        .or(config.product_home.as_deref()),
-                ),
+                plugin_files.as_deref(),
                 config.plugin_defaults.as_deref(),
                 &config.plugin_configs,
                 builder.catalog_mut(),
@@ -964,12 +974,16 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             move |names| Ok(Box::new(TransportPlugin::new(names, config.clone())?)),
         )?);
     }
-    match builder.plugin_rows(&mut builtins).await {
-        Ok(plugins) => rows.extend(
-            plugins
-                .iter()
-                .map(|row| row["id"].as_str().expect("plugin row id").to_owned()),
-        ),
+    let optional_plugins = match builder.plugin_rows(&mut builtins).await {
+        Ok(plugins) => {
+            rows.extend(
+                plugins
+                    .rows
+                    .iter()
+                    .map(|row| row["id"].as_str().expect("plugin row id").to_owned()),
+            );
+            plugins.optional
+        }
         Err(error) => {
             startup.armed = false;
             handle.shutdown().cancel();
@@ -979,7 +993,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             }
             .into());
         }
-    }
+    };
     let reserved_names = session_parts
         .iter()
         .flat_map(|parts| &parts.rows)
@@ -1005,7 +1019,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     let mut required: Vec<String> = rows
         .iter()
         .map(|row| row["id"].as_str().expect("host row id").to_owned())
-        .filter(|id| !optional.contains(&id.as_str()))
+        .filter(|id| !optional.contains(&id.as_str()) && !optional_plugins.contains(id))
         .collect();
     if let Some(parts) = &session_parts {
         for row in &parts.rows {
@@ -1032,7 +1046,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 .iter()
                 .filter(|row| row.get("group").is_none())
                 .map(|row| row["id"].as_str().expect("host row id").to_owned())
-                .filter(|id| required.contains(id))
+                .filter(|id| required.contains(id) || optional_plugins.contains(id))
                 .collect();
             let layer = state
                 .layer(builtins, builder.catalog().clone())
@@ -1171,6 +1185,7 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<rutis_loader::Loader>(catalog, None);
     register::<collaboration::CollaborationDirectory>(catalog, None);
     register::<collaboration::Collaboration>(catalog, None);
+    register::<plugin_files::PluginFileTransactions>(catalog, None);
     register::<ConnectionHub>(catalog, None);
     register::<ListenAddresses>(catalog, None);
     register::<ui_host::UiHost>(catalog, None);

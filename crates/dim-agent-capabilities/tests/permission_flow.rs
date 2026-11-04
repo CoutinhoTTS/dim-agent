@@ -15,6 +15,7 @@ use dim_agent_capabilities::{
     tool_registry::definition,
 };
 use dim_agent_runtime::testing::MinimalHost;
+use dim_agent_runtime::testing::{branch_events, chain_events};
 use dim_agent_runtime::*;
 use dim_agent_types::{
     grant::{GrantKind, GrantMode, SessionGrant},
@@ -313,8 +314,7 @@ async fn exec(session: &Session, command: &str) -> ToolResult {
 /// Waits for the approval request of a call with `command` on main.
 async fn approval_request(session: &Session, command: &str) -> String {
     loop {
-        let found = session
-            .local("main", ..)
+        let found = branch_events(session, "main", ..)
             .await
             .unwrap()
             .iter()
@@ -338,8 +338,7 @@ async fn approval_request(session: &Session, command: &str) -> String {
     }
 }
 async fn approval_requests(session: &Session) -> usize {
-    session
-        .local("main", ..)
+    branch_events(session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -353,8 +352,7 @@ fn text(result: &ToolResult) -> &str {
     }
 }
 async fn last_result(session: &Session, branch: &str) -> ToolResult {
-    session
-        .history(branch, None)
+    chain_events(session, branch, ..)
         .await
         .unwrap()
         .iter()
@@ -971,8 +969,7 @@ async fn updates_are_versioned_per_branch_take_effect_when_dispatched_and_surviv
             .unwrap();
         let permission = session.service::<Permission>("main").unwrap();
         let changes = async |session: &Session, branch: &str| {
-            session
-                .local(branch, ..)
+            branch_events(session, branch, ..)
                 .await
                 .unwrap()
                 .iter()
@@ -1086,8 +1083,7 @@ async fn an_allowed_approval_is_rechecked_against_the_current_policy() {
             .await
             .unwrap();
         let approval_id = loop {
-            let found = session
-                .local("main", ..)
+            let found = branch_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()
@@ -1120,8 +1116,7 @@ async fn an_allowed_approval_is_rechecked_against_the_current_policy() {
         session.idle("main").await.unwrap();
         assert!(last_result(&session, "main").await.is_error == Some(true));
         assert!(
-            session
-                .local("main", ..)
+            branch_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()
@@ -1218,7 +1213,7 @@ async fn a_response_that_finds_its_batch_stopped_ends_as_an_interrupt() {
         }
         session.stop("main", "user stop".into()).await.unwrap();
         session.idle("main").await.unwrap();
-        let events = session.local("main", ..).await.unwrap();
+        let events = branch_events(&session, "main", ..).await.unwrap();
         let outcome = events
             .iter()
             .rev()
@@ -1384,8 +1379,7 @@ async fn a_deny_rule_written_while_approval_is_pending_cancels_the_allowed_call(
         let reason = "Command denied by command rule `git push` (exact)";
         assert_eq!(text(&last_result(&session, "main").await), reason);
         assert!(
-            session
-                .local("main", ..)
+            branch_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()
@@ -1810,8 +1804,7 @@ async fn advisors_are_asked_in_name_order_and_an_ask_refines_an_allow() {
         }
     });
     let request = asked_approval(&session, "ls").await;
-    let reason = session
-        .local("main", ..)
+    let reason = branch_events(&session, "main", ..)
         .await
         .unwrap()
         .iter()

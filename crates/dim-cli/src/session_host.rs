@@ -268,6 +268,7 @@ struct Worker {
     shell_stops: Vec<u64>,
     /// The model the session adopted, for the preference commands.
     model: Option<Configuration>,
+    model_session: Option<String>,
     /// The MCP sign-in waiting for its callback.
     mcp_attempt: Option<McpAttempt>,
     /// Callbacks the local listener captured.
@@ -375,6 +376,7 @@ async fn run(
         title_revision: 0,
         session_cwd: None,
         parked: String::new(),
+        model_session: None,
         projection: Projection::default(),
         question_responses: Vec::new(),
         approval_details: Default::default(),
@@ -418,7 +420,7 @@ async fn run(
         ..Default::default()
     })));
     if let Err(error) = worker.open().await {
-        if worker.options.resume.is_some() {
+        if worker.options.resume.is_some() || worker.options.startup.is_some() {
             let _ = updates.send(Update::Failed(error.to_string()));
             return;
         }
@@ -500,6 +502,8 @@ struct Created {
 struct Attached {
     #[serde(default)]
     model: Option<ModelId>,
+    #[serde(default)]
+    capability_snapshot: Option<Box<dim_agent_types::ModelCapabilitySnapshot>>,
     /// The adopted configuration's preferences; absent when it carries none.
     #[serde(default)]
     model_preferences: Option<dim_agent_types::ModelPreferences>,
@@ -716,6 +720,9 @@ impl Worker {
     /// Creates or resumes the session the process was started for.
     async fn open(&mut self) -> crate::Result<()> {
         if let Some(id) = self.options.resume.clone() {
+            if self.options.ui_identity.is_none() {
+                adopt_startup(&mut self.client, &self.options, &id).await?;
+            }
             let kind = if self.options.created_session {
                 SwitchKind::New
             } else {
@@ -725,17 +732,19 @@ impl Worker {
         }
         let attached_session = self.invalidate_projection();
         let mut params = creation_params(&self.options);
-        let mut preferences = None;
+        self.options.creation_startup(&mut params);
+        let mut preferences = self.options.creation_preferences(None);
         let mut target = None;
         if let (Some(provider), Some(model)) =
             (self.options.provider.clone(), self.options.model.clone())
         {
-            params["model"] = json!({"provider": provider, "modelId": model});
-            preferences = saved_model_preferences(&mut self.client, &provider, &model).await?;
-            if let Some(preferences) = &preferences {
-                params["modelPreferences"] = preferences.clone();
-            }
+            preferences = self.options.creation_preferences(
+                saved_model_preferences(&mut self.client, &provider, &model).await?,
+            );
             target = Some((provider, model));
+        }
+        if let Some(preferences) = &preferences {
+            params["modelPreferences"] = preferences.clone();
         }
         let created: Created = match self.client.typed("session.create", params).await {
             Ok(created) => created,
@@ -744,7 +753,9 @@ impl Worker {
                     &mut self.client,
                     target.as_ref().map(|(p, m)| (p.as_str(), m.as_str())),
                     error,
-                    preferences.as_ref(),
+                    preferences
+                        .as_ref()
+                        .filter(|_| self.options.effort.is_none()),
                 )
                 .await);
             }
@@ -766,14 +777,35 @@ impl Worker {
         let mut preferences = None;
         let mut target = None;
         let result = async {
-            if let Some(model) = &self.model {
-                params["model"] = json!({"provider": model.provider_id, "modelId": model.model_id});
+            if let Some(source) = &self.model_session
+                && self.client.offers("session.create.modelFromSession")
+            {
+                params["modelFromSession"] = json!(source);
+            } else if let Some(model) = &self.model {
                 let (provider, model) = (model.provider_id.clone(), model.model_id.clone());
-                preferences = saved_model_preferences(&mut self.client, &provider, &model).await?;
-                if let Some(preferences) = &preferences {
-                    params["modelPreferences"] = preferences.clone();
+                params["model"] = json!({"provider": provider, "modelId": model});
+                if self.model_session.is_some() && self.options.model_config.is_none() {
+                    let cannot_copy = "This daemon cannot copy the adopted Session model. Restart the daemon with a version supporting session.create.modelFromSession, then rebind the temporary connection with DIM_BASE_URL and DIM_API_FORMAT";
+                    if !self.client.offers("provider.management") {
+                        return Err(cannot_copy.into());
+                    }
+                    let snapshot: ProviderManagement = self
+                        .client
+                        .typed("provider.management", json!({}))
+                        .await?;
+                    let configured = snapshot
+                        .providers
+                        .into_iter()
+                        .find(|entry| entry.provider_id == provider)
+                        .ok_or_else(|| format!("{cannot_copy}, or select a configured Provider model before starting a new Session"))?;
+                    preferences = configured.preferences.get(&model).cloned();
+                } else {
+                    preferences = saved_model_preferences(&mut self.client, &provider, &model).await?;
                 }
                 target = Some((provider, model));
+            }
+            if let Some(preferences) = &preferences {
+                params["modelPreferences"] = preferences.clone();
             }
             match self.client.typed::<Created>("session.create", params).await {
                 Ok(created) => Ok(created),
@@ -839,11 +871,13 @@ impl Worker {
         let configuration = Configuration {
             provider_id: model.provider_id.clone(),
             model_id: model.model_id.clone(),
+            capability_snapshot: attached.capability_snapshot,
             model_preferences,
         };
         self.session_title = stored_title(attached.title.as_deref()).map(str::to_owned);
         self.title_revision = attached.title_revision;
         self.session_id = session_id.clone();
+        self.model_session = Some(session_id.clone());
         // The method table is read once per Session, before anything can ask
         // for an offer or probe the settings source: a Session that does not
         // list the methods is never asked.
@@ -868,9 +902,29 @@ impl Worker {
             self.send(Update::Permissions(policy));
         }
         self.send(Update::Switched { session_id, kind });
+        self.refresh_skills().await;
         self.context_stale = true;
         self.publish();
         Ok(())
+    }
+
+    /// Reads the Session's Skills for the command palette. A daemon without
+    /// `skills.catalog`, or a failed read, leaves the palette with commands
+    /// only: no error, and the next event asks again.
+    async fn refresh_skills(&mut self) {
+        let Some(cwd) = self.session_cwd.clone() else {
+            self.send(Update::Skills(Vec::new()));
+            return;
+        };
+        if !self.client.supports(&["skills.catalog"]) {
+            self.send(Update::Skills(Vec::new()));
+            return;
+        }
+        let entries = crate::management::skills::catalog(&mut self.client, &cwd)
+            .await
+            .map(|catalog| catalog.entries)
+            .unwrap_or_default();
+        self.send(Update::Skills(entries));
     }
 
     /// Whether the model takes image input, from its catalog entry:
@@ -1046,7 +1100,13 @@ impl Worker {
             && matches!(command, Command::Submit(..) | Command::SubmitDraft(..))
             && let Err(error) = self.start_session().await
         {
-            self.send(Update::Notice(no_session(&error)));
+            self.send(Update::Notice(
+                if self.options.startup.is_some() || self.model_session.is_some() {
+                    error.to_string()
+                } else {
+                    no_session(&error)
+                },
+            ));
             return Ok(());
         }
         match command {
@@ -1254,6 +1314,7 @@ impl Worker {
                         session_id: String::new(),
                         kind: SwitchKind::New,
                     });
+                    self.send(Update::Skills(Vec::new()));
                 }
             }
             Command::Resume(session_id) => {
@@ -1751,10 +1812,18 @@ impl Worker {
                     session_id: self.session_id.clone(),
                     branch_id: self.focus.clone(),
                 });
-                let result =
+                let applied =
                     crate::management::apply(&mut self.client, &request, Some(cwd), line.as_ref())
                         .await;
-                self.send(Update::Management(ManagementReply { request, result }));
+                self.send(Update::Management(ManagementReply {
+                    request,
+                    result: applied.result,
+                }));
+                // The palette lists the same entries the panel's view was
+                // built from.
+                if let Some(entries) = applied.skills {
+                    self.send(Update::Skills(entries));
+                }
             }
             Command::SetLocale(language) => crate::management::use_language(language),
             Command::Configure(text) => {
@@ -2469,9 +2538,10 @@ impl Worker {
 
     /// `/mcp [list]`, `/mcp login [--no-browser] ID`, `/mcp callback URL`,
     /// `/mcp logout ID`, `/mcp disconnect ID`, `/mcp enable ID`,
-    /// `/mcp disable ID`.
+    /// `/mcp disable ID`; every command that names one entry takes
+    /// `--source SOURCE`.
     async fn mcp(&mut self, args: &str) -> crate::Result<()> {
-        const USAGE: &str = "Usage: /mcp [list|login [--no-browser] ID|callback URL|logout ID|disconnect ID|enable ID|disable ID]";
+        const USAGE: &str = "Usage: /mcp [list|login [--no-browser] ID|callback URL|logout ID|disconnect ID|enable ID|disable ID] [--source SOURCE]";
         let words: Vec<&str> = args.split_whitespace().collect();
         match words.as_slice() {
             [] | ["list"] => {
@@ -2490,11 +2560,12 @@ impl Worker {
                 if rest.contains(&"--client-secret") {
                     return Err("A client secret needs hidden input; run dimcode mcp login ID --client-secret in a terminal".into());
                 }
+                let (source, rest) = crate::mcp::take_source(rest)?;
                 let ids: Vec<_> = rest.iter().filter(|word| !word.starts_with("--")).collect();
                 let [id] = ids.as_slice() else {
                     return Err(USAGE.into());
                 };
-                self.mcp_login(id, no_browser).await?;
+                self.mcp_login(id, source, no_browser).await?;
             }
             ["callback", url] => {
                 let Some(attempt) = &self.mcp_attempt else {
@@ -2503,12 +2574,22 @@ impl Worker {
                 let attempt_id = attempt.attempt_id.clone();
                 self.mcp_complete(attempt_id, url.to_string(), None).await;
             }
-            ["logout", id] => {
+            ["logout", rest @ ..] => {
                 #[derive(Deserialize)]
                 struct LoggedOut {
                     revoked: bool,
                 }
-                let params = mcp::target(&mut self.client, &self.options, id).await?;
+                let (source, rest) = crate::mcp::take_source(rest)?;
+                let [id] = rest.as_slice() else {
+                    return Err(USAGE.into());
+                };
+                let params = crate::management::mcp::target_params(
+                    &mut self.client,
+                    self.options.workspace().as_str(),
+                    id,
+                    source,
+                )
+                .await?;
                 let result: LoggedOut = self.client.typed("mcp.auth.logout", params).await?;
                 self.report(
                     format!("Signed out of {id:?}. Revoked: {}.", result.revoked),
@@ -2516,37 +2597,38 @@ impl Worker {
                 );
             }
             // The ID is the rest of the line, spaces included.
-            ["disconnect", ..] => {
-                let (_, id) = args
-                    .trim()
-                    .split_once(char::is_whitespace)
-                    .unwrap_or((args.trim(), ""));
-                let id = id.trim();
+            ["disconnect", rest @ ..] => {
+                let (source, rest) = crate::mcp::take_source(rest)?;
+                let id = rest.join(" ");
                 if id.is_empty() {
                     return Err(USAGE.into());
                 }
-                let params = mcp::target(&mut self.client, &self.options, id).await?;
+                let params = crate::management::mcp::target_params(
+                    &mut self.client,
+                    self.options.workspace().as_str(),
+                    &id,
+                    source,
+                )
+                .await?;
                 self.client.rpc("mcp.disconnect", params).await?;
                 self.report(
-                    format!("Disconnected {}.", crate::sanitize::safe(id)),
+                    format!("Disconnected {}.", crate::sanitize::safe(&id)),
                     false,
                 );
             }
             // The ID is the rest of the line, spaces included.
-            ["enable", ..] | ["disable", ..] => {
-                let (command, id) = args
-                    .trim()
-                    .split_once(char::is_whitespace)
-                    .unwrap_or((args.trim(), ""));
-                let id = id.trim();
+            ["enable", rest @ ..] | ["disable", rest @ ..] => {
+                let (source, rest) = crate::mcp::take_source(rest)?;
+                let id = rest.join(" ");
                 if id.is_empty() {
                     return Err(USAGE.into());
                 }
                 let state = crate::management::mcp::set_enabled(
                     &mut self.client,
                     self.options.workspace().as_str(),
-                    id,
-                    command == "enable",
+                    &id,
+                    source,
+                    words[0] == "enable",
                 )
                 .await?;
                 let mut lines = vec![state.sentence()];
@@ -2572,9 +2654,20 @@ impl Worker {
         Ok(crate::recording::report(&state, &self.options))
     }
 
-    async fn mcp_login(&mut self, id: &str, no_browser: bool) -> crate::Result<()> {
+    async fn mcp_login(
+        &mut self,
+        id: &str,
+        source: Option<&str>,
+        no_browser: bool,
+    ) -> crate::Result<()> {
         self.end_mcp_attempt();
-        let params = mcp::target(&mut self.client, &self.options, id).await?;
+        let params = crate::management::mcp::target_params(
+            &mut self.client,
+            self.options.workspace().as_str(),
+            id,
+            source,
+        )
+        .await?;
         let started: mcp::Started = self.client.typed("mcp.auth.start", params).await?;
         let issuer = url::Url::parse(&started.issuer)?;
         let now = std::time::SystemTime::now()
@@ -3294,6 +3387,7 @@ impl Worker {
             }
         }
         let model = if self.session_id.is_empty() {
+            self.model_session = None;
             let model = ModelId {
                 provider_id,
                 model_id,
@@ -3302,6 +3396,7 @@ impl Worker {
             let configuration = Configuration {
                 provider_id: model.provider_id.clone(),
                 model_id: model.model_id.clone(),
+                capability_snapshot: None,
                 model_preferences: None,
             };
             self.model = Some(configuration.clone());
@@ -3341,6 +3436,14 @@ impl Worker {
             let configuration = Configuration {
                 provider_id: updated.model.provider_id.clone(),
                 model_id: updated.model.model_id.clone(),
+                capability_snapshot: self
+                    .model
+                    .as_ref()
+                    .filter(|shown| {
+                        shown.provider_id == updated.model.provider_id
+                            && shown.model_id == updated.model.model_id
+                    })
+                    .and_then(|shown| shown.capability_snapshot.clone()),
                 model_preferences,
             };
             self.model = Some(configuration.clone());
@@ -3909,7 +4012,7 @@ impl Worker {
             return;
         }
         *cursor = event.sequence;
-        self.discover_workflow(&event);
+        self.discover_workflow(branch_id, &event);
         if branch_id == "main"
             && let EventContent::Configuration(configuration) = &event.content
         {
@@ -4149,6 +4252,38 @@ fn effort_choices(
         .clone()
         .filter(|effort| efforts.iter().any(|option| option == effort));
     (efforts, default)
+}
+
+pub(crate) async fn adopt_startup(
+    client: &mut Client,
+    options: &Options,
+    session_id: &str,
+) -> crate::Result<()> {
+    if options.startup.is_none() && options.effort.is_none() && options.model.is_none() {
+        return Ok(());
+    }
+    let mut params = json!({"sessionId":session_id,"branchId":"main"});
+    if let Some(startup) = &options.startup {
+        params["startup"] = startup.clone();
+    }
+    if let Some(model) = &options.model {
+        params["modelId"] = json!(model);
+    }
+    let mut saved = None;
+    if let (Some(provider), Some(model)) = (&options.provider, &options.model) {
+        params["providerId"] = json!(provider);
+        saved = saved_model_preferences(client, provider, model).await?;
+    }
+    if let Some(preferences) = options.creation_preferences(saved) {
+        params["modelPreferences"] = preferences;
+    }
+    client
+        .rpc("session.model.update", params)
+        .await
+        .map_err(|error| {
+            format!("Cannot adopt startup configuration for resumed Session: {error}")
+        })?;
+    Ok(())
 }
 
 pub(crate) async fn saved_model_preferences(

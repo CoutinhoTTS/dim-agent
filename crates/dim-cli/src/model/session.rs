@@ -386,12 +386,21 @@ impl Area {
 }
 
 /// What a management request asks of its area's owner.
+///
+/// An action that names one entry carries the source its row reports beside
+/// the id, so an area whose owner lists two entries of one id acts on the
+/// row the user chose rather than searching for a source itself. `source` is
+/// `None` for an area whose owner reports no source; those areas ignore it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ManagementAction {
     /// Read the area.
     List,
     /// Enable or disable one entry, and report the area again.
-    Toggle { id: String, enabled: bool },
+    Toggle {
+        id: String,
+        source: Option<String>,
+        enabled: bool,
+    },
     /// Re-read the area, or ask its owner to rescan it.
     Reload,
     /// Replace the area's document, or one entry's, if it is still at
@@ -400,17 +409,19 @@ pub enum ManagementAction {
         /// The entry whose document this is, for an area whose documents are
         /// per entry; `None` writes the area's own document.
         id: Option<String>,
+        source: Option<String>,
         expected_revision: String,
         document: serde_json::Value,
     },
     /// Create an entry from `document`.
     Add { document: serde_json::Value },
     /// Remove one entry.
-    Remove { id: String },
+    Remove { id: String, source: Option<String> },
     /// Perform the area's named operation on one entry, with the input
     /// document the editor left when the entry carries one.
     Run {
         id: String,
+        source: Option<String>,
         /// The parameters the operation takes; `None` sends it at once.
         document: Option<serde_json::Value>,
         /// The input document the editor was opened with, `None` when the
@@ -420,7 +431,7 @@ pub enum ManagementAction {
         seed: Option<serde_json::Value>,
     },
     /// Read one entry's detail, in place of the list.
-    Inspect { id: String },
+    Inspect { id: String, source: Option<String> },
 }
 
 /// One request to a management area, carrying the area and what it asks.
@@ -468,6 +479,11 @@ pub struct ManagementGroup {
 pub struct ManagementEntry {
     /// The id the owner's actions take.
     pub id: String,
+    /// The source the owner reported for the entry, when it reports one:
+    /// every action taken on this row carries it, so the client never has to
+    /// search a catalog for the source of an id. `None` for an area whose
+    /// entries are unique on their own.
+    pub source: Option<String>,
     pub label: String,
     /// What the entry says about itself, a line each, shown for the entry the
     /// panel has selected.
@@ -1080,6 +1096,9 @@ pub enum Update {
         session_id: String,
         kind: SwitchKind,
     },
+    /// The Session's Skills as the palette lists them: enabled and not
+    /// shadowed. An empty list when the daemon has no catalog.
+    Skills(Vec<crate::management::skills::Entry>),
     /// The stored sessions, or why they could not be listed.
     Sessions {
         id: String,

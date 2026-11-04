@@ -1,5 +1,6 @@
 use dim_agent_capabilities::{defaults, timeline_tree::TreeCommands};
 use dim_agent_runtime::Names;
+use dim_agent_runtime::testing::branch_events;
 use dim_agent_runtime::{
     AgentBuilder, AgentConfig, AgentError, BranchOptions, Dispatcher, Feature, SessionConfig,
     Timeline, TimelineIdentity, TimelineKey, TimelineStore, testing::MinimalHost,
@@ -169,7 +170,7 @@ async fn storage_failure_during_generic_cleanup_supersedes_the_session_fault() {
             assert!(matches!(session.submit("late input".into(), InputMode::Queue, branch).await, Err(AgentError::Storage(message)) if message.contains("cleanup storage failure")));
         }
         assert!(matches!(session.failure(), Some(AgentError::Storage(message)) if message.contains("cleanup storage failure")));
-        assert!(!session.local("main", ..).await.unwrap().iter().any(|event| event.tags.as_deref() == Some(&["cleanup".into()])));
+        assert!(!branch_events(&session, "main", ..).await.unwrap().iter().any(|event| event.tags.as_deref() == Some(&["cleanup".into()])));
         let _ = agent.close().await;
         drop(connection);
         timelines.lock().unwrap().clear();
@@ -225,9 +226,9 @@ async fn sqlite_session_failure_rejects_writes_on_an_idle_sibling_timeline() {
                 Err(AgentError::Storage(message)) if message.contains("injected sibling output failure")));
         }
         assert_eq!(session.sequence(idle).unwrap(), idle_through);
-        assert!(!session.local(failed, (failed_through + 1)..).await.unwrap().iter().any(|event|
+        assert!(!branch_events(&session, failed, (failed_through + 1)..).await.unwrap().iter().any(|event|
             matches!(event.kind, EventKind::Text(_) | EventKind::ModelOutputEnd(_) | EventKind::TurnEnd(_))));
-        assert!(!session.local(idle, (idle_through + 1)..).await.unwrap().iter().any(|event|
+        assert!(!branch_events(&session, idle, (idle_through + 1)..).await.unwrap().iter().any(|event|
             matches!(event.kind, EventKind::ModelOutputEnd(_) | EventKind::TurnEnd(_))));
         let _ = agent.close().await;
         drop(connection);

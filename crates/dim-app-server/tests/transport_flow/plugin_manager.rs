@@ -2,6 +2,7 @@
 //! the `plugin.*` methods and the loader rows they command.
 use super::session_typescript::{fixture, start, submit, when_served};
 use super::*;
+use dim_agent_runtime::testing::chain_events;
 use std::path::{Path, PathBuf};
 
 pub(super) fn home() -> PathBuf {
@@ -508,7 +509,7 @@ async fn last_tool_text(server: &RunningServer, session: &str) -> String {
 /// The text of the last tool result in `session` and whether it is an error.
 async fn last_tool_result(server: &RunningServer, session: &str) -> (String, bool) {
     let session = server.agent().unwrap().get_session(session).unwrap();
-    let history = session.history("main", None).await.unwrap();
+    let history = chain_events(&session, "main", ..).await.unwrap();
     let result = history
         .iter()
         .rev()
@@ -863,7 +864,7 @@ async fn node_default_plugins_load_and_their_settings_follow_them() {
     config.session_typescript = Some(parts);
     let (server, _requests, _) = start(config).await;
     let mut client = Client::new_version(&server, false, 3).await;
-    let defaults = ["goal", "workflow", "scheduler"];
+    let defaults = ["goal", "workflow"];
     let list = running(&mut client, &defaults).await;
     for name in defaults {
         assert_eq!(item(&list, name)["use"], "default", "{list}");
@@ -2117,6 +2118,56 @@ async fn plugin_hooks_follow_the_hooks_owner() {
     let session = session_in(&mut client, &work).await;
     turn(&mut client, &session).await;
     wait_lines(&runs, 1).await;
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// #951: a plugin's MCP document is one unit; one broken entry refuses the
+/// whole document, so its valid sibling registers nothing either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugin_mcp_document_with_one_broken_entry_registers_nothing() {
+    let home = home();
+    let mut config = config(&home);
+    config.unix_path = Some(home.join("ipc/server.sock"));
+    let server = serve(product_builder(), config).await.unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    select_fixture_model(&mut client).await;
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let absent = json!({"command": "dim-test-absent-mcp-server"});
+    let source = home.join("src/mixed");
+    write_content_plugin(&source, "mixed", &["mixed"], json!({"good": absent}));
+    let installed = call(
+        &mut client,
+        "plugin.install",
+        json!({"source":{"path":source}}),
+    )
+    .await;
+    assert!(installed["result"].get("refused").is_none(), "{installed}");
+    assert_eq!(mcp_ids(&mut client).await, ["mixed:good"]);
+
+    write_content_plugin(
+        &source,
+        "mixed",
+        &["mixed"],
+        json!({"good": absent, "bad": {"command": ""}}),
+    );
+    let reloaded = call(&mut client, "plugin.reload", json!({"name":"mixed"})).await;
+    let refused = reloaded["result"]["refused"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{reloaded}"));
+    assert!(
+        refused.iter().any(|item| item["kind"] == "mcp"),
+        "{reloaded}"
+    );
+    assert!(
+        mcp_ids(&mut client).await.is_empty(),
+        "a refused plugin document registered an entry"
+    );
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(item(&list, "mixed")["refused"][0]["kind"], "mcp", "{list}");
     drop(client);
     server.shutdown();
     server.join().await.unwrap();

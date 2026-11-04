@@ -4,9 +4,11 @@ use crate::{
     tool_registry::{ToolContribution, ToolHandler, ToolRegistry},
 };
 use dim_agent_runtime::{
-    AgentError, Branch, BranchLifecycle, BranchOptions, Delivery, Dispatcher, Names, Result,
-    SessionIdentity, StoredBranch, StoredEvent, Timeline, TimelineContext, TimelineFactory,
-    TimelineIdentity, TimelineInfo, TimelineKey, TimelineStore, TimelineTreeControl,
+    AgentError, Branch, BranchLifecycle, BranchOptions, Dispatcher, Names, Result, SessionIdentity,
+    StoredBranch, StoredEvent, Timeline, TimelineContext, TimelineFactory, TimelineIdentity,
+    TimelineInfo, TimelineKey, TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
+    TimelineQueryPredicate, TimelineQueryReply, TimelineQueryScope, TimelineStore,
+    TimelineTreeControl, rebuild_facts,
 };
 use dim_agent_types::*;
 use futures_util::{FutureExt, future::join_all};
@@ -14,8 +16,10 @@ use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::service;
 use rutis::{Ctx, Error};
 use serde::Deserialize;
+use serde_json::json;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    num::NonZeroU64,
     panic::AssertUnwindSafe,
     sync::{
         Arc, Mutex, Weak,
@@ -32,7 +36,8 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 /// created child wrote while it opened fit in one.
 const CREATION_PAGE: usize = 32;
 
-const TAIL_EVENTS: u64 = 32;
+/// Facts one page of a line read keeps.
+const LINE_PAGE: u64 = 32;
 
 /// How a loaded branch begins on its Timeline.
 enum Opening {
@@ -68,6 +73,8 @@ struct Node {
     /// The built branch, before and after publication.
     context: Option<Arc<TimelineContext>>,
     ready: watch::Sender<Option<Result<Branch>>>,
+    /// The sequence of the line's latest `turn/end`, 0 before the first.
+    turn_end: watch::Sender<u64>,
     started: bool,
 }
 struct EndedLine {
@@ -189,11 +196,46 @@ impl TreeCommands {
             .page(&id, after, limit)
             .await
     }
+    /// Queries one line's own facts, forwarding to its Timeline while open
+    /// and reading at the tree's fixed head after it ends. Chain scope is
+    /// invalid; an ended line has no publishing tail.
+    pub async fn query(
+        &self,
+        id: String,
+        query: TimelineQuery,
+    ) -> std::result::Result<TimelineQueryReply, AgentError> {
+        self.tree
+            .upgrade()
+            .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?
+            .query(&id, query)
+            .await
+    }
     /// The head a read of `id` ends at: fixed once ended, published while
     /// open.
     #[service(skip)]
     fn head(&self, id: &str) -> Option<u64> {
         self.tree.upgrade()?.head(id)
+    }
+    /// A signal that changes when line `id` ends a turn; it carries that
+    /// `turn/end`'s sequence.
+    #[service(skip)]
+    fn turn_ends(&self, id: &str) -> Option<watch::Receiver<u64>> {
+        self.tree.upgrade()?.turn_ends(id)
+    }
+    /// Whether line `id` did anything after `from` that a line it opened must
+    /// see: an operator input, or a tool call.
+    #[service(skip)]
+    async fn activity_after(
+        &self,
+        id: &str,
+        from: u64,
+        through: u64,
+    ) -> std::result::Result<bool, AgentError> {
+        self.tree
+            .upgrade()
+            .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?
+            .activity_after(id, from, through)
+            .await
     }
     /// Creates a child of `parent` cut at `at` and returns its id.
     /// `cancelled` is the caller's cancellation as an explicit argument, the
@@ -230,6 +272,55 @@ impl TreeCommands {
         Ok(created?.id().to_owned())
     }
 }
+/// One page of an open line's own facts after `after`, at most `limit`, never
+/// past `through`, ending on an atomic batch: a page that reaches its limit
+/// inside one runs to that batch's end, so an open and an ended line's pages
+/// keep the same shape.
+async fn open_page(
+    timeline: &Timeline,
+    after: u64,
+    limit: usize,
+    through: u64,
+) -> Result<Vec<Arc<AgentEvent>>> {
+    let mut events = timeline.query(line_page(after, limit)).await?.events;
+    events.retain(|event| event.sequence <= through);
+    while let Some(last) = events.last() {
+        if last.sequence >= through {
+            break;
+        }
+        match timeline.batch_end(last.sequence).await {
+            Ok(()) => break,
+            Err(AgentError::InvalidInput(_)) => {}
+            Err(error) => return Err(error),
+        }
+        let next = timeline.query(line_page(last.sequence, 1)).await?.events;
+        let Some(event) = next.into_iter().find(|event| event.sequence <= through) else {
+            break;
+        };
+        events.push(event);
+    }
+    Ok(events)
+}
+
+/// The facts after `after` a page asks for, up to `limit`.
+fn line_page(after: u64, limit: usize) -> TimelineQuery {
+    TimelineQuery {
+        scope: TimelineQueryScope::Branch,
+        include_publishing: false,
+        from_event: None,
+        from_sequence: Some(after.saturating_add(1)),
+        order_by: TimelineQueryOrderBy::Sequence,
+        direction: TimelineQueryDirection::Ascending,
+        kinds: Vec::new(),
+        flags: Vec::new(),
+        event_id: None,
+        predicate: None,
+        limit: std::num::NonZeroU64::new(u64::try_from(limit).unwrap_or(u64::MAX).max(1))
+            .expect("a page keeps one fact"),
+        offset: 0,
+    }
+}
+
 impl TimelineTree {
     fn create_failed(info: &TimelineInfo, error: &AgentError) -> BranchCreateFailedData {
         let branch = info.id.clone();
@@ -486,12 +577,14 @@ impl TimelineTree {
             ));
         }
         let (ready, receiver) = watch::channel(None);
+        let (turn_end, _) = watch::channel(0);
         state.nodes.insert(
             info.id.clone(),
             Node {
                 info,
                 context: None,
                 ready,
+                turn_end,
                 started: false,
             },
         );
@@ -531,9 +624,9 @@ impl TimelineTree {
                         }
                     }
                 }
-                if let Some((timeline, through)) = validate {
+                if let Some((timeline, through)) = &validate {
                     let boundary = tokio::select! {
-                        result = tokio::time::timeout(owner.factory.startup_timeout(), crate::history::validate_context_boundary_at(&timeline, through)) =>
+                        result = tokio::time::timeout(owner.factory.startup_timeout(), crate::history::validate_context_boundary_at(timeline, *through)) =>
                             result.map_err(|_| AgentError::Build("branch opening timed out".into()))??,
                         _ = owner.cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into())),
                     };
@@ -559,36 +652,82 @@ impl TimelineTree {
                     .get_mut(&id)
                     .expect("building branch")
                     .context = Some(context.clone());
-                let (opening, first) = match opening {
+                let (opening, mut first) = match opening {
                     Opening::Start { start, first } => (EventKind::BranchStart(start), first),
                     Opening::Resume { head, lines } => {
-                        let history = tokio::select! {
-                            result = tokio::time::timeout(owner.factory.startup_timeout(), context.timeline().local(..=head)) =>
-                                result.map_err(|_| AgentError::Build("branch opening timed out".into()))??,
-                            _ = owner.cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into())),
-                        };
                         let mut facts = LineFacts::default();
-                        for event in &history {
-                            match &event.kind {
-                                EventKind::BranchCreateFailed(
-                                    BranchCreateFailedData::Failed { create_event, .. }
-                                    | BranchCreateFailedData::Cancelled { create_event, .. },
-                                ) => {
-                                    facts.failed_creates.insert(*create_event);
+                        let mut from = 1;
+                        loop {
+                            let reply = tokio::select! {
+                                result = tokio::time::timeout(owner.factory.startup_timeout(), context.timeline().query(TimelineQuery {
+                                    scope: TimelineQueryScope::Branch,
+                                    include_publishing: false,
+                                    from_event: None,
+                                    from_sequence: Some(from),
+                                    order_by: TimelineQueryOrderBy::Sequence,
+                                    direction: TimelineQueryDirection::Ascending,
+                                    kinds: vec![
+                                        "branch/create-failed".into(),
+                                        "branch/create".into(),
+                                        "branch/ended".into(),
+                                    ],
+                                    flags: Vec::new(),
+                                    event_id: None,
+                                    predicate: None,
+                                    limit: NonZeroU64::new(LINE_PAGE).expect("a page keeps at least one event"),
+                                    offset: 0,
+                                })) =>
+                                    result.map_err(|_| AgentError::Build("branch opening timed out".into()))??,
+                                _ = owner.cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into())),
+                            };
+                            let short = (reply.events.len() as u64) < LINE_PAGE;
+                            let last = reply.events.last().map(|event| event.sequence);
+                            for event in &reply.events {
+                                match &event.kind {
+                                    EventKind::BranchCreateFailed(
+                                        BranchCreateFailedData::Failed { create_event, .. }
+                                        | BranchCreateFailedData::Cancelled { create_event, .. },
+                                    ) => {
+                                        facts.failed_creates.insert(*create_event);
+                                    }
+                                    EventKind::BranchCreate(data) => {
+                                        facts.sources.insert(data.branch.clone(), data.source.clone());
+                                    }
+                                    EventKind::BranchEnded(data) => {
+                                        facts.ended.insert(data.branch.clone());
+                                    }
+                                    _ => unreachable!("the read selects the line facts"),
                                 }
-                                EventKind::BranchCreate(data) => {
-                                    facts.sources.insert(data.branch.clone(), data.source.clone());
-                                }
-                                EventKind::BranchEnded(data) => {
-                                    facts.ended.insert(data.branch.clone());
-                                }
-                                _ => {}
+                            }
+                            match last {
+                                Some(last) if !short && last < head => from = last + 1,
+                                _ => break,
                             }
                         }
                         let _ = lines.send(facts);
                         (EventKind::BranchResume(BranchResumeData {}), None)
                     }
                 };
+                if let (Some(parent), Some((timeline, cut)), Some(input)) =
+                    (&info.parent, &validate, &mut first)
+                {
+                    // A nested line inherits its parent's parent block, which
+                    // names a line it cannot read; its own opening input
+                    // supersedes that state with one naming the line that
+                    // opened it (§7.1.1). The read runs here, as a resumed
+                    // line's facts do, so a failed read fails this create
+                    // through the existing path and the parent keeps
+                    // dispatching.
+                    let key = parent_key();
+                    let carried = tokio::select! {
+                        result = tokio::time::timeout(owner.factory.startup_timeout(), owner.keyed_live(parent, timeline, *cut, &key)) =>
+                            result.map_err(|_| AgentError::Build("branch opening timed out".into()))??,
+                        _ = owner.cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into())),
+                    };
+                    if carried {
+                        input.blocks.push(parent_open_block(parent, *cut));
+                    }
+                }
                 let opened = context.timeline().append(opening.into())?;
                 tokio::select! {
                     result = context.finish_opening(opened.sequence, owner.factory.startup_timeout()) => result?,
@@ -659,6 +798,9 @@ impl TimelineTree {
         if through <= after {
             return Ok(Vec::new());
         }
+        if let Some(context) = self.owned_context(id) {
+            return open_page(context.timeline(), after, limit, through).await;
+        }
         let key = TimelineKey {
             session_id: self.session_id.clone(),
             branch_id: id.into(),
@@ -671,12 +813,189 @@ impl TimelineTree {
             .map(|record| record.event)
             .collect())
     }
+    async fn query(&self, id: &str, query: TimelineQuery) -> Result<TimelineQueryReply> {
+        query.validate()?;
+        if query.scope != TimelineQueryScope::Branch {
+            return Err(AgentError::InvalidInput(
+                "a tree query reads one line's own facts".into(),
+            ));
+        }
+        if let Some(context) = self.owned_context(id) {
+            return context.timeline().query(query).await;
+        }
+        let through = self
+            .ended_head(id)
+            .ok_or_else(|| AgentError::UnknownBranch(id.into()))?;
+        let key = TimelineKey {
+            session_id: self.session_id.clone(),
+            branch_id: id.into(),
+        };
+        let anchor = if let Some(event_id) = &query.from_event {
+            let point = TimelineQuery {
+                from_event: None,
+                event_id: Some(event_id.clone()),
+                kinds: Vec::new(),
+                flags: Vec::new(),
+                predicate: None,
+                offset: 0,
+                limit: NonZeroU64::MIN,
+                ..query.clone()
+            };
+            let page = self.store.query(&key, &point, 1, through).await?;
+            let Some(event) = page.events.first() else {
+                return Ok(TimelineQueryReply {
+                    events: Vec::new(),
+                    positions: Vec::new(),
+                    through,
+                });
+            };
+            Some(event.sequence)
+        } else {
+            query.from_sequence
+        };
+        let (from, bound) = match query.direction {
+            TimelineQueryDirection::Ascending => (anchor.unwrap_or(1), through),
+            TimelineQueryDirection::Descending => (1, anchor.unwrap_or(through).min(through)),
+        };
+        let page = self.store.query(&key, &query, from, bound).await?;
+        Ok(TimelineQueryReply {
+            events: page.events,
+            positions: page.positions,
+            through,
+        })
+    }
+    /// Whether `id` did anything after `from` up to `through` that a line it
+    /// opened must see ([timeline branches §7.1.1](../../../docs/design/timeline-branches.md#711-the-parent-block-branchparent)):
+    /// an operator input, or a tool call.
+    async fn activity_after(&self, id: &str, from: u64, through: u64) -> Result<bool> {
+        const PAGE: u64 = 8;
+        if through <= from {
+            return Ok(false);
+        }
+        let key = TimelineKey {
+            session_id: self.session_id.clone(),
+            branch_id: id.into(),
+        };
+        let mut offset = 0;
+        loop {
+            let query = TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                from_event: None,
+                from_sequence: None,
+                order_by: TimelineQueryOrderBy::Sequence,
+                direction: TimelineQueryDirection::Descending,
+                include_publishing: false,
+                kinds: vec!["input/message".into(), "step/tool-use".into()],
+                flags: Vec::new(),
+                event_id: None,
+                predicate: None,
+                limit: std::num::NonZeroU64::new(PAGE).expect("a page is nonzero"),
+                offset,
+            };
+            let page = self
+                .store
+                .query(&key, &query, from.saturating_add(1), through)
+                .await?;
+            if page.events.is_empty() {
+                return Ok(false);
+            }
+            for event in &page.events {
+                if event.sequence <= from {
+                    return Ok(false);
+                }
+                if counts_as_activity(event) {
+                    return Ok(true);
+                }
+            }
+            if (page.events.len() as u64) < PAGE {
+                return Ok(false);
+            }
+            offset += PAGE;
+        }
+    }
+    /// Whether the latest block under `key` in the context `parent` has built
+    /// at `cut` is live: the keyed state, resolved over the chain the child
+    /// inherits, the state a block written under the same key supersedes. The
+    /// blocks are read as blocks, never as the rendered history.
+    async fn keyed_live(
+        &self,
+        parent: &str,
+        timeline: &Timeline,
+        cut: u64,
+        key: &str,
+    ) -> Result<bool> {
+        const PAGE: u64 = 8;
+        let mut chain = timeline.ancestors();
+        chain.push((parent.to_owned(), cut));
+        for (line, through) in chain.into_iter().rev() {
+            // The root line has no parent, so it never carries a parent block.
+            if self.info(&line).is_none_or(|info| info.parent.is_none()) {
+                continue;
+            }
+            let target = TimelineKey {
+                session_id: self.session_id.clone(),
+                branch_id: line,
+            };
+            let mut offset = 0;
+            loop {
+                let query = TimelineQuery {
+                    scope: TimelineQueryScope::Branch,
+                    from_event: None,
+                    from_sequence: None,
+                    order_by: TimelineQueryOrderBy::Sequence,
+                    direction: TimelineQueryDirection::Descending,
+                    include_publishing: false,
+                    kinds: vec!["input/message".into()],
+                    flags: Vec::new(),
+                    event_id: None,
+                    predicate: None,
+                    limit: std::num::NonZeroU64::new(PAGE).expect("a page is nonzero"),
+                    offset,
+                };
+                let page = self.store.query(&target, &query, 1, through).await?;
+                if page.events.is_empty() {
+                    break;
+                }
+                for event in &page.events {
+                    let EventKind::InputMessage(data) = &event.kind else {
+                        continue;
+                    };
+                    for block in data.blocks.iter().rev() {
+                        let InputBlock::Raw {
+                            key: Some(found),
+                            retire,
+                            ..
+                        } = block
+                        else {
+                            continue;
+                        };
+                        if found == key {
+                            return Ok(!*retire);
+                        }
+                    }
+                }
+                if (page.events.len() as u64) < PAGE {
+                    break;
+                }
+                offset += PAGE;
+            }
+        }
+        Ok(false)
+    }
     fn head(&self, id: &str) -> Option<u64> {
         if let Some(ended) = self.state.lock().unwrap().ended.get(id) {
             return Some(ended.head);
         }
         self.owned_context(id)
             .map(|context| context.timeline().sequence())
+    }
+    fn turn_ends(&self, id: &str) -> Option<watch::Receiver<u64>> {
+        self.state
+            .lock()
+            .unwrap()
+            .nodes
+            .get(id)
+            .map(|node| node.turn_end.subscribe())
     }
     async fn own_end(&self, branch: &str, head: u64) -> Result<Option<(u64, BranchEndData)>> {
         if head == 0 {
@@ -686,7 +1005,7 @@ impl TimelineTree {
             session_id: self.session_id.clone(),
             branch_id: branch.into(),
         };
-        let mut window = TAIL_EVENTS;
+        let mut window = LINE_PAGE;
         loop {
             let from = head.saturating_sub(window.saturating_sub(1)).max(1);
             let records = self.store.read(&key, from..=head).await?;
@@ -829,9 +1148,16 @@ impl TimelineTree {
         }
         self.close_ended(id, sequence, data);
     }
-    /// Closes a line whose end command is part of the turn that just ended.
-    fn on_turn_end(self: &Arc<Self>, id: &str) {
-        let pending = self.state.lock().unwrap().pending.remove(id);
+    /// Closes a line whose end command is part of the turn that just ended,
+    /// and lets the line's children see that it moved.
+    fn on_turn_end(self: &Arc<Self>, id: &str, sequence: u64) {
+        let pending = {
+            let mut state = self.state.lock().unwrap();
+            if let Some(node) = state.nodes.get(id) {
+                node.turn_end.send_replace(sequence);
+            }
+            state.pending.remove(id)
+        };
         if let Some(pending) = pending {
             self.close_ended(id, pending.sequence, pending.data);
         }
@@ -1542,7 +1868,7 @@ impl DynPlugin for TreeTimelinePlugin {
                             .tree
                             .upgrade()
                             .ok_or_else(|| AgentError::Closed("TimelineTree".into()))
-                            .map(|tree| tree.on_turn_end(branch)),
+                            .map(|tree| tree.on_turn_end(branch, event.sequence)),
                         _ => Ok(()),
                     };
                     Box::pin(async move { result })
@@ -1599,6 +1925,15 @@ impl DynPlugin for TimelineTreePlugin {
                     markers: vec!["dim-branch-line".into()],
                     order: 40,
                     text: IDENTITY_ENTRY.into(),
+                },
+            )?;
+            guide.register(
+                ctx,
+                GuideScope::Session,
+                GuideEntry {
+                    markers: vec!["dim-branch-parent".into()],
+                    order: 45,
+                    text: PARENT_ENTRY.into(),
                 },
             )?;
             let tree = TimelineTree::new(factory, store, identity.session_id.clone());
@@ -1680,6 +2015,7 @@ enum Decision {
     Roster,
     Ended(String),
     Idle { turn: String, status: &'static str },
+    Parent,
 }
 /// BranchLine's fold of its own line's facts.
 #[derive(Default)]
@@ -1692,12 +2028,34 @@ struct LineView {
     /// The turn that steered the parent, when one did.
     steered: Option<String>,
     steering: Option<(String, String)>,
+    /// The `nextCursor` of the latest successful read of each line, by line.
+    cursors: BTreeMap<String, u64>,
+    /// The line a pending `branch` read names, by its call id.
+    reads: BTreeMap<String, String>,
+    /// The event id of the latest `branch:parent` block on this line.
+    parent_input: Option<String>,
+    /// The parent head the latest `branch:parent` block reported.
+    parent_told: u64,
     /// Inputs committed and not consumed, with their modes.
     held: BTreeMap<String, InputMode>,
     /// The sequence of each input's `input/applied`.
     applied: BTreeMap<String, u64>,
     /// The line committed its own `branch/end`: it is ending.
     ending: bool,
+}
+impl LineView {
+    /// Whether input `id` is the parent block and is still held.
+    fn holds_parent(&self, id: &str) -> bool {
+        self.parent_input.as_deref() == Some(id) && self.held.contains_key(id)
+    }
+    /// Drops input `id` from what is held, and queues the parent decision when
+    /// the dropped input was the parent block (design §7.1.1).
+    fn release(&mut self, id: &str) -> Option<Decision> {
+        let released = self.holds_parent(id);
+        self.held.remove(id);
+        self.applied.remove(id);
+        released.then_some(Decision::Parent)
+    }
 }
 /// `<dim-branch-line>`, written by TimelineTree at the start of every child.
 const IDENTITY_ENTRY: &str = r#"<dim-branch-line branch="C" parent="main" source="tool">: which line of this session you are, placed by the runtime at the start of a line's own history. A later block of this name replaces the earlier one; it is state about the line, not a request."#;
@@ -1713,8 +2071,12 @@ const ROSTER_CLOSING: &str = "They message you when they find something, need yo
 /// `<dim-branch-message>`, `<dim-branch-idle>` and `<dim-branch-ended>`.
 const BRANCH_MESSAGE_ENTRY: &str = r#"<dim-branch-message from="C" to="main">: a message from another line of this session, in that line's own words and not the operator's. dim-branch-idle and dim-branch-ended are the runtime's reports about a line you opened: information, not requests."#;
 
+/// `<dim-branch-parent>`, written by BranchLine on a line whose parent moved.
+const PARENT_ENTRY: &str = r#"<dim-branch-parent branch="P" head="H" after="A">: on a line, the runtime reports that the line it was cut from has moved past where this line last read it, and where the next read starts. A later block of this name replaces the earlier one; it is state about that line, not a request."#;
+
 pub struct BranchLinePlugin {
     line: Key<BranchLine>,
+    timeline: Key<Timeline>,
     dispatcher: Key<Dispatcher>,
     identity: Key<TimelineIdentity>,
     lifecycle: Key<BranchLifecycle>,
@@ -1731,6 +2093,7 @@ impl BranchLinePlugin {
     pub fn with_config(names: &Names<'_>, config: BranchToolConfig) -> rutis::Result<Self> {
         Ok(Self {
             line: names.key()?,
+            timeline: names.key()?,
             dispatcher: names.key()?,
             identity: names.key()?,
             lifecycle: names.key()?,
@@ -1746,6 +2109,7 @@ impl DynPlugin for BranchLinePlugin {
     }
     fn injects(&self) -> Vec<TypeKey> {
         vec![
+            self.timeline.erase(),
             self.dispatcher.erase(),
             self.identity.erase(),
             self.lifecycle.erase(),
@@ -1755,6 +2119,7 @@ impl DynPlugin for BranchLinePlugin {
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
             let dispatcher = ctx.require_at(&self.dispatcher)?;
             let identity = ctx.require_at(&self.identity)?;
             let lifecycle = ctx.require_at(&self.lifecycle)?;
@@ -1789,11 +2154,13 @@ impl DynPlugin for BranchLinePlugin {
                 stop: CancellationToken::new(),
             });
             let consumer = line.clone();
+            let read = line.clone();
+            let read_timeline = timeline.clone();
             dispatcher
-                .follow(
+                .consume(
                     ctx,
-                    "BranchLine",
-                    &[
+                    "BranchLine".into(),
+                    [
                         "branch/create",
                         "branch/create-failed",
                         "branch/ended",
@@ -1806,20 +2173,46 @@ impl DynPlugin for BranchLinePlugin {
                         "turn/end",
                         "step/tool-use",
                         "step/tool-result",
-                    ],
-                    move |delivery| {
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                    Arc::new(move || {
+                        let read = read.clone();
+                        let timeline = read_timeline.clone();
+                        Box::pin(async move {
+                            let reply = rebuild_facts(
+                                &timeline,
+                                &[
+                                    "branch/create",
+                                    "branch/create-failed",
+                                    "branch/ended",
+                                    "branch/end",
+                                    "input/message",
+                                    "input/applied",
+                                    "input/consumed",
+                                    "input/deleted",
+                                    "stop/interrupt",
+                                    "turn/end",
+                                    "step/tool-use",
+                                    "step/tool-result",
+                                ],
+                            )
+                            .await?;
+                            read.rebuild(&reply.events);
+                            Ok(reply.through)
+                        })
+                    }),
+                    Arc::new(move |event| {
                         let consumer = consumer.clone();
                         Box::pin(async move {
-                            match delivery {
-                                Delivery::Replay(events) => consumer.rebuild(&events),
-                                Delivery::Live(event) => consumer.consume(&event),
-                            }
+                            consumer.consume(&event);
                             Ok(())
                         })
-                    },
+                    }),
                 )
                 .await?;
             line.want(Decision::Roster);
+            line.want(Decision::Parent);
             let writer = line.clone();
             let phase = lifecycle.clone();
             let tasks = TaskTracker::new();
@@ -1920,9 +2313,15 @@ impl BranchLine {
                         key: Some(key),
                         retire,
                     } = block
-                        && key == &line_key()
                     {
-                        view.roster = Some((text.clone(), *retire));
+                        if key == &line_key() {
+                            view.roster = Some((text.clone(), *retire));
+                        } else if key == &parent_key() {
+                            view.parent_input = Some(event.id.clone());
+                            if let Some(head) = parent_head(text) {
+                                view.parent_told = head;
+                            }
+                        }
                     }
                 }
                 None
@@ -1932,26 +2331,27 @@ impl BranchLine {
                 None
             }
             EventKind::StopInterrupt(_) => {
+                let released = view
+                    .parent_input
+                    .clone()
+                    .filter(|id| view.held.contains_key(id));
                 let applied = &view.applied;
                 view.held
                     .retain(|id, _| applied.get(id).is_none_or(|at| *at > event.sequence));
-                None
+                released
+                    .filter(|id| !view.held.contains_key(id))
+                    .map(|_| Decision::Parent)
             }
-            EventKind::InputConsumed(data) => {
-                view.held.remove(&data.input_id);
-                view.applied.remove(&data.input_id);
-                None
-            }
-            EventKind::InputDeleted(data) => {
-                view.held.remove(&data.input_id);
-                view.applied.remove(&data.input_id);
-                None
-            }
+            EventKind::InputConsumed(data) => view.release(&data.input_id),
+            EventKind::InputDeleted(data) => view.release(&data.input_id),
             EventKind::ToolUse(data) => {
                 if let Some(parent) = view.parent.clone()
                     && steered_parent(&data.call, &parent)
                 {
                     view.steering = Some((data.turn_id.clone(), data.call.id.clone()));
+                }
+                if let Some(target) = read_target(&data.call) {
+                    view.reads.insert(data.call.id.clone(), target);
                 }
                 None
             }
@@ -1963,6 +2363,23 @@ impl BranchLine {
                         view.steered = Some(turn);
                     }
                     view.steering = None;
+                }
+                for result in &data.results {
+                    let Some(target) = view.reads.remove(&result.call_id) else {
+                        continue;
+                    };
+                    if result.result.is_error == Some(true) {
+                        continue;
+                    }
+                    let next = result
+                        .result
+                        .structured_content
+                        .as_ref()
+                        .and_then(|page| page.get("nextCursor"))
+                        .and_then(serde_json::Value::as_u64);
+                    if let Some(next) = next {
+                        view.cursors.insert(target, next);
+                    }
                 }
                 None
             }
@@ -1986,6 +2403,27 @@ impl BranchLine {
     /// The line committed its own `branch/end`.
     fn ending(&self) -> bool {
         self.view.lock().unwrap().ending
+    }
+    /// The `nextCursor` of the line's latest successful read of `target`.
+    fn cursor(&self, target: &str) -> Option<u64> {
+        self.view.lock().unwrap().cursors.get(target).copied()
+    }
+    /// The sequence this line was cut from its parent at; 0 for main.
+    fn branch_point(&self) -> u64 {
+        self.tree
+            .info(self.own.clone())
+            .ok()
+            .and_then(|info| info.branch_point)
+            .unwrap_or(0)
+    }
+    /// The sequence of the `branch/create` event on the parent that opened
+    /// this line; every cut is at or below it.
+    fn opened(&self) -> u64 {
+        self.tree
+            .info(self.own.clone())
+            .ok()
+            .and_then(|info| info.create_anchor)
+            .unwrap_or(0)
     }
     /// The line's role and parent, from its directory record.
     fn resolved(&self) -> Option<(LineRole, Option<String>)> {
@@ -2011,18 +2449,47 @@ impl BranchLine {
         self.changed.notify_one();
     }
     async fn run(self: Arc<Self>) {
+        /// What woke the writer when its queue was empty.
+        enum Wake {
+            Queued,
+            Parent,
+            Lost,
+        }
+        let mut parent = self
+            .resolved()
+            .and_then(|(_, parent)| parent)
+            .and_then(|parent| self.tree.turn_ends(&parent));
         loop {
             let next = self.wanted.lock().unwrap().pop_front();
-            let Some(decision) = next else {
-                tokio::select! {
-                    _ = self.stop.cancelled() => return,
-                    _ = self.changed.notified() => continue,
+            if let Some(decision) = next {
+                if self.stop.is_cancelled() {
+                    return;
+                }
+                let _ = self.write(decision).await;
+                continue;
+            }
+            let wake = match parent.as_mut() {
+                Some(signal) => {
+                    tokio::select! {
+                        _ = self.stop.cancelled() => return,
+                        _ = self.changed.notified() => Wake::Queued,
+                        changed = signal.changed() => {
+                            if changed.is_ok() { Wake::Parent } else { Wake::Lost }
+                        }
+                    }
+                }
+                None => {
+                    tokio::select! {
+                        _ = self.stop.cancelled() => return,
+                        _ = self.changed.notified() => Wake::Queued,
+                    }
                 }
             };
-            if self.stop.is_cancelled() {
-                return;
+            match wake {
+                Wake::Queued => {}
+                Wake::Parent => self.want(Decision::Parent),
+                Wake::Lost => parent = None,
             }
-            let _ = self.write(decision).await;
         }
     }
     async fn write(&self, decision: Decision) -> Result<()> {
@@ -2078,6 +2545,59 @@ impl BranchLine {
                 };
                 self.tree.input(parent, data).await.map(|_| ())
             }
+            Decision::Parent => {
+                let Some(parent) = parent.filter(|_| role != LineRole::Main) else {
+                    return Ok(());
+                };
+                let Some(head) = self.tree.head(&parent) else {
+                    return Ok(());
+                };
+                let cut = self.branch_point();
+                let opened = self.opened();
+                let (after, from) = {
+                    let view = self.view.lock().unwrap();
+                    if !parent_due(&view) || head <= view.parent_told {
+                        return Ok(());
+                    }
+                    (
+                        view.cursors.get(&parent).copied().unwrap_or(cut),
+                        parent_from(&view, &parent, opened),
+                    )
+                };
+                if !self.tree.activity_after(&parent, from, head).await? {
+                    return Ok(());
+                }
+                let body = format!(
+                    "Line {parent} has new activity: it was at {head} when this was written, and you have read it to {after}. Read what is new with the branch tool (action read, branch \"{parent}\"); with no after, the read continues from {after}. Read it when what {parent} did changes what you do, and before your final message; do not page through all of {parent}'s work."
+                );
+                let block = crate::context_block::raw(
+                    crate::context_block::element(
+                        "dim-branch-parent",
+                        &[
+                            ("branch", &parent),
+                            ("head", &head.to_string()),
+                            ("after", &after.to_string()),
+                        ],
+                        &body,
+                    ),
+                    Some(parent_key()),
+                );
+                let data = InputMessageData {
+                    blocks: vec![block],
+                    mode: Some(InputMode::Append),
+                    ..InputMessageData::default()
+                };
+                let written = self.tree.input(self.own.clone(), data).await?;
+                let mut view = self.view.lock().unwrap();
+                if view.parent_input.as_deref() != Some(written.id.as_str()) {
+                    // The live fold may not have seen this input yet; a trigger
+                    // that arrives first must still see it held.
+                    view.held.insert(written.id.clone(), InputMode::Append);
+                }
+                view.parent_told = head;
+                view.parent_input = Some(written.id.clone());
+                Ok(())
+            }
         }
     }
     /// The roster the fold calls for and whether it retires the key.
@@ -2116,7 +2636,7 @@ impl BranchLine {
                 "dim-branch-lines",
                 &[("branch", &self.own)],
                 &format!(
-                    "Lines you opened that are still open. Each is you, working in parallel from the point you opened it; it does not see your work after that point unless you message it.\n{listed}\n{}",
+                    "Lines you opened that are still open. Each is you, working in parallel from the point you opened it; it can read your work after that point, and you can read its.\n{listed}\n{}",
                     self.roster_closing.as_deref().unwrap_or(ROSTER_CLOSING)
                 ),
             ),
@@ -2165,6 +2685,57 @@ fn steered_parent(call: &ToolCall, parent: &str) -> bool {
         && call.input.get("action").and_then(|value| value.as_str()) == Some("message")
         && call.input.get("mode").and_then(|value| value.as_str()) == Some("steer")
         && call.input.get("to").and_then(|value| value.as_str()) == Some(parent)
+}
+/// The line a `branch` read call names, when the call is a read.
+fn read_target(call: &ToolCall) -> Option<String> {
+    if call.name != "branch"
+        || call.input.get("action").and_then(|value| value.as_str()) != Some("read")
+    {
+        return None;
+    }
+    call.input
+        .get("branch")
+        .and_then(|value| value.as_str())
+        .map(str::to_owned)
+}
+/// The parent head a `<dim-branch-parent>` block reports.
+fn parent_head(text: &str) -> Option<u64> {
+    let rest = text.strip_prefix("<dim-branch-parent ")?;
+    let start = rest.find("head=\"")? + "head=\"".len();
+    let digits = &rest[start..];
+    let end = digits.find('"')?;
+    digits[..end].parse().ok()
+}
+/// Whether the line can be told about a parent move now: it is not ending and
+/// no earlier parent block is still held (design §7.1.1).
+fn parent_due(view: &LineView) -> bool {
+    !view.ending
+        && !view
+            .parent_input
+            .as_ref()
+            .is_some_and(|id| view.held.contains_key(id))
+}
+/// The sequence the parent is checked after: what the line read, what the
+/// last block told it, and its opening (design §7.1.1). Every cut is at or
+/// below the opening, so a line that has not read starts there, and activity
+/// from before the line existed is never news; the line reads it when it needs
+/// it.
+fn parent_from(view: &LineView, parent: &str, opened: u64) -> u64 {
+    view.cursors
+        .get(parent)
+        .copied()
+        .unwrap_or(opened)
+        .max(view.parent_told)
+        .max(opened)
+}
+/// Whether `event` is activity a line must hear about (design §7.1.1): an
+/// operator input, or a tool call.
+fn counts_as_activity(event: &AgentEvent) -> bool {
+    match &event.kind {
+        EventKind::InputMessage(data) => data.user.is_some(),
+        EventKind::ToolUse(_) => true,
+        _ => false,
+    }
 }
 /// The first line of a purpose, at most 120 characters (design §12.1).
 fn first_line(purpose: &str) -> String {
@@ -2253,7 +2824,7 @@ impl BranchTool {
         match input.action.as_str() {
             "create" => self.create(&own, input, &context, &call.id, cancel).await,
             "message" => self.message(&own, input).await,
-            "read" => self.read(&own, input).await,
+            "read" => self.read(&own, input, &line).await,
             "end" => tokio::select! {
                 result = self.end(&own, input, &context, &call.id) => result,
                 _ = cancel.cancelled() => Err(HostError::Cancelled("branch end cancelled".into())),
@@ -2287,35 +2858,65 @@ impl BranchTool {
                     .tree
                     .get(&context.branch_id)
                     .map_err(|error| HostError::failed(error.to_string()))?;
-                let events = parent
-                    .local(..)
-                    .await
-                    .map_err(|error| HostError::failed(error.to_string()))?;
-                let first_use = events
-                    .iter()
-                    .position(|event| {
-                        matches!(&event.kind, EventKind::ToolUse(data)
-                            if data.turn_id == context.turn_id
-                                && data.request_id == context.request_id)
-                    })
-                    .ok_or_else(|| {
-                        HostError::failed("branch tool call is absent from its owning timeline")
-                    })?;
-                events[..first_use]
-                    .iter()
-                    .rev()
-                    .find_map(|event| match &event.kind {
-                        EventKind::ModelStart(data)
-                            if data.turn_id == context.turn_id
-                                && data.request_id == context.request_id =>
-                        {
-                            Some(event.sequence - 1)
+                // The dispatcher delivers only published facts, so the
+                // `step/tool-use` this call runs from and the `step/model-start`
+                // before it are published when the read runs.
+                let mut model_start = None;
+                let mut found = None;
+                let mut from = 1;
+                loop {
+                    let reply = parent
+                        .query(TimelineQuery {
+                            scope: TimelineQueryScope::Branch,
+                            include_publishing: false,
+                            from_event: None,
+                            from_sequence: Some(from),
+                            order_by: TimelineQueryOrderBy::Sequence,
+                            direction: TimelineQueryDirection::Ascending,
+                            kinds: vec!["step/model-start".into(), "step/tool-use".into()],
+                            flags: Vec::new(),
+                            event_id: None,
+                            predicate: Some(TimelineQueryPredicate {
+                                path: "request_id".into(),
+                                value: json!(context.request_id),
+                            }),
+                            limit: NonZeroU64::new(LINE_PAGE)
+                                .expect("a page keeps at least one event"),
+                            offset: 0,
+                        })
+                        .await
+                        .map_err(|error| HostError::failed(error.to_string()))?;
+                    let short = (reply.events.len() as u64) < LINE_PAGE;
+                    let last = reply.events.last().map(|event| event.sequence);
+                    for event in &reply.events {
+                        match &event.kind {
+                            EventKind::ModelStart(data) if data.turn_id == context.turn_id => {
+                                model_start = Some(event.sequence);
+                            }
+                            EventKind::ToolUse(data) if data.turn_id == context.turn_id => {
+                                found = Some(
+                                    model_start.ok_or_else(|| {
+                                        HostError::failed(
+                                            "branch tool batch has no owning model start",
+                                        )
+                                    })? - 1,
+                                );
+                                break;
+                            }
+                            _ => {}
                         }
-                        _ => None,
-                    })
-                    .ok_or_else(|| {
-                        HostError::failed("branch tool batch has no owning model start")
-                    })?
+                    }
+                    if found.is_some() {
+                        break;
+                    }
+                    match last {
+                        Some(last) if !short => from = last + 1,
+                        _ => break,
+                    }
+                }
+                found.ok_or_else(|| {
+                    HostError::failed("branch tool call is absent from its owning timeline")
+                })?
             }
         };
         let branch = self
@@ -2378,11 +2979,12 @@ impl BranchTool {
             Err(error) => Err(HostError::failed(error.to_string())),
         }
     }
-    /// One page of a tool line's committed history, open or ended (design §6).
+    /// One page of a line's committed history, open or ended (design §6).
     async fn read(
         &self,
         own: &OwnLine,
         input: BranchInput,
+        line: &BranchLine,
     ) -> std::result::Result<ToolResult, HostError> {
         let id = input
             .branch
@@ -2391,10 +2993,14 @@ impl BranchTool {
         let Some(target) = self.line(&id) else {
             return Ok(self.not_kin());
         };
-        if own.role != LineRole::Main || !kin(own, &target) {
+        let permitted = match own.role {
+            LineRole::Main => kin(own, &target),
+            LineRole::Tool | LineRole::Host => own.parent.as_deref() == Some(target.id.as_str()),
+        };
+        if !permitted {
             return Ok(self.not_kin());
         }
-        if matches!(target.source, Some(BranchSource::Host { .. })) {
+        if own.role == LineRole::Main && matches!(target.source, Some(BranchSource::Host { .. })) {
             return Ok(self.not_tool_line(&target.id));
         }
         let limit = match input.limit.unwrap_or(READ_PAGE_LIMIT as u64) {
@@ -2405,16 +3011,38 @@ impl BranchTool {
                 )));
             }
         };
-        let after = input.after.unwrap_or(0);
+        // main reads from a line's start; a line reads from its cut. Without
+        // `after`, a read continues after the reader's last read of the
+        // target, and a parent read never goes below the cut (design §6).
+        let cut = if own.role == LineRole::Main {
+            0
+        } else {
+            self.tree
+                .info(own.id.clone())
+                .ok()
+                .and_then(|info| info.branch_point)
+                .unwrap_or(0)
+        };
+        let after = match input.after {
+            Some(after) if own.role == LineRole::Main => after,
+            Some(after) => after.max(cut),
+            None => line.cursor(&target.id).unwrap_or(cut),
+        };
+        let head = self
+            .tree
+            .head(&target.id)
+            .ok_or_else(|| HostError::failed(format!("unknown line {}", target.id)))?;
+        if after > head {
+            return Err(HostError::failed(format!(
+                "after {after} is past line {}'s head {head}; a read starts at or below {head}",
+                target.id
+            )));
+        }
         let events = self
             .tree
             .page(target.id.clone(), after, limit)
             .await
             .map_err(|error| HostError::failed(error.to_string()))?;
-        let head = self
-            .tree
-            .head(&target.id)
-            .ok_or_else(|| HostError::failed(format!("unknown line {}", target.id)))?;
         let (items, next) = read_items(&events, after);
         let done = next >= head;
         let page = serde_json::json!({"items": items, "nextCursor": next, "done": done});
@@ -2473,7 +3101,8 @@ impl BranchTool {
     fn not_kin(&self) -> ToolResult {
         refusal(
             "branch_not_kin",
-            "You can message only the lines you opened and the line that opened you.".into(),
+            "You can message or read only the lines you opened and the line you were cut from."
+                .into(),
         )
     }
     fn not_tool_line(&self, id: &str) -> ToolResult {
@@ -2617,6 +3246,9 @@ impl ToolHandler for BranchTool {
 fn line_key() -> String {
     "branch:line".into()
 }
+fn parent_key() -> String {
+    "branch:parent".into()
+}
 
 fn first_input(parent: &str, data: &BranchCreateData) -> InputMessageData {
     let (blocks, user) = match data.source {
@@ -2641,20 +3273,40 @@ fn first_input(parent: &str, data: &BranchCreateData) -> InputMessageData {
     }
 }
 
+/// The block a nested line gets at open: it keeps the parent key live and
+/// names the line that opened it at the cut, so the block it inherited, which
+/// names a line it cannot read, is no longer its latest (§7.1.1).
+fn parent_open_block(parent: &str, cut: u64) -> InputBlock {
+    crate::context_block::raw(
+        crate::context_block::element(
+            "dim-branch-parent",
+            &[
+                ("branch", parent),
+                ("head", &cut.to_string()),
+                ("after", &cut.to_string()),
+            ],
+            &format!(
+                "Line {parent} has no new activity since you were cut from it at {cut}. Parent blocks above this point were written for {parent} and are not yours."
+            ),
+        ),
+        Some(parent_key()),
+    )
+}
+
 fn tool_line_identity(line: &str, parent: &str, prompt: &str) -> InputBlock {
     let prompt = crate::context_block::text(prompt);
     let body = [
-        format!("You are line {line} of this session. Line {parent} opened you at this point of its history to work in parallel with it. You are the same agent as {parent}: everything above is your own history, and you continue from here on your own line. {parent} keeps working on its line; you do not see its work after this point, and it sees yours only through what you send it. Messages above that were addressed to {parent}, such as its list of open lines, are {parent}'s, not yours."),
+        format!("You are line {line} of this session. Line {parent} opened you at this point of its history to work in parallel with it. You are the same agent as {parent}: everything above is your own history, and you continue from here on your own line. {parent} keeps working on its line; you can read its work after this point, and it can read yours. Messages above that were addressed to {parent}, such as its list of open lines, are {parent}'s, not yours."),
         String::new(),
         format!("Your purpose, as {parent} wrote it:"),
         prompt,
         String::new(),
         format!("How you work with {parent}:"),
         format!("- Work on this purpose only. You cannot open lines; if more parallel work is needed, tell {parent}."),
-        format!("- Tell {parent} with the branch tool (message, to \"{parent}\"). Use mode \"steer\" for what {parent} must act on now: a finding that changes its work or another line's, a blocking question, a conflict. Use \"append\" for progress {parent} should see at its next step. Do not repeat what {parent} already knows: when several steps give the same result, send one message for the run of them, and say only what changes what {parent} does or what it cannot see for itself."),
+        format!("- Read {parent} with the branch tool (action read, branch \"{parent}\") when what {parent} did or decided since your cut changes your work; the parent block reports when {parent} has moved. Message {parent} only for what it must act on: a decision that changes its work, a blocker only the user can settle, a conflict with another line, or a change to your purpose. Use mode \"steer\" for what {parent} must act on now, \"append\" for what {parent} should see at its next step. Do not send {parent} a progress report it can read, and do not page through {parent}'s whole stream: read the page that answers your question, then act."),
         format!("- You share the workspace with {parent} and its other lines. Change only the files {parent} gave you; before changing any other file, tell {parent} which. If edit or write fails because the file was modified after it was last read, another line may have changed the file: read it again and tell {parent} before you continue."),
         "- The user can talk to you directly. Answer the user, and ask with ask_user when only the user can decide.".to_string(),
-        format!("- When your purpose is done, or cannot be done, call the branch tool with action \"end\" and content saying what you found, did, changed and left undone. If you already told {parent} that in a message, your end content carries only what is new. That is your last action; {parent} receives it."),
+        format!("- When your purpose is done, or cannot be done, call the branch tool with action \"end\" and content saying what you found, did, changed and left undone. If you already told {parent} that in a message, your end content carries only what is new. Read {parent} once more before you end if the parent block says {parent} has moved, so your last word still holds. That is your last action; {parent} receives it."),
     ]
     .join("\n");
     crate::context_block::raw(
@@ -2673,7 +3325,7 @@ fn host_line_identity(line: &str, parent: &str) -> InputBlock {
             "dim-branch-line",
             &[("branch", line), ("parent", parent), ("source", "host")],
             &format!(
-                "You are line {line} of this session, opened from line {parent} at this point of its history. You are the same agent as {parent}: everything above is your own history, and you continue from here on your own line, in parallel with {parent}. You do not see {parent}'s work after this point. Messages above that were addressed to {parent} are {parent}'s, not yours. The message after this one says what this line is for."
+                "You are line {line} of this session, opened from line {parent} at this point of its history. You are the same agent as {parent}: everything above is your own history, and you continue from here on your own line, in parallel with {parent}. You can read {parent}'s work after this point. Messages above that were addressed to {parent} are {parent}'s, not yours. The message after this one says what this line is for."
             ),
         ),
         Some(line_key()),
@@ -2683,7 +3335,7 @@ fn host_line_identity(line: &str, parent: &str) -> InputBlock {
 /// The `branch` tool's description: its policy sentences are the coordination
 /// text for `main` ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)),
 /// replaceable at [`BranchToolConfig`].
-const BRANCH_TOOL_DESCRIPTION: &str = "Work with the other lines of this session. A line is you: it starts from your history at the point it is opened, then works in parallel on its own line. It is not a helper with its own memory, and it owes you no result; you and it keep each other informed while you work. On main you coordinate: answer a line's steer and act on what it asks for; leave a line's part to that line instead of redoing it.\n- create (main only): open a line to work on prompt in parallel. Open one line per part that can go on at the same time as the rest — separate files, a separate question, or a second approach — instead of doing those parts one after another yourself; not for a single quick edit, nor when your next step needs its result. Write prompt as a brief to yourself: the purpose, what you already know that it needs, which files or area are its own, and when it should tell you or end. Returns the line's id.\n- message: send content to a line you opened, or to the line that opened you. Mode \"append\" (default) reaches the receiver at its next step without interrupting it and does not wake an idle line. Use \"steer\" when the receiver must act now or is idle.\n- read: show the recent activity of a line you opened, also after it ended. Pass nextCursor as after to continue.\n- end: on a line opened with create, end your own line. content is your final message to the line that opened you: what you found, did, changed and left undone. It is your last action.\nLines talk only with the line that opened them and the lines they opened.";
+const BRANCH_TOOL_DESCRIPTION: &str = "Work with the other lines of this session. A line is you: it starts from your history at the point it is opened, then works in parallel on its own line. It is not a helper with its own memory, and it owes you no result; you and it keep each other informed by reading each other's work and messaging what the other must act on. On main you coordinate: answer a line's steer and act on what it asks for; leave a line's part to that line instead of redoing it; read a line's work instead of waiting for a report.\n- create (main only): open a line to work on prompt in parallel. Open one line per part that can go on at the same time as the rest — separate files, a separate question, or a second approach — instead of doing those parts one after another yourself; not for a single quick edit, nor when your next step needs its result. Write prompt as a brief to yourself: the purpose, what you already know that it needs, which files or area are its own, and when it should tell you or end. Returns the line's id.\n- message: send content to a line you opened, or to the line that opened you. Send a decision, a blocker, or a conflict, not a progress report the receiver can read. Mode \"append\" (default) reaches the receiver at its next step without interrupting it and does not wake an idle line. Use \"steer\" when the receiver must act now or is idle.\n- read: show a page of the activity of the line you were cut from, or of a line you opened, also after it ended. With no after, a read continues after your last read of that line: from your cut for the line you were cut from, and from its first event for a line you opened. Pass after to read from another point. Do not page through a whole line.\n- end: on a line opened with create, end your own line. content is your final message to the line that opened you: what you found, did, changed and left undone. It is your last action.\nA line reads the line it was cut from; main reads the lines it opened. Messages pass only between main and the lines it opened.";
 
 /// Factory configuration of the branch tool ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)).
 /// The product sets none of it, so the built-in text is in force.
@@ -2790,5 +3442,163 @@ mod tests {
         BranchLine::fold(&mut delivered, &call(1, "call", "branch", steer));
         BranchLine::fold(&mut delivered, &result(2, "call", false));
         assert_eq!(delivered.steered.as_deref(), Some("turn"));
+    }
+
+    /// A read result carrying `nextCursor`, as the branch tool returns it.
+    fn page(sequence: u64, id: &str, next: Option<u64>, is_error: bool) -> Arc<AgentEvent> {
+        let mut result = if is_error {
+            ToolResult::error("refused")
+        } else {
+            ToolResult::text(format!(
+                r#"{{"items":[],"nextCursor":{next:?},"done":false}}"#
+            ))
+        };
+        if let Some(next) = next {
+            result.structured_content = json!({"items": [], "nextCursor": next, "done": false})
+                .as_object()
+                .cloned();
+        }
+        event(
+            sequence,
+            EventKind::ToolResult(ToolResultData {
+                turn_id: "turn".into(),
+                request_id: "request".into(),
+                call_event_id: Some("call-event".into()),
+                results: vec![ToolCallResult {
+                    call_id: id.into(),
+                    result,
+                }],
+            }),
+        )
+    }
+
+    #[test]
+    fn the_fold_keeps_the_next_cursor_of_each_successful_read() {
+        let mut view = line();
+        BranchLine::fold(
+            &mut view,
+            &call(
+                1,
+                "call",
+                "branch",
+                json!({"action":"read","branch":"main"}),
+            ),
+        );
+        assert_eq!(view.reads.get("call").map(String::as_str), Some("main"));
+        BranchLine::fold(&mut view, &page(2, "call", Some(42), false));
+        assert_eq!(view.cursors.get("main"), Some(&42));
+        assert!(view.reads.is_empty());
+        BranchLine::fold(
+            &mut view,
+            &call(
+                3,
+                "failed",
+                "branch",
+                json!({"action":"read","branch":"main"}),
+            ),
+        );
+        BranchLine::fold(&mut view, &page(4, "failed", Some(99), true));
+        assert_eq!(
+            view.cursors.get("main"),
+            Some(&42),
+            "a refused read moves no cursor"
+        );
+        BranchLine::fold(
+            &mut view,
+            &call(
+                5,
+                "elsewhere",
+                "branch",
+                json!({"action":"read","branch":"other"}),
+            ),
+        );
+        BranchLine::fold(&mut view, &page(6, "elsewhere", Some(7), false));
+        assert_eq!(view.cursors.get("other"), Some(&7));
+        assert_eq!(view.cursors.get("main"), Some(&42), "cursors are per line");
+    }
+
+    #[test]
+    fn a_parent_block_starts_after_the_read_cursor_the_last_block_and_the_opening() {
+        let mut view = line();
+        view.cursors.insert("main".into(), 5);
+        assert_eq!(parent_from(&view, "main", 1), 5);
+        assert_eq!(
+            parent_from(&view, "other", 8),
+            8,
+            "activity before the opening is not news"
+        );
+        view.parent_told = 6;
+        assert_eq!(parent_from(&view, "main", 1), 6);
+        assert_eq!(parent_from(&view, "main", 9), 9, "the opening is a floor");
+        let text = crate::context_block::element(
+            "dim-branch-parent",
+            &[("branch", "main"), ("head", "6"), ("after", "5")],
+            "Line main has new activity.",
+        );
+        BranchLine::fold(
+            &mut view,
+            &event(
+                7,
+                EventKind::InputMessage(InputMessageData {
+                    blocks: vec![crate::context_block::raw(text, Some(parent_key()))],
+                    mode: Some(InputMode::Append),
+                    ..InputMessageData::default()
+                }),
+            ),
+        );
+        assert_eq!(view.parent_told, 6, "the block's head is folded");
+        assert_eq!(view.parent_input.as_deref(), Some("event-7"));
+        assert!(!parent_due(&view), "a held block is not written over");
+        view.held.clear();
+        assert!(parent_due(&view));
+        view.ending = true;
+        assert!(!parent_due(&view), "an ending line gets no block");
+    }
+
+    #[test]
+    fn activity_is_an_operator_input_or_a_tool_call() {
+        let operator = event(
+            1,
+            EventKind::InputMessage(InputMessageData::text("move on", Some(InputMode::Queue))),
+        );
+        assert!(counts_as_activity(&operator));
+        let block_only = event(
+            2,
+            EventKind::InputMessage(InputMessageData {
+                blocks: vec![crate::context_block::raw("state".to_string(), None)],
+                mode: Some(InputMode::Append),
+                ..InputMessageData::default()
+            }),
+        );
+        assert!(!counts_as_activity(&block_only));
+        let call = |id: &str| {
+            event(
+                3,
+                EventKind::ToolUse(ToolUseData {
+                    turn_id: "turn".into(),
+                    request_id: "request".into(),
+                    call: ToolCall {
+                        id: id.into(),
+                        name: "echo".into(),
+                        input: serde_json::Map::new(),
+                    },
+                }),
+            )
+        };
+        assert!(
+            counts_as_activity(&call("creating")),
+            "the creating call is below the opening, so it never reaches this check"
+        );
+        assert!(counts_as_activity(&call("later")));
+        let end = event(
+            4,
+            EventKind::TurnEnd(TurnEndData {
+                turn_id: "turn".into(),
+                outcome: TurnOutcome::Completed {
+                    reason: "stop".into(),
+                },
+            }),
+        );
+        assert!(!counts_as_activity(&end));
     }
 }

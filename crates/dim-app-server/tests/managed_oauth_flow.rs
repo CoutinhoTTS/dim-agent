@@ -1174,7 +1174,7 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
                 assert_eq!(headers["originator"], "codex-tui");
                 assert_eq!(
                     headers["user-agent"],
-                    "codex-tui/0.144.1 (Ubuntu 22.4.0; x86_64) xterm-256color (codex-tui; 0.144.1)"
+                    "codex-tui/0.144.1 (Ubuntu 22.4.0; x86_64) xterm-256color (codex-tui; 0.144.1) ai-sdk-provider-utils/5.0.53"
                 );
                 assert_eq!(body["store"], false);
                 assert!(body.get("max_output_tokens").is_none());

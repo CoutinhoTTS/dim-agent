@@ -263,14 +263,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Press Ctrl+C to stop the Web workspace." => "按 Ctrl+C 停止 Web 工作區。",
         "To resume this session:" => "繼續此工作階段：",
 
-        // composer/commands.rs: categories
-        "session" => "工作階段",
-        "run" => "執行",
-        "view" => "檢視",
-        "model" => "模型",
-        "extensions" => "擴充",
-        "app" => "應用程式",
-        "skill" => "技能",
         // composer/commands.rs: descriptions
         "start a new session" => "開始新工作階段",
         "show or set the reasoning effort" => "檢視或設定推理強度",
@@ -308,6 +300,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "esc close" => "esc 關閉",
         "Suggestions" => "建議",
         "Skills" => "技能",
+        "Skill loaded: {name}" => "已載入技能：{name}",
         "Commands" => "指令",
         "Command Palette" => "命令面板",
         "No matches" => "無相符項目",

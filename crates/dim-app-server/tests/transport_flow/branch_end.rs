@@ -1,4 +1,5 @@
 use super::*;
+use dim_agent_runtime::testing::branch_events;
 use dim_agent_types::{BranchSource, InputMode};
 
 fn error_name(value: &Value) -> &str {
@@ -60,7 +61,7 @@ async fn a_user_ends_a_line_and_a_v3_client_reads_both_sides() {
     let ended = client.rpc("session.branch_end", end(&id, &child)).await;
     assert_ok(&ended);
     assert_eq!(ended["result"], json!({}));
-    let main = session.local("main", ..).await.unwrap();
+    let main = branch_events(&session, "main", ..).await.unwrap();
     let result = main
         .iter()
         .rev()
@@ -106,7 +107,7 @@ async fn a_user_ends_a_line_and_a_v3_client_reads_both_sides() {
     );
     let notice = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let events = session.local("main", ..).await.unwrap();
+            let events = branch_events(&session, "main", ..).await.unwrap();
             if let Some(text) = events.iter().find_map(|event| match &event.kind {
                 EventKind::InputMessage(data) if data.effective_mode() == InputMode::Steer => {
                     data.blocks.iter().find_map(|block| match block {

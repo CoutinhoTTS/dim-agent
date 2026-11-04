@@ -65,22 +65,30 @@ execution, sub-agents and calls that never ran are not in it. Recall therefore h
 projection over events. It selects what counts with the same rules as context assembly (§3.3),
 and it tells it in its own shape.
 
-### 3.1 The pinned read
+### 3.1 The read and its head
 
-At the start of each call the tool pins `head = branch.sequence()` (the published
-sequence) and reads that pinned history backwards in pages: `branch.page_cursor()`
-and `branch.page(cursor, PAGE_ROWS, KINDS)` return the newest stored rows whose kind
-the projection folds (§3.2), at or below `head`, and the tool continues from the
-oldest sequence of each page until its answer is met (§5.3). For a child branch the
-pages run through the parent's events up to the fork point (the inherited prefix)
-and then its own; for a forked Session's `main` they run through the copied facts
-and then its `session/forked` and its own events. Both are history from before the
-fork, and Recall reads them like any other.
-Everything is computed from this one pinned head, so a call never mixes two heads. The pattern
-is the one `wait` already uses ([wait.rs](../../../crates/dim-agent-capabilities/src/wait.rs)): a
-Session tool that resolves the calling branch from `ToolExecutionContext.branch_id` through
-`TreeCommands`. Recall does not apply compaction: it walks the whole pinned history the pages
-reach.
+Each call reads the calling branch's chain backwards through `branch.query()`: the
+chain scope, sequence order, the descending direction and the kinds the projection
+folds (§3.2), one page of `PAGE_EVENTS` events at a time, carrying the page's offset
+into the next read until its answer is met (§5.3). The chain is the branch's own
+facts and its ancestors up to the fork point (the inherited prefix); for a forked
+Session's `main` it is the copied facts and then its `session/forked` and its own
+events. Both are history from before the fork, and Recall reads them like any other.
+
+The read fixes its selection before the first page: it reads the calling branch's
+published sequence once and starts every page at that sequence (`from_sequence`), so
+each page bounds that branch at the lesser of its head when the page runs and the
+sequence the call fixed. The bound comes from the branch itself, not from a position
+among the returned facts, so it holds even when the first page holds no fact of that
+branch. The collected events are one contiguous suffix of the chain below that head: a
+fact published while the read runs is outside the selection, never returned and never
+told out of order, and the page's offset keeps counting from the same place.
+Everything is computed from that one head, so a call never mixes two heads. An
+ancestor is still read to its cut. The pattern is the one `wait` already uses
+([wait.rs](../../../crates/dim-agent-capabilities/src/wait.rs)): a Session tool that
+resolves the calling branch from `ToolExecutionContext.branch_id` through
+`TreeCommands`. Recall does not apply compaction: it walks the whole pinned history the
+pages reach.
 
 The read does not fold while it pages. It stops when the collected pages reach the turn or the
 count the answer needs: the turn of the id it opens, 21 entries for the index, 21 candidate things
@@ -377,8 +385,10 @@ format (§3.4), so a page of 20 entries stays under 13,000 characters. The turn 
 Characters are Unicode scalar values, so CJK text is never cut inside a character. A turn's lines
 only grow at its end, so an offset returned once keeps pointing at the same line.
 
-The read that feeds these pages takes `PAGE_ROWS` stored rows at a time (§3.1). That size is a
+The read that feeds these pages takes `PAGE_EVENTS` events at a time (§3.1). That size is a
 constant of the tool as well; it never decides an answer, only how many pages the read takes.
+Each page continues the selection the first read fixed at the calling branch's head, so a
+write during the call neither adds a page nor moves an offset.
 
 ### 5.4 Model-facing texts
 
@@ -530,12 +540,16 @@ type change.
 
 ## 12. Requirements raised to mechanism owners
 
-- **A paged, kind-filtered history read on the facade.** Recall reads its pages through
-  `Branch::page_cursor` and `Branch::page`: the runtime returns the newest stored rows of the
-  kinds Recall names, at or below the pinned head, as one contiguous suffix of the branch chain.
-  The facade gains no cache and no projection rule; the read is
+- **A bounded, kind-filtered chain read on the facade.** Recall reads its pages through
+  `Branch::query` and a `TimelineQuery`: the runtime returns the newest events of the kinds
+  Recall names as one contiguous suffix of the branch chain, each with the branch and sequence it
+  was read from, and the page's offset continues the read. A chain read that names the calling
+  branch and a sequence in `from_sequence` starts that branch there and bounds it at the lesser
+  of its published head and the sequence, so every page keeps the selection the first page fixed;
+  the ancestors are still read to their cuts. The facade gains no cache and no projection rule;
+  the read is
   [timeline storage §5](../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描)'s,
-  and `TimelineStore::read_kind_page` states its page and row bounds.
+  and `TimelineStore::query` states its page and skip bounds.
 
 Considered and not needed:
 
@@ -606,7 +620,9 @@ in `crates/dim-app-server/tests` that finds `recall` in the tool table of both t
    page. A call with 1,000 scalar arguments and a 1,000-character tool name, an input with 50
    blocks and a turn that called 100 different tools each give a line of at most 600 characters,
    every variable part cut at 120 with `…`; the Timeline gains only
-   the events ToolExecutor writes for any tool call.
+   the events ToolExecutor writes for any tool call. A fact written to the branch while a call
+   pages is not returned, and the pages stay one contiguous suffix below the head the call read
+   first.
 10. **Permission.** Under the read-only preset the tool runs without an approval request.
 11. **A long turn.** A turn longer than one page ends with `More of this turn: open=<turn>
     offset=<n>.`; following each returned continuation reaches the end of the turn, every line

@@ -275,14 +275,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Press Ctrl+C to stop the Web workspace." => "Ctrl+C로 Web 작업 공간 중지",
         "To resume this session:" => "세션 재개:",
 
-        // composer/commands.rs: categories
-        "session" => "세션",
-        "run" => "실행",
-        "view" => "보기",
-        "model" => "모델",
-        "extensions" => "확장",
-        "app" => "앱",
-        "skill" => "스킬",
         // composer/commands.rs: descriptions
         "start a new session" => "새 세션 시작",
         "show or set the reasoning effort" => "추론 강도 보기/설정",
@@ -320,6 +312,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "esc close" => "esc 닫기",
         "Suggestions" => "추천",
         "Skills" => "스킬",
+        "Skill loaded: {name}" => "스킬 로드됨: {name}",
         "Commands" => "명령",
         "Command Palette" => "명령 팔레트",
         "No matches" => "결과 없음",

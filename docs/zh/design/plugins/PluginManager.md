@@ -15,7 +15,7 @@ PluginManager 保存一个宿主的插件配置：装了哪些插件，它们从
 | 插件代码：创建、打开/关闭、替换、重新加载 loader 行（§3） | 是，TypeScript 和 Python，前提是运行时已经提供（§2.5） | |
 | `plugin.*` 管理方法和 `dimcode plugin` 命令（§6、A.1） | 是 | 变更的客户端通知 |
 | 通过 Session 部件提供的 agent 工具（§6） | 是 | |
-| 默认 CLI 加载内置 SessionTitle 和配置的默认插件（goal、web、workflow、scheduler、plugin-authoring） | 是 | |
+| 默认 CLI 加载内置 SessionTitle、Scheduler 和配置的默认插件（goal、web、workflow、plugin-authoring） | 是 | |
 | 每个插件在运行时自己登记 Settings 来源（§9 R1） | 是，内置插件和 TypeScript 插件一起 | |
 | 内容种类：skill、MCP 配置、hook（§3、§9 R2） | skill 和 MCP，前提是它们的所有者按时落地；hook（Hooks 属于 M1） | |
 
@@ -84,7 +84,7 @@ flowchart LR
 
 **行的配置。** 行的 `config` 是清单的 `code.config` 上深合并宿主的同名补丁：对象逐成员合并，其他值（包括数组）替换清单的值。宿主在启动前设置补丁；产品不设置，所以随产品发布的插件读到清单里的值。运行候选文本的宿主把文本放在插件作者暴露的成员上，评测工具即如此（[model-prompts §8.1](../model-prompts.md#81-规则)），两臂运行同一份插件代码。
 
-**数据目录。** pluginFiles 根目录是产品 home 的；没有产品 home 的宿主自己给出这个根。打开一个带代码的插件时，如果 `<pluginFiles 根目录>/<id>/` 不存在，PluginManager 就创建它：`<id>` 是已安装插件的 id，或默认插件的名字，两者都按 id 规则检查（§7）。关闭或删除插件时，PluginManager 从不删除这个目录，和 Settings 文档留在 home 中一样。已存在的条目只有在它是目录、不是符号链接、并且解析后就是根目录下的它自己时才使用；否则不创建任何东西，插件的文件操作会像没有这个目录时一样失败。插件通过 `pluginFiles` 只在自己的 id 目录下写入（[进程 TypeScript §5.2](../../../design/process-typescript.md#52-public-pluginfiles-binding)）。
+**数据目录。** pluginFiles 根目录依次是：嵌入式宿主给出的根、产品 home、宿主启动时的执行 home（`--home`）。只带数据库文件启动的宿主三者都没有，所以既没有 pluginFiles 根，也不运行 PluginManager；根目录从不取数据库所在目录或工作目录。打开一个带代码的插件时，如果 `<pluginFiles 根目录>/<id>/` 不存在，PluginManager 就创建它：`<id>` 是已安装插件的 id，或默认插件的名字，两者都按 id 规则检查（§7）。关闭或删除插件时，PluginManager 从不删除这个目录，和 Settings 文档留在 home 中一样。已存在的条目只有在它是目录、不是符号链接、并且解析后就是根目录下的它自己时才使用；否则不创建任何东西，插件的文件操作会像没有这个目录时一样失败。插件通过 `pluginFiles` 只在自己的 id 目录下写入（[进程 TypeScript §5.2](../../../design/process-typescript.md#52-public-pluginfiles-binding)）。
 
 插件的业务配置（它的 Settings 来源）不在清单中：插件的代码在启动时向 Settings 登记自己的来源（§9 R1）。现在 TypeScript 行中的 `settings` 成员将被去掉。
 
@@ -145,7 +145,6 @@ flowchart LR
   "plugins": {
     "goal": "plugins/goal",
     "workflow": "plugins/workflow",
-    "scheduler": "plugins/scheduler",
     "plugin-authoring": "plugins/plugin-authoring"
   },
   "locked": ["PluginManager", "Rpc", "Transport"]
@@ -153,7 +152,7 @@ flowchart LR
 ```
 
 - `plugins` 把每个默认插件的名字映射到它的目录，路径相对于这个文件。默认插件和其他插件一样是一个插件目录（§2.1）。
-- 内置 SessionTitle 由原生产品 profile 安装，在这个文件中没有条目。
+- 内置 SessionTitle 和 Scheduler 由原生产品 profile 安装，在这个文件中没有条目。
 - `locked` 列出不能关闭、也不能切换所用插件的名字。锁定名字的其他插件仍然可以安装。锁定是产品配置；PluginManager 执行它。
 
 ### 2.4 PluginManager 不保存的状态
@@ -383,7 +382,7 @@ PluginManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 
 ## 附录 C. 验收（M1）
 
-1. 使用隔离的 home，`dimcode` 启动时已加载 goal、web、workflow、scheduler 和 plugin-authoring；`dimcode plugin list` 显示它们和包括 SessionTitle 的内置插件。
+1. 使用隔离的 home，`dimcode` 启动时已加载 goal、web、workflow 和 plugin-authoring；`dimcode plugin list` 显示它们和包括 SessionTitle、Scheduler 的内置插件。
 2. `dimcode plugin install ./my-tool`（一个登记一个工具的 TypeScript 插件）使该工具在新的轮次中对模型可见，不需要重启。
 3. 编辑 `index.ts` 并运行 `dimcode plugin reload my-tool`，会改变该工具在已打开 Session 中的行为。
 4. agent 通过 `plugin` 工具完成步骤 2–3，每次调用都由 Permission 决定；`plugin config goal set maxContinuations 5` 不用重启就改变 goal 的设置。

@@ -19,6 +19,7 @@ use dim_agent_capabilities::{
     timeline_tree::TreeCommands,
 };
 use dim_agent_runtime::testing::MinimalHost;
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -531,8 +532,7 @@ pub fn system_text(prompt: &SystemPrompt) -> String {
 
 /// Every model request of `branch`, oldest first.
 pub async fn requests(session: &Session) -> Vec<Arc<ModelRequest>> {
-    session
-        .history("main", None)
+    chain_events(session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -568,8 +568,7 @@ pub fn request_text(request: &ModelRequest) -> String {
 
 /// The input messages of `main`, oldest first.
 pub async fn inputs(session: &Session) -> Vec<InputMessageData> {
-    session
-        .history("main", None)
+    chain_events(session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -601,8 +600,7 @@ pub fn state_value(input: &InputMessageData, source: &str) -> Option<Option<Stri
 
 /// Tool results of `main`, oldest first.
 pub async fn tool_results(session: &Session) -> Vec<ToolResult> {
-    session
-        .history("main", None)
+    chain_events(session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -717,6 +715,28 @@ impl HoldingStore {
     pub fn release_read(&self) {
         self.gate.add_permits(1);
     }
+    /// Whether this read is the one the flow holds, and arms nothing after it.
+    fn held(&self, branch: &str) -> bool {
+        let mut selected = self.read_branch.lock().unwrap();
+        let Some((_, skip)) = selected.as_mut().filter(|(held, _)| held == branch) else {
+            return false;
+        };
+        if *skip > 1 {
+            *skip -= 1;
+            return false;
+        }
+        *selected = None;
+        true
+    }
+    /// Parks the read after saying so, until the flow releases it.
+    async fn enter_held_read(&self) {
+        self.read_entered.notify_one();
+        self.gate
+            .acquire()
+            .await
+            .expect("the read gate stays open")
+            .forget();
+    }
     /// The segments read since the last call, by branch.
     pub fn take(&self) -> Vec<(String, std::ops::RangeInclusive<u64>)> {
         std::mem::take(&mut *self.reads.lock().unwrap())
@@ -745,6 +765,9 @@ impl TimelineStore for HoldingStore {
     }
     fn head<'a>(&'a self, key: &'a TimelineKey) -> BoxFuture<'a, Result<u64>> {
         self.memory.head(key)
+    }
+    fn batch_end<'a>(&'a self, key: &'a TimelineKey, sequence: u64) -> BoxFuture<'a, Result<()>> {
+        self.memory.batch_end(key, sequence)
     }
     fn append(
         &self,
@@ -783,32 +806,13 @@ impl TimelineStore for HoldingStore {
         id: &'a str,
         segments: Vec<(String, std::ops::RangeInclusive<u64>)>,
     ) -> BoxFuture<'a, Result<Vec<Vec<StoredEvent>>>> {
-        let hold = {
-            let mut selected = self.read_branch.lock().unwrap();
-            let mut hold = false;
-            if let Some((branch, skip)) = selected.as_mut()
-                && segments.iter().any(|(read, _)| read == branch)
-            {
-                if *skip <= 1 {
-                    hold = true;
-                } else {
-                    *skip -= 1;
-                }
-            }
-            if hold {
-                *selected = None;
-            }
-            hold
-        };
+        let hold = segments
+            .iter()
+            .fold(false, |held, (branch, _)| self.held(branch) || held);
         self.reads.lock().unwrap().extend(segments.iter().cloned());
         Box::pin(async move {
             if hold {
-                self.read_entered.notify_one();
-                self.gate
-                    .acquire()
-                    .await
-                    .expect("the read gate stays open")
-                    .forget();
+                self.enter_held_read().await;
             }
             self.memory.read_segments(id, segments).await
         })
@@ -827,6 +831,16 @@ impl TimelineStore for HoldingStore {
         from: u64,
         through: u64,
     ) -> BoxFuture<'a, Result<dim_agent_runtime::TimelineQueryPage>> {
-        self.memory.query(key, query, from, through)
+        let hold = self.held(&key.branch_id);
+        self.reads
+            .lock()
+            .unwrap()
+            .push((key.branch_id.clone(), from..=through));
+        Box::pin(async move {
+            if hold {
+                self.enter_held_read().await;
+            }
+            self.memory.query(key, query, from, through).await
+        })
     }
 }

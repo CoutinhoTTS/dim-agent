@@ -9,11 +9,12 @@
 
 use async_trait::async_trait;
 
-use crate::composite::ChildModel;
+use crate::composite::{ChildModel, child_max_retries, step_context};
 use crate::error::AiMuxError;
 use crate::language_model::LanguageModel;
 use crate::language_model_message::LanguageModelPrompt;
 use crate::options::CallOptions;
+use crate::recording::RecordingContext;
 use crate::result::{GenerateResult, StreamResult};
 use crate::retry;
 
@@ -52,7 +53,7 @@ impl Router for RuleRouter {
         models: &[ChildModel],
     ) -> Result<usize, AiMuxError> {
         if models.is_empty() {
-            return Err(AiMuxError::Other("router: no models configured".into()));
+            return Err(AiMuxError::other("router: no models configured"));
         }
         Ok(0)
     }
@@ -84,7 +85,7 @@ impl Router for WeightedRouter {
         models: &[ChildModel],
     ) -> Result<usize, AiMuxError> {
         if models.is_empty() {
-            return Err(AiMuxError::Other("router: no models configured".into()));
+            return Err(AiMuxError::other("router: no models configured"));
         }
         // Pick the child with the highest weight. On ties, prefer the earliest
         // index (matches `RuleRouter`'s "child 0 first" expectation when all
@@ -177,20 +178,18 @@ impl RouterModel {
             if i == exclude {
                 continue;
             }
-            let retries = retry::prepare_retries(
-                options.max_retries,
-                m.retry_config(),
-                options.abort_signal.clone(),
-            );
-            let child_options = options.for_step(self.step_label(i));
-            match retries
-                .retry(|| {
-                    if let Some(context) = &child_options.recording_context {
+            let retries = retry::prepare_retries(child_max_retries(), options.abort_signal.clone());
+            let context = step_context(self.step_label(i));
+            match RecordingContext::scope(
+                context.clone(),
+                retries.retry(|| {
+                    if let Some(context) = &context {
                         let _ = context.start_attempt();
                     }
-                    m.do_generate(&child_options)
-                })
-                .await
+                    m.do_generate(options)
+                }),
+            )
+            .await
             {
                 Ok(r) => return Ok(r),
                 Err(e) => last_err = Some(e),
@@ -211,7 +210,7 @@ impl RouterModel {
         if idx < self.models.len() {
             Ok(idx)
         } else {
-            Err(AiMuxError::InvalidArgument(format!(
+            Err(AiMuxError::invalid_argument(format!(
                 "{from}: router returned out-of-bounds index {idx} (models: {})",
                 self.models.len()
             )))
@@ -229,33 +228,22 @@ impl LanguageModel for RouterModel {
         &self.config.model_id
     }
 
-    fn retry_config(&self) -> retry::RetryConfig {
-        // Retrying the composite would rerun routing and previously attempted
-        // children; each child is retried at its own execution boundary.
-        retry::RetryConfig {
-            max_retries: 0,
-            ..retry::RetryConfig::default()
-        }
-    }
-
     async fn do_generate(&self, options: &CallOptions) -> Result<GenerateResult, AiMuxError> {
         let raw = self.router.route(&options.prompt, &self.models)?;
         let idx = self.check_index(raw, "router")?;
         let model = &self.models[idx];
-        let retries = retry::prepare_retries(
-            options.max_retries,
-            model.retry_config(),
-            options.abort_signal.clone(),
-        );
-        let child_options = options.for_step(self.step_label(idx));
-        match retries
-            .retry(|| {
-                if let Some(context) = &child_options.recording_context {
+        let retries = retry::prepare_retries(child_max_retries(), options.abort_signal.clone());
+        let context = step_context(self.step_label(idx));
+        match RecordingContext::scope(
+            context.clone(),
+            retries.retry(|| {
+                if let Some(context) = &context {
                     let _ = context.start_attempt();
                 }
-                model.do_generate(&child_options)
-            })
-            .await
+                model.do_generate(options)
+            }),
+        )
+        .await
         {
             Ok(r) => Ok(r),
             Err(e) => {
@@ -272,22 +260,22 @@ impl LanguageModel for RouterModel {
         let raw = self.router.route(&options.prompt, &self.models)?;
         let idx = self.check_index(raw, "router")?;
         let model = &self.models[idx];
-        let retries = retry::prepare_retries(
-            options.max_retries,
-            model.retry_config(),
-            options.abort_signal.clone(),
-        );
-        let child_options = options.for_step(self.step_label(idx));
+        let retries = retry::prepare_retries(child_max_retries(), options.abort_signal.clone());
+        let context = step_context(self.step_label(idx));
         // Only setup can be retried. The returned stream is passed through, so
         // failures after setup never invoke another child or duplicate output.
-        retries
-            .retry(|| {
-                if let Some(context) = &child_options.recording_context {
+        let mut result = RecordingContext::scope(
+            context.clone(),
+            retries.retry(|| {
+                if let Some(context) = &context {
                     let _ = context.start_attempt();
                 }
-                model.do_stream(&child_options)
-            })
-            .await
+                model.do_stream(options)
+            }),
+        )
+        .await?;
+        result.stream = Box::pin(RecordingContext::scope_stream(context, result.stream));
+        Ok(result)
     }
 }
 
@@ -325,7 +313,7 @@ mod tests {
         async fn do_generate(&self, _options: &CallOptions) -> Result<GenerateResult, AiMuxError> {
             let attempt = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
             if self.fail {
-                return Err(AiMuxError::Other(format!("{} always fails", self.name)));
+                return Err(AiMuxError::other(format!("{} always fails", self.name)));
             }
             if attempt <= self.retry_failures {
                 return Err(retryable_error(self.name));
@@ -342,15 +330,14 @@ mod tests {
                 usage: Usage::default(),
                 warnings: vec![],
                 provider_metadata: None,
-                response: Default::default(),
-                request_body: None,
-                response_headers: None,
+                response: None,
+                request: None,
             })
         }
         async fn do_stream(&self, _options: &CallOptions) -> Result<StreamResult, AiMuxError> {
             let attempt = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
             if self.fail {
-                return Err(AiMuxError::Other(format!("{} always fails", self.name)));
+                return Err(AiMuxError::other(format!("{} always fails", self.name)));
             }
             if attempt <= self.retry_failures {
                 return Err(retryable_error(self.name));
@@ -373,8 +360,8 @@ mod tests {
             ];
             Ok(StreamResult {
                 stream: Box::pin(stream::iter(parts)),
-                request_body: None,
-                response_headers: None,
+                request: None,
+                response: None,
             })
         }
     }
@@ -391,7 +378,6 @@ mod tests {
                 format!("{name} retryable failure"),
                 "https://example.test",
                 serde_json::json!({}),
-                crate::ApiCallErrorOrigin::Local,
             )
         }))
     }
@@ -583,7 +569,7 @@ mod tests {
         );
         let err = router.do_generate(&opts()).await.unwrap_err();
         match err {
-            AiMuxError::InvalidArgument(msg) => {
+            AiMuxError::InvalidArgument { message: msg, .. } => {
                 assert!(msg.contains("out-of-bounds"), "got: {msg}");
             }
             other => panic!("expected InvalidArgument, got {other:?}"),
@@ -653,7 +639,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(r.text, "works through trait object");
+        assert_eq!(r.text(), "works through trait object");
     }
 
     #[tokio::test]
@@ -667,7 +653,6 @@ mod tests {
             FallbackPolicy::OnError,
             RouterConfig::default(),
         );
-        assert_eq!(router.retry_config().max_retries, 0);
 
         let result = crate::generate::generate_text(
             &router,
@@ -680,7 +665,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(result.text, "backup");
+        assert_eq!(result.text(), "backup");
         assert_eq!(route_calls.load(Ordering::SeqCst), 1);
         assert_eq!(primary_calls.load(Ordering::SeqCst), 3);
         assert_eq!(backup_calls.load(Ordering::SeqCst), 2);
@@ -702,17 +687,12 @@ mod tests {
             fn model_id(&self) -> &str {
                 "probe"
             }
-            async fn do_generate(
-                &self,
-                options: &CallOptions,
-            ) -> Result<GenerateResult, AiMuxError> {
-                self.seen.lock().unwrap().push(
-                    options
-                        .recording_context
-                        .as_ref()
-                        .and_then(RecordingContext::step),
-                );
-                Err(AiMuxError::Other("probe fails".into()))
+            async fn do_generate(&self, _: &CallOptions) -> Result<GenerateResult, AiMuxError> {
+                self.seen
+                    .lock()
+                    .unwrap()
+                    .push(RecordingContext::current().and_then(|context| context.step()));
+                Err(AiMuxError::other("probe fails"))
             }
             async fn do_stream(&self, _: &CallOptions) -> Result<StreamResult, AiMuxError> {
                 unreachable!()
@@ -747,11 +727,9 @@ mod tests {
             RouterConfig::default(),
         );
 
-        let options = CallOptions {
-            recording_context: Some(RecordingContext::new("call-1", Arc::new(NoopRecorder))),
-            ..CallOptions::default()
-        };
-        let _ = router.do_generate(&options).await;
+        let context = RecordingContext::new("call-1", Arc::new(NoopRecorder));
+        let _ = RecordingContext::scope(Some(context), router.do_generate(&CallOptions::default()))
+            .await;
 
         let seen = probe.seen.lock().unwrap();
         assert!(!seen.is_empty());

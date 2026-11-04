@@ -1,6 +1,6 @@
 # Scheduler
 
-状态：设计已批准，可选包实现见 [#317](https://github.com/arcships/dim/pull/317)。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
+状态：设计已批准，可选包实现见 [#317](https://github.com/arcships/dim/pull/317)。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：Rust，原生，无 Node 依赖（[overview 附录 C](../overview.md#附录-c-实现语言)）。TypeScript 包已随迁移移除。
 
 **交付边界。** 包及其公开流程验证由 [#317](https://github.com/arcships/dim/pull/317) 提供，按 §1.3 显式安装。C4 工具 #150、Settings 来源声明/读写 #175、事件 #177、S2 sessions、实时权限读取 #259、原生输入所有权 #267 与 S10 的[公开装配](../../../design/process-typescript.md#52-public-pluginfiles-binding)已提供公开依赖。Agents 空闲卸载 #126/#331 与首次 reuse 合同 #339 已合入。包使用统一升级的 rutis 0.16.0，并保留 §1.3 与附录 D 的失败报告检查；不扩充 core 或 rutis。
 
@@ -56,14 +56,14 @@ flowchart LR
 共享声明加载仍有限制：模块顶层加载卡住会使宿主启动超时；进程模块不在顶层执行业务 I/O。
 
 [已确认的功能依赖绑定](../../../design/process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
-在可选 Session 工具模块声明 `definePlugin.inject: ["scheduleJobs", "toolRegistry"]`。
+声明 `scheduleJobs` 与 `toolRegistry` 为这个可选 Session 工具模块的依赖。
 提供者激活、退役、重试和恢复采用该绑定的当前规则，Scheduler 不另定接入策略或复制错误文本。
 进程依赖稳定边界仍适用；#35 访问选择已确定，包须实施绑定的生命周期合同。
 
 | 入口 | 当前实现与约束 |
 | --- | --- |
 | Session 工具 | 由进程行经 partRegistry 注册的 C4 Session 定义注入 toolRegistry，在 apply 中以其声明和异步 execute 注册 schedule，注册不做 I/O；注册和提供者代际变化遵循当前 C4 绑定（§1.1）。 |
-| 进程包 / scheduleJobs | ServerConfig.session_typescript.rows 中的一行在共享运行时装载包的普通进程 owner；每个 Session 在该运行时挂载其 Session 定义的一份副本。Session 工具在 definePlugin.inject 声明 scheduleJobs（§1.1）。 |
+| 进程包 / `scheduleJobs` | 经 `AgentBuilder::optional_plugin` 注册的可选进程行 `Scheduler` 装载进程 owner；其 `apply` 经 `partRegistry` 注册 `SchedulerSession` 部分。Session 部分经 `names.key()` 读取 `scheduleJobs`（§1.1）。 |
 | 管理命名空间 | 进程行先恢复运行存储，再把 schedule 注册到 managementMethods 并发布 scheduleJobs。恢复失败时保留 fault，仍注册命名空间后使行失败，让后续调用返回该行的失败状态。原生按调用准入及 report/drain 跟随注册行的生命周期和状态。 |
 | Settings | owner settings.read/update、settings/schedule 已实现（#175/#177）。仅进程 row 登记来源 schedule、用户文件 schedule.json、无 projectFile，以及 userOnly /max_concurrent_runs（§7.1）。使用时读取已校验/默认化文档，以 expectedRevision 做 CAS。整份文档的本地写入沿用 Settings 信任边界（§7），不证明经过 Scheduler 保存。 |
 | 存储 | [公开绑定](../../../design/process-typescript.md#52-public-pluginfiles-binding)在宿主授权 product root 提供 pluginFiles。宿主在启用行前创建 `scheduler/`；父目录缺失时在事务回调前返回 `io`。Scheduler 内部 v1（A.7）与宿主外层 v1 不变。 |
@@ -72,32 +72,29 @@ flowchart LR
 
 ### 1.2 影响面
 
-不提运行时、门面、loader、事件格式或 rutis 改动，新业务归 Scheduler 包。来源、工具与管理命名空间分别由 Settings、ToolRegistry、运维方消费；scheduleJobs 只连接功能的两个真实作用域。不增加注册表、就绪服务、通知总线或 App Server 业务模块。
+不提门面、loader、事件格式或 rutis 改动，新业务归 Scheduler 包。运行时装配新增一个入口 `AgentBuilder::optional_plugin`，使进程行为可选（宿主不等待它），`plugin_rows` 返回带可选行 id 的 `PluginRows`；不改变核心就绪路径或机制。来源、工具与管理命名空间分别由 Settings、ToolRegistry、运维方消费；scheduleJobs 只连接功能的两个真实作用域。不增加注册表、就绪服务、通知总线或 App Server 业务模块。
 
 ### 1.3 具体包行
 
-可选包位于 `runtime/plugins/scheduler`，包名 `@dimcode/scheduler`；根模块为进程插件，
-并在 apply 中经 `partRegistry` 把 `session.ts` 注册为 Session 定义 `SchedulerSession`，即 Session 工具。
-插件目录带有 `dim-plugin.json`，是 `runtime/default-plugins.json` 列出的默认插件，由 PluginManager 加载（`--defaults`）。
-嵌入宿主仍可从清单的 `code` 字段构造下面这一行。
+原生实现位于 `crates/dim-agent-scheduler`。进程部分是经 `AgentBuilder::optional_plugin` 注册的可选行，Session 部分由该行在 `apply` 中经 `partRegistry` 注册。`dimcode` 通过 `dim_app_server::cli` 的 `ProductInstall` 安装它，它不在默认插件清单中。
 
 | row 字段 | 进程行 |
 | --- | --- |
-| `id` | `scheduler` |
-| `name` | `@dimcode/scheduler` |
+| `id` | `Scheduler` |
+| `name` | `Scheduler` |
 | `config` | `{}` |
-| `inject` | `sessions`、`sessionPermissions`、`settings`、`pluginFiles`、`managementMethods`、`partRegistry` |
-| `provides` | `scheduleJobs: {call:"async"}`；apply 把 `schedule` 注册到 `managementMethods`，把 Session 定义注册到 `partRegistry` |
+| `inject` | `settings`、`pluginFiles`、`managementMethods`、`sessionPermissions`、`partRegistry`；`sessions` 经宿主分派名称调用（§1.1） |
+| `provides` | `scheduleJobs`；apply 把 `schedule` 注册到 `managementMethods`，把 `SchedulerSession` 部分注册到 `partRegistry` |
 | `settings` | §7.1 完整的 schedule 来源及 schema |
 
-Session 定义注入 `scheduleJobs` 与 `toolRegistry`，不提供服务，在 apply 中把 `schedule` 注册到 `toolRegistry`。
+`SchedulerSession` 部分注入 `scheduleJobs`、`toolRegistry`、guide 条目、`SessionConfig` 与 `SessionIdentity`，不提供服务，在 apply 中把 `schedule` 注册到 `toolRegistry` 并注册 §5.2 guide 条目。
 
 **失败 owner 报告。** 统一的 [rutis 0.16 升级](../rutis-0.16-upgrade.md)
 提供附录 C 与附录 D 第 8、12、13 项要求的加载失败报告。运行存储不可读或无效时，
 进程行失败，`schedule.*` 返回 `service_unavailable`，原始字节保持不变。
 行级依赖与失败断言保持原样。Scheduler 与宿主使用同一 SDK 版本，不增加加载器绕过逻辑。
 
-模块的 definePlugin 与包行声明相同依赖和方法种类；两个行属于同一功能，
+可选进程行与其注册的 Session 部分声明相同依赖和方法种类；它们属于同一功能，
 不是两个运行时。进程原行提供 scheduleJobs 并注册管理命名空间，不增加方法适配器或 Session 转发插件。
 结构 config 不含任务、权限默认值、凭据、定时配置或运行状态。
 
@@ -285,7 +282,7 @@ equal 比较预设，并把每个工具列表视为集合，忽略顺序和重�
 `within(x,savedEffective)` 与 `within(x,currentStarterOrHostBound)`。
 这是 S2 的保守 cap 稳定检查，不是逐工具权限等价判定。不得为通过检查而改写被复用 Session 的权限。
 
-TypeScript 包按共享[权限 cap 样例](../../../../tests/fixtures/permission-policy-cap.json)
+`PermissionPolicy::cap` 与 `within`（`crates/dim-agent-types/src/permission.rs`）按共享[权限 cap 样例](../../../../tests/fixtures/permission-policy-cap.json)
 实现该纯计算。样例分为 cap 向量和独立 reuse 向量，后者包含 x、savedEffective、
 liveBound、withinSaved、withinLive。标记 job-save-and-launch 的 cap 向量使用仅含
 预设的任务请求；launch-only 向量验证完整策略的 launch 输入，不扩大 Job.policy。
@@ -354,7 +351,7 @@ sequenceDiagram
 
 报告的正文保留其句子，并以 `escaped(...)` 作为一整段文本转义，与 Workflow 报告的做法相同，因此带有标记文字的任务 id 或结局细节无法开启或关闭该标记；属性同样转义。
 
-policy 文本是出厂配置成员：`code.config.description` 替换声明的 description，`code.config.report_guidance` 替换结果报告的指引行；产品不设置它们，因此内置文本生效。一个成员承载一段文本——整段 description，或一行指引——其中的 protocol 句子由流程测试钉住：候选若改动其中一句，就是改动 protocol，必须与行为和测试一起落地（[面向模型的提示词 §9.2](../model-prompts.md#92-每个写入面向模型文字的能力)）。`report_guidance` 必须是一行，且由配置强制：guide 条目（§5.2）告诉模型报告的最后一行是指引，不属于 scheduler 对这次运行结局的记述，因此含换行的值会在插件加载时被拒绝（`scheduler/index.ts`）。改动它的 profile 也保持它只有一行。
+policy 文本是出厂配置成员：`description` 替换声明的 description，`report_guidance` 替换结果报告的指引行（附录 G）；产品不设置它们，因此内置文本生效。一个成员承载一段文本——整段 description，或一行指引——其中的 protocol 句子由流程测试钉住：候选若改动其中一句，就是改动 protocol，必须与行为和测试一起落地（[面向模型的提示词 §9.2](../model-prompts.md#92-每个写入面向模型文字的能力)）。`report_guidance` 必须是一行，且由配置强制：guide 条目（§5.2）告诉模型报告的最后一行是指引，不属于 scheduler 对这次运行结局的记述，因此含换行的值会在安装插件时被拒绝。改动它的 profile 也保持它只有一行。
 
 两个 kind 都带有 guide 条目：Scheduler 的 Session 部件在 `apply` 中为 `dim-scheduler` 注册一个条目，按 session 范围生效，因此 scheduled-run 标记所开辟的运行 Session 中的请求、以及报告落到的保存方分支所在的 Session 中的请求，各自带上本 Session 部件的该条目（[Prompt §6.2](Prompt.md#62-写入者)）。
 
@@ -434,7 +431,7 @@ Settings 在外部边界统一应用默认值并校验文档。非法文档返�
 
 ## 9. 向机制所有者提出的需求
 
-无。以现有 C3/C4、S2、Settings、pluginFiles 为前提；附录 F 区分已明确的绑定和包验收，实现不增加可选服务 API、通知协议、运行时事件或基础设施需求。
+唯一新增机制是绑定用到的运行时装配入口：`AgentBuilder::optional_plugin`（可选进程行）、`plugin_rows` 返回的 `PluginRows`，以及用于 Session 部分的 `PartRegistry::register`。以现有 C3/C4、S2、Settings、pluginFiles 为前提；附录 F 区分已明确的绑定和包验收，实现除这些装配入口外不增加可选服务 API、通知协议、运行时事件或基础设施需求。
 
 ## 附录 A. 接口细节
 
@@ -768,13 +765,22 @@ launch 一个 Session。不增加立即删除策略，也不从旧运行推断�
 
 ## 附录 G. Rust 绑定
 
-下列公开绑定已可用；#317 的包拥有 Scheduler 功能服务和任务，交付仍须通过上述失败报告检查。
+Scheduler 以原生 Rust 实现，没有 TypeScript 包、Node 进程或回退路径。上文合同不变，只更换绑定。
+
+位置：独立业务 crate `crates/dim-agent-scheduler`，不属于 App Server 代码（principles §1）。产品入口经 App Server 的原生 profile 安装函数（`process_entry(args, provider, install)`）安装它，App Server crate 不依赖它；未安装它的宿主没有 `schedule.*` 方法和 `schedule` 工具。进程部分经 `AgentBuilder::optional_plugin` 添加，并在其 `apply` 中经 `partRegistry` 注册 `SchedulerSession` 部分。两部分都使用现有 Rust 名称：`Names::key`、`Key<T>`、`require_at`、`provide_as` 与 `PartRegistry::register`。
 
 | 中立 | Rust |
 | --- | --- |
-| 注册到 toolRegistry 的工具 schedule | SchedulerSession 在 apply 中经 `Keyed<ToolRegistry>` 调用 `tools.register(ctx, ToolContribution {definition, handler})`；execute(ToolCall,cancel) |
-| 注册到 `managementMethods` 的命名空间 `schedule` | 由 Rpc 按调用查找而不依赖 |
-| sessions | 公开命名服务 host_key("sessions")；原生请求类型和 AgentIndex::acquire 是私有实现，不是外部 crate API |
-| scheduleJobs | Scheduler 已实现的进程服务，依赖绑定见 §1.1 |
-| 进程存储 | 既有 pluginFiles.open scope，立即登记 effect 清理；使用 A.7 已确定的内部 v1 格式 |
-| 定时器 / 跟踪 | 进程插件拥有，立即登记清理，apply 后启动业务，卸载前停止新工作并结算 |
+| 注册到 toolRegistry 的工具 schedule | Session 部分经 `names.key()` 取得 `ToolRegistry`，在 apply 中调用 `tools.register(ctx, ToolContribution {definition, handler})` |
+| 注册到 `managementMethods` 的命名空间 `schedule` | 进程部分取得 `ManagementMethods` 并调用 `methods.register(ctx, "schedule", declarations, handler)`；Rpc 按调用查找，不依赖 Scheduler |
+| scheduleJobs | 以 `names::register::<ScheduleJobs>(catalog, None)` 注册的进程组名称；Session 部分经 `names.key()` 读取，没有接线部分或转发插件 |
+| sessionPermissions、settings、pluginFiles | App Server 的类型化服务（`SessionPermissions`、`SettingsService`、`PluginFileTransactions`），经 `names.key()` 取得；crate 依赖 `dim-app-server`，`xtask check` 允许该依赖 |
+| sessions | 共享的 host-dispatch 名称，以 JSON 信封调用；其原生请求类型是 App Server 私有实现 |
+| 权限 cap | `dim-agent-types` 中的 `PermissionPolicy::cap` 与 `within`，与 S2 launch 使用同一函数，并按共享样例测试 |
+| 进程存储 | App Server 的类型化 `PluginFileTransactions` 服务；宿主写 `{version: 1, text}` 信封，Scheduler 提供内部 v1 文本，字节与 TypeScript 版本相同 |
+| 定时器 / 跟踪 | 进程部分拥有：定时器、运行任务、恢复与保留在其任务跟踪器中运行，在方法与服务注册后启动。卸载时（`ctx.cancellation_token()`）停止新工作并结束等待，清理在存储 scope 关闭前等待跟踪器；已接纳的 `sessions` 调用先结算。仍活动的运行留在文件中，由下一代恢复。Session 工具返回 §1.3 的卸载结果及 `schedule: cancelled before handover` |
+| policy 文本 | `install_with(builder, SchedulerTexts {description, report_guidance})`；`install` 使用内置文本。含换行的 `report_guidance` 被拒绝 |
+| guide 条目 | Session 部分取得 `GuideEntries`，注册 §5.2 的条目，session 范围，order 110 |
+| 可选行 | `AgentBuilder::optional_plugin`：宿主不等待该行，依赖缺失或运行存储不可读只让 Scheduler 失败（附录 D 第 12 项） |
+| Cron 与时区 | `croner` 与 `chrono-tz`，由 `deny.toml` 检查。墙钟时间落在夏令时空档的触发被跳过，回拨时重复的时间只在较早的那一刻触发一次 |
+| 测试 | 经管理方法、`schedule` 工具与 CLI wire 测试的公开流程，脚本模型可挂起一个 turn；不添加私有辅助函数单元测试（AGENTS.md Testing） |

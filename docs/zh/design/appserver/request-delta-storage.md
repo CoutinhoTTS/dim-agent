@@ -321,11 +321,11 @@ node body      = { parent: string | null, message: Message }                    
 
 ### 7.5 不使用请求正文的读取
 
-分页或投影读取只返回事件所说的内容，不还原 `context/prepare` 与 `model/call` 存储的请求：这类记录中的请求保持其行所持有的空消息列表、缺席的 `tools` 与缺席的 `system`，它引用的内容行一律不加载、不校验 hash、不校验种类。这些读取从不查看这些请求：历史分页丢弃这两种记录，`session.summaries` 只读输入文本与最后一个事件的时间，上下文投影只投影输入与输出事实，协作只读工具调用、结果与轮次结局。它们通过 `TimelineStore::read_page_without_request_bodies` 分页，其默认实现就是 `read_page`；存储实现可以完全不遍历请求。使用请求的读取（`local`、`history`、`context`、`trace`、`validate_session`、导出）仍按 §7.1–§8 逐个还原并校验。
+分页或投影读取只返回事件所说的内容，不还原 `context/prepare` 与 `model/call` 存储的请求：这类记录中的请求保持其行所持有的空消息列表、缺席的 `tools` 与缺席的 `system`，它引用的内容行一律不加载、不校验 hash、不校验种类。这些读取从不查看这些请求：历史分页丢弃这两种记录，`session.summaries` 只读输入文本与最后一个事件的时间，上下文投影只投影输入与输出事实，协作只读工具调用、结果与轮次结局。协作取得对端 Session，通过其 query 只选择自己消费的事件种类，不选择模型请求行。仍通过 `TimelineStore::read_page_without_request_bodies` 分页的是 App Server 读取本进程不持有或已结束的线；其默认实现就是 `read_page`；存储实现可以完全不遍历请求。已装载线的历史分页改为经过该分支的 query，它会还原所返回行的请求（[ADR 020](../adr/020-timeline-read-convergence.md) D6）。使用请求的读取（`local`、`history`、`context`、`trace`、`validate_session`、导出）仍按 §7.1–§8 逐个还原并校验。
 
 - 读取仍校验每条记录及其 before 轨迹的每个草稿是否带有其种类要求的引用，以及非请求记录是否没有引用；但它从不跟随这些引用。
 - 因此损坏的节点不会让分页读取失败，因为该读取本来就不会加载它。恢复和每个使用请求的读取仍会在它上面失败，列表损坏的 Session 在恢复时仍被拒绝（§8）。
-- 流式投影（§10）经分页读取历史，所以它投影的事件不携带存储的请求。估算所比较的那个请求来自 `policy_facts`，其中的行包含最后一个 `model/usage` 对应的 `model/call`，而不是来自被投影的事件。
+- 流式投影（§10）经分页读取历史，所以它投影的事件不携带存储的请求。估算所比较的那个请求是最后一个 `model/usage` 所度量的请求：它来自查询按该 usage 的 `request_id` 找到的 `model/call`，而不是来自被投影的事件。
 
 ## 8. 校验与损坏行
 
@@ -362,7 +362,7 @@ node body      = { parent: string | null, message: Message }                    
 
 锚定在 42 的快照记录 `resume` 30，即第一条保留的历史条目的事件。`resume` 不晚于该次压缩的 `through`（[timeline-storage §4](../../../architecture/rust-agent/timeline-storage.md#压缩检查点)、[history.rs](../../../../crates/dim-agent-capabilities/src/history.rs) 的 `projection_checkpoint`），所以 30 与 42 之间的请求行写入时还没有任何快照选定它，它们的列表一直回到 `u1`。
 
-检查点读取照旧从 30 开始。其中第一个请求行由遍历该行自己的列表还原：只读内容行，每次持锁至多加载 256 个节点。不读取在 30 之前结束的任何行，也不读取 30 之前的任何请求行，这正是 [timeline-storage §4](../../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描) 对 `context_with_checkpoint` 的约定。它加载的节点是该读取返回的请求的消息，v16 经这些行的引用加载的正是这些。之后的行（包括 43 处的新列表）从所保留的请求按序继续。
+检查点读取照旧从 30 开始。其中第一个请求行由遍历该行自己的列表还原：只读内容行，每次持锁至多加载 256 个节点。不读取在 30 之前结束的任何行，也不读取 30 之前的任何请求行，这正是 [timeline-storage §4](../../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描) 对检查点读取的约定。它加载的节点是该读取返回的请求的消息，v16 经这些行的引用加载的正是这些。之后的行（包括 43 处的新列表）从所保留的请求按序继续。
 
 ## 11. 格式 v17
 

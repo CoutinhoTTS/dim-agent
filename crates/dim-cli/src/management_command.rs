@@ -65,7 +65,7 @@ pub async fn edit(
     }
     // Refuse a write the daemon cannot serve before the user edits.
     management::supports_kind(client, &area, ActionKind::Edit)?;
-    let (revision, document) = read(client, options, &area, id.as_deref()).await?;
+    let (revision, document, source) = read(client, options, &area, id.as_deref()).await?;
     let text = serde_json::to_string_pretty(&document)
         .map(|text| format!("{text}\n"))
         .map_err(|error| error.to_string())?;
@@ -98,6 +98,7 @@ pub async fn edit(
         &Draft {
             area,
             id,
+            source,
             text,
             revision,
             stored: document,
@@ -126,7 +127,7 @@ pub async fn set(
     // The input first and the revision second, so the revision is read
     // immediately before the write however long the input takes.
     let text = read_text(path)?;
-    let (revision, stored) = read(client, options, &area, id.as_deref()).await?;
+    let (revision, stored, source) = read(client, options, &area, id.as_deref()).await?;
     if path == Path::new("-") {
         let draft = editor::Draft::open(&options.home, area.clone(), &text)?;
         let kept = draft.path().display().to_string();
@@ -136,6 +137,7 @@ pub async fn set(
             &Draft {
                 area,
                 id,
+                source,
                 text,
                 revision,
                 stored,
@@ -154,6 +156,7 @@ pub async fn set(
         &Draft {
             area,
             id,
+            source,
             text,
             revision,
             stored,
@@ -210,6 +213,7 @@ pub async fn start(
         area,
         action: ManagementAction::Run {
             id,
+            source: None,
             document,
             // A file or stdin document is the caller's own: it was never
             // opened in the panel's editor, so it has no seed.
@@ -229,13 +233,14 @@ fn read_text(path: &Path) -> Result<String> {
     std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()).into())
 }
 
-/// The document and the revision to write it at, read immediately before.
+/// The document and the revision to write it at, read immediately before,
+/// with the source an MCP entry's row reports so the write names it.
 async fn read(
     client: &mut Client,
     options: &Options,
     area: &Area,
     id: Option<&str>,
-) -> Result<(String, Value)> {
+) -> Result<(String, Value, Option<String>)> {
     management::supported(
         client,
         &ManagementRequest {
@@ -258,23 +263,34 @@ async fn read(
             let model = provider
                 .model(id)
                 .ok_or_else(|| format!("No model has that id: {id}"))?;
-            Ok((version.to_string(), models::edit_template(&provider, model)))
+            Ok((
+                version.to_string(),
+                models::edit_template(&provider, model),
+                None,
+            ))
         }
         Area::Hooks => {
             let catalog = hooks::catalog(client, options.workspace().as_str()).await?;
             let document = catalog
                 .user_document
                 .ok_or("The daemon reports no hook document to edit.")?;
-            Ok((catalog.user_revision, document))
+            Ok((catalog.user_revision, document, None))
         }
         Area::Mcp => {
             let Some(id) = id else {
                 return Err("mcp edit and set take an entry id.".to_owned().into());
             };
-            let server = mcp::target(client, options.workspace().as_str(), id).await?;
+            let server = mcp::target(
+                client,
+                options.workspace().as_str(),
+                id,
+                options.mcp_source.as_deref(),
+            )
+            .await?;
             if server.source == "plugin" {
                 return Err("plugin MCP entries change through their plugin".into());
             }
+            let source = server.source.clone();
             let editable = mcp::editable(client, options.workspace().as_str(), &server).await?;
             // A plugin entry's read reports no revision; the refusal above
             // already covers it, and any other missing revision leaves
@@ -283,7 +299,7 @@ async fn read(
                 .revision
                 .ok_or("The daemon reports no revision for this MCP entry to edit.")?;
             let document = mcp::seed(&editable.configuration)?;
-            Ok((revision, document))
+            Ok((revision, document, Some(source)))
         }
         Area::Scheduled => {
             let Some(id) = id else {
@@ -295,7 +311,7 @@ async fn read(
                 .iter()
                 .find(|job| job.id == id)
                 .ok_or_else(|| format!("No scheduled job has that id: {id}"))?;
-            Ok((job.revision.to_string(), job.document()))
+            Ok((job.revision.to_string(), job.document(), None))
         }
         Area::Workflow => {
             let Some(id) = id else {
@@ -325,7 +341,7 @@ async fn read(
             let (revision, document) = listing
                 .document(entry)
                 .ok_or("The user workflow source has no such definition.")?;
-            Ok((revision.to_owned(), document.clone()))
+            Ok((revision.to_owned(), document.clone(), None))
         }
         Area::Permissions => Err("A command rule has no document to edit.".to_owned().into()),
     }
@@ -336,6 +352,8 @@ async fn read(
 struct Draft {
     area: Area,
     id: Option<String>,
+    /// The source an MCP entry's row reports, which its save names.
+    source: Option<String>,
     text: String,
     /// The revision the document was read at.
     revision: String,
@@ -358,11 +376,15 @@ async fn write(client: &mut Client, options: &Options, draft: &Draft) -> Result<
         area: draft.area.clone(),
         action: ManagementAction::Save {
             id: draft.id.clone(),
+            source: draft.source.clone(),
             expected_revision: draft.revision.clone(),
             document,
         },
     };
-    match management::apply(client, &request, options.named_workspace(), None).await {
+    match management::apply(client, &request, options.named_workspace(), None)
+        .await
+        .result
+    {
         ManagementResult::Refused(error) => {
             Err(format!("{error} Your text is kept in {}.", draft.kept).into())
         }
@@ -405,7 +427,10 @@ async fn create(
         area,
         action: ManagementAction::Add { document },
     };
-    match management::apply(client, &request, options.named_workspace(), None).await {
+    match management::apply(client, &request, options.named_workspace(), None)
+        .await
+        .result
+    {
         ManagementResult::View { note, .. } => {
             // The note names the entry the owner saved: made safe, as every
             // line the Scheduler prints is.
@@ -658,7 +683,14 @@ async fn run_mcp(
         print_report(rows, notes);
         return Ok(0);
     }
-    match mcp::apply(client, &request.action, options.workspace().as_str()).await {
+    match mcp::apply_named(
+        client,
+        &request.action,
+        options.workspace().as_str(),
+        options.mcp_source.as_deref(),
+    )
+    .await
+    {
         // A test's tools are typed: one row per tool, `name\tdescription`,
         // and the no-tools sentence when the owner found none.
         Ok(mcp::Answer::Tools { tools, .. }) => {

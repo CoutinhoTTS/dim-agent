@@ -55,7 +55,7 @@ covers the table and the Rpc entries.
 | 作用域 | Session |
 | 注入 | `S:SessionMethods`、`S:TreeCommands` |
 | 提供 | `S:SubmitChecks` |
-| 被注入于 | `HooksSession` |
+| 被注入于 | `HooksSession`、`Skills` |
 <!-- /generated -->
 
 ## InputQueue
@@ -75,7 +75,7 @@ observable input queue.
 
 Consumes `input/message`, `input/consumed`, `turn/start`, `turn/end`,
 `stop/interrupt`; produces `input/applied`. It does not run a model itself.
-It registers with `Dispatcher::follow`; the replay writes owed application
+It registers with `Dispatcher::consume`; the rebuild writes owed application
 decisions, without duplicating already committed ones, before any live event. No background tasks or
 external resources. Reload reconstructs state from local history. An idle append
 is pending until a driving input; an interrupt is not permission to start a new

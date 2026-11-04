@@ -4,8 +4,8 @@ use dim_agent_capabilities::input_queue::{
     CheckInterrupted, SubmitCheckReply, SubmitCheckRequest, SubmitChecks, SubmitEntry,
     append_blocks,
 };
-use dim_agent_runtime::BranchOptions;
-use dim_agent_types::{BranchSource, InputMode};
+use dim_agent_runtime::{BranchOptions, TimelineQuery};
+use dim_agent_types::{BranchSource, EventKind, InputMode};
 
 impl Connection {
     /// Runs the Session's submit checks before writing operator input (Hooks
@@ -193,10 +193,7 @@ impl Connection {
         }
         if window {
             let turn = if params.latest_turn {
-                rpc.index
-                    .turn_window(&params.session_id, branch, through)
-                    .await
-                    .map_err(history_error)?
+                turn_window(&session, branch, through).await?
             } else {
                 crate::storage::TurnWindow {
                     turn_start: None,
@@ -223,8 +220,9 @@ impl Connection {
                 self.protocol_version(),
             )?));
         }
-        let events = session
-            .local_page(branch, after, limit, through)
+        let events = rpc
+            .index
+            .history_page(&params.session_id, branch, after, limit, through)
             .await
             .map_err(history_error)?;
         let next_after = events.last().map_or(after, |event| event.sequence);
@@ -354,12 +352,156 @@ const HISTORY_TURN_BYTES: usize = 4 * 1024 * 1024;
 /// 16 MiB frame, with room for the envelope. A batch above it cannot be sent
 /// and the read fails `history_too_large`.
 const HISTORY_FRAME_BYTES: usize = crate::outbound::MAX_FRAME_BYTES - 64 * 1024;
+/// Facts one page of the window's anchor read keeps.
+const TURN_WINDOW_PAGE: u64 = 256;
 
 fn history_error(error: AgentError) -> RpcError {
     match error {
         AgentError::InvalidInput(message) => RpcError::invalid(message),
         error => RpcError::from(error),
     }
+}
+
+/// The newest turn at `through` and the first sequence a window over it
+/// includes (session-history-window §4.2): the turn's start, and the messages
+/// its first request consumed or, when it has yet to take one, the newest
+/// message at or below the start.
+async fn turn_window(
+    session: &Session,
+    branch: &str,
+    through: u64,
+) -> Result<crate::storage::TurnWindow, RpcError> {
+    if through == 0 {
+        return Ok(crate::storage::TurnWindow {
+            turn_start: None,
+            window_start: 1,
+        });
+    }
+    let tree = session
+        .session_service::<dim_agent_capabilities::timeline_tree::TreeCommands>()
+        .map_err(history_error)?;
+    let page = |kinds: Vec<String>,
+                direction: TimelineQueryDirection,
+                from: Option<u64>,
+                event_id: Option<String>| TimelineQuery {
+        scope: TimelineQueryScope::Branch,
+        include_publishing: false,
+        from_event: None,
+        from_sequence: from,
+        order_by: TimelineQueryOrderBy::Sequence,
+        direction,
+        kinds,
+        flags: Vec::new(),
+        event_id,
+        predicate: None,
+        limit: std::num::NonZeroU64::new(TURN_WINDOW_PAGE).expect("a page keeps one event"),
+        offset: 0,
+    };
+    let turned = tree
+        .query(
+            branch.to_owned(),
+            page(
+                vec!["turn/start".into()],
+                TimelineQueryDirection::Descending,
+                Some(through),
+                None,
+            ),
+        )
+        .await
+        .map_err(history_error)?;
+    let Some(turn_start) = turned.events.first().map(|event| event.sequence) else {
+        return Ok(crate::storage::TurnWindow {
+            turn_start: None,
+            window_start: 1,
+        });
+    };
+    let first_step = tree
+        .query(
+            branch.to_owned(),
+            page(
+                vec!["step/model-start".into()],
+                TimelineQueryDirection::Ascending,
+                Some(turn_start.saturating_add(1)),
+                None,
+            ),
+        )
+        .await
+        .map_err(history_error)?
+        .events
+        .first()
+        .map(|event| event.sequence)
+        .filter(|sequence| *sequence <= through);
+    let mut window_start = turn_start;
+    let mut consumed = false;
+    if let Some(first_step) = first_step {
+        let mut from = turn_start.saturating_add(1);
+        loop {
+            let reply = tree
+                .query(
+                    branch.to_owned(),
+                    page(
+                        vec!["input/consumed".into()],
+                        TimelineQueryDirection::Ascending,
+                        Some(from),
+                        None,
+                    ),
+                )
+                .await
+                .map_err(history_error)?;
+            let short = (reply.events.len() as u64) < TURN_WINDOW_PAGE;
+            let mut next = None;
+            for event in &reply.events {
+                if event.sequence >= first_step {
+                    break;
+                }
+                next = Some(event.sequence.saturating_add(1));
+                let EventKind::InputConsumed(data) = &event.kind else {
+                    unreachable!("the read selects consumed inputs")
+                };
+                let input = tree
+                    .query(
+                        branch.to_owned(),
+                        page(
+                            Vec::new(),
+                            TimelineQueryDirection::Ascending,
+                            None,
+                            Some(data.input_id.clone()),
+                        ),
+                    )
+                    .await
+                    .map_err(history_error)?;
+                if let Some(sequence) = input.events.first().map(|event| event.sequence) {
+                    window_start = window_start.min(sequence);
+                    consumed = true;
+                }
+            }
+            match next {
+                Some(next) if !short => from = next,
+                _ => break,
+            }
+        }
+    }
+    if !consumed {
+        let newest = tree
+            .query(
+                branch.to_owned(),
+                page(
+                    vec!["input/message".into()],
+                    TimelineQueryDirection::Descending,
+                    Some(turn_start),
+                    None,
+                ),
+            )
+            .await
+            .map_err(history_error)?;
+        if let Some(sequence) = newest.events.first().map(|event| event.sequence) {
+            window_start = window_start.min(sequence);
+        }
+    }
+    Ok(crate::storage::TurnWindow {
+        turn_start: Some(turn_start),
+        window_start,
+    })
 }
 
 /// Builds a newest-first window reply: the newest whole batches within the

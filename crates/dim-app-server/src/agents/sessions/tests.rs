@@ -1,4 +1,5 @@
 use super::*;
+use dim_agent_runtime::testing::branch_events;
 use dim_agent_runtime::{AgentBuilder, AgentConfig, SessionConfig};
 use dim_agent_types::EventKind;
 use std::time::Duration;
@@ -129,7 +130,7 @@ async fn typed_input_retains_admitted_io_and_accepts_each_submission_once() {
     );
     let (one, two) = (one.unwrap(), two.unwrap());
     assert_eq!((one.input_id, one.sequence), (two.input_id, two.sequence));
-    let history = session.local("main", ..).await.unwrap();
+    let history = branch_events(&session, "main", ..).await.unwrap();
     for submission in [
         "settlement:typed:publication",
         "settlement:typed:dropped",

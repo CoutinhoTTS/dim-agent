@@ -7,6 +7,7 @@
 //! so every count is exact.
 use super::{AgentIndex, builder, config};
 use crate::{RunningServer, ServerConfig, agents::SessionSlot};
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::{AgentBuilder, Feature, Names, SessionIdentity};
 use dim_agent_types::EventKind;
 use futures_util::{SinkExt, StreamExt};
@@ -395,21 +396,18 @@ async fn poll_member(agent: &dim_agent_runtime::Agent, lead: &str) -> String {
     let session = agent.get_session(lead).unwrap();
     tokio::time::timeout(DEADLINE, async {
         loop {
-            let report_delivered =
-                session
-                    .history("main", None)
-                    .await
-                    .unwrap()
-                    .iter()
-                    .any(|event| {
-                        matches!(&event.kind, EventKind::InputMessage(data)
+            let report_delivered = chain_events(&session, "main", ..)
+                .await
+                .unwrap()
+                .iter()
+                .any(|event| {
+                    matches!(&event.kind, EventKind::InputMessage(data)
                     if data.blocks.first().is_some_and(|block| matches!(block,
                         dim_agent_types::InputBlock::Raw { text, .. }
                             if text.starts_with("<dim-agent-report "))))
-                    });
+                });
             if report_delivered {
-                let member = session
-                    .history("main", None)
+                let member = chain_events(&session, "main", ..)
                     .await
                     .unwrap()
                     .iter()

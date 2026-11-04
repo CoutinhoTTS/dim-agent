@@ -12,7 +12,7 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::{AgentError, Publication};
 use dim_agent_types::{
     AgentEvent, ContentBlock, InputBlock, InputMessageData, InputMode, InputWithdrawData, ModelId,
-    ModelSelection, PermissionPolicy, PermissionPreset, UserInput,
+    ModelSelection, PermissionPolicy, UserInput,
 };
 use rutis::Ctx;
 use rutis::host::CtxHost;
@@ -296,47 +296,6 @@ fn settlement(error: AgentError) -> SessionsError {
     }
 }
 
-/// The launch cap (sessions service §6.1): the lower preset, the union of the
-/// disallowed tools, and only the allowed tools both sides allow
-/// unconditionally. It is never wider than either side.
-fn cap(requested: &PermissionPolicy, bound: &PermissionPolicy) -> PermissionPolicy {
-    fn rank(preset: PermissionPreset) -> u8 {
-        match preset {
-            PermissionPreset::ReadOnly => 0,
-            PermissionPreset::WorkspaceWrite => 1,
-            PermissionPreset::FullAccess => 2,
-        }
-    }
-    fn allows(policy: &PermissionPolicy, tool: &String) -> bool {
-        policy.preset == PermissionPreset::FullAccess || policy.allowed_tools.contains(tool)
-    }
-    let mut disallowed_tools = Vec::new();
-    for tool in requested
-        .disallowed_tools
-        .iter()
-        .chain(&bound.disallowed_tools)
-    {
-        if !disallowed_tools.contains(tool) {
-            disallowed_tools.push(tool.clone());
-        }
-    }
-    let mut allowed_tools = Vec::new();
-    for tool in requested.allowed_tools.iter().chain(&bound.allowed_tools) {
-        if allows(requested, tool)
-            && allows(bound, tool)
-            && !disallowed_tools.contains(tool)
-            && !allowed_tools.contains(tool)
-        {
-            allowed_tools.push(tool.clone());
-        }
-    }
-    PermissionPolicy {
-        preset: std::cmp::min_by_key(requested.preset, bound.preset, |preset| rank(*preset)),
-        allowed_tools,
-        disallowed_tools,
-    }
-}
-
 impl AgentIndex {
     /// Ends a call with `reloading` when this index generation unloads; the
     /// `sessions` service and its callers stay (§8.3).
@@ -397,7 +356,7 @@ impl AgentIndex {
                     None if request.starter.is_some() => bound.clone(),
                     None => PermissionPolicy::default(),
                 };
-                let policy = cap(&requested, &bound);
+                let policy = requested.cap(&bound);
                 let mut config = super::session_config(&host.profile, &self.session_defaults);
                 config.cwd = cwd;
                 config.permission_policy = policy.clone();
@@ -578,9 +537,14 @@ impl AgentIndex {
             if after > through {
                 return Err(SessionsError::rejected("after exceeds through"));
             }
-            let events = lease
-                .session
-                .local_page(&request.branch_id, after, limit, through)
+            let events = self
+                .history_page(
+                    &request.session_id,
+                    &request.branch_id,
+                    after,
+                    limit,
+                    through,
+                )
                 .await?;
             Ok(HistoryPage { through, events })
         })

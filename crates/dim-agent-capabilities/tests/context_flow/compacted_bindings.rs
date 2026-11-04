@@ -10,6 +10,7 @@ use dim_agent_capabilities::{
     host_platform::{HostPlatform, ShellStatus},
     workspace_tools::{self, WorkspaceToolsConfig},
 };
+use dim_agent_runtime::testing::chain_events;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
@@ -281,7 +282,7 @@ async fn until(
 ) -> Vec<Arc<AgentEvent>> {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(session, "main", ..).await.unwrap();
             if done(&events) {
                 return events;
             }
@@ -362,7 +363,7 @@ async fn a_write_after_a_compaction_that_cut_its_read_is_refused_until_the_file_
             ],
         )
         .await;
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let refused = last_result(&events);
     assert_eq!(code(&refused), Some("text_binding_required"));
     assert!(text(&refused).contains("What you last read or wrote of this file was compacted out"));
@@ -391,7 +392,7 @@ async fn a_write_after_a_compaction_that_cut_its_read_is_refused_until_the_file_
             ],
         )
         .await;
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert_eq!(last_result(&events).is_error, None);
     assert_eq!(
         std::fs::read(files.dir.join("note.txt")).unwrap(),
@@ -407,7 +408,7 @@ async fn a_compaction_that_keeps_the_read_leaves_the_write_admitted() {
     let session = files.session().await;
     read_then_turn(&files, &session, "kept.txt", "alpha\nbeta\n").await;
     let retain_from = files.compact(&session).await;
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let cut = events
         .iter()
         .position(|event| event.id == retain_from)
@@ -430,7 +431,7 @@ async fn a_compaction_that_keeps_the_read_leaves_the_write_admitted() {
             ],
         )
         .await;
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert_eq!(last_result(&events).is_error, None);
     assert_eq!(
         std::fs::read(files.dir.join("kept.txt")).unwrap(),
@@ -459,7 +460,7 @@ async fn an_edit_after_a_compaction_that_cut_its_read_succeeds() {
             ],
         )
         .await;
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert_eq!(last_result(&events).is_error, None);
     assert_eq!(
         std::fs::read(files.dir.join("edit.txt")).unwrap(),
@@ -488,7 +489,7 @@ async fn a_compaction_that_cuts_a_written_binding_refuses_the_next_write() {
             ],
         )
         .await;
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert_eq!(last_result(&events).is_error, None);
     files.turn(&session, "next", vec![Step::Says("ok")]).await;
     files.compact(&session).await;
@@ -502,7 +503,7 @@ async fn a_compaction_that_cuts_a_written_binding_refuses_the_next_write() {
             ],
         )
         .await;
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let refused = last_result(&events);
     assert_eq!(code(&refused), Some("text_binding_required"));
     assert!(text(&refused).contains("What you last read or wrote of this file was compacted out"));
