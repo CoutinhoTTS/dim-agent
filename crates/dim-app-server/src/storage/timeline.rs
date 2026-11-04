@@ -1246,26 +1246,6 @@ impl SessionStore {
             })
             .await
     }
-    pub async fn read_page(
-        &self,
-        id: &str,
-        branch: &str,
-        after: u64,
-        limit: usize,
-        through: u64,
-    ) -> Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
-        let key = TimelineKey {
-            session_id: id.into(),
-            branch_id: branch.into(),
-        };
-        Ok(self
-            .timeline
-            .page(&key, after, limit, through, RequestBodies::Rebuild)
-            .await?
-            .into_iter()
-            .map(|record| record.event)
-            .collect())
-    }
     pub async fn has_records(&self, id: &str) -> Result<bool> {
         let id = id.to_owned();
         self.timeline

@@ -2644,6 +2644,24 @@ async fn paging_reads_do_not_rebuild_request_bodies() {
 /// request, four when it rewrites the last four messages. A request after
 /// another in the same round takes that one and loads no node. Every write
 /// encodes nodes for its new messages only.
+/// One page of `branch`'s events through the timeline store.
+async fn page(
+    store: &Arc<dyn TimelineStore>,
+    id: &str,
+    branch: &str,
+    after: u64,
+    limit: usize,
+    through: u64,
+) -> Vec<Arc<dim_agent_types::AgentEvent>> {
+    store
+        .read_page(&key(id, branch), after, limit, through)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|record| record.event)
+        .collect()
+}
+
 #[tokio::test]
 async fn a_long_request_is_read_and_extended_in_bounded_holds() {
     const MESSAGES: usize = 600;
@@ -5966,10 +5984,7 @@ async fn directory_history_pages_keep_a_fixed_head() {
         .unwrap();
     wait.await.unwrap().unwrap();
     let through = store.head(&key("paged", "main")).await.unwrap();
-    let first = sessions
-        .read_page("paged", "main", 0, 200, through)
-        .await
-        .unwrap();
+    let first = page(&store, "paged", "main", 0, 200, through).await;
     assert_eq!(first.len(), 200);
     let (done, wait) = tokio::sync::oneshot::channel();
     store
@@ -5982,14 +5997,8 @@ async fn directory_history_pages_keep_a_fixed_head() {
         )
         .unwrap();
     wait.await.unwrap().unwrap();
-    let second = sessions
-        .read_page("paged", "main", 200, 200, through)
-        .await
-        .unwrap();
-    let third = sessions
-        .read_page("paged", "main", 400, 200, through)
-        .await
-        .unwrap();
+    let second = page(&store, "paged", "main", 200, 200, through).await;
+    let third = page(&store, "paged", "main", 400, 200, through).await;
     let sequences: Vec<_> = first
         .iter()
         .chain(&second)
@@ -6011,10 +6020,8 @@ async fn directory_history_pages_keep_a_fixed_head() {
         );
     }
     assert!(
-        sessions
-            .read_page("paged", "main", 600, 200, through)
+        page(&store, "paged", "main", 600, 200, through)
             .await
-            .unwrap()
             .is_empty()
     );
     let connection = Connection::open(&database.0).unwrap();
