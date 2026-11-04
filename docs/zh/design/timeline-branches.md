@@ -114,7 +114,7 @@ BranchLine 注入 `B:Dispatcher`、`B:TimelineIdentity`、`B:BranchLifecycle` �
 
 - **标记。** `<dim-branch-message from="C" to="P">`。接收方凭这个标记把消息和用户的话区分开。RPC 只接收操作者内容、不接收块，所以客户端无法伪造消息。
 - **允许的两端。** 消息：`main` 和它每条未结束的工具线之间，双向都可以。读取：一条线读它被切出来的那条线，这一对两端都可以（工具线读 `main`，`main` 读它的工具线，host 线读开出它的那条线）。其他任何组合都由工具结果拒绝，什么也不写：兄弟分支、工具线读 host 线、host 线收发消息、已结束的线。拒绝码仍是 `branch_not_kin` 和 `branch_not_tool_line`；`main` 仍然绝不通过工具读 host 线。
-- **读取。** `read {branch, after?, limit?}` 返回目标已提交历史的一页，未结束或已结束都可以，经 `TreeCommands.page` 从存储读取，按 Collaboration 的 `read` 渲染成员页面的方式呈现：输入、文本、工具调用与结果、每轮结束，带 `nextCursor`。目标是调用方被切出来的那条线；在 `main` 上则是它开的工具线。两个方向共用一条游标规则：
+- **读取。** `read {branch, after?, limit?}` 返回目标已提交历史的一页，未结束或已结束都可以，经 `TreeCommands.page` 从存储读取，按 Collaboration 的 `read` 渲染成员页面的方式呈现：输入、文本、工具调用与结果、每轮结束，带 `nextCursor`；工具结果条目携带其工具在该结果上声明的效果（[工具契约 A.6](../contracts/session-boundary.md#a6-工具效果)），仅当结果至少声明了一个时才存在，路径原样，命令在第 200 个字符处截断并标出截断。目标是调用方被切出来的那条线；在 `main` 上则是它开的工具线。两个方向共用一条游标规则：
   - 不带 `after` 时，读取从调用方上一次成功读取该线的位置继续：最后一次返回了页的读取的 `nextCursor`。此前没有读过时，一条线第一次读父线从它的切点开始，`main` 第一次读一条线从该线的第一个事件开始。
   - 显式 `after` 从该点读取。读父线时，低于切点的值会抬到切点，因为切点之前的事件已经是这条线自己的历史。`main` 的值原样使用，所以 `after: 0` 会从一条线的开头重读。
   - 每次成功读取都把游标移到它的 `nextCursor`，显式 `after` 的读取也一样；以最后一次为准。游标是调用方自己那条线的事实：BranchLine 从调用方自己的 `step/tool-use` 和 `step/tool-result` 折叠得到，所以重载和压缩都能重建它。

@@ -32,8 +32,12 @@ TimelineTree reloads it with the services it injects.
 
 `read` renders one page of the target line's events, one item each: input,
 text, tool call, tool result and turn end. A tool result whose call lies on an
-earlier page carries no name: each page is rendered on its own. The target is
-the line the caller was cut from, and on `main` a tool line it opened; with no
+earlier page carries no name: each page is rendered on its own. A tool
+result with declared effects carries them on its item, absent when the
+result declared none, a path verbatim and a command cut at its 200th
+character with the cut marked (session boundary A.6; the compaction digest
+shares the rule). The target is the line the caller was cut from, and on
+`main` a tool line it opened; with no
 `after`, the read continues after the caller's last successful read of that
 line, which the line's BranchLine folds from its own `tool/use` and
 `tool/result` (design [§6](../../../design/timeline-branches.md#6-messages-between-lines)).
