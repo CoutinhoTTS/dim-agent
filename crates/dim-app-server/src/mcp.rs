@@ -110,13 +110,16 @@ pub(crate) fn sources_in_precedence(project: Option<usize>) -> impl Iterator<Ite
 }
 
 /// Server-side configuration, including secrets. Not a wire or logging type.
-/// For a project entry, the configuration is effective: its enablement comes
-/// from the user's record (`config::effective`).
+/// For a project entry the configuration is the effective view: the overlay
+/// is merged, the workspace `cwd` is joined and the enablement comes from the
+/// user's record (`config::effective`). Environment references stay as the
+/// user wrote them; only the resolved entry's expanded copy is what a
+/// connection runs.
 #[derive(Clone)]
 pub struct McpServerEntry {
     pub source: McpSource,
     pub configuration: McpServerSettings,
-    /// Names the effective configuration references, as written.
+    /// Names the effective view references, as written.
     pub referenced_variables: BTreeSet<String>,
     /// Referenced names that are unset and have no default.
     pub unset_variables: BTreeSet<String>,
