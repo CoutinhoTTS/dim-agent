@@ -193,7 +193,9 @@ impl Connection {
             }
         }
         if window {
-            let tree = session.session_service::<TreeCommands>().map_err(history_error)?;
+            let tree = session
+                .session_service::<TreeCommands>()
+                .map_err(history_error)?;
             let turn = if params.latest_turn {
                 turn_window(&tree, branch, through).await?
             } else {
@@ -575,7 +577,9 @@ async fn window_page(
     window_start: u64,
 ) -> Result<Vec<Arc<dim_agent_types::AgentEvent>>, RpcError> {
     if through > 0 {
-        read.batch_end(branch, through).await.map_err(history_error)?;
+        read.batch_end(branch, through)
+            .await
+            .map_err(history_error)?;
     }
     let top = before.saturating_sub(1).min(through);
     if top == 0 || top < window_start || limit == 0 {
