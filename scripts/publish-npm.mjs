@@ -93,7 +93,7 @@ for (const name of names) {
 }
 
 console.log(`Validated ${archives.length} npm packages for ${version} (${sourceCommit}).`);
-if (mode === '--publish' || mode === '--publish-local') {
+if (mode) {
   if (tag === 'alpha') {
     const listed = spawnSync('npm', ['view', 'dimcode', 'versions', '--json',
       '--registry', 'https://registry.npmjs.org'], { encoding: 'utf8' });
@@ -132,10 +132,12 @@ if (mode === '--publish' || mode === '--publish-local') {
       pending.push(archive);
     }
   }
-  for (const archive of pending) {
-    const published = spawnSync('npm', ['publish', archive, '--access', 'public', '--tag', tag,
-      '--ignore-scripts', '--registry', 'https://registry.npmjs.org'], { stdio: 'inherit' });
-    assert.ifError(published.error);
-    assert.equal(published.status, 0, `npm publish failed: ${path.basename(archive)}`);
+  if (mode !== '--check-release') {
+    for (const archive of pending) {
+      const published = spawnSync('npm', ['publish', archive, '--access', 'public', '--tag', tag,
+        '--ignore-scripts', '--registry', 'https://registry.npmjs.org'], { stdio: 'inherit' });
+      assert.ifError(published.error);
+      assert.equal(published.status, 0, `npm publish failed: ${path.basename(archive)}`);
+    }
   }
 }

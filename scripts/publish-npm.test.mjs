@@ -74,9 +74,11 @@ printf "%s\\n" "$*" >> "$PUBLISH_LOG"
   return { root, names, manifest, release, log, run };
 }
 
-test('validates Release packages without accessing npm or publishing', (t) => {
+test('validates Release and registry state without publishing', (t) => {
   const { release, log, run } = fixture(t, '1.2.3-alpha.2');
-  assert.equal(run({ checkRelease: true, registry: 'fail' }).status, 0);
+  assert.equal(run({ checkRelease: true }).status, 0);
+  for (const registry of ['fail', 'mismatch']) assert.notEqual(run({ checkRelease: true, registry }).status, 0);
+  assert.notEqual(run({ checkRelease: true, versions: ['1.2.2-beta.0'] }).status, 0);
   release.draft = true;
   assert.notEqual(run({ checkRelease: true }).status, 0);
   assert.equal(readFileSync(log, 'utf8'), '');

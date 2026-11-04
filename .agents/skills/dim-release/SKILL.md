@@ -65,7 +65,7 @@ git diff --check
 - Confirm the eight packages' trusted publishers and the `npm-release` environment using the linked npm setup instructions. No npm write credentials go to self-hosted jobs.
 - `gh workflow run npm-publish.yml --ref main -f release_tag=vVERSION` performs verification on the self-hosted Linux runner. It schedules no GitHub-hosted job. Do not dispatch it just to review skill/configuration changes.
 - Actual publication requires an explicit npm-publication request, `NPM_ALPHA_PUBLISH_ENABLED=true`, and the same command with `-f publish=true`. Keep the switch unset or `false` during setup and ordinary verification; do not silently enable it for a preparation request.
-- The hosted job publishes the verified original tarballs without building or repacking: six platform packages and `dimcode-web`, then `dimcode-alpha`, all on `alpha`. It does not publish `dimcode` or change `latest`/`beta`. Check registry versions/dist-tags and retain the workflow's publication receipt.
+- The hosted job independently downloads the original tarballs and manifest from the GitHub Release and validates their bytes and registry state again. It publishes without building or repacking: six platform packages and `dimcode-web`, then `dimcode-alpha`, all on `alpha`. It does not publish `dimcode` or change `latest`/`beta`. Check registry versions/dist-tags and retain the workflow's publication receipt.
 
 ## Recovery
 

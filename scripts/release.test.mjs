@@ -75,7 +75,7 @@ function entries(archive) {
   return names;
 }
 
-test('workflow actions use immutable commits, including disabled publication',()=>{
+test('workflow actions use immutable commits',()=>{
   const workflows=path.join(root,'.github/workflows');
   for (const file of readdirSync(workflows).filter(file=>/\.ya?ml(?:\.disabled)?$/.test(file))) {
     const source=readFileSync(path.join(workflows,file),'utf8');

@@ -105,7 +105,7 @@ Workflows use GitHub's [default self-hosted OS and architecture labels](https://
 All runners need a current GitHub Actions runner, Git, rustup, a C/C++ toolchain, tar and Bash. Actions installs Node from `.node-version`; Rust is pinned by `rust-toolchain.toml`, and release jobs install their Rust target. PR runners must be isolated from release credentials and private networks. Apply GitHub's approval policy before running untrusted PRs on self-hosted machines.
 
 - macOS: install Xcode Command Line Tools and accept the Xcode license. Apple Clang and its SDK build both architectures.
-- Linux: provision a GNU/Linux baseline suitable for the intended users. On Debian/Ubuntu install `build-essential gcc-aarch64-linux-gnu g++-aarch64-linux-gnu`. The ARM64 job selects that cross compiler, archiver and linker; it does not require emulation. Install `gh` for release assembly.
+- Linux: provision a GNU/Linux baseline suitable for the intended users. On Debian/Ubuntu install `build-essential gcc-aarch64-linux-gnu g++-aarch64-linux-gnu`. The ARM64 job selects that cross compiler, archiver and linker; it does not require emulation. Install `gh` and `jq` for release assembly and npm verification.
 - Windows: install Git for Windows (Bash and tar), PowerShell 7, Visual Studio Build Tools with the x64 and ARM64 MSVC tools and Windows SDK, LLVM/clang-cl, and NASM for x64 assembly. Put `clang-cl` and `nasm` on the runner's PATH. The workflow configures `amd64` or `amd64_arm64` and selects the target MSVC linker by full path to avoid Git Bash's unrelated `link.exe`. [Windows native dependency requirements](https://aws.github.io/aws-lc-rs/requirements/windows.html).
 
 Cross-built executables are inspected for their ELF, Mach-O or PE target architecture. Staging runs `dimcode --version` on native builds. Cross-target version execution and target-system runtime acceptance require the corresponding system; a successful cross build alone is not that acceptance. Record and verify OS/libc baselines before declaring installation support.
@@ -281,7 +281,7 @@ In each package's npm Settings → Trusted publishing, add GitHub Actions with:
 
 Use only the filename, without `.github/workflows/`. npm requires Node >=22.14.0 and npm >=11.5.1; the workflow uses `.node-version` and checks npm's minimum version. A new trusted publisher must complete its first publication within two days, so configure it close to the intended release. No `NPM_TOKEN` or `NODE_AUTH_TOKEN` secret is required. The repository must be public for npm's automatic provenance generation. [npm trusted publishing documentation](https://docs.npmjs.com/trusted-publishers/).
 
-Create the GitHub `npm-release` environment and restrict it to the `main` branch. After all eight publishers are configured and a release is ready, set the repository Actions variable `NPM_ALPHA_PUBLISH_ENABLED=true`. Setting it alone does not schedule a runner or publish a package.
+Create the GitHub `npm-release` environment and restrict it to the `main` branch. This configuration has no required environment reviewer: repository write access and an explicit workflow dispatch with `publish=true` authorize publication. After all eight publishers are configured and a release is ready, set the repository Actions variable `NPM_ALPHA_PUBLISH_ENABLED=true`. Setting it alone does not schedule a runner or publish a package.
 
 Release construction and npm publication are separate operations. Review and publish the GitHub draft first. The npm workflow has only `workflow_dispatch`; it takes the tag of an existing **non-draft** GitHub Release and can run from `main` regardless of that release's age:
 
@@ -289,7 +289,7 @@ Release construction and npm publication are separate operations. Review and pub
 gh workflow run npm-publish.yml --ref main -f release_tag=vX.Y.Z-alpha.N
 ```
 
-The command above performs verification only and never schedules a GitHub-hosted runner. It downloads the original eight `.tgz` attachments and manifest, then checks published status, exact package names, versions, source commit and digests with `publish-npm.mjs --check-release`. It neither rebuilds nor publishes. [Release attachment download](https://cli.github.com/manual/gh_release_download).
+The command above performs verification only and never schedules a GitHub-hosted runner. It downloads the original eight `.tgz` attachments and manifest, then checks published status, exact package names, versions, source commit and digests with `publish-npm.mjs --check-release`. It also reads npm registry metadata to reject conflicting published bytes and an alpha that would overtake the existing `dimcode` beta. It neither rebuilds nor publishes. [Release attachment download](https://cli.github.com/manual/gh_release_download).
 
 For an explicitly authorized publication, with the repository variable enabled:
 
@@ -297,7 +297,7 @@ For an explicitly authorized publication, with the repository variable enabled:
 gh workflow run npm-publish.yml --ref main -f release_tag=vX.Y.Z-alpha.N -f publish=true
 ```
 
-The self-hosted job verifies the originals first and transfers those same archives to the GitHub-hosted job as a one-day artifact. That job rechecks the Release and tag identity, validates the packages again, and publishes with npm OIDC. It runs no build, install or test suite. Retrying the workflow downloads the originals from the Release again, independently of any previous run's artifact retention.
+The self-hosted job verifies the originals first. The GitHub-hosted job independently downloads the original archives and manifest directly from the GitHub Release, rechecks the alpha tag and Release identity, validates the packages and registry state again, and publishes with npm OIDC. It consumes no package bytes from the self-hosted runner and runs no build, install or test suite. Retrying the workflow downloads the originals from the Release again, independently of any previous run's artifact retention.
 
 Publication validates every package before the first registry write. A retry compares an already published version's SHA-512 integrity with the original local archive and skips an exact match. A different archive, authentication error or network error fails; only an explicit registry E404 permits publication. The six platform packages and `dimcode-web` precede `dimcode-alpha`; all eight use the `alpha` dist-tag. `dimcode`, `latest` and `beta` are untouched. An alpha must stay below the newest `dimcode` beta on the registry, because installed TypeScript betas upgrade to the highest prerelease of any identifier; publication checks this before any write.
 

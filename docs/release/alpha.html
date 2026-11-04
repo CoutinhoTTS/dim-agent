@@ -138,7 +138,7 @@ node scripts/publish-alpha.mjs --platform darwin-arm64  # 只发指定平台（�
     <li>
       <strong>发布 npm</strong>
       <code>publish-npm.mjs --publish-local</code> 先发 6 个平台包和 Web，最后发 <code>dimcode-alpha</code>，全部打 <code>alpha</code> tag，然后打印 dist-tags。开了 2FA 的话每个包都会提示输入 OTP。
-      <code>--publish-local</code> 只接受 alpha；beta 和正式版只能从已发布的 GitHub Release 发。
+      <code>--publish-local</code> 只接受 alpha；本仓库尚未配置 Rust beta 和正式版的 CI 发布。
     </li>
     <li>
       <strong>清理</strong>
