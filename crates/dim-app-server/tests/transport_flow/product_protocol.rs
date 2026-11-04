@@ -1,4 +1,6 @@
 use super::*;
+use dim_agent_capabilities::history::read_context_in;
+use dim_agent_runtime::testing::chain_events;
 use rutis::host::CtxHost;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -824,8 +826,7 @@ async fn reconnect_locates_a_published_submission_without_resubmitting() {
             .await;
         let admitted = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if let Some(event) = session
-                    .history("main", None)
+                if let Some(event) = chain_events(&session, "main", ..)
                     .await
                     .unwrap()
                     .into_iter()
@@ -861,8 +862,7 @@ async fn reconnect_locates_a_published_submission_without_resubmitting() {
             .await;
         assert_eq!(absent["result"], json!({"status":"unknown"}));
         let inputs = || async {
-            session
-                .history("main", None)
+            chain_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()
@@ -1383,7 +1383,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
                         "<dim-state source=\"dim/skills/list\" cleared=\"true\"></dim-state>".into()
                     }
                 };
-                let events = session.history("main", None).await.unwrap();
+                let events = chain_events(session, "main", ..).await.unwrap();
                 let delivered = events.iter().rev().find_map(|event| match &event.kind {
                     EventKind::InputMessage(data) => data.blocks.iter().find_map(|block| {
                         let dim_agent_types::InputBlock::Raw { text, .. } = block;
@@ -1862,8 +1862,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     );
     assert_eq!(client.rpc("session.permission.update", json!({"sessionId":sid,"branchId":"main","expectedVersion":policy["result"]["version"],"policy":policy["result"]["policy"]})).await["error"]["data"]["appError"], "permission_conflict");
     async fn project_rule(session: &dim_agent_runtime::Session) -> (String, String) {
-        let context = session
-            .context("main", session.sequence("main").unwrap())
+        let context = read_context_in(session, "main", session.sequence("main").unwrap())
             .await
             .unwrap();
         let system = serde_json::to_string(
@@ -1903,8 +1902,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
             )
             .await,
     );
-    let context = session
-        .context("main", session.sequence("main").unwrap())
+    let context = read_context_in(&session, "main", session.sequence("main").unwrap())
         .await
         .unwrap();
     assert_eq!(
@@ -3177,7 +3175,7 @@ async fn mcp_app_methods_are_session_built_ins_that_json_rpc_serves() {
         "no endpoint in a reply"
     );
 
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert!(
         events.iter().all(|event| !matches!(
             event.kind,
@@ -3194,5 +3192,412 @@ async fn mcp_app_methods_are_session_built_ins_that_json_rpc_serves() {
     server.join().await.unwrap();
     stop.cancel();
     server_task.await.unwrap().unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// #951: a move names an entry, not a broken row: a broken source answers
+/// invalid config, a broken destination conflicts, and nothing moves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_move_refuses_broken_sources_and_destinations() {
+    let home =
+        std::path::PathBuf::from("/tmp").join(format!("dm-move-broken-{}", uuid::Uuid::new_v4()));
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project = std::fs::canonicalize(&project).unwrap();
+    std::fs::write(
+        home.join("mcp.json"),
+        json!({"mcpServers":{
+            "broken-user": {"type": "ws", "url": "wss://broken.test"},
+            "clash": {"command": "echo"}
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join(".mcp.json"),
+        json!({"mcpServers":{
+            "broken-project": {"command": ""},
+            "clash": {"type": "ws", "url": "wss://clash.test"}
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    let user_revision = catalog["result"]["userRevision"].clone();
+    let project_revision = catalog["result"]["projectRevision"].clone();
+    let servers = catalog["result"]["servers"].as_array().unwrap();
+    assert!(
+        !servers
+            .iter()
+            .any(|server| server["id"] == "broken-user" || server["id"] == "broken-project")
+    );
+    assert!(servers.iter().any(|server| server["id"] == "clash"));
+    let invalid = catalog["result"]["invalid"].as_array().unwrap();
+    assert!(
+        invalid
+            .iter()
+            .any(|entry| entry["id"] == "broken-user" && entry["source"] == "user")
+    );
+    assert!(
+        invalid
+            .iter()
+            .any(|entry| entry["id"] == "broken-project" && entry["source"] == "project")
+    );
+
+    for (id, from, to, expected) in [
+        ("broken-user", "user", "project", "mcp_invalid_config"),
+        ("broken-project", "project", "user", "mcp_invalid_config"),
+        ("clash", "user", "project", "mcp_move_conflict"),
+    ] {
+        let refused = client
+            .rpc(
+                "mcp.move",
+                json!({"id":id,"from":from,"to":to,"cwd":project,
+        "expectedFromVersion": if from == "user" { user_revision.clone() } else { project_revision.clone() },
+        "expectedToVersion": if to == "user" { user_revision.clone() } else { project_revision.clone() }}),
+            )
+            .await;
+        assert_eq!(
+            refused["error"]["data"]["appError"], expected,
+            "{id} {from}->{to}: {refused}"
+        );
+    }
+    let after = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&after);
+    assert_eq!(after["result"]["userRevision"], user_revision);
+    assert_eq!(after["result"]["projectRevision"], project_revision);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// #951: over the RPC path too, `null` in an optional member means absent;
+/// the saved entry loads as a server.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_save_reads_null_optional_members_as_absent() {
+    let home = std::path::PathBuf::from("/tmp").join(format!("dm-null-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let before = client.rpc("mcp.catalog", json!({"cwd":home})).await;
+    assert_ok(&before);
+    assert_ok(
+        &client
+            .rpc(
+                "mcp.save",
+                json!({"source":"user","id":"nullable","expectedVersion":before["result"]["userRevision"],
+        "configuration":{"type":"http","url":"https://example.invalid/mcp","enabled":null,"auth":null,"oauth":null}}),
+            )
+            .await,
+    );
+    let before = client.rpc("mcp.catalog", json!({"cwd":home})).await;
+    assert_ok(&before);
+    assert_ok(
+        &client
+            .rpc(
+                "mcp.save",
+                json!({"source":"user","id":"nullable-command","expectedVersion":before["result"]["userRevision"],
+        "configuration":{"type":null,"command":"never-start-this-fixture","enabled":null,"auth":null,"oauth":null}}),
+            )
+            .await,
+    );
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":home})).await;
+    assert_ok(&catalog);
+    assert!(
+        catalog["result"]["invalid"].as_array().unwrap().is_empty(),
+        "{catalog}"
+    );
+    let servers = catalog["result"]["servers"].as_array().unwrap();
+    let nullable = servers
+        .iter()
+        .find(|entry| entry["id"] == "nullable")
+        .unwrap();
+    assert_eq!(nullable["transport"], "http");
+    let command = servers
+        .iter()
+        .find(|entry| entry["id"] == "nullable-command")
+        .unwrap();
+    assert_eq!(command["transport"], "stdio");
+    let db = rusqlite::Connection::open(home.join("native/dimcode.sqlite")).unwrap();
+    let stored: String = db
+        .query_row(
+            "SELECT document FROM settings_documents WHERE source='user/mcp'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stored: Value = serde_json::from_str(&stored).unwrap();
+    for member in ["auth", "oauth", "enabled"] {
+        assert!(
+            stored["mcpServers"]["nullable"].get(member).is_none(),
+            "{member}: {stored}"
+        );
+        assert!(
+            stored["mcpServers"]["nullable-command"]
+                .get(member)
+                .is_none(),
+            "{member}: {stored}"
+        );
+    }
+    assert_eq!(stored["mcpServers"]["nullable"]["type"], "http");
+    assert!(
+        stored["mcpServers"]["nullable-command"]
+            .get("type")
+            .is_none(),
+        "{stored}"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// #951: a document decodes entry by entry. A broken entry is reported in
+/// `invalid` with its field and expected kind, never a value, and is not a
+/// server; it is removable and replaceable, while an edit, enable, test or
+/// inspect is refused with its error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_broken_entries_are_reported_and_managed_entry_by_entry() {
+    let home = std::path::PathBuf::from("/tmp").join(format!("dm-broken-{}", uuid::Uuid::new_v4()));
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project = std::fs::canonicalize(&project).unwrap();
+    let marker = "qzfvr-ptlma-w8xke-3d1s";
+    let user_file = json!({"mcpServers": {
+        "keep": {"command": "legacy-server", "args": ["--flag"], "future": {"keep": true}},
+        "stream": {"type": "streamable-http", "url": "https://stream.test/mcp"},
+        "broken": {"type": "ws", "url": "wss://broken.test"},
+        "mover": {"command": "move-server", "env": {"TOKEN": "private"}}
+    }});
+    let project_file = json!({"mcpServers": {
+        "project-keep": {"type": "sse", "url": "https://project.test/sse"},
+        "project-broken": {"type": "http", "url": "https://broken.test/mcp",
+                            "headers": {"Authorization": {"leak": marker}}}
+    }});
+    std::fs::write(home.join("mcp.json"), user_file.to_string()).unwrap();
+    std::fs::write(project.join(".mcp.json"), project_file.to_string()).unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    let servers = catalog["result"]["servers"].as_array().unwrap();
+    assert!(servers.iter().any(|server| server["id"] == "keep"));
+    assert!(servers.iter().any(|server| server["id"] == "project-keep"));
+    let stream = servers
+        .iter()
+        .find(|server| server["id"] == "stream")
+        .unwrap();
+    assert_eq!(stream["transport"], "http");
+    assert!(
+        !servers
+            .iter()
+            .any(|server| server["id"] == "broken" || server["id"] == "project-broken")
+    );
+    let invalid = catalog["result"]["invalid"].as_array().unwrap();
+    let broken = invalid
+        .iter()
+        .find(|entry| entry["id"] == "broken")
+        .unwrap();
+    assert_eq!(broken["source"], "user");
+    assert!(
+        broken["error"]
+            .as_str()
+            .unwrap()
+            .contains("field type must be http or sse")
+    );
+    let project_broken = invalid
+        .iter()
+        .find(|entry| entry["id"] == "project-broken")
+        .unwrap();
+    assert_eq!(project_broken["source"], "project");
+    assert!(
+        project_broken["error"]
+            .as_str()
+            .unwrap()
+            .contains("field headers.Authorization must be a string")
+    );
+    assert!(
+        !catalog.to_string().contains(marker),
+        "a reply repeated a value"
+    );
+    let user_revision = catalog["result"]["userRevision"].clone();
+    let project_revision = catalog["result"]["projectRevision"].clone();
+
+    for id in ["broken", "project-broken"] {
+        let source = if id == "broken" { "user" } else { "project" };
+        let revision = if source == "user" {
+            user_revision.clone()
+        } else {
+            project_revision.clone()
+        };
+        for method in ["mcp.configuration", "mcp.inspect", "mcp.test"] {
+            let refused = client
+                .rpc(method, json!({"source":source,"id":id,"cwd":project}))
+                .await;
+            assert_eq!(
+                refused["error"]["data"]["appError"], "mcp_invalid_config",
+                "{method} did not refuse the broken entry"
+            );
+        }
+        let refused = client
+            .rpc(
+                "mcp.update",
+                json!({"source":source,"id":id,"cwd":project,
+                       "expectedVersion":revision,
+                       "patch":{"command":"other"}}),
+            )
+            .await;
+        assert_eq!(
+            refused["error"]["data"]["appError"], "mcp_invalid_config",
+            "mcp.update did not refuse the broken entry"
+        );
+        let refused = client
+            .rpc(
+                "mcp.set_enabled",
+                json!({"source":source,"id":id,"cwd":project,
+                       "expectedVersion":revision,
+                       "enabled":true}),
+            )
+            .await;
+        assert_eq!(
+            refused["error"]["data"]["appError"], "mcp_invalid_config",
+            "mcp.set_enabled did not refuse the broken entry"
+        );
+    }
+
+    // A save replaces the broken entry with a valid definition.
+    assert_ok(
+        &client
+            .rpc(
+                "mcp.save",
+                json!({"source":"user","id":"broken","cwd":project,
+        "expectedVersion":catalog["result"]["userRevision"],
+        "configuration":{"type":"http","url":"https://replacement.test/mcp"}}),
+            )
+            .await,
+    );
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    let servers = catalog["result"]["servers"].as_array().unwrap();
+    let saved = servers
+        .iter()
+        .find(|server| server["id"] == "broken")
+        .unwrap();
+    assert_eq!(saved["transport"], "http");
+    assert!(
+        !catalog["result"]["invalid"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["id"] == "broken")
+    );
+
+    // A broken project entry takes no overlay. Its kept record belongs to
+    // the entry a move created and a save replaces, so the save deletes it
+    // at the generation it read and the new entry starts without withheld
+    // values.
+    assert_ok(
+        &client
+            .rpc(
+                "mcp.move",
+                json!({"id":"mover","from":"user","to":"project","cwd":project,
+        "expectedFromVersion":catalog["result"]["userRevision"],
+        "expectedToVersion":catalog["result"]["projectRevision"]}),
+            )
+            .await,
+    );
+    let mut rewritten = project_file.clone();
+    rewritten["mcpServers"]["mover"] = json!({"type": "ws", "url": "wss://mover.test"});
+    std::fs::write(project.join(".mcp.json"), rewritten.to_string()).unwrap();
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    for id in ["project-broken", "mover"] {
+        assert!(
+            catalog["result"]["invalid"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["id"] == id),
+            "{id} is not reported as broken"
+        );
+    }
+    assert_ok(
+        &client
+            .rpc(
+                "mcp.save",
+                json!({"source":"project","id":"mover","cwd":project,
+        "expectedVersion":catalog["result"]["projectRevision"],
+        "configuration":{"command":"other"}}),
+            )
+            .await,
+    );
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    assert!(
+        !catalog["result"]["invalid"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["id"] == "mover")
+    );
+    assert!(
+        catalog["result"]["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|server| server["id"] == "mover")
+    );
+    let configuration = client
+        .rpc(
+            "mcp.configuration",
+            json!({"source":"project","id":"mover","cwd":project}),
+        )
+        .await;
+    assert_ok(&configuration);
+    assert_eq!(configuration["result"]["secretsInUserScope"], false);
+    assert_ok(
+        &client
+            .rpc(
+                "mcp.remove",
+                json!({"source":"project","id":"project-broken","cwd":project,
+        "expectedVersion":catalog["result"]["projectRevision"]}),
+            )
+            .await,
+    );
+    let persisted: Value =
+        serde_json::from_slice(&std::fs::read(project.join(".mcp.json")).unwrap()).unwrap();
+    assert!(persisted["mcpServers"].get("project-broken").is_none());
+    assert_eq!(
+        persisted["mcpServers"]["project-keep"],
+        project_file["mcpServers"]["project-keep"]
+    );
+    server.shutdown();
+    server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }

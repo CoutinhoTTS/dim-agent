@@ -4,7 +4,8 @@ use dim_agent_capabilities::{
     history::HistoryRenderer,
     host::*,
 };
-use dim_agent_runtime::{testing::MinimalHost, *};
+use dim_agent_runtime::testing::{branch_events, chain_events, timeline_events};
+use dim_agent_runtime::{TimelineQueryScope, testing::MinimalHost, *};
 use dim_agent_types::*;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -180,7 +181,7 @@ async fn model_adoption_preserves_enabled_tools_on_initialization_and_refresh() 
                 .await
                 .unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             let call = events
                 .iter()
                 .rev()
@@ -269,7 +270,7 @@ async fn input_guide_survives_configuration_refresh_and_revocation_without_dupli
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let call = events
             .iter()
             .rev()
@@ -476,7 +477,7 @@ async fn configuration_publication_preserves_trusted_before_changes_atomically()
                 .unwrap(),
             ConfigureOutcome::Adopted
         );
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         assert_eq!(
             events
                 .iter()
@@ -523,7 +524,7 @@ async fn configuration_publication_preserves_trusted_before_changes_atomically()
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        assert!(session.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind,
+        assert!(chain_events(&session, "main", ..).await.unwrap().iter().any(|event| matches!(&event.kind,
             EventKind::ModelCall(data) if data.configuration.as_ref().is_some_and(|reference| reference.revision == configured.revision))));
         agent.close().await.unwrap();
     }
@@ -566,8 +567,7 @@ async fn prepared_model_call_keeps_its_configuration_while_later_turn_uses_refre
             )
             .await
             .unwrap();
-        let version_one = session
-            .history("main", None)
+        let version_one = chain_events(&session, "main", ..)
             .await
             .unwrap()
             .into_iter()
@@ -634,14 +634,7 @@ async fn prepared_model_call_keeps_its_configuration_while_later_turn_uses_refre
             .unwrap();
         session.idle("main").await.unwrap();
 
-        let child_events = session.history(&child, None).await.unwrap();
-        let child_configured = child_events
-            .iter()
-            .find_map(|event| match &event.kind {
-                EventKind::ContextConfigured(data) => Some(data),
-                _ => None,
-            })
-            .unwrap();
+        let child_events = chain_events(&session, &child, ..).await.unwrap();
         let first_call = child_events
             .iter()
             .find_map(|event| match &event.kind {
@@ -649,6 +642,19 @@ async fn prepared_model_call_keeps_its_configuration_while_later_turn_uses_refre
                 _ => None,
             })
             .unwrap();
+        let child_configured = child_events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ContextConfigured(data)
+                    if first_call.configuration.as_ref().is_some_and(|reference| {
+                        reference.timeline == data.timeline && reference.revision == data.revision
+                    }) =>
+                {
+                    Some(data)
+                }
+                _ => None,
+            })
+            .expect("the first call references a recorded configuration");
         assert_eq!(first_call.request.model_id, "one");
         assert_eq!(
             first_call
@@ -667,13 +673,14 @@ async fn prepared_model_call_keeps_its_configuration_while_later_turn_uses_refre
         assert_eq!(
             first_call.configuration,
             Some(PromptReference {
-                timeline: "main".into(),
+                timeline: version_one.timeline.clone(),
                 revision: version_one.revision.clone(),
-            })
+            }),
+            "the prepared call keeps the configuration it was prepared with"
         );
         assert_eq!(first_call.prompt, version_one.prompt);
 
-        let main_events = session.history("main", None).await.unwrap();
+        let main_events = chain_events(&session, "main", ..).await.unwrap();
         let latest_configured = main_events
             .iter()
             .rev()
@@ -715,6 +722,135 @@ async fn prepared_model_call_keeps_its_configuration_while_later_turn_uses_refre
         assert_eq!(second_call.prompt, latest_configured.prompt);
         agent.close().await.unwrap();
     }
+}
+
+/// A line sends the System its configuration holds. The parent block reaches
+/// the line between two of its turns; each request sends the System its
+/// `configuration` reference holds, and each reference resolves in the line's
+/// chain, which holds the configuration the line inherited.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_line_records_the_system_it_sends_across_a_parent_block() {
+    let host = Arc::new(Prompts(Mutex::new(BTreeMap::new())));
+    let agent = MinimalHost::start(&builder(host)).await.unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    session
+        .configure(
+            ConfigureUpdate {
+                sources: vec![],
+                model: Some(configuration("one")),
+            },
+            "main",
+        )
+        .await
+        .unwrap();
+    session
+        .submit("on main".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let child = session
+        .branch(
+            "main".into(),
+            session.sequence("main").unwrap(),
+            BranchOptions {
+                prompt: "on the line".into(),
+                source: BranchSource::Host {
+                    operation_id: "child".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    session.idle(&child).await.unwrap();
+
+    session
+        .submit("move main".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let mut events = branch_events(&session, &child, ..).await.unwrap();
+    for _ in 0..600 {
+        if parent_block(&events).is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        events = branch_events(&session, &child, ..).await.unwrap();
+    }
+    session
+        .submit("again".into(), InputMode::Queue, &child)
+        .await
+        .unwrap();
+    session.idle(&child).await.unwrap();
+
+    let events = branch_events(&session, &child, ..).await.unwrap();
+    let chain = chain_events(&session, &child, ..).await.unwrap();
+    let calls: Vec<(u64, &ModelCallData)> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => Some((event.sequence, data)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls.len(), 2, "one request per turn on the line");
+    let (block, text) =
+        parent_block(&events[..]).expect("main moved after the first turn, so the line was told");
+    assert!(
+        text.contains(r#"branch="main""#),
+        "the block names the line it was cut from: {text}"
+    );
+    assert!(
+        calls[0].0 < block && block < calls[1].0,
+        "the block reached the line between its two requests: {calls:?} {block}"
+    );
+    let Some(SystemPrompt::Text(first_system)) = calls[0].1.request.system.as_deref() else {
+        panic!("the first request carries a composed system");
+    };
+    assert!(
+        first_system.contains("<dim-branch-parent"),
+        "the line composes the parent entry into its System: {first_system}"
+    );
+    for (sequence, call) in &calls {
+        let reference = call
+            .configuration
+            .as_ref()
+            .unwrap_or_else(|| panic!("the request at {sequence} references a configuration"));
+        let configured = chain
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ContextConfigured(data)
+                    if data.revision == reference.revision
+                        && data.timeline == reference.timeline =>
+                {
+                    Some(data)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!("the request at {sequence} references a missing configuration")
+            });
+        assert_eq!(
+            call.request.system.as_deref(),
+            configured.system.as_ref(),
+            "the request at {sequence} sends the System its configuration holds"
+        );
+    }
+    agent.close().await.unwrap();
+}
+
+/// The `<dim-branch-parent>` block on the line: its sequence and text.
+fn parent_block(events: &[Arc<AgentEvent>]) -> Option<(u64, String)> {
+    events.iter().find_map(|event| match &event.kind {
+        EventKind::InputMessage(data) => data.blocks.iter().find_map(|block| match block {
+            InputBlock::Raw { text, .. } if text.starts_with("<dim-branch-parent") => {
+                Some((event.sequence, text.clone()))
+            }
+            _ => None,
+        }),
+        _ => None,
+    })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -783,7 +919,7 @@ async fn configuration_is_atomic_failure_safe_and_inherited() {
                 .model_id,
             "one"
         );
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let changed = events
             .iter()
             .position(|event| matches!(event.kind, EventKind::PromptChanged(_)))
@@ -814,8 +950,7 @@ async fn configuration_is_atomic_failure_safe_and_inherited() {
                 .is_err()
         );
         assert_eq!(
-            session
-                .history("main", None)
+            chain_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()
@@ -837,7 +972,7 @@ async fn configuration_is_atomic_failure_safe_and_inherited() {
             )
             .await
             .unwrap();
-        let inherited = session.history(&child, None).await.unwrap();
+        let inherited = chain_events(&session, &child, ..).await.unwrap();
         assert!(inherited.iter().any(|event| matches!(&event.kind, EventKind::PromptChanged(data) if data.changes.iter().any(|change| matches!(change, PromptChange::Set { entry } if entry.version == "1")))));
         session.idle(&child).await.unwrap();
         session
@@ -1107,7 +1242,7 @@ async fn initial_configuration_loads_before_start_and_failure_rolls_back() {
         .create_session(SessionConfig::default())
         .await
         .unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert!(matches!(events[0].kind, EventKind::BranchStart(_)));
     assert!(matches!(events[1].kind, EventKind::PromptChanged(_)));
     assert!(matches!(events[2].kind, EventKind::ContextConfigured(_)));
@@ -1240,14 +1375,28 @@ impl DynPlugin for SlowOpening {
                                 let (timeline, completed) = (timeline.clone(), completed.clone());
                                 opening.register(Box::pin(async move {
                                     tokio::time::sleep(Duration::from_millis(200 * step)).await;
-                                    assert!(timeline.local(..=1001).await?.len() >= 1001);
+                                    assert!(
+                                        timeline_events(
+                                            &timeline,
+                                            TimelineQueryScope::Branch,
+                                            ..=1001
+                                        )
+                                        .await?
+                                        .len()
+                                            >= 1001
+                                    );
                                     completed.fetch_add(1, Ordering::SeqCst);
                                     Ok(())
                                 }))?;
                             }
                         } else {
                             opening.register(Box::pin(async move {
-                                assert!(timeline.local(..=1001).await?.len() >= 1001);
+                                assert!(
+                                    timeline_events(&timeline, TimelineQueryScope::Branch, ..=1001)
+                                        .await?
+                                        .len()
+                                        >= 1001
+                                );
                                 let mut dispatched = dispatcher.watch();
                                 for step in 0..7 {
                                     let event = timeline.append(
@@ -1825,7 +1974,7 @@ async fn restoring_a_session_keeps_its_adopted_system_and_model() {
         LoopPhase::Idle
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let configured: Vec<_> = events
         .iter()
         .filter_map(|event| match &event.kind {
@@ -1867,8 +2016,7 @@ async fn restoring_a_session_keeps_its_adopted_system_and_model() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let call = session
-        .history("main", None)
+    let call = chain_events(&session, "main", ..)
         .await
         .unwrap()
         .into_iter()
@@ -1925,7 +2073,7 @@ async fn restoring_a_session_keeps_its_adopted_system_and_model() {
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let configured = events
             .iter()
             .rev()
@@ -1985,7 +2133,7 @@ async fn restoring_a_never_started_session_starts_it() {
         .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(matches!(
-        session.history("main", None).await.unwrap()[0].kind,
+        chain_events(&session, "main", ..).await.unwrap()[0].kind,
         EventKind::BranchStart(BranchStartData { parent: None, .. })
     ));
     agent.close().await.unwrap();
@@ -2019,8 +2167,7 @@ async fn context_only_initial_prompt_is_inherited_and_unchanged_in_a_child() {
         .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(
-        !session
-            .history("main", None)
+        !chain_events(&session, "main", ..)
             .await
             .unwrap()
             .iter()
@@ -2041,8 +2188,7 @@ async fn context_only_initial_prompt_is_inherited_and_unchanged_in_a_child() {
         .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert!(
-        !session
-            .local(&child, ..)
+        !branch_events(&session, &child, ..)
             .await
             .unwrap()
             .iter()
@@ -2106,8 +2252,7 @@ async fn same_body_new_version_reconfigures_but_identical_update_is_unchanged() 
             .unwrap(),
         ConfigureOutcome::Adopted
     );
-    let configured = session
-        .history("main", None)
+    let configured = chain_events(&session, "main", ..)
         .await
         .unwrap()
         .into_iter()
@@ -2327,7 +2472,7 @@ async fn before_retargeting_requires_matching_capabilities_without_remerging_par
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let request = events
             .iter()
             .find_map(|event| match &event.kind {

@@ -1,6 +1,7 @@
 pub mod adapters;
 pub mod agent_loop;
 pub mod approval;
+pub mod auxiliary_model;
 pub(crate) mod branch_input;
 pub mod context_block;
 pub mod context_methods;
@@ -127,6 +128,7 @@ impl PublicService for shell_session::ShellSession {}
 impl PublicService for dyn exec_stop::ExecStop {}
 impl PublicService for workspace_tools::file_reads::FileReads {}
 impl PublicService for timeline_tree::BranchLine {}
+impl PublicService for timeline_tree::TreeCommands {}
 impl PublicService for wait::Wait {}
 impl PublicService for skills::SkillsBranch {}
 impl PublicService for prompt::Prompt {}

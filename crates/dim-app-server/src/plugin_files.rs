@@ -1,6 +1,6 @@
 //! Generic, host-owned file transactions for an explicitly authorized plugin root.
 //! No account formats or provider policy belong at this boundary.
-use dim_agent_capabilities::file_storage::{FileLease, FileStorage, FileStorageError};
+use dim_agent_capabilities::file_storage::{FileLease, FilePath, FileStorage, FileStorageError};
 use dim_agent_runtime::Names;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -270,6 +270,111 @@ fn lease_value(lease: Arc<tokio::sync::Mutex<Option<FileLease>>>, tasks: TaskTra
     )
 }
 
+/// Why a typed file transaction did not run or did not commit.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PluginFileError {
+    #[error("the file store is closed")]
+    Closed,
+    #[error("the file path is outside the authorized root")]
+    InvalidPath,
+    #[error("the stored file is not a version 1 text envelope; it is left unchanged")]
+    InvalidData,
+    #[error("file operation failed: {0}")]
+    Io(String),
+}
+
+fn file_error(error: FileStorageError) -> PluginFileError {
+    match error {
+        FileStorageError::Closed | FileStorageError::Cancelled => PluginFileError::Closed,
+        FileStorageError::InvalidPath(_) => PluginFileError::InvalidPath,
+        FileStorageError::Io(ref error) if error.kind() == io::ErrorKind::InvalidData => {
+            PluginFileError::InvalidData
+        }
+        error => PluginFileError::Io(error.to_string()),
+    }
+}
+
+/// Typed transactions on files under the authorized root, for process plugins
+/// written in Rust. The host's `{version, text}` envelope is read and written
+/// here; a caller sees and returns only the inner text, as the JSON
+/// `pluginFiles` scope exposes it.
+pub struct PluginFileTransactions(Arc<Files>);
+impl PluginFileTransactions {
+    /// Runs `change` on the inner text of `name` under its file lock. `change`
+    /// receives `None` for a missing file. It returns the replacement text
+    /// (`None` keeps the file as it is) and its own result, which the
+    /// transaction returns. An envelope that is not version 1 fails with
+    /// [`PluginFileError::InvalidData`] before `change` runs, and the bytes are
+    /// left as they were.
+    pub async fn transact<R: Send + 'static>(
+        &self,
+        name: &str,
+        change: impl FnOnce(Option<&str>) -> (Option<String>, R) + Send + 'static,
+    ) -> Result<R, PluginFileError> {
+        let files = self.0.clone();
+        let path = files
+            .storage
+            .path(files.root, name)
+            .map_err(|_| PluginFileError::InvalidPath)?;
+        let admission = files.admission.lock().unwrap();
+        if files.stopping.is_cancelled() {
+            return Err(PluginFileError::Closed);
+        }
+        let stopping = files.stopping.child_token();
+        let storage = files.storage.clone();
+        let owner = files.tasks.token();
+        let task = files.tasks.spawn(async move {
+            let _owner = owner;
+            transact_file(&storage, &path, &stopping, change).await
+        });
+        drop(admission);
+        task.await
+            .unwrap_or_else(|error| Err(PluginFileError::Io(error.to_string())))
+    }
+}
+
+async fn transact_file<R>(
+    storage: &Arc<FileStorage>,
+    path: &FilePath,
+    stopping: &CancellationToken,
+    change: impl FnOnce(Option<&str>) -> (Option<String>, R),
+) -> Result<R, PluginFileError> {
+    let mut lease = loop {
+        match storage.lock(path, stopping).await {
+            Ok(lease) => break lease,
+            Err(FileStorageError::Locked) => tokio::select! {
+                _ = stopping.cancelled() => return Err(PluginFileError::Closed),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {},
+            },
+            Err(error) => return Err(file_error(error)),
+        }
+    };
+    let current = match lease.read(stopping).await {
+        Ok(bytes) => match serde_json::from_slice::<StoredFile>(&bytes) {
+            Ok(StoredFile {
+                version: FORMAT_VERSION,
+                text,
+            }) => Some(text),
+            _ => return Err(PluginFileError::InvalidData),
+        },
+        Err(FileStorageError::Io(error)) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(file_error(error)),
+    };
+    let (next, result) = change(current.as_deref());
+    if let Some(text) = next {
+        let bytes = serde_json::to_vec(&StoredFile {
+            version: FORMAT_VERSION,
+            text,
+        })
+        .expect("text records contain only serializable fields");
+        lease
+            .replace(bytes, private_permissions(), stopping)
+            .await
+            .map_err(file_error)?;
+    }
+    Ok(result)
+}
+
 struct Dispatch(Arc<Files>);
 impl HostDispatch for Dispatch {
     fn methods(&self) -> Option<serde_json::Value> {
@@ -331,8 +436,9 @@ impl DynPlugin for PluginFilesPlugin {
             })?;
             ctx.provide_at(
                 host_key("pluginFiles"),
-                Arc::new(Dispatch(files)) as Arc<dyn HostDispatch>,
+                Arc::new(Dispatch(files.clone())) as Arc<dyn HostDispatch>,
             )?;
+            ctx.provide_as::<PluginFileTransactions>(Arc::new(PluginFileTransactions(files)))?;
             Ok(Effect::Done)
         })
     }

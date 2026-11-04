@@ -7,13 +7,19 @@ This repository is Dim: a Rust coding agent (Agent v4), its App Server and the n
 - Set up the toolchain and workspace according to the [build environment](docs/architecture/build.md); it applies to both local development and CI.
 - Write code, comments and commit messages in English. Documentation may be written in English or Chinese; translations live under `docs/zh/`, mirroring `docs/`.
 - Illustrate terminal UI and interaction changes with ASCII diagrams.
-- Follow the [CLI command menu contract](docs/design/cli-commands.md#command-menu) for category grouping, ordering and keyboard-only actions in both TUI modes.
+- Follow the [CLI command menu contract](docs/design/cli-commands.md#command-menu) for the curated order and keyboard-only actions in both TUI modes.
 - The corresponding design document is authoritative. When a requirement conflicts with the design, update the document and get confirmation first.
 - After each design or implementation, do an ablation review: check whether every change is necessary and prefer removing abstractions, wrappers, intermediate state and extra branches that do not serve the requirement. Where a simplification is plausible, try it and confirm the result still satisfies the requirement and interface contracts within the affected scope. For structure that is required, state its purpose; do not deliberately revert fixes or manufacture test failures to prove necessity. If nothing can be removed, say so instead of inventing experiments.
 - Process serves delivery; keep effort proportional to the complexity and risk of the change. Handle ordinary changes directly and only delegate complex work that can progress independently. Tracking issues individually does not mean a separate agent, report or full verification run per issue.
 - Development and tests use an isolated `--home` (or `DIMCODE_HOME`); never touch the product home `~/.dimcode`.
 - This is a public repository. The Dim account plugin (`crates/dim-oauth`) lives here, but its OAuth client IDs and any credentials stay out of it: they are build-time secrets; see the [managed provider boundary](docs/architecture/development.md#managed-provider-boundary).
 - Review correctness, security, compatibility and unnecessary abstraction before committing. Commit complete, reviewable units on their declared parent, with their documentation and observable-behavior tests. Never commit secrets or scratch experiments.
+
+## Issues and pull requests
+
+- Prefer a linked primary issue on every pull request: `Fixes #N` when it completes the issue, `Refs #N` when it only advances it. Open the issue first when the change's scope, design, or acceptance needs agreement; small mechanical changes — routine dependency updates, typo or formatting fixes — may skip it. When in doubt, open the issue; it is cheap.
+- Before starting, search open issues and pull requests for the same change and read the assignee and comments. If someone already owns it, coordinate in that issue instead of opening a parallel branch or pull request.
+- When the change has an issue, assign it to yourself before opening the pull request; if you cannot assign it, ask a maintainer in the issue. If you stop working on it, unassign yourself and leave a status comment.
 
 ## Data and interface conventions
 
@@ -114,5 +120,5 @@ Rust parts are written this way; the full binding is [How Dim uses rutis, append
 - A feature is one process plugin that registers its Session and branch parts with the part registry (`partRegistry`, `PartRegistry::register`); they are withdrawn when it unloads. A plugin that owns nothing for the process is a `Feature` (`Feature::new(name).session(part, make).branch(part, make)`, or `.when(scope, part, generator)`), added with `AgentBuilder::feature`; one that owns process state is its own plugin, added with `AgentBuilder::plugin`. The install functions are the profile: `require_feature` and `require_part` make parts required. An App Server process row is `register_part`, and `AgentBuilder::plugin_rows` places the builder's plugins. External crates export parts; the runtime keeps no part enum.
 - `AgentBuilder::session_value` provides a host value under a Session name, `AgentBuilder::process_value` under a process name.
 - Background tasks wait for publication: branch parts depend on `Keyed<BranchLifecycle>` (branch started and published), Session parts on `Keyed<SessionLifecycle>` (Session published by its Agent), and both wait for `activated()`.
-- Owner state is published through `StateCell` and read externally through `Session::get/on`; a branch's runtime memory state lives in its TimelineContext. External input enters through `Session::input`/`Branch::input`. Ordinary callers read through `Session::history/local/trace/get/on` or `Branch`; the facades' service reads take only `PublicService` types registered in the matching group.
+- Owner state is published through `StateCell` and read externally through `Session::get/on`; a branch's runtime memory state lives in its TimelineContext. External input enters through `Session::input`/`Branch::input`. Ordinary callers read through `Session::query/get/on` or `Branch::query`; the facades' service reads take only `PublicService` types registered in the matching group.
 - Host ports include `PrepareModelHost`, `ModelHost` and `ToolHost`; the [generated services](docs/architecture/rust-agent/generated/services.md) list them all.

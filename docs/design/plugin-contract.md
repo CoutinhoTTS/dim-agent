@@ -109,7 +109,7 @@ R4). This table says what each name Dim defines is for.
 | `sessionPermissions` | process | Agents | yes | Marked `#[rutis::service]` |
 | `sessionMetadata` | process | SessionStore | yes | SessionTitle is the title's one writer |
 | `settings` | process | Settings | yes | Business configuration |
-| `auxiliaryModel` | process | App Server | yes | Auxiliary model requests |
+| `auxiliaryModel` | process | the profile's model-selection owner | yes | Auxiliary model requests |
 | `pluginFiles` | process | host | yes, when the host supplies a root | A process part's own files |
 | `workflowFiles` | process | App Server | yes | Marked `#[rutis::service]` |
 | `collaborationMembers:<kind>` | process | the member provider | designed, not implemented | [ExternalAgent](plugins/ExternalAgent.md); registers with Collaboration when built (rutis usage R6) |
@@ -118,7 +118,7 @@ R4). This table says what each name Dim defines is for.
 | `sessionLifecycle` | `session` | SessionScope | yes | `activated`, `closing`, `hold`, `release`: a hold is an id the calling row owns, ended by `release(id)` or that row's unload |
 | `sessionConfig` | `session` | SessionScope | yes | `get()`: the creation-time configuration, the snapshot a tool call carries |
 | `timeline` | `branch` | BranchScope | yes, except `before` | `append`, the published sequence and the event query (§5.4); the query reaches other languages with its declaration |
-| `dispatcher` | `branch` | BranchScope | yes, `consume`, `listen` and reads; their Rust forms `follow` and `subscribe` are Rust-only | Ordered consumption (§5.2) |
+| `dispatcher` | `branch` | BranchScope | yes, `consume`, `listen` and reads; their Rust forms are the same `consume` and `subscribe`, which is Rust-only | Ordered consumption (§5.2) |
 | `branchLifecycle` | `branch` | BranchScope | yes | `activated`, `closing` |
 | `timelineIdentity` | `branch` | BranchScope | yes | `{sessionId, branchId}` |
 
@@ -164,14 +164,24 @@ so only in-process Rust registers one.
 
 A part consumes a branch's facts by registering with its `dispatcher` and naming the keys it consumes:
 an exact `domain/name`, `domain/*` or `*`. The Dispatcher delivers them in sequence order, one fact at a
-time, to every part registered in the current generation. A new generation rebuilds as the
+time, to every part registered in the current generation. It delivers live facts only; a part that
+rebuilds reads its own history (§5.4). A new generation rebuilds as the
 [capability reload protocol](../architecture/rust-agent/single-tree.md#能力重载协议) describes.
 
-A part that rebuilds registers once for both (R1). The registration fixes the cutoff `S`, hands its
-handler the replay, the branch's own facts through `S` as `local` reads them and not filtered by the
-keys, then each matching fact after `S`, in sequence order and none twice. Live facts wait until the
-replay is handled, so the work it leaves, such as failing the operations a previous generation left
-open, is done in the replay. Registering, reading the cutoff and rebuilding by hand stays valid.
+A part that rebuilds registers once for both (R1), under the name `consume` in every binding: it
+subscribes to the keys first, holds the matching facts, runs its rebuild, which reads the facts it
+folds through the branch's `timeline` query including its publishing facts (§5.4) and returns the cutoff
+that read took; then it delivers the held facts above the cutoff and each later matching fact, in
+sequence order and none twice. Live facts wait until the rebuild returns, so the work the rebuild
+leaves, such as failing the operations a previous generation left open, is done before them. The
+handler and the rebuild are functions in every binding: a closure in Rust, where the registration
+is `dispatcher.consume`, and a function in a part in another language, whose binding passes it the
+same way. The read belongs to the part.
+
+The kinds the read selects are the kinds its rebuild folds, which are not always the keys it
+consumes: a rebuild may fold the terminals of the operations its part issues. The cutoff belongs to
+the read, so a part that pages a selection takes the cutoff of its last page; a caller that fixes an
+earlier one replays what lies between the two.
 
 ### 5.3 Bus events
 
@@ -195,7 +205,7 @@ Public bus events:
 | `settings/{source}` | Settings | `{source, scope, revision}` | A business source changed |
 | `settings/projects` | App Server Settings | `{root, cwd}` | A project root was authorized |
 | `skills/catalog` | SkillsCatalog | catalog version | The Skill catalog advanced |
-| `agent/session-restored`, `agent/unloaded-session-deleted` | Agents | ids | Host-internal, consumed by Collaboration |
+| `agent/session-restored`, `agent/unloaded-session-deleted` | Agents | ids | Host-internal, consumed by Collaboration and Provider; [Session loading](appserver/session-deletion-and-fork.md#65-opening-the-fork) |
 
 *Today:* the events are implemented as listed, and TypeScript rows listen to them directly.
 
@@ -211,6 +221,7 @@ A part reads facts through its branch's `timeline` service with one bounded quer
 | Predicate | One equality against one JSON scalar. The path is a sequence of field names inside the event's data joined by dots, with no array indexing and no wildcards |
 | From | Where the read begins, named by an event id or by a sequence; the event it names is part of the read. A branch read takes it on that branch; a chain read begins in the segment it names and carries on, skipping the segments before it |
 | Order | The key the reply is ordered by — the sequence — and the direction: ascending (oldest first) or descending (newest first). A chain read orders by chain position first |
+| Publishing facts | Whether the queried branch's own facts written but not yet published are part of the read (§5.2); by default they are not. An ancestor is read to its cut either way |
 | Page | How many matching events the read skips, and how many it returns; the second is nonzero by type, so no read is unbounded. Both count events, not storage rows |
 
 The elements combine: an event is selected when it satisfies all of them, and flags named together
@@ -222,8 +233,9 @@ first event of its scope, and a flag it does not name constrains nothing: no omi
 Paging is skipping: a caller repeats the query with a larger skip, and a page shorter than the
 count is what says the selection is exhausted. A page does not align with an atomic batch — it may
 end inside one and the next page carries the rest, which a consumer folding in order handles. A
-read is taken at what is published when it runs, so a consumer that folds several pages drops what
-it has already folded.
+read is taken at what is published when it runs, unless it asks for the facts still publishing,
+which takes the write head instead; either way a consumer that folds several pages drops what it has
+already folded.
 
 The path's spelling is fixed here and not in a binding: there is one form, the one above, and the
 storage translates that form. A binding writes this path syntax and invents no other.
@@ -231,7 +243,7 @@ storage translates that form. A binding writes this path syntax and invents no o
 The selection is what the query is for. Its elements describe events, not a slice of the store, so
 the store executes them where the events are kept and returns the page those events form. A read
 never returns a fact above the coverage of the branch it reads: an ancestor to its cut, this branch
-to what is published, which the service bounds and no caller states. A
+to the cutoff the service takes, which no caller states as a sequence. A
 selection the store can execute from an index costs the page; one it cannot — an equality on a field
 it holds no index for, a flag set with no index of its own, or any selection in a store that filters
 in memory — costs the scoped range and proves the end of the scope the same way. A
@@ -241,6 +253,15 @@ event's chain position with it, so a caller reads where an event sits without as
 The query returns facts; it does not fold, project or aggregate them. What a part folds from facts
 is its own state and stays with it ([ADR 002](../adr/002-plugin-scope.md) D1). A part that needs a
 whole prefix reads pages and folds them itself.
+
+A part that rebuilds asks the same query for its publishing facts
+([ADR 020](../adr/020-timeline-read-convergence.md) D3). That read answers what the query would,
+plus this branch's facts written before it ran that are not yet published, in sequence order and
+without overlapping the published page. The reply carries `through`, the cutoff the read took: the
+published head, or the write head when the request asked for them. A rebuild that then receives live
+events from that cutoff loses and repeats nothing. The cutoff belongs to the read: a caller that
+fixes an earlier one replays what lies between the two. Paging is skipping over both parts, the
+published page first.
 
 | Input | Result |
 | --- | --- |
@@ -339,21 +360,24 @@ design is merged. R4–R7 concern how Dim uses rutis and are in
 
 - **Blocked:** the subscribe-and-rebuild steps of the [capability reload protocol](../architecture/rust-agent/single-tree.md#能力重载协议). Every Capability repeats them by hand. Examples are
   `crates/dim-agent-capabilities/src/wait.rs:361-380` and `runtime/plugins/goal/branch.ts:120-128`.
-  A mistake (a cutoff read before subscribing, `history` instead of `local`) silently loses or
-  double-counts events.
-- **Existing mechanisms considered:** `subscribe`/`listen` plus `committed`/`local` are correct but
-  leave the protocol to every author. An SDK helper per language would replicate the protocol
-  (ADR 006 D1).
-- **Needed:** `dispatcher.consume(name, keys, handler)`, which registers, fixes `S`, delivers
-  `local(..=S)` once as the replay, then delivers live events after `S`, through one handler and in
-  sequence order. Live events wait until the replay is handled, as the hand-written rebuild gate
-  holds them, so the failure terminals a rebuild writes come before them. It carries no business
-  meaning.
+  A mistake (a cutoff read before subscribing, reading the chain instead of the branch) silently
+  loses or double-counts events.
+- **Existing mechanisms considered:** `subscribe`/`listen` plus `committed` and a query are correct
+  but leave the protocol to every author. A separate SDK helper per language would replicate the
+  protocol (ADR 006 D1); one registration that takes the rebuild and the handler as functions does
+  not, since each language passes its own.
+- **Needed:** `consume`, one registration in every language, which subscribes and holds the matching
+  facts, calls the rebuild — the part reads the facts it folds through the Timeline query at the
+  publishing facts and returns the cutoff — then delivers the held facts above the cutoff and each
+  later matching fact, in sequence order. Live facts wait until the rebuild returns, so the failure
+  terminals a rebuild writes come before them. It carries no business meaning. The handler and the
+  rebuild are closures in the Rust binding and functions in the others; that is a binding
+  difference, not a second interface.
 - **Effect on sequence, batch, interruption, reload:** none on the Timeline. The delivery order equals
   the hand-written protocol's. Reload behaviour is that of §7.2.
 - **Owner:** Dim runtime (Dispatcher). Delivered in phase 5
-  ([#380](https://github.com/arcships/dim/issues/380)): `consume` in every language, `follow` in
-  Rust; the replay is one delivery of the whole slice, not one call per event.
+  ([#380](https://github.com/arcships/dim/issues/380)): `consume` in every language; the rebuild is
+  one call the part makes, not one call per fact.
 
 ### R2. Lifecycle and identity services in the Session and branch scopes, for every language
 

@@ -13,6 +13,7 @@ documentation = "https://docs.rs/aimux-providers"
 exclude = ["tests/cassettes/**", "tests/cassettes"]
 
 [dependencies]
+schemars = { workspace = true }
 aimux-core = { workspace = true }
 aimux-stream = { workspace = true }
 aimux-provider-utils = { workspace = true }
@@ -28,11 +29,11 @@ tracing = { workspace = true }
 async-stream = { workspace = true }
 base64 = "0.22"
 chrono = "0.4"
+indexmap = { workspace = true }
 url = { workspace = true }
 percent-encoding = "2"
-aws-credential-types = "1.2"
-aws-sigv4 = { version = "1.6.0", default-features = false, features = ["sign-http", "http1"] }
-aws-smithy-eventstream = "0.61.4"
+regex = "1"
+ring = "0.17"
 
 [features]
 default = ["realtime"]
@@ -50,6 +51,9 @@ tokio = { workspace = true }
 wiremock = "0.6"
 futures = { workspace = true }
 serial_test = { workspace = true }
+# SigV4 payload-hash assertions in the Bedrock / Anthropic-on-AWS tests.
+sha2 = "0.10"
+hex = "0.4"
 
 [lints]
 workspace = true

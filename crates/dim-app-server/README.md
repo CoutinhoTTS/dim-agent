@@ -18,8 +18,11 @@ cargo run --locked -p dim-app-server -- \
 ```
 
 A configured model file uses the same public execution capabilities: workspace tools, approvals,
-Skills, prompt sources, MCP, branches and collaboration. Provider selection does not select a
-different harness. Account/provider management remains specific to the product provider.
+Skills, prompt sources, MCP, branches, collaboration and automatic Session titles. The configured
+catalog provides the auxiliary model those titles use, and plugin files live under `--home`; a host
+started with only a database file has no plugin files root and registers no `pluginFiles` provider.
+Provider selection does not select a different harness. Accounts,
+OAuth sign-in and provider management remain specific to the product provider.
 
 ```sh
 cargo run --locked -p dim-app-server -- \
@@ -153,6 +156,16 @@ not the user source.
   unreadable or no longer defines the entry, and `mcp.remove` withdraws it before editing the file.
 - `mcp.disconnect` takes `source`, `id` and optional `cwd`, without a revision; it does not edit
   persisted intent.
+
+A document decodes entry by entry: an entry that does not decode is kept as written and reported
+in the catalog's `invalid` list (`[{id, source, error}]`), while every valid entry loads. Its error
+names the id and the field and states the expected kind, never a value. A broken entry takes no
+`mcp-secrets` overlay and cannot be updated, enabled, tested or inspected: `mcp.remove` deletes it
+and `mcp.save` replaces it with a valid definition, deleting the project record the broken entry
+kept. Every write puts each entry it did not change
+back exactly as it was read. A file that is not JSON and a non-object `mcpServers` still fail the
+whole document, with the decoder's line and column and no value. A client that predates `invalid`
+still reads every valid `servers` row and shows nothing about the broken entries.
 
 Edits are source-local. No atomic user/project scope migration is offered; the Web editor fixes
 the selected entry's source rather than copying secrets into another scope. OAuth sign-in,
@@ -389,16 +402,20 @@ The public server runs without a managed provider. API-key and supported native 
 
 ```rust
 // `dimcode app-server …`, run by the CLI as its daemon from this same executable.
-dim_app_server::cli::process_entry(args, Some(ManagedProviderRow(Arc::new(|builtins, root| {
-    dim_agent_runtime::register_part(builtins, &dim_app_server::catalog(), move |names| {
-        Ok(Box::new(MyProviderPlugin::new(names, root)?))
-    }).expect("managed provider dependencies")
-}))))
+dim_app_server::cli::process_entry(
+    args,
+    Some(ManagedProviderRow(Arc::new(|builtins, root| {
+        dim_agent_runtime::register_part(builtins, &dim_app_server::catalog(), move |names| {
+            Ok(Box::new(MyProviderPlugin::new(names, root)?))
+        }).expect("managed provider dependencies")
+    }))),
+    install_product_plugins,
+)
 ```
 
 `ManagedProviderRow` registers the plugin's process row given the product root's FileStorage index and returns the row name; `ServerConfig.managed_provider` carries it for embedders. It is installed only with a product home, beside `ManagedProviderBinding`, which hands the provider to `ManagedProviders`. The plugin owns its account schema, authentication, token refresh and catalog normalization; the host does not interpret supplier-specific responses. Files it keeps under the product root go through FileStorage; `auth.json` is plain JSON shared with the native subscription providers, each owning its own root fields.
 
-`process_entry` is the process entry: on Unix it closes every descriptor above standard error that the process inherited, then calls `run_with`, so a process `main` calls it before it opens anything. Linux closes the range in one `close_range` call; where that call is unavailable, and on the other Unix systems, the daemon lists `/proc/self/fd` (Linux) or `/dev/fd` and closes every number the listing names; when no listing can be read it closes 3 up to the process's descriptor limit, which is the soft limit, else the hard limit, else `sysconf(_SC_OPEN_MAX)`, else 65,536, so no inherited descriptor stays open. `run_with` and `run` do not touch the descriptors the process has open and are the entries for an embedder that keeps its own. `process_entry` and `run_with` take a native-profile installer, `fn(&mut AgentBuilder)`, called when the product-home or model-config execution profile is assembled. It contributes host-selected plugins through the existing builder API. `run` and the standalone server choose no additional native plugins; `dimcode` installs its product plugins from their own crates.
+`process_entry` is the process entry: on Unix it closes every descriptor above standard error that the process inherited, then calls `run_with`, so a process `main` calls it before it opens anything. Linux closes the range in one `close_range` call; where that call is unavailable, and on the other Unix systems, the daemon lists `/proc/self/fd` (Linux) or `/dev/fd` and closes every number the listing names; when no listing can be read it closes 3 up to the process's descriptor limit, which is the soft limit, else the hard limit, else `sysconf(_SC_OPEN_MAX)`, else 65,536, so no inherited descriptor stays open. `run_with` and `run` do not touch the descriptors the process has open and are the entries for an embedder that keeps its own. `process_entry` and `run_with` take a native-profile installer, `fn(&mut AgentBuilder)`, called when the product-home or model-config execution profile is assembled. It contributes host-selected plugins through the existing builder API. `run` and the standalone server choose no additional native plugins; `dimcode` installs its product plugins from their own crates (`dim_session_title::install` and `dim_agent_scheduler::install`). The Scheduler is one of those plugins and is no longer a default TypeScript plugin, so a host that wants `schedule.*` and the `schedule` tool calls `dim_agent_scheduler::install` from its installer; the plain `dim-app-server` binary serves neither.
 
 The Dim account (`dimcode-api-oauth`) is such a plugin, in [`crates/dim-oauth`](../dim-oauth/README.md); `dimcode` built with the account's client IDs is the account build. See the [development contract](../../docs/architecture/development.md#managed-provider-boundary) and [release packaging](../../docs/release/README.md#local-packaging).
 
@@ -411,8 +428,11 @@ that root, no provider or working-directory fallback is supplied. See the
 [public binding](../../docs/design/process-typescript.md#52-public-pluginfiles-binding).
 The embedding host must provision each consumer's parent directories before
 enabling it: `withLock` returns `io` for a missing parent and does not create it.
+A host without a product home names its plugin root in `ServerConfig.plugin_files`. The `dimcode` development profile (`--model-config`) uses its `--home` directory, so the root and its `scheduler/` directory are provisioned there.
 
 A plugin declares `inject: ['pluginFiles']` and opens a fresh scope during each `apply`. Register `scope.close()` with `ctx.effect` immediately after opening, then register business cleanup. The host chooses the authorized product root; the plugin supplies relative file paths only. This is a trusted-plugin API, not a sandbox for untrusted Node code.
+
+A Rust process plugin uses the typed `PluginFileTransactions` service (`names.key::<PluginFileTransactions>()`) instead. `transact(name, change)` runs `change` on the inner text under the file's lock. `change` receives `None` for a missing file and returns the replacement text (`None` keeps the file as it is) together with its own result. The host writes and checks the same `{version: 1, text}` envelope. An envelope that is not version 1 fails with `InvalidData` before `change` runs, and its bytes stay unchanged.
 
 Import `PluginFiles`, `FileScope`, `FileLease` and `FileResult` with
 `import type { PluginFiles } from 'dimcode/plugin'`. The

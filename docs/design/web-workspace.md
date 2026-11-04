@@ -356,13 +356,35 @@ optional account feature must not prevent identity or usage from loading.
 | MCP | List, add/edit transports, enable/disable, test, authentication/sign-out, confirmed removal and user↔project scope migration; secret fields stay omitted from edits and a move never writes them into `.mcp.json` |
 | Plugins | List, enable/disable, installation/update/removal and the owner's typed settings surfaces |
 | Skills | List, enable/disable, source installation, update and confirmed removal |
-| Permissions | Default execution/network settings and command-rule management, with confirmation for privilege increases. The Execution card reads `host.execution.backend` and shows the owner's sandbox-backend reason when the host has none; the browser never infers the platform |
+| Permissions | Default execution/network settings and user-scope command-rule management (exact/prefix allow/deny; project scope, patterns and per-rule ask are rejected, [§10.1](appserver/permission-command-rules.md#101-legacy-rule-kinds)), with confirmation for privilege increases. The Execution card reads `host.execution.backend` and shows the owner's sandbox-backend reason when the host has none; the browser never infers the platform |
 | Archived sessions | Search, restore/open and confirmed permanent deletion |
 | Diagnostics | Safe version, protocol, connection and metadata with refresh, the model-request recording switch, and the start-up rule for process logs instead of a log-mode control ([logging controls](#diagnostics-the-legacy-logging-controls)) |
 
 Use the current owner's semantics when old terminology no longer describes the
 system, and document the mapping. Reuse existing Settings, MCP, PluginManager,
 Skills and Session owners rather than adding parallel browser-only state.
+
+#### Permissions: legacy rule kinds
+
+The legacy CLI Web's Permissions page also offered project/workspace scope,
+wildcard or regular expression matching and an `ask` decision. The
+[command-rule design](appserver/permission-command-rules.md#101-legacy-rule-kinds)
+rejects all three; this page shows the owner's one list and no placeholder for
+them.
+
+| Legacy surface | Current contract | On this page |
+| --- | --- | --- |
+| Project or workspace scope | One user-scope `permission` source; a project file is not read | No scope selector; the page says the rules are user-level and apply to every Session |
+| Wildcard, glob or regular expression | Word-wise `exact`/`prefix`; `*` is a literal word; deny wins regardless of specificity | No pattern field, preview or parser; the form says matching is by words |
+| `ask` decision, including `defaultAction` | `allow` or `deny`; an unmatched command follows the Session preset, and asking is the preset's decision alone ([ADR 018](../adr/018-permission-is-the-preset.md)) | No Ask choice in the rule row; the preset is the only tool-approval control |
+
+**Known losses and replacements.** Per-workspace lists and pattern shortcuts are
+gone with replacements: one user list and exact or prefix rules. Asking for one
+command under a preset that otherwise runs is also gone, and after
+[ADR 018](../adr/018-permission-is-the-preset.md) it has no replacement: asking is
+the preset's decision alone. Nothing is browser-only: the page reads and writes
+`permission.rules`/`permission.set_rules` at the Settings revision, reports a
+conflict without retrying, and keeps no rule it has not saved.
 
 #### MCP scope migration
 
@@ -612,5 +634,7 @@ defaults, archive flags or copied credentials cannot substitute for owner behavi
 | MCP | User and project sources have independent revisions, and safe projections deliberately hide credentials | `mcp.move` reads the complete entry internally, checks both source revisions, keeps withheld values in the user-scope `mcp-secrets` overlay instead of `.mcp.json`, starts a project destination disabled, and reports a partial move as an error recovered by direction (remove destination and retry, or remove source); exactly `mcp.move` is admitted for the control. |
 
 Legacy permission patterns and tracing behavior do not override the current
-[command-rule design](appserver/permission-command-rules.md) or accepted ADR 016.
-Any change to those contracts requires separate design alignment.
+[command-rule design](appserver/permission-command-rules.md) or accepted ADR 016;
+the Permissions page follows
+[§10.1](appserver/permission-command-rules.md#101-legacy-rule-kinds). A change to
+either contract requires separate design alignment.

@@ -5,6 +5,7 @@ use dim_agent_capabilities::{
     defaults,
     host::{HostFuture, ToolDriver, ToolExecutionContext},
 };
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::{AgentBuilder, AgentConfig, Feature};
 use dim_agent_types::{EventKind, ToolCall, ToolDefinition, ToolResult};
 use dim_app_server::{RunningServer, ServerConfig, ShutdownReason, serve};
@@ -56,6 +57,8 @@ mod collaboration;
 
 #[path = "transport_flow/catalog.rs"]
 mod catalog;
+#[path = "transport_flow/configured_auxiliary.rs"]
+mod configured_auxiliary;
 #[path = "transport_flow/native_storage.rs"]
 mod native_storage;
 
@@ -73,6 +76,12 @@ mod barrier;
 
 #[path = "transport_flow/product_protocol.rs"]
 mod product_protocol;
+
+#[path = "transport_flow/model_startup.rs"]
+mod model_startup;
+
+#[path = "transport_flow/model_switch.rs"]
+mod model_switch;
 
 #[path = "transport_flow/summaries.rs"]
 mod summaries;
@@ -106,6 +115,8 @@ mod branch_typescript;
 #[path = "transport_flow/runtime_manager.rs"]
 mod runtime_manager;
 
+#[path = "transport_flow/agent_models.rs"]
+mod agent_models;
 #[path = "transport_flow/foreign_rows.rs"]
 mod foreign_rows;
 #[path = "transport_flow/goal.rs"]
@@ -129,6 +140,9 @@ mod web;
 
 #[path = "transport_flow/skills.rs"]
 mod skills;
+
+#[path = "transport_flow/skill_references.rs"]
+mod skill_references;
 
 #[path = "transport_flow/sessions.rs"]
 mod sessions;
@@ -159,9 +173,6 @@ mod web_entry;
 mod prompt_suggestion;
 #[path = "transport_flow/workflow.rs"]
 mod workflow;
-
-#[path = "transport_flow/scheduler.rs"]
-mod scheduler;
 
 #[path = "transport_flow/questions.rs"]
 mod questions;
@@ -662,7 +673,7 @@ async fn v2_v3_submit_accepts_typed_user_and_state_but_rejects_internal_blocks_a
                 )
                 .await,
         );
-        let history = session.history("main", None).await.unwrap();
+        let history = chain_events(&session, "main", ..).await.unwrap();
         assert!(history.iter().any(|event| matches!(&event.kind,
             EventKind::InputMessage(data) if data.user.as_ref().is_some_and(|user|
                 matches!(user.content.as_slice(), [
@@ -742,7 +753,7 @@ async fn both_transports_filter_controls_and_keep_real_timeline_sequences() {
         assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
 
         assert_ok(&client.rpc("session.stop", json!({"sessionId":sid})).await);
-        let idle_events = session.history("main", None).await.unwrap();
+        let idle_events = chain_events(&session, "main", ..).await.unwrap();
         assert!(idle_events.iter().any(|event| matches!(
             &event.kind,
             EventKind::StopInterrupt(data) if data.scope == InterruptScope::Turn
@@ -773,7 +784,7 @@ async fn both_transports_filter_controls_and_keep_real_timeline_sequences() {
         }
         assert_ok(&client.rpc("session.stop", json!({"sessionId":sid})).await);
         assert_ok(&client.rpc("session.idle", json!({"sessionId":sid})).await);
-        let stopped = session.history("main", None).await.unwrap();
+        let stopped = chain_events(&session, "main", ..).await.unwrap();
         let expected = v1_events(&stopped, 0);
         let last_business = expected.last().unwrap()["sequence"].as_u64().unwrap();
         live.extend(receive_events_through(&mut client, last_business).await);
@@ -798,7 +809,7 @@ async fn both_transports_filter_controls_and_keep_real_timeline_sequences() {
                 .await,
         );
         assert_ok(&client.rpc("session.idle", json!({"sessionId":sid})).await);
-        let resumed = session.history("main", None).await.unwrap();
+        let resumed = chain_events(&session, "main", ..).await.unwrap();
         let expected = v1_events(&resumed, high);
         let last = expected.last().unwrap()["sequence"].as_u64().unwrap();
         assert_eq!(receive_events_through(&mut client, last).await, expected);
@@ -814,7 +825,7 @@ async fn both_transports_filter_controls_and_keep_real_timeline_sequences() {
                 .await,
         );
         assert_ok(&client.rpc("session.idle", json!({"sessionId":sid})).await);
-        let final_events = session.history("main", None).await.unwrap();
+        let final_events = chain_events(&session, "main", ..).await.unwrap();
         let expected = v1_events(&final_events, high);
         let last = expected.last().unwrap()["sequence"].as_u64().unwrap();
         assert_eq!(receive_events_through(&mut client, last).await, expected);
@@ -1331,7 +1342,7 @@ async fn handshake_errors_and_a_busy_close_are_real_transport_boundaries() {
             .filter(|notice| notice["method"] == "session.event")
             .map(|notice| notice["params"]["event"].clone()),
     );
-    let history = session.history("main", None).await.unwrap();
+    let history = chain_events(&session, "main", ..).await.unwrap();
     assert!(observed.iter().all(|event| event["type"] != "stop"));
     let business: Vec<_> = history
         .iter()

@@ -1,4 +1,5 @@
 use super::*;
+use dim_agent_runtime::testing::chain_events;
 use rutis::host::CtxHost;
 use std::sync::Mutex;
 
@@ -48,7 +49,7 @@ async fn snapshot_codecs_preserve_completed_compaction_even_when_saving_fails() 
                 .unwrap();
             session.idle("main").await.unwrap();
         }
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let compactions: Vec<_> = events
             .iter()
             .filter_map(|event| match &event.kind {
@@ -93,15 +94,24 @@ async fn snapshot_codecs_preserve_completed_compaction_even_when_saving_fails() 
             )
             .await
             .unwrap();
-            let accelerated = timeline
-                .context_with_checkpoint(timeline.sequence(), interpreter, decode)
+            let renderer = HistoryRenderer {
+                checkpoint_interpreter: interpreter,
+                decode_checkpoint: decode,
+                ..Default::default()
+            };
+            let accelerated = renderer
+                .context(&timeline, timeline.sequence())
                 .await
                 .unwrap();
             assert!(accelerated.checkpoint.is_some());
             assert_eq!(
                 project_context_history(&accelerated).unwrap(),
-                project_context_history(&timeline.context(timeline.sequence()).await.unwrap())
-                    .unwrap()
+                project_context_history(
+                    &replay_context(&timeline, timeline.sequence())
+                        .await
+                        .unwrap()
+                )
+                .unwrap()
             );
             dim_agent_runtime::core::close_timeline(&timeline)
                 .await
@@ -313,7 +323,7 @@ async fn committed_summary_drives_current_and_following_model_requests() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let requests: Vec<_> = events
         .iter()
         .filter_map(|event| match &event.kind {
@@ -385,7 +395,7 @@ async fn committed_cursor_preserves_the_history_after_its_cutoff() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let compaction = events
         .iter()
         .find_map(|event| match &event.kind {
@@ -394,8 +404,7 @@ async fn committed_cursor_preserves_the_history_after_its_cutoff() {
         })
         .unwrap();
     let history = project_history(
-        &session
-            .history("main", Some(compaction.through))
+        &chain_events(&session, "main", ..=compaction.through)
             .await
             .unwrap(),
         "main",
@@ -471,7 +480,7 @@ async fn final_outcome_controls_normal_preparation_and_budget_recovery() {
                 .await
                 .unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             let requests: Vec<_> = events
                 .iter()
                 .filter_map(|event| match &event.kind {
@@ -553,7 +562,7 @@ async fn a_damaged_compaction_fails_replay_without_silently_regenerating_history
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert!(events.iter().any(|event| matches!(
         &event.kind,
         EventKind::ContextCompaction(ContextCompactionData {
@@ -578,7 +587,7 @@ async fn a_damaged_compaction_fails_replay_without_silently_regenerating_history
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert_eq!(
         events
             .iter()

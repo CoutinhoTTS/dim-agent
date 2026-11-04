@@ -77,7 +77,7 @@ spike 改变了三处设计：服务由谁提供（第 5 条）、生命周期�
  |             其他方法 -> acquire(sessionId)：本次调用的租约        |
  +----------------------------+------------------------------------+
                               v
- Session 门面：input、publication、idle、stop、sequence、local_page、
+ Session 门面：input、publication、idle、stop、sequence、query、
                get::<PermissionState>(branch)、service::<撤回服务>(branch)（S1）
 ```
 
@@ -291,7 +291,7 @@ Agents 在该分支上用 `Session::service::<InputQueue>` 取得 S1 的 InputQu
 | 项 | 规则 |
 | --- | --- |
 | `through` | 带 `atLeast` 时：已发布 head（`Session::sequence`）；低于 `atLeast` 时为 `future_sequence`。否则为请求的 `through`（不能超过 head，否则 `future_sequence`），或 head |
-| `events` | 该分支自己在 `(after, through]` 内的事件，用 `Session::local_page` 读取。`after`（缺省为 0）必须是某批次的结尾。剩余事件足够时，一页先取 `limit` 条（1 到 256，缺省 256），再读到该批次结尾，因此可能超过 `limit`；它从不越过 `through`。以已发布 head 或 `idle` 截止点作为 `through` 时，每个批次都完整。调用方把 `after` 设为上一页最后的序号继续读，直到 `through` |
+| `events` | 该分支自己在 `(after, through]` 内的事件，由 `AgentIndex::history_page` 读取：已装载的线经该分支的 query 分页，并问存储该页最后一条是否结束一个批次；已结束的线在固定的头部经 `TreeCommands.page` 读取；本进程不持有的线经 App Server 自己的页读取。`after`（缺省为 0）必须是某批次的结尾。剩余事件足够时，一页先取 `limit` 条（1 到 256，缺省 256），再读到该批次结尾，因此可能超过 `limit`；它从不越过 `through`。以已发布 head 或 `idle` 截止点作为 `through` 时，每个批次都完整。调用方把 `after` 设为上一页最后的序号继续读，直到 `through` |
 | 形式 | 分支的每个事件都作为 `AgentEvent` 记录返回，序列化形式与 `session.history` 展示事件时相同。不做过滤，因此一页最后的序号总是某个批次的结尾 |
 | 祖先 | 不包含。启动的 Session 在 `main` 上读取，`main` 没有祖先。等有使用方需要时，再增加读取子分支前缀的方式 |
 | 错误 | `rejected`（`after` > `through`、`after` 位于批次中间、`limit` 不在 1 到 256 之间、同时给出 `atLeast` 与 `through`）、`future_sequence`、`session_closed`、`branch_missing`、`reloading` |

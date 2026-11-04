@@ -1,4 +1,5 @@
 use super::*;
+use dim_agent_runtime::testing::chain_events;
 
 /// The execution switches are user settings read at each process start: with
 /// the sandbox on, a write outside the workspace fails, and the same write
@@ -103,8 +104,7 @@ async fn execution_settings_decide_the_next_process_boundary() {
                     .await,
             );
             assert_ok(&client.rpc("session.idle", branch.clone()).await);
-            session
-                .history("main", None)
+            chain_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()

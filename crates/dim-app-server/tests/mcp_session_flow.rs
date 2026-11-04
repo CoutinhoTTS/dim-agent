@@ -13,11 +13,12 @@ use dim_agent_capabilities::{
     host::*,
     tool_registry::ToolSourcesView,
 };
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::{testing::MinimalHost, *};
 use dim_agent_types::*;
 use dim_app_server::{
     mcp::{
-        self, McpAppError, McpChange, McpPlugin, McpPublication, McpService, McpSession,
+        self, McpAppError, McpChange, McpPlugin, McpPublication, McpService, McpSession, McpSource,
         McpSourceState,
     },
     settings::{SettingsPlugin, SettingsScope, SettingsService},
@@ -577,7 +578,7 @@ async fn adopted(session: &Session, version: Option<&str>) {
             changed.changed().await.unwrap();
         }
         loop {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(session, "main", ..).await.unwrap();
             if events.iter().rev().find_map(|e| match &e.kind {
                 EventKind::ContextConfigured(c) => Some(
                     c.settings
@@ -598,8 +599,7 @@ async fn adopted(session: &Session, version: Option<&str>) {
     .unwrap();
 }
 async fn results(session: &Session) -> Vec<String> {
-    session
-        .history("main", None)
+    chain_events(session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -1101,7 +1101,7 @@ async fn a_type_array_tool_registers_calls_and_stores_the_canonical_form() {
             .unwrap()
             .contains("spaces-ok")
     );
-    let history = session.history("main", None).await.unwrap();
+    let history = chain_events(&session, "main", ..).await.unwrap();
     let called = history
         .iter()
         .rev()
@@ -1356,7 +1356,7 @@ async fn project_visibility_disable_refresh_failure_and_permission_use_real_sour
             .unwrap()
             .is_empty()
     );
-    assert!(user.history("main", None).await.unwrap().iter().any(|event| matches!(
+    assert!(chain_events(&user, "main", ..).await.unwrap().iter().any(|event| matches!(
         &event.kind, EventKind::ModelOutputEnd(end)
         if matches!(&end.outcome, ModelOutputOutcome::Failed { error, .. } if error.contains("Tool was not offered"))
     )));
@@ -1750,6 +1750,167 @@ async fn an_unpublished_session_never_starts_discovery() {
     env.close().await;
 }
 
+/// #951: an optional member written as `null` is absent, so an entry that
+/// loaded before the per-entry decoder still loads and serves tools.
+#[tokio::test]
+async fn null_optional_members_from_a_file_load_and_run() {
+    let env = Env::with_config(
+        |_, _| {},
+        |_, home| {
+            json!({"mcpServers":{"docs":{
+                "type": null,
+                "command": "node",
+                "args": [PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp-reconnect.cjs"), "normal"],
+                "cwd": home,
+                "headers": null,
+                "enabled": null,
+                "auth": null,
+                "oauth": null
+            }}})
+        },
+    )
+    .await;
+    let session = env.session(false, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    env.turn(
+        &session,
+        Action::Call {
+            pause: false,
+            name: None,
+        },
+    )
+    .await;
+    assert!(results(&session).await.last().unwrap().contains("ok"));
+    env.close().await;
+}
+
+/// #951: a broken project entry is not a server, so the user's server for the
+/// same id keeps running and the catalog lists both rows.
+#[tokio::test]
+async fn a_broken_project_entry_shadows_no_user_server() {
+    let env = Env::new().await;
+    std::fs::write(
+        env.home.join("project/.mcp.json"),
+        json!({"mcpServers":{"docs":{"command":""}}}).to_string(),
+    )
+    .unwrap();
+    let catalog = env
+        .directory
+        .catalog(Some(1), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(catalog.servers["docs"].source, McpSource::User);
+    assert_eq!(
+        catalog
+            .invalid
+            .iter()
+            .find(|entry| entry.id == "docs")
+            .unwrap()
+            .source,
+        McpSource::Project(1)
+    );
+    let session = env.session(true, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    env.turn(
+        &session,
+        Action::Call {
+            pause: false,
+            name: None,
+        },
+    )
+    .await;
+    assert!(results(&session).await.last().unwrap().contains("one:8"));
+    env.close().await;
+}
+
+/// #951: the reverse: a broken user entry is not a server, so an enabled
+/// project entry with the same id runs and both rows are listed.
+#[tokio::test]
+async fn a_broken_user_entry_shadows_no_project_server() {
+    let env = Env::with_config(
+        |_, _| {},
+        |_, _| json!({"mcpServers":{"docs":{"command":""}}}),
+    )
+    .await;
+    env.update(
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::Put(serde_json::from_value(configuration(&env.url, "project")).unwrap()),
+    )
+    .await;
+    env.update(
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::SetEnabled(true),
+    )
+    .await;
+    let catalog = env
+        .directory
+        .catalog(Some(1), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(catalog.servers["docs"].source, McpSource::Project(1));
+    assert_eq!(
+        catalog
+            .invalid
+            .iter()
+            .find(|entry| entry.id == "docs")
+            .unwrap()
+            .source,
+        McpSource::User
+    );
+    let session = env.session(true, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    env.turn(
+        &session,
+        Action::Call {
+            pause: false,
+            name: None,
+        },
+    )
+    .await;
+    assert!(
+        results(&session)
+            .await
+            .last()
+            .unwrap()
+            .contains("project:8")
+    );
+    env.close().await;
+}
+
+/// #951: both sources hold a broken entry for one id, so the catalog lists
+/// two rows, one per source, and no server runs for that id.
+#[tokio::test]
+async fn two_broken_entries_with_one_id_list_two_rows() {
+    let env = Env::with_config(
+        |_, _| {},
+        |_, _| json!({"mcpServers":{"docs":{"command":""}}}),
+    )
+    .await;
+    std::fs::write(
+        env.home.join("project/.mcp.json"),
+        json!({"mcpServers":{"docs":{"type":"ws","url":"wss://docs.test"}}}).to_string(),
+    )
+    .unwrap();
+    let catalog = env
+        .directory
+        .catalog(Some(1), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(!catalog.servers.contains_key("docs"));
+    let rows: Vec<_> = catalog
+        .invalid
+        .iter()
+        .filter(|entry| entry.id == "docs")
+        .collect();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].source, McpSource::User);
+    assert_eq!(rows[1].source, McpSource::Project(1));
+    assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 0);
+    env.close().await;
+}
+
 #[tokio::test]
 async fn a_shadowed_user_server_closes_its_unused_connection() {
     let env = Env::new().await;
@@ -1956,7 +2117,7 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
                 .await
                 .unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             assert!(
                 matches!(events.last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })),
                 "{:?}",
@@ -2000,7 +2161,7 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
             .unwrap();
         session.idle("main").await.unwrap();
         assert!(
-            matches!(session.history("main", None).await.unwrap().last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })),
+            matches!(chain_events(&session, "main", ..).await.unwrap().last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })),
             "a later turn also completes"
         );
         agent.close().await.unwrap();
@@ -2152,7 +2313,7 @@ async fn a_view_mounts_its_document_and_calls_the_entry_it_came_from() {
             .contains(&"refresh".to_string())
     );
 
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert!(
         events.iter().all(|event| !matches!(
             event.kind,

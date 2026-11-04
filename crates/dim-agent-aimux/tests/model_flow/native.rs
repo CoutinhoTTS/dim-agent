@@ -1,12 +1,17 @@
 use super::*;
 use axum::http::Uri;
+use dim_agent_runtime::testing::chain_events;
 use rutis::host::CtxHost;
 
 const IMAGE: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jD1sAAAAASUVORK5CYII=";
 
 fn bedrock_frame(name: &str, payload: Value) -> Vec<u8> {
-    aimux_providers::bedrock::event_stream::encode_message("event", name, &payload.to_string())
+    aimux_providers::bedrock::event_stream_decoder::encode_message(
+        "event",
+        name,
+        &payload.to_string(),
+    )
 }
 
 #[tokio::test]
@@ -211,11 +216,20 @@ async fn bedrock_native_auth_stream_and_continuation_are_first_party() {
                 assert_eq!(sent[1].headers["authorization"], "Bearer bearer-asymmetric")
             }
             BedrockAuth::SigV4 { .. } => {
+                let authorization = sent[1].headers["authorization"].to_str().unwrap();
+                assert!(authorization.contains("Credential=access-asymmetric/"));
+                // aws4fetch 1.0.20, the signer of the AI SDK's AWS providers,
+                // sends `content-type` but leaves it out of `SignedHeaders`;
+                // the tag's signer carries that list, not a patch.
+                let signed_headers = authorization
+                    .split_once("SignedHeaders=")
+                    .and_then(|(_, rest)| rest.split(',').next())
+                    .expect("the Authorization header names its signed headers");
                 assert!(
-                    sent[1].headers["authorization"]
-                        .to_str()
-                        .unwrap()
-                        .contains("Credential=access-asymmetric/")
+                    !signed_headers
+                        .split(';')
+                        .any(|name| name.eq_ignore_ascii_case("content-type")),
+                    "content-type must not be signed: {signed_headers}"
                 );
                 assert_eq!(
                     sent[1].headers["x-amz-security-token"],
@@ -232,13 +246,22 @@ async fn bedrock_native_auth_stream_and_continuation_are_first_party() {
             api_key: None,
             preset: None,
         });
-        assert!(
-            host.0
-                .invoke(Arc::new(request), cross, CancellationToken::new())
-                .await
-                .is_err()
-        );
-        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        // Stored Bedrock continuation data never reaches another protocol:
+        // the request is built without it instead of failing.
+        let mut foreign = host
+            .0
+            .invoke(Arc::new(request), cross, CancellationToken::new())
+            .await
+            .expect("another protocol's metadata must not fail the request");
+        while let Some(chunk) = foreign.next().await {
+            // The mock answers in Bedrock's framing; only the request matters.
+            let _ = chunk;
+        }
+        let sent = server.received_requests().await.unwrap();
+        assert_eq!(sent.len(), 3);
+        let foreign = String::from_utf8(sent[2].body.clone()).unwrap();
+        assert!(!foreign.contains("signature-A"), "{foreign}");
+        assert!(!foreign.contains("redactedContent"), "{foreign}");
         for config in [
             json!({"topK":7}),
             json!({"reasoning":{"effort":"high"}}),
@@ -280,7 +303,7 @@ async fn bedrock_native_auth_stream_and_continuation_are_first_party() {
                 .await
                 .is_err()
         );
-        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
         let url_image = ModelRequest::new(
             "bedrock",
             "model-url-image",
@@ -313,7 +336,7 @@ async fn bedrock_native_auth_stream_and_continuation_are_first_party() {
                 ..
             })
         ));
-        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
         let cancellation = CancellationToken::new();
         let mut cancelled = host
             .0
@@ -358,6 +381,229 @@ async fn bedrock_native_auth_stream_and_continuation_are_first_party() {
                 ..
             }))
         ));
+    }
+}
+
+#[tokio::test]
+async fn bedrock_unreadable_tool_delta_fails_the_turn_without_a_call() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    let body = [
+        bedrock_frame("messageStart", json!({"role":"assistant"})),
+        bedrock_frame(
+            "contentBlockStart",
+            json!({"contentBlockIndex":0,"start":{"toolUse":{"toolUseId":"call-array","name":"echo"}}}),
+        ),
+        bedrock_frame(
+            "contentBlockDelta",
+            json!({"contentBlockIndex":0,"delta":{"toolUse":{"input":["unreadable"]}}}),
+        ),
+        bedrock_frame("contentBlockStop", json!({"contentBlockIndex":0})),
+        bedrock_frame("messageStop", json!({"stopReason":"tool_use"})),
+        bedrock_frame(
+            "metadata",
+            json!({"usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}),
+        ),
+    ]
+    .concat();
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/vnd.amazon.eventstream")
+                .set_body_bytes(body),
+        )
+        .mount(&server)
+        .await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let mut request = ModelRequest::new(
+        "bedrock",
+        "anthropic.model",
+        vec![Message::text(Role::User, "run")],
+    );
+    request.tools = Some(MockTools.definitions().into());
+    let connection = ModelConnection::Bedrock(BedrockModelConnection {
+        base_url: server.uri(),
+        network: Default::default(),
+        headers: Default::default(),
+        auth: BedrockAuth::Bearer("bearer".into()),
+    });
+    let mut output = host
+        .0
+        .invoke(Arc::new(request), connection, CancellationToken::new())
+        .await
+        .unwrap();
+    let mut tool_use = false;
+    let mut failure = None;
+    while let Some(chunk) = output.next().await {
+        match chunk {
+            Ok(ModelChunk::Content(parts)) => {
+                tool_use |= parts
+                    .iter()
+                    .any(|part| matches!(part, MessagePart::ToolUse { .. }));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                failure = Some(error);
+                break;
+            }
+        }
+    }
+    let failure = failure.expect("the unreadable delta must fail the turn");
+    assert!(matches!(failure, HostError::Failed { .. }), "{failure:?}");
+    assert!(!tool_use, "no tool call may come from an unreadable delta");
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn bedrock_finishes_at_metadata_while_the_body_stays_open() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    for cancel in [false, true] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (proceed, ready) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 8192];
+            loop {
+                let count = socket.read(&mut buffer).await.unwrap();
+                assert_ne!(count, 0);
+                request.extend_from_slice(&buffer[..count]);
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let length = String::from_utf8_lossy(&request[..end])
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|s| s.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/vnd.amazon.eventstream\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .await
+                .unwrap();
+            let first = [
+                bedrock_frame("messageStart", json!({"role":"assistant"})),
+                bedrock_frame(
+                    "contentBlockDelta",
+                    json!({"contentBlockIndex":0,"delta":{"text":"early"}}),
+                ),
+            ]
+            .concat();
+            // A chunk ending exactly at a frame prelude exercises internal
+            // decoder state.
+            for bytes in [&first[..12], &first[12..]] {
+                socket
+                    .write_all(format!("{:x}\r\n", bytes.len()).as_bytes())
+                    .await
+                    .unwrap();
+                socket.write_all(bytes).await.unwrap();
+                socket.write_all(b"\r\n").await.unwrap();
+            }
+            ready.await.unwrap();
+            if !cancel {
+                let final_bytes = [
+                    bedrock_frame("contentBlockStop", json!({"contentBlockIndex":0})),
+                    bedrock_frame("messageStop", json!({"stopReason":"end_turn"})),
+                    bedrock_frame(
+                        "metadata",
+                        json!({"usage":{"inputTokens":17,"outputTokens":9,"totalTokens":26}}),
+                    ),
+                ]
+                .concat();
+                socket
+                    .write_all(format!("{:x}\r\n", final_bytes.len()).as_bytes())
+                    .await
+                    .unwrap();
+                socket.write_all(&final_bytes).await.unwrap();
+                socket.write_all(b"\r\n").await.unwrap();
+            }
+            std::future::pending::<()>().await;
+        });
+        let root = rutis::Ctx::root().unwrap();
+        root.plugin(AimuxPlugin).await.unwrap();
+        let host = root.get::<ModelHost>().unwrap();
+        let request = ModelRequest::new(
+            "bedrock",
+            "anthropic.model",
+            vec![Message::text(Role::User, "hi")],
+        );
+        let connection = ModelConnection::Bedrock(BedrockModelConnection {
+            base_url: base,
+            network: Default::default(),
+            headers: Default::default(),
+            auth: BedrockAuth::Bearer("bearer".into()),
+        });
+        let cancel_token = CancellationToken::new();
+        let mut output = host
+            .0
+            .invoke(Arc::new(request), connection, cancel_token.clone())
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if matches!(output.next().await.unwrap().unwrap(), ModelChunk::Text(text) if text == "early") {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        if cancel {
+            cancel_token.cancel();
+        }
+        proceed.send(()).unwrap();
+        let mut usage = None;
+        let mut stopped = false;
+        let mut failure = false;
+        if cancel {
+            loop {
+                match tokio::time::timeout(std::time::Duration::from_secs(2), output.next()).await {
+                    Ok(Some(Ok(ModelChunk::MessageStop { .. }))) => {
+                        stopped = true;
+                        break;
+                    }
+                    Ok(Some(Ok(_))) => {}
+                    Ok(Some(Err(_))) => {
+                        failure = true;
+                        break;
+                    }
+                    Ok(None) | Err(_) => break,
+                }
+            }
+            assert!(failure, "an abort must end the flow with an error");
+            assert!(!stopped, "an abort must not deliver MessageStop");
+        } else {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while let Some(chunk) = output.next().await {
+                    match chunk.unwrap() {
+                        ModelChunk::Usage(value) => usage = Some(value),
+                        ModelChunk::MessageStop { .. } => {
+                            stopped = true;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("MessageStop must arrive while the body stays open");
+            assert!(stopped, "the terminal event must deliver MessageStop");
+            let usage = usage.expect("usage must arrive before the stop");
+            assert_eq!((usage.prompt_tokens, usage.completion_tokens), (17.0, 9.0));
+        }
+        server.abort();
+        let _ = server.await;
+        root.shutdown().await.unwrap();
     }
 }
 
@@ -490,16 +736,26 @@ async fn xai_native_continuation_roundtrips_and_owner_releases_streams() {
     );
     assert_eq!(body["store"], false);
     assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
-    assert!(
-        host.0
-            .invoke(
-                Arc::new(request),
-                connection(ModelProtocol::OpenaiResponses),
-                CancellationToken::new()
-            )
-            .await
-            .is_err()
-    );
+    // xAI continuation data does not reach the OpenAI Responses protocol: the
+    // request is built without the reasoning item instead of failing.
+    let mut foreign = host
+        .0
+        .invoke(
+            Arc::new(request),
+            connection(ModelProtocol::OpenaiResponses),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("another protocol's metadata must not fail the request");
+    while let Some(chunk) = foreign.next().await {
+        // The mock answers in xAI's framing; only the request matters.
+        let _ = chunk;
+    }
+    let sent = server.received_requests().await.unwrap();
+    assert_eq!(sent.len(), 3);
+    let foreign = String::from_utf8(sent[2].body.clone()).unwrap();
+    assert!(!foreign.contains("rs-native"), "{foreign}");
+    assert!(!foreign.contains("opaque-native"), "{foreign}");
     for protocol in [ModelProtocol::Xai, ModelProtocol::XaiResponses] {
         for config in [
             ModelConfig {
@@ -532,7 +788,7 @@ async fn xai_native_continuation_roundtrips_and_owner_releases_streams() {
             );
         }
     }
-    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
     let mut held = Vec::new();
     for protocol in [ModelProtocol::Xai, ModelProtocol::XaiResponses] {
         let mut request =
@@ -576,6 +832,143 @@ async fn xai_native_continuation_roundtrips_and_owner_releases_streams() {
             }))
         ));
     }
+}
+
+#[tokio::test]
+async fn xai_responses_content_parts_keep_their_blocks() {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+    let server = MockServer::start().await;
+    let frames = [
+        json!({"type":"response.created","response":{"id":"resp-parts","created_at":1,"model":"test-model"}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1"}}),
+        json!({"type":"response.output_text.delta","item_id":"msg_1","content_index":0,"delta":"before"}),
+        json!({"type":"response.output_text.delta","item_id":"msg_1","content_index":1,"delta":"after"}),
+        json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_1","content":[
+            {"type":"output_text","text":"before"},
+            {"type":"output_text","text":"after"},
+            {"type":"output_text","text":"only-in-done"}
+        ]}}),
+        json!({"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":3,"output_tokens":3}}}),
+    ]
+    .into_iter()
+    .map(|frame| format!("data: {frame}\n\n"))
+    .collect::<String>();
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(frames),
+        )
+        .mount(&server)
+        .await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let request = ModelRequest::new("xai", "alias", vec![Message::text(Role::User, "start")]);
+    let mut output = host
+        .0
+        .invoke(
+            Arc::new(request),
+            ModelConnection::Http(HttpModelConnection {
+                protocol: ModelProtocol::XaiResponses,
+                base_url: format!("{}?tenant=native", server.uri()),
+                network: Default::default(),
+                headers: std::collections::HashMap::new(),
+                bearer: Some("fixture-key".into()),
+                api_key: None,
+                preset: None,
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let mut parts = None;
+    while let Some(chunk) = output.next().await {
+        if let ModelChunk::Content(value) = chunk.unwrap() {
+            parts = Some(value);
+        }
+    }
+    let parts = parts.expect("native content must be emitted");
+    let texts: Vec<&str> = parts
+        .iter()
+        .filter_map(|part| match part {
+            MessagePart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, ["before", "after", "only-in-done"]);
+    let request = ModelRequest::new(
+        "xai",
+        "alias",
+        vec![
+            Message::text(Role::User, "start"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![
+                    MessagePart::Text {
+                        text: "before".into(),
+                        start_time: None,
+                        end_time: None,
+                        provider_metadata: Some(ContentMetadata::XaiResponses {
+                            item_id: "msg_1".into(),
+                            encrypted_content: None,
+                        }),
+                    },
+                    MessagePart::Text {
+                        text: "after".into(),
+                        start_time: None,
+                        end_time: None,
+                        provider_metadata: Some(ContentMetadata::XaiResponses {
+                            item_id: "msg_1".into(),
+                            encrypted_content: None,
+                        }),
+                    },
+                ]),
+            },
+        ],
+    );
+    let mut output = host
+        .0
+        .invoke(
+            Arc::new(request),
+            ModelConnection::Http(HttpModelConnection {
+                protocol: ModelProtocol::XaiResponses,
+                base_url: format!("{}?tenant=native", server.uri()),
+                network: Default::default(),
+                headers: std::collections::HashMap::new(),
+                bearer: Some("fixture-key".into()),
+                api_key: None,
+                preset: None,
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    while let Some(chunk) = output.next().await {
+        chunk.unwrap();
+    }
+    let sent = server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&sent[1].body).unwrap();
+    let messages: Vec<&Value> = body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|part| part["role"] == "assistant")
+        .collect();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["id"], "msg_1");
+    assert_eq!(
+        messages[0]["content"],
+        json!([
+            {"type": "output_text", "text": "before"},
+            {"type": "output_text", "text": "after"},
+        ])
+    );
+    root.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -728,7 +1121,10 @@ async fn codex_request_profile_is_isolated_to_responses() {
     assert_eq!(sent_headers["chatgpt-account-id"], "account-1");
     assert_eq!(sent_headers["oai-product-sku"], "codex");
     assert_eq!(sent_headers["originator"], "codex-tui");
-    assert_eq!(sent_headers["user-agent"], "dimagent/0.144.1");
+    assert_eq!(
+        sent_headers["user-agent"],
+        "dimagent/0.144.1 ai-sdk-provider-utils/5.0.53"
+    );
     assert_eq!(body["store"], false);
     assert!(body.get("max_output_tokens").is_none());
     assert_eq!(body["service_tier"], "priority");
@@ -775,6 +1171,180 @@ async fn codex_request_profile_is_isolated_to_responses() {
     }
     root.shutdown().await.unwrap();
     server.close().await;
+}
+
+#[tokio::test]
+async fn openai_chat_protocols_send_reasoning_models_the_rules_they_accept() {
+    let server = NativeServer::start("openai-chat").await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    for protocol in [ModelProtocol::OpenaiChat, ModelProtocol::OpenaiCompatible] {
+        for model_id in ["gpt-4o", "gpt-5", "o3"] {
+            let mut request =
+                ModelRequest::new("local", model_id, vec![Message::text(Role::User, "hi")]);
+            request.system = Some(Arc::new(SystemPrompt::Text("system instructions".into())));
+            request.config = Some(ModelConfig {
+                max_tokens: Some(4096.0),
+                temperature: Some(0.25),
+                reasoning: Some(ProviderReasoningConfig {
+                    effort: Some("high".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            let connection = ModelConnection::Http(HttpModelConnection {
+                protocol,
+                base_url: server.url.clone(),
+                network: Default::default(),
+                headers: Default::default(),
+                bearer: Some("native-secret".into()),
+                api_key: None,
+                preset: None,
+            });
+            let mut stream = host
+                .0
+                .invoke(Arc::new(request), connection, CancellationToken::new())
+                .await
+                .unwrap();
+            while let Some(chunk) = stream.next().await {
+                chunk.unwrap();
+            }
+        }
+    }
+    // Two turns on gpt-5 over openai-chat: the second request replays the
+    // assistant's reasoning text with its tool call.
+    let mut first = ModelRequest::new("local", "gpt-5", vec![Message::text(Role::User, "hi")]);
+    first.system = Some(Arc::new(SystemPrompt::Text("system instructions".into())));
+    first.config = Some(ModelConfig {
+        max_tokens: Some(4096.0),
+        reasoning: Some(ProviderReasoningConfig {
+            effort: Some("high".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let connection = ModelConnection::Http(HttpModelConnection {
+        protocol: ModelProtocol::OpenaiChat,
+        base_url: server.url.clone(),
+        network: Default::default(),
+        headers: Default::default(),
+        bearer: Some("native-secret".into()),
+        api_key: None,
+        preset: None,
+    });
+    let mut stream = host
+        .0
+        .invoke(Arc::new(first), connection, CancellationToken::new())
+        .await
+        .unwrap();
+    while let Some(chunk) = stream.next().await {
+        chunk.unwrap();
+    }
+    // The second request carries the history from the first.
+    let history: ModelRequest = serde_json::from_value(json!({
+        "providerId": "local",
+        "modelId": "gpt-5",
+        "system": [{"type": "text", "text": "system instructions"}],
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "plan"},
+                {"type": "text", "text": "searching"},
+                {"type": "tool_use", "id": "call-1", "name": "search", "input": {"query": "recent"}}
+            ]},
+            {"role": "tool_result", "content": [{"type": "tool_result", "tool_use_id": "call-1", "content": [{"type": "text", "text": "done"}]}]},
+            {"role": "user", "content": "continue"}
+        ],
+        "config": {"maxTokens": 4096, "reasoning": {"effort": "high"}}
+    }))
+    .unwrap();
+    let connection = ModelConnection::Http(HttpModelConnection {
+        protocol: ModelProtocol::OpenaiChat,
+        base_url: server.url.clone(),
+        network: Default::default(),
+        headers: Default::default(),
+        bearer: Some("native-secret".into()),
+        api_key: None,
+        preset: None,
+    });
+    let mut stream = host
+        .0
+        .invoke(Arc::new(history), connection, CancellationToken::new())
+        .await
+        .unwrap();
+    while let Some(chunk) = stream.next().await {
+        chunk.unwrap();
+    }
+    let bodies: Vec<Value> = server
+        .endpoint
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(uri, _, body)| {
+            assert_eq!(uri.path(), "/v1/chat/completions");
+            body.clone()
+        })
+        .collect();
+    assert_eq!(bodies.len(), 8);
+    // A reasoning model takes the token key, the system role and the sampling
+    // parameters the OpenAI API accepts; every other model keeps `max_tokens`,
+    // `system` and the sampling values.
+    for (index, body) in bodies[..6].iter().enumerate() {
+        let model_id = ["gpt-4o", "gpt-5", "o3"][index % 3];
+        let protocol = if index < 3 {
+            "openai-chat"
+        } else {
+            "openai-compatible"
+        };
+        let expected = if index % 3 == 0 {
+            json!({
+                "model": model_id,
+                "max_tokens": 4096,
+                "temperature": 0.25,
+                "messages": [
+                    {"role": "system", "content": "system instructions"},
+                    {"role": "user", "content": "hi"}
+                ],
+                "stream": true,
+                "stream_options": {"include_usage": true},
+                "reasoning_effort": "high"
+            })
+        } else {
+            json!({
+                "model": model_id,
+                "max_completion_tokens": 4096,
+                "messages": [
+                    {"role": "developer", "content": "system instructions"},
+                    {"role": "user", "content": "hi"}
+                ],
+                "stream": true,
+                "stream_options": {"include_usage": true},
+                "reasoning_effort": "high"
+            })
+        };
+        assert_eq!(body, &expected, "{protocol} body {index}");
+    }
+    // The first turn of the pair sends the reasoning-model rules.
+    assert_eq!(bodies[6]["model"], "gpt-5");
+    assert_eq!(bodies[6]["max_completion_tokens"], 4096);
+    assert_eq!(
+        bodies[6]["messages"][0],
+        json!({"role": "developer", "content": "system instructions"})
+    );
+    // The second turn keeps the reasoning-model rules and replays the
+    // assistant's reasoning text with its tool call.
+    let body = &bodies[7];
+    assert_eq!(body["model"], "gpt-5");
+    assert_eq!(body["max_completion_tokens"], 4096);
+    assert!(body.get("max_tokens").is_none(), "{body}");
+    assert_eq!(
+        body["messages"][0],
+        json!({"role": "developer", "content": "system instructions"})
+    );
+    assert_eq!(body["messages"][2]["reasoning_content"], "plan", "{body}");
+    assert_eq!(body["messages"][2]["tool_calls"][0]["id"], "call-1");
 }
 
 #[derive(Clone)]
@@ -891,7 +1461,7 @@ async fn malformed_native_block_lifecycle_is_a_classified_failure() {
     for (events, diagnostic) in [
         (
             vec![text_delta.clone()],
-            "Text delta without an active text block",
+            "text-delta for text block `0` that was not started",
         ),
         (
             vec![
@@ -900,31 +1470,31 @@ async fn malformed_native_block_lifecycle_is_a_classified_failure() {
                 text_start.clone(),
                 text_delta.clone(),
             ],
-            "Duplicate text start",
+            "text block `0` started twice",
         ),
         (
             vec![text_start.clone(), text_delta.clone(), end, text_delta],
-            "Text delta without an active text block",
+            "text-delta for text block `0` that was not started",
         ),
         (
             vec![
                 json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}),
                 json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}),
             ],
-            "Duplicate reasoning start",
+            "reasoning block `0` started twice",
         ),
         (
             vec![
                 text_start,
                 json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"wrong kind"}}),
             ],
-            "Reasoning delta without an active reasoning block",
+            "reasoning-delta for reasoning block `0` that was not started",
         ),
         (
             vec![
                 json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"missing start"}}),
             ],
-            "Reasoning delta without an active reasoning block",
+            "reasoning-delta for reasoning block `0` that was not started",
         ),
     ] {
         server.reset().await;
@@ -968,10 +1538,12 @@ async fn chat_reasoning_can_reopen_a_completed_segment_identity() {
     let body = frame(
         json!({"reasoning_content":"first", "content":""}),
         Value::Null,
-    ) + &frame(
-        json!({"reasoning_content":" second", "content":""}),
-        Value::Null,
-    ) + &frame(json!({"content":"answer"}), json!("stop"))
+    ) + &frame(json!({"content":"answer"}), Value::Null)
+        + &frame(
+            json!({"reasoning_content":" second", "content":""}),
+            Value::Null,
+        )
+        + &frame(json!({}), json!("stop"))
         + "data: [DONE]\n\n";
     Mock::given(method("POST"))
         .respond_with(
@@ -1173,7 +1745,7 @@ async fn native_failures_expose_only_normalized_model_facts() {
     .await;
     assert_model_failure(
         &error,
-        (Some(200), Some("server_error")),
+        (Some(500), Some("server_error")),
         ModelFailureOrigin::StreamEvent,
         Some("api_error"),
         Some("responses unavailable"),
@@ -1222,6 +1794,38 @@ async fn native_failures_expose_only_normalized_model_facts() {
     chat.close().await;
     responses.close().await;
     anthropic.close().await;
+}
+
+/// A stream-event failure whose code is neither permanent nor transient is not
+/// retried: the event's code decides, not the status the tag synthesizes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_event_failure_with_an_unknown_code_is_not_retried() {
+    let responses = NativeServer::start("openai-responses").await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let error = invoke_failure(
+        &host,
+        ModelProtocol::OpenaiResponses,
+        responses.url.clone(),
+        "facts-unrecognized-stream",
+    )
+    .await;
+    let HostError::Failed {
+        model: Some(model), ..
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(model.origin, ModelFailureOrigin::StreamEvent);
+    assert!(!model.transient, "{model:?}");
+    assert_eq!(
+        responses.endpoint.requests.lock().unwrap().len(),
+        1,
+        "an unrecognized stream-event failure is not retried"
+    );
+    responses.close().await;
+    root.shutdown().await.unwrap();
 }
 
 async fn respond_native(
@@ -1315,7 +1919,7 @@ async fn respond_native(
     let missing_terminal = request.to_string().contains("native-eof");
     let missing_stop = request.to_string().contains("native-stop-eof");
     let data = match endpoint.kind {
-        "openai-chat" => {
+        "openai-chat" | "openai-compatible" => {
             if continuation {
                 frame(json!({"content":"finished"}), json!("stop")) + "data: [DONE]\n\n"
             } else {
@@ -1395,6 +1999,19 @@ async fn respond_native(
             sse(vec![chunk])
         }
         "openai-responses" => {
+            if request_text.contains("facts-unrecognized-stream") {
+                return Response::builder()
+                    .status(200)
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from(sse(vec![
+                        json!({"type":"response.created","response":{"id":"resp-error","created_at":1,"model":"test-model"}}),
+                        json!({
+                            "type": "response.failed",
+                            "response": {"error": {"code": "unrecognized_failure", "type": "unexpected_failure", "message": "unrecognized"}}
+                        }),
+                    ])))
+                    .unwrap();
+            }
             if request_text.contains("facts-responses-stream") {
                 return Response::builder()
                     .status(200)
@@ -1417,18 +2034,18 @@ async fn respond_native(
             if refusal {
                 events.extend([
                     json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"refusal-1","role":"assistant","phase":"final_answer","content":[]}}),
-                    json!({"type":"response.content_part.added","item_id":"refusal-1","content_index":0,"part":{"type":"refusal","refusal":""}}),
+                    json!({"type":"response.content_part.added","item_id":"refusal-1","output_index":0,"content_index":0,"part":{"type":"refusal","refusal":""}}),
                 ]);
                 if request.to_string().contains("native-refusal-empty") {
-                    events.push(json!({"type":"response.refusal.delta","item_id":"refusal-1","content_index":0,"delta":""}));
+                    events.push(json!({"type":"response.refusal.delta","item_id":"refusal-1","output_index":0,"content_index":0,"delta":""}));
                 } else if !request.to_string().contains("native-refusal-done") {
                     events.extend([
-                        json!({"type":"response.refusal.delta","item_id":"refusal-1","content_index":0,"delta":"Cannot "}),
-                        json!({"type":"response.refusal.delta","item_id":"refusal-1","content_index":0,"delta":"comply."}),
+                        json!({"type":"response.refusal.delta","item_id":"refusal-1","output_index":0,"content_index":0,"delta":"Cannot "}),
+                        json!({"type":"response.refusal.delta","item_id":"refusal-1","output_index":0,"content_index":0,"delta":"comply."}),
                     ]);
                 }
                 events.extend([
-                    json!({"type":"response.refusal.done","item_id":"refusal-1","content_index":0,"refusal":"Cannot comply."}),
+                    json!({"type":"response.refusal.done","item_id":"refusal-1","output_index":0,"content_index":0,"refusal":"Cannot comply."}),
                     json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"refusal-1","role":"assistant","phase":"final_answer","content":[{"type":"refusal","refusal":"Cannot comply."}]}}),
                 ]);
             } else {
@@ -1476,10 +2093,17 @@ async fn respond_native(
         _ => unreachable!(),
     };
     let hold = endpoint.kind == "gemini" && !missing_terminal;
-    let body = Body::from_stream(async_stream::stream! {
-        yield Ok::<_, Infallible>(data);
-        if hold { std::future::pending::<()>().await; }
-    });
+    // The body carries its length unless the case holds the connection open: a
+    // client that stops reading at the stream's terminal frame then still
+    // leaves the connection reusable for its next request.
+    let body = if hold {
+        Body::from_stream(async_stream::stream! {
+            yield Ok::<_, Infallible>(data);
+            std::future::pending::<()>().await;
+        })
+    } else {
+        Body::from(data)
+    };
     Response::builder()
         .header("content-type", "text/event-stream")
         .body(body)
@@ -1502,7 +2126,7 @@ async fn four_native_apis_preserve_signed_blocks_and_tool_continuation() {
                 ..Default::default()
             }, "main").await.unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main",None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             assert!(matches!(events.last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })), "{kind}: {:?}", events.iter().filter_map(|e| if let EventKind::ModelOutputEnd(data)=&e.kind{Some(&data.outcome)}else{None}).collect::<Vec<_>>());
             assert!(events.iter().any(|e| matches!(&e.kind, EventKind::Text(data) if data.delta=="finished")));
             let requests = server.endpoint.requests.lock().unwrap().clone();
@@ -1603,25 +2227,26 @@ async fn four_native_apis_preserve_signed_blocks_and_tool_continuation() {
             agent.close().await.unwrap();
             for stream in [&mut unpolled,&mut partial] { assert!(matches!(stream.next().await,Some(Err(HostError::Failed{kind:HostErrorKind::OwnerClosed,..})))); }
             if kind == "gemini" {
-                use aimux_core::{content::ContentPart, language_model::LanguageModel, language_model_message::LanguageModelPromptMessage, message::Role as NativeRole, options::CallOptions, stream_part::StreamPart, types::FinishReasonUnified};
-                use aimux_providers::vertex::{VertexAuth, VertexConfig, VertexModel};
-                let model = VertexModel::new(server.model_id().into(), VertexConfig {
-                    base_url: server.url.trim_end_matches("?tenant=sandbox").into(),
-                    auth: VertexAuth::BearerToken("vertex-secret".into()),
-                    api_key_source: None,
-                    retry_config: Default::default(),
-                });
+                use aimux_core::{language_model::LanguageModel, language_model_message::{LanguageModelMessage, TextPart, UserPart}, options::CallOptions, stream_part::StreamPart, types::FinishReasonUnified};
+                use aimux_provider_utils::Resolvable;
+                use aimux_providers::vertex::{VertexProviderSettings, create_google_vertex};
+                let provider = create_google_vertex(VertexProviderSettings {
+                    api_key: Some(Resolvable::Value(String::new())),
+                    base_url: Some(server.url.trim_end_matches("?tenant=sandbox").into()),
+                    access_token: Some(Resolvable::Value("vertex-secret".into())),
+                    ..VertexProviderSettings::default()
+                }).unwrap();
+                let model = provider.chat(server.model_id());
                 let options = CallOptions {
-                    prompt: vec![LanguageModelPromptMessage {
-                        role: NativeRole::User,
-                        content: vec![ContentPart::Text { text: "tool".into(), provider_options: None }],
+                    prompt: vec![LanguageModelMessage::User {
+                        content: vec![UserPart::Text(TextPart { text: "tool".into(), provider_options: None })],
                         provider_options: None,
                     }],
                     ..Default::default()
                 };
                 let result = model.do_stream(&options).await.unwrap();
                 let parts = tokio::time::timeout(Duration::from_secs(1), result.stream.collect::<Vec<_>>()).await.expect("Vertex terminal must finish while HTTP stays open");
-                assert!(parts.iter().any(|part| matches!(part, Ok(StreamPart::ToolCall { tool_name, .. }) if tool_name == "echo")));
+                assert!(parts.iter().any(|part| matches!(part, Ok(StreamPart::ToolCall(call)) if call.tool_name == "echo")));
                 assert!(matches!(parts.last().unwrap(), Ok(StreamPart::Finish { finish_reason, usage, .. }) if finish_reason.unified == FinishReasonUnified::ToolCalls && usage.input_tokens.total == Some(5) && usage.output_tokens.total == Some(3)));
             }
             server.close().await;
@@ -1763,7 +2388,7 @@ async fn explicit_system_breakpoints_stay_within_the_four_breakpoint_limit() {
                 .await
                 .unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             let last = &events.last().unwrap().kind;
             if breaks < 5 {
                 assert!(
@@ -1883,7 +2508,7 @@ async fn native_unsigned_thinking_completes_and_is_not_replayed() {
                 .await
                 .unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             assert!(
                 matches!(
                     events.last().unwrap().kind,
@@ -2031,6 +2656,82 @@ async fn native_unsigned_thinking_completes_and_is_not_replayed() {
             agent.close().await.unwrap();
             server.close().await;
         }
+        // Bedrock: a stored unsigned block is metadata only, so the replay
+        // carries neither it nor a `reasoningContent` for it.
+        {
+            use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+            let server = MockServer::start().await;
+            let body = [
+                bedrock_frame("messageStart", json!({"role":"assistant"})),
+                bedrock_frame(
+                    "contentBlockDelta",
+                    json!({"contentBlockIndex":0,"delta":{"text":"kept"}}),
+                ),
+                bedrock_frame("contentBlockStop", json!({"contentBlockIndex":0})),
+                bedrock_frame("messageStop", json!({"stopReason":"end_turn"})),
+                bedrock_frame(
+                    "metadata",
+                    json!({"usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}),
+                ),
+            ]
+            .concat();
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "application/vnd.amazon.eventstream")
+                        .set_body_bytes(body),
+                )
+                .mount(&server)
+                .await;
+            let root = rutis::Ctx::root().unwrap();
+            root.plugin(AimuxPlugin).await.unwrap();
+            let host = root.get::<ModelHost>().unwrap();
+            let request = Arc::new(ModelRequest::new(
+                "local",
+                "arn:aws:bedrock:us-west-2:123:inference-profile/model-A",
+                vec![Message {
+                    role: Role::Assistant,
+                    content: MessageContent::Parts(vec![
+                        MessagePart::Thinking {
+                            thinking: "unsigned".into(),
+                            start_time: None,
+                            end_time: None,
+                            provider_metadata: Some(ContentMetadata::Bedrock { signature: None }),
+                        },
+                        MessagePart::Text {
+                            text: "kept".into(),
+                            start_time: None,
+                            end_time: None,
+                            provider_metadata: None,
+                        },
+                    ]),
+                }],
+            ));
+            let connection = ModelConnection::Bedrock(BedrockModelConnection {
+                base_url: server.uri(),
+                network: Default::default(),
+                headers: Default::default(),
+                auth: BedrockAuth::Bearer("bedrock-secret".into()),
+            });
+            let mut stream = host
+                .0
+                .invoke(request, connection, CancellationToken::new())
+                .await
+                .unwrap();
+            while let Some(chunk) = stream.next().await {
+                chunk.unwrap();
+            }
+            let sent = server.received_requests().await.unwrap();
+            assert_eq!(sent.len(), 1);
+            let sent: Value = serde_json::from_slice(&sent[0].body).unwrap();
+            assert!(
+                !sent.to_string().contains("reasoningContent")
+                    && !sent.to_string().contains("unsigned"),
+                "{sent}"
+            );
+            assert!(sent.to_string().contains("kept"), "{sent}");
+            root.shutdown().await.unwrap();
+        }
     })
     .await
     .unwrap();
@@ -2047,7 +2748,7 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
             let agent=model_agent(models.clone(),Some(custom)).await;
             let session=agent.create_session(server.session_config()).await.unwrap();
             session.submit("tool".into(),InputMode::Queue,"main").await.unwrap();session.idle("main").await.unwrap();
-            let events=session.history("main",None).await.unwrap();
+            let events=chain_events(&session, "main", ..).await.unwrap();
             assert!(events.iter().any(|e|matches!(&e.kind,EventKind::ModelOutputEnd(data) if matches!(data.outcome,ModelOutputOutcome::Failed{..}))));
             // Calls the failed output started are closed, never dispatched (agent-029).
             assert!(!events.iter().any(|e|matches!(&e.kind,EventKind::ToolCall(_)) || matches!(&e.kind,EventKind::ToolResult(data) if data.call_event_id.is_some())));
@@ -2067,16 +2768,30 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
             let session = agent.create_session(server.session_config()).await.unwrap();
             session.submit("missing-continuation".into(),InputMode::Queue,"main").await.unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main",None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             // The reply completes and commits its complete content.
             assert!(matches!(events.last().unwrap().kind,EventKind::TurnEnd(TurnEndData{outcome:TurnOutcome::Completed{..},..})),"{kind}");
             assert!(events.iter().any(|event|matches!(&event.kind,EventKind::ModelContent(_))),"{kind}");
             if kind == "anthropic" {
                 let host = agent.root().get::<ModelHost>().unwrap();
-                let request=Arc::new(ModelRequest::new("local",server.model_id(),vec![Message {role:Role::Assistant,content:MessageContent::Parts(vec![MessagePart::Thinking {thinking:"signed".into(),start_time:None,end_time:None,provider_metadata:Some(ContentMetadata::Anthropic {signature:"original-signature".into()})}])}]));
+                // Thinking off: stored signed thinking is left out of the
+                // request instead of failing it.
+                let request=Arc::new(ModelRequest::new("local",server.model_id(),vec![
+                    Message::text(Role::User,"question"),
+                    Message {role:Role::Assistant,content:MessageContent::Parts(vec![
+                        MessagePart::Thinking {thinking:"signed".into(),start_time:None,end_time:None,provider_metadata:Some(ContentMetadata::Anthropic {signature:"original-signature".into()})},
+                        MessagePart::Text {text:"kept".into(),start_time:None,end_time:None,provider_metadata:None},
+                    ])}
+                ]));
                 let connection=ModelConnection::Http(HttpModelConnection {protocol:ModelProtocol::Anthropic,base_url:server.url.clone(),network:Default::default(),headers:Default::default(),bearer:None,api_key:None,preset:None});
-                let Err(error)=host.0.invoke(request,connection,CancellationToken::new()).await else {panic!("signed thinking was silently dropped")};
-                assert!(error.to_string().contains("requires enabled or adaptive"));
+                let before=server.endpoint.requests.lock().unwrap().len();
+                let mut stream=host.0.invoke(request,connection,CancellationToken::new()).await.expect("stored thinking with thinking off must not fail the request");
+                while let Some(chunk)=stream.next().await{chunk.unwrap();}
+                let requests=server.endpoint.requests.lock().unwrap();
+                assert_eq!(requests.len(),before+1);
+                let sent=requests.last().unwrap().2.to_string();
+                assert!(!sent.contains("original-signature"),"the signature reached the request: {sent}");
+                assert!(sent.contains("kept"),"{sent}");
             }
             agent.close().await.unwrap();server.close().await;
         }
@@ -2091,9 +2806,12 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
             let session = agent.create_session(server.session_config()).await.unwrap();
             session.submit(prompt.into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.starts_with("before"))), "{kind}: {prompt}");
-            assert!(events.iter().any(|event| matches!(event.kind, EventKind::ToolUse(_))), "complete native tool input must precede EOF");
+            // Strict mode holds a client tool call until the finish and
+            // drops it when the stream fails, so it does not appear in the
+            // history. At main it appeared but was never executed.
+            assert!(!events.iter().any(|event| matches!(event.kind, EventKind::ToolUse(_))), "{kind}: {prompt}");
             assert!(events.iter().any(|event| matches!(&event.kind, EventKind::ModelOutputEnd(data) if matches!(data.outcome, ModelOutputOutcome::Failed { .. }))), "{kind}: {prompt}");
             assert!(!events.iter().any(|event| matches!(&event.kind, EventKind::ModelContent(_) | EventKind::ToolCall(_) | EventKind::ModelUsage(_)) || matches!(&event.kind, EventKind::ToolResult(data) if data.call_event_id.is_some())), "{kind}: {prompt}");
             assert!(matches!(events.last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Failed { .. }, .. })), "{kind}: {prompt}");
@@ -2107,7 +2825,7 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
             let session = agent.create_session(server.session_config()).await.unwrap();
             session.submit(prompt.into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             let visible: String = events.iter().filter_map(|event| match &event.kind { EventKind::Text(data) => Some(data.delta.as_str()), _ => None }).collect();
             assert_eq!(visible, "Cannot comply.");
             assert!(matches!(events.last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })));
@@ -2118,7 +2836,7 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
             let replay = requests[1].2["input"].as_array().unwrap().iter().find(|item| item["id"] == "refusal-1").unwrap();
             assert_eq!(replay["content"], json!([{"type":"output_text","text":"Cannot comply."}]));
             assert_eq!(replay["phase"], "final_answer");
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta == "finished")));
             agent.close().await.unwrap();
             server.close().await;
@@ -2129,7 +2847,7 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
             let session = agent.create_session(server.session_config()).await.unwrap();
             session.submit(prompt.into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             assert!(matches!(events.last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })), "{prompt}");
             let requests = server.endpoint.requests.lock().unwrap().clone();
             assert_eq!(requests.len(), 2);
@@ -2176,6 +2894,256 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
         }
         agent.close().await.unwrap();server.close().await;
     }).await.unwrap();
+}
+
+/// #1038: a Session that ran on an Anthropic model moves to a Chat model and
+/// back. The stored signed thinking only reaches the protocol that produced
+/// it, and moving back continues it again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_model_switch_keeps_stored_thinking_for_its_protocol() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let claude = NativeServer::start("anthropic").await;
+        let chat = NativeServer::start("openai-compatible").await;
+        let models = Arc::new(
+            AimuxModels::from_config(
+                serde_json::from_value(json!({
+                    "defaultModel": {"providerId": "local", "modelId": "test-model"},
+                    "providers": [
+                        {
+                            "id": "local", "kind": "anthropic", "baseUrl": claude.url,
+                            "headers": {"x-api-key": "native-secret", "CONTENT-TYPE": "application/json"},
+                            "models": [{"id": "test-model", "contextWindow": 128000, "maxOutputTokens": 4096,
+                                        "config": {"maxTokens": 4096, "providerOptions": {"anthropic": {"thinking": {"type": "enabled", "budgetTokens": 1024}}}}}]
+                        },
+                        {
+                            "id": "chat", "kind": "openai-compatible", "baseUrl": chat.url,
+                            "headers": {"Authorization": "Bearer native-secret", "CONTENT-TYPE": "application/json"},
+                            "models": [{"id": "test-model", "contextWindow": 128000, "maxOutputTokens": 4096,
+                                        "config": {"maxTokens": 4096}}]
+                        }
+                    ]
+                }))
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        let agent = model_agent(models, None).await;
+        let session = agent
+            .create_session(claude.session_config())
+            .await
+            .unwrap();
+        session
+            .submit("question".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        assert!(
+            matches!(
+                events.last().unwrap().kind,
+                EventKind::TurnEnd(TurnEndData {
+                    outcome: TurnOutcome::Completed { .. },
+                    ..
+                })
+            ),
+            "{:?}",
+            events.last().unwrap().kind
+        );
+        assert_eq!(claude.endpoint.requests.lock().unwrap().len(), 2);
+        let selection = |provider_id: &str| {
+            let provider_id = provider_id.to_owned();
+            let host = agent.root().get::<ModelSelectionHost>().unwrap();
+            async move {
+                host.0
+                    .resolve(
+                        Some(ModelId {
+                            provider_id,
+                            model_id: "test-model".into(),
+                        }),
+                        None,
+                        CancellationToken::new(),
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // The Session moves to a Chat model; the second turn completes and its
+        // request carries the earlier answer without the Anthropic signature.
+        session
+            .configure(
+                ConfigureUpdate {
+                    model: Some(selection("chat").await),
+                    ..Default::default()
+                },
+                "main",
+            )
+            .await
+            .unwrap();
+        session
+            .submit("after the switch".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        assert!(
+            matches!(
+                events.last().unwrap().kind,
+                EventKind::TurnEnd(TurnEndData {
+                    outcome: TurnOutcome::Completed { .. },
+                    ..
+                })
+            ),
+            "{:?}",
+            events.last().unwrap().kind
+        );
+        let requests = chat.endpoint.requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1);
+        let sent = requests[0].2.to_string();
+        assert!(!sent.contains("signature"), "the signature reached the Chat model: {sent}");
+        assert!(sent.contains("before"), "the earlier answer is kept: {sent}");
+        assert!(sent.contains("finished"), "the earlier answer is kept: {sent}");
+        assert!(sent.contains("after the switch"), "{sent}");
+
+        // Moving back with thinking on replays the signed thinking.
+        session
+            .configure(
+                ConfigureUpdate {
+                    model: Some(selection("local").await),
+                    ..Default::default()
+                },
+                "main",
+            )
+            .await
+            .unwrap();
+        session
+            .submit("back".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        assert!(
+            matches!(
+                events.last().unwrap().kind,
+                EventKind::TurnEnd(TurnEndData {
+                    outcome: TurnOutcome::Completed { .. },
+                    ..
+                })
+            ),
+            "{:?}",
+            events.last().unwrap().kind
+        );
+        let requests = claude.endpoint.requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 3);
+        let replay = &requests[2].2;
+        let thinking = replay["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+            .flat_map(|message| message["content"].as_array().unwrap())
+            .find(|part| part["type"] == "thinking")
+            .expect("the signed thinking is replayed");
+        assert_eq!(thinking["signature"], "anthropic-signature");
+        assert_eq!(replay["thinking"]["budget_tokens"], 1024);
+        agent.close().await.unwrap();
+        claude.close().await;
+        chat.close().await;
+    })
+    .await
+    .unwrap();
+}
+
+/// #1038: a Session whose Chat model stored thinking without continuation
+/// data moves to Bedrock. The turn completes and the thinking is left out of
+/// the Bedrock request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_bedrock_leaves_stored_chat_thinking_out_of_the_turn() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let server = MockServer::start().await;
+        let body = [
+            bedrock_frame("messageStart", json!({"role": "assistant"})),
+            bedrock_frame(
+                "contentBlockDelta",
+                json!({"contentBlockIndex": 0, "delta": {"text": "answer"}}),
+            ),
+            bedrock_frame("contentBlockStop", json!({"contentBlockIndex": 0})),
+            bedrock_frame("messageStop", json!({"stopReason": "end_turn"})),
+            bedrock_frame(
+                "metadata",
+                json!({"usage": {"inputTokens": 5, "outputTokens": 3}}),
+            ),
+        ]
+        .concat();
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/vnd.amazon.eventstream")
+                    .set_body_bytes(body),
+            )
+            .mount(&server)
+            .await;
+        let root = rutis::Ctx::root().unwrap();
+        root.plugin(AimuxPlugin).await.unwrap();
+        let host = root.get::<ModelHost>().unwrap();
+        // The history a Chat model leaves behind: thinking without data.
+        let request = ModelRequest::new(
+            "bedrock",
+            "anthropic.model",
+            vec![
+                Message::text(Role::User, "question"),
+                Message {
+                    role: Role::Assistant,
+                    content: MessageContent::Parts(vec![
+                        MessagePart::Thinking {
+                            thinking: "why".into(),
+                            start_time: None,
+                            end_time: None,
+                            provider_metadata: None,
+                        },
+                        MessagePart::Text {
+                            text: "earlier answer".into(),
+                            start_time: None,
+                            end_time: None,
+                            provider_metadata: None,
+                        },
+                    ]),
+                },
+                Message::text(Role::User, "again"),
+            ],
+        );
+        let mut output = host
+            .0
+            .invoke(
+                Arc::new(request),
+                ModelConnection::Bedrock(BedrockModelConnection {
+                    base_url: server.uri(),
+                    network: Default::default(),
+                    headers: Default::default(),
+                    auth: BedrockAuth::Bearer("bearer".into()),
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("missing Bedrock thinking data must not fail the request");
+        let mut text = String::new();
+        while let Some(chunk) = output.next().await {
+            if let ModelChunk::Text(delta) = chunk.unwrap() {
+                text.push_str(&delta);
+            }
+        }
+        assert_eq!(text, "answer");
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let sent = String::from_utf8(requests[0].body.clone()).unwrap();
+        assert!(!sent.contains("reasoningContent"), "{sent}");
+        assert!(sent.contains("earlier answer"), "{sent}");
+        root.shutdown().await.unwrap();
+    })
+    .await
+    .unwrap();
 }
 
 /// A tool whose result carries a text block and a PNG, as an MCP image result
@@ -2248,7 +3216,7 @@ async fn tool_result_images_take_the_form_its_protocol_defines() {
             let session = agent.create_session(server.session_config()).await.unwrap();
             session.submit("call the tool".into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             assert!(
                 matches!(events.last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })),
                 "{kind}: {:?}",
@@ -2322,7 +3290,7 @@ async fn tool_result_images_take_the_form_its_protocol_defines() {
             session.submit("another".into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
             assert!(
-                matches!(session.history("main", None).await.unwrap().last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })),
+                matches!(chain_events(&session, "main", ..).await.unwrap().last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })),
                 "{kind}: a later turn also completes"
             );
             agent.close().await.unwrap();
@@ -2350,7 +3318,7 @@ async fn a_model_without_image_input_gets_the_placeholder_in_a_tool_result() {
         let session = agent.create_session(config).await.unwrap();
         session.submit("call the tool".into(), InputMode::Queue, "main").await.unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(matches!(events.last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })));
         for content in tool_result_events(&events) {
             assert!(
@@ -2377,7 +3345,7 @@ async fn a_model_without_image_input_gets_the_placeholder_in_a_tool_result() {
 fn error_tool_result_request() -> ModelRequest {
     let mut input = serde_json::Map::new();
     input.insert("text".into(), json!("result text"));
-    ModelRequest::new(
+    let mut request = ModelRequest::new(
         "local",
         "test-model",
         vec![
@@ -2414,11 +3382,14 @@ fn error_tool_result_request() -> ModelRequest {
                 }]),
             },
         ],
-    )
+    );
+    // Bedrock keeps tool content only while a tool is active.
+    request.tools = Some(MockTools.definitions().into());
+    request
 }
 
-/// An error tool result that carries an image keeps both the error flag and
-/// the image, for each protocol whose tool message carries the image inside.
+/// An error tool result that carries an image keeps the image, for each
+/// protocol whose tool message carries the image inside.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_error_tool_result_image_keeps_the_flag_and_the_image() {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
@@ -2546,4 +3517,820 @@ async fn an_error_tool_result_image_keeps_the_flag_and_the_image() {
     assert_eq!(result["toolResult"]["status"], "error", "{body}");
 
     root.shutdown().await.unwrap();
+}
+
+/// A native stream that ends without its own terminal event is an invalid
+/// response: classified as such, and not retried.
+#[tokio::test]
+async fn a_native_stream_without_its_terminal_is_classified_and_not_retried() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(vec![
+                    json!({"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"test-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}),
+                    json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                    json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}),
+                ])),
+        )
+        .mount(&server)
+        .await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let failure =
+        invoke_failure(&host, ModelProtocol::Anthropic, server.uri(), "no-terminal").await;
+    assert!(
+        matches!(
+            &failure,
+            HostError::Failed {
+                kind: HostErrorKind::Other,
+                ..
+            }
+        ),
+        "{failure:?}"
+    );
+    assert!(
+        failure.to_string().contains("invalid_response_data"),
+        "{failure}"
+    );
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        1,
+        "an invalid response is not retried"
+    );
+    root.shutdown().await.unwrap();
+}
+
+/// A thinking part stored by an older session carries `summaryIndex`; the
+/// event still loads, and the reasoning item continues.
+#[tokio::test]
+async fn a_stored_summary_index_loads_and_continues() {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    let part = MessagePart::Thinking {
+        thinking: "earlier summary".into(),
+        start_time: None,
+        end_time: None,
+        provider_metadata: Some(ContentMetadata::OpenaiResponses {
+            item_id: "rs-old".into(),
+            encrypted_content: Some("opaque".into()),
+            summary_index: Some(1),
+            phase: None,
+        }),
+    };
+    // What the event store holds, as a session written before the upgrade.
+    let stored = serde_json::to_value(&part).unwrap();
+    let loaded: MessagePart = serde_json::from_value(stored).unwrap();
+    assert_eq!(loaded, part);
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(vec![
+                    json!({"type":"response.created","response":{"id":"resp-1","created_at":1,"model":"alias"}}),
+                    json!({"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}),
+                ])),
+        )
+        .mount(&server)
+        .await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let request = ModelRequest::new(
+        "local",
+        "alias",
+        vec![
+            Message::text(Role::User, "start"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![loaded]),
+            },
+        ],
+    );
+    let mut stream = host
+        .0
+        .invoke(
+            Arc::new(request),
+            ModelConnection::Http(HttpModelConnection {
+                protocol: ModelProtocol::OpenaiResponses,
+                base_url: server.uri(),
+                network: Default::default(),
+                headers: Default::default(),
+                bearer: None,
+                api_key: None,
+                preset: None,
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    while let Some(chunk) = stream.next().await {
+        chunk.unwrap();
+    }
+    let sent = server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&sent[0].body).unwrap();
+    let reasoning = body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "reasoning")
+        .unwrap();
+    assert_eq!(reasoning["id"], "rs-old");
+    assert_eq!(reasoning["encrypted_content"], "opaque");
+    assert_eq!(
+        reasoning["summary"],
+        json!([{"type":"summary_text","text":"earlier summary"}])
+    );
+    root.shutdown().await.unwrap();
+}
+
+/// The `xai` protocol is served by the OpenAI-compatible Chat model: the
+/// request goes to `/chat/completions` and carries the xAI options dim sends.
+#[tokio::test]
+async fn an_xai_chat_request_uses_the_compatible_chat_path() {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(
+                    frame(json!({"content":"visible"}), json!("stop")) + "data: [DONE]\n\n",
+                ),
+        )
+        .mount(&server)
+        .await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let mut request = ModelRequest::new(
+        "xai",
+        "fixture-model",
+        vec![Message::text(Role::User, "hello")],
+    );
+    request.config = Some(
+        serde_json::from_value(json!({"providerOptions":{"xai":{"reasoningEffort":"high"}}}))
+            .unwrap(),
+    );
+    let mut stream = host
+        .0
+        .invoke(
+            Arc::new(request),
+            ModelConnection::Http(HttpModelConnection {
+                protocol: ModelProtocol::Xai,
+                base_url: format!("{}/v1", server.uri()),
+                network: Default::default(),
+                headers: Default::default(),
+                bearer: None,
+                api_key: None,
+                preset: None,
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    while let Some(chunk) = stream.next().await {
+        chunk.unwrap();
+    }
+    let sent = server.received_requests().await.unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].url.path(), "/v1/chat/completions");
+    let body: Value = serde_json::from_slice(&sent[0].body).unwrap();
+    assert_eq!(body["model"], "fixture-model");
+    assert_eq!(body["reasoning_effort"], "high");
+    root.shutdown().await.unwrap();
+}
+
+/// An alias with an explicit reasoning setting becomes a reasoning model, so a
+/// temperature is unsupported; dim fails with that classification.
+#[tokio::test]
+async fn an_alias_with_explicit_reasoning_and_temperature_is_unsupported() {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(vec![
+                    json!({"type":"response.created","response":{"id":"resp-1","created_at":1,"model":"alias"}}),
+                    json!({"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}),
+                ])),
+        )
+        .mount(&server)
+        .await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let mut request = ModelRequest::new("local", "alias", vec![Message::text(Role::User, "hello")]);
+    request.config = Some(
+        serde_json::from_value(json!({"temperature":0.2,"reasoning":{"effort":"high"}})).unwrap(),
+    );
+    let mut stream = host
+        .0
+        .invoke(
+            Arc::new(request),
+            ModelConnection::Http(HttpModelConnection {
+                protocol: ModelProtocol::OpenaiResponses,
+                base_url: server.uri(),
+                network: Default::default(),
+                headers: Default::default(),
+                bearer: None,
+                api_key: None,
+                preset: None,
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let failure = loop {
+        match stream.next().await {
+            Some(Err(failure)) => break failure,
+            Some(Ok(_)) => {}
+            None => panic!("the request did not fail"),
+        }
+    };
+    assert!(
+        matches!(
+            &failure,
+            HostError::Failed {
+                kind: HostErrorKind::Unsupported,
+                ..
+            }
+        ),
+        "{failure:?}"
+    );
+    assert!(failure.to_string().contains("temperature"), "{failure}");
+    root.shutdown().await.unwrap();
+}
+
+/// A Chat refusal delta becomes visible text (vendored patch for
+/// arcships/aimux#461).
+#[tokio::test]
+async fn chat_refusal_delta_is_visible_text() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    let body = frame(json!({"refusal":"I cannot help with that."}), Value::Null)
+        + &frame(json!({}), json!("stop"))
+        + "data: [DONE]\n\n";
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let mut stream = host
+        .0
+        .invoke(
+            Arc::new(ModelRequest::new(
+                "local",
+                "test-model",
+                vec![Message::text(Role::User, "question")],
+            )),
+            ModelConnection::Http(HttpModelConnection {
+                protocol: ModelProtocol::OpenaiCompatible,
+                base_url: server.uri(),
+                network: Default::default(),
+                headers: Default::default(),
+                bearer: None,
+                api_key: None,
+                preset: None,
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let mut text = String::new();
+    let mut stop = None;
+    while let Some(chunk) = stream.next().await {
+        match chunk.unwrap() {
+            ModelChunk::Text(delta) => text.push_str(&delta),
+            ModelChunk::MessageStop { reason, .. } => stop = Some(reason),
+            _ => {}
+        }
+    }
+    assert_eq!(text, "I cannot help with that.");
+    assert_eq!(stop, Some(ModelStopReason::EndTurn));
+    root.shutdown().await.unwrap();
+}
+
+/// A Responses refusal reaches the reply as visible text (vendored patch for
+/// arcships/aimux#466).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_refusal_deltas_are_visible_text() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    let body = sse(vec![
+        json!({"type":"response.created","response":{"id":"resp-1","created_at":1,"model":"test-model"}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"refusal-1","role":"assistant","phase":"final_answer","content":[]}}),
+        json!({"type":"response.content_part.added","item_id":"refusal-1","output_index":0,"content_index":0,"part":{"type":"refusal","refusal":""}}),
+        json!({"type":"response.refusal.delta","item_id":"refusal-1","output_index":0,"content_index":0,"delta":"Cannot "}),
+        json!({"type":"response.refusal.delta","item_id":"refusal-1","output_index":0,"content_index":0,"delta":"comply."}),
+        json!({"type":"response.refusal.done","item_id":"refusal-1","output_index":0,"content_index":0,"refusal":"Cannot comply."}),
+        json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"refusal-1","role":"assistant","phase":"final_answer","content":[{"type":"refusal","refusal":"Cannot comply."}]}}),
+        json!({"type":"response.completed","response":{"id":"resp-1","created_at":1,"model":"test-model","usage":{"input_tokens":1,"output_tokens":2}}}),
+    ]);
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let mut stream = host
+        .0
+        .invoke(
+            Arc::new(ModelRequest::new(
+                "local",
+                "test-model",
+                vec![Message::text(Role::User, "question")],
+            )),
+            ModelConnection::Http(HttpModelConnection {
+                protocol: ModelProtocol::OpenaiResponses,
+                base_url: server.uri(),
+                network: Default::default(),
+                headers: Default::default(),
+                bearer: None,
+                api_key: None,
+                preset: None,
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let mut text = String::new();
+    while let Some(chunk) = stream.next().await {
+        if let ModelChunk::Text(delta) = chunk.unwrap() {
+            text.push_str(&delta);
+        }
+    }
+    assert_eq!(text, "Cannot comply.");
+    root.shutdown().await.unwrap();
+}
+
+/// Signed Gemini text parts keep their own blocks, and text closes before a
+/// function call (vendored patch for arcships/aimux#467).
+#[tokio::test]
+async fn gemini_signed_text_parts_keep_their_blocks() {
+    use aimux_core::language_model::LanguageModel;
+    use aimux_core::language_model_message::convert_to_language_model_prompt;
+    use aimux_core::message::ModelMessage;
+    use aimux_core::options::CallOptions;
+    use aimux_core::stream_part::StreamPart;
+    use aimux_providers::google::{GoogleProviderSettings, create_google};
+    use futures::StreamExt;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    let chunk = json!({"candidates":[{"content":{"role":"model","parts":[
+        {"text":"before","thoughtSignature":"sig-before"},
+        {"text":"after","thoughtSignature":"sig-after"},
+        {"functionCall":{"id":"call-1","name":"echo","args":{"text":"x"}},"thoughtSignature":"sig-tool"}
+    ]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}});
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(vec![chunk])),
+        )
+        .mount(&server)
+        .await;
+    let model = create_google(GoogleProviderSettings {
+        api_key: Some("test-key".into()),
+        base_url: Some(format!("{}/v1beta", server.uri())),
+        ..Default::default()
+    })
+    .unwrap()
+    .generative_ai("gemini-2.5-pro");
+    let options = CallOptions::new(
+        convert_to_language_model_prompt(&[ModelMessage::user("hi")], None, None).unwrap(),
+    );
+    let mut result = model.do_stream(&options).await.unwrap();
+    let mut trace = Vec::new();
+    while let Some(part) = result.stream.next().await {
+        match part.unwrap() {
+            StreamPart::TextStart { id, .. } => trace.push(format!("start:{id}")),
+            StreamPart::TextEnd { .. } => trace.push("end".into()),
+            StreamPart::ToolCall(call) => trace.push(format!("tool:{}", call.tool_call_id)),
+            StreamPart::Finish { .. } => trace.push("finish".into()),
+            _ => {}
+        }
+    }
+    let starts = trace
+        .iter()
+        .filter(|line| line.starts_with("start:"))
+        .count();
+    assert_eq!(starts, 2, "{trace:?}");
+    let end = trace
+        .iter()
+        .position(|line| line == "end")
+        .expect("text closes");
+    let tool = trace
+        .iter()
+        .position(|line| line.starts_with("tool:"))
+        .expect("tool call");
+    assert!(
+        end < tool,
+        "text must close before the function call: {trace:?}"
+    );
+}
+
+/// Gemini signs the text it follows: the tag's two recorded streams carry the
+/// text in unsigned chunks and the `thoughtSignature` in a last, empty chunk,
+/// so that signature belongs to the text before it and is replayed with it.
+/// The streams are `fixtures/google-text.chunks.txt` and
+/// `fixtures/google-reasoning.chunks.txt` under `vendor/aimux`; the tag's
+/// tests at `aimux-providers/src/google/tests/language_model.rs:4429` and
+/// `:4546` stream them and snapshot the result.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gemini_signature_after_unsigned_text_signs_that_text_and_replays() {
+    use std::sync::Mutex;
+
+    #[derive(Clone, Default)]
+    struct Endpoint {
+        requests: Arc<Mutex<Vec<(Uri, Value)>>>,
+    }
+    async fn respond(
+        State(endpoint): State<Endpoint>,
+        uri: Uri,
+        Json(request): Json<Value>,
+    ) -> Response {
+        let turn = {
+            let mut requests = endpoint.requests.lock().unwrap();
+            requests.push((uri, request));
+            requests.len()
+        };
+        let chunks = if turn == 1 {
+            vec![
+                json!({"candidates":[{"content":{"role":"model","parts":[{"text":"first token "}]},"index":0}]}),
+                json!({"candidates":[{"content":{"role":"model","parts":[{"text":"second token"}]},"index":0}]}),
+                json!({"candidates":[{"content":{"role":"model","parts":[{"text":"","thoughtSignature":"signature-after-text"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2,"totalTokenCount":3}}),
+            ]
+        } else {
+            vec![
+                json!({"candidates":[{"content":{"role":"model","parts":[{"text":"finished"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}),
+            ]
+        };
+        Response::builder()
+            .status(200)
+            .header("content-type", "text/event-stream")
+            .body(Body::from(sse(chunks)))
+            .unwrap()
+    }
+
+    let endpoint = Endpoint::default();
+    let router = Router::new()
+        .route("/v1beta/{*path}", post(respond))
+        .with_state(endpoint.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/v1beta", listener.local_addr().unwrap());
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    let join = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(stop.cancelled_owned())
+            .await
+            .unwrap();
+    });
+    let models = Arc::new(
+        AimuxModels::from_config(
+            serde_json::from_value(json!({
+                "defaultModel":{"providerId":"local","modelId":"test-model"},
+                "providers":[{"id":"local","kind":"gemini","baseUrl":url,"headers":{"x-goog-api-key":"test-key"},"models":[{"id":"test-model","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":4096}}]}]
+            }))
+            .unwrap(),
+        )
+        .unwrap(),
+    );
+    let agent = model_agent(models, None).await;
+    let session = agent.create_session(session_config()).await.unwrap();
+    session
+        .submit("first".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    assert!(
+        matches!(
+            events.last().unwrap().kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Completed { .. },
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    let content = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelContent(data) => Some(data.content.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    // The empty signed chunk signs the open block; it does not start one.
+    assert_eq!(content.len(), 1, "{content:?}");
+    assert!(
+        matches!(
+            &content[0],
+            MessagePart::Text {
+                text,
+                provider_metadata: Some(ContentMetadata::Gemini { thought_signature }),
+                ..
+            } if text == "first token second token" && thought_signature == "signature-after-text"
+        ),
+        "{content:?}"
+    );
+    session
+        .submit("second".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let requests = endpoint.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2, "{}", requests.len());
+    let parts = requests[1].1["contents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "model")
+        .unwrap()["parts"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        parts,
+        vec![json!({"text":"first token second token","thoughtSignature":"signature-after-text"})],
+        "{}",
+        requests[1].1
+    );
+    drop(session);
+    cancel.cancel();
+    join.await.unwrap();
+}
+
+/// Responses text blocks split by content part, and a function call keeps its
+/// item id (vendored patch for arcships/aimux#468).
+#[tokio::test]
+async fn responses_output_text_parts_and_function_call_ids_are_kept() {
+    use aimux_core::language_model::LanguageModel;
+    use aimux_core::language_model_message::convert_to_language_model_prompt;
+    use aimux_core::message::ModelMessage;
+    use aimux_core::options::CallOptions;
+    use aimux_core::stream_part::StreamPart;
+    use aimux_providers::openai::{OpenAIProviderSettings, create_openai};
+    use futures::StreamExt;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    let body = sse(vec![
+        json!({"type":"response.created","response":{"id":"resp-1","created_at":1,"model":"test-model"}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg-1","role":"assistant","phase":"commentary","content":[]}}),
+        json!({"type":"response.content_part.added","item_id":"msg-1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}),
+        json!({"type":"response.output_text.delta","item_id":"msg-1","output_index":0,"content_index":0,"delta":"before"}),
+        json!({"type":"response.content_part.added","item_id":"msg-1","output_index":0,"content_index":1,"part":{"type":"output_text","text":"","annotations":[]}}),
+        json!({"type":"response.output_text.delta","item_id":"msg-1","output_index":0,"content_index":1,"delta":"after"}),
+        json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg-1","role":"assistant","phase":"commentary","content":[]}}),
+        json!({"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc-1","call_id":"call-1","name":"echo","arguments":""}}),
+        json!({"type":"response.function_call_arguments.done","item_id":"fc-1","output_index":1,"arguments":"{\"text\":\"x\"}"}),
+        json!({"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","id":"fc-1","call_id":"call-1","name":"echo","arguments":"{\"text\":\"x\"}"}}),
+        json!({"type":"response.completed","response":{"id":"resp-1","created_at":1,"model":"test-model","usage":{"input_tokens":1,"output_tokens":1}}}),
+    ]);
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    let model = create_openai(OpenAIProviderSettings {
+        api_key: Some("test-key".into()),
+        base_url: Some(format!("{}/v1", server.uri())),
+        ..Default::default()
+    })
+    .unwrap()
+    .responses("test-model");
+    let options = CallOptions::new(
+        convert_to_language_model_prompt(&[ModelMessage::user("hi")], None, None).unwrap(),
+    );
+    let mut result = model.do_stream(&options).await.unwrap();
+    let mut text_starts = 0;
+    let mut tool_item_id = None;
+    while let Some(part) = result.stream.next().await {
+        match part.unwrap() {
+            StreamPart::TextStart { .. } => text_starts += 1,
+            StreamPart::ToolInputStart {
+                provider_metadata, ..
+            } => {
+                tool_item_id = provider_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("openai"))
+                    .and_then(|namespace| namespace.get("itemId"))
+                    .cloned();
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(text_starts, 2, "each output_text part keeps its own block");
+    assert_eq!(
+        tool_item_id,
+        Some(json!("fc-1")),
+        "the function call keeps its item id"
+    );
+}
+
+/// A Gemini terminal chunk finishes the stream while the HTTP body stays open
+/// (vendored patch for arcships/aimux#469).
+#[tokio::test]
+async fn gemini_terminal_chunk_finishes_while_the_body_stays_open() {
+    use aimux_core::language_model::LanguageModel;
+    use aimux_core::language_model_message::convert_to_language_model_prompt;
+    use aimux_core::message::ModelMessage;
+    use aimux_core::options::CallOptions;
+    use aimux_core::stream_part::StreamPart;
+    use aimux_providers::google::{GoogleProviderSettings, create_google};
+    use futures::StreamExt;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0u8; 4096];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let count = socket.read(&mut chunk).await.unwrap();
+            assert_ne!(count, 0);
+            request.extend_from_slice(&chunk[..count]);
+        }
+        let body = "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"done\"}]},\"finishReason\":\"STOP\",\"index\":0}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1,\"totalTokenCount\":2}}\n\n";
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n{body}"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    });
+    let model = create_google(GoogleProviderSettings {
+        api_key: Some("test-key".into()),
+        base_url: Some(format!("http://{address}/v1beta")),
+        ..Default::default()
+    })
+    .unwrap()
+    .generative_ai("gemini-2.5-pro");
+    let options = CallOptions::new(
+        convert_to_language_model_prompt(&[ModelMessage::user("hi")], None, None).unwrap(),
+    );
+    let mut result = model.do_stream(&options).await.unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut finished = false;
+        while let Some(part) = result.stream.next().await {
+            if matches!(part.unwrap(), StreamPart::Finish { .. }) {
+                finished = true;
+                break;
+            }
+        }
+        finished
+    })
+    .await;
+    server.abort();
+    assert!(
+        matches!(outcome, Ok(true)),
+        "the terminal chunk must finish the stream while the body stays open"
+    );
+}
+
+/// A TCP proxy in front of a local stub that counts the client connections it
+/// accepts, so a test can tell a reused keep-alive connection from a new
+/// client.
+struct CountingProxy {
+    url: String,
+    accepted: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    join: tokio::task::JoinHandle<()>,
+}
+
+impl CountingProxy {
+    async fn start(target: std::net::SocketAddr) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = accepted.clone();
+        let join = tokio::spawn(async move {
+            loop {
+                let Ok((mut client, _)) = listener.accept().await else {
+                    return;
+                };
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let Ok(mut upstream) = tokio::net::TcpStream::connect(target).await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+                });
+            }
+        });
+        Self {
+            url,
+            accepted,
+            join,
+        }
+    }
+
+    fn accepted(&self) -> usize {
+        self.accepted.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// One request, drained to its end: what matters is the transport it used.
+async fn drain_request(host: &ModelHost, base_url: String, timeout_ms: Option<u64>) {
+    let connection = ModelConnection::Http(HttpModelConnection {
+        protocol: ModelProtocol::OpenaiChat,
+        base_url,
+        network: ModelNetwork {
+            timeout_ms,
+            ..ModelNetwork::default()
+        },
+        headers: Default::default(),
+        bearer: None,
+        api_key: Some("test-key".into()),
+        preset: None,
+    });
+    let request = ModelRequest::new("local", "test-model", vec![Message::text(Role::User, "hi")]);
+    let mut stream = host
+        .0
+        .invoke(Arc::new(request), connection, CancellationToken::new())
+        .await
+        .unwrap();
+    while let Some(chunk) = stream.next().await {
+        chunk.unwrap();
+    }
+}
+
+/// A connection whose base URL carries a query, or whose network names a
+/// timeout, keeps the driver's transport and its connection pool: two requests
+/// with each use the one accepted TCP connection the driver holds.
+#[tokio::test]
+async fn a_connection_reuses_one_tcp_connection_for_its_query_and_timeout() {
+    let server = NativeServer::start("openai-chat").await;
+    let target: std::net::SocketAddr = server
+        .url
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let proxy = CountingProxy::start(target).await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+
+    for _ in 0..2 {
+        drain_request(&host, format!("{}/v1?tenant=sandbox", proxy.url), None).await;
+    }
+    assert_eq!(proxy.accepted(), 1, "the query connection reuses its pool");
+    for _ in 0..2 {
+        drain_request(&host, format!("{}/v1", proxy.url), Some(5_000)).await;
+    }
+    assert_eq!(
+        proxy.accepted(),
+        1,
+        "the timeout connection reuses the driver's pool"
+    );
+    proxy.join.abort();
+    server.close().await;
 }

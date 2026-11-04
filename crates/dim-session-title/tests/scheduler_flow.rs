@@ -1,31 +1,21 @@
 #![cfg(unix)]
 mod support;
 use dim_agent_capabilities::{adapters::MockTools, defaults};
+use dim_agent_runtime::testing::branch_events;
 use dim_agent_runtime::{AgentBuilder, AgentConfig};
 use dim_agent_types::{EventKind, ToolContent};
-use dim_app_server::{ServerConfig, serve, session_typescript::SessionTypeScriptConfig};
+use dim_app_server::{ServerConfig, serve};
 use serde_json::{Value, json};
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use support::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn scheduler_reports_do_not_replace_the_first_operator_input_for_titles() {
     let store = Store::new();
     std::fs::create_dir(store.0.join("scheduler")).unwrap();
-    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .unwrap();
-    let directory = workspace.join("runtime/plugins/scheduler");
-    let manifest: Value =
-        serde_json::from_slice(&std::fs::read(directory.join("dim-plugin.json")).unwrap()).unwrap();
-    let code = &manifest["code"];
-    let row = json!({"id":"scheduler","name":directory.join(code["entry"].as_str().unwrap()),
-        "inject":code["inject"],"provides":code.get("provides").cloned().unwrap_or_else(||json!({})),
-        "config":code.get("config").cloned().unwrap_or_else(||json!({}))});
     let mut builder = AgentBuilder::new(AgentConfig::default());
     dim_session_title::install(&mut builder);
+    dim_agent_scheduler::install(&mut builder);
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
     defaults::tool_host(&mut builder, Arc::new(MockTools));
@@ -33,18 +23,6 @@ async fn scheduler_reports_do_not_replace_the_first_operator_input_for_titles() 
     let mut config = ServerConfig {
         product_home: Some(store.0.clone()),
         unix_path: Some(store.0.join("server.sock")),
-        session_typescript: Some(SessionTypeScriptConfig {
-            python: None,
-            acquire: None,
-            node: std::env::var_os("DIM_TEST_NODE")
-                .expect("DIM_TEST_NODE")
-                .into(),
-            js_runtime: std::env::var_os("DIM_TEST_JS_RUNTIME")
-                .expect("DIM_TEST_JS_RUNTIME")
-                .into(),
-            anchor: workspace.join("runtime/package.json"),
-            rows: vec![row],
-        }),
         ..store.config()
     };
     config.session_defaults.tools = Some(vec!["echo".into(), "schedule".into()]);
@@ -109,7 +87,7 @@ async fn scheduler_reports_do_not_replace_the_first_operator_input_for_titles() 
         .rpc("session.idle", json!({"sessionId":id,"branchId":"main"}))
         .await
         .unwrap();
-    let history = session.local("main", ..).await.unwrap();
+    let history = branch_events(&session, "main", ..).await.unwrap();
     let result = history
         .iter()
         .rev()
@@ -165,7 +143,7 @@ async fn scheduler_reports_do_not_replace_the_first_operator_input_for_titles() 
     let report_id = format!("scheduler-report:{}", run["run_id"].as_str().unwrap());
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let history = session.local("main", ..).await.unwrap();
+            let history = branch_events(&session, "main", ..).await.unwrap();
             if let Some(report) = history.iter().find(|event| {
                 matches!(&event.kind, EventKind::InputMessage(data)
                     if data.submission_id.as_deref() == Some(&report_id))

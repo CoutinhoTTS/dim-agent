@@ -1,5 +1,6 @@
 use super::*;
 use dim_agent_runtime::BranchOptions;
+use dim_agent_runtime::testing::branch_events;
 use dim_agent_types::{BranchCreateAt, BranchSource, EventKind, InputMode};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -36,7 +37,7 @@ async fn both_transports_encode_the_v1_branch_create_boundary_live() {
             .await
             .unwrap();
         session.idle(&child).await.unwrap();
-        let events = session.local("main", ..).await.unwrap();
+        let events = branch_events(&session, "main", ..).await.unwrap();
         let create = events
             .iter()
             .find(|event| matches!(&event.kind, EventKind::BranchCreate(data) if data.branch == child))
@@ -53,7 +54,7 @@ async fn both_transports_encode_the_v1_branch_create_boundary_live() {
         assert_eq!(notices, v1_events(&through_create, high));
         assert!(notices[0]["data"].get("at").is_none());
         assert_eq!(notices[0]["sequence"], create.sequence);
-        let local = session.local(&child, ..).await.unwrap();
+        let local = branch_events(&session, &child, ..).await.unwrap();
         assert!(
             matches!(&local[0].kind, EventKind::BranchStart(data) if data.create_event == Some(create.sequence))
         );

@@ -103,7 +103,7 @@ pub async fn apply(
     let mut applied = false;
     match action {
         ManagementAction::List | ManagementAction::Reload => {}
-        ManagementAction::Toggle { id, enabled } => {
+        ManagementAction::Toggle { id, enabled, .. } => {
             if id != PROJECT {
                 return Err(Failure::Refused(format!(
                     "Only this workspace's {PROJECT} hooks can be turned on or off here."
@@ -207,6 +207,7 @@ pub(super) fn view(catalog: &Catalog, available: &[ActionKind]) -> ManagementVie
             t("sources"),
             ManagementEntry {
                 id: source.source.clone(),
+                source: None,
                 label: source.source.clone(),
                 detail: detail(source),
                 enabled: Some(source.enabled),

@@ -1,10 +1,10 @@
 use super::error;
 use crate::config::ProviderKind;
 use aimux_core::options::CallOptions;
+use aimux_core::shared::provider_namespace;
 use dim_agent_capabilities::host::HostError;
 use dim_agent_types::{AnthropicThinkingType, ModelConfig, ModelRequest};
 use serde_json::{Map, Value, json};
-use std::collections::HashMap;
 
 pub(super) fn apply(
     request: &ModelRequest,
@@ -230,6 +230,13 @@ pub(super) fn apply(
                     "requires a concrete reasoning effort",
                 ));
             }
+            // The model decides from its name whether it reasons; an explicit
+            // setting makes the alias one, so the setting reaches the wire
+            // instead of being dropped. This replaces the 0.5 patch that
+            // preserved explicit reasoning for deployment aliases.
+            if fields.contains_key("reasoningEffort") || fields.contains_key("reasoningSummary") {
+                fields.insert("forceReasoning".into(), json!(true));
+            }
             fields.insert("store".into(), json!(false));
             fields.insert("include".into(), json!(["reasoning.encrypted_content"]));
         }
@@ -369,9 +376,12 @@ pub(super) fn apply(
                 ));
             }
             if let Some(budget) = thinking.remove("budgetTokens") {
+                // The Converse API takes the thinking block itself: the
+                // portable reasoning path would also add the budget to
+                // maxTokens, which is not what this request states.
                 fields.insert(
-                    "reasoningConfig".into(),
-                    json!({"type":"enabled", "budgetTokens":budget}),
+                    "additionalModelRequestFields".into(),
+                    json!({"thinking": {"type":"enabled", "budget_tokens":budget}}),
                 );
             }
         }
@@ -386,7 +396,10 @@ pub(super) fn apply(
         _ => unreachable!(),
     };
     if !fields.is_empty() {
-        options.provider_options = Some(HashMap::from([(namespace.into(), Value::Object(fields))]));
+        options.provider_options = Some(
+            provider_namespace(namespace, Value::Object(fields))
+                .expect("native reasoning fields are an object"),
+        );
     }
     Ok(())
 }

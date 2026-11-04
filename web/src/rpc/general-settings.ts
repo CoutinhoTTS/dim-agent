@@ -173,7 +173,8 @@ export function readPlugins(value: unknown): PluginEntry[] {
 }
 
 export type McpEntry = { id: string; source: "user" | "project" | "plugin"; enabled: boolean; transport: string; auth: string | undefined }
-export type McpView = { userRevision: string; projectRevision: string | undefined; servers: McpEntry[]; errors: string[] }
+export type McpInvalidEntry = { id: string; source: "user" | "project" | "plugin"; error: string }
+export type McpView = { userRevision: string; projectRevision: string | undefined; servers: McpEntry[]; invalid: McpInvalidEntry[]; errors: string[] }
 export function readMcp(value: unknown): McpView {
   const source = object(value)
   return {
@@ -181,6 +182,11 @@ export function readMcp(value: unknown): McpView {
     servers: array(source.servers, (item) => {
       const server = object(item)
       return { id: string(server.id), source: choice(server.source, ["user", "project", "plugin"]), enabled: boolean(server.enabled), transport: string(server.transport), auth: server.auth === undefined ? undefined : string(object(server.auth).status) }
+    }),
+    // A daemon older than this list reports no broken entries.
+    invalid: source.invalid === undefined ? [] : array(source.invalid, (item) => {
+      const entry = object(item)
+      return { id: string(entry.id), source: choice(entry.source, ["user", "project", "plugin"]), error: string(entry.error) }
     }),
     errors: [source.userApplication, source.pluginApplication, source.projectApplication].flatMap((item) => {
       if (item === null) return []

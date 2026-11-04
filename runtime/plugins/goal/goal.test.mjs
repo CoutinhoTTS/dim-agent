@@ -92,7 +92,7 @@ async function loadGoalBranch(read, options = {}) {
   let call
   const emit = async (type, name, data) => {
     const event = branch.commit(type, name, data)
-    await call(listener, [{ live: event }])
+    await call(listener, [event])
     return event
   }
   const create = options.create ?? defaultCreate
@@ -105,15 +105,55 @@ async function loadGoalBranch(read, options = {}) {
     })
     return id
   }
+  // The inherited prefix is `options.inherited`, the parent's facts, in
+  // chain order before this branch's own; the query keeps the position of
+  // each fact, which is how the part tells the two apart.
+  const queryTimeline = async query => {
+    const chain = [
+      ...(options.inherited ?? []).map(event => ({ event, branch: B })),
+      ...branch.events.map(event => ({ event, branch: branchId })),
+    ]
+    let selected = query.scope === 'branch' ? chain.filter(entry => entry.branch === branchId) : chain
+    if (query.from_sequence !== undefined) {
+      const at = BigInt(query.from_sequence)
+      selected = query.direction === 'descending' && query.scope === 'chain'
+        ? selected.filter(entry => entry.branch !== branchId || entry.event.sequence <= at)
+        : selected.filter(entry => entry.event.sequence >= at)
+    }
+    if (query.kinds?.length) selected = selected.filter(entry => query.kinds.includes(`${entry.event.type}/${entry.event.name}`))
+    if (query.predicate) {
+      const path = query.predicate.path.split('.')
+      selected = selected.filter(entry => path.reduce((value, part) => value?.[part], entry.event.data) === query.predicate.value)
+    }
+    if (query.direction === 'descending') selected.reverse()
+    const offset = Number(query.offset ?? 0)
+    const page = selected.slice(offset, offset + Number(query.limit))
+    return {
+      events: page.map(entry => entry.event),
+      positions: page.map(entry => ({ branch_id: entry.branch, sequence: entry.event.sequence })),
+    }
+  }
   const h = host({ services: {
     timelineIdentity: { get: async () => ({ branchId }) },
     branchLifecycle: { activated: async () => true, closing: () => closing.promise },
     sessionLifecycle,
     dispatcher: counted({
-      consume: async (_name, _keys, handler) => { listener = handler },
-      local: async (start, through) => branch.events.filter(event => event.sequence >= BigInt(start) && event.sequence <= BigInt(through)),
-      history: async through => branch.events.filter(event => event.sequence <= BigInt(through)),
-      committed: async () => branch.sequence,
+      consume: async (_name, _keys, rebuild, handler) => {
+        const held = []
+        let covered
+        listener = event => {
+          if (covered === undefined) {
+            held.push(event)
+            return
+          }
+          return handler(event)
+        }
+        covered = BigInt(await call(rebuild, []))
+        for (const event of held) if (event.sequence > covered) await handler(event)
+      },
+    }),
+    timeline: counted({
+      query: async query => ({ ...(await queryTimeline(query)), through: branch.sequence }),
     }),
     settings: counted({ read }),
     treeCommands: counted({
@@ -139,10 +179,11 @@ async function loadGoalBranch(read, options = {}) {
       },
     }),
   } })
-  await h.load(goalBranch, { config: TEXTS })
+  // The driver comes first: the part folds its branch in `apply`, and a
+  // decision that follows may write before `load` returns.
   const driver = await h.load(driveCallback)
   call = (fn, args) => driver.service('driveCallback').call(fn, args)
-  await call(listener, [{ replay: [...branch.events] }])
+  await h.load(goalBranch, { config: TEXTS })
   let unloaded = false
   return { unload: async () => { if (unloaded) return; unloaded = true; closing.resolve(); await h.unload() }, branch, emit, writes, sent, creates, ends,
     turn: async input => {
@@ -957,6 +998,26 @@ test('Pursuit 4: a report outside the first block decides nothing', async t => {
   assert.equal(goal.branch.fold.status.status, 'active')
 })
 
+test('a parent-moved block on an evaluator changes no Goal decision', async t => {
+  const evaluator = 'E1'
+  const goal = await loadGoalBranch(async () => settingsDocument(5), { branchId: evaluator })
+  t.after(() => goal.unload())
+  const text = '<dim-branch-parent branch="main" head="9" after="4">\nLine main has new activity: it was at 9 when this was written, and you have read it to 4. Read what is new with the branch tool (action read, branch "main"); with no after, the read continues from 4. Read it when what main did changes what you do, and before your final message; do not page through all of main\'s work.\n</dim-branch-parent>'
+  const moved = await goal.emit('input', 'message', {
+    mode: 'append',
+    blocks: [{ type: 'raw', text, key: 'branch:parent', retire: false }],
+  })
+  await flush()
+  assert.equal(goal.writes.length, 0, 'the block is runtime state, not a goal input')
+  assert.deepEqual([...goal.branch.fold.conclusions], [])
+  assert.equal(goal.branch.fold.status, undefined)
+  assert.equal(goal.branch.fold.objective, undefined)
+  await goal.turn(moved)
+  await flush()
+  assert.equal(goal.writes.length, 0, 'the evaluator decides nothing at its turn end')
+  assert.deepEqual([...goal.branch.fold.conclusions], [])
+})
+
 test('Pursuit 2: a CONTINUE conclusion writes one Pursuit continuation, or Goal limit pause', async t => {
   const goal = await loadGoalBranch(async () => settingsDocument(20))
   t.after(() => goal.unload())
@@ -1170,4 +1231,35 @@ test('Pursuit 6/7/10: a reload creates no second evaluator, and foreign or stale
   await flush()
   assert.equal(restored.writes.length, 0)
   assert.equal(restored.branch.fold.status.status, 'paused')
+})
+
+test('A.6 Load: a new branch clears the goal its inherited prefix still carries', async t => {
+  const parent = new Branch()
+  parent.input(changes.set(B, 'ship it', TEXTS))
+  const goal = await loadGoalBranch(async () => settingsDocument(20), {
+    branchId: 'L',
+    info: { id: 'L', parent: B },
+    inherited: parent.events,
+    before: branch => branch.commit('branch', 'start', { parent: B }),
+  })
+  t.after(() => goal.unload())
+  await flush()
+  assert.equal(goal.writes.length, 1, 'the inherited objective is retired once')
+  assert.match(goal.writes[0].data.blocks[0].text, /^<dim-goal kind="goal" op="clear" reason="new_branch"/)
+})
+
+test('A.6 Load: a cleared inherited goal is not cleared again', async t => {
+  const parent = new Branch()
+  const set = parent.input(changes.set(B, 'ship it', TEXTS))
+  parent.input(changes.clear(B))
+  const goal = await loadGoalBranch(async () => settingsDocument(20), {
+    branchId: 'L',
+    info: { id: 'L', parent: B },
+    inherited: parent.events,
+    before: branch => branch.commit('branch', 'start', { parent: B }),
+  })
+  t.after(() => goal.unload())
+  await flush()
+  assert.equal(set.type, 'input')
+  assert.equal(goal.writes.length, 0, 'the newest inherited key retires both')
 })

@@ -53,6 +53,11 @@
             "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
             "scope": null,
             "status": "Ready"
+          },
+          {
+            "service": "dim_agent_runtime::core::timeline::Timeline@main",
+            "scope": null,
+            "status": "Ready"
           }
         ],
         "resolved": [
@@ -61,11 +66,23 @@
             "scope": null,
             "provider": 58,
             "generation": 1
+          },
+          {
+            "service": "dim_agent_runtime::core::timeline::Timeline@main",
+            "scope": null,
+            "provider": 58,
+            "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
+            "provider": 58,
+            "declared": true,
+            "external": false
+          },
+          {
+            "service": "dim_agent_runtime::core::timeline::Timeline@main",
             "provider": 58,
             "declared": true,
             "external": false
@@ -1526,6 +1543,11 @@
             "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
             "scope": null,
             "status": "Ready"
+          },
+          {
+            "service": "dim_agent_runtime::core::timeline::Timeline@main",
+            "scope": null,
+            "status": "Ready"
           }
         ],
         "resolved": [
@@ -1558,6 +1580,12 @@
             "scope": null,
             "provider": 58,
             "generation": 1
+          },
+          {
+            "service": "dim_agent_runtime::core::timeline::Timeline@main",
+            "scope": null,
+            "provider": 58,
+            "generation": 1
           }
         ],
         "reads": [
@@ -1587,6 +1615,12 @@
           },
           {
             "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
+            "provider": 58,
+            "declared": true,
+            "external": false
+          },
+          {
+            "service": "dim_agent_runtime::core::timeline::Timeline@main",
             "provider": 58,
             "declared": true,
             "external": false
@@ -2509,6 +2543,11 @@
         "generation": 1,
         "injects": [
           {
+            "service": "dim_agent_capabilities::input_queue::SubmitChecks@session",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
             "service": "dim_agent_capabilities::prompt_registry::PromptRegistry@session",
             "scope": null,
             "status": "Ready"
@@ -2545,6 +2584,12 @@
           }
         ],
         "resolved": [
+          {
+            "service": "dim_agent_capabilities::input_queue::SubmitChecks@session",
+            "scope": null,
+            "provider": 39,
+            "generation": 1
+          },
           {
             "service": "dim_agent_capabilities::prompt_registry::PromptRegistry@session",
             "scope": null,
@@ -2589,6 +2634,12 @@
           }
         ],
         "reads": [
+          {
+            "service": "dim_agent_capabilities::input_queue::SubmitChecks@session",
+            "provider": 39,
+            "declared": true,
+            "external": true
+          },
           {
             "service": "dim_agent_capabilities::prompt_registry::PromptRegistry@session",
             "provider": 42,

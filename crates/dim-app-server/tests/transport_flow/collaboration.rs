@@ -1,7 +1,8 @@
 use super::deletion::Store;
 use super::*;
 use dim_agent_capabilities::prompt_state::PromptSnapshot;
-use dim_agent_runtime::{Agent, CollaborationRole, Session};
+use dim_agent_runtime::testing::{branch_events, chain_events, timeline_events};
+use dim_agent_runtime::{Agent, CollaborationRole, Session, TimelineQueryScope};
 use dim_agent_types::{
     AgentEvent, CollaborationDelivery, CollaborationOutcome, ContentBlock, EventKind, InputBlock,
     InputMessageData, MessageContent, ToolContent,
@@ -99,6 +100,13 @@ impl dim_agent_runtime::TimelineStore for CountingTimelineStore {
         key: &'a dim_agent_runtime::TimelineKey,
     ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<u64>> {
         self.memory.head(key)
+    }
+    fn batch_end<'a>(
+        &'a self,
+        key: &'a dim_agent_runtime::TimelineKey,
+        sequence: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.batch_end(key, sequence)
     }
     fn append(
         &self,
@@ -325,6 +333,70 @@ async fn product_collaboration_adopts_profile_and_default_capabilities() {
         assert!(last_error(&events(&lead_session).await).contains("member_create_failed"), "the failure detail is stored before collaboration/delivered so the waiting tool call observes it");
         assert_eq!(configs.lock().unwrap().len(), members);
         assert_eq!(client.rpc("agent.list", json!({})).await["result"].as_array().unwrap().len(), agents);
+
+        assert_ok(&client.rpc("session.model.update", json!({"sessionId":lead,"branchId":"main","modelId":"alpha",
+            "startup":{"connection":{"apiFormat":"openai-compatible","baseUrl":"http://127.0.0.1:9/gateway"},
+                "contextWindow":32000,"maxOutputTokens":128,"autoCompactWindow":16000}})).await);
+        let adopted = lead_session.get::<PromptSnapshot>("main").unwrap().unwrap().configuration.unwrap();
+        let mut startup = dim_agent_types::ModelSelection {
+            provider_id: adopted.provider_id,
+            model_id: adopted.model_id,
+            capability_snapshot: adopted.capability_snapshot,
+            config: adopted.config,
+            metadata: adopted.metadata,
+        };
+        startup.config = Some(serde_json::from_value(json!({"temperature":0.25,"maxTokens":64,
+            "providerOptions":{"openai-compatible":{"reasoningEffort":"high"}}})).unwrap());
+        let metadata = startup.metadata.get_or_insert_default();
+        assert!(metadata.startup.as_ref().unwrap().connection.is_some());
+        metadata.session_id = Some("old-session".into());
+        metadata.run_id = Some("old-run".into());
+        metadata.trace_id = Some("old-trace".into());
+        metadata.turn_id = Some("old-turn".into());
+        lead_session.service::<dim_agent_capabilities::prompt::Prompt>("main").unwrap()
+            .configure_loaded(Some(startup.clone()), Vec::new()).await.unwrap();
+        let cut = lead_session.sequence("main").unwrap();
+        let child = lead_session.branch("main".into(), cut, dim_agent_runtime::BranchOptions {
+            prompt: "Startup inheritance child".into(),
+            source: dim_agent_types::BranchSource::Host { operation_id: "startup-inheritance".into() },
+        }).await.unwrap();
+        assert_ok(&client.rpc("session.model.update", json!({"sessionId":lead,"branchId":"main","providerId":PROVIDER,"modelId":"beta"})).await);
+        let child_selection = lead_session.get::<PromptSnapshot>(&child).unwrap().unwrap().configuration.unwrap();
+        assert_eq!(child_selection.model_id, startup.model_id);
+        assert_eq!(child_selection.config, startup.config);
+        assert_eq!(child_selection.capability_snapshot, startup.capability_snapshot);
+        assert_eq!(child_selection.metadata, startup.metadata, "a child retains full parent-cut metadata after main changes");
+        for (branch, request, policy) in [
+            (child.as_str(), json!({"action":"request","agentId":reviewer,"prompt":"startup child"}), json!({"mode":"fixed","model":model("missing")})),
+            ("main", json!({"action":"request","profile":temporary,"prompt":"startup temporary"}), json!({"mode":"agent"})),
+        ] {
+            if branch == "main" {
+                let revision = client.rpc("collaboration.model_policy", json!({})).await["result"]["revision"].as_str().unwrap().to_owned();
+                set(&mut client, &revision, policy.clone()).await;
+                lead_session.service::<dim_agent_capabilities::prompt::Prompt>("main").unwrap()
+                    .configure_loaded(Some(startup.clone()), Vec::new()).await.unwrap();
+            }
+            let before = configs.lock().unwrap().len();
+            let through = lead_session.sequence(branch).unwrap();
+            lead_session.submit(tool(request), dim_agent_types::InputMode::Queue, branch).await.unwrap();
+            lead_session.idle(branch).await.unwrap();
+            poll("startup member delivered", async || {
+                branch_events(&lead_session, branch, ..).await.unwrap().iter().any(|event|
+                    event.sequence > through && matches!(&event.kind,
+                        EventKind::CollaborationDelivered(data) if matches!(&data.delivery, CollaborationDelivery::Ok { .. })))
+                    .then_some(())
+            }).await;
+            assert_eq!(configs.lock().unwrap().len(), before + 1);
+            let config = configs.lock().unwrap().last().unwrap().clone();
+            let mut expected = startup.clone();
+            let metadata = expected.metadata.as_mut().unwrap();
+            metadata.session_id = None;
+            metadata.run_id = None;
+            metadata.trace_id = None;
+            metadata.turn_id = None;
+            assert_eq!(config.model, expected, "startup wins over user and Agent policy");
+            assert_eq!(client.rpc("collaboration.model_policy", json!({})).await["result"]["policy"], policy);
+        }
         server.shutdown();
         server.join().await.unwrap();
         std::fs::remove_dir_all(home).unwrap();
@@ -535,7 +607,7 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
             .await
             .unwrap();
         session.idle(&child).await.unwrap();
-        let denied = last_error(&session.local(&child, ..).await.unwrap());
+        let denied = last_error(&branch_events(&session, &child, ..).await.unwrap());
         assert!(!denied.is_empty(), "a result from main must be denied on child");
 
         session
@@ -547,8 +619,7 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
             .await
             .unwrap();
         poll("child result", async || {
-            session
-                .local(&child, ..)
+            branch_events(&session, &child, ..)
                 .await
                 .unwrap()
                 .iter()
@@ -561,7 +632,7 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
         })
         .await;
         session.idle(&child).await.unwrap();
-        let child_events = session.local(&child, ..).await.unwrap();
+        let child_events = branch_events(&session, &child, ..).await.unwrap();
         let (child_result_id, child_member) = child_events
             .iter()
             .find_map(|event| match &event.kind {
@@ -589,7 +660,7 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
             .await
             .unwrap();
         session.idle(&child).await.unwrap();
-        let child_result = last_ok(&session.local(&child, ..).await.unwrap());
+        let child_result = last_ok(&branch_events(&session, &child, ..).await.unwrap());
         assert_eq!(child_result["resultId"], child_result_id);
         assert_eq!(
             child_result["result"]["text"],
@@ -657,7 +728,7 @@ fn tool(input: Value) -> String {
 }
 
 async fn events(session: &Session) -> Vec<Arc<AgentEvent>> {
-    session.history("main", None).await.unwrap()
+    chain_events(session, "main", ..).await.unwrap()
 }
 
 /// Content of every agent tool result, in Timeline order.
@@ -2021,7 +2092,7 @@ async fn leader_stop_and_close_settle_requests() {
             .rpc("session.close", json!({"sessionId": lead}))
             .await,
     );
-    let closed = lead_session.local("main", ..).await.unwrap();
+    let closed = branch_events(&lead_session, "main", ..).await.unwrap();
     assert_eq!(
         result_of(&closed, &earlier).last(),
         Some(&CollaborationOutcome::Cancelled {
@@ -2080,8 +2151,18 @@ impl ToolDriver for GateTools {
 /// returns the last turn's output. `read` pages through a Timeline.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn member_work_absorbs_messages_and_spans_turns() {
+    member_work(ServerConfig::default()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_member_work_absorbs_messages_and_spans_turns() {
+    let store = Store::new();
+    member_work(store.config()).await;
+}
+
+async fn member_work(mut config: ServerConfig) {
+    let native = config.database_path.is_some();
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
-    let mut config = ServerConfig::default();
     config
         .session_defaults
         .tools
@@ -2394,7 +2475,21 @@ async fn member_work_absorbs_messages_and_spans_turns() {
     assert_eq!(after, end);
     assert_eq!(&paged, full["events"].as_array().unwrap());
 
+    if native {
+        unload(&agent, &member).await;
+        assert!(agent.get_session(&member).is_none());
+        say(&mut client, &lead, read(0, 200), "queue").await;
+        idle(&mut client, &lead).await;
+        let restored = agent
+            .get_session(&member)
+            .expect("the authorized read acquires its peer");
+        let read = last_ok(&events(&lead_session).await);
+        assert_eq!(read["events"], full["events"]);
+        assert_eq!(read["nextCursor"], restored.sequence("main").unwrap());
+    }
+
     assert_pairing(&events(&lead_session).await);
+    let member_session = agent.get_session(&member).unwrap();
     assert_no_collaboration_facts(&member_session).await;
     server.shutdown();
     server.join().await.unwrap();
@@ -2667,7 +2762,7 @@ impl dim_agent_capabilities::host::ModelDriver for PartialCallModel {
             started.extend((0..calls).map(|at| {
                 Ok(ModelChunk::ToolStart {
                     id: format!("unfinished-{at}"),
-                    name: "echo".into(),
+                    name: if calls == MANY_CALLS { "wait" } else { "echo" }.into(),
                 })
             }));
             let started = futures_util::stream::iter(started);
@@ -2848,11 +2943,12 @@ async fn undispatched_results_name_calls_from_their_starts() {
     say(
         &mut client,
         &lead,
-        tool(json!({"action": "request", "agentId": holder, "prompt": "many-calls"})),
+        tool(json!({"action": "request", "agentId": holder, "sessionId": member, "prompt": "many-calls"})),
         "queue",
     )
     .await;
     let many = next_member(&lead_session, 1).await;
+    assert_eq!(many, member);
     let many_session = agent.get_session(&many).unwrap();
     poll("every started call", async || {
         let events = events(&many_session).await;
@@ -2864,7 +2960,7 @@ async fn undispatched_results_name_calls_from_their_starts() {
             .iter()
             .filter(|event| matches!(event.kind, EventKind::ModelUsage(_)))
             .count() as u64;
-        (started == MANY_CALLS && usage == PARTIAL_USAGE).then_some(())
+        (started == MANY_CALLS + UNFINISHED_CALLS && usage == PARTIAL_USAGE * 2).then_some(())
     })
     .await;
     assert_ok(
@@ -2880,7 +2976,9 @@ async fn undispatched_results_name_calls_from_their_starts() {
             .await
             .iter()
             .find_map(|event| match &event.kind {
-                EventKind::ToolResult(data) if data.call_event_id.is_none() => {
+                EventKind::ToolResult(data)
+                    if data.call_event_id.is_none() && data.results.len() == MANY_CALLS =>
+                {
                     Some((event.sequence, data.results.len()))
                 }
                 _ => None,
@@ -2915,12 +3013,33 @@ async fn undispatched_results_name_calls_from_their_starts() {
     assert_eq!(named.len(), MANY_CALLS, "{page}");
     for (at, item) in named.iter().enumerate() {
         assert_eq!(item["callId"], format!("unfinished-{at}"));
-        assert_eq!(item["name"], "echo", "{item}");
+        assert_eq!(item["name"], "wait", "{item}");
     }
     assert_eq!(
         collaboration.take_reads(),
         2,
         "one page and one read of the starts"
+    );
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action":"read","agentId":holder,
+        "sessionId":member,"after":after,"limit":200})),
+        "queue",
+    )
+    .await;
+    idle(&mut client, &lead).await;
+    let earlier = last_ok(&events(&lead_session).await);
+    let earlier: Vec<_> = earlier["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["type"] == "tool_result")
+        .collect();
+    assert_eq!(earlier.len(), UNFINISHED_CALLS);
+    assert!(
+        earlier.iter().all(|event| event["name"] == "echo"),
+        "reused call ids in a later request must not rename earlier results"
     );
     server.shutdown();
     server.join().await.unwrap();
@@ -2998,7 +3117,7 @@ async fn collaboration_facts_publish_to_tree_protocols_only() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stored_member_can_unload_be_read_without_loading_and_work_again() {
+async fn stored_member_read_acquires_it_and_it_can_unload_and_work_again() {
     let directory = std::env::temp_dir().join(format!("dim-team-store-{}", uuid::Uuid::new_v4()));
     let (server, agent) = launch_with_agent(
         Arc::new(MockTools),
@@ -3073,8 +3192,8 @@ async fn stored_member_can_unload_be_read_without_loading_and_work_again() {
     let read = last_ok(&events(&session).await);
     assert!(!read["events"].as_array().unwrap().is_empty());
     assert!(
-        agent.get_session(&member).is_none(),
-        "history reads do not load a member"
+        agent.get_session(&member).is_some(),
+        "history reads acquire the member"
     );
     say(
         &mut client,
@@ -3349,8 +3468,7 @@ async fn launch_gated_with(
 /// Committed events of the gated branch hold one of `kind`.
 async fn committed_has(timeline: &dim_agent_runtime::Timeline, kind: &str) -> bool {
     let through = timeline.committed();
-    timeline
-        .local(..=through)
+    timeline_events(timeline, TimelineQueryScope::Branch, ..=through)
         .await
         .unwrap()
         .iter()
@@ -3852,8 +3970,8 @@ async fn passes(client: &mut Client, agent: &Agent) {
 /// grace; when the member ends its work the result is recorded as
 /// completed, the woken leader turn runs, and both Sessions unload. The
 /// relation outlives the unload: the leader's next request to the member
-/// restores both and reaches the same member. The leader's `read` of the
-/// member, repeated while the Sessions unload, never fails or omits an event.
+/// restores both and reaches the same member. Each peer read acquires the
+/// member; after reads stop it unloads, and the next read restores its facts.
 /// Nothing keeps a released instance of either alive.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_idle_unload_pass_keeps_a_leader_with_an_open_request() {
@@ -3918,27 +4036,35 @@ async fn the_idle_unload_pass_keeps_a_leader_with_an_open_request() {
 
     let read = tool(json!({"action": "read", "agentId": holder, "sessionId": member}));
     let mut reads = vec![];
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            let gone = agent.get_session(&member).is_none();
-            say(&mut client, &lead, read.clone(), "queue").await;
-            let lead_session = agent.get_session(&lead).unwrap();
-            idle(&mut client, &lead).await;
-            reads.push(last_ok(&events(&lead_session).await));
-            if gone {
-                break;
-            }
-        }
+    for _ in 0..3 {
+        say(&mut client, &lead, read.clone(), "queue").await;
+        let lead_session = agent.get_session(&lead).unwrap();
+        idle(&mut client, &lead).await;
+        reads.push(last_ok(&events(&lead_session).await));
+    }
+    super::deletion::eventually("the member unloads after peer reads", || {
+        agent.get_session(&member).is_none()
     })
-    .await
-    .expect("deadline: the member unloads");
+    .await;
+    let loaded_before_read = loads.of(&member).0;
+    say(&mut client, &lead, read, "queue").await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    idle(&mut client, &lead).await;
+    reads.push(last_ok(&events(&lead_session).await));
+    drop(lead_session);
+    assert_eq!(
+        loads.of(&member),
+        (loaded_before_read + 1, true),
+        "the read restores the member"
+    );
     let first = &reads[0];
     assert!(
         first.to_string().contains("Echo: again"),
         "the read holds the second request: {first}"
     );
     for read in &reads {
-        assert_eq!(read, first);
+        assert_eq!(read["events"], first["events"]);
+        assert!(read["nextCursor"].as_u64().unwrap() >= first["nextCursor"].as_u64().unwrap());
     }
     loads.released(&member).await;
     super::deletion::eventually("the leader unloads", || agent.get_session(&lead).is_none()).await;
@@ -4517,7 +4643,7 @@ async fn every_settlement_of_a_request_releases_its_leader() {
             .rpc("session.close", json!({"sessionId": lead}))
             .await,
     );
-    let closed_timeline = lead_session.local("main", ..).await.unwrap();
+    let closed_timeline = branch_events(&lead_session, "main", ..).await.unwrap();
     assert_eq!(
         result_of(&closed_timeline, &last),
         [CollaborationOutcome::Cancelled {
@@ -4605,7 +4731,7 @@ async fn a_closing_leader_gives_no_hold_and_refuses_the_request() {
     interrupt_release.notify_one();
     closing.await.unwrap().unwrap();
 
-    let closed = lead_session.local("main", ..).await.unwrap();
+    let closed = branch_events(&lead_session, "main", ..).await.unwrap();
     let delivery = closed
         .iter()
         .find_map(|event| match &event.kind {
@@ -5154,7 +5280,7 @@ async fn member_tool_approval_reviews_the_original_action_and_settles_cancelled_
         assert_eq!(detail["result"]["descriptor"]["call"]["input"]["command"], "child action");
         assert_ok(&client.rpc("approval.respond", json!({"sessionId":lead,"branchId":child,"requestId":request_id,"decision":"allow"})).await);
         poll("child approval report", async || {
-            leader.local(&child, ..).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::InputMessage(data) if report(data).is_some())).then_some(())
+            branch_events(&leader, &child, ..).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::InputMessage(data) if report(data).is_some())).then_some(())
         }).await;
         leader.idle(&child).await.unwrap();
         assert_eq!(runs.load(Ordering::SeqCst), 2);
@@ -5218,11 +5344,11 @@ async fn new_members_sample_requesting_branch_policy_and_reused_members_keep_the
         lead_session.submit(tool(json!({"action":"request","agentId":agent_id,"prompt":"hello"})), dim_agent_types::InputMode::Queue, &branch).await.unwrap();
         lead_session.idle(&branch).await.unwrap();
         let member_id = poll("child member delivered", async || {
-            lead_session.history(&branch, None).await.unwrap().iter().find_map(|event| match &event.kind { EventKind::CollaborationDelivered(data) => match &data.delivery { CollaborationDelivery::Ok { session_id, .. } => Some(session_id.clone()), _ => None }, _ => None })
+            chain_events(&lead_session, &branch, ..).await.unwrap().iter().find_map(|event| match &event.kind { EventKind::CollaborationDelivered(data) => match &data.delivery { CollaborationDelivery::Ok { session_id, .. } => Some(session_id.clone()), _ => None }, _ => None })
         }).await;
         let member = agent.get_session(&member_id).unwrap();
         poll("child delegation completed before member reuse", async || {
-            lead_session.local(&branch, ..).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::InputMessage(data) if report(data).is_some())).then_some(())
+            branch_events(&lead_session, &branch, ..).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::InputMessage(data) if report(data).is_some())).then_some(())
         }).await;
         lead_session.idle(&branch).await.unwrap();
         assert_eq!(serde_json::to_value(&member.config().permission_policy).unwrap(), policy);
@@ -5273,7 +5399,7 @@ async fn member_approval_cancellation_and_policy_tightening_never_execute_a_late
                     if action == "cancel" {
                         leader.submit(format!("tool:member_approval_allow {}", json!({"approvalId":detail["result"]["approvalId"]})), dim_agent_types::InputMode::Queue, &control).await.unwrap();
                         leader.idle(&control).await.unwrap();
-                        let calls = results(&leader.local(&control, ..).await.unwrap());
+                        let calls = results(&branch_events(&leader, &control, ..).await.unwrap());
                         let (_, result) = calls.last().unwrap();
                         let result: Value = serde_json::from_str(result).unwrap();
                         assert_eq!(result["code"], "not_pending");
@@ -5462,7 +5588,13 @@ async fn member_routes_are_authorized_only_after_the_owning_branch_consumes_the_
         entered.notified().await;
         let timeline = gate.contexts.lock().unwrap().get(lead).unwrap().1.clone();
         let (input_event, input, route) = poll("member request is committed behind the dispatch gate", async || {
-            let events = timeline.local(..=timeline.committed()).await.unwrap();
+            let events = timeline_events(
+                &timeline,
+                TimelineQueryScope::Branch,
+                ..=timeline.committed(),
+            )
+            .await
+            .unwrap();
             events.into_iter().find_map(|event| {
                 let EventKind::InputMessage(input) = &event.kind else { return None; };
                 let Some(InputBlock::Raw { text, .. }) = input.blocks.first() else { return None; };

@@ -7,13 +7,32 @@ import {
   truncate, writes,
 } from './goal.ts'
 
-type Delivery = { replay: AgentEvent[] } | { live: AgentEvent }
 type TurnEnd = { turn_id: string; status: string }
 type Dispatcher = {
-  consume(name: string, keys: string[], handler: (delivery: Delivery) => void | Promise<void>): Promise<void>
-  local(start: number | bigint, through: number | bigint): Promise<AgentEvent[]>
-  history(through: number | bigint): Promise<AgentEvent[]>
-  committed(): Promise<number | bigint>
+  consume(
+    name: string,
+    keys: string[],
+    rebuild: () => number | bigint | Promise<number | bigint>,
+    handler: (event: AgentEvent) => void | Promise<void>,
+  ): Promise<void>
+}
+type TimelineQuery = {
+  scope: 'branch' | 'chain'
+  include_publishing?: boolean
+  from_event?: string
+  from_sequence?: number | bigint
+  order_by?: 'sequence'
+  direction?: 'ascending' | 'descending'
+  kinds?: string[]
+  flags?: ('render' | 'state')[]
+  event_id?: string
+  predicate?: { path: string; value: unknown }
+  limit: number | bigint
+  offset?: number | bigint
+}
+type TimelineReply = { events: AgentEvent[]; positions: { branch_id: string; sequence: number | bigint }[] }
+type Timeline = {
+  query(query: TimelineQuery): Promise<TimelineReply & { through: number | bigint }>
 }
 type BranchOptions = { prompt: string; source: { kind: 'host'; operation_id: string } }
 type TimelineInfo = {
@@ -33,6 +52,15 @@ type Settings = {
 
 const KEYS = ['branch/start', 'session/forked', 'branch/create', 'branch/create-failed', 'branch/ended', 'input/message', 'input/consumed', 'input/deleted', 'turn/start', 'turn/end', 'stop/interrupt']
 
+/** Inherited `input/message` facts one page of the new-branch check keeps. */
+const INHERITED_PAGE = 64n
+
+/** Facts one page of the rebuild reads. */
+const REBUILD_PAGE = 256n
+
+/** Facts one page of the reply read keeps. */
+const REPLY_PAGE = 256n
+
 const codeOf = (error: unknown): string =>
   typeof error === 'object' && error !== null && 'code' in error
     ? String((error as { code: unknown }).code)
@@ -45,9 +73,10 @@ const codeOf = (error: unknown): string =>
 export default definePlugin({
   name: 'GoalBranch',
   provides: {},
-  inject: ['dispatcher', 'timelineIdentity', 'treeCommands', 'settings', 'branchLifecycle', 'sessionLifecycle'],
+  inject: ['dispatcher', 'timeline', 'timelineIdentity', 'treeCommands', 'settings', 'branchLifecycle', 'sessionLifecycle'],
   async apply(ctx, texts: Texts) {
     const dispatcher = ctx.use<Dispatcher>('dispatcher')
+    const timeline = ctx.use<Timeline>('timeline')
     const tree = ctx.use<TreeCommands>('treeCommands')
     const settings = ctx.use<Settings>('settings')
     const { branchId } = await ctx.use<{ get(): Promise<{ branchId: string }> }>('timelineIdentity').get()
@@ -101,11 +130,20 @@ export default definePlugin({
     // the caller waiting (Pursuit §4.1).
     const created = async (after: bigint) => {
       const operation = evaluationOperation(String(after))
-      const through = await dispatcher.committed()
-      return (await dispatcher.local(after, through)).some(event => event.type === 'branch'
-        && event.name === 'create'
-        && event.data.source?.kind === 'host'
-        && event.data.source.operation_id === operation)
+      // The creation may still be in flight when its wait was abandoned, so the
+      // read adds the facts written and not yet published.
+      const page = await timeline.query({
+        scope: 'branch',
+        include_publishing: true,
+        from_sequence: after,
+        order_by: 'sequence',
+        direction: 'ascending',
+        kinds: ['branch/create'],
+        predicate: { path: 'source.operation_id', value: operation },
+        limit: 1n,
+        offset: 0n,
+      })
+      return page.events.length > 0
     }
     const doTurnEnd = async (after: bigint) => {
       if (fold.turnEnd?.sequence !== after) return
@@ -171,9 +209,28 @@ export default definePlugin({
         : writes.pause(branchId, decision.reason, evaluation))
     })
     // The reply is the turn's final model request: the text deltas of the
-    // request its last `step/model-start` names (Pursuit §4.2).
+    // request its last `step/model-start` names (Pursuit §4.2). The turn id is
+    // one equality, so the store selects the turn's facts, and the turn's end
+    // is where the read stops.
     const reply = async (turnStart: bigint, through: bigint, turnId: string) => {
-      const events = await dispatcher.local(turnStart, through)
+      const events: AgentEvent[] = []
+      let from = turnStart
+      for (;;) {
+        const page = await timeline.query({
+          scope: 'branch',
+          from_sequence: from,
+          order_by: 'sequence',
+          direction: 'ascending',
+          kinds: ['step/model-start', 'step/text'],
+          predicate: { path: 'turn_id', value: turnId },
+          limit: REPLY_PAGE,
+          offset: 0n,
+        })
+        events.push(...page.events.filter(event => BigInt(event.sequence) <= through))
+        const last = page.events.at(-1)
+        if (last === undefined || BigInt(page.events.length) < REPLY_PAGE || BigInt(last.sequence) >= through) break
+        from = BigInt(last.sequence) + 1n
+      }
       const starts = events.filter(event => event.type === 'step' && event.name === 'model-start' && event.data.turn_id === turnId)
       const request = starts.at(-1)?.data.request_id
       if (request === undefined) return ''
@@ -201,16 +258,32 @@ export default definePlugin({
           await report('continue', truncate(text))
         }
       })
+    // The inherited prefix carries the parent's goal blocks; the branch's own
+    // events are the fold's, not the prefix's. Newest first, so the first
+    // event with a keyed block decides and the rest is not read.
     const inheritedLive = async (at: bigint) => {
-      const local = new Set((await dispatcher.local(at, at)).map(event => event.id))
-      let live = false
-      for (const event of await dispatcher.history(at)) {
-        if (local.has(event.id) || event.type !== 'input' || event.name !== 'message') continue
-        for (const raw of event.data.blocks ?? []) {
-          if (marker(raw.text) && (raw.key === OBJECTIVE_KEY || raw.key === STATUS_KEY)) live = !raw.retire
+      let offset = 0n
+      for (;;) {
+        const page = await timeline.query({
+          scope: 'chain',
+          from_sequence: at,
+          order_by: 'sequence',
+          direction: 'descending',
+          kinds: ['input/message'],
+          limit: INHERITED_PAGE,
+          offset,
+        })
+        for (const [index, event] of page.events.entries()) {
+          if (page.positions[index].branch_id === branchId) continue
+          let live: boolean | undefined
+          for (const raw of event.data.blocks ?? []) {
+            if (marker(raw.text) && (raw.key === OBJECTIVE_KEY || raw.key === STATUS_KEY)) live = !raw.retire
+          }
+          if (live !== undefined) return live
         }
+        if (page.events.length < Number(INHERITED_PAGE)) return false
+        offset += BigInt(page.events.length)
       }
-      return live
     }
     const decideStart = (at: bigint) => {
       if (fold.isDecided(at) || fold.localBlocks > 0) return
@@ -254,7 +327,7 @@ export default definePlugin({
         })
       }
     }
-    const consume = (event: AgentEvent, live: boolean) => {
+    const ingest = (event: AgentEvent, live: boolean) => {
       const turnStart = fold.turnStart
       fold.apply(event)
       const sequence = BigInt(event.sequence)
@@ -288,14 +361,35 @@ export default definePlugin({
       }
     }
 
-    // Fold the replayed history; the decisions the previous generation owed
-    // are taken once, before any live event (A.6 Load).
-    await dispatcher.consume('Goal', KEYS, delivery => {
-      if ('live' in delivery) return consume(delivery.live, true)
-      for (const event of delivery.replay) consume(event, false)
+    // Fold this branch's facts through the cutoff of one read, unpublished
+    // tail included, and release only what lies above it (A.6 Load).
+    await dispatcher.consume('Goal', KEYS, async () => {
+      let from: bigint | undefined
+      let through = 0n
+      for (;;) {
+        const reply = await timeline.query({
+          scope: 'branch',
+          include_publishing: true,
+          ...(from === undefined ? {} : { from_sequence: from }),
+          order_by: 'sequence',
+          direction: 'ascending',
+          limit: REBUILD_PAGE,
+          offset: 0n,
+        })
+        for (const event of reply.events) ingest(event, false)
+        const last = reply.events.at(-1)
+        if (last === undefined || BigInt(reply.events.length) < REBUILD_PAGE) {
+          through = BigInt(reply.through)
+          break
+        }
+        from = BigInt(last.sequence) + 1n
+      }
+      // The decisions the previous generation owed are taken once, before any
+      // live event.
       decideEnd()
       settle()
       if (start !== undefined) decideStart(start)
-    })
+      return through
+    }, event => ingest(event, true))
   },
 })

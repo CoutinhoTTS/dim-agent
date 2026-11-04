@@ -58,19 +58,25 @@ impl dim_agent_capabilities::host::ModelDriver for StreamingModel {
     }
 }
 
-/// Captures the main branch's Timeline so a flow can commit several events as
-/// one atomic batch, which a fixed `through` must not point inside.
+/// Captures the current branch's Timeline for atomic batches and can hold
+/// the next thinking fact before dispatch completes.
 #[derive(Default)]
-struct BatchProbe(std::sync::Mutex<Option<Arc<dim_agent_runtime::Timeline>>>);
+struct BatchProbe {
+    timeline: std::sync::Mutex<Option<Arc<dim_agent_runtime::Timeline>>>,
+    hold: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
 
 struct BatchProbePlugin(
     Arc<BatchProbe>,
     rutis::host::Key<dim_agent_runtime::Timeline>,
+    rutis::host::Key<dim_agent_runtime::Dispatcher>,
 );
 
 impl BatchProbePlugin {
     fn new(names: &dim_agent_runtime::Names<'_>, probe: Arc<BatchProbe>) -> rutis::Result<Self> {
-        Ok(Self(probe, names.key()?))
+        Ok(Self(probe, names.key()?, names.key()?))
     }
 }
 
@@ -79,14 +85,30 @@ impl rutis::host::DynPlugin for BatchProbePlugin {
         "history-window-batch-probe"
     }
     fn injects(&self) -> Vec<rutis::host::TypeKey> {
-        vec![self.1.erase()]
+        vec![self.1.erase(), self.2.erase()]
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
     ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
-            *self.0.0.lock().unwrap() = Some(ctx.require_at(&self.1)?.clone());
+            *self.0.timeline.lock().unwrap() = Some(ctx.require_at(&self.1)?.clone());
+            let probe = self.0.clone();
+            ctx.require_at(&self.2)?.subscribe(
+                ctx,
+                "history-window-dispatch-gate",
+                &["step/thinking"],
+                move |_| {
+                    let probe = probe.clone();
+                    Box::pin(async move {
+                        if probe.hold.swap(false, Ordering::SeqCst) {
+                            probe.entered.notify_one();
+                            probe.resume.notified().await;
+                        }
+                        Ok(())
+                    })
+                },
+            )?;
             Ok(rutis::host::Effect::Done)
         })
     }
@@ -280,6 +302,134 @@ async fn the_latest_turn_window_carries_the_prompt_and_folds_like_forward_paging
     assert_ok(&forward);
     assert_eq!(sequences(&page), sequences(&forward));
 
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_latest_turn_waiting_for_dispatch_survives_the_line_ending() {
+    let directory = new_directory("ended");
+    let model = Arc::new(StreamingModel::default());
+    let (server, batch) = serve_streaming(&directory, model.clone()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client
+        .rpc("session.create", create(json!(["branch"])))
+        .await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    turn(&mut client, &model, &id, "parent prompt", Plan::Chunks(1)).await;
+    let parent = client
+        .rpc(
+            "session.history",
+            json!({"sessionId":id,"branchId":"main","after":0,"limit":1}),
+        )
+        .await;
+    assert_ok(&parent);
+    let at = parent["result"]["through"].as_u64().unwrap();
+    batch.hold.store(true, Ordering::SeqCst);
+    let created = client
+        .rpc(
+            "session.branch_create",
+            json!({"sessionId":id,
+        "parentBranchId":"main","at":at,"prompt":"child prompt"}),
+        )
+        .await;
+    assert_ok(&created);
+    let branch = created["result"]["branch"]["branchId"].as_str().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), batch.entered.notified())
+        .await
+        .expect("the streaming turn reaches the dispatch gate");
+    let timeline = batch.timeline.lock().unwrap().clone().unwrap();
+    let mut reader = Client::new_version(&server, false, 3).await;
+    let params = json!({"sessionId":id,"branchId":branch,"latestTurn":true});
+    let waiting = reader.send("session.history", params.clone()).await;
+    let future = reader
+        .rpc(
+            "session.history",
+            json!({"sessionId":id,"branchId":branch,
+        "latestTurn":true,"through":timeline.sequence()}),
+        )
+        .await;
+    assert_eq!(
+        future["error"]["message"], "Future dispatched history position",
+        "{future}"
+    );
+    assert!(
+        !reader.notices.iter().any(|reply| reply["id"] == waiting),
+        "the history call must remain pending behind dispatch"
+    );
+    let end_query = dim_agent_runtime::TimelineQuery {
+        scope: dim_agent_runtime::TimelineQueryScope::Branch,
+        include_publishing: false,
+        from_event: None,
+        from_sequence: Some(timeline.sequence() + 1),
+        order_by: Default::default(),
+        direction: Default::default(),
+        kinds: vec!["branch/end".into()],
+        flags: Vec::new(),
+        event_id: None,
+        predicate: None,
+        limit: std::num::NonZeroU64::MIN,
+        offset: 0,
+    };
+    let ending = client
+        .send(
+            "session.branch_end",
+            json!({"sessionId":id,"branchId":branch}),
+        )
+        .await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if !timeline
+                .query(end_query.clone())
+                .await
+                .unwrap()
+                .events
+                .is_empty()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the end is committed while history waits");
+    batch.resume.notify_one();
+    let open = reader.response(waiting).await;
+    assert_ok(&open);
+    assert_ok(&client.response(ending).await);
+    let ended = client.rpc("session.history", params.clone()).await;
+    assert_ok(&ended);
+    assert_eq!(ended["result"]["turnStart"], open["result"]["turnStart"]);
+    assert!(
+        ended["result"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| text_of(event) == Some("child prompt")),
+        "{ended}"
+    );
+    assert!(
+        ended["result"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["type"] == "branch" && event["name"] == "end"),
+        "{ended}"
+    );
+    let mut pinned = params;
+    pinned["through"] = open["result"]["through"].clone();
+    let pinned = client.rpc("session.history", pinned).await;
+    assert_ok(&pinned);
+    assert_eq!(pinned["result"], open["result"]);
+    let late = client
+        .rpc(
+            "session.submit",
+            json!({"sessionId":id,"branchId":branch,"text":"late"}),
+        )
+        .await;
+    assert_eq!(error_name(&late), "branch_ended");
     server.shutdown();
     server.join().await.unwrap();
     std::fs::remove_dir_all(directory).unwrap();
@@ -511,7 +661,7 @@ async fn the_latest_turn_window_rejects_a_through_inside_a_batch() {
     let created = client.rpc("session.create", create(json!([]))).await;
     assert_ok(&created);
     let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
-    let timeline = batch.0.lock().unwrap().clone().unwrap();
+    let timeline = batch.timeline.lock().unwrap().clone().unwrap();
     let inside = timeline
         .append_batch_registered(
             ["first in batch", "second in batch"]
