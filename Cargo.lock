@@ -1440,6 +1440,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "dim-goal"
+version = "0.1.0-alpha.8"
+dependencies = [
+ "dim-agent-aimux",
+ "dim-agent-capabilities",
+ "dim-agent-runtime",
+ "dim-agent-types",
+ "dim-app-server",
+ "dim-client",
+ "futures-util",
+ "rutis",
+ "rutis-loader",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "dim-migration"
 version = "0.1.0-alpha.8"
 dependencies = [
