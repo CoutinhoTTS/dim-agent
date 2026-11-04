@@ -806,15 +806,10 @@ mod do_generate {
             result_json(&result)["usage"],
             json!({
                 "inputTokens": {
-                    "cacheRead": 0,
                     "noCache": 20,
                     "total": 20
                 },
-                "outputTokens": {
-                    "reasoning": 0,
-                    "text": 0,
-                    "total": 0
-                },
+                "outputTokens": {},
                 "raw": {
                     "prompt_tokens": 20,
                     "total_tokens": 20
@@ -2607,12 +2602,10 @@ mod do_stream {
                     "type": "finish",
                     "usage": {
                         "inputTokens": {
-                            "cacheRead": 0,
                             "noCache": 18,
                             "total": 18
                         },
                         "outputTokens": {
-                            "reasoning": 0,
                             "text": 439,
                             "total": 439
                         },
@@ -2733,12 +2726,10 @@ mod do_stream {
                     "type": "finish",
                     "usage": {
                         "inputTokens": {
-                            "cacheRead": 0,
                             "noCache": 18,
                             "total": 18
                         },
                         "outputTokens": {
-                            "reasoning": 0,
                             "text": 439,
                             "total": 439
                         },
@@ -2816,12 +2807,10 @@ mod do_stream {
                     "type": "finish",
                     "usage": {
                         "inputTokens": {
-                            "cacheRead": 0,
                             "noCache": 18,
                             "total": 18
                         },
                         "outputTokens": {
-                            "reasoning": 0,
                             "text": 439,
                             "total": 439
                         },
@@ -2926,12 +2915,10 @@ mod do_stream {
                     "type": "finish",
                     "usage": {
                         "inputTokens": {
-                            "cacheRead": 0,
                             "noCache": 18,
                             "total": 18
                         },
                         "outputTokens": {
-                            "reasoning": 0,
                             "text": 439,
                             "total": 439
                         },
@@ -3020,12 +3007,10 @@ mod do_stream {
                     "type": "finish",
                     "usage": {
                         "inputTokens": {
-                            "cacheRead": 0,
                             "noCache": 18,
                             "total": 18
                         },
                         "outputTokens": {
-                            "reasoning": 0,
                             "text": 10,
                             "total": 10
                         },
@@ -3338,12 +3323,10 @@ mod do_stream {
                     "type": "finish",
                     "usage": {
                         "inputTokens": {
-                            "cacheRead": 0,
                             "noCache": 18,
                             "total": 18
                         },
                         "outputTokens": {
-                            "reasoning": 0,
                             "text": 439,
                             "total": 439
                         },
@@ -3460,12 +3443,10 @@ mod do_stream {
                     "type": "finish",
                     "usage": {
                         "inputTokens": {
-                            "cacheRead": 0,
                             "noCache": 226,
                             "total": 226
                         },
                         "outputTokens": {
-                            "reasoning": 0,
                             "text": 20,
                             "total": 20
                         },
@@ -3534,12 +3515,10 @@ mod do_stream {
                     "type": "finish",
                     "usage": {
                         "inputTokens": {
-                            "cacheRead": 0,
                             "noCache": 18,
                             "total": 18
                         },
                         "outputTokens": {
-                            "reasoning": 0,
                             "text": 439,
                             "total": 439
                         },
@@ -3617,12 +3596,10 @@ mod do_stream {
                     "type": "finish",
                     "usage": {
                         "inputTokens": {
-                            "cacheRead": 0,
                             "noCache": 18,
                             "total": 18
                         },
                         "outputTokens": {
-                            "reasoning": 0,
                             "text": 439,
                             "total": 439
                         },
@@ -4899,10 +4876,11 @@ mod upstream_e2e {
         assert_eq!(finish_reason.unified, FinishReasonUnified::Stop);
         assert_eq!(usage.input_tokens.total, Some(18));
         assert_eq!(usage.input_tokens.no_cache, Some(18));
-        assert_eq!(usage.input_tokens.cache_read, Some(0));
+        // The provider reported no cache details, so the count stays unknown.
+        assert_eq!(usage.input_tokens.cache_read, None);
         assert_eq!(usage.output_tokens.total, Some(439));
         assert_eq!(usage.output_tokens.text, Some(439));
-        assert_eq!(usage.output_tokens.reasoning, Some(0));
+        assert_eq!(usage.output_tokens.reasoning, None);
         assert_eq!(
             provider_metadata.as_ref().unwrap(),
             &provider_namespace("test-provider", json!({}))
@@ -5072,7 +5050,10 @@ mod upstream_e2e {
                 content: vec![ToolPart::ToolResult(ToolResultPart {
                     tool_call_id: "call-1".into(),
                     tool_name: "weather".into(),
-                    output: ToolResultOutput::Content { value, .. },
+                    output: ToolResultOutput::Content {
+                        value,
+                        is_error: None,
+                    },
                     provider_options: None,
                 })],
                 provider_options: None,

@@ -801,10 +801,12 @@ pub(crate) fn new_call_id() -> String {
 /// 敏感键判断:受保护头/参数名(值将恒脱敏)。
 ///
 /// 这是 recording、logging 和 public error context 的唯一敏感键策略。
-/// 覆盖 `authorization`/`api-key`/`apikey`/`key`/`cookie`/`set-cookie`。
-/// 其中 `key` 取 **exact** 匹配
-/// 而非 contains——避免误伤 `X-Key`/`monkey`/`keyboard`/`keyword` 等含 "key"
-/// 子串的非凭据名(既有 `redact_json` 测试即要求 `X-Key` 值保留)。
+/// 覆盖 `authorization`/`api-key`/`apikey`/`key`/`cookie`/`set-cookie`,
+/// 以及去掉 `-`/`_` 后以 `key`、`auth` 或 `token` 结尾,或含 `secret` 的名字
+/// (arcships/aimux#459:连接头 `x-portkey-virtual-key`、`helicone-auth` 这类
+/// 名字不在此列时会以明文写入录制)。因此 `X-Key` 也会被脱敏:多脱敏是安全
+/// 的一侧,少脱敏则把凭据写进录制;`monkey`/`keyboard`/`keyword` 这类名字
+/// 不以 `key` 结尾,不受影响。
 ///
 /// **token 不再用 contains**——教训:`contains("token")` 会误伤
 /// `max_output_tokens`/`prompt_tokens`/`completion_tokens` 这类正常用量字段名
@@ -2751,7 +2753,9 @@ mod tests {
         assert_eq!(r["headers"]["Authorization"], "[REDACTED]");
         assert_eq!(r["headers"]["x-goog-api-key"], "[REDACTED]");
         assert_eq!(r["headers"]["x-amz-security-token"], "[REDACTED]");
-        assert_eq!(r["headers"]["X-Key"], "ok");
+        // A name ending in `key` is redacted even where it is not a credential:
+        // over-redaction is the safe side.
+        assert_eq!(r["headers"]["X-Key"], "[REDACTED]");
         assert_eq!(r["providerOptions"]["headers"]["Cookie"], "[REDACTED]");
         assert_eq!(r["providerOptions"]["openai"]["api_key"], "[REDACTED]");
         assert_eq!(r["providerOptions"]["openai"]["token"], "[REDACTED]");

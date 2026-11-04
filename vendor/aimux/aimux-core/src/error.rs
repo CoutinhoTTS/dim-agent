@@ -1337,10 +1337,10 @@ mod tests {
         let now = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_445_412_480);
         for (value, expected) in [
             ("250", Some(250)),
-            ("250.999", Some(250)),
-            ("0.999", Some(0)),
+            ("250.999", Some(251)),
+            ("0.999", Some(1)),
             ("-0", Some(0)),
-            (" 250.5 ", Some(250)),
+            (" 250.5 ", Some(251)),
             ("1e3", Some(1_000)),
             ("-1", None),
             ("-0.1", None),
@@ -1359,8 +1359,8 @@ mod tests {
         }
         for (value, expected) in [
             ("1.5", Some(1_500)),
-            ("1.2349", Some(1_234)),
-            ("0.0009", Some(0)),
+            ("1.2349", Some(1_235)),
+            ("0.0009", Some(1)),
             ("-0.0001", None),
             ("18446744073709552", None),
             ("1.5 seconds", None),

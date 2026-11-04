@@ -36,7 +36,6 @@ mod convert_open_ai_compatible_chat_usage {
                 "inputTokens": {
                     "total": 10,
                     "noCache": 10,
-                    "cacheRead": 0,
                 },
                 "outputTokens": { "total": 20, "text": 15, "reasoning": 5 },
                 "raw": {

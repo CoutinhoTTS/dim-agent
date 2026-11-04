@@ -815,7 +815,8 @@ mod do_generate {
             serde_json::to_value(&result.usage).unwrap(),
             json!({
                 "inputTokens": { "total": 20, "noCache": 20 },
-                "outputTokens": { "total": 0, "text": 0 },
+                // An unreported completion count stays unknown.
+                "outputTokens": {},
                 "raw": { "prompt_tokens": 20, "total_tokens": 20 }
             })
         );

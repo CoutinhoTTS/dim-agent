@@ -1703,8 +1703,6 @@ mod do_generate {
         (result, body)
     }
 
-    const PRIORITY_WARNING: &str = "priority processing is only available for supported models (gpt-4, gpt-5, gpt-5-mini, o3, o4-mini) and requires Enterprise access. gpt-5-nano is not supported";
-
     /// upstream: @ai-sdk/openai src/chat/openai-chat-language-model.test.ts › doGenerate › should send serviceTier flex processing setting
     #[tokio::test]
     async fn should_send_service_tier_flex_processing_setting() {
@@ -1716,18 +1714,13 @@ mod do_generate {
     }
 
     /// upstream: @ai-sdk/openai src/chat/openai-chat-language-model.test.ts › doGenerate › should show warning when using flex processing with unsupported model
+    /// The vendored patch for arcships/aimux#462 sends the selected tier for
+    /// every model id, so the model produces no warning.
     #[tokio::test]
-    async fn should_show_warning_when_using_flex_processing_with_unsupported_model() {
+    async fn should_send_flex_processing_for_an_unsupported_model_without_a_warning() {
         let (result, body) = service_tier("gpt-4o-mini", "flex").await;
-        assert_eq!(body.get("service_tier"), None);
-        assert_eq!(
-            warnings(&result),
-            json!([{
-                "details": "flex processing is only available for o3, o4-mini, and gpt-5 models",
-                "feature": "serviceTier",
-                "type": "unsupported",
-            }])
-        );
+        assert_eq!(body["service_tier"], json!("flex"));
+        assert_eq!(warnings(&result), json!([]));
     }
 
     /// upstream: @ai-sdk/openai src/chat/openai-chat-language-model.test.ts › doGenerate › should allow flex processing with o4-mini model without warnings
@@ -1752,14 +1745,13 @@ mod do_generate {
     }
 
     /// upstream: @ai-sdk/openai src/chat/openai-chat-language-model.test.ts › doGenerate › should show warning when using priority processing with unsupported model
+    /// The vendored patch for arcships/aimux#462 sends the selected tier for
+    /// every model id, so the model produces no warning.
     #[tokio::test]
-    async fn should_show_warning_when_using_priority_processing_with_unsupported_model() {
+    async fn should_send_priority_processing_for_an_unsupported_model_without_a_warning() {
         let (result, body) = service_tier("gpt-3.5-turbo", "priority").await;
-        assert_eq!(body.get("service_tier"), None);
-        assert_eq!(
-            warnings(&result),
-            json!([{ "details": PRIORITY_WARNING, "feature": "serviceTier", "type": "unsupported" }])
-        );
+        assert_eq!(body["service_tier"], json!("priority"));
+        assert_eq!(warnings(&result), json!([]));
     }
 
     /// upstream: @ai-sdk/openai src/chat/openai-chat-language-model.test.ts › doGenerate › should allow priority processing with gpt-4o model without warnings
@@ -1789,14 +1781,13 @@ mod do_generate {
     }
 
     /// upstream: @ai-sdk/openai src/chat/openai-chat-language-model.test.ts › doGenerate › should show warning when using fast processing with unsupported model
+    /// The vendored patch for arcships/aimux#462 sends the selected tier for
+    /// every model id, so the model produces no warning.
     #[tokio::test]
-    async fn should_show_warning_when_using_fast_processing_with_unsupported_model() {
+    async fn should_send_fast_processing_for_an_unsupported_model_without_a_warning() {
         let (result, body) = service_tier("gpt-3.5-turbo", "fast").await;
-        assert_eq!(body.get("service_tier"), None);
-        assert_eq!(
-            warnings(&result),
-            json!([{ "details": PRIORITY_WARNING, "feature": "serviceTier", "type": "unsupported" }])
-        );
+        assert_eq!(body["service_tier"], json!("fast"));
+        assert_eq!(warnings(&result), json!([]));
     }
 
     /// upstream: @ai-sdk/openai src/chat/openai-chat-language-model.test.ts › doGenerate › should allow fast processing with gpt-4o model without warnings

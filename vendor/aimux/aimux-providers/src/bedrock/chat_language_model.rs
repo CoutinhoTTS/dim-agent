@@ -692,6 +692,9 @@ fn readable_delta(payload: &serde_json::Value) -> bool {
         || delta
             .get("reasoningContent")
             .is_some_and(serde_json::Value::is_object)
+        // A citation carries no stream output of its own and is ignored, as it
+        // was before the check: it is a delta the decoder reads.
+        || delta.get("citation").is_some_and(serde_json::Value::is_object)
 }
 
 /// Attach accumulated encrypted reasoning once at the end of the block.

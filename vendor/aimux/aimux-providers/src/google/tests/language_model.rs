@@ -5236,8 +5236,11 @@ mod do_stream {
     }
 
     /// upstream: @ai-sdk/google src/google-language-model.test.ts › doStream › should preserve prompt feedback and trailing usage from separate chunks
+    ///
+    /// The stream finishes at the candidate chunk that carries `finishReason`
+    /// (`PATCHES.md` #469), so the trailing usage chunk is not read.
     #[tokio::test]
-    async fn should_preserve_prompt_feedback_and_trailing_usage_from_separate_chunks() {
+    async fn should_finish_at_the_candidate_chunk_without_trailing_usage() {
         let prompt_feedback = json!({
             "blockReason": "BLOCK_REASON_UNSPECIFIED",
             "safetyRatings": [],
@@ -5276,14 +5279,13 @@ mod do_stream {
                     "raw": "STOP",
                 },
                 "usage": {
-                    "outputTokens": {
-                        "total": 3,
-                    },
+                    "inputTokens": {},
+                    "outputTokens": {},
                 },
                 "providerMetadata": {
                     "google": {
                         "promptFeedback": prompt_feedback,
-                        "usageMetadata": usage_metadata,
+                        "usageMetadata": null,
                     },
                 },
             }),
@@ -6108,6 +6110,10 @@ mod do_stream {
     }
 
     /// upstream: @ai-sdk/google src/google-language-model.test.ts › doStream › should stream files
+    ///
+    /// The stream finishes at the chunk that carries `finishReason`
+    /// (`PATCHES.md` #469), so the usage metadata of a later chunk is not read
+    /// and the finish event carries the empty usage of the first chunk.
     #[tokio::test]
     async fn should_stream_files() {
         let mock = sse_stream_mock(vec![
@@ -6177,30 +6183,13 @@ mod do_stream {
                             ],
                             "serviceTier": null,
                             "urlContextMetadata": null,
-                            "usageMetadata": {
-                                "candidatesTokenCount": 233,
-                                "promptTokenCount": 294,
-                                "totalTokenCount": 527
-                            }
+                            "usageMetadata": null
                         }
                     },
                     "type": "finish",
                     "usage": {
-                        "inputTokens": {
-                            "cacheRead": 0,
-                            "noCache": 294,
-                            "total": 294
-                        },
-                        "outputTokens": {
-                            "reasoning": 0,
-                            "text": 233,
-                            "total": 233
-                        },
-                        "raw": {
-                            "candidatesTokenCount": 233,
-                            "promptTokenCount": 294,
-                            "totalTokenCount": 527
-                        }
+                        "inputTokens": {},
+                        "outputTokens": {}
                     }
                 }
             ])
@@ -8024,8 +8013,17 @@ mod in_stream_error {
                 "status": "RESOURCE_EXHAUSTED",
             }
         });
+        // The text chunk carries no `finishReason`: the stream finishes at the
+        // chunk that has one (`PATCHES.md` #469), and the error event would
+        // never be read after it.
         let mock = sse_stream_mock(vec![
-            sse_text_chunks(&["Hello"], None, None).concat(),
+            sse_data_chunk(&json!({
+                "candidates": [{
+                    "content": { "parts": [{ "text": "Hello" }], "role": "model" },
+                    "index": 0,
+                    "safetyRatings": stream_safety_ratings(),
+                }],
+            })),
             sse_data_chunk(&error_event),
         ]);
         let model = stream_test_provider(&mock).chat("gemini-pro");

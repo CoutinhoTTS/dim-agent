@@ -1867,7 +1867,8 @@ mod openai_responses_language_model {
                           "type": "function_call",
                           "call_id": "call_123",
                           "name": "weather",
-                          "arguments": "{\"location\":\"San Francisco\"}"
+                          "arguments": "{\"location\":\"San Francisco\"}",
+                          "id": "fc_existing_123"
                         },
                         {
                           "type": "function_call_output",
@@ -3257,9 +3258,12 @@ mod openai_responses_language_model {
             }
 
             /// upstream: @ai-sdk/openai src/responses/openai-responses-language-model.test.ts › OpenAIResponsesLanguageModel › doGenerate › basic text response › should warn and drop serviceTier fast for a model without priority processing
+            ///
+            /// The integration sends an explicitly selected tier for every model id
+            /// (`PATCHES.md` #462): the product catalogue and the remote account
+            /// entitlement are the authorities, so no warning is raised.
             #[tokio::test]
-            async fn should_warn_and_drop_service_tier_fast_for_a_model_without_priority_processing()
-             {
+            async fn should_send_service_tier_fast_for_a_model_without_priority_processing() {
                 let r = run(
                     "gpt-5-nano",
                     json!({
@@ -3272,17 +3276,8 @@ mod openai_responses_language_model {
                     }),
                 )
                 .await;
-                assert!(r.body.get("service_tier").is_none(), "{:#}", r.body);
-                assert_json_eq(
-                    &r.warnings(),
-                    &json!([
-                      {
-                        "type": "unsupported",
-                        "feature": "serviceTier",
-                        "details": "priority processing is only available for supported models (gpt-4, gpt-5, gpt-5-mini, o3, o4-mini) and requires Enterprise access. gpt-5-nano is not supported"
-                      }
-                    ]),
-                );
+                assert_json_eq(&r.body["service_tier"], &json!("fast"));
+                assert_json_eq(&r.warnings(), &json!([]));
             }
 
             /// upstream: @ai-sdk/openai src/responses/openai-responses-language-model.test.ts › OpenAIResponsesLanguageModel › doGenerate › basic text response › should send serviceTier ultrafast provider option
@@ -9036,6 +9031,11 @@ mod openai_responses_language_model {
                     }),
                     json!({
                         "id": "call_6KxSghkb4MVnunFH2TxPErLP",
+                        "providerMetadata": {
+                            "openai": {
+                                "itemId": "fc_67cb13a838088190be08eb3927c87501",
+                            },
+                        },
                         "toolName": "currentLocation",
                         "type": "tool-input-start",
                     }),
@@ -9061,6 +9061,11 @@ mod openai_responses_language_model {
                     }),
                     json!({
                         "id": "call_Dg6WUmFHNeR5JxX1s53s1G4b",
+                        "providerMetadata": {
+                            "openai": {
+                                "itemId": "fc_67cb13a858f081908a600343fa040f47",
+                            },
+                        },
                         "toolName": "weather",
                         "type": "tool-input-start",
                     }),
@@ -9168,7 +9173,7 @@ mod openai_responses_language_model {
             .unwrap();
             let events = stream_collect(stream).await;
             let mut expected = vec![
-                json!({"type": "tool-input-start", "id": "call_parallel_malformed", "toolName": "parallel"}),
+                json!({"type": "tool-input-start", "id": "call_parallel_malformed", "toolName": "parallel", "providerMetadata": {"openai": {"itemId": "fc_parallel_malformed"}}}),
             ];
             for delta in input_deltas {
                 expected.push(json!({"type": "tool-input-delta", "id": "call_parallel_malformed", "delta": delta}));
@@ -9199,7 +9204,7 @@ mod openai_responses_language_model {
             .unwrap();
             let events = stream_collect(stream).await;
             let mut expected = vec![
-                json!({"type": "tool-input-start", "id": "call_parallel_truncated", "toolName": "parallel"}),
+                json!({"type": "tool-input-start", "id": "call_parallel_truncated", "toolName": "parallel", "providerMetadata": {"openai": {"itemId": "fc_parallel_truncated"}}}),
             ];
             for delta in input_deltas {
                 expected.push(json!({"type": "tool-input-delta", "id": "call_parallel_truncated", "delta": delta}));
@@ -9531,6 +9536,11 @@ mod openai_responses_language_model {
                         }),
                         json!({
                             "id": "call_custom_sql_001",
+                            "providerMetadata": {
+                                "openai": {
+                                    "itemId": "ct_abc123def456",
+                                },
+                            },
                             "toolName": "write_sql",
                             "type": "tool-input-start",
                         }),

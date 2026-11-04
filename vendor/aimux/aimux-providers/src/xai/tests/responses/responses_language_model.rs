@@ -974,6 +974,7 @@ mod xai_responses_language_model {
                                     }),
                                     ToolResultContent::File(png_file(None)),
                                 ],
+                                is_error: None,
                             },
                             provider_options: None,
                         })],
@@ -2436,6 +2437,7 @@ mod xai_responses_language_model {
                     json!([
                         {
                             "input": "{\"location\":\"sf\"}",
+                            "providerMetadata": { "xai": { "itemId": "fc_123" } },
                             "toolCallId": "call_123",
                             "toolName": "weather",
                             "type": "tool-call"
@@ -3788,24 +3790,24 @@ mod xai_responses_language_model {
                             "toolName": "image_generation",
                             "type": "tool-result"
                         }),
-                        json!({ "id": "text-msg_00000000-0000-4000-8000-000000000002", "type": "text-start" }),
-                        json!({ "delta": "Here's", "id": "text-msg_00000000-0000-4000-8000-000000000002", "type": "text-delta" }),
-                        json!({ "delta": " a", "id": "text-msg_00000000-0000-4000-8000-000000000002", "type": "text-delta" }),
-                        json!({ "delta": " serene", "id": "text-msg_00000000-0000-4000-8000-000000000002", "type": "text-delta" }),
-                        json!({ "delta": " image", "id": "text-msg_00000000-0000-4000-8000-000000000002", "type": "text-delta" }),
-                        json!({ "delta": " of", "id": "text-msg_00000000-0000-4000-8000-000000000002", "type": "text-delta" }),
-                        json!({ "delta": " a", "id": "text-msg_00000000-0000-4000-8000-000000000002", "type": "text-delta" }),
-                        json!({ "delta": " paper", "id": "text-msg_00000000-0000-4000-8000-000000000002", "type": "text-delta" }),
-                        json!({ "delta": " boat", "id": "text-msg_00000000-0000-4000-8000-000000000002", "type": "text-delta" }),
-                        json!({ "delta": " sailing", "id": "text-msg_00000000-0000-4000-8000-000000000002", "type": "text-delta" }),
-                        json!({ "delta": " on", "id": "text-msg_00000000-0000-4000-8000-000000000002", "type": "text-delta" }),
-                        json!({ "delta": " a", "id": "text-msg_00000000-0000-4000-8000-000000000002", "type": "text-delta" }),
-                        json!({ "delta": " leaf", "id": "text-msg_00000000-0000-4000-8000-000000000002", "type": "text-delta" }),
-                        json!({ "delta": "-", "id": "text-msg_00000000-0000-4000-8000-000000000002", "type": "text-delta" }),
-                        json!({ "delta": "covered", "id": "text-msg_00000000-0000-4000-8000-000000000002", "type": "text-delta" }),
-                        json!({ "delta": " pond", "id": "text-msg_00000000-0000-4000-8000-000000000002", "type": "text-delta" }),
-                        json!({ "delta": ":", "id": "text-msg_00000000-0000-4000-8000-000000000002", "type": "text-delta" }),
-                        json!({ "id": "text-msg_00000000-0000-4000-8000-000000000002", "type": "text-end" }),
+                        json!({ "providerMetadata": {"xai": {"itemId": "msg_00000000-0000-4000-8000-000000000002", "contentIndex": 0}}, "id": "text-msg_00000000-0000-4000-8000-000000000002:0", "type": "text-start" }),
+                        json!({ "providerMetadata": {"xai": {"itemId": "msg_00000000-0000-4000-8000-000000000002", "contentIndex": 0}}, "delta": "Here's", "id": "text-msg_00000000-0000-4000-8000-000000000002:0", "type": "text-delta" }),
+                        json!({ "providerMetadata": {"xai": {"itemId": "msg_00000000-0000-4000-8000-000000000002", "contentIndex": 0}}, "delta": " a", "id": "text-msg_00000000-0000-4000-8000-000000000002:0", "type": "text-delta" }),
+                        json!({ "providerMetadata": {"xai": {"itemId": "msg_00000000-0000-4000-8000-000000000002", "contentIndex": 0}}, "delta": " serene", "id": "text-msg_00000000-0000-4000-8000-000000000002:0", "type": "text-delta" }),
+                        json!({ "providerMetadata": {"xai": {"itemId": "msg_00000000-0000-4000-8000-000000000002", "contentIndex": 0}}, "delta": " image", "id": "text-msg_00000000-0000-4000-8000-000000000002:0", "type": "text-delta" }),
+                        json!({ "providerMetadata": {"xai": {"itemId": "msg_00000000-0000-4000-8000-000000000002", "contentIndex": 0}}, "delta": " of", "id": "text-msg_00000000-0000-4000-8000-000000000002:0", "type": "text-delta" }),
+                        json!({ "providerMetadata": {"xai": {"itemId": "msg_00000000-0000-4000-8000-000000000002", "contentIndex": 0}}, "delta": " a", "id": "text-msg_00000000-0000-4000-8000-000000000002:0", "type": "text-delta" }),
+                        json!({ "providerMetadata": {"xai": {"itemId": "msg_00000000-0000-4000-8000-000000000002", "contentIndex": 0}}, "delta": " paper", "id": "text-msg_00000000-0000-4000-8000-000000000002:0", "type": "text-delta" }),
+                        json!({ "providerMetadata": {"xai": {"itemId": "msg_00000000-0000-4000-8000-000000000002", "contentIndex": 0}}, "delta": " boat", "id": "text-msg_00000000-0000-4000-8000-000000000002:0", "type": "text-delta" }),
+                        json!({ "providerMetadata": {"xai": {"itemId": "msg_00000000-0000-4000-8000-000000000002", "contentIndex": 0}}, "delta": " sailing", "id": "text-msg_00000000-0000-4000-8000-000000000002:0", "type": "text-delta" }),
+                        json!({ "providerMetadata": {"xai": {"itemId": "msg_00000000-0000-4000-8000-000000000002", "contentIndex": 0}}, "delta": " on", "id": "text-msg_00000000-0000-4000-8000-000000000002:0", "type": "text-delta" }),
+                        json!({ "providerMetadata": {"xai": {"itemId": "msg_00000000-0000-4000-8000-000000000002", "contentIndex": 0}}, "delta": " a", "id": "text-msg_00000000-0000-4000-8000-000000000002:0", "type": "text-delta" }),
+                        json!({ "providerMetadata": {"xai": {"itemId": "msg_00000000-0000-4000-8000-000000000002", "contentIndex": 0}}, "delta": " leaf", "id": "text-msg_00000000-0000-4000-8000-000000000002:0", "type": "text-delta" }),
+                        json!({ "providerMetadata": {"xai": {"itemId": "msg_00000000-0000-4000-8000-000000000002", "contentIndex": 0}}, "delta": "-", "id": "text-msg_00000000-0000-4000-8000-000000000002:0", "type": "text-delta" }),
+                        json!({ "providerMetadata": {"xai": {"itemId": "msg_00000000-0000-4000-8000-000000000002", "contentIndex": 0}}, "delta": "covered", "id": "text-msg_00000000-0000-4000-8000-000000000002:0", "type": "text-delta" }),
+                        json!({ "providerMetadata": {"xai": {"itemId": "msg_00000000-0000-4000-8000-000000000002", "contentIndex": 0}}, "delta": " pond", "id": "text-msg_00000000-0000-4000-8000-000000000002:0", "type": "text-delta" }),
+                        json!({ "providerMetadata": {"xai": {"itemId": "msg_00000000-0000-4000-8000-000000000002", "contentIndex": 0}}, "delta": ":", "id": "text-msg_00000000-0000-4000-8000-000000000002:0", "type": "text-delta" }),
+                        json!({ "id": "text-msg_00000000-0000-4000-8000-000000000002:0", "type": "text-end" }),
                         json!({
                             "finishReason": { "raw": "completed", "unified": "stop" },
                             "providerMetadata": {
@@ -3936,13 +3938,14 @@ mod xai_responses_language_model {
                             "toolName": "image_generation",
                             "type": "tool-result"
                         }),
-                        json!({ "id": "text-msg_123", "type": "text-start" }),
+                        json!({ "id": "text-msg_123:0", "providerMetadata": {"xai": {"itemId": "msg_123", "contentIndex": 0}}, "type": "text-start" }),
                         json!({
                             "delta": "Here is your origami fox.",
-                            "id": "text-msg_123",
+                            "id": "text-msg_123:0",
+                            "providerMetadata": {"xai": {"itemId": "msg_123", "contentIndex": 0}},
                             "type": "text-delta"
                         }),
-                        json!({ "id": "text-msg_123", "type": "text-end" }),
+                        json!({ "id": "text-msg_123:0", "type": "text-end" }),
                         json!({
                             "finishReason": { "raw": "completed", "unified": "stop" },
                             "type": "finish",
@@ -4191,7 +4194,12 @@ mod xai_responses_language_model {
 
                 assert_contains(
                     &parts,
-                    json!({ "type": "tool-input-start", "id": "call_123", "toolName": "weather" }),
+                    json!({
+                        "type": "tool-input-start",
+                        "id": "call_123",
+                        "toolName": "weather",
+                        "providerMetadata": { "xai": { "itemId": "fc_123" } }
+                    }),
                 );
                 assert_contains(
                     &parts,
@@ -4211,7 +4219,8 @@ mod xai_responses_language_model {
                         "type": "tool-call",
                         "toolCallId": "call_123",
                         "toolName": "weather",
-                        "input": "{\"location\":\"sf\"}"
+                        "input": "{\"location\":\"sf\"}",
+                        "providerMetadata": { "xai": { "itemId": "fc_123" } }
                     }),
                 );
             }

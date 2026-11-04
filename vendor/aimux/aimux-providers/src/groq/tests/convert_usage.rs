@@ -437,9 +437,10 @@ mod convert_groq_usage {
 
         assert_eq!(
             serde_json::to_value(&result.usage).unwrap(),
+            // An absent usage object keeps every count unknown.
             json!({
-                "inputTokens": { "total": 0, "noCache": 0 },
-                "outputTokens": { "total": 0, "text": 0 },
+                "inputTokens": {},
+                "outputTokens": {},
                 "raw": {}
             })
         );

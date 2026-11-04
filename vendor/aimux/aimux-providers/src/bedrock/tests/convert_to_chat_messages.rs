@@ -809,6 +809,7 @@ mod assistant_messages {
                             "toolResult": {
                                 "toolUseId": "call-1",
                                 "content": [{ "text": "{\"sum\":4}" }],
+                                "status": "success",
                             },
                         }],
                     },
@@ -828,6 +829,7 @@ mod assistant_messages {
                             "toolResult": {
                                 "toolUseId": "call-2",
                                 "content": [{ "text": "{\"sum\":6}" }],
+                                "status": "success",
                             },
                         }],
                     },
@@ -886,6 +888,7 @@ mod assistant_messages {
                                 "toolResult": {
                                     "toolUseId": "call-1",
                                     "content": [{ "text": "{\"sum\":4}" }],
+                                    "status": "success",
                                 },
                             },
                             { "text": "Now double that." },
@@ -1487,6 +1490,7 @@ mod assistant_messages {
                             "toolResult": {
                                 "content": [{ "text": "Sunny, 72F" }],
                                 "toolUseId": "call-1",
+                                "status": "success",
                             },
                         }],
                         "role": "user",
@@ -1571,6 +1575,7 @@ mod assistant_messages {
                             "toolResult": {
                                 "content": [{ "text": "Sunny, 72F" }],
                                 "toolUseId": "call-1",
+                                "status": "success",
                             },
                         }],
                         "role": "user",
@@ -1837,6 +1842,7 @@ mod tool_messages {
                         "content": [
                             { "image": { "format": "jpeg", "source": { "bytes": "base64data" } } },
                         ],
+                        "status": "success",
                     },
                 }],
             })
@@ -1879,6 +1885,7 @@ mod tool_messages {
                                 },
                             },
                         }],
+                        "status": "success",
                     },
                 }],
             })
@@ -1916,6 +1923,7 @@ mod tool_messages {
                         "content": [
                             { "video": { "format": "mp4", "source": { "bytes": "base64data" } } },
                         ],
+                        "status": "success",
                     },
                 }],
             })
@@ -1958,6 +1966,7 @@ mod tool_messages {
                                 },
                             },
                         }],
+                        "status": "success",
                     },
                 }],
             })
@@ -2000,6 +2009,7 @@ mod tool_messages {
                                 "source": { "bytes": "base64data" },
                             },
                         }],
+                        "status": "success",
                     },
                 }],
             })
@@ -2082,6 +2092,7 @@ mod tool_messages {
                     "toolResult": {
                         "toolUseId": "call-123",
                         "content": [{ "text": "{\"value\":42}" }],
+                        "status": "success",
                     },
                 }],
             })
@@ -2203,6 +2214,7 @@ mod mistral_tool_call_id_normalization {
                     "toolResult": {
                         "toolUseId": "8eHypBDcw",
                         "content": [{ "text": "The result is 42" }],
+                        "status": "success",
                     },
                 }],
             })
@@ -2255,6 +2267,7 @@ mod mistral_tool_call_id_normalization {
                     "toolResult": {
                         "toolUseId": original_id,
                         "content": [{ "text": "The result is 42" }],
+                        "status": "success",
                     },
                 }],
             })
@@ -2275,6 +2288,7 @@ mod mistral_tool_call_id_normalization {
                     "toolResult": {
                         "toolUseId": original_id,
                         "content": [{ "text": "The result is 42" }],
+                        "status": "success",
                     },
                 }],
             })
@@ -2668,6 +2682,7 @@ mod bedrock_convert {
                         text: "The result is 42".to_string(),
                         provider_options: None,
                     })],
+                    is_error: None,
                 },
             )])])
             .unwrap();
@@ -2678,7 +2693,8 @@ mod bedrock_convert {
                     "content": [{
                         "toolResult": {
                             "toolUseId": "call-123",
-                            "content": [{ "text": "The result is 42" }]
+                            "content": [{ "text": "The result is 42" }],
+                            "status": "success"
                         }
                     }]
                 })
@@ -3090,7 +3106,7 @@ mod bedrock_convert {
                     "toolUse": { "input": { "city": "SF" }, "name": "getWeather", "toolUseId": "call-1" }
                 }]},
                 { "role": "user", "content": [{
-                    "toolResult": { "toolUseId": "call-1", "content": [{ "text": "Sunny, 72F" }] }
+                    "toolResult": { "toolUseId": "call-1", "content": [{ "text": "Sunny, 72F" }] , "status": "success"}
                 }]},
             ])
         );
@@ -3129,7 +3145,7 @@ mod bedrock_convert {
                     { "toolUse": { "input": { "city": "SF" }, "name": "getWeather", "toolUseId": "call-1" } },
                 ]},
                 { "role": "user", "content": [{
-                    "toolResult": { "toolUseId": "call-1", "content": [{ "text": "Sunny, 72F" }] }
+                    "toolResult": { "toolUseId": "call-1", "content": [{ "text": "Sunny, 72F" }] , "status": "success"}
                 }]},
                 { "role": "assistant", "content": [
                     { "reasoningContent": { "reasoningText": {
@@ -3275,6 +3291,7 @@ mod bedrock_convert {
                     filename: None,
                     provider_options: None,
                 })],
+                is_error: None,
             },
         )])])
         .unwrap();
@@ -3283,7 +3300,8 @@ mod bedrock_convert {
             json!({
                 "toolResult": {
                     "toolUseId": "call-123",
-                    "content": [{ "image": { "format": "jpeg", "source": { "bytes": "base64data" } } }]
+                    "content": [{ "image": { "format": "jpeg", "source": { "bytes": "base64data" } } }],
+                    "status": "success"
                 }
             })
         );
@@ -3303,6 +3321,7 @@ mod bedrock_convert {
                     filename: Some("tool-result.pdf".to_string()),
                     provider_options: None,
                 })],
+                is_error: None,
             },
         )])])
         .unwrap();
@@ -3313,7 +3332,8 @@ mod bedrock_convert {
                     "toolUseId": "call-123",
                     "content": [{
                         "document": { "format": "pdf", "name": "tool-result", "source": { "bytes": "base64data" } }
-                    }]
+                    }],
+                    "status": "success"
                 }
             })
         );
@@ -3340,7 +3360,8 @@ mod bedrock_convert {
             json!({
                 "toolResult": {
                     "toolUseId": "call-123",
-                    "content": [{ "text": "{\"value\":42}" }]
+                    "content": [{ "text": "{\"value\":42}" }],
+                    "status": "success",
                 }
             })
         );
