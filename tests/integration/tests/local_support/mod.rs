@@ -388,7 +388,7 @@ pub struct Options {
     /// A client-presence source, provided at the root when present.
     pub clients: Option<Arc<dyn SessionClientsSource>>,
     /// The execution switches, provided to HostPlatform and the root when
-    /// present; `EnvironmentSettings` is installed with it.
+    /// present; the settings tool and snapshot parts are registered with it.
     pub execution: Option<Arc<dyn ExecutionSettingsSource>>,
 }
 impl Default for Options {
