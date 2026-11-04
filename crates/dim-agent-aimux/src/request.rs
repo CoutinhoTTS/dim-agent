@@ -150,106 +150,26 @@ pub(crate) fn convert(
             });
         }
         let path = format!("messages[{index}].content");
-        let content = match &source.content {
-            MessageContent::Text(text) if source.role != Role::ToolResult => {
-                vec![ContentPart::text(text.clone())]
-            }
-            MessageContent::Text(_) => {
-                return Err(error(request, &path, "tool results require a tool call ID"));
-            }
-            MessageContent::Parts(parts) => {
-                let mut content = Vec::with_capacity(parts.len());
-                for (part_index, part) in parts.iter().enumerate() {
-                    let path = format!("{path}[{part_index}]");
-                    let mut mapped = match (source.role, part) {
-                        (Role::User | Role::Assistant, MessagePart::Text { text, .. }) => {
-                            Ok(ContentPart::text(text.clone()))
-                        }
-                        (Role::Assistant, MessagePart::Thinking { thinking, .. }) => {
-                            Ok(ContentPart::reasoning(thinking.clone()))
-                        }
-                        (Role::User, MessagePart::Image { source }) => {
-                            image_part(request, &path, source)
-                        }
-                        (
-                            Role::Assistant,
-                            MessagePart::ToolUse {
-                                id, name, input, ..
-                            },
-                        ) => {
-                            let name = tool_names.register(name).map_err(|reason| {
-                                error(request, &format!("{path}.name"), &reason)
-                            })?;
-                            calls.insert(id.as_str(), name.clone());
-                            Ok(ContentPart::ToolCall {
-                                id: id.clone(),
-                                name,
-                                input: Value::Object(input.clone()),
-                                provider_options: None,
-                            })
-                        }
-                        (
-                            Role::ToolResult,
-                            MessagePart::ToolResult {
-                                tool_use_id,
-                                content,
-                                is_error,
-                                ..
-                            },
-                        ) => {
-                            let name = calls.get(tool_use_id.as_str()).ok_or_else(|| {
-                                error(
-                                    request,
-                                    &format!("{path}.tool_use_id"),
-                                    "no preceding tool call",
-                                )
-                            })?;
-                            let output = tool_result(
-                                request,
-                                kind,
-                                &path,
-                                tool_use_id,
-                                content,
-                                *is_error == Some(true),
-                                &mut following,
-                            )?;
-                            Ok(ContentPart::ToolResult {
-                                tool_use_id: tool_use_id.clone(),
-                                name: name.clone(),
-                                output,
-                                provider_options: None,
-                            })
-                        }
-                        _ => Err(error(
-                            request,
-                            &path,
-                            "content cannot be represented for this message role",
-                        )),
-                    }?;
-                    let later_encrypted = source.role == Role::Assistant
-                        && *kind == ProviderKind::OpenaiResponses
-                        && later_encrypted(&parts[part_index + 1..], part);
-                    if continuation(request, kind, &path, part, &mut mapped, later_encrypted)? {
-                        content.push(mapped);
-                    }
-                }
-                content
-            }
+        let message = match source.role {
+            Role::User => user_message(request, kind, &path, &source.content)?,
+            Role::Assistant => assistant_message(
+                request,
+                kind,
+                &path,
+                &source.content,
+                &mut tool_names,
+                &mut calls,
+            )?,
+            Role::ToolResult => tool_message(
+                request,
+                kind,
+                &path,
+                &source.content,
+                &calls,
+                &mut following,
+            )?,
         };
-        prompt.push(match source.role {
-            Role::User => LanguageModelMessage::User {
-                content: content.into_iter().map(user_part).collect(),
-                provider_options: None,
-            },
-            Role::Assistant => LanguageModelMessage::Assistant {
-                content: content.into_iter().map(assistant_part).collect(),
-                provider_options: None,
-            },
-            Role::ToolResult => LanguageModelMessage::Tool {
-                content: content.into_iter().filter_map(tool_part).collect(),
-                provider_options: None,
-            },
-        });
+        prompt.push(message);
     }
     if !following.is_empty() {
         prompt.push(LanguageModelMessage::User {
@@ -479,134 +399,197 @@ fn reasoning_model_rules(
     }
 }
 
-/// One content part of a message, before its role decides the protocol type.
-enum ContentPart {
-    Text {
-        text: String,
-        provider_options: Option<SharedProviderOptions>,
-    },
-    Reasoning {
-        text: String,
-        provider_options: Option<SharedProviderOptions>,
-    },
-    ToolCall {
-        id: String,
-        name: String,
-        input: Value,
-        provider_options: Option<SharedProviderOptions>,
-    },
-    ToolResult {
-        tool_use_id: String,
-        name: String,
-        output: ToolResultOutput,
-        provider_options: Option<SharedProviderOptions>,
-    },
-    File {
-        data: FileData,
-        media_type: String,
-    },
-}
-
-impl ContentPart {
-    fn text(text: String) -> Self {
-        Self::Text {
-            text,
+/// One user message, built as the user role's own part type.
+fn user_message(
+    request: &ModelRequest,
+    kind: &ProviderKind,
+    path: &str,
+    content: &MessageContent,
+) -> Result<LanguageModelMessage, HostError> {
+    let content = match content {
+        MessageContent::Text(text) => vec![UserPart::Text(TextPart {
+            text: text.clone(),
             provider_options: None,
+        })],
+        MessageContent::Parts(parts) => {
+            let mut content = Vec::with_capacity(parts.len());
+            for (index, part) in parts.iter().enumerate() {
+                let path = format!("{path}[{index}]");
+                let mut provider_options = None;
+                let include =
+                    continuation(request, kind, &path, part, &mut provider_options, false)?;
+                match part {
+                    MessagePart::Text { text, .. } if include => {
+                        content.push(UserPart::Text(TextPart {
+                            text: text.clone(),
+                            provider_options,
+                        }));
+                    }
+                    MessagePart::Image { source } if include => {
+                        content.push(image_part(request, &path, source)?);
+                    }
+                    MessagePart::Text { .. } | MessagePart::Image { .. } => {}
+                    _ => {
+                        return Err(error(
+                            request,
+                            &path,
+                            "content cannot be represented for this message role",
+                        ));
+                    }
+                }
+            }
+            content
         }
-    }
+    };
+    Ok(LanguageModelMessage::User {
+        content,
+        provider_options: None,
+    })
+}
 
-    fn reasoning(text: String) -> Self {
-        Self::Reasoning {
-            text,
+/// One assistant message, built as the assistant role's own part type. The
+/// tool names this message registers stay in force for the results after it.
+fn assistant_message<'a>(
+    request: &ModelRequest,
+    kind: &ProviderKind,
+    path: &str,
+    content: &'a MessageContent,
+    tool_names: &mut ToolNames,
+    calls: &mut HashMap<&'a str, String>,
+) -> Result<LanguageModelMessage, HostError> {
+    let content = match content {
+        MessageContent::Text(text) => vec![AssistantPart::Text(TextPart {
+            text: text.clone(),
             provider_options: None,
+        })],
+        MessageContent::Parts(parts) => {
+            let mut content = Vec::with_capacity(parts.len());
+            for (index, part) in parts.iter().enumerate() {
+                let path = format!("{path}[{index}]");
+                let later_encrypted = *kind == ProviderKind::OpenaiResponses
+                    && later_encrypted(&parts[index + 1..], part);
+                let mut provider_options = None;
+                let include = continuation(
+                    request,
+                    kind,
+                    &path,
+                    part,
+                    &mut provider_options,
+                    later_encrypted,
+                )?;
+                match part {
+                    MessagePart::Text { text, .. } if include => {
+                        content.push(AssistantPart::Text(TextPart {
+                            text: text.clone(),
+                            provider_options,
+                        }));
+                    }
+                    MessagePart::Thinking { thinking, .. } if include => {
+                        content.push(AssistantPart::Reasoning(ReasoningPart {
+                            text: thinking.clone(),
+                            provider_options,
+                        }));
+                    }
+                    MessagePart::ToolUse {
+                        id, name, input, ..
+                    } if include => {
+                        let name = tool_names
+                            .register(name)
+                            .map_err(|reason| error(request, &format!("{path}.name"), &reason))?;
+                        calls.insert(id.as_str(), name.clone());
+                        content.push(AssistantPart::ToolCall(ToolCallPart {
+                            tool_call_id: id.clone(),
+                            tool_name: name,
+                            input: Value::Object(input.clone()),
+                            provider_executed: None,
+                            provider_options,
+                        }));
+                    }
+                    MessagePart::Text { .. }
+                    | MessagePart::Thinking { .. }
+                    | MessagePart::ToolUse { .. } => {}
+                    _ => {
+                        return Err(error(
+                            request,
+                            &path,
+                            "content cannot be represented for this message role",
+                        ));
+                    }
+                }
+            }
+            content
         }
-    }
+    };
+    Ok(LanguageModelMessage::Assistant {
+        content,
+        provider_options: None,
+    })
+}
 
-    fn provider_options(&mut self) -> Option<&mut Option<SharedProviderOptions>> {
-        match self {
-            Self::Text {
-                provider_options, ..
-            }
-            | Self::Reasoning {
-                provider_options, ..
-            }
-            | Self::ToolCall {
-                provider_options, ..
-            }
-            | Self::ToolResult {
-                provider_options, ..
-            } => Some(provider_options),
-            Self::File { .. } => None,
+/// One tool message, built as the tool role's own part type. The result has
+/// to name a tool call an earlier assistant message registered.
+fn tool_message<'a>(
+    request: &ModelRequest,
+    kind: &ProviderKind,
+    path: &str,
+    content: &'a MessageContent,
+    calls: &HashMap<&'a str, String>,
+    following: &mut Vec<UserPart>,
+) -> Result<LanguageModelMessage, HostError> {
+    let content = match content {
+        MessageContent::Text(_) => {
+            return Err(error(request, path, "tool results require a tool call ID"));
         }
-    }
-}
-
-fn user_part(part: ContentPart) -> UserPart {
-    match part {
-        ContentPart::Text {
-            text,
-            provider_options,
-        } => UserPart::Text(TextPart {
-            text,
-            provider_options,
-        }),
-        ContentPart::File { data, media_type } => UserPart::File(FilePart {
-            data,
-            media_type,
-            filename: None,
-            provider_options: None,
-        }),
-        _ => unreachable!("a user message holds text and file parts"),
-    }
-}
-
-fn assistant_part(part: ContentPart) -> AssistantPart {
-    match part {
-        ContentPart::Text {
-            text,
-            provider_options,
-        } => AssistantPart::Text(TextPart {
-            text,
-            provider_options,
-        }),
-        ContentPart::Reasoning {
-            text,
-            provider_options,
-        } => AssistantPart::Reasoning(ReasoningPart {
-            text,
-            provider_options,
-        }),
-        ContentPart::ToolCall {
-            id,
-            name,
-            input,
-            provider_options,
-        } => AssistantPart::ToolCall(ToolCallPart {
-            tool_call_id: id,
-            tool_name: name,
-            input,
-            provider_executed: None,
-            provider_options,
-        }),
-        _ => unreachable!("an assistant message holds text, reasoning and tool calls"),
-    }
-}
-
-fn tool_part(part: ContentPart) -> Option<ToolPart> {
-    match part {
-        ContentPart::ToolResult {
-            tool_use_id,
-            name,
-            output,
-            provider_options,
-        } => Some(ToolPart::ToolResult(ToolResultPart {
-            tool_call_id: tool_use_id,
-            tool_name: name,
-            output,
-            provider_options,
-        })),
-        _ => None,
-    }
+        MessageContent::Parts(parts) => {
+            let mut content = Vec::with_capacity(parts.len());
+            for (index, part) in parts.iter().enumerate() {
+                let path = format!("{path}[{index}]");
+                let MessagePart::ToolResult {
+                    tool_use_id,
+                    content: tool_content,
+                    is_error,
+                    ..
+                } = part
+                else {
+                    return Err(error(
+                        request,
+                        &path,
+                        "content cannot be represented for this message role",
+                    ));
+                };
+                let name = calls.get(tool_use_id.as_str()).ok_or_else(|| {
+                    error(
+                        request,
+                        &format!("{path}.tool_use_id"),
+                        "no preceding tool call",
+                    )
+                })?;
+                let output = tool_result(
+                    request,
+                    kind,
+                    &path,
+                    tool_use_id,
+                    tool_content,
+                    *is_error == Some(true),
+                    following,
+                )?;
+                let mut provider_options = None;
+                if continuation(request, kind, &path, part, &mut provider_options, false)? {
+                    content.push(ToolPart::ToolResult(ToolResultPart {
+                        tool_call_id: tool_use_id.clone(),
+                        tool_name: name.clone(),
+                        output,
+                        provider_options,
+                    }));
+                }
+            }
+            content
+        }
+    };
+    Ok(LanguageModelMessage::Tool {
+        content,
+        provider_options: None,
+    })
 }
 
 /// An image part as the protocols' user messages carry it.
@@ -614,8 +597,8 @@ fn image_part(
     request: &ModelRequest,
     path: &str,
     source: &ImageSource,
-) -> Result<ContentPart, HostError> {
-    match source.source_type {
+) -> Result<UserPart, HostError> {
+    let data = match source.source_type {
         ImageSourceType::Base64 => {
             let data = source.data.as_ref().ok_or_else(|| {
                 error(
@@ -624,12 +607,9 @@ fn image_part(
                     "base64 image has no data",
                 )
             })?;
-            Ok(ContentPart::File {
-                data: FileData::Data {
-                    data: FileBytes::Base64(data.clone()),
-                },
-                media_type: source.media_type.clone(),
-            })
+            FileData::Data {
+                data: FileBytes::Base64(data.clone()),
+            }
         }
         ImageSourceType::Url => {
             let url = source.url.as_ref().ok_or_else(|| {
@@ -639,15 +619,18 @@ fn image_part(
                     "URL image has no URL",
                 )
             })?;
-            Ok(ContentPart::File {
-                data: FileData::Url {
-                    url: url.clone(),
-                    original_url: None,
-                },
-                media_type: source.media_type.clone(),
-            })
+            FileData::Url {
+                url: url.clone(),
+                original_url: None,
+            }
         }
-    }
+    };
+    Ok(UserPart::File(FilePart {
+        data,
+        media_type: source.media_type.clone(),
+        filename: None,
+        provider_options: None,
+    }))
 }
 
 /// A tool result's output. Protocols whose tool message carries an image keep
@@ -729,17 +712,7 @@ fn tool_result(
                         ),
                         provider_options: None,
                     }));
-                    match image_part(request, path, source)? {
-                        ContentPart::File { data, media_type } => {
-                            following.push(UserPart::File(FilePart {
-                                data,
-                                media_type,
-                                filename: None,
-                                provider_options: None,
-                            }));
-                        }
-                        _ => unreachable!(),
-                    }
+                    following.push(image_part(request, path, source)?);
                     TOOL_IMAGE_MARKER
                 }
             },
@@ -807,7 +780,7 @@ fn continuation(
     kind: &ProviderKind,
     path: &str,
     part: &MessagePart,
-    native: &mut ContentPart,
+    provider_options: &mut Option<SharedProviderOptions>,
     later_encrypted: bool,
 ) -> Result<bool, HostError> {
     let thinking = matches!(part, MessagePart::Thinking { .. });
@@ -925,13 +898,6 @@ fn continuation(
                 "continuation metadata belongs to a different protocol or content kind",
             ));
         }
-    };
-    let Some(provider_options) = native.provider_options() else {
-        return Err(error(
-            request,
-            &format!("{path}.providerMetadata"),
-            "continuation metadata belongs to a different content kind",
-        ));
     };
     *provider_options =
         Some(provider_namespace(namespace, fields).expect("continuation fields are an object"));

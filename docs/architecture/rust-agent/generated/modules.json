@@ -228,7 +228,6 @@
         "json",
         "matches",
         "tracing::warn",
-        "unreachable",
         "vec"
       ]
     },
@@ -6563,8 +6562,7 @@
       "from": "dim_agent_aimux::request",
       "to": "dim_agent_aimux::request::native",
       "references": [
-        "mod native",
-        "path native"
+        "mod native"
       ]
     },
     {
@@ -6607,6 +6605,7 @@
         "path ImageSource",
         "path ImageSourceType::Base64",
         "path ImageSourceType::Url",
+        "path MessageContent",
         "path MessageContent::Parts",
         "path MessageContent::Text",
         "path MessagePart",
