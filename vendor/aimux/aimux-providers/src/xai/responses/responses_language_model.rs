@@ -715,6 +715,15 @@ impl XaiResponsesStream {
                     let item_id = parsed.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
                     let delta = parsed.get("delta").and_then(|v| v.as_str()).unwrap_or("");
                     let block_id = format!("reasoning-{item_id}");
+                    if !active_reasoning.contains_key(item_id) {
+                        active_reasoning.insert(item_id.to_string(), ());
+                        controller.enqueue(StreamPart::ReasoningStart {
+                            id: block_id.clone(),
+                            provider_metadata: Some(crate::xai::options::xai_metadata(
+                                json!({ "itemId": item_id }),
+                            )),
+                        });
+                    }
                     controller.enqueue(StreamPart::ReasoningDelta {
                         id: block_id,
                         delta: delta.to_string(),
