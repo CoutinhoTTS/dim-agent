@@ -528,6 +528,7 @@ test('stages public native payload, packs it and rejects modified content', {ski
   assert.equal(JSON.parse(metadata.stdout).license,'SEE LICENSE IN NOTICE');
   const native=path.join(temporary,'packed',packedManifest.nativeArchives[0].file);
   const npm=path.join(temporary,'packed',packedManifest.npmPackages[0].file);
+  assert.equal(spawnSync('tar',['-xOzf',npm,'package/licenses/aimux/LICENSE'],{encoding:'utf8'}).stdout,readFileSync(path.join(root,'vendor/aimux/LICENSE'),'utf8'));
   for (const file of ['LICENSE','NOTICE','xai-ratatui-inline/NOTICE','xai-ratatui-textarea/NOTICE']) {
     const source=readFileSync(path.join(root,'vendor/grok-build',file),'utf8');
     for (const [archive,prefix] of [[native,`dimcode-${manifest.platform}`],[npm,'package']]) {
@@ -577,6 +578,7 @@ test('stages the Web workspace as one native archive and npm package with its pr
   const dist=path.join(temporary,'dist');
   mkdirSync(path.join(dist,'assets'),{recursive:true});
   writeFileSync(path.join(dist,'index.html'),'<!doctype html><title>Dim</title>');
+  writeFileSync(path.join(dist,'THIRD-PARTY-NOTICES.txt'),'Third-party license fixture');
   writeFileSync(path.join(dist,'assets/app-1.js'),'export {}');
   const output=path.join(temporary,'web');
   const staged=run('stage-web.mjs',[output,version,commit,'--dist',dist]);
@@ -586,17 +588,23 @@ test('stages the Web workspace as one native archive and npm package with its pr
   assert.equal(manifest.version,version);
   const protocol=Number(readFileSync(path.join(root,'crates/dim-app-server/src/protocol.rs'),'utf8').match(/PROTOCOL_VERSION: u32 = (\d+)/)[1]);
   assert.equal(manifest.protocolVersion,protocol);
-  assert.deepEqual(Object.keys(manifest.files).sort(),['LICENSE','web/assets/app-1.js','web/dimcode-web.json','web/index.html']);
+  assert.deepEqual(Object.keys(manifest.files).sort(),['LICENSE','NOTICE','web/THIRD-PARTY-NOTICES.txt','web/assets/app-1.js','web/dimcode-web.json','web/index.html']);
   assert.deepEqual(manifest.npmPackages.map(({name,file})=>[name,file]),[['dimcode-web',`dimcode-web-${version}.tgz`]]);
   assert.deepEqual(manifest.nativeArchives.map(({platform,file})=>[platform,file]),[['web',`dimcode-web-${version}.tar.gz`]]);
   const names=entries(path.join(output,`dimcode-web-${version}.tar.gz`)).filter((name)=>!name.endsWith('/')).sort();
-  assert.deepEqual(names,['dimcode-web/LICENSE','dimcode-web/release-manifest.json','dimcode-web/web/assets/app-1.js','dimcode-web/web/dimcode-web.json','dimcode-web/web/index.html']);
+  assert.deepEqual(names,['dimcode-web/LICENSE','dimcode-web/NOTICE','dimcode-web/release-manifest.json','dimcode-web/web/THIRD-PARTY-NOTICES.txt','dimcode-web/web/assets/app-1.js','dimcode-web/web/dimcode-web.json','dimcode-web/web/index.html']);
   const record=spawnSync('tar',['-xOzf',path.join(output,`dimcode-web-${version}.tgz`),'package/web/dimcode-web.json'],{encoding:'utf8'});
   assert.equal(record.status,0,record.stderr);
   assert.deepEqual(JSON.parse(record.stdout),{version,protocolVersion:protocol,sourceCommit:commit});
   const metadata=JSON.parse(spawnSync('tar',['-xOzf',path.join(output,`dimcode-web-${version}.tgz`),'package/package.json'],{encoding:'utf8'}).stdout);
   assert.equal(metadata.name,'dimcode-web');
+  assert.equal(metadata.license,'SEE LICENSE IN NOTICE');
   assert.equal(metadata.os,undefined);
+  const notices=spawnSync('tar',['-xOzf',path.join(output,`dimcode-web-${version}.tgz`),'package/web/THIRD-PARTY-NOTICES.txt'],{encoding:'utf8'});
+  assert.equal(notices.stdout,'Third-party license fixture');
+  rmSync(path.join(dist,'THIRD-PARTY-NOTICES.txt'));
+  assert.notEqual(run('stage-web.mjs',[path.join(temporary,'missing-notices'),version,commit,'--dist',dist]).status,0);
+  assert.equal(existsSync(path.join(temporary,'missing-notices')),false);
   rmSync(path.join(dist,'index.html'));
   assert.notEqual(run('stage-web.mjs',[path.join(temporary,'again'),version,commit,'--dist',dist]).status,0);
   assert.equal(existsSync(path.join(temporary,'again')),false);
@@ -615,12 +623,12 @@ test('an account build records the account and stages only its executable', {ski
     'setting the extended attribute must succeed before packing');
   const manifest=JSON.parse(readFileSync(path.join(stage,'release-manifest.json')));
   assert.equal(manifest.account,true);
-  assert.deepEqual(Object.keys(manifest.files).sort(),['default-plugins.json','LICENSE','NOTICE','bin/dimcode',...['LICENSE','NOTICE','xai-ratatui-inline/NOTICE','xai-ratatui-textarea/NOTICE'].map((file)=>`licenses/grok-build/${file}`)].sort());
+  assert.deepEqual(Object.keys(manifest.files).sort(),['default-plugins.json','LICENSE','NOTICE','bin/dimcode','licenses/aimux/LICENSE',...['LICENSE','NOTICE','xai-ratatui-inline/NOTICE','xai-ratatui-textarea/NOTICE'].map((file)=>`licenses/grok-build/${file}`)].sort());
   const packed=run('pack-release.mjs',[stage,path.join(temporary,'packed')]);
   assert.equal(packed.status,0,packed.stderr);
   const npmFile=JSON.parse(readFileSync(path.join(temporary,'packed/release-manifest.json'))).npmPackages[0].file;
   assert.deepEqual(entries(path.join(temporary,'packed',npmFile)).filter((name)=>!name.endsWith('/')).sort(),
-    ['package/default-plugins.json','package/LICENSE','package/NOTICE','package/bin/dimcode','package/package.json','package/release-manifest.json',...['LICENSE','NOTICE','xai-ratatui-inline/NOTICE','xai-ratatui-textarea/NOTICE'].map((file)=>`package/licenses/grok-build/${file}`)].sort());
+    ['package/default-plugins.json','package/LICENSE','package/NOTICE','package/bin/dimcode','package/package.json','package/release-manifest.json','package/licenses/aimux/LICENSE',...['LICENSE','NOTICE','xai-ratatui-inline/NOTICE','xai-ratatui-textarea/NOTICE'].map((file)=>`package/licenses/grok-build/${file}`)].sort());
 });
 
 test('stages cross-built executables without running them and rejects the wrong architecture', (t)=>{
@@ -684,6 +692,7 @@ test('collects exact platform packages, installs wrapper offline and rejects inc
   const dist=path.join(temporary,'dist');
   mkdirSync(dist,{recursive:true});
   writeFileSync(path.join(dist,'index.html'),'<!doctype html>');
+  writeFileSync(path.join(dist,'THIRD-PARTY-NOTICES.txt'),'Third-party license fixture');
   const web=run('stage-web.mjs',[path.join(temporary,'release-web'),version,commit,'--dist',dist]);
   assert.equal(web.status,0,web.stderr);
   const complete=path.join(temporary,'complete');
@@ -694,6 +703,7 @@ test('collects exact platform packages, installs wrapper offline and rejects inc
   const wrapperName=alpha?'dimcode-alpha':'dimcode';
   const wrapper=JSON.parse(spawnSync('tar',['-xOzf',path.join(complete,'npm',`${wrapperName}-${version}.tgz`),'package/package.json'],{encoding:'utf8'}).stdout);
   assert.equal(wrapper.name,wrapperName);
+  assert.equal(spawnSync('tar',['-xOzf',path.join(complete,'npm',`${wrapperName}-${version}.tgz`),'package/NOTICE'],{encoding:'utf8'}).stdout,readFileSync(path.join(root,'NOTICE'),'utf8'));
   assert.deepEqual(Object.keys(wrapper.bin),alpha?['dima']:['dim','dimcode']);
   assert.equal(wrapper.optionalDependencies['dimcode-web'],version);
   if(process.platform!=='win32') {

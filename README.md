@@ -4,6 +4,26 @@ Dim is a Rust coding agent with a simple terminal scrollback interface. The nati
 
 This workspace contains Agent v4 and the native CLI. It builds independently of the original TypeScript agent, OpenTUI, Desktop and web applications. Public source is licensed under [MIT](LICENSE). The Dim account is a Rust plugin ([`crates/dim-oauth`](crates/dim-oauth/README.md)) compiled into the account build of the same executable when its OAuth client IDs are supplied at build time; it is not required to build or use API-key providers.
 
+## Install
+
+The Rust CLI is currently published on the alpha channel. npm installation requires Node.js `^22.19.0 || >=23.11.0`, with optional dependencies enabled.
+
+```sh
+npm install -g dimcode-alpha@alpha
+dima
+```
+
+The alpha installs the `dima` command and uses `~/.dimcode-alpha`. It can coexist with `dim`; sessions and account files are not automatically migrated. Run `dima --help` for login, provider and API-key configuration options. See [release packaging](docs/release/README.md) for platform requirements and distribution contents.
+
+The `dimcode` package and `dim` command remain available:
+
+```sh
+npm install -g dimcode
+dim
+```
+
+The Rust CLI in this repository has not been published to `dimcode` yet. That package currently distributes the earlier TypeScript CLI. Use `dimcode-alpha@alpha` to try this Rust implementation.
+
 ## API-key setup
 
 The examples use Bash. Install Rust through rustup; Cargo selects Rust 1.98.1 from `rust-toolchain.toml`. Native prerequisites are described in [build setup](docs/architecture/build.md). API-key development needs no Node or pnpm. Run from the workspace root:
@@ -106,7 +126,11 @@ The default product home is `~/.dimcode` (`~/.dimcode-alpha` for an alpha build)
 | `xtask/` | Architecture boundaries, generated graphs and measurements |
 | `npm/` | `dimcode` wrapper with `dim` and `dimcode` command aliases |
 
-See [documentation](docs/INDEX.md), [architecture](docs/architecture/README.md), [build setup](docs/architecture/build.md) and [release packaging](docs/release/README.md). The npm package name is `dimcode`; the repository is `arcships/dim`. Self-hosted CI builds draft GitHub Releases; npm publishing remains disabled. Release preparation follows the [project release skill](.agents/skills/dim-release/SKILL.md).
+See [documentation](docs/INDEX.md), [architecture](docs/architecture/README.md), [build setup](docs/architecture/build.md) and [release packaging](docs/release/README.md). Rust alphas use the `dimcode-alpha` npm package; the repository is `arcships/dim`. Self-hosted CI builds draft GitHub Releases. Release preparation follows the [project release skill](.agents/skills/dim-release/SKILL.md).
+
+## Distribution notices
+
+Dim's original source is MIT-licensed. Third-party code and assets retain their own licenses; see [NOTICE](NOTICE). Native distributions include vendored terminal notices under `licenses/grok-build/` and Aimux's license under `licenses/aimux/`. The Web workspace ships `THIRD-PARTY-NOTICES.txt` with the production dependency license texts, including the SIL Open Font License for Geist and Geist Mono. Bundled TypeScript plugins retain their installed dependency license files.
 
 ## Verify
 

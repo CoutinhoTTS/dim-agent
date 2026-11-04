@@ -224,4 +224,8 @@ Publication validates every package before the first registry write. A retry com
 
 `scripts/export-public-source.sh OUTPUT.tar.gz` exports a whitelist of tracked public source, project skills and documentation from HEAD, without `.git`, repository history, private plugins, caches or staging directories. This creates a local archive only and does not push to any remote.
 
-Native archives and platform npm packages include the vendored terminal libraries’ Apache-2.0 license and notices under `licenses/grok-build/`, referenced by the root `NOTICE`. The extra Swift syntax asset is excluded pending license verification.
+## Distribution notices
+
+The wrapper, native packages and Web package include the root `NOTICE`. Native archives and platform npm packages retain Aimux's MIT license under `licenses/aimux/` and the vendored terminal libraries' Apache-2.0 license and notices under `licenses/grok-build/`. The extra Swift syntax asset is excluded pending license verification. Default TypeScript plugins keep their installed dependency license files.
+
+Every Web production build emits `THIRD-PARTY-NOTICES.txt` from the installed production package licenses. It includes Geist and Geist Mono's SIL Open Font License and any upstream notices. Packages that omit license files use the exact-version source notices recorded under `web/licenses/`; a missing notice fails the build. The file is shipped in both Web archives, in the npm package and in embedded Web builds. Staging refuses a frontend build without it, and the release manifest covers its digest.

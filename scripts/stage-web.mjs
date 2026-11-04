@@ -43,11 +43,13 @@ try {
     npm(['run', 'build', '--', '--outDir', dist, '--emptyOutDir']);
   }
   assert(lstatSync(path.join(dist, 'index.html')).isFile(), 'The frontend build has no index.html');
+  assert(lstatSync(path.join(dist, 'THIRD-PARTY-NOTICES.txt')).isFile(), 'The frontend build has no third-party notices');
   const name = `dimcode-web`;
   const stage = path.join(scratch, name);
   cpSync(dist, path.join(stage, 'web'), { recursive: true });
   writeFileSync(path.join(stage, 'web', 'dimcode-web.json'), `${JSON.stringify({ version, protocolVersion, sourceCommit }, null, 2)}\n`);
   copyFileSync(path.join(repo, 'LICENSE'), path.join(stage, 'LICENSE'));
+  copyFileSync(path.join(repo, 'NOTICE'), path.join(stage, 'NOTICE'));
   const files = {};
   for (const entry of readdirSync(stage, { withFileTypes: true, recursive: true })) {
     assert(entry.isFile() || entry.isDirectory(), 'Unexpected frontend file type');
@@ -62,9 +64,9 @@ try {
   const packageRoot = path.join(scratch, 'package');
   cpSync(stage, packageRoot, { recursive: true });
   writeFileSync(path.join(packageRoot, 'package.json'), `${JSON.stringify({
-    name, version, description: 'Dim Web workspace frontend, served by the dimcode App Server', license: 'MIT',
+    name, version, description: 'Dim Web workspace frontend, served by the dimcode App Server', license: 'SEE LICENSE IN NOTICE',
     repository: { type: 'git', url: 'git+https://github.com/arcships/dim.git' },
-    files: ['web', 'LICENSE', 'release-manifest.json'],
+    files: ['web', 'LICENSE', 'NOTICE', 'release-manifest.json'],
   }, null, 2)}\n`);
   const archive = `${name}-${version}.tgz`;
   runTar(['-czf', path.join(output, archive), '-C', scratch, 'package']);

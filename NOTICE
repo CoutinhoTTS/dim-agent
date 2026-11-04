@@ -1,0 +1,22 @@
+Dim
+Copyright (c) 2026 arcships
+
+Dim's original source is licensed under MIT; see LICENSE.
+Third-party components retain their own copyright notices and licenses.
+
+Native distributions include:
+- Aimux (MIT): licenses/aimux/LICENSE.
+- Vendored xai-org/grok-build terminal libraries (Apache-2.0), including
+  their Ratatui attribution: licenses/grok-build/LICENSE and NOTICE,
+  licenses/grok-build/xai-ratatui-inline/NOTICE, and
+  licenses/grok-build/xai-ratatui-textarea/NOTICE.
+- Default TypeScript plugins and their installed dependencies, whose
+  license files remain in plugins/<name>/node_modules/.
+
+The optional Web workspace includes third-party JavaScript and font assets.
+Its web/THIRD-PARTY-NOTICES.txt contains the production dependency license
+texts, including the SIL Open Font License 1.1 for Geist and Geist Mono.
+An embedded Web build includes the same notices with its Web assets.
+
+In the source tree, vendored licenses and attribution are under vendor/.
+The extra Swift grammar from grok-build is excluded from distributions.

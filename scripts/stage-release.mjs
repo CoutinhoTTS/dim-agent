@@ -51,9 +51,9 @@ try {
     mkdirSync(path.dirname(destination), { recursive: true });
     copyFileSync(path.join(repo, 'vendor/grok-build', file), destination);
   }
-  const notice = 'Dim public source is licensed under MIT; see LICENSE.\n'
-    + 'Vendored terminal libraries retain their licenses and notices; see licenses/grok-build/NOTICE and licenses/grok-build/LICENSE.\n';
-  writeFileSync(path.join(output, 'NOTICE'), notice);
+  mkdirSync(path.join(output, 'licenses/aimux'), { recursive: true });
+  copyFileSync(path.join(repo, 'vendor/aimux/LICENSE'), path.join(output, 'licenses/aimux/LICENSE'));
+  copyFileSync(path.join(repo, 'NOTICE'), path.join(output, 'NOTICE'));
   const toolchain = { rust: readFileSync(path.join(repo, 'rust-toolchain.toml'), 'utf8').match(/channel = "([^"]+)"/)[1] };
   const files = {};
   for (const entry of readdirSync(output, { withFileTypes: true, recursive: true })) {

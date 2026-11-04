@@ -83,6 +83,7 @@ try {
     writeFileSync(wrapper,`${JSON.stringify(data,null,2)}\n`);
   }
   copyFileSync(path.join(repo,'LICENSE'),path.join(scratch,'package/LICENSE'));
+  copyFileSync(path.join(repo,'NOTICE'),path.join(scratch,'package/NOTICE'));
   const archive = `${wrapperName}-${first.version}.tgz`;
   const packed = spawnSync('tar',['-czf',path.join(npm,archive),'-C',scratch,'package'],{encoding:'utf8',env:{...process.env,COPYFILE_DISABLE:'1'}});
   assert.ifError(packed.error);
