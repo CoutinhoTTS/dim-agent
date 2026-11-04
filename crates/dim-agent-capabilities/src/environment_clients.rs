@@ -5,7 +5,7 @@
 //! attached connections at branch open and on every `ClientsChanged` fact.
 use crate::{branch_input::append_own, context_block};
 use dim_agent_runtime::{
-    BranchLifecycle, Names, PartRegistry, PartScope, SessionIdentity, Timeline,
+    BranchLifecycle, BranchPhase, Names, PartRegistry, PartScope, SessionIdentity, Timeline,
 };
 use dim_agent_types::*;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -225,10 +225,16 @@ impl DynPlugin for ClientsBranchPlugin {
                 let mut last = None;
                 loop {
                     let current = snapshot(&clients.0.presences(&session));
-                    if last.as_deref() != Some(current.as_str())
-                        && append(&timeline, &current).is_ok()
-                    {
-                        last = Some(current);
+                    if last.as_deref() != Some(current.as_str()) {
+                        if lifecycle.is_cancelled() || phase.phase() >= BranchPhase::Closing {
+                            return;
+                        }
+                        match append(&timeline, &current) {
+                            Ok(()) => last = Some(current),
+                            Err(error) => {
+                                tracing::warn!(%error, "client presence was not appended");
+                            }
+                        }
                     }
                     tokio::select! {
                         _ = lifecycle.cancelled() => return,
