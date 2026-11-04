@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/design/assets/dimagent-banner.png" alt="DimAgent logo above a green wave of light" width="760">
+
 # Dim
 
 **Dim is a paradigm for general-purpose agents that grow into the environments they inhabit.**
@@ -22,10 +24,14 @@ With Node.js `^22.19.0 || >=23.11.0` and npm optional dependencies enabled, run 
 
 ```sh
 npm install -g dimcode-alpha@alpha
-dima --permission read-only
+dima
 ```
 
-Sign in with `/login` or select a configured model with `/models`. For a first task, pick a function and ask Dim to read its implementation on the main line and check its tests on a branch. To try the example below, start `dima` in the [retry example workspace](xtask/scenario-eval/timeline-branches/sibling-relay/workspace) and ask:
+Sign in with `/login` or select a configured model with `/models`. Type `ls` in the chat and press Enter. In this session Dim asks to run `ls -la` in `runtime/plugins`. Choosing **Allow once** lets it list the three plugin directories.
+
+<img src="docs/design/assets/cli-ls.gif" alt="A user sends ls in Dim chat, approves one directory listing, and gets goal, plugin-authoring and workflow." width="760">
+
+For a read-only investigation, start `dima --permission read-only` in the [retry example workspace](xtask/scenario-eval/timeline-branches/sibling-relay/workspace) and ask:
 
 > Read src/retry.py to see what happens when every attempt fails. Open a branch to read tests/test_retry.py. Does the existing test cover that case?
 
