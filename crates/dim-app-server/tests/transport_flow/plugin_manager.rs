@@ -895,7 +895,7 @@ async fn node_default_plugins_load_and_their_settings_follow_them() {
     assert_eq!(source["document"]["max_concurrent_runs"], 4, "{shown}");
     assert_eq!(
         source["schema"]["properties"]["max_concurrent_runs"]["maximum"],
-        9007199254740991
+        9007199254740991_u64
     );
     let set = "config workflow set max_concurrent_runs 5";
     let updated = plugin_reply(&mut client, &server, &session, set).await;
