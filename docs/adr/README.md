@@ -29,7 +29,7 @@ original text.
 | [019 — One bounded event query is the Timeline read surface](019-event-query.md) | Proposed | Follows 006 D1; replaces the consumer-shaped reads on the Timeline service |
 | [020 — Timeline reads converge on the event query and replay is removed](020-timeline-read-convergence.md) | Proposed | Refines 019 D5; follows 006 D1 |
 
-| [021 — A read follows the object that owns the state](021-reads-follow-the-state-owner.md) | Proposed | Refines 019 D1 and 020 D6 for the case where no Timeline exists |
+| [021 — A read follows the object that owns the state](021-reads-follow-the-state-owner.md) | Proposed | Supersedes 020 D6's unloaded-Session clause; refines 019 D1 for the ended-line read |
 
 Source baseline: [initial foundation parent](https://github.com/arcships/dim/commit/aaaffa5768e031d781abb73e45b1915b05dc2aa0).
 This baseline includes lifecycle fixes not necessarily present on the default branch.
