@@ -22,6 +22,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 /// The snapshot source name.
 pub const SNAPSHOT_SOURCE: &str = "dim/settings/execution";
@@ -286,10 +287,12 @@ impl DynPlugin for SettingsSnapshotBranch {
             }
 
             let session = identity.session_id.clone();
+            let tasks = TaskTracker::new();
             let changed_host = host.clone();
             let changed_timeline = timeline.clone();
             let changed_last = last.clone();
             let changed_dirty = dirty.clone();
+            let changed_tasks = tasks.clone();
             ctx.listen::<SettingsChanged>()
                 .name(settings_changes(SETTINGS_SOURCE))
                 .on(move |event, _| {
@@ -298,55 +301,68 @@ impl DynPlugin for SettingsSnapshotBranch {
                     let timeline = changed_timeline.clone();
                     let last = changed_last.clone();
                     let dirty = changed_dirty.clone();
+                    let tasks = changed_tasks.clone();
                     let session = session.clone();
                     Box::pin(async move {
                         if origin.as_deref() != Some(session.as_str()) {
                             dirty.store(true, Ordering::SeqCst);
                             return Ok(None);
                         }
-                        match host.0.read(CancellationToken::new()).await {
-                            Ok(settings) => {
-                                let current = snapshot(settings);
-                                let mut last = last.lock().expect("settings body");
-                                if last.as_deref() != Some(current.as_str()) {
-                                    if let Err(error) = append(&timeline, &current) {
-                                        tracing::warn!(%error, "execution settings were not appended");
-                                    } else {
-                                        *last = Some(current);
+                        tasks.spawn(async move {
+                            match host.0.read(CancellationToken::new()).await {
+                                Ok(settings) => {
+                                    let current = snapshot(settings);
+                                    let mut last = last.lock().expect("settings body");
+                                    if last.as_deref() != Some(current.as_str()) {
+                                        if let Err(error) = append(&timeline, &current) {
+                                            tracing::warn!(%error, "execution settings were not appended");
+                                        } else {
+                                            *last = Some(current);
+                                        }
                                     }
                                 }
+                                Err(error) => tracing::warn!(%error, "execution settings were not read"),
                             }
-                            Err(error) => tracing::warn!(%error, "execution settings were not read"),
-                        }
+                        });
                         Ok(None)
                     })
                 })?;
 
             let turn_host = host.clone();
             let turn_timeline = timeline.clone();
-            let turn_last = last;
-            let turn_dirty = dirty;
+            let turn_last = last.clone();
+            let turn_dirty = dirty.clone();
+            let turn_tasks = tasks.clone();
             dispatcher.subscribe(ctx, "SettingsSnapshot", &["turn/start"], move |_| {
-                if !turn_dirty.swap(false, Ordering::SeqCst) {
-                    return Box::pin(async { Ok(()) });
-                }
                 let host = turn_host.clone();
                 let timeline = turn_timeline.clone();
                 let last = turn_last.clone();
+                let dirty = turn_dirty.clone();
+                let tasks = turn_tasks.clone();
                 Box::pin(async move {
-                    if let Ok(settings) = host.0.read(CancellationToken::new()).await {
-                        let current = snapshot(settings);
-                        let mut last = last.lock().expect("settings body");
-                        if last.as_deref() != Some(current.as_str()) {
-                            if let Err(error) = append(&timeline, &current) {
-                                tracing::warn!(%error, "execution settings were not appended");
-                            } else {
-                                *last = Some(current);
+                    if !dirty.swap(false, Ordering::SeqCst) {
+                        return Ok(());
+                    }
+                    tasks.spawn(async move {
+                        if let Ok(settings) = host.0.read(CancellationToken::new()).await {
+                            let current = snapshot(settings);
+                            let mut last = last.lock().expect("settings body");
+                            if last.as_deref() != Some(current.as_str()) {
+                                if let Err(error) = append(&timeline, &current) {
+                                    tracing::warn!(%error, "execution settings were not appended");
+                                } else {
+                                    *last = Some(current);
+                                }
                             }
                         }
-                    }
+                    });
                     Ok(())
                 })
+            })?;
+            ctx.effect(move || async move {
+                tasks.close();
+                tasks.wait().await;
+                Ok(())
             })?;
             Ok(Effect::Done)
         })
