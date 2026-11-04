@@ -12,7 +12,9 @@ use dim_agent_capabilities::{
     workspace_tools::{file_reads::FileReads, files::FileTools},
 };
 use dim_agent_runtime::testing::MinimalHost;
-use dim_agent_runtime::testing::{branch_events, chain_events, chain_events_paged, timeline_events};
+use dim_agent_runtime::testing::{
+    branch_events, chain_events, chain_events_paged, timeline_events,
+};
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
