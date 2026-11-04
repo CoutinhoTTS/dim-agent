@@ -858,19 +858,39 @@ async fn running(client: &mut Client, names: &[&str]) -> Value {
 async fn node_default_plugins_load_and_their_settings_follow_them() {
     let home = home();
     let mut config = config(&home);
+    let workflow_settings = home.join("workflow.json");
+    let workflow_runs = home.join("workflow/runs.json");
+    let settings_bytes = b"{\"definitions\":{},\"projectEnabled\":{}}\n";
+    let runs_bytes = br#"{"version":1,"text":"{\"version\":2,\"runs\":[]}"}"#;
+    std::fs::create_dir_all(workflow_runs.parent().unwrap()).unwrap();
+    std::fs::write(&workflow_settings, settings_bytes).unwrap();
+    std::fs::write(&workflow_runs, runs_bytes).unwrap();
     let mut parts = fixture();
     parts.rows.clear();
+    let workflow = parts.anchor.parent().unwrap().join("plugins/workflow");
     config.plugin_defaults = Some(parts.anchor.with_file_name("default-plugins.json"));
     config.session_typescript = Some(parts);
-    let (server, _requests, _) = start(config).await;
+    let (server, _requests, _) = start(config.clone()).await;
     let mut client = Client::new_version(&server, false, 3).await;
-    let defaults = ["goal", "workflow"];
+    let defaults = ["goal"];
     let list = running(&mut client, &defaults).await;
     for name in defaults {
         assert_eq!(item(&list, name)["use"], "default", "{list}");
     }
     assert_eq!(item(&list, "web")["use"], "builtin", "{list}");
     assert_eq!(item(&list, "Agents")["use"], "builtin", "{list}");
+    assert!(
+        list["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["name"] != "workflow"),
+        "{list}"
+    );
+    let absent = client.rpc("workflow.status", json!({})).await;
+    assert_eq!(absent["error"]["code"], -32601, "{absent}");
+    assert_eq!(std::fs::read(&workflow_settings).unwrap(), settings_bytes);
+    assert_eq!(std::fs::read(&workflow_runs).unwrap(), runs_bytes);
 
     let read = json!({"source": "goal", "scope": "user"});
     assert_ok(&call(&mut client, "settings.read", read.clone()).await);
@@ -957,6 +977,37 @@ async fn node_default_plugins_load_and_their_settings_follow_them() {
     }
     let stored = call(&mut client, "settings.read", read).await;
     assert_eq!(stored["result"]["document"], document, "{stored}");
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.install",
+            json!({"source":{"path":workflow},"enable":false}),
+        )
+        .await,
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let list = running(&mut client, &["goal"]).await;
+    assert!(item(&list, "workflow")["use"].is_null(), "{list}");
+    let absent = client.rpc("workflow.status", json!({})).await;
+    assert_eq!(absent["error"]["code"], -32601, "{absent}");
+    assert_eq!(std::fs::read(&workflow_settings).unwrap(), settings_bytes);
+    assert_eq!(std::fs::read(&workflow_runs).unwrap(), runs_bytes);
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.enable",
+            json!({"name":"workflow","use":"workflow"}),
+        )
+        .await,
+    );
+    let list = running(&mut client, &["workflow"]).await;
+    assert_eq!(item(&list, "workflow")["use"], "workflow", "{list}");
+    assert_ok(&call(&mut client, "workflow.status", json!({})).await);
     drop(client);
     server.shutdown();
     server.join().await.unwrap();
@@ -1370,7 +1421,7 @@ async fn plugin_content_reaches_sessions_through_its_owners() {
     let catalog = client.rpc("mcp.catalog", json!({})).await;
     assert_eq!(
         catalog["result"]["servers"],
-        json!([{"id":"kit:docs","source":"plugin","enabled":true,"transport":"stdio"}]),
+        json!([{"id":"kit:docs","source":"plugin","enabled":true,"transport":"stdio","referencedVariables":[],"unsetVariables":[]}]),
         "{catalog}"
     );
     let entry = client

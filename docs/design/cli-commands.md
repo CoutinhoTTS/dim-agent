@@ -1084,7 +1084,9 @@ disabled because only the toggle or `dimcode mcp enable|disable` turns it on. An
 round trip would erase them.
 
 The edit document is the patch: an omitted field keeps its stored value, a present value replaces
-it, and `env` or `headers` changes only the keys it names. The seed names the command and working
+it, and `env` or `headers` changes only the keys it names. It may also state `timeout`, the
+entry's tool-call limit in milliseconds from 1000 to 86400000; `null` clears it and the ten-minute
+default applies ([MCP management §D20](appserver/mcp-management.md#d20-a-tool-call-waits-as-long-as-its-entry-allows)). The seed names the command and working
 directory, empty `env` and `headers`, and a configured OAuth's reported fields; it never names a
 stored argument, environment value, header value, bearer token or URL, because those are withheld
 or wholesale-replaced. The document carries no transport, since the stored entry's transport is
@@ -1102,6 +1104,8 @@ stored.
 ```json
 {"url": "https://mcp.example.com/mcp", "headers": {"X-Key": "value"}}
 ```
+
+A definition states `timeout` the same way, and the inspection shows a stated one.
 
 Add writes `mcp.save` with the catalog's source revision — `userRevision`, or `projectRevision`
 for a source of `project` — and refuses an id the catalog already lists, since a save would replace
@@ -1867,13 +1871,17 @@ reasoning, tool calls/results and non-text attachments. It does not execute
 content, resolve attachment URLs, or replay tools. It preserves code fences
 without allowing a message to close the surrounding tool-result fence.
 
-The CLI reads the fixed prefix successfully before opening an output file.
-Files use create-new semantics: existing paths fail without replacement.
+The CLI opens the output file before reading the fixed prefix, and removes it
+when the read or a write fails, so a completed run leaves the file and a failed
+one does not. Files use create-new semantics: existing paths fail without
+replacement.
 On Unix they are created with mode 0600 through the standard OpenOptions
 extension; Windows uses the native inherited ACL. Existing files are never
 opened to change their permissions.
-No output file is created after a history error. A write failure is reported
-and may leave a partial newly created file; no success message is printed.
+A history error removes the file the run created, so no partial export stays
+behind; a process killed mid-run can leave the partial file, because nothing
+runs to remove it. A write failure is reported and the file is removed; no
+success message is printed.
 Export-to-stdout failures return a nonzero code. Interactive export errors
 return to the input prompt and never become model input. During an admitted
 interactive export, Ctrl+C reports that the CLI is waiting for the result and

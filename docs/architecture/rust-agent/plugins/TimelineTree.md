@@ -34,9 +34,9 @@ ending line. `TreeCommands::end`
 checks only the target: it exists, it is open, and it is not `main`; a line
 that ended writes nothing and answers `branch_ended`. `info` answers for an
 ended line too, and `page` reads an open or ended line from the store at its
-head, without rebuilding stored request bodies after it ends. `batch_end`
-checks a cursor against that line's published or ended head and its atomic
-batch boundaries. `query` selects one line's own facts: it forwards to the
+head, rebuilding stored request bodies. `batch_end`
+checks a cursor against that line's atomic batch boundaries.
+`query` selects one line's own facts: it forwards to the
 Timeline while open and uses the ended head after closing, with the event
 query's anchors, selection, ordering and paging. It rejects chain scope.
 

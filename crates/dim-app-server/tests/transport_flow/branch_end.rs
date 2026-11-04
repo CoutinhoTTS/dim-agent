@@ -150,16 +150,16 @@ async fn read_both_sides(config: ServerConfig) {
     let tree = session
         .session_service::<dim_agent_capabilities::timeline_tree::TreeCommands>()
         .unwrap();
-    let facts = tree.page(child.clone(), 0, 256).await.unwrap();
+    let facts = tree.page(child.clone(), 0, 256, through).await.unwrap();
     if native {
         assert!(
             facts.iter().any(|event| matches!(&event.kind,
-            EventKind::ModelCall(data) if data.request.messages.is_empty())),
-            "ended history must not rebuild stored request bodies"
+            EventKind::ModelCall(data) if !data.request.messages.is_empty())),
+            "ended history must rebuild stored request bodies"
         );
     }
     assert!(matches!(
-        tree.batch_end(child.clone(), through + 1).await,
+        tree.page(child.clone(), 0, 256, through + 1).await,
         Err(dim_agent_runtime::AgentError::InvalidInput(_))
     ));
     assert!(
