@@ -2270,6 +2270,9 @@ impl App {
                 }
             }
             Update::Models(models) => {
+                if let Err(error) = &models {
+                    self.set_notice(error.clone());
+                }
                 if let Some(Prompt::Models(panel)) = &mut self.prompt {
                     panel.set_models(models);
                 }

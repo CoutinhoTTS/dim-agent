@@ -1498,6 +1498,15 @@ fn tui_workflow_panel_starts_a_run_on_the_shown_line() {
                 "through":10,"nextAfter":10,"done":true}),
         );
         wait_shown.recv_timeout(PATIENCE).unwrap();
+        let transcript = wire.read("session.history");
+        assert_eq!(transcript["params"]["branchId"], "line-1");
+        assert_eq!(transcript["params"]["after"], 0);
+        wire.reply(
+            &transcript,
+            json!({"events":[{"id":"start-line-1","sequence":10,"create_at":1,
+                    "type":"branch","name":"start","data":{"parent":"main"}}],
+                "through":10,"nextAfter":10,"done":true}),
+        );
         let request = wire.read("workflow.list");
         wire.reply(&request, listing(false));
         let request = wire.read("settings.read");

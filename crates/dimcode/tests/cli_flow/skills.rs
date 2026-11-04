@@ -3,6 +3,47 @@
 use super::*;
 use std::sync::mpsc;
 
+#[test]
+fn skill_discovery_reports_failures_and_a_failed_reload_keeps_the_palette() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let skills = wire.read("skills.catalog");
+        wire.send(json!({"jsonrpc":"2.0","id":skills["id"],"error":{
+            "code":-32000,"message":"Skill source is unavailable","data":{"appError":"skills_unavailable"}}}));
+        wire.no_context();
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let refresh = wire.read("skills.refresh");
+        wire.reply(&refresh, json!({}));
+        let skills = wire.read("skills.catalog");
+        wire.reply(&skills, catalog(true));
+        let refresh = wire.read("skills.refresh");
+        wire.reply(&refresh, json!({}));
+        let skills = wire.read("skills.catalog");
+        wire.send(json!({"jsonrpc":"2.0","id":skills["id"],"error":{
+            "code":-32000,"message":"Skill source is still unavailable","data":{"appError":"skills_unavailable"}}}));
+        wire.hold();
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("Skills unavailable: Skill source is unavailable");
+    terminal.write(b"/reload-skills\r");
+    terminal.write(b"/comm");
+    terminal.until("$commit");
+    terminal.write(b"\x03/reload-skills\r");
+    terminal.until("Skill source is still unavailable");
+    terminal.write(b"/comm");
+    terminal.until("$commit");
+    home.kill(&terminal);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
 fn hello(wire: &mut Wire) {
     wire.hello(&["skills.catalog", "skills.set_enabled", "skills.refresh"]);
 }

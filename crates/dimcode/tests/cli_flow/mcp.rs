@@ -2,6 +2,63 @@
 use super::*;
 use std::sync::mpsc;
 
+#[test]
+fn resumed_mcp_line_commands_use_the_session_workspace_in_both_clients() {
+    for tui in [false, true] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
+            hello(wire);
+            let attach = wire.read("session.attach");
+            assert_eq!(attach["params"]["sessionId"], "session");
+            wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history");
+            wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+            if tui {
+                wire.no_context();
+                let providers = wire.read("account.providers");
+                wire.reply(&providers, json!([]));
+            } else {
+                let idle = wire.read("session.idle");
+                wire.reply(&idle, json!({"sequence":8}));
+            }
+            let list = wire.read("mcp.catalog");
+            assert_eq!(list["params"]["cwd"], "/workspace");
+            wire.reply(&list, catalog(true, None));
+            let state = wire.read("session.mcp");
+            wire.reply(&state, json!({"sessionId":"session","servers":[]}));
+            let resolve = wire.read("mcp.catalog");
+            assert_eq!(resolve["params"]["cwd"], "/workspace");
+            wire.reply(&resolve, catalog(true, None));
+            let disable = wire.read("mcp.set_enabled");
+            assert_eq!(disable["params"], json!({"cwd":"/workspace","id":"metrics","source":"project","expectedVersion":"project:1","enabled":false}));
+            wire.reply(&disable, json!({}));
+            wire.hold();
+        });
+        let mut launch = home.command();
+        launch.args(["--resume", "session", "--cwd", home.0.to_str().unwrap()]);
+        let mut terminal = if tui {
+            Terminal::launch_tui(launch)
+        } else {
+            Terminal::launch(launch)
+        };
+        if tui {
+            terminal.until("test / model");
+        } else {
+            terminal.editor();
+        }
+        terminal.write(b"/mcp list\r");
+        terminal.until("Columns: ID, source");
+        if !tui {
+            terminal.editor();
+        }
+        terminal.write(b"/mcp disable metrics --source project\r");
+        terminal.until("Disabled");
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
 fn hello(wire: &mut Wire) {
     wire.hello(&[
         "mcp.catalog",
