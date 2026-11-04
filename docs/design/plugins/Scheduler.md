@@ -1,6 +1,6 @@
 # Scheduler
 
-Status: Design approved; optional package implemented in [#317](https://github.com/arcships/dim/pull/317). Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
+Status: Design approved; optional package implemented in [#317](https://github.com/arcships/dim/pull/317). Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: Rust, native, with no Node dependency ([overview Appendix C](../overview.md#appendix-c-implementation-language)). The TypeScript package it replaces is removed with the migration; [Appendix G](#appendix-g-rust-binding) is the Rust binding.
 
 **Delivery boundary.** The package and its public-flow verification are supplied by #317; installation remains explicit under §1.3. C4 tools (#150), Settings source declarations/read-write (#175), Settings events (#177), `sessions` (S2), live permission reads (#259), native input ownership (#267) and S10's [public composition](../process-typescript.md#52-public-pluginfiles-binding) supply its public dependencies. Agents idle unloading (#126/#331) and the first-reuse contract (#339) are merged. The package uses the coordinated rutis 0.16.0 upgrade and the unchanged Appendix D failure-reporting checks in §1.3; no core or rutis expansion is requested.
 
@@ -61,7 +61,7 @@ The shared declaration gate still permits a hung top-level module load to time
 out host startup; process modules follow the binding's author-guide rule.
 
 The [accepted feature dependency binding](../process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
-uses `definePlugin.inject: ["scheduleJobs", "toolRegistry"]` in this optional Session tool module.
+declares `scheduleJobs` and `toolRegistry` as this optional Session tool module's dependencies.
 Provider activation, retirement, retry and recovery follow that binding's current
 rules; Scheduler does not define another attachment policy or copy its error
 text. The stable process dependency boundary still applies. This settles the
@@ -70,7 +70,7 @@ text. The stable process dependency boundary still applies. This settles the
 | Surface | Current implementation and consequence |
 | --- | --- |
 | Session tool | A C4 Session definition, registered by the process row with `partRegistry`, injects `toolRegistry` and registers `schedule` from its apply with its declaration and asynchronous `execute`. Registration does no I/O. Registration and provider-generation changes follow the current C4 binding (§1.1). |
-| Process package / `scheduleJobs` | One row in `ServerConfig.session_typescript.rows` installs the package's ordinary process owner in the shared runtime; each Session mounts a copy of its Session definition there. The Session tool declares `scheduleJobs` in `definePlugin.inject` (§1.1). |
+| Process package / `scheduleJobs` | One optional process row, `Scheduler`, registered with `AgentBuilder::optional_plugin`, installs the process owner; its `apply` registers the `SchedulerSession` part with `partRegistry`. The Session part reads `scheduleJobs` through `names.key()` (§1.1). |
 | Management namespace | The process row restores its run store before registering `schedule` with `managementMethods` and publishing `scheduleJobs`. A failed restore retains the fault and still registers the namespace before failing the row, so subsequent calls report that row's failed status. Native per-call admission and `report`/`drain` follow the registering row's lifetime and status. |
 | Settings | Owner `settings.read/update` and `settings/schedule` are implemented (#175/#177). The process row alone declares source `schedule`, user file `schedule.json`, no `projectFile` and user-only `/max_concurrent_runs` (§7.1). Read the validated/defaulted document at use, and CAS with `expectedRevision`. Full-document local writes use Settings' existing trust boundary (§7); they do not authenticate a Scheduler save. |
 | Storage | The [public binding](../process-typescript.md#52-public-pluginfiles-binding) supplies pluginFiles at the authorized product root. The embedding host provisions `scheduler/` before enabling the row; a missing parent returns `io` before the transaction callback. Scheduler inner v1 (A.7) and host outer v1 are unchanged. |
@@ -79,29 +79,22 @@ text. The stable process dependency boundary still applies. This settles the
 
 ### 1.2 Impact
 
-No runtime, facade, loader, event format or rutis change is proposed. All new business behavior belongs to the Scheduler package. The source, tool and management namespace above have concrete consumers (Settings, ToolRegistry and operators); `scheduleJobs` exists only for the feature's two scopes. There is no additional registry, readiness service, notification bus or App Server business module.
+No facade, loader, event-format or rutis change is proposed; all new business behavior belongs to the Scheduler package. The runtime assembly gains one entry, `AgentBuilder::optional_plugin`, so the process row is optional (the host does not wait for it), and `plugin_rows` returns `PluginRows`, which carries the optional row ids; no core readiness path or mechanism is altered. The source, tool and management namespace above have concrete consumers (Settings, ToolRegistry and operators); `scheduleJobs` exists only for the feature's two scopes. There is no additional registry, readiness service, notification bus or App Server business module.
 
 ### 1.3 Concrete package row
 
-The optional package lives at `runtime/plugins/scheduler`, with package name
-`@dimcode/scheduler`. Its root module is the process plugin; from its apply it
-registers `session.ts` with `partRegistry` as the Session definition
-`SchedulerSession`, the Session tool. The plugin directory carries `dim-plugin.json`
-and is a default plugin listed in `runtime/default-plugins.json`, which PluginManager
-loads (`--defaults`). An embedding host may still build the row below from the
-manifest's `code` fields.
+The row fields below are the dependency, method-kind and Settings contract that the native binding keeps. Their TypeScript spelling (manifest `code` fields, `definePlugin`, `ctx.use`) is replaced by [Appendix G](#appendix-g-rust-binding). The process part is an optional row registered by the product entry point with `AgentBuilder::optional_plugin`, and the Session part is registered through `partRegistry` from that row's `apply`.
 
 | Row field | Process row |
 | --- | --- |
-| `id` | `scheduler` |
-| `name` | `@dimcode/scheduler` |
+| `id` | `Scheduler` |
+| `name` | `Scheduler` |
 | `config` | `{}` |
-| `inject` | `sessions`, `sessionPermissions`, `settings`, `pluginFiles`, `managementMethods`, `partRegistry` |
-| `provides` | `scheduleJobs: {call:"async"}`; apply registers `schedule` with `managementMethods` and the Session definition with `partRegistry` |
+| `inject` | `settings`, `pluginFiles`, `managementMethods`, `sessionPermissions`, `partRegistry`; `sessions` by host-dispatch name (§1.1) |
+| `provides` | `scheduleJobs`; apply registers `schedule` with `managementMethods` and the `SchedulerSession` part with `partRegistry` |
 | `settings` | The complete `schedule` source in §7.1, including its schema |
 
-The Session definition injects `scheduleJobs` and `toolRegistry`, provides nothing,
-and registers `schedule` with `toolRegistry` from its apply.
+The `SchedulerSession` part injects `scheduleJobs`, `toolRegistry`, the guide entries, `SessionConfig` and `SessionIdentity`, provides nothing, and registers `schedule` with `toolRegistry` and the §5.2 guide entry from its apply.
 
 **Failed-owner reporting.** The coordinated [rutis 0.16 upgrade](../rutis-0.16-upgrade.md)
 supplies the loader failure reporting required by Appendix C and Appendix D
@@ -110,8 +103,8 @@ items 8, 12 and 13. An unreadable or invalid run store fails the process row;
 Keep the row-level dependencies and failure assertions unchanged. Scheduler uses
 the same SDK version as the host and adds no loader workaround.
 
-The module's `definePlugin` and its supplied row agree on dependencies and
-method kinds. The two rows are one feature with two owners of work, not separate
+The optional process row and its registered Session part agree on dependencies and
+method kinds; they are one feature with two owners of work, not separate
 runtimes. The process row provides `scheduleJobs` and registers its namespace on the original context;
 there is no methods adapter or Session forwarding plugin. Structural config
 contains no jobs, policy defaults, credentials, timer settings or run state.
@@ -324,7 +317,7 @@ each tool list as a set (order and duplicates do not matter). Require
 input. This is S2 cap-stability, a conservative check rather than pointwise
 permission equivalence. Do not rewrite the reused Session's policy to pass it.
 
-The TypeScript package implements this pure calculation against the shared
+`PermissionPolicy::cap` and `within` (`crates/dim-agent-types/src/permission.rs`) implement this pure calculation against the shared
 [policy-cap fixtures](../../../tests/fixtures/permission-policy-cap.json).
 The fixture has `cap` vectors and separate `reuse` vectors with `x`,
 `savedEffective`, `liveBound`, `withinSaved` and `withinLive`. Cap vectors marked
@@ -397,7 +390,7 @@ A text is protocol or policy as [model-facing prompts §4](../model-prompts.md#4
 
 The report's body keeps its sentences and is escaped as one text with `escaped(...)`, as the Workflow report's is, so a job id or an outcome detail that carries markup cannot open or close the tag; the attributes are escaped the same way.
 
-The policy text is a factory member: `code.config.description` replaces the declaration's description and `code.config.report_guidance` replaces the report's guidance line; the product sets neither, so the built-in texts are in force. A member holds one text — a whole description, or one line of guidance — and the flow tests pin any protocol sentence it contains: a candidate that changes one changes protocol, and lands with the behaviour and its test ([model-facing prompts §9.2](../model-prompts.md#92-every-capability-that-writes-model-facing-text)). `report_guidance` must be one line, and the configuration enforces it: the guide entry (§5.2) tells the model the report's last line is guidance and not part of the scheduler's account, so a value with a line break is refused when the plugin loads (`scheduler/index.ts`). A profile that changes it keeps it to one line.
+The policy text is a factory member: `description` replaces the declaration's description and `report_guidance` replaces the report's guidance line (Appendix G); the product sets neither, so the built-in texts are in force. A member holds one text — a whole description, or one line of guidance — and the flow tests pin any protocol sentence it contains: a candidate that changes one changes protocol, and lands with the behaviour and its test ([model-facing prompts §9.2](../model-prompts.md#92-every-capability-that-writes-model-facing-text)). `report_guidance` must be one line, and the configuration enforces it: the guide entry (§5.2) tells the model the report's last line is guidance and not part of the scheduler's account, so a value with a line break is refused when the plugin is installed. A profile that changes it keeps it to one line.
 
 Both kinds carry the guide entry: the Scheduler Session part registers one entry for `dim-scheduler` from `apply`, session-scoped, so a request in the run Session the scheduled-run marker opens, and a request in the saving branch the report lands on, each carry the entry from that Session's part ([Prompt §6.2](Prompt.md#62-the-writers)).
 
@@ -480,7 +473,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 
 ## 9. Requirements raised to mechanism owners
 
-None. Existing C3/C4, S2, Settings and pluginFiles mechanisms are the baseline. Appendix F distinguishes the specified bindings from package acceptance; implementation adds no optional-service API, notification protocol, runtime event or infrastructure requirement.
+The only mechanism additions are the runtime assembly entries the binding uses: `AgentBuilder::optional_plugin` (an optional process row), `PluginRows` returned by `plugin_rows`, and `PartRegistry::register` for the Session part. Existing C3/C4, S2, Settings and pluginFiles mechanisms remain the baseline. Appendix F distinguishes the specified bindings from package acceptance; implementation adds no optional-service API, notification protocol, runtime event or infrastructure requirement beyond those assembly entries.
 
 ## Appendix A. Interface details
 
@@ -852,15 +845,30 @@ Known recovery limit: `launch` can finish after a caller disappears, before its 
 
 ## Appendix G. Rust binding
 
-The public bindings below are available. Scheduler owns the feature-specific
-services and tasks through the package in #317; delivery still requires the
-failure-reporting checks above.
+Scheduler is native Rust with no TypeScript package, Node process or fallback.
+The contract above is unchanged; only its binding moves.
+
+Placement: a dedicated business crate, `crates/dim-agent-scheduler`, not App
+Server code (principles §1). The product entry point installs it through the App
+Server's native-profile installer (`process_entry(args, provider, install)`), so
+the App Server crate does not depend on it; a host that does not install it has
+no `schedule.*` methods or `schedule` tool. The process part is added with
+`AgentBuilder::optional_plugin` and registers its `SchedulerSession` part through
+`partRegistry` from its `apply`. Both parts use the Rust names that exist today:
+`Names::key`, `Key<T>`, `require_at`, `provide_as` and `PartRegistry::register`.
 
 | Neutral | Rust |
 | --- | --- |
-| Tool `schedule` registered with `toolRegistry` | `SchedulerSession` calls `tools.register(ctx, ToolContribution {definition, handler})` through `Keyed<ToolRegistry>` in its `apply`; `execute(ToolCall, cancel)` |
-| Namespace `schedule` registered with `managementMethods` | Looked up by Rpc per call, not a dependency of Rpc ([methods Appendix F](../contracts/session-boundary.md#appendix-f-rust-binding)) |
-| `sessions` | Public named service through `host_key("sessions")`; native request types and `AgentIndex::acquire` are private implementation details, not an external crate API |
-| `scheduleJobs` | Scheduler's implemented process service; declared dependency binding in §1.1 |
-| Process storage | Existing `pluginFiles.open` scope, with immediate effect cleanup; use A.7's agreed inner v1 format |
-| Timer / trackers | Owned by the process plugin; register cleanup immediately and start business work after apply; stop new work and settle before unloading |
+| Tool `schedule` registered with `toolRegistry` | Session part keys `ToolRegistry` from `names.key()` and calls `tools.register(ctx, ToolContribution {definition, handler})` in `apply`, as `dim-agent-questions` does |
+| Namespace `schedule` registered with `managementMethods` | Process part keys `ManagementMethods` and calls `methods.register(ctx, "schedule", declarations, handler)`; Rpc looks it up per call and holds no dependency on Scheduler |
+| `scheduleJobs` | Process-group name registered with `names::register::<ScheduleJobs>(catalog, None)`; the Session part reads it with `names.key()`, so no wiring part or forwarding plugin exists |
+| `sessionPermissions`, `settings`, `pluginFiles` | Typed App Server services (`SessionPermissions`, `SettingsService`, `PluginFileTransactions`) keyed with `names.key()`; the crate depends on `dim-app-server`, which `xtask check` allows |
+| `sessions` | The shared host-dispatch name, called with its JSON envelope; its native request types are private to App Server |
+| Policy cap | `PermissionPolicy::cap` and `within` in `dim-agent-types`, the same functions the S2 launch uses, tested against the shared fixtures |
+| Process storage | The typed `PluginFileTransactions` service of App Server ([trusted plugin storage](../../../crates/dim-app-server/README.md#trusted-plugin-storage)). The host writes the `{version: 1, text}` envelope; Scheduler supplies the inner v1 text, the same bytes the TypeScript version wrote. |
+| Timer and trackers | Owned by the process part: the timer, run tasks, recovery and retention run in its task tracker and start after its methods and services are registered. On unload (`ctx.cancellation_token()`), new work stops, waits end, and cleanup joins the tracker before the storage scope closes; an admitted `sessions` call settles first. A run still active is left in the file for the next generation's recovery. The Session tool returns the unloading results of §1.3 and `schedule: cancelled before handover` |
+| Policy texts | `install_with(builder, SchedulerTexts {description, report_guidance})`; `install` uses the built-in texts. A `report_guidance` with a line break is refused |
+| Guide entry | The Session part keys `GuideEntries` and registers the §5.2 entry, session-scoped, order 110 |
+| Optional row | `AgentBuilder::optional_plugin`: the host does not wait for the row, so missing dependencies or an unreadable run store fail only Scheduler (Appendix D item 12) |
+| Cron and time zones | `croner` and `chrono-tz`, checked by `deny.toml`. Scheduler skips an occurrence whose wall time falls in a DST gap and fires a repeated fall-back time once, at its earlier instant |
+| Tests | Public flows through the management methods, the `schedule` tool and the CLI wire tests, with a scripted model that can hold a turn; private helper unit tests are not added (AGENTS.md Testing) |

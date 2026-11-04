@@ -42,6 +42,7 @@ pub mod web;
 mod web_entry;
 
 use agents::{AgentIndex, AgentsPlugin};
+pub use agents::{SessionPermissions, SessionRef, SessionsError};
 use collaboration::CollaborationPlugin;
 use connection::{ConnectionHub, ConnectionPlugin, RpcPlugin};
 use control::{ServerControl, ServerControlPlugin};
@@ -973,12 +974,16 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             move |names| Ok(Box::new(TransportPlugin::new(names, config.clone())?)),
         )?);
     }
-    match builder.plugin_rows(&mut builtins).await {
-        Ok(plugins) => rows.extend(
-            plugins
-                .iter()
-                .map(|row| row["id"].as_str().expect("plugin row id").to_owned()),
-        ),
+    let optional_plugins = match builder.plugin_rows(&mut builtins).await {
+        Ok(plugins) => {
+            rows.extend(
+                plugins
+                    .rows
+                    .iter()
+                    .map(|row| row["id"].as_str().expect("plugin row id").to_owned()),
+            );
+            plugins.optional
+        }
         Err(error) => {
             startup.armed = false;
             handle.shutdown().cancel();
@@ -988,7 +993,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             }
             .into());
         }
-    }
+    };
     let reserved_names = session_parts
         .iter()
         .flat_map(|parts| &parts.rows)
@@ -1014,7 +1019,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     let mut required: Vec<String> = rows
         .iter()
         .map(|row| row["id"].as_str().expect("host row id").to_owned())
-        .filter(|id| !optional.contains(&id.as_str()))
+        .filter(|id| !optional.contains(&id.as_str()) && !optional_plugins.contains(id))
         .collect();
     if let Some(parts) = &session_parts {
         for row in &parts.rows {
@@ -1041,7 +1046,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 .iter()
                 .filter(|row| row.get("group").is_none())
                 .map(|row| row["id"].as_str().expect("host row id").to_owned())
-                .filter(|id| required.contains(id))
+                .filter(|id| required.contains(id) || optional_plugins.contains(id))
                 .collect();
             let layer = state
                 .layer(builtins, builder.catalog().clone())
@@ -1180,6 +1185,7 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<rutis_loader::Loader>(catalog, None);
     register::<collaboration::CollaborationDirectory>(catalog, None);
     register::<collaboration::Collaboration>(catalog, None);
+    register::<plugin_files::PluginFileTransactions>(catalog, None);
     register::<ConnectionHub>(catalog, None);
     register::<ListenAddresses>(catalog, None);
     register::<ui_host::UiHost>(catalog, None);

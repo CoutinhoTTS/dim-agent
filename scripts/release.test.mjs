@@ -101,14 +101,14 @@ test('staging the default plugins update is incremental and never leaves a half 
   const update=()=>run('stage-plugins.mjs',[output,'--update'],env);
   const first=update();
   assert.equal(first.status,0,first.stderr);
-  assert.match(first.stdout,/npm ci: goal, workflow, scheduler/);
-  assert.deepEqual(installs().map(installName).sort(),['goal','scheduler','workflow']);
+  assert.match(first.stdout,/npm ci: goal, workflow/);
+  assert.deepEqual(installs().map(installName).sort(),['goal','workflow']);
   assert.equal(readRecord().schemaVersion,1);
-  assert.deepEqual(Object.keys(readRecord().plugins).sort(),['goal','plugin-authoring','scheduler','workflow']);
+  assert.deepEqual(Object.keys(readRecord().plugins).sort(),['goal','plugin-authoring','workflow']);
   const second=update();
   assert.equal(second.status,0,second.stderr);
   assert.match(second.stdout,/npm ci: none/);
-  assert.equal(installs().length,3);
+  assert.equal(installs().length,2);
   const sourceFile=path.join(output,'plugins/goal/index.ts');
   const original=readFileSync(sourceFile,'utf8');
   rmSync(sourceFile);
@@ -119,7 +119,7 @@ test('staging the default plugins update is incremental and never leaves a half 
   writeFileSync(record,`${JSON.stringify(changed)}\n`);
   const reinstalled=update();
   assert.equal(reinstalled.status,0,reinstalled.stderr);
-  assert.equal(installs().length,4);
+  assert.equal(installs().length,3);
   assert.equal(installName(installs().at(-1)),'goal');
   const removed=readRecord();
   removed.plugins.retired={hash:null,dir:'plugins/retired'};
@@ -269,13 +269,13 @@ test('two concurrent updates serialize on the stage lock', {skip:process.platfor
   const [firstRun,secondRun]=await Promise.all([first.done,second.done]);
   assert.equal(firstRun.status,0,firstRun.err);
   assert.equal(secondRun.status,0,secondRun.err);
-  assert.equal(readFileSync(log,'utf8').trim().split('\n').filter(Boolean).length,3);
+  assert.equal(readFileSync(log,'utf8').trim().split('\n').filter(Boolean).length,2);
   assert.match(secondRun.err,/Waiting for another staging run/);
   assert.match(secondRun.out,/npm ci: none/);
   const record=JSON.parse(readFileSync(path.join(output,'.stage-plugins.json')));
   assert.equal(record.schemaVersion,1);
-  assert.deepEqual(Object.keys(record.plugins).sort(),['goal','plugin-authoring','scheduler','workflow']);
-  for (const name of ['goal','workflow','scheduler']) {
+  assert.deepEqual(Object.keys(record.plugins).sort(),['goal','plugin-authoring','workflow']);
+  for (const name of ['goal','workflow']) {
     assert(existsSync(path.join(output,'plugins',name,'node_modules')),name);
     assert.match(record.plugins[name].hash,/^[0-9a-f]{64}$/);
   }
@@ -474,7 +474,7 @@ test('a recorded parent directory does not remove the plugins inside it', {skip:
   writeFileSync(record,`${JSON.stringify(data)}\n`);
   const updated=run('stage-plugins.mjs',[output,'--update'],env);
   assert.equal(updated.status,0,updated.stderr);
-  for (const name of ['goal','workflow','scheduler']) {
+  for (const name of ['goal','workflow']) {
     assert(existsSync(path.join(output,'plugins',name,'index.ts')),name);
   }
   const after=JSON.parse(readFileSync(record));

@@ -183,6 +183,8 @@ pub(crate) struct Assembly {
     plugins: Vec<PartMake>,
     /// Where the plugin of each feature is in `plugins`, by name.
     features: std::collections::HashMap<String, usize>,
+    /// Which of `plugins` are optional ([`AgentBuilder::optional_plugin`]).
+    optional_plugins: HashSet<usize>,
     /// The parts plugins register: the builder's, for the host that builds
     /// its Agents ([`AgentBuilder::build`]); the minimal host takes a fresh one.
     pub parts: Arc<crate::parts::PartRegistry>,
@@ -221,6 +223,7 @@ impl AgentBuilder {
                 process_values: vec![],
                 plugins: vec![],
                 features: Default::default(),
+                optional_plugins: Default::default(),
                 parts: Arc::default(),
                 required_parts: Arc::default(),
                 required_rows: Arc::default(),
@@ -274,6 +277,22 @@ impl AgentBuilder {
         self.assembly.plugins.push(Arc::new(make));
         self
     }
+    /// Adds an optional process plugin ([`Self::plugin`]): its row is not
+    /// required for the host to start, so a failed or missing dependency
+    /// affects only the plugin's own features. [`Self::plugin_rows`] names
+    /// the optional rows.
+    pub fn optional_plugin(
+        &mut self,
+        make: impl Fn(&Names<'_>) -> std::result::Result<Box<dyn DynPlugin>, Error>
+        + Send
+        + Sync
+        + 'static,
+    ) -> &mut Self {
+        self.assembly
+            .optional_plugins
+            .insert(self.assembly.plugins.len());
+        self.plugin(make)
+    }
     /// Adds the plugin of `feature` ([`Self::plugin`]). A feature of the
     /// same name added before is replaced.
     pub fn feature(&mut self, feature: crate::Feature) -> &mut Self {
@@ -301,10 +320,11 @@ impl AgentBuilder {
     }
     /// Registers in `builtins` the module providing [`Self::parts`] at
     /// `partRegistry` and those of the plugins added with [`Self::plugin`],
-    /// and returns their rows, for the host that builds its Agents. Register
-    /// them before [`Self::install`]; a module of the same name registered
-    /// already fails.
-    pub async fn plugin_rows(&self, builtins: &mut Modules) -> Result<Vec<Value>> {
+    /// and returns their rows, for the host that builds its Agents, with the
+    /// ids of the optional ones ([`Self::optional_plugin`]). Register them
+    /// before [`Self::install`]; a module of the same name registered already
+    /// fails.
+    pub async fn plugin_rows(&self, builtins: &mut Modules) -> Result<PluginRows> {
         let registry = self.assembly.parts.clone();
         let registry: PartMake = Arc::new(move |names| {
             Ok(Box::new(crate::parts::PartRegistryPlugin {
@@ -313,7 +333,15 @@ impl AgentBuilder {
             }))
         });
         let mut rows = vec![];
-        for make in std::iter::once(&registry).chain(&self.assembly.plugins) {
+        let mut optional_rows = vec![];
+        let optional = std::iter::once(false).chain(
+            (0..self.assembly.plugins.len())
+                .map(|index| self.assembly.optional_plugins.contains(&index)),
+        );
+        for (make, optional) in std::iter::once(&registry)
+            .chain(&self.assembly.plugins)
+            .zip(optional)
+        {
             let name = make(&Names::check(&self.catalog, &[], None))
                 .map_err(|error| AgentError::Build(format!("a process plugin: {error}")))?
                 .name()
@@ -325,9 +353,15 @@ impl AgentBuilder {
             }
             let make = make.clone();
             register_part(builtins, &self.catalog, move |names| make(names))?;
+            if optional {
+                optional_rows.push(name.clone());
+            }
             rows.push(row(&name));
         }
-        Ok(rows)
+        Ok(PluginRows {
+            rows,
+            optional: optional_rows,
+        })
     }
     /// Makes the registered part `name` part of the profile: a Session or
     /// branch publishes only once its copy is Active, and a copy that fails
@@ -831,6 +865,13 @@ fn extension_value<V: Send + Sync + 'static>(build: &Build) -> std::result::Resu
     })
 }
 /// A row named after its module.
+/// The process rows of [`AgentBuilder::plugin_rows`].
+pub struct PluginRows {
+    pub rows: Vec<Value>,
+    /// The ids of the rows the host does not need Active to start.
+    pub optional: Vec<String>,
+}
+
 pub(crate) fn row(module: &str) -> Value {
     json!({ "id": module, "name": module })
 }
