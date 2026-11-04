@@ -196,11 +196,8 @@ impl TreeCommands {
     }
     /// Checks that a position ends a complete batch on an open or ended line.
     /// A position above the line's published or ended head is invalid input.
-    pub async fn batch_end(
-        &self,
-        id: String,
-        sequence: u64,
-    ) -> std::result::Result<(), AgentError> {
+    #[service(skip)]
+    pub async fn batch_end(&self, id: String, sequence: u64) -> Result<()> {
         let tree = self
             .tree
             .upgrade()

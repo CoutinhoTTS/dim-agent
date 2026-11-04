@@ -171,11 +171,6 @@ async fn pages(sessions: &Sessions, id: &str, through: u64, limit: usize) -> Vec
     events
 }
 
-/// §13 item 1: 50 runs through `sessions`, each one input, `idle` and the
-/// `history` pages. Once dropped, all are unloaded after the grace and every
-/// released instance is gone; `session.summaries` still lists each at its stored
-/// head and its history reads in full. A later input restores one, and its
-/// turn runs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fifty_dropped_runs_unload_and_the_next_input_restores_one() {
     let store = Store::new();
@@ -216,6 +211,7 @@ async fn fifty_dropped_runs_unload_and_the_next_input_restores_one() {
             .unwrap_or_else(|| panic!("{id} listed: {listed}"));
         assert_eq!(info["sequence"], *through, "{info}");
     }
+    assert_eq!(loaded(&mut client).await, 0);
 
     let (first, through, _) = &runs[0];
     let receipt = sessions
@@ -241,6 +237,7 @@ async fn fifty_dropped_runs_unload_and_the_next_input_restores_one() {
     );
     for (id, through, events) in &runs {
         assert_eq!(&pages(&sessions, id, *through, 4).await, events, "{id}");
+        assert!(loads.of(id).1, "expected Session {id} to be restored");
     }
     server.shutdown();
     server.join().await.unwrap();

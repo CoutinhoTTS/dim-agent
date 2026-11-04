@@ -183,12 +183,6 @@ export interface TreeCommands {
    */
   page(id: string, after: number | bigint, limit: number | bigint): Promise<import('./plugin.js').BranchEvent[]>
   /**
-   * Checks that a position ends a complete batch on an open or ended line.
-   * A position above the line's published or ended head is invalid input.
-   * @throws {AgentErrorThrown}
-   */
-  batchEnd(id: string, sequence: number | bigint): Promise<void>
-  /**
    * Queries one line's own facts, forwarding to its Timeline while open
    * and reading at the tree's fixed head after it ends. Chain scope is
    * invalid; an ended line has no publishing tail.
