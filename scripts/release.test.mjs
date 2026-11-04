@@ -61,6 +61,12 @@ function stubPlugins(temporary,name='plugins-stub') {
   return directory;
 }
 
+function stubRustNotices(temporary) {
+  const file=path.join(temporary,'rust-notices.txt');
+  writeFileSync(file,'Rust dependency license fixture');
+  return file;
+}
+
 function entries(archive) {
   const data=gunzipSync(readFileSync(archive));
   const names=[];
@@ -516,7 +522,7 @@ test('stages public native payload, packs it and rejects modified content', {ski
   mkdirSync(bin);
   writeFileSync(path.join(bin,'dimcode'),`#!/bin/sh\nprintf "dimcode ${version}\\n"\n`,{mode:0o755});
   const stage=path.join(temporary,'stage');
-  const staged=run('stage-release.mjs',[bin,stage,version,commit,'--plugins',stubPlugins(temporary)]);
+  const staged=run('stage-release.mjs',[bin,stage,version,commit,'--plugins',stubPlugins(temporary),'--rust-notices',stubRustNotices(temporary)]);
   assert.equal(staged.status,0,staged.stderr);
   const manifest=JSON.parse(readFileSync(path.join(stage,'release-manifest.json')));
   assert.equal(manifest.account,false);
@@ -528,6 +534,10 @@ test('stages public native payload, packs it and rejects modified content', {ski
   assert.equal(JSON.parse(metadata.stdout).license,'SEE LICENSE IN NOTICE');
   const native=path.join(temporary,'packed',packedManifest.nativeArchives[0].file);
   const npm=path.join(temporary,'packed',packedManifest.npmPackages[0].file);
+  for (const [archive,prefix] of [[native,`dimcode-${manifest.platform}`],[npm,'package']]) {
+    assert.equal(spawnSync('tar',['-xOzf',archive,`${prefix}/licenses/RUST-THIRD-PARTY-NOTICES.txt`],{encoding:'utf8'}).stdout,
+      'Rust dependency license fixture');
+  }
   assert.equal(spawnSync('tar',['-xOzf',npm,'package/licenses/aimux/LICENSE'],{encoding:'utf8'}).stdout,readFileSync(path.join(root,'vendor/aimux/LICENSE'),'utf8'));
   for (const file of ['LICENSE','NOTICE','xai-ratatui-inline/NOTICE','xai-ratatui-textarea/NOTICE']) {
     const source=readFileSync(path.join(root,'vendor/grok-build',file),'utf8');
@@ -558,7 +568,12 @@ test('stages the default plugins beside bin/ in the native archive and the npm p
   writeFileSync(path.join(plugins,'plugins/goal/node_modules/@arcships/rutis/package.json'),'{}');
   assert.notEqual(run('stage-release.mjs',[bin,path.join(temporary,'empty'),version,commit,'--plugins',bin]).status,0);
   const stage=path.join(temporary,'stage');
-  const staged=run('stage-release.mjs',[bin,stage,version,commit,'--plugins',plugins]);
+  assert.notEqual(run('stage-release.mjs',[bin,stage,version,commit,'--plugins',plugins]).status,0);
+  assert.equal(existsSync(stage),false);
+  const rustNotices=stubRustNotices(temporary);
+  writeFileSync(rustNotices,'');
+  assert.notEqual(run('stage-release.mjs',[bin,stage,version,commit,'--plugins',plugins,'--rust-notices',rustNotices]).status,0);
+  const staged=run('stage-release.mjs',[bin,stage,version,commit,'--plugins',plugins,'--rust-notices',stubRustNotices(temporary)]);
   assert.equal(staged.status,0,staged.stderr);
   const manifest=JSON.parse(readFileSync(path.join(stage,'release-manifest.json')));
   for (const file of ['default-plugins.json','plugins/goal/index.ts','plugins/goal/node_modules/@arcships/rutis/package.json']) assert(manifest.files[file],file);
@@ -617,18 +632,18 @@ test('an account build records the account and stages only its executable', {ski
   mkdirSync(bin);
   writeFileSync(path.join(bin,'dimcode'),`#!/bin/sh\nprintf "dimcode ${version}\\n"\n`,{mode:0o755});
   const stage=path.join(temporary,'stage');
-  const staged=run('stage-release.mjs',[bin,stage,version,commit,'--account','--plugins',stubPlugins(temporary)]);
+  const staged=run('stage-release.mjs',[bin,stage,version,commit,'--account','--plugins',stubPlugins(temporary),'--rust-notices',stubRustNotices(temporary)]);
   assert.equal(staged.status,0,staged.stderr);
   if(process.platform==='darwin') assert.equal(spawnSync('xattr',['-w','com.apple.provenance','x',path.join(stage,'bin/dimcode')]).status,0,
     'setting the extended attribute must succeed before packing');
   const manifest=JSON.parse(readFileSync(path.join(stage,'release-manifest.json')));
   assert.equal(manifest.account,true);
-  assert.deepEqual(Object.keys(manifest.files).sort(),['default-plugins.json','LICENSE','NOTICE','bin/dimcode','licenses/aimux/LICENSE',...['LICENSE','NOTICE','xai-ratatui-inline/NOTICE','xai-ratatui-textarea/NOTICE'].map((file)=>`licenses/grok-build/${file}`)].sort());
+  assert.deepEqual(Object.keys(manifest.files).sort(),['default-plugins.json','LICENSE','NOTICE','bin/dimcode','licenses/aimux/LICENSE','licenses/RUST-THIRD-PARTY-NOTICES.txt',...['LICENSE','NOTICE','xai-ratatui-inline/NOTICE','xai-ratatui-textarea/NOTICE'].map((file)=>`licenses/grok-build/${file}`)].sort());
   const packed=run('pack-release.mjs',[stage,path.join(temporary,'packed')]);
   assert.equal(packed.status,0,packed.stderr);
   const npmFile=JSON.parse(readFileSync(path.join(temporary,'packed/release-manifest.json'))).npmPackages[0].file;
   assert.deepEqual(entries(path.join(temporary,'packed',npmFile)).filter((name)=>!name.endsWith('/')).sort(),
-    ['package/default-plugins.json','package/LICENSE','package/NOTICE','package/bin/dimcode','package/package.json','package/release-manifest.json','package/licenses/aimux/LICENSE',...['LICENSE','NOTICE','xai-ratatui-inline/NOTICE','xai-ratatui-textarea/NOTICE'].map((file)=>`package/licenses/grok-build/${file}`)].sort());
+    ['package/default-plugins.json','package/LICENSE','package/NOTICE','package/bin/dimcode','package/package.json','package/release-manifest.json','package/licenses/aimux/LICENSE','package/licenses/RUST-THIRD-PARTY-NOTICES.txt',...['LICENSE','NOTICE','xai-ratatui-inline/NOTICE','xai-ratatui-textarea/NOTICE'].map((file)=>`package/licenses/grok-build/${file}`)].sort());
 });
 
 test('stages cross-built executables without running them and rejects the wrong architecture', (t)=>{
@@ -656,7 +671,8 @@ test('stages cross-built executables without running them and rejects the wrong 
   writeFileSync(cli,header,{mode:0o755});
   const stage=path.join(temporary,'stage');
   const plugins=stubPlugins(temporary);
-  const result=run('stage-release.mjs',[bin,stage,version,commit,'--plugins',plugins],{DIM_BUILD_PLATFORM:platform});
+  const rustNotices=stubRustNotices(temporary);
+  const result=run('stage-release.mjs',[bin,stage,version,commit,'--plugins',plugins,'--rust-notices',rustNotices],{DIM_BUILD_PLATFORM:platform});
   assert.equal(result.status,0,result.stderr);
   assert.equal(JSON.parse(readFileSync(path.join(stage,'release-manifest.json'))).platform,platform);
   const packed=run('pack-release.mjs',[stage,path.join(temporary,'packed')]);
@@ -667,7 +683,7 @@ test('stages cross-built executables without running them and rejects the wrong 
   else if(osName==='darwin') header.writeUInt32LE(cpu==='arm64'?0x01000007:0x0100000c,4);
   else header.writeUInt16LE(cpu==='arm64'?62:183,18);
   writeFileSync(cli,header);
-  const mismatch=run('stage-release.mjs',[bin,rejected,version,commit,'--plugins',plugins],{DIM_BUILD_PLATFORM:platform});
+  const mismatch=run('stage-release.mjs',[bin,rejected,version,commit,'--plugins',plugins,'--rust-notices',rustNotices],{DIM_BUILD_PLATFORM:platform});
   assert.notEqual(mismatch.status,0);
   assert.match(mismatch.stderr,/architecture mismatch/);
   assert.equal(existsSync(rejected),false);
@@ -703,6 +719,9 @@ test('collects exact platform packages, installs wrapper offline and rejects inc
   const wrapperName=alpha?'dimcode-alpha':'dimcode';
   const wrapper=JSON.parse(spawnSync('tar',['-xOzf',path.join(complete,'npm',`${wrapperName}-${version}.tgz`),'package/package.json'],{encoding:'utf8'}).stdout);
   assert.equal(wrapper.name,wrapperName);
+  const readme=spawnSync('tar',['-xOzf',path.join(complete,'npm',`${wrapperName}-${version}.tgz`),'package/README.md'],{encoding:'utf8'});
+  assert.equal(readme.stdout,readFileSync(path.join(root,'npm',alpha?'README.alpha.md':'README.md'),'utf8'));
+  assert(!entries(path.join(complete,'npm',`${wrapperName}-${version}.tgz`)).includes('package/README.alpha.md'));
   assert.equal(spawnSync('tar',['-xOzf',path.join(complete,'npm',`${wrapperName}-${version}.tgz`),'package/NOTICE'],{encoding:'utf8'}).stdout,readFileSync(path.join(root,'NOTICE'),'utf8'));
   assert.deepEqual(Object.keys(wrapper.bin),alpha?['dima']:['dim','dimcode']);
   assert.equal(wrapper.optionalDependencies['dimcode-web'],version);

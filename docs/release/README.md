@@ -50,6 +50,8 @@ Workflows use GitHub's [default self-hosted OS and architecture labels](https://
 
 All runners need a current GitHub Actions runner, Git, rustup, a C/C++ toolchain, tar and Bash. Actions installs Node from `.node-version`; Rust is pinned by `rust-toolchain.toml`, and release jobs install their Rust target. PR runners must be isolated from release credentials and private networks. Apply GitHub's approval policy before running untrusted PRs on self-hosted machines.
 
+Native release runners also need `cargo-about` 0.9.3 (`cargo install cargo-about --version 0.9.3 --locked`). It generates Rust distribution notices; PR script checks do not need it. [cargo-about generation](https://embarkstudios.github.io/cargo-about/cli/generate/index.html).
+
 - macOS: install Xcode Command Line Tools and accept the Xcode license. Apple Clang and its SDK build both architectures.
 - Linux: provision a GNU/Linux baseline suitable for the intended users. On Debian/Ubuntu install `build-essential gcc-aarch64-linux-gnu g++-aarch64-linux-gnu`. The ARM64 job selects that cross compiler, archiver and linker; it does not require emulation. Install `gh` for release assembly.
 - Windows: install Git for Windows (Bash and tar), PowerShell 7, Visual Studio Build Tools with the x64 and ARM64 MSVC tools and Windows SDK, LLVM/clang-cl, and NASM for x64 assembly. Put `clang-cl` and `nasm` on the runner's PATH. The workflow configures `amd64` or `amd64_arm64` and selects the target MSVC linker by full path to avoid Git Bash's unrelated `link.exe`. [Windows native dependency requirements](https://aws.github.io/aws-lc-rs/requirements/windows.html).
@@ -162,7 +164,8 @@ One product version is shared by `Cargo.toml`, workspace versions in `Cargo.lock
 ```sh
 DIM_RELEASE_BUILD=1 cargo build --release --locked -p dimcode
 node scripts/stage-plugins.mjs staging/local-plugins
-node scripts/stage-release.mjs target/release staging/local 0.1.0 FULL_SOURCE_COMMIT --plugins staging/local-plugins
+node scripts/rust-notices.mjs staging/rust-notices.txt
+node scripts/stage-release.mjs target/release staging/local 0.1.0 FULL_SOURCE_COMMIT --plugins staging/local-plugins --rust-notices staging/rust-notices.txt
 node scripts/pack-release.mjs staging/local release/local
 node scripts/stage-web.mjs release/web 0.1.0 FULL_SOURCE_COMMIT
 ```
@@ -176,7 +179,8 @@ These commands stage an API-key-only distribution. An account build is the same 
 ```sh
 DIM_RELEASE_BUILD=1 DIM_OAUTH_CLIENT_ID_CN=… DIM_OAUTH_CLIENT_ID_GLOBAL=… cargo build --release --locked -p dimcode
 node scripts/stage-plugins.mjs staging/local-plugins
-node scripts/stage-release.mjs target/release staging/local 0.1.0 FULL_SOURCE_COMMIT --account --plugins staging/local-plugins
+node scripts/rust-notices.mjs staging/rust-notices.txt
+node scripts/stage-release.mjs target/release staging/local 0.1.0 FULL_SOURCE_COMMIT --account --plugins staging/local-plugins --rust-notices staging/rust-notices.txt
 ```
 
 In CI, set the `DIM_OAUTH_CLIENT_ID_CN` and `DIM_OAUTH_CLIENT_ID_GLOBAL` repository secrets. Every target is then an account build; without both secrets CI builds API-key-only payloads, and a partial configuration fails. The IDs are compiled into the executable and never enter manifests. The account build adds no runtime, package or Node. Each platform package and native archive holds the executable, the default configuration file and the default plugins (`scripts/stage-plugins.mjs`, then `stage-release.mjs --plugins DIR`); the Node and Python runtimes are not bundled: RuntimeManager downloads them, verified against pins compiled into Dim, into the home ([RuntimeManager](../design/plugins/RuntimeManager.md)):
@@ -187,6 +191,7 @@ default-plugins.json          # the default configuration file, passed as `--def
 plugins/<name>/               # the default plugins with their production node_modules
 LICENSE
 NOTICE
+licenses/                     # Rust dependency texts and vendored notices
 release-manifest.json         # `account` records whether this is the account build
 ```
 
@@ -226,6 +231,8 @@ Publication validates every package before the first registry write. A retry com
 
 ## Distribution notices
 
-The wrapper, native packages and Web package include the root `NOTICE`. Native archives and platform npm packages retain Aimux's MIT license under `licenses/aimux/` and the vendored terminal libraries' Apache-2.0 license and notices under `licenses/grok-build/`. The extra Swift syntax asset is excluded pending license verification. Default TypeScript plugins keep their installed dependency license files.
+The wrapper, native packages and Web package include the root `NOTICE`. Native archives and platform npm packages retain Rust dependency notices under `licenses/RUST-THIRD-PARTY-NOTICES.txt`, Aimux's MIT license under `licenses/aimux/` and the vendored terminal libraries' Apache-2.0 license and notices under `licenses/grok-build/`. The extra Swift syntax asset is excluded pending license verification. Default TypeScript plugins keep the license files supplied by their npm packages.
 
-Every Web production build emits `THIRD-PARTY-NOTICES.txt` from the installed production package licenses. It includes Geist and Geist Mono's SIL Open Font License and any upstream notices. Packages that omit license files use the exact-version source notices recorded under `web/licenses/`; a missing notice fails the build. The file is shipped in both Web archives, in the npm package and in embedded Web builds. Staging refuses a frontend build without it, and the release manifest covers its digest.
+Run `node scripts/rust-notices.mjs staging/rust-notices.txt` before staging native payloads and pass `--rust-notices staging/rust-notices.txt` to `stage-release.mjs`. CI and the local alpha publisher do this automatically. The generator uses pinned `cargo-about`, the locked workspace's full feature and target graph, and `scripts/release-licenses.toml`; it excludes dev-only dependencies. It preserves the generated license texts and supplements them with the crates' original license, copyright and notice files, including nested native dependencies. Generation errors stop packaging; staging refuses missing or empty Rust notices. This is distribution output, while `deny.toml` remains the license-policy gate.
+
+Every Web production build emits `THIRD-PARTY-NOTICES.txt` from the installed production package licenses. The conservative inventory includes every non-dev lock entry, including type packages, and skips optional packages absent on the build host. It includes Geist and Geist Mono's SIL Open Font License and any upstream notices. Packages that omit license files use the exact-version source notices recorded under `web/licenses/`; a missing notice fails the build. The file is shipped in both Web archives, in the npm package and in embedded Web builds. Staging refuses a frontend build without it, and the release manifest covers its digest.

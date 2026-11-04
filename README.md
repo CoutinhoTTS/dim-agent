@@ -130,7 +130,7 @@ See [documentation](docs/INDEX.md), [architecture](docs/architecture/README.md),
 
 ## Distribution notices
 
-Dim's original source is MIT-licensed. Third-party code and assets retain their own licenses; see [NOTICE](NOTICE). Native distributions include vendored terminal notices under `licenses/grok-build/` and Aimux's license under `licenses/aimux/`. The Web workspace ships `THIRD-PARTY-NOTICES.txt` with the production dependency license texts, including the SIL Open Font License for Geist and Geist Mono. Bundled TypeScript plugins retain their installed dependency license files.
+Dim's original source is MIT-licensed. Third-party code and assets retain their own licenses; see [NOTICE](NOTICE). Native distributions include Rust dependency license texts and copyright files in `licenses/RUST-THIRD-PARTY-NOTICES.txt`, vendored terminal notices under `licenses/grok-build/` and Aimux's license under `licenses/aimux/`. The Web workspace ships `THIRD-PARTY-NOTICES.txt` with the production dependency license texts, including the SIL Open Font License for Geist and Geist Mono. Bundled TypeScript plugins retain the license files supplied by their npm packages.
 
 ## Verify
 

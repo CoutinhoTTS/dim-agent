@@ -72,6 +72,8 @@ try {
     copyFileSync(path.join(directory,manifest.nativeArchives[0].file),path.join(native,manifest.nativeArchives[0].file));
   }
   cpSync(path.join(repo,'npm'),path.join(scratch,'package'),{recursive:true});
+  if (alpha) copyFileSync(path.join(repo,'npm/README.alpha.md'),path.join(scratch,'package/README.md'));
+  rmSync(path.join(scratch,'package/README.alpha.md'));
   if (alpha || platforms.length < all.length) {
     const wrapper = path.join(scratch,'package/package.json');
     const data = JSON.parse(readFileSync(wrapper));

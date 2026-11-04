@@ -7,17 +7,21 @@ import path from 'node:path';
 import { buildPlatform, checkArchitecture } from './native-binary.mjs';
 
 const [binaryDirectory, destination, version, sourceCommit, ...rest] = process.argv.slice(2);
-const usage = 'Usage: node scripts/stage-release.mjs BIN_DIR DESTINATION VERSION SOURCE_COMMIT --plugins DIR [--account]';
+const usage = 'Usage: node scripts/stage-release.mjs BIN_DIR DESTINATION VERSION SOURCE_COMMIT --plugins DIR --rust-notices FILE [--account]';
 assert(binaryDirectory && destination && version && sourceCommit, usage);
 let account = false;
 let plugins;
+let rustNotices;
 for (let index = 0; index < rest.length; index += 1) {
   if (rest[index] === '--account' && !account) account = true;
   else if (rest[index] === '--plugins' && plugins === undefined && rest[index + 1]) plugins = path.resolve(rest[++index]);
+  else if (rest[index] === '--rust-notices' && rustNotices === undefined && rest[index + 1]) rustNotices = path.resolve(rest[++index]);
   else assert.fail(usage);
 }
 assert(plugins !== undefined, '--plugins DIR is required: a payload without the default plugins is not a release payload');
 assert(existsSync(path.join(plugins, 'default-plugins.json')), 'The plugins directory has no default-plugins.json');
+assert(rustNotices !== undefined && readFileSync(rustNotices, 'utf8').trim().length > 0,
+  '--rust-notices FILE is required: generate Rust dependency notices before staging');
 assert(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/.test(version), 'Invalid version');
 assert(/^[a-f0-9]{40}$/.test(sourceCommit), 'Invalid source commit');
 const { platform, host, osName, cpu } = buildPlatform();
@@ -54,6 +58,7 @@ try {
   mkdirSync(path.join(output, 'licenses/aimux'), { recursive: true });
   copyFileSync(path.join(repo, 'vendor/aimux/LICENSE'), path.join(output, 'licenses/aimux/LICENSE'));
   copyFileSync(path.join(repo, 'NOTICE'), path.join(output, 'NOTICE'));
+  copyFileSync(rustNotices, path.join(output, 'licenses/RUST-THIRD-PARTY-NOTICES.txt'));
   const toolchain = { rust: readFileSync(path.join(repo, 'rust-toolchain.toml'), 'utf8').match(/channel = "([^"]+)"/)[1] };
   const files = {};
   for (const entry of readdirSync(output, { withFileTypes: true, recursive: true })) {
